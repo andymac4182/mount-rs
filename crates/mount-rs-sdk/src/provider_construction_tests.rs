@@ -479,12 +479,10 @@ async fn observed_context_tidb_error_does_not_close_context_owned_pool() {
     assert!(
         tokio::time::timeout(
             BOUND,
-            open_storage_in_context_with_observer(
+            context.inspect_compact_layout_with_construction_observer(
                 &config,
                 &StoreConfig::Memory,
-                None,
-                Some(&context),
-                Some(&journal)
+                &journal,
             )
         )
         .await
@@ -553,4 +551,135 @@ async fn observed_sync_blocks_stay_retained_after_decorator_error() {
     attempt.fail();
     journal.close().await.unwrap();
     assert!(weak.upgrade().is_none());
+}
+
+async fn observed_inspection_cancelled_at_constructor(role: Role) {
+    let mut peer = Peer::start(Backend::Pglite, role, false).await;
+    let (metadata, blocks) = pair(role, peer.config.clone());
+    let context = StorageContext::new(1).unwrap();
+    let observer = Arc::new(Observer::default());
+    let operation = tokio::spawn({
+        let context = context.clone();
+        let observer = observer.clone();
+        async move {
+            context
+                .inspect_compact_layout_with_construction_observer(
+                    &metadata,
+                    &blocks,
+                    observer.as_ref(),
+                )
+                .await
+        }
+    });
+    peer.reached().await;
+    let groups = observer.0.lock().unwrap().clone();
+    assert_eq!(
+        groups.len(),
+        1,
+        "provider group precedes the blocked constructor"
+    );
+    assert_eq!(groups[0].close().await.unwrap_err().code, ErrorCode::Ebusy);
+    operation.abort();
+    assert!(matches!(operation.await, Err(error) if error.is_cancelled()));
+    assert_eq!(groups[0].close().await.unwrap_err().code, ErrorCode::Eio);
+    assert_eq!(groups[0].close().await.unwrap_err().code, ErrorCode::Eio);
+    assert_eq!(observer.0.lock().unwrap().len(), 1);
+    // Stopping this controlled peer is containment, not client cleanup proof.
+    peer.finish(false).await;
+    assert!(context.inner.lock().unwrap().tidb.is_empty());
+    context.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn observed_inspection_cancelled_metadata_constructor_retains_uncertainty() {
+    observed_inspection_cancelled_at_constructor(Role::Metadata).await;
+}
+
+#[tokio::test]
+async fn observed_inspection_cancelled_block_constructor_retains_uncertainty() {
+    observed_inspection_cancelled_at_constructor(Role::Blocks).await;
+}
+
+async fn observed_inspection_constructor_error_closes_actual_owner(role: Role) {
+    let mut peer = Peer::start(Backend::Pglite, role, true).await;
+    let (metadata, blocks) = pair(role, peer.config.clone());
+    let context = StorageContext::new(1).unwrap();
+    let observer = Observer::default();
+    let inspected = tokio::time::timeout(
+        BOUND,
+        context.inspect_compact_layout_with_construction_observer(&metadata, &blocks, &observer),
+    )
+    .await
+    .unwrap();
+    assert!(inspected.is_err());
+    peer.reached().await;
+    let groups = observer.0.lock().unwrap().clone();
+    assert_eq!(groups.len(), 1);
+    tokio::time::timeout(BOUND, groups[0].close())
+        .await
+        .unwrap()
+        .unwrap();
+    groups[0].close().await.unwrap();
+    context.require_open().unwrap();
+    peer.finish(true).await;
+    context.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn observed_inspection_metadata_error_closes_actual_wire_owner() {
+    observed_inspection_constructor_error_closes_actual_owner(Role::Metadata).await;
+}
+
+#[tokio::test]
+async fn observed_inspection_block_error_closes_actual_wire_owner() {
+    observed_inspection_constructor_error_closes_actual_owner(Role::Blocks).await;
+}
+
+#[tokio::test]
+async fn observed_inspection_retained_operation_survives_waiter_timeout() {
+    let mut peer = Peer::start(Backend::Pglite, Role::Metadata, false).await;
+    let metadata = peer.config.clone();
+    let context = StorageContext::new(1).unwrap();
+    let observer = Arc::new(Observer::default());
+    let mut operation = tokio::spawn({
+        let context = context.clone();
+        let observer = observer.clone();
+        async move {
+            context
+                .inspect_compact_layout_with_construction_observer(
+                    &metadata,
+                    &StoreConfig::Memory,
+                    observer.as_ref(),
+                )
+                .await
+        }
+    });
+    peer.reached().await;
+    let groups = observer.0.lock().unwrap().clone();
+    assert_eq!(groups.len(), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut operation)
+            .await
+            .is_err()
+    );
+    assert!(!operation.is_finished());
+    assert_eq!(groups[0].close().await.unwrap_err().code, ErrorCode::Ebusy);
+    // End the held wire operation without cancelling its actual owner. The
+    // constructor then returns an acknowledged provider error; this fixture
+    // supplies no successful SQL, compact layout or backing-store durability.
+    peer.finish(false).await;
+    assert!(
+        tokio::time::timeout(BOUND, &mut operation)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    tokio::time::timeout(BOUND, groups[0].close())
+        .await
+        .unwrap()
+        .unwrap();
+    groups[0].close().await.unwrap();
+    context.require_open().unwrap();
+    context.close().await.unwrap();
 }

@@ -1,5 +1,12 @@
 //! Server-owned cache configuration and SDK block decoration.
 use crate::CliError;
+mod cold_holder;
+use cold_holder::ConfiguredHolderRegistry;
+/// Separately retained inspector ownership and immediate admission fence.
+/// Sealing is synchronous; actual task/provider joins remain asynchronous.
+pub(crate) trait InspectionOwner: mount_rs_core::construction::ConstructionResource {
+    fn seal_admission(&self) -> Result<()>;
+}
 use serde::Deserialize;
 use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf};
 
@@ -12,6 +19,11 @@ pub(crate) struct CacheServiceConfig {
     pub ram_bytes: usize,
     pub disk_bytes: usize,
     pub max_entries: usize,
+    /// Scoped authority identities are bounded independently of blob LRU entries.
+    #[serde(default = "default_max_scopes")]
+    pub max_scopes: usize,
+    #[serde(default = "default_holder_inspections")]
+    pub holder_inspection_concurrency: usize,
     pub peer_listen: SocketAddr,
     pub ca_certificate: PathBuf,
     pub certificate: PathBuf,
@@ -36,6 +48,12 @@ pub(crate) struct CacheServiceConfig {
     pub hedge_delay_ms: u64,
     #[serde(default = "default_peer_transfer_bytes")]
     pub peer_transfer_bytes: usize,
+}
+fn default_max_scopes() -> usize {
+    20_000
+}
+fn default_holder_inspections() -> usize {
+    4
 }
 fn default_placement_concurrency() -> usize {
     4
@@ -112,6 +130,10 @@ impl CacheServiceConfig {
             || self.disk_path.as_os_str().is_empty()
             || self.max_entries == 0
             || self.max_entries > 1_000_000
+            || self.max_scopes == 0
+            || self.max_scopes > 1_000_000
+            || self.holder_inspection_concurrency == 0
+            || self.holder_inspection_concurrency > 16
             || self.max_blob_bytes == 0
             || self.max_blob_bytes > 16 * 1024 * 1024
             || self.max_inflight == 0
@@ -142,7 +164,7 @@ impl CacheServiceConfig {
                 || !ids.insert(&peer.id)
                 || !pins.insert(peer.certificate_sha256.to_ascii_lowercase())
                 || peer.partitions.is_empty()
-                || peer.partitions.len() > 1024
+                || peer.partitions.len() > 5000
                 || peer.partitions.iter().any(|p| !name(p))
                 || peer.certificate_sha256.len() != 64
                 || !peer
@@ -200,6 +222,27 @@ use mount_rs_sdk::{BlockStoreDecorator, StoreConfig};
 use std::sync::{Arc, Mutex};
 type DriveMetrics = Arc<Mutex<BTreeMap<(String, String), Arc<mount_rs_blob_cache::CacheMetrics>>>>;
 
+fn block_policy(config: &StoreConfig) -> Result<IntegrityPolicy> {
+    Ok(match config {
+        StoreConfig::SlateDb { .. } => {
+            return Err(
+                mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Enotsup).with_message(
+                    "SlateDB stores metadata; use a block provider for the blob cache",
+                ),
+            );
+        }
+        StoreConfig::Tidb { .. } => IntegrityPolicy::Sha256Prefixed,
+        StoreConfig::FoundationDb { .. } => IntegrityPolicy::Sha256Colon,
+        StoreConfig::R2 { .. } | StoreConfig::RustFs { .. } | StoreConfig::AwsS3 { .. } => {
+            IntegrityPolicy::ObjectStoreSha256OrOpaque
+        }
+        StoreConfig::Pglite { .. } => IntegrityPolicy::PgliteMd5,
+        StoreConfig::Memory
+        | StoreConfig::Sqlite { .. }
+        | StoreConfig::SqliteWithOptions { .. } => IntegrityPolicy::Opaque,
+    })
+}
+
 pub(crate) struct DriveCacheDecorator {
     pub cache: Arc<LocalCache>,
     pub runtime: Arc<DistributedRuntime>,
@@ -212,24 +255,7 @@ impl BlockStoreDecorator for DriveCacheDecorator {
         config: &StoreConfig,
         store: Arc<dyn BlockStore>,
     ) -> Result<Arc<dyn BlockStore>> {
-        let policy = match config {
-            StoreConfig::SlateDb { .. } => {
-                return Err(
-                    mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Enotsup).with_message(
-                        "SlateDB stores metadata; use a block provider for the blob cache",
-                    ),
-                );
-            }
-            StoreConfig::Tidb { .. } => IntegrityPolicy::Sha256Prefixed,
-            StoreConfig::FoundationDb { .. } => IntegrityPolicy::Sha256Colon,
-            StoreConfig::R2 { .. } | StoreConfig::RustFs { .. } | StoreConfig::AwsS3 { .. } => {
-                IntegrityPolicy::ObjectStoreSha256OrOpaque
-            }
-            StoreConfig::Pglite { .. } => IntegrityPolicy::PgliteMd5,
-            StoreConfig::Memory
-            | StoreConfig::Sqlite { .. }
-            | StoreConfig::SqliteWithOptions { .. } => IntegrityPolicy::Opaque,
-        };
+        let policy = block_policy(config)?;
         let metrics = self
             .metrics
             .lock()
@@ -260,6 +286,7 @@ pub(crate) struct ServerCache {
     pub peers: Arc<QuicPeerTransport>,
     cluster: String,
     metrics: DriveMetrics,
+    holder: Option<Arc<ConfiguredHolderRegistry>>,
 }
 fn relative(config: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -291,19 +318,55 @@ fn roots(path: &Path) -> std::result::Result<rustls::RootCertStore, CliError> {
     Ok(roots)
 }
 impl ServerCache {
+    #[cfg(test)]
     pub(crate) fn start(
         config: &CacheServiceConfig,
         path: &Path,
     ) -> std::result::Result<Self, CliError> {
+        Self::start_impl(config, path, None)
+    }
+    pub(crate) fn start_with_configured_holders(
+        config: &CacheServiceConfig,
+        path: &Path,
+        catalog: Arc<dyn mount_rs_service::catalog::CatalogStore>,
+        context: mount_rs_sdk::StorageContext,
+        max_routes: usize,
+    ) -> std::result::Result<Self, CliError> {
+        Self::start_impl(config, path, Some((catalog, context, max_routes)))
+    }
+    fn start_impl(
+        config: &CacheServiceConfig,
+        path: &Path,
+        holders: Option<(
+            Arc<dyn mount_rs_service::catalog::CatalogStore>,
+            mount_rs_sdk::StorageContext,
+            usize,
+        )>,
+    ) -> std::result::Result<Self, CliError> {
         config.validate()?;
         let deadline = Duration::from_millis(config.deadline_ms);
-        let local = LocalCache::new(LocalCacheConfig {
-            directory: relative(path, &config.disk_path),
-            memory_bytes: config.ram_bytes,
-            disk_bytes: config.disk_bytes,
-            max_entries: config.max_entries,
-            max_blob_bytes: config.max_blob_bytes,
-        })?;
+        let local = LocalCache::new_with_scope_capacity(
+            LocalCacheConfig {
+                directory: relative(path, &config.disk_path),
+                memory_bytes: config.ram_bytes,
+                disk_bytes: config.disk_bytes,
+                max_entries: config.max_entries,
+                max_blob_bytes: config.max_blob_bytes,
+            },
+            config.max_scopes,
+        )?;
+        let holder = holders
+            .map(|(catalog, context, max_routes)| {
+                ConfiguredHolderRegistry::new(
+                    config.cluster.clone(),
+                    catalog,
+                    context,
+                    local.clone(),
+                    max_routes,
+                    config.holder_inspection_concurrency,
+                )
+            })
+            .transpose()?;
         let key_bytes = std::fs::read(relative(path, &config.private_key))
             .map_err(|_| CliError::runtime("cannot read cache TLS key"))?;
         let key = rustls_pemfile::private_key(&mut key_bytes.as_slice())
@@ -326,21 +389,26 @@ impl ServerCache {
                 },
             );
         }
-        let peers = QuicPeerTransport::bind(
-            QuicPeerConfig {
-                local: PeerId(config.node_id.clone()),
-                bind: config.peer_listen,
-                certificates: certificates(&relative(path, &config.certificate))?,
-                private_key: key,
-                roots: roots(&relative(path, &config.ca_certificate))?,
-                trusted,
-                max_blob_bytes: config.max_blob_bytes,
-                transfer_bytes: config.peer_transfer_bytes,
-                max_inflight: config.max_inflight,
-                deadline,
-            },
-            local.clone(),
-        )?;
+        let peer_config = QuicPeerConfig {
+            local: PeerId(config.node_id.clone()),
+            bind: config.peer_listen,
+            certificates: certificates(&relative(path, &config.certificate))?,
+            private_key: key,
+            roots: roots(&relative(path, &config.ca_certificate))?,
+            trusted,
+            max_blob_bytes: config.max_blob_bytes,
+            transfer_bytes: config.peer_transfer_bytes,
+            max_inflight: config.max_inflight,
+            deadline,
+        };
+        let peers = match &holder {
+            Some(holder) => QuicPeerTransport::bind_with_scope_admission(
+                peer_config,
+                local.clone(),
+                holder.clone(),
+            ),
+            None => QuicPeerTransport::bind(peer_config, local.clone()),
+        }?;
         let mut members = config
             .peers
             .iter()
@@ -420,7 +488,28 @@ impl ServerCache {
             peers,
             cluster: config.cluster.clone(),
             metrics: Arc::new(Mutex::new(BTreeMap::new())),
+            holder,
         })
+    }
+    pub(crate) fn register_holder_route(
+        &self,
+        partition: &str,
+        drive: &str,
+        definition: serde_json::Value,
+        plan: Arc<crate::runtime::DriverRuntimePlan>,
+    ) -> Result<()> {
+        if let Some(holder) = &self.holder
+            && let Some(config) = plan.cache_block_config()
+            && let Ok(policy) = block_policy(config)
+        {
+            holder.register_route(partition, drive, definition, plan.clone(), policy)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn inspector_owner(&self) -> Option<Arc<dyn InspectionOwner>> {
+        self.holder
+            .as_ref()
+            .map(|owner| owner.clone() as Arc<dyn InspectionOwner>)
     }
     pub(crate) fn decorator(&self, partition: &str, drive: &str) -> Result<DriveCacheDecorator> {
         self.metrics
@@ -440,20 +529,32 @@ impl ServerCache {
         })
     }
     pub(crate) async fn shutdown(&self) -> Result<()> {
-        // Every drain is attempted in dependency order, even after an error.
-        // Preserve the first failure; metrics only describe a proven drain.
-        let mut failure = None;
-        for result in [
-            self.runtime.shutdown().await,
-            self.peers.shutdown().await,
-            self.local.shutdown().await,
-        ] {
-            if let Err(error) = result {
-                failure.get_or_insert(error);
-            }
+        // Seal inspection before provider context close (also called earlier by
+        // RemoteRuntimeLifecycle). Already admitted peer/cache work is joined
+        // before releasing retained proof groups. Unknown owners stay retained.
+        let inspection = match &self.holder {
+            Some(holder) => holder.seal_and_drain().await,
+            None => Ok(()),
+        };
+        let runtime = self.runtime.shutdown().await;
+        let peers = self.peers.shutdown().await;
+        let release = if inspection.is_ok() && peers.is_ok() {
+            self.holder
+                .as_ref()
+                .map_or(Ok(()), |holder| holder.release_proofs())
+        } else {
+            Ok(())
+        };
+        let local = self.local.shutdown().await;
+        for result in [inspection, runtime, peers, release, local] {
+            result?;
         }
-        if let Some(error) = failure {
-            return Err(error);
+        if let Some(holder) = &self.holder {
+            eprintln!(
+                "cache_holder {}",
+                serde_json::to_string(&holder.snapshot())
+                    .map_err(|_| mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio))?
+            );
         }
         if let Ok(metrics) = self.metrics.lock() {
             for ((partition, drive), metrics) in metrics.iter() {
@@ -491,6 +592,45 @@ mod tests {
             serde_json::from_value(p.clone()).unwrap(),
             serde_json::from_value(p).unwrap(),
         ];
+        assert!(c.validate().is_err());
+    }
+    #[test]
+    fn scope_and_partition_bounds_are_independent_of_blob_storage_limits() {
+        let mut c = config();
+        c.max_entries = 1;
+        let bytes = (
+            c.ram_bytes,
+            c.disk_bytes,
+            c.max_blob_bytes,
+            c.peer_transfer_bytes,
+            c.max_inflight,
+            c.deadline_ms,
+        );
+        assert_eq!(c.max_scopes, 20_000);
+        assert_eq!(c.holder_inspection_concurrency, 4);
+        let peer = serde_json::json!({"id":"peer","address":"127.0.0.1:4001","server_name":"peer.local",
+            "certificate_sha256":"00".repeat(32),"partitions":["first"]});
+        c.peers = vec![serde_json::from_value(peer).unwrap()];
+        c.peers[0].partitions = (0..5000).map(|p| format!("partition-{p}")).collect();
+        assert!(c.validate().is_ok());
+        assert_eq!(
+            bytes,
+            (
+                c.ram_bytes,
+                c.disk_bytes,
+                c.max_blob_bytes,
+                c.peer_transfer_bytes,
+                c.max_inflight,
+                c.deadline_ms
+            )
+        );
+        c.peers[0].partitions.insert("extra".into());
+        assert!(c.validate().is_err());
+        let mut c = config();
+        c.max_scopes = 0;
+        assert!(c.validate().is_err());
+        let mut c = config();
+        c.holder_inspection_concurrency = 0;
         assert!(c.validate().is_err());
     }
     #[test]

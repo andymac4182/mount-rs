@@ -471,7 +471,15 @@ async fn serve_resources(
                 config
                     .cache
                     .as_ref()
-                    .map(|cache| crate::server_cache::ServerCache::start(cache, path))
+                    .map(|cache| {
+                        crate::server_cache::ServerCache::start_with_configured_holders(
+                            cache,
+                            path,
+                            catalog.clone(),
+                            context.clone(),
+                            drive_count,
+                        )
+                    })
                     .transpose()
             },
             sink,
@@ -508,6 +516,15 @@ async fn serve_resources(
                 }
                 Ok::<_, CliError>((DriverRuntime::prepare(&options, uid, gid)?, decorator))
                 }, sink).await?;
+                let plan = Arc::new(plan);
+                if let Some(cache) = &cache {
+                    cache.register_holder_route(
+                        partition_id,
+                        drive_id,
+                        drive.driver.clone(),
+                        plan.clone(),
+                    )?;
+                }
                 startup.construction_plan();
                 let factory = mount_rs_service::filesystem_runtime::SdkRuntimeFactory::new(
                     Arc::new(CliRuntimeConstructor {

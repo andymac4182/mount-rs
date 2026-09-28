@@ -16,6 +16,158 @@ NAME = "redis_directory_real_peer_failures_preserve_exact_backing"
 SUMMARY = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.42s\n"
 
 
+class ObjectStoreModuleSelectors(unittest.TestCase):
+    # Independent required results: a successful empty Cargo filter is insufficient.
+    cases = {
+        'rustfsownedprefix': tuple('owned_prefix_tests::' + name for name in (
+            'empty_observation_uses_one_exact_bounded_signed_list_seam',
+            'any_owned_child_including_reserved_and_nested_markers_is_present',
+            'sibling_locations_and_incomplete_page_shapes_fail_closed',
+            'unsafe_or_oversized_prefixes_are_rejected_before_dispatch',
+            'configured_public_method_checks_scope_before_building_a_client',
+            'deadline_drops_a_held_listing_once_without_retry',
+            'caller_cancellation_drops_the_exact_held_listing',
+        )),
+        'objectstoreunit': tuple('diagnostics::object_store::tests::' + name for name in (
+            'headers_and_body_completion_are_separate_observations',
+            'dispatch_errors_pre_header_cancellation_and_body_drop_are_distinct',
+            'actual_service_lifetime_can_outlive_bundle_group',
+            'failed_and_abandoned_builds_never_commit_residency',
+            'enabled_guards_read_clock_and_disabled_guards_do_not',
+            'cache_unknown_and_final_release_remove_only_own_contribution',
+            'fixed_bank_saturates_and_snapshot_discloses_active_update',
+        )),
+        'objectstorecacheunit': tuple('object_store_cache_diagnostics_tests::' + name for name in (
+            'actual_cache_owner_releases_payload_without_observer_retaining_it',
+            'cache_replacement_removal_and_lru_keep_actual_residency',
+            'byte_cap_and_oversize_rejection_preserve_existing_policy',
+            'poisoned_cache_is_unknown_once_and_keeps_existing_bypass',
+            'disabled_cache_observation_keeps_cache_behavior',
+            'actual_store_clone_shares_cache_until_final_facade_drop',
+        )),
+        'rustfshttpunit': tuple('http_observation_tests::' + name for name in (
+            'actual_s3_retry_counts_two_dispatches_with_original_signing_and_create_headers',
+            'unpolled_observed_call_counts_box_construction_without_dispatch_or_cancellation',
+            'held_actual_dispatch_drop_preserves_owner_drop_and_records_only_preheader_cancel',
+            'body_frames_trailers_pointer_sizehint_and_eof_pass_through_without_copy',
+            'typed_transport_and_body_errors_remain_distinct_and_body_prefix_is_counted',
+            'pending_response_body_keeps_no_observed_service_and_drop_is_not_dispatch_cancel',
+            'initially_empty_head_hint_does_not_infer_eof_and_actual_none_is_positive_control',
+            'configured_four_clients_roles_budgets_sharing_and_final_bundle_release_are_preserved',
+            'actual_fourth_client_build_failure_releases_prior_clients_and_never_commits_bundle',
+            'invalid_prefix_after_four_actual_client_builds_records_bundle_error_and_releases_all',
+            'disabled_connector_returns_original_service_without_wrapper_or_observation',
+            'allocation_control::pending_call_adds_exactly_one_box_and_disabled_call_preserves_baseline',
+            'allocation_control::ready_prebuilt_response_adds_one_future_box_and_one_body_box',
+        )),
+    }
+    ignored_qualification = 'object_store_cache_diagnostics_tests::actual_qualification_temporary_adapters_release_both_observed_caches'
+
+    def fixture(self, kind):
+        names = self.cases[kind]
+        ignored = int(kind == 'objectstorecacheunit')
+        output = f'running {len(names) + ignored} tests\n'
+        output += ''.join(f'test {name} ... ok\n' for name in names)
+        if ignored:
+            output += f'test {self.ignored_qualification} ... ignored, requires isolated process\n'
+        return output + f'test result: ok. {len(names)} passed; 0 failed; {ignored} ignored; 0 measured; 0 filtered out; finished in 0.01s\n'
+
+    def passed(self, kind, output):
+        names = parent.EXPECTED_PACKAGE_CASES.get(kind)
+        return names is not None and parent.package_harness_passed(output, names)
+
+    def test_selectors_bind_exact_nonignored_cases_and_fixed_commands(self):
+        selectors = {
+            'rustfsownedprefix': ('mount-rs-rustfs', 'owned_prefix_tests::'),
+            'objectstoreunit': ('mount-rs-core', 'diagnostics::object_store::tests::'),
+            'objectstorecacheunit': ('mount-rs-object-store-blocks', 'object_store_cache_diagnostics_tests::'),
+            'rustfshttpunit': ('mount-rs-rustfs', 'http_observation_tests::'),
+        }
+        for kind, (package, prefix) in selectors.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(parent.EXPECTED_PACKAGE_CASES.get(kind), self.cases[kind])
+                command, limit, profile, trace = parent.COMMANDS[kind]
+                self.assertEqual((limit, profile, trace), (180, 0, 0))
+                self.assertEqual(command, ['./scripts/cargo-shared', 'test', '-p', package, '--lib', '--locked', '--offline', prefix, '--', '--test-threads=1'])
+
+    def test_complete_named_modules_preserve_legitimate_ignored_qualification(self):
+        for kind in self.cases:
+            with self.subTest(kind=kind):
+                self.assertTrue(self.passed(kind, self.fixture(kind)))
+
+    def test_empty_and_renamed_successful_filters_cannot_qualify(self):
+        empty = 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
+        for kind, names in self.cases.items():
+            with self.subTest(kind=kind):
+                self.assertFalse(self.passed(kind, empty))
+                self.assertFalse(self.passed(kind, self.fixture(kind).replace(names[0], 'unrelated::renamed_case')))
+
+    def test_required_ignored_or_duplicate_result_cannot_qualify(self):
+        for kind, names in self.cases.items():
+            with self.subTest(kind=kind):
+                output = self.fixture(kind)
+                old_ignored = int(kind == 'objectstorecacheunit')
+                ignored = output.replace(f'test {names[0]} ... ok', f'test {names[0]} ... ignored')
+                ignored = ignored.replace(f'{len(names)} passed; 0 failed; {old_ignored} ignored;', f'{len(names) - 1} passed; 0 failed; {old_ignored + 1} ignored;')
+                self.assertFalse(self.passed(kind, ignored))
+                duplicated = output.replace(f'test {names[0]} ... ok\n', f'test {names[0]} ... ok\ntest {names[0]} ... ok\n')
+                duplicated = duplicated.replace(f'running {len(names) + old_ignored} tests', f'running {len(names) + old_ignored + 1} tests')
+                duplicated = duplicated.replace(f'{len(names)} passed;', f'{len(names) + 1} passed;')
+                self.assertFalse(self.passed(kind, duplicated))
+
+    def test_unfinished_or_unterminated_module_cannot_qualify(self):
+        for kind in self.cases:
+            with self.subTest(kind=kind):
+                self.assertFalse(self.passed(kind, self.fixture(kind).rstrip('\n')))
+                self.assertFalse(self.passed(kind, self.fixture(kind) + 'running 1 test\n'))
+
+
+class PackageHarnessControls(unittest.TestCase):
+    names = ("cold::inspection", "cold::retained_owner")
+
+    def fixture(self):
+        return (
+            "running 0 tests\n"
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n\n"
+            "running 2 tests\n"
+            "test cold::inspection ... ok\n"
+            "test cold::retained_owner ... ok\n"
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        )
+
+    def passed(self, output):
+        return parent.package_harness_passed(output, self.names)
+
+    def test_package_requires_actual_named_passes_and_all_harness_results(self):
+        self.assertTrue(self.passed(self.fixture()))
+
+    def test_zero_test_package_cannot_qualify(self):
+        self.assertFalse(self.passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"))
+
+    def test_earlier_failed_harness_is_not_hidden_by_later_success(self):
+        failed = "running 1 test\ntest unrelated ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        self.assertFalse(self.passed(failed + self.fixture()))
+
+    def test_unfinished_or_unpaired_harness_cannot_qualify(self):
+        self.assertFalse(self.passed("running 1 test\n" + self.fixture()))
+        self.assertFalse(self.passed(self.fixture().replace("running 0 tests\n", "", 1)))
+
+    def test_harness_count_must_match_executed_and_ignored_cases(self):
+        self.assertFalse(self.passed(self.fixture().replace("running 2 tests", "running 3 tests")))
+
+    def test_required_case_cannot_be_missing_ignored_or_duplicated(self):
+        for changed in (
+            self.fixture().replace("cold::retained_owner", "unrelated"),
+            self.fixture().replace("test cold::retained_owner ... ok", "test cold::retained_owner ... ignored"),
+            self.fixture().replace("test cold::inspection ... ok\n", "test cold::inspection ... ok\ntest cold::inspection ... ok\n"),
+        ):
+            self.assertFalse(self.passed(changed))
+
+    def test_terminal_result_must_be_complete_and_last(self):
+        self.assertFalse(self.passed(self.fixture().rstrip("\n")))
+        self.assertFalse(self.passed(self.fixture() + "running 1 test\n"))
+
+
 # Independent schema-v2 oracles; never derive these keys or values from the parser.
 SQLITE_REPLY_LOSS_PREFIX = b"MOUNT_RS_SQLITE_REPLY_LOSS "
 SQLITE_REPLY_LOSS_FIXTURES = {
@@ -653,11 +805,12 @@ class CacheStageSelectors(unittest.TestCase):
         command=parent.COMMANDS['targetlazyunit'][0]
         self.assertIn('lazy_target_',command);self.assertNotIn('--ignored',command)
         names=parent.EXPECTED_SUITES['targetlazyunit']
-        self.assertEqual(len(names),14);self.assertEqual(len(set(names)),14)
-        output='running 14 tests\n'+''.join(f'test {name} ... fixture output\nok\n' for name in names)+'test result: ok. 14 passed; 0 failed; 0 ignored;\n'
+        self.assertEqual(len(names),20);self.assertEqual(len(set(names)),20)
+        self.assertIn('target::progress::tests::lazy_target_balanced_validation_phases_preserve_closed_progress_accounting',names)
+        output='running 20 tests\n'+''.join(f'test {name} ... fixture output\nok\n' for name in names)+'test result: ok. 20 passed; 0 failed; 0 ignored;\n'
         self.assertTrue(parent.named_suite_passed(output,names,nocapture=True))
         self.assertFalse(parent.named_suite_passed(output.replace(names[0],'unrelated'),names,nocapture=True))
-        self.assertFalse(parent.named_suite_passed(output.replace('14 passed','13 passed'),names,nocapture=True))
+        self.assertFalse(parent.named_suite_passed(output.replace('20 passed','19 passed'),names,nocapture=True))
         self.assertFalse(parent.named_suite_passed('running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n',names,nocapture=True))
 
     def test_websocket_client_metrics_requires_one_profiled_case(self):
@@ -836,6 +989,28 @@ class CacheDeliverySelectors(unittest.TestCase):
 
 
 class NamedSuiteControls(unittest.TestCase):
+    def test_named_suite_requires_one_complete_terminal_harness(self):
+        names = parent.EXPECTED_SUITES['clidiagnostics']
+        count = len(names)
+        for nocapture in (False, True):
+            result = 'controlled output\nok' if nocapture else 'ok'
+            output = f'running {count} tests\n' + ''.join(f'test {name} ... {result}\n' for name in names)
+            summary = f'test result: ok. {count} passed; 0 failed; 0 ignored;\n'
+            output += summary
+            with self.subTest(nocapture=nocapture):
+                self.assertTrue(parent.named_suite_passed(output, names, nocapture=nocapture))
+                self.assertTrue(parent.named_suite_passed(output + '\n', names, nocapture=nocapture))
+                for malformed in (
+                    output + 'running 1 test\n',
+                    output + 'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n',
+                    output + 'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n',
+                    output.rstrip('\n'),
+                    output + summary,
+                    'test result: FAILED. 0 passed; 1 failed; 0 ignored;\n' + output,
+                    output.replace(f'running {count} tests\n', ''),
+                ):
+                    self.assertFalse(parent.named_suite_passed(malformed, names, nocapture=nocapture))
+
     def test_current_cli_suite_requires_every_named_case(self):
         names = parent.EXPECTED_SUITES["clidiagnostics"]
         self.assertEqual(len(names), 8)

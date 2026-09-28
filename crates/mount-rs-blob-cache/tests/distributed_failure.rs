@@ -397,8 +397,11 @@ struct Pair {
     dir: Option<tempfile::TempDir>,
     cache_lifetimes: Vec<Weak<LocalCache>>,
     cleanup_complete: Option<tokio::sync::oneshot::Sender<PairCleanupResult>>,
+    cleanup_task: Option<tokio::sync::oneshot::Sender<PairCleanupTask>>,
     a_cache: Option<Arc<LocalCache>>,
     b_cache: Arc<LocalCache>,
+    a_leases: Vec<ScopeLease>,
+    b_leases: Vec<ScopeLease>,
     a: Option<Arc<QuicPeerTransport>>,
     b: Arc<QuicPeerTransport>,
     counted: Arc<CountPeer>,
@@ -407,6 +410,14 @@ struct Pair {
     roots: rustls::RootCertStore,
     trusted: BTreeMap<PeerId, PeerEndpoint>,
     address: SocketAddr,
+}
+fn register_fixture_scope(
+    cache: &Arc<LocalCache>,
+    scope: CacheScope,
+    policy: IntegrityPolicy,
+) -> ScopeLease {
+    let epoch = cache.identity_epoch(&scope.identity).unwrap();
+    cache.register_scope_lease(scope, policy, epoch).unwrap()
 }
 fn cache(path: &std::path::Path, memory: usize, disk: usize) -> Arc<LocalCache> {
     LocalCache::new(LocalCacheConfig {
@@ -466,12 +477,8 @@ impl Pair {
         let dir = tempfile::tempdir().unwrap();
         let a_cache = cache(&dir.path().join("a"), memory, disk);
         let b_cache = cache(&dir.path().join("b"), 8192, 32768);
-        a_cache
-            .register_scope(scope(), IntegrityPolicy::Sha256Prefixed)
-            .unwrap();
-        b_cache
-            .register_scope(scope(), IntegrityPolicy::Sha256Prefixed)
-            .unwrap();
+        let a_lease = register_fixture_scope(&a_cache, scope(), IntegrityPolicy::Sha256Prefixed);
+        let b_lease = register_fixture_scope(&b_cache, scope(), IntegrityPolicy::Sha256Prefixed);
         let mut params = rcgen::CertificateParams::new(vec!["cache-ca".into()]).unwrap();
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let ca = rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap())
@@ -527,8 +534,11 @@ impl Pair {
             dir: Some(dir),
             cache_lifetimes: vec![Arc::downgrade(&a_cache), Arc::downgrade(&b_cache)],
             cleanup_complete: None,
+            cleanup_task: None,
             a_cache: Some(a_cache),
             b_cache,
+            a_leases: vec![a_lease],
+            b_leases: vec![b_lease],
             a: Some(a),
             b,
             counted,
@@ -571,16 +581,15 @@ impl Pair {
         store
     }
     async fn stop_a(&mut self) {
-        self.a.take().unwrap().shutdown().await.unwrap();
-        let local = self.a_cache.take().unwrap();
-        local.shutdown().await.unwrap();
-        drop(local);
+        self.a.as_ref().unwrap().shutdown().await.unwrap();
+        drop(self.a.take());
+        self.a_leases.clear();
+        self.a_cache.as_ref().unwrap().shutdown().await.unwrap();
+        drop(self.a_cache.take());
     }
     fn restart_a(&mut self) {
         let local = cache(&self.dir.as_ref().unwrap().path().join("a"), 0, 32768);
-        local
-            .register_scope(scope(), IntegrityPolicy::Sha256Prefixed)
-            .unwrap();
+        let lease = register_fixture_scope(&local, scope(), IntegrityPolicy::Sha256Prefixed);
         let peer = QuicPeerTransport::bind(
             config(
                 "a",
@@ -595,6 +604,7 @@ impl Pair {
         .unwrap();
         self.track_cache(&local);
         self.a_cache = Some(local);
+        self.a_leases.push(lease);
         self.a = Some(peer);
     }
     fn track_cache(&mut self, cache: &Arc<LocalCache>) {
@@ -605,13 +615,60 @@ impl Pair {
         assert!(self.cleanup_complete.replace(complete).is_none());
         completed
     }
+    fn observe_cleanup_task(&mut self) -> tokio::sync::oneshot::Receiver<PairCleanupTask> {
+        let (observe, observed) = tokio::sync::oneshot::channel();
+        assert!(self.cleanup_task.replace(observe).is_none());
+        observed
+    }
     async fn shutdown(&mut self) {
         if self.a.is_some() {
             self.stop_a().await;
         }
         self.b.shutdown().await.unwrap();
+        self.b_leases.clear();
         self.b_cache.shutdown().await.unwrap();
         self.cleaned = true;
+    }
+}
+// A canceled/expired cleanup is not an acknowledgment that peers released
+// their serving proof. Retain the groups (and exact LocalCache owners) until
+// the cleanup explicitly observes successful peer drain.
+type FixtureLeaseGroups = (Vec<Arc<ScopeLease>>, Vec<Arc<ScopeLease>>);
+struct FixtureLeaseOwners {
+    a: Vec<Weak<ScopeLease>>,
+    b: Vec<Weak<ScopeLease>>,
+}
+struct PairCleanupTask {
+    worker: tokio::task::JoinHandle<()>,
+    entered: tokio::sync::oneshot::Receiver<()>,
+    leases: FixtureLeaseOwners,
+}
+struct RetainedFixtureLeases(Option<FixtureLeaseGroups>);
+impl RetainedFixtureLeases {
+    fn new(a: Vec<ScopeLease>, b: Vec<ScopeLease>) -> Self {
+        // Moving each lease into one Arc adds no registration or lease clone.
+        // Weak observers can identify the exact owner retained by this guard.
+        Self(Some((
+            a.into_iter().map(Arc::new).collect(),
+            b.into_iter().map(Arc::new).collect(),
+        )))
+    }
+    fn owners(&self) -> FixtureLeaseOwners {
+        let (a, b) = self.0.as_ref().unwrap();
+        FixtureLeaseOwners {
+            a: a.iter().map(Arc::downgrade).collect(),
+            b: b.iter().map(Arc::downgrade).collect(),
+        }
+    }
+    fn release(&mut self) {
+        drop(self.0.take());
+    }
+}
+impl Drop for RetainedFixtureLeases {
+    fn drop(&mut self) {
+        if let Some(leases) = self.0.take() {
+            std::mem::forget(leases);
+        }
     }
 }
 type PairCleanupResult = std::result::Result<(), String>;
@@ -676,7 +733,15 @@ impl Drop for Pair {
         let cleaned = self.cleaned;
         let caches = std::mem::take(&mut self.cache_lifetimes);
         let complete = self.cleanup_complete.take();
+        let observe = self.cleanup_task.take();
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let mut leases = RetainedFixtureLeases::new(
+            std::mem::take(&mut self.a_leases),
+            std::mem::take(&mut self.b_leases),
+        );
+        let lease_owners = leases.owners();
         let work = async move {
+            let _ = entered.send(());
             let mut failure = None;
             if !cleaned {
                 if let Some(a) = &a
@@ -686,6 +751,9 @@ impl Drop for Pair {
                 }
                 if let Err(error) = b.shutdown().await {
                     failure.get_or_insert(error);
+                }
+                if failure.is_none() {
+                    leases.release();
                 }
                 if let Some(ac) = &ac
                     && let Err(error) = ac.shutdown().await
@@ -699,9 +767,11 @@ impl Drop for Pair {
             if failure.is_some() {
                 // A failed fixture cleanup cannot release resource keepers or
                 // remove the directory as if it had an acknowledgment.
-                std::mem::forget((a, ac, b, bc));
+                std::mem::forget((a, ac, b, bc, leases));
                 return Err("peer/cache shutdown was not acknowledged".to_owned());
             }
+            leases.release();
+            drop(leases);
             drop(a);
             drop(ac);
             drop(b);
@@ -710,7 +780,14 @@ impl Drop for Pair {
         };
         let cleanup = pair_cleanup(dir, work, complete);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(cleanup);
+            let worker = handle.spawn(cleanup);
+            if let Some(observe) = observe {
+                let _ = observe.send(PairCleanupTask {
+                    worker,
+                    entered: entry,
+                    leases: lease_owners,
+                });
+            }
         } else {
             eprintln!(
                 "peer/cache cleanup has no runtime; retained {:?}; remaining owners are unobserved",
@@ -719,6 +796,208 @@ impl Drop for Pair {
             drop(cleanup);
         }
     }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn acknowledged_actual_peer_fixture_cleanup_releases_serving_lease_and_cache_owner() {
+    timeout(BOUND, async {
+        let mut pair = Pair::new(0, 32768);
+        let directory = pair.dir.as_ref().unwrap().path().to_owned();
+        let a_cache = Arc::downgrade(pair.a_cache.as_ref().unwrap());
+        let b_cache = Arc::downgrade(&pair.b_cache);
+        let completed = pair.cleanup_completion();
+        let task = pair.observe_cleanup_task();
+        // Exercise the installed Drop cleanup and its actual release path.
+        drop(pair);
+        let PairCleanupTask {
+            worker,
+            entered,
+            leases,
+        } = task
+            .await
+            .expect("actual positive Pair cleanup worker observed");
+        entered
+            .await
+            .expect("actual positive Pair cleanup work entered");
+        worker
+            .await
+            .expect("actual positive Pair cleanup task joined");
+        completed
+            .await
+            .expect("positive Pair cleanup result receipt")
+            .expect("peer/cache cleanup positively acknowledged");
+        assert_eq!(leases.a.len(), 1);
+        assert_eq!(leases.b.len(), 1);
+        assert_eq!(leases.a[0].strong_count(), 0);
+        assert_eq!(leases.b[0].strong_count(), 0);
+        assert_eq!(a_cache.strong_count(), 0);
+        assert_eq!(b_cache.strong_count(), 0);
+        assert!(
+            !directory.exists(),
+            "positive cleanup permits fixture removal"
+        );
+    })
+    .await
+    .expect("bounded actual positive fixture keeper release control");
+}
+// These negative controls intentionally retain the real failed fixture owners
+// and directory. Execute each in an isolated test process; a controller may only
+// remove the printed directory after positively observing that process exit.
+#[derive(Clone, Copy)]
+enum InterruptedPairCleanup {
+    Cancel,
+    Expire,
+}
+async fn interrupted_peer_cleanup_retains_fixture_proof(mode: InterruptedPairCleanup) {
+    timeout(BOUND, async {
+        let mut pair = Pair::new(0, 32768);
+        let directory = pair.dir.as_ref().unwrap().path().to_owned();
+        let sentinel = directory.join("retained-fixture-owner");
+        std::fs::write(&sentinel, b"awaiting actual fixture cleanup ACK").unwrap();
+        let cache_owner = Arc::downgrade(&pair.b_cache);
+        let requester = pair.b.clone();
+        let peer = PeerId("a".into());
+        let request_scope = scope();
+        let bytes = b"authenticated before interrupted cleanup";
+        let warm_id = block(bytes);
+        pair.a_cache
+            .as_ref()
+            .unwrap()
+            .insert(
+                &request_scope,
+                &warm_id,
+                bytes,
+                IntegrityPolicy::Sha256Prefixed,
+            )
+            .unwrap();
+        // A real successful authenticated GET establishes the configured peer
+        // seam before we deliberately hold a second actual outgoing request.
+        let warm = requester.get(&peer, &request_scope, &warm_id).await;
+        let mut slots = Vec::with_capacity(8);
+        for _ in 0..8 {
+            slots.push(pair.a_cache.as_ref().unwrap().io_permit().await.unwrap());
+        }
+        let cold_id = block(b"held cold request has no cached response");
+        let mut held = requester.get(&peer, &request_scope, &cold_id);
+        let request_pending =
+            poll_fn(|cx| Poll::Ready(matches!(held.as_mut().poll(cx), Poll::Pending))).await;
+        // The request's real RAII owner was installed before its first await.
+        // Keep its future unpolled: a timer or connection close cannot drop it.
+        drop(slots);
+        pair.stop_a().await;
+        let mut shutdown_waiter = Box::pin(requester.shutdown());
+        let shutdown_pending =
+            poll_fn(|cx| Poll::Ready(matches!(shutdown_waiter.as_mut().poll(cx), Poll::Pending)))
+                .await;
+        // Cancellation of this waiter leaves the actual owned peer drain live.
+        drop(shutdown_waiter);
+        let mut completed = pair.cleanup_completion();
+        let task = pair.observe_cleanup_task();
+        drop(pair);
+        let PairCleanupTask {
+            worker,
+            entered,
+            leases,
+        } = task.await.expect("actual Pair cleanup worker observed");
+        entered.await.expect("actual Pair cleanup work entered");
+        let (joined, receipt) = match mode {
+            InterruptedPairCleanup::Cancel => {
+                worker.abort();
+                let joined = worker.await;
+                let receipt = completed.try_recv();
+                (joined, receipt)
+            }
+            InterruptedPairCleanup::Expire => {
+                // Preserve the fixture's original 3-second cleanup budget.
+                // Join the actual task as well as reading its result receipt.
+                let joined = worker.await;
+                let receipt = completed.try_recv();
+                (joined, receipt)
+            }
+        };
+        // Release and positively rejoin the same peer drain promptly, before
+        // assertions or disk probes spend its unchanged 4.4-second total budget.
+        drop(held);
+        let peer_closed = requester.shutdown().await;
+        drop(requester);
+        eprintln!(
+            "peer_cache_cleanup=interrupted keeper_directory={directory:?} \
+             intentional_retention=true fixture_cleanup_ack=false"
+        );
+        assert_eq!(warm.unwrap(), Some(bytes.to_vec()));
+        assert!(request_pending, "the actual cold peer request must be held");
+        assert!(shutdown_pending, "the held request must prevent drain ACK");
+        peer_closed.expect("same actual peer drain acknowledged after held request release");
+        match mode {
+            InterruptedPairCleanup::Cancel => {
+                assert!(matches!(joined, Err(error) if error.is_cancelled()));
+                assert!(matches!(
+                    receipt,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                ));
+            }
+            InterruptedPairCleanup::Expire => {
+                joined.expect("expired Pair cleanup task positively joined");
+                assert!(matches!(
+                    receipt,
+                    Ok(Err(error))
+                        if error == "peer/cache cleanup deadline; remaining owners are unobserved"
+                ));
+            }
+        }
+        // No peer remains and neither observation carries a strong owner.
+        // The exact guard lease group is now the sole B-cache owner.
+        assert!(
+            leases.a.is_empty(),
+            "A was positively shut down before cleanup"
+        );
+        assert_eq!(leases.b.len(), 1);
+        assert_eq!(leases.b[0].strong_count(), 1);
+        assert_eq!(cache_owner.strong_count(), 1);
+        let retained_lease = leases.b[0]
+            .upgrade()
+            .expect("actual serving group retained");
+        assert_eq!(retained_lease.policy(), IntegrityPolicy::Sha256Prefixed);
+        assert!(retained_lease.is_current().unwrap());
+        let retained_cache = cache_owner.upgrade().expect("exact LocalCache retained");
+        assert_eq!(
+            retained_cache.scope_policy(&request_scope),
+            Some(IntegrityPolicy::Sha256Prefixed)
+        );
+        let reopen = LocalCache::new(LocalCacheConfig {
+            directory: directory.join("b"),
+            memory_bytes: 8192,
+            disk_bytes: 32768,
+            max_entries: 128,
+            max_blob_bytes: 4096,
+        });
+        assert!(
+            reopen.is_err(),
+            "the retained cache still owns its disk lock"
+        );
+        assert!(directory.is_dir());
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"awaiting actual fixture cleanup ACK"
+        );
+        drop(retained_cache);
+        drop(retained_lease);
+        assert_eq!(leases.b[0].strong_count(), 1);
+        assert_eq!(cache_owner.strong_count(), 1);
+        // The later peer-only ACK does not turn interrupted fixture cleanup
+        // into a success. Its forgotten proof groups and files stay retained.
+    })
+    .await
+    .expect("bounded actual peer fixture keeper control");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "isolated actual-peer cancellation control intentionally retains failed fixture keepers"]
+async fn cancelled_actual_peer_fixture_cleanup_retains_serving_lease_and_cache_owner() {
+    interrupted_peer_cleanup_retains_fixture_proof(InterruptedPairCleanup::Cancel).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "isolated actual-peer expiry control intentionally retains failed fixture keepers"]
+async fn expired_actual_peer_fixture_cleanup_retains_serving_lease_and_cache_owner() {
+    interrupted_peer_cleanup_retains_fixture_proof(InterruptedPairCleanup::Expire).await;
 }
 #[test]
 fn cancelled_pair_cleanup_future_retains_owned_directory() {
@@ -2494,6 +2773,7 @@ async fn exact_registered_scope_isolation_precedes_peer_lookup_and_put() {
         let mut forbidden = base.clone();
         forbidden.identity.partition = "forbidden".into();
         let local = pair.a_cache.as_ref().unwrap();
+        let peer = PeerId("a".into());
         for (s, bytes) in [
             (&base, b"one".as_slice()),
             (&sibling, b"two"),
@@ -2501,17 +2781,27 @@ async fn exact_registered_scope_isolation_precedes_peer_lookup_and_put() {
             (&other_cluster, b"cluster"),
             (&forbidden, b"partition"),
         ] {
-            local
-                .register_scope(s.clone(), IntegrityPolicy::Opaque)
-                .unwrap();
+            pair.a_leases.push(register_fixture_scope(
+                local,
+                s.clone(),
+                IntegrityPolicy::Opaque,
+            ));
             local
                 .insert(s, &id, bytes, IntegrityPolicy::Opaque)
                 .unwrap();
+            if s == &base {
+                assert_eq!(
+                    pair.b.get(&peer, s, &id).await.unwrap(),
+                    Some(bytes.to_vec())
+                );
+            }
         }
-        let peer = PeerId("a".into());
+        assert!(
+            pair.b.get(&peer, &base, &id).await.is_err(),
+            "observed replacement must deny the old backing scope"
+        );
         for (s, bytes) in [
-            (&base, b"one".as_slice()),
-            (&sibling, b"two"),
+            (&sibling, b"two".as_slice()),
             (&other_backing, b"backing"),
             (&other_cluster, b"cluster"),
         ] {
@@ -2664,11 +2954,11 @@ async fn sqlite_sdk_acknowledgment_survives_fresh_undecorated_reopen() {
         let underlying = decorator.backing.lock().unwrap().as_ref().unwrap().clone();
         let mut actual_scope = scope();
         actual_scope.backing = underlying.prepare_concurrent_backing().await.unwrap();
-        pair.a_cache
-            .as_ref()
-            .unwrap()
-            .register_scope(actual_scope, IntegrityPolicy::Opaque)
-            .unwrap();
+        pair.a_leases.push(register_fixture_scope(
+            pair.a_cache.as_ref().unwrap(),
+            actual_scope,
+            IntegrityPolicy::Opaque,
+        ));
         drop(underlying);
         let bytes: Vec<u8> = (0..3072).map(|i| (i % 251) as u8).collect();
         let view = mount_rs_core::Loopback::from_arc(first.driver());

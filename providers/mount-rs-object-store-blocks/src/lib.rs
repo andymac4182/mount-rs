@@ -12,6 +12,8 @@ pub use raw_metrics::{
     RAW_API_SCHEMA, RAW_API_SCOPE, RawApiClaims, RawApiEntry, RawApiSnapshot,
 };
 #[cfg(test)]
+mod object_store_cache_diagnostics_tests;
+#[cfg(test)]
 mod raw_metrics_tests;
 
 mod qualification;
@@ -583,18 +585,36 @@ struct ObjectStoreBlockCacheState {
     bytes: usize,
 }
 
-#[derive(Default)]
 struct ObjectStoreBlockCache {
     state: Mutex<ObjectStoreBlockCacheState>,
+    // Declared last: publish final release after the actual cache state drops.
+    residency: mount_rs_core::diagnostics::object_store::CacheResidencyGuard,
+}
+
+impl Default for ObjectStoreBlockCache {
+    fn default() -> Self {
+        Self::new_with_observer(&mount_rs_core::diagnostics::object_store::Observer::enabled())
+    }
 }
 
 impl ObjectStoreBlockCache {
+    fn new_with_observer(observer: &mount_rs_core::diagnostics::object_store::Observer) -> Self {
+        Self {
+            state: Mutex::new(ObjectStoreBlockCacheState::default()),
+            residency: observer.cache_residency(),
+        }
+    }
     fn lock(
         &self,
         local: Option<&LocalState>,
     ) -> std::sync::LockResult<std::sync::MutexGuard<'_, ObjectStoreBlockCacheState>> {
         let mut span = LocalSpan::new(local, Local::CacheLock, 0);
         let result = self.state.lock();
+        if result.is_err() {
+            // The poisoned guard still serializes this observation with state.
+            // Known totals exclude this owner until its final drop.
+            self.residency.mark_unknown();
+        }
         span.result(&result, 0);
         result
     }
@@ -646,6 +666,7 @@ impl ObjectStoreBlockCache {
         copy.success(copied.len() as u64);
         state.entries.insert(key, copied);
         state.order.push_back(id.to_owned());
+        self.residency.publish(state.entries.len(), state.bytes);
     }
 
     fn remove(&self, id: &str, local: Option<&LocalState>) {
@@ -658,6 +679,7 @@ impl ObjectStoreBlockCache {
         if let Some(position) = state.order.iter().position(|entry| entry == id) {
             state.order.remove(position);
         }
+        self.residency.publish(state.entries.len(), state.bytes);
     }
 }
 

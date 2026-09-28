@@ -398,15 +398,24 @@ async fn connect(
     drive: usize,
     server: usize,
 ) -> Result<quinn::Connection, String> {
+    let address = fleet.children[server]
+        .ready
+        .as_ref()
+        .ok_or("worker readiness missing")?
+        .address;
+    connect_address(endpoint, address, tokens, drive).await
+}
+async fn connect_address(
+    endpoint: &quinn::Endpoint,
+    address: std::net::SocketAddr,
+    tokens: &SignedTokens,
+    drive: usize,
+) -> Result<quinn::Connection, String> {
     tokio::time::timeout(
         Duration::from_secs(REQUEST_SECONDS),
         wire::connect_token(
             endpoint,
-            fleet.children[server]
-                .ready
-                .as_ref()
-                .ok_or("worker readiness missing")?
-                .address,
+            address,
             &format!("partition-{}", drive / 2),
             &tokens.token(drive, 3000),
         ),
@@ -734,27 +743,32 @@ pub async fn controller() -> Result<(), String> {
             }).await.map_err(|_| "replica reconnect inherited phase deadline")??;
             journal.phase("routes_and_scope")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("routes_and_scope","before"),&oracle_owner).await?;
-            let (routes, sibling, partition) = tokio::time::timeout_at(journal.phase_deadline.into(), async {
+            let (route_probes, sibling, partition) = tokio::time::timeout_at(journal.phase_deadline.into(), async {
             let mut routes = 0;
             let mut sibling = 0;
             let mut partition = 0;
             for (server, endpoint) in endpoints.iter().enumerate() {
                 for drive in 0..config.drives {
                     let connection = connect(endpoint, &fleet, &tokens, drive, server).await?;
-                    tokio::time::timeout(
+                    // A fresh session has no handle0. Its typed EBADF follows
+                    // current catalog authorization, definition and route checks,
+                    // without acquiring a filesystem runtime. Backing access is
+                    // proved by assigned warmup and the post-profile Stat batches.
+                    let response = tokio::time::timeout(
                         Duration::from_secs(REQUEST_SECONDS),
-                        wire::success(
+                        wire::request(
                             &connection,
                             1,
                             &format!("sandbox-{drive}"),
-                            mount_rs_remote_protocol::OperationName::Stat,
-                            json!({
-                                    "path":"/mixed-0"}
-                            ),
+                            mount_rs_remote_protocol::OperationName::HandleClose,
+                            json!({"handle":0}),
                         ),
                     )
                     .await
                     .map_err(|_| "route request deadline")??;
+                    if response != Err("EBADF".into()) {
+                        return Err("nonactivating route binding proof missing".into());
+                    }
                     routes += 1;
                     connection.close(0u32.into(), b"route complete");
                 }
@@ -798,12 +812,30 @@ pub async fn controller() -> Result<(), String> {
             }
                 Ok::<_, String>((routes, sibling, partition))
             }).await.map_err(|_| "routes inherited phase deadline")??;
-            journal.value["routes"] = json!(routes);
+            journal.value["nonactivating_routes"] = json!(route_probes);
+            journal.value["nonactivating_route_scope"] = json!("fresh authenticated handle0 EBADF after current catalog and Drive binding checks; no backing or runtime health proof");
             journal.value["scope_denials"] = json!({
                     "sibling":sibling,
                     "partition":partition}
             );
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("routes_and_scope","after"),&oracle_owner).await?;
+            journal.phase("assigned_warmup")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("assigned_warmup","before"),&oracle_owner).await?;
+            let mut warmed = 0;
+            let warmup = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
+                for lane in &mut lanes {
+                    lane.request(
+                        mount_rs_remote_protocol::OperationName::Stat,
+                        json!({"path":"/mixed-0"}),
+                    ).await?;
+                    warmed += 1;
+                }
+                Ok(())
+            }).await;
+            journal.value["assigned_warmup"] = json!({"acknowledged_stats":warmed,"expected_stats":config.drives,"complete":warmup.is_ok(),"scope":"actual I/O for each sandbox on its assigned server; caches may warm before timed modes"});
+            journal.flush()?;
+            warmup?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("assigned_warmup","after"),&oracle_owner).await?;
             for mostly_idle in [true, false] {
                 for pattern in PATTERNS {
                     let mode = if mostly_idle {
@@ -916,6 +948,74 @@ pub async fn controller() -> Result<(), String> {
                     journal.flush()?;
                 }
             }
+            // Keep the complete actual cross-server storage proof after the
+            // balanced timed modes. Every rotation starts only after the old
+            // generation's acknowledged drain; no batch receives a fresh phase.
+            journal.phase("crossnode_routes")?;
+            journal.value["crossnode_route_batches"] = json!([]);
+            let mut routes = 0;
+            for rotation in 1..=SERVERS {
+                let generation = rotation as u64 + 1;
+                let offset = rotation % SERVERS;
+                for lane in &lanes {
+                    lane.connection.close(0u32.into(), b"post-profile rotation");
+                }
+                fleet.command("reopen", generation)?;
+                tokio::time::timeout_at(journal.phase_deadline.into(), fleet.ready(&private, generation, &mut journal.progress, resource))
+                    .await.map_err(|_| "crossnode refresh inherited phase deadline")??;
+                let ready_sequence = phase_metrics.as_ref().unwrap().sequence + 1;
+                metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("crossnode_routes","after_ready"),&oracle_owner).await?;
+                // Retain the just-validated addresses separately so the owned
+                // supervisor can keep checking the mutable Fleet while I/O runs.
+                let addresses = fleet.children.iter().map(|child| {
+                    child.ready.as_ref().map(|ready| ready.address).ok_or("worker readiness missing")
+                }).collect::<Result<Vec<_>, _>>()?;
+                if addresses.len() != SERVERS {
+                    return Err("crossnode worker geometry missing".into());
+                }
+                let mut batch_routes = 0;
+                let batch = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
+                    for drive in 0..config.drives {
+                        let server = (drive + offset) % SERVERS;
+                        let connection = connect_address(&endpoints[server], addresses[server], &tokens, drive).await?;
+                        tokio::time::timeout(
+                            Duration::from_secs(REQUEST_SECONDS),
+                            wire::success(
+                                &connection,
+                                1,
+                                &format!("sandbox-{drive}"),
+                                mount_rs_remote_protocol::OperationName::Stat,
+                                json!({"path":"/mixed-0"}),
+                            ),
+                        ).await.map_err(|_| "crossnode route request deadline")??;
+                        batch_routes += 1;
+                        connection.close(0u32.into(), b"post-profile route complete");
+                    }
+                    Ok(())
+                }).await;
+                routes += batch_routes;
+                journal.value["routes"] = json!(routes);
+                journal.value["crossnode_route_batches"].as_array_mut().unwrap().push(json!({"generation":generation,"offset":offset,"acknowledged_stats":batch_routes,"expected_stats":config.drives,"ready_sequence":ready_sequence,"rpc_complete":batch.is_ok(),"validation_complete":false}));
+                journal.flush()?;
+                batch?;
+                let batch_sequence = phase_metrics.as_ref().unwrap().sequence + 1;
+                metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("crossnode_routes","after_batch"),&oracle_owner).await?;
+                let receipt = journal.value["crossnode_route_batches"].as_array_mut().unwrap().last_mut().unwrap();
+                receipt["batch_sequence"] = json!(batch_sequence);
+                receipt["validation_complete"] = json!(true);
+                journal.flush()?;
+            }
+            if routes != config.drives * SERVERS {
+                return Err("complete crossnode route coverage missing".into());
+            }
+            // The last rotation has offset0. Retain fresh original-assignment
+            // sessions for the existing final durability and revocation checks.
+            tokio::time::timeout_at(journal.phase_deadline.into(), async {
+                for (drive, lane) in lanes.iter_mut().enumerate() {
+                    lane.connection = connect(&endpoints[drive % SERVERS], &fleet, &tokens, drive, drive % SERVERS).await?;
+                }
+                Ok::<_, String>(())
+            }).await.map_err(|_| "post-profile reconnect inherited phase deadline")??;
             journal.phase("final_fresh_oracle")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("final_fresh_oracle","before"),&oracle_owner).await?;
             let mut verified_files = 0;

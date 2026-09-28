@@ -531,3 +531,92 @@ async fn authorization_rechecks_revocation_after_owned_handle_cleanup_wait() {
     drop(handles);
     pool.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn authenticated_cold_route_probe_requires_binding_and_definition_without_activation() {
+    let (dispatcher, pool, _other, gates, catalog) = fixture_with_catalog();
+    let probe = Operation {
+        name: OperationName::HandleClose,
+        body: serde_json::json!({"handle":0}),
+    };
+    let authorized = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatcher.dispatch(&identity(), "d", &probe),
+    )
+    .await
+    .unwrap();
+    let cold_authorized = pool.snapshot();
+    // An authorized catalog entry alone is not a registered route.
+    let unbound = DriveDispatcher::new(catalog.clone());
+    let missing_binding = tokio::time::timeout(
+        Duration::from_secs(5),
+        unbound.dispatch(&identity(), "d", &probe),
+    )
+    .await
+    .unwrap();
+    let cold_missing = pool.snapshot();
+    let original = catalog.0.lock().unwrap().clone();
+    let mut stale = (*original).clone();
+    stale
+        .partitions
+        .get_mut("p")
+        .unwrap()
+        .drives
+        .get_mut("d")
+        .unwrap()
+        .driver = serde_json::json!({"kind":"changed"});
+    *catalog.0.lock().unwrap() = Arc::new(stale);
+    let stale_definition = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatcher.dispatch(&identity(), "d", &probe),
+    )
+    .await
+    .unwrap();
+    let cold_stale = pool.snapshot();
+    let mut revoked = (*original).clone();
+    revoked.grants.clear();
+    *catalog.0.lock().unwrap() = Arc::new(revoked);
+    let unauthorized = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatcher.dispatch(&identity(), "d", &probe),
+    )
+    .await
+    .unwrap();
+    let cold_revoked = pool.snapshot();
+    *catalog.0.lock().unwrap() = original;
+    // Positive storage control: ordinary assigned Stat really activates its owner.
+    let actual_stat = tokio::time::timeout(
+        Duration::from_secs(5),
+        dispatcher.dispatch(
+            &identity(),
+            "d",
+            &Operation {
+                name: OperationName::Stat,
+                body: serde_json::json!({"path":"/"}),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let activated = pool.snapshot();
+    tokio::time::timeout(Duration::from_secs(5), pool.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(authorized.unwrap_err().code, "EBADF");
+    assert_eq!(missing_binding.unwrap_err().code, "EACCES");
+    assert_eq!(stale_definition.unwrap_err().code, "ESTALE");
+    assert_eq!(unauthorized.unwrap_err().code, "EACCES");
+    for cold in [cold_authorized, cold_missing, cold_stale, cold_revoked] {
+        assert_eq!(
+            cold.open_success, 0,
+            "route/auth probe activated a provider"
+        );
+        assert_eq!(cold.resident, 0);
+    }
+    actual_stat.unwrap();
+    assert_eq!(activated.open_success, 1);
+    assert_eq!(activated.resident, 1);
+    assert_eq!(gates.stats.load(Ordering::SeqCst), 1);
+    assert_eq!(gates.shutdowns.load(Ordering::SeqCst), 1);
+}

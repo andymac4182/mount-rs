@@ -1770,8 +1770,10 @@ dependencies = [
  "mount-rs-remote-client",
  "mount-rs-remote-protocol",
  "mount-rs-sdk",
+ "mount-rs-rustfs",
  "mount-rs-service",
  "mount-rs-sqlite",
+ "mount-rs-tidb",
  "rcgen",
  "ring",
  "rusqlite",
@@ -2099,6 +2101,8 @@ name = "mount-rs-rustfs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "http-body",
  "mount-rs-core",
  "mount-rs-object-store-blocks",
  "object_store 0.12.5",

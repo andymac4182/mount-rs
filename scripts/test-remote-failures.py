@@ -14,6 +14,7 @@ COMMANDS.update({
     'wsheldmonitor': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--test', 'quic_mount', '--locked', '--offline', '--', 'quic_mount_reply_loss::held_reply_monitor_', '--test-threads=1', '--nocapture'], 180, 0, 0),
     'targetlazy': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'sdk-runtime,resource-profiling', '--test', 'quic_production_target', '--locked', '--offline', '--', '--ignored', '--exact', 'ten_process_lazy_startup_preserves_exact_backing_and_workload', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'targetlazyunit': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'sdk-runtime,resource-profiling', '--test', 'quic_production_target', '--locked', '--offline', 'lazy_target_', '--', '--test-threads=1', '--nocapture'], 180, 1, 0),
+    'balancedprobe': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'sdk-runtime,resource-profiling', '--lib', '--locked', '--offline', '--', '--exact', 'dispatch::lazy_handle_tests::authenticated_cold_route_probe_requires_binding_and_definition_without_activation', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'lazycli': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'local-oidc-fixture,io-profiling', '--lib', '--locked', '--offline', '::lazy_', '--', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'lazyservice': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-service', '--features', 'sdk-runtime,io-profiling', '--test', 'filesystem_runtime', '--test', 'lazy_dispatch', '--test', 'runtime_pool_sqlite', '--locked', '--offline', '--', '--test-threads=1', '--nocapture'], 180, 1, 0),
     'clientsetupmetrics': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-remote-client', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'connection::metrics_tests::quic_connection_setup_metrics_preserve_outcomes', '--test-threads=1', '--nocapture'], 180, 1, 0),
@@ -59,7 +60,53 @@ COMMANDS.update({
     'cachemetricsclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-core', '-p', 'mount-rs-blob-cache', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0),
     'cacheconsumers': (['fnm', 'exec', '--using', 'v24.18.0', 'node', '--test', 'benchmarks/storage/test.mjs', 'benchmarks/storage/foundationdb-diagnostics.test.mjs', 'benchmarks/storage/owned-layout-metrics.test.mjs', 'benchmarks/storage/owned-backing-pilot.test.mjs', 'scripts/verify-owned-backing-pilot.test.mjs'], 180, 0, 0),
 })
+COLD_HOLDER_CASES = {
+    'holderleasepositive': 'acknowledged_actual_peer_fixture_cleanup_releases_serving_lease_and_cache_owner',
+    'holderleasecancelled': 'cancelled_actual_peer_fixture_cleanup_retains_serving_lease_and_cache_owner',
+    'holderleaseexpired': 'expired_actual_peer_fixture_cleanup_retains_serving_lease_and_cache_owner',
+    'holderfirstseal': 'server_cache::cold_holder::tests::first_close_request_seals_holders_before_held_failed_factory_cleanup',
+    'holderroutepublish': 'server_cache::cold_holder::tests::route_poison_during_final_catalog_check_blocks_new_proof_publication',
+    'holderroutecoalesce': 'server_cache::cold_holder::tests::route_poison_during_final_catalog_check_blocks_coalesced_proof_reuse',
+    'holderdrainpoison': 'server_cache::cold_holder::tests::first_drain_ack_rejects_registry_poison_at_terminal_publication',
+    'holderdraintyped': 'server_cache::cold_holder::tests::terminal_publication_poison_preserves_an_existing_typed_drain_error',
+    'holderreleaseregistry': 'server_cache::cold_holder::tests::proof_release_refuses_registry_poison_after_final_owner_query',
+    'holderreleaseroute': 'server_cache::cold_holder::tests::proof_release_refuses_route_poison_before_final_proof_take',
+}
+COMMANDS.update({
+    'holdersdk': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-sdk', '--all-targets', '--locked', '--offline'], 180, 0, 0),
+    'holdercli': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--lib', '--locked', '--offline'], 180, 0, 0),
+    'holdercliprofiled': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'io-profiling', '--lib', '--locked', '--offline'], 180, 1, 0),
+    'holderclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-sdk', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-cli', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0),
+    'holderclippyprofiled': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-sdk', '-p', 'mount-rs-blob-cache', '-p', 'mount-rs-cli', '--features', 'mount-rs-cli/io-profiling,mount-rs-cli/local-oidc-fixture', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 1, 0),
+    'tidbcoldcompile': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'local-oidc-fixture', '--test', 'ten_process_cache', '--no-run', '--locked', '--offline'], 180, 0, 0),
+    'tidbcoldunit': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features', 'local-oidc-fixture', '--test', 'ten_process_cache', '--locked', '--offline'], 180, 0, 0),
+    'objectstorered': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-core', '--lib', '--locked', '--offline', '--', '--exact', 'diagnostics::object_store::tests::headers_and_body_completion_are_separate_observations', '--test-threads=1'], 180, 0, 0),
+    'objectstorecachered': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-object-store-blocks', '--lib', '--locked', '--offline', '--', '--exact', 'object_store_cache_diagnostics_tests::actual_cache_owner_releases_payload_without_observer_retaining_it', '--test-threads=1'], 180, 0, 0),
+    'rustfshttpred': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-rustfs', '--lib', '--locked', '--offline', '--', '--exact', 'http_observation_tests::actual_s3_retry_counts_two_dispatches_with_original_signing_and_create_headers', '--test-threads=1'], 180, 0, 0),
+    'objectstoreunit': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-core', '--lib', '--locked', '--offline', 'diagnostics::object_store::tests::', '--', '--test-threads=1'], 180, 0, 0),
+    'objectstorecacheunit': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-object-store-blocks', '--lib', '--locked', '--offline', 'object_store_cache_diagnostics_tests::', '--', '--test-threads=1'], 180, 0, 0),
+    'rustfshttpunit': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-rustfs', '--lib', '--locked', '--offline', 'http_observation_tests::', '--', '--test-threads=1'], 180, 0, 0),
+    'rustfsownedprefix': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-rustfs', '--lib', '--locked', '--offline', 'owned_prefix_tests::', '--', '--test-threads=1'], 180, 0, 0),
+    'objectstorealloc': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-core', '--test', 'storage_diagnostics_allocations', '--locked', '--offline', '--', '--exact', 'warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations', '--test-threads=1'], 180, 0, 0),
+    'objectstorequalification': (['./scripts/cargo-shared', 'test', '-p', 'mount-rs-object-store-blocks', '--lib', '--locked', '--offline', '--', '--ignored', '--exact', 'object_store_cache_diagnostics_tests::actual_qualification_temporary_adapters_release_both_observed_caches', '--test-threads=1'], 180, 1, 0),
+    'objectstoreclippy': (['./scripts/cargo-shared', 'clippy', '-p', 'mount-rs-core', '-p', 'mount-rs-object-store-blocks', '-p', 'mount-rs-rustfs', '--all-targets', '--locked', '--offline', '--', '-D', 'warnings'], 180, 0, 0),
+})
+for kind, case in COLD_HOLDER_CASES.items():
+    if case.startswith('server_cache::cold_holder::tests::'):
+        command = ['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--lib', '--locked', '--offline', '--', '--exact', case, '--test-threads=1', '--nocapture']
+    else:
+        command = ['./scripts/cargo-shared', 'test', '-p', 'mount-rs-blob-cache', '--test', 'distributed_failure', '--locked', '--offline', '--', '--exact', case, '--test-threads=1', '--nocapture']
+        if kind != 'holderleasepositive':
+            command.append('--ignored')
+    COMMANDS[kind] = (command, 180, 0, 0)
+
 EXACT_CASES = {
+    'objectstorered': 'diagnostics::object_store::tests::headers_and_body_completion_are_separate_observations',
+    'objectstorecachered': 'object_store_cache_diagnostics_tests::actual_cache_owner_releases_payload_without_observer_retaining_it',
+    'rustfshttpred': 'http_observation_tests::actual_s3_retry_counts_two_dispatches_with_original_signing_and_create_headers',
+    'objectstorealloc': 'warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations',
+    'objectstorequalification': 'object_store_cache_diagnostics_tests::actual_qualification_temporary_adapters_release_both_observed_caches',
+    'balancedprobe': 'dispatch::lazy_handle_tests::authenticated_cold_route_probe_requires_binding_and_definition_without_activation',
     'wscompactloss': 'automatic_fallback_compact_sqlite_commit_survives_lost_wire_reply_without_replay',
     'targetlazy': 'ten_process_lazy_startup_preserves_exact_backing_and_workload',
     'clientsetupmetrics': 'connection::metrics_tests::quic_connection_setup_metrics_preserve_outcomes',
@@ -87,12 +134,85 @@ EXACT_CASES = {
     'storagealloc': 'warmed_core_spans_record_without_added_allocations',
     'corealloc': 'warmed_causal_profile_rows_record_without_added_allocations',
 }
+EXACT_CASES.update(COLD_HOLDER_CASES)
+EXPECTED_PACKAGE_CASES = {
+    'holdersdk': tuple('providers::provider_construction_tests::' + name for name in (
+        'observed_inspection_cancelled_metadata_constructor_retains_uncertainty',
+        'observed_inspection_cancelled_block_constructor_retains_uncertainty',
+        'observed_inspection_metadata_error_closes_actual_wire_owner',
+        'observed_inspection_block_error_closes_actual_wire_owner',
+        'observed_inspection_retained_operation_survives_waiter_timeout',
+    )) + tuple('providers::compact_layout_inspection_tests::' + name for name in (
+        'observed_compact_inspection_preserves_same_and_split_sqlite_state',
+        'observed_compact_inspection_does_not_enroll_a_noncompact_layout',
+        'observed_compact_inspection_rejects_foreign_backing_without_repair',
+        'observed_compact_inspection_closed_context_rejects_before_registration',
+        'observed_inspection_keeps_primary_failure_separate_from_cleanup_failure',
+        'observed_inspection_owned_operation_survives_a_cancelled_cleanup_waiter',
+    )) + ('retained_unobserved_split_resource_rejects_failed_authority',),
+    'holdercli': tuple('server_cache::cold_holder::tests::' + name for name in (
+        'cold_holder_admission_uses_configured_scope_and_survives_active_store_eviction',
+        'cancelled_waiter_retains_actual_task_and_coalesces_without_new_provider_work',
+        'revoked_old_await_cannot_publish_after_exact_catalog_restore',
+        'actual_registry_drain_precedes_context_close_even_when_close_waiter_is_cancelled',
+    )),
+}
+EXPECTED_PACKAGE_CASES['holdercliprofiled'] = EXPECTED_PACKAGE_CASES['holdercli']
+EXPECTED_PACKAGE_CASES['tidbcoldunit'] = tuple('ten_process_cache_support::cold_retirement::tests::' + name for name in (
+    'cold_holder_shutdown_frame_requires_complete_unique_real_contract',
+    'cold_oracle_owner_unwind_retains_unproven_actual_resource_group',
+    'cold_oracle_owner_releases_only_positive_groups_and_retains_poison',
+))
+EXPECTED_PACKAGE_CASES.update({
+    'rustfsownedprefix': tuple('owned_prefix_tests::' + name for name in (
+        'empty_observation_uses_one_exact_bounded_signed_list_seam',
+        'any_owned_child_including_reserved_and_nested_markers_is_present',
+        'sibling_locations_and_incomplete_page_shapes_fail_closed',
+        'unsafe_or_oversized_prefixes_are_rejected_before_dispatch',
+        'configured_public_method_checks_scope_before_building_a_client',
+        'deadline_drops_a_held_listing_once_without_retry',
+        'caller_cancellation_drops_the_exact_held_listing',
+    )),
+    'objectstoreunit': tuple('diagnostics::object_store::tests::' + name for name in (
+        'headers_and_body_completion_are_separate_observations',
+        'dispatch_errors_pre_header_cancellation_and_body_drop_are_distinct',
+        'actual_service_lifetime_can_outlive_bundle_group',
+        'failed_and_abandoned_builds_never_commit_residency',
+        'enabled_guards_read_clock_and_disabled_guards_do_not',
+        'cache_unknown_and_final_release_remove_only_own_contribution',
+        'fixed_bank_saturates_and_snapshot_discloses_active_update',
+    )),
+    'objectstorecacheunit': tuple('object_store_cache_diagnostics_tests::' + name for name in (
+        'actual_cache_owner_releases_payload_without_observer_retaining_it',
+        'cache_replacement_removal_and_lru_keep_actual_residency',
+        'byte_cap_and_oversize_rejection_preserve_existing_policy',
+        'poisoned_cache_is_unknown_once_and_keeps_existing_bypass',
+        'disabled_cache_observation_keeps_cache_behavior',
+        'actual_store_clone_shares_cache_until_final_facade_drop',
+    )),
+    'rustfshttpunit': tuple('http_observation_tests::' + name for name in (
+        'actual_s3_retry_counts_two_dispatches_with_original_signing_and_create_headers',
+        'unpolled_observed_call_counts_box_construction_without_dispatch_or_cancellation',
+        'held_actual_dispatch_drop_preserves_owner_drop_and_records_only_preheader_cancel',
+        'body_frames_trailers_pointer_sizehint_and_eof_pass_through_without_copy',
+        'typed_transport_and_body_errors_remain_distinct_and_body_prefix_is_counted',
+        'pending_response_body_keeps_no_observed_service_and_drop_is_not_dispatch_cancel',
+        'initially_empty_head_hint_does_not_infer_eof_and_actual_none_is_positive_control',
+        'configured_four_clients_roles_budgets_sharing_and_final_bundle_release_are_preserved',
+        'actual_fourth_client_build_failure_releases_prior_clients_and_never_commits_bundle',
+        'invalid_prefix_after_four_actual_client_builds_records_bundle_error_and_releases_all',
+        'disabled_connector_returns_original_service_without_wrapper_or_observation',
+        'allocation_control::pending_call_adds_exactly_one_box_and_disabled_call_preserves_baseline',
+        'allocation_control::ready_prebuilt_response_adds_one_future_box_and_one_body_box',
+    )),
+})
 EXPECTED_SUITES = {
     'wsheldmonitor': (
         'quic_mount_reply_loss::held_reply_monitor_rejects_second_write_even_when_release_is_ready',
         'quic_mount_reply_loss::held_reply_monitor_flushes_ping_and_accepts_pong_before_release',
     ),
     'targetlazyunit': (
+        'target::progress::tests::lazy_target_balanced_validation_phases_preserve_closed_progress_accounting',
         'target::process::lazy_target_terminal_requires_the_same_cold_plan_as_ready',
         'target::lazy_runtime::tests::lazy_target_prepared_registration_preserves_full_bytes_and_backing_across_generation_reopen',
         'target::lazy_runtime::tests::lazy_target_cancelled_waiter_retains_real_lease_and_rejoins_same_acknowledged_drain',
@@ -107,6 +227,11 @@ EXPECTED_SUITES = {
         'target::metrics::tests::lazy_target_runtime_incomplete_frames_cannot_qualify_or_invent_zero',
         'target::metrics::tests::lazy_target_runtime_delta_keeps_gauges_and_rejects_cross_generation',
         'target::metrics::tests::lazy_target_runtime_boundary_requires_actual_primary_and_all_route_activations',
+        'target::metrics::tests::lazy_target_timed_modes_accept_only_balanced_assigned_runtime_owners',
+        'target::metrics::tests::lazy_target_timed_modes_reject_unassigned_crossnode_runtime_replication',
+        'target::metrics::tests::lazy_target_nonactivating_route_checks_require_zero_opened_owners',
+        'target::metrics::tests::lazy_target_postprofile_rotation_requires_only_its_exact_assigned_owners',
+        'target::metrics::tests::lazy_target_closed_measured_generation_rejects_unassigned_replication',
     ),
     'lazycli': tuple('remote::tests::'+name for name in (
         'lazy_actual_listener_bind_failures_close_created_resources_without_opening_drives',
@@ -218,8 +343,9 @@ EXPECTED_SUITES = {
 def named_suite_passed(output, names, nocapture=False):
     count=len(names)
     return bool(
-        re.search(r'^running '+str(count)+r' tests$', output, re.M)
-        and re.search(r'^test result: ok\. '+str(count)+r' passed; 0 failed; 0 ignored;', output, re.M)
+        re.findall(r'^running ([0-9]+) tests?$', output, re.M) == [str(count)]
+        and len(re.findall(r'^test result:', output, re.M)) == 1
+        and re.search(r'^test result: ok\. '+str(count)+r' passed; 0 failed; 0 ignored;[^\n]*\n+\Z', output, re.M)
         and (
             (lambda observed: len(observed) == count and set(observed) == set(names))(
                 re.findall(r'^test ([^\s]+) \.\.\.', output, re.M)
@@ -621,6 +747,36 @@ def exact_case_passed(output, selected_test):
     )
 
 
+def package_harness_passed(output, required_cases):
+    # All package harnesses must finish, including feature-gated empty ones.
+    # A terminal successful Cargo exit alone cannot establish executed tests.
+    starts = re.findall(r'^running ([0-9]+) tests?$', output, re.M)
+    summaries = re.findall(
+        r'^test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured;[^\n]*\n',
+        output, re.M,
+    )
+    if not starts or len(starts) != len(summaries):
+        return False
+    if len(re.findall(r'^test result:', output, re.M)) != len(summaries):
+        return False
+    if not re.search(r'^test result: ok\.[^\n]*\n+\Z', output, re.M):
+        return False
+    total_passed = 0
+    for start, (status, passed, failed, ignored, measured) in zip(starts, summaries):
+        if status != 'ok' or int(failed) != 0:
+            return False
+        if int(start) != sum(int(count) for count in (passed, failed, ignored, measured)):
+            return False
+        total_passed += int(passed)
+    if total_passed == 0:
+        return False
+    for case in required_cases:
+        records = re.findall(r'^test ' + re.escape(case) + r' \.\.\. ([^\n]*)$', output, re.M)
+        if records != ['ok']:
+            return False
+    return True
+
+
 def compact_sqlite_named_case_passed(output):
     selected_test = EXACT_CASES['wscompactloss']
     return bool(
@@ -658,11 +814,15 @@ def main():
     FAULT_KINDS.add('peeriometrics')
     FAULT_KINDS.add('peeriometricstrace')
     FAULT_KINDS.add('sqlitecache')
-    FAULT_KINDS.update({'lazycli', 'lazyservice', 'targetlazy', 'targetlazyunit'})
+    FAULT_KINDS.update({'lazycli', 'lazyservice', 'targetlazy', 'targetlazyunit', 'balancedprobe'})
     FAULT_KINDS.add('wsclientmetrics')
     FAULT_KINDS.add('wsautoloss')
     FAULT_KINDS.update({'wscompactloss','wsheldmonitor'})
     FAULT_KINDS.update({'wsservicedefault','wsserviceon','wsserviceunit','wspackages','wspackagesprofiled','wsclippy','wsclippyprofiled'})
+    FAULT_KINDS.update({'holdersdk', 'holdercli', 'holdercliprofiled', 'holderclippy', 'holderclippyprofiled'})
+    FAULT_KINDS.update({'tidbcoldcompile', 'tidbcoldunit'})
+    FAULT_KINDS.update({'objectstorered', 'objectstorecachered', 'rustfshttpred', 'objectstoreunit', 'objectstorecacheunit', 'rustfshttpunit', 'rustfsownedprefix', 'objectstorealloc', 'objectstorequalification', 'objectstoreclippy'})
+    FAULT_KINDS.update(COLD_HOLDER_CASES)
     assert kind in FAULT_KINDS, 'fixed fault qualification commands only'
     root=pathlib.Path(tempfile.mkdtemp(prefix='mount-rs-owned-fault-'+kind+'-',dir=os.environ.get('MOUNT_RS_FAILURE_EVIDENCE_ROOT',tempfile.gettempdir())));os.chmod(root,0o700)
     fixture_tmp=root/'fixtures';fixture_tmp.mkdir(mode=0o700)
@@ -688,7 +848,7 @@ def main():
       paths.extend([pathlib.Path(__file__).resolve(),BASE/'scripts/test-remote-failures-controls.py',BASE/'.github/workflows/ci.yml',BASE/'.github/workflows/remote-drives.yml',BASE/'crates/mount-rs-blob-cache/tests/support/stage_metrics.rs'])
       paths.extend(BASE/v for v in ['scripts/test-foundationdb.sh','tests/ozone/production-rollout-contract.json','scripts/test-tidb.sh','scripts/test-rustfs.sh'])
      else:
-      tracked=subprocess.check_output(['git','ls-files','-z'],cwd=BASE).decode().split('\0')
+      tracked=subprocess.check_output(['git','ls-files','--cached','--others','--exclude-standard','-z'],cwd=BASE).decode().split('\0')
       paths=[BASE/v for v in tracked if v and (v.endswith(('.rs','.toml','.lock')) or v=='scripts/cargo-shared')]
       paths.append(BASE/'.github/workflows/ci.yml')
       paths.append(pathlib.Path(__file__).resolve())
@@ -709,6 +869,9 @@ def main():
      paths.extend(BASE/v for v in (
       'apps/mount-rs-cli/src/remote_runtime.rs',
       'apps/mount-rs-cli/src/remote_runtime/lifecycle_tests.rs',
+      'apps/mount-rs-cli/src/server_cache/cold_holder.rs',
+      'apps/mount-rs-cli/src/server_cache/cold_holder_tests.rs',
+      'apps/mount-rs-cli/tests/ten_process_cache_support/cold_retirement.rs',
       'crates/mount-rs-service/src/filesystem_runtime.rs',
       'crates/mount-rs-service/tests/filesystem_runtime.rs',
      ) if (BASE/v).is_file())
@@ -879,6 +1042,11 @@ def main():
       output=(root/'stdout.log').read_text()
       selected_suite_pass=held_reply_monitor_suite_passed(output) if kind=='wsheldmonitor' else lazy_suite_passed(output,kind) if kind in {'lazycli','lazyservice'} else named_suite_passed(output,selected_suite,nocapture=kind in {'createpath','createunit','filesystemmetrics','targetlazyunit'})
       if not selected_suite_pass:unknown.append('named_suite_not_observed_passed')
+     required_package_cases=EXPECTED_PACKAGE_CASES.get(kind)
+     package_harness_pass=None
+     if required_package_cases is not None:
+      package_harness_pass=package_harness_passed((root/'stdout.log').read_text(),required_package_cases)
+      if not package_harness_pass:unknown.append('package_harness_not_observed_passed')
      cache_slow_records=None
      if kind=='cachemetricstrace':
       cache_slow_records=slow_logging_file_records(root/'stderr.log')
@@ -901,6 +1069,7 @@ def main():
       shutil.rmtree(fixture_tmp);fixture_removed=not fixture_tmp.exists()
      else:unknown.append('fixture_directory_retained_unknown_process_ownership')
      receipt={'schema':'mount-rs.causal-bounded-local-gate.v2','kind':kind,'command':command,'elapsed_seconds':time.monotonic()-start,'parent_limit_seconds':limit,'cleanup_reserved_seconds':5,'returncode':code,'owned_pid':owned,'new_session':True,'wnowait_owner_pin':True,'signal_decisions_finished':signal_decisions_finished,'owned_child_reaped':code is not None,'owned_group_absent':absent,'pipes_eof':eof,'deadline_exceeded':deadline,'signals':signals,'sticky_unknown':unknown,'primary_failure':None if primary is None else {'type':type(primary).__name__,'errno':getattr(primary,'errno',None)},'logs':logs,'source_count':len(before),'source_unchanged':before==after,'head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=BASE).decode().strip(),'runner_sha256':hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),'profile':env.get('MOUNT_RS_PROFILE_IO'),'trace':env.get('MOUNT_RS_TRACE_STORAGE'),'native_capture_binding':str(BASE/'benchmarks/storage/capture-native.cjs') if kind in {'node','processnode','diagnosticnode','cacheconsumers','cacheconsumerred'} else None,'automatic_retry':False,'cache_slow_records':cache_slow_records,'selected_suite':selected_suite,'named_suite_observed_passed':selected_suite_pass,'selected_test':selected_test,'exact_named_case_observed_passed':selected_test_pass,'redis_executable':redis_pin,'redis_executable_unchanged':redis_unchanged,'fixture_tmpdir':str(fixture_tmp),'fixture_children_before_postprocess_removal':fixture_children,'fixture_tmpdir_removed_after_reap_group_absence_eof':fixture_removed,'postterminal_group_sweep':'containment_only; fixture_cleanup_requires_in_test_assertions'}
+     receipt.update({'required_package_cases':required_package_cases,'package_harness_observed_passed':package_harness_pass})
      if kind in {'wsloss','wsautoloss','wscompactloss'}:receipt['sqlite_reply_loss']=sqlite_reply_loss
      diagnostic=gate_failure_diagnostic(kind, receipt, gate_failure_log_sample(root/'stdout.log'), gate_failure_log_sample(root/'stderr.log'))
      receipt['failure_diagnostic']=diagnostic

@@ -154,3 +154,68 @@ fn warmed_core_spans_record_without_added_allocations() {
         assert_eq!((row.returned_rows, row.returned_row_observations), (0, 0));
     }
 }
+
+#[test]
+fn warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations() {
+    use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+    // Isolated bank and owner token construction are deliberately outside the window.
+    let observer = Observer::isolated();
+    let disabled = Observer::disabled();
+    let cache = observer.cache_residency();
+    let bundle = observer.bundle_build().finish_success().unwrap();
+    let bundle_clone = std::sync::Arc::clone(&bundle);
+    let client = observer.client(ClientRole::PrimaryDataMixed);
+    let inert_client = disabled.client(ClientRole::StandaloneData);
+    let _ = observer.snapshot();
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    let positive = std::hint::black_box(Box::new([7u8; 1024]));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let positive_calls = ALLOCATION_CALLS.with(Cell::get);
+    drop(positive);
+    assert!(positive_calls > 0, "allocator positive control failed");
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    for _ in 0..64 {
+        observer.known_extra_future_box(ClientRole::PrimaryDataMixed, HttpMethod::Get);
+        observer.known_extra_response_body_box(ClientRole::PrimaryDataMixed, HttpMethod::Get);
+        let mut body = client.attempt(HttpMethod::Get, Some(3)).headers(200);
+        body.data(3);
+        body.eof();
+        client.attempt(HttpMethod::Get, None).transport_error();
+        drop(client.attempt(HttpMethod::Get, None));
+        drop(client.attempt(HttpMethod::Get, None).headers(404));
+        cache.publish(2, 3);
+        cache.publish(1, 2);
+        observer.bundle_build().finish_error();
+        drop(observer.bundle_build());
+        inert_client
+            .attempt(HttpMethod::Get, None)
+            .headers(200)
+            .eof();
+        drop(disabled.bundle_build().finish_success());
+        let _ = std::hint::black_box(observer.snapshot());
+    }
+    drop(bundle);
+    drop(bundle_clone);
+    drop(client);
+    drop(inert_client);
+    drop(cache);
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let recorded_calls = ALLOCATION_CALLS.with(Cell::get);
+    assert_eq!(
+        recorded_calls, 0,
+        "warmed bank-only guard updates added allocations"
+    );
+    let final_state = observer.snapshot().unwrap();
+    assert_eq!(final_state.cache.live, 0);
+    assert_eq!(final_state.bundles.live, 0);
+    assert_eq!(
+        final_state.clients[ClientRole::PrimaryDataMixed.index()].live,
+        0
+    );
+    assert!(!final_state.saturated);
+    assert_eq!(storage::snapshot().entries.len(), 116);
+    // Excludes serialization, startup Arc/token construction, wrapper Box sites,
+    // backing clients and the existing allocating storage::snapshot() above.
+}

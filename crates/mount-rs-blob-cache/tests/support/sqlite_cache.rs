@@ -418,13 +418,19 @@ struct ScopedPair {
 }
 impl ScopedPair {
     fn new(scope: CacheScope) -> Self {
-        let pair = Pair::new(0, 32768);
-        for cache in [pair.a_cache.as_ref().unwrap(), &pair.b_cache] {
-            cache.unregister_scope(&super::scope());
-            cache
-                .register_scope(scope.clone(), IntegrityPolicy::Opaque)
-                .unwrap();
-        }
+        let mut pair = Pair::new(0, 32768);
+        pair.a_leases.clear();
+        pair.b_leases.clear();
+        pair.a_leases.push(register_fixture_scope(
+            pair.a_cache.as_ref().unwrap(),
+            scope.clone(),
+            IntegrityPolicy::Opaque,
+        ));
+        pair.b_leases.push(register_fixture_scope(
+            &pair.b_cache,
+            scope.clone(),
+            IntegrityPolicy::Opaque,
+        ));
         Self { pair, scope }
     }
     async fn stop_holder(&mut self) {
@@ -444,9 +450,7 @@ impl ScopedPair {
         let released = bind_stopped_fixture_udp(self.pair.address).await.unwrap();
         drop(released);
         let local = cache(&self.pair.dir.as_ref().unwrap().path().join("a"), 0, 32768);
-        local
-            .register_scope(self.scope.clone(), IntegrityPolicy::Opaque)
-            .unwrap();
+        let lease = register_fixture_scope(&local, self.scope.clone(), IntegrityPolicy::Opaque);
         let peer = QuicPeerTransport::bind(
             config(
                 "a",
@@ -461,6 +465,7 @@ impl ScopedPair {
         .unwrap();
         self.pair.track_cache(&local);
         self.pair.a_cache = Some(local);
+        self.pair.a_leases.push(lease);
         self.pair.a = Some(peer);
     }
 }

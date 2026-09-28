@@ -7,6 +7,8 @@
 //! records at instrumented error boundaries, without request phase tracing.
 
 #[doc(hidden)]
+pub mod object_store;
+#[doc(hidden)]
 pub mod profile;
 #[doc(hidden)]
 pub mod storage;

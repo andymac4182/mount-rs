@@ -53,6 +53,8 @@ base64 = "0.22"
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 mount-rs-remote-protocol = { path = "../../crates/mount-rs-remote-protocol" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
+mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }
+mount-rs-rustfs = { path = "../../providers/mount-rs-rustfs" }
 rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring"] }
 ring = "0.17"
 rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }

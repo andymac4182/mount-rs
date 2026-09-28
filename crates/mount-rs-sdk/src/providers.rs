@@ -133,6 +133,37 @@ impl StorageContext {
         let opened = open_storage_in_context(metadata, blocks, None, Some(self)).await?;
         inspect_compact_layout_opened(opened).await
     }
+    /// Inspect compact authority while retaining partial provider owners.
+    ///
+    /// Retain the observer and the actual inspection operation before polling
+    /// this future, then seal and join that operation before closing this
+    /// context. An observer alone does not keep a cancelled operation running
+    /// or acknowledge cleanup. Close retained resources after an acknowledged
+    /// result, and preserve them when cleanup fails or remains uncertain.
+    ///
+    /// Provider opening may initialize schemas and metadata rows. Inspection
+    /// reads the selected compact authority and verifies its existing backing;
+    /// it never opens a filesystem, enrolls compact layout or repairs markers.
+    /// No block decorator participates in this authority inspection.
+    /// An inspection error takes precedence over a cleanup error; the observer
+    /// retains the cleanup result independently through its resource owner.
+    pub async fn inspect_compact_layout_with_construction_observer(
+        &self,
+        metadata: &StoreConfig,
+        blocks: &StoreConfig,
+        observer: &dyn ConstructionObserver,
+    ) -> Result<Option<InodeModeState>> {
+        let opened = open_storage_in_context_with_observer(
+            metadata,
+            blocks,
+            None,
+            Some(self),
+            Some(observer),
+        )
+        .await?;
+        inspect_compact_layout_opened(opened).await
+    }
+
     pub async fn close(&self) -> Result<()> {
         let contexts: Vec<_> = {
             let mut state = self
@@ -1031,6 +1062,348 @@ mod compact_layout_inspection_tests {
                 .push(ProviderResource::CloseProbe(probe.clone()));
         }
         (opened, probes)
+    }
+
+    #[derive(Default)]
+    struct InspectionObserver(std::sync::Mutex<Vec<Arc<dyn ConstructionResource>>>);
+    impl ConstructionObserver for InspectionObserver {
+        fn retain(&self, resource: Arc<dyn ConstructionResource>) {
+            self.0.lock().unwrap().push(resource);
+        }
+    }
+    impl InspectionObserver {
+        fn group(&self) -> Arc<dyn ConstructionResource> {
+            let resources = self.0.lock().unwrap();
+            assert_eq!(
+                resources.len(),
+                1,
+                "one canonical inspection provider group"
+            );
+            resources[0].clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_compact_inspection_preserves_same_and_split_sqlite_state() {
+        for same_database in [true, false] {
+            let owned = OwnedDirectory::new();
+            let metadata = owned.store("metadata");
+            let blocks = if same_database {
+                metadata.clone()
+            } else {
+                owned.store("blocks")
+            };
+            let context = StorageContext::new(2).unwrap();
+            let fs = layout(&context, &metadata, &blocks, true).await;
+            let driver = fs.driver();
+            driver.write_file("/sentinel", b"proof\0").await.unwrap();
+            let StoreConfig::Sqlite { path } = &metadata else {
+                unreachable!()
+            };
+            let raw = SqliteMetadataStore::open(path).unwrap();
+            let mode = raw.compact_inode_mode_state().await.unwrap().unwrap();
+            let before = raw.load_compact_snapshot(mode.backing).await.unwrap();
+            let observer = InspectionObserver::default();
+            assert_eq!(
+                context
+                    .inspect_compact_layout_with_construction_observer(
+                        &metadata, &blocks, &observer,
+                    )
+                    .await
+                    .unwrap(),
+                Some(mode)
+            );
+            observer.group().close().await.unwrap();
+            assert_eq!(raw.compact_inode_mode_state().await.unwrap(), Some(mode));
+            assert_eq!(
+                raw.load_compact_snapshot(mode.backing).await.unwrap(),
+                before
+            );
+            let handle = driver.open("/sentinel", "r", 0).await.unwrap();
+            let mut bytes = [0_u8; 8];
+            assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 6);
+            assert_eq!(&bytes[..6], b"proof\0");
+            assert_eq!(handle.read(&mut bytes, Some(6)).await.unwrap(), 0);
+            handle.close().await.unwrap();
+            context.require_open().unwrap();
+            driver
+                .write_file("/after-inspection", b"usable")
+                .await
+                .unwrap();
+            fs.shutdown().await.unwrap();
+            drop(fs);
+            context.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_compact_inspection_does_not_enroll_a_noncompact_layout() {
+        let owned = OwnedDirectory::new();
+        let store = owned.store("noncompact");
+        let context = StorageContext::new(2).unwrap();
+        let fs = layout(&context, &store, &store, false).await;
+        fs.shutdown().await.unwrap();
+        drop(fs);
+        let observer = InspectionObserver::default();
+        assert_eq!(
+            context
+                .inspect_compact_layout_with_construction_observer(&store, &store, &observer)
+                .await
+                .unwrap(),
+            None
+        );
+        observer.group().close().await.unwrap();
+        let StoreConfig::Sqlite { path } = &store else {
+            unreachable!()
+        };
+        assert_eq!(
+            SqliteMetadataStore::open(path)
+                .unwrap()
+                .compact_inode_mode_state()
+                .await
+                .unwrap(),
+            None
+        );
+        context.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn observed_compact_inspection_rejects_foreign_backing_without_repair() {
+        for established_foreign_marker in [false, true] {
+            let owned = OwnedDirectory::new();
+            let store = owned.store("layout");
+            let wrong = owned.store("wrong-blocks");
+            let context = StorageContext::new(2).unwrap();
+            let fs = layout(&context, &store, &store, true).await;
+            fs.shutdown().await.unwrap();
+            drop(fs);
+            let StoreConfig::Sqlite { path } = &store else {
+                unreachable!()
+            };
+            let raw = SqliteMetadataStore::open(path).unwrap();
+            let mode = raw.compact_inode_mode_state().await.unwrap().unwrap();
+            let before = raw.load_compact_snapshot(mode.backing).await.unwrap();
+            let StoreConfig::Sqlite { path } = &wrong else {
+                unreachable!()
+            };
+            let foreign = SqliteBlockStore::open(path).unwrap();
+            let foreign_id = if established_foreign_marker {
+                Some(foreign.prepare_concurrent_backing().await.unwrap())
+            } else {
+                None
+            };
+            let observer = InspectionObserver::default();
+            assert_eq!(
+                context
+                    .inspect_compact_layout_with_construction_observer(&store, &wrong, &observer)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Estale
+            );
+            // The inspection result alone does not certify resource cleanup.
+            observer.group().close().await.unwrap();
+            assert!(
+                foreign
+                    .verify_concurrent_backing(mode.backing)
+                    .await
+                    .is_err()
+            );
+            if let Some(foreign_id) = foreign_id {
+                foreign.verify_concurrent_backing(foreign_id).await.unwrap();
+            }
+            assert_eq!(raw.compact_inode_mode_state().await.unwrap(), Some(mode));
+            assert_eq!(
+                raw.load_compact_snapshot(mode.backing).await.unwrap(),
+                before
+            );
+            context.require_open().unwrap();
+            context.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_compact_inspection_closed_context_rejects_before_registration() {
+        let owned = OwnedDirectory::new();
+        let unopened = owned.store("must-not-open");
+        let context = StorageContext::new(2).unwrap();
+        context.close().await.unwrap();
+        let observer = InspectionObserver::default();
+        assert_eq!(
+            context
+                .inspect_compact_layout_with_construction_observer(&unopened, &unopened, &observer,)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Estale
+        );
+        assert!(observer.0.lock().unwrap().is_empty());
+        let StoreConfig::Sqlite { path } = &unopened else {
+            unreachable!()
+        };
+        assert!(
+            !path.exists(),
+            "closed context must not open a selected provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_inspection_keeps_primary_failure_separate_from_cleanup_failure() {
+        for compact in [true, false] {
+            let owned = OwnedDirectory::new();
+            let store = owned.store("layout");
+            let context = StorageContext::new(2).unwrap();
+            if compact {
+                let fs = layout(&context, &store, &store, true).await;
+                fs.shutdown().await.unwrap();
+                drop(fs);
+            }
+            let metadata = if compact {
+                store.clone()
+            } else {
+                StoreConfig::Memory
+            };
+            let blocks = if compact {
+                store.clone()
+            } else {
+                StoreConfig::Memory
+            };
+            let observer = InspectionObserver::default();
+            let opened = open_storage_in_context_with_observer(
+                &metadata,
+                &blocks,
+                None,
+                Some(&context),
+                Some(&observer),
+            )
+            .await
+            .unwrap();
+            let group = opened.resources.observed.as_ref().unwrap().clone();
+            let failed = CloseProbe::new(true);
+            let later = CloseProbe::new(false);
+            let weak_later = Arc::downgrade(&later);
+            // Add controlled cleanup dependencies before inspection begins.
+            // This is fixture setup, not late production registration.
+            group
+                .lock()
+                .resources
+                .push(ProviderResource::CloseProbe(failed.clone()));
+            group
+                .lock()
+                .resources
+                .push(ProviderResource::CloseProbe(later.clone()));
+            drop(later);
+            let inspection = inspect_compact_layout_opened(opened).await.unwrap_err();
+            assert_eq!(
+                inspection.code,
+                if compact {
+                    ErrorCode::Eio
+                } else {
+                    ErrorCode::Enotsup
+                }
+            );
+            assert_eq!(
+                observer.group().close().await.unwrap_err().code,
+                ErrorCode::Eio
+            );
+            assert_eq!(
+                observer.group().close().await.unwrap_err().code,
+                ErrorCode::Eio
+            );
+            failed.assert_awaited();
+            assert!(
+                weak_later.upgrade().is_some(),
+                "failed cleanup retains later owners"
+            );
+            assert_eq!(
+                weak_later.upgrade().unwrap().calls.load(Ordering::SeqCst),
+                0
+            );
+            // These SQLite/Memory fixtures contain no context-owned TiDB pool.
+            // No successful observed-group drain is claimed on this negative path.
+            assert!(context.inner.lock().unwrap().tidb.is_empty());
+            context.close().await.unwrap();
+        }
+    }
+
+    struct HeldInspectionCleanup {
+        entered: tokio::sync::watch::Sender<bool>,
+        release: tokio::sync::Semaphore,
+        calls: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl ConstructionResource for HeldInspectionCleanup {
+        async fn close(&self) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.send_replace(true);
+            self.release
+                .acquire()
+                .await
+                .map_err(|_| FsError::new(ErrorCode::Eio))?
+                .forget();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_inspection_owned_operation_survives_a_cancelled_cleanup_waiter() {
+        let owned = OwnedDirectory::new();
+        let store = owned.store("layout");
+        let context = StorageContext::new(2).unwrap();
+        let fs = layout(&context, &store, &store, true).await;
+        fs.shutdown().await.unwrap();
+        drop(fs);
+        let observer = InspectionObserver::default();
+        let opened = open_storage_in_context_with_observer(
+            &store,
+            &store,
+            None,
+            Some(&context),
+            Some(&observer),
+        )
+        .await
+        .unwrap();
+        let group = opened.resources.observed.as_ref().unwrap().clone();
+        let (entered, mut entering) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(HeldInspectionCleanup {
+            entered,
+            release: tokio::sync::Semaphore::new(0),
+            calls: AtomicUsize::new(0),
+        });
+        group
+            .lock()
+            .resources
+            .push(ProviderResource::Constructor(gate.clone()));
+        // The actual operation handle is retained before any waiter is polled.
+        let mut operation = tokio::spawn(inspect_compact_layout_opened(opened));
+        tokio::time::timeout(std::time::Duration::from_secs(5), entering.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(*entering.borrow());
+        let waiter = observer.group();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), waiter.close())
+                .await
+                .is_err()
+        );
+        assert!(!operation.is_finished());
+        assert!(!group.lock().closed);
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        context.require_open().unwrap();
+        gate.release.add_permits(1);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut operation)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .is_some()
+        );
+        observer.group().close().await.unwrap();
+        assert!(group.lock().closed);
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        context.close().await.unwrap();
     }
 
     #[tokio::test]

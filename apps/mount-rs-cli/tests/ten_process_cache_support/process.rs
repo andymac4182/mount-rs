@@ -1888,6 +1888,20 @@ fn outer_sample_with(
 }
 
 pub fn supervise() {
+    supervise_selected(
+        "native_worker",
+        "SQLite public CLI debug local OIDC fixture",
+    );
+}
+
+pub fn supervise_tidb_rustfs_cold() {
+    supervise_selected(
+        "native_tidb_rustfs_cold_worker",
+        "TiDB/RustFS public CLI debug local OIDC cold retirement fixture",
+    );
+}
+
+fn supervise_selected(worker_entry: &'static str, scope: &'static str) {
     assert_eq!(
         std::env::var("MOUNT_RS_TEN_PROCESS_RUN").as_deref(),
         Ok("1"),
@@ -1934,7 +1948,7 @@ pub fn supervise() {
         .expect("CLI binary attestation");
     assert!(Instant::now() < deadline, "expired supervisor start budget");
     let child = Command::new(&executable)
-        .args(["--ignored", "--exact", "native_worker", "--nocapture"])
+        .args(["--ignored", "--exact", worker_entry, "--nocapture"])
         .env("MOUNT_RS_TEN_PROCESS_ROOT", &root)
         .env("MOUNT_RS_TEN_PROCESS_SETUP_NS", setup_ns.to_string())
         .env("MOUNT_RS_TEN_PROCESS_OUTER_NS", outer_ns.to_string())
@@ -2147,7 +2161,7 @@ pub fn supervise() {
     let sentinel_owned = sentinel.local_addr().ok() == Some(sentinel_address)
         && UdpSocket::bind(sentinel_address).is_err();
     let capture = output(&out_path, true).and_then(|_| output(&err_path, true));
-    let controller = json!({"schema":1,"scope":"SQLite public CLI debug local OIDC fixture",
+    let controller = json!({"schema":1,"scope":scope,"worker_entry":worker_entry,
         "worker_pid":group,"process_group":group,"supervisor_pid":std::process::id(),
         "test_binary_sha256":binary_hash,"cli_binary_sha256":cli_hash,
         "debug_assertions":cfg!(debug_assertions),"local_oidc_fixture":cfg!(feature="local-oidc-fixture"),

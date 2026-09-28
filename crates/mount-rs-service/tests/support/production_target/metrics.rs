@@ -777,6 +777,16 @@ fn validate_worker_runtime(value: &Value, expected: &[String]) -> Result<bool, S
         expected,
     )
 }
+fn runtime_assignment(generation: u64, drive: usize) -> Result<usize, String> {
+    let offset = match generation {
+        0 | 1 => 0,
+        generation if generation <= super::SERVERS as u64 + 1 => {
+            ((generation - 1) % super::SERVERS as u64) as usize
+        }
+        _ => return Err("runtime assignment generation outside fixture proof".into()),
+    };
+    Ok((drive % super::SERVERS + offset) % super::SERVERS)
+}
 fn runtime_boundary(
     value: &Value,
     expected: &[String],
@@ -788,33 +798,34 @@ fn runtime_boundary(
         return Err("runtime boundary observation incomplete".into());
     }
     let generation = runtime_integer(&value["identity"]["generation"])?;
-    let capacity = expected.len();
-    let wanted = match (generation, phase, boundary) {
+    if server >= super::SERVERS {
+        return Err("runtime boundary server outside fixture proof".into());
+    }
+    // g0 populates assigned Drives; g1 measures those assignments. Generations
+    // g2..=g11 separately prove every cross-server pair after timed traffic.
+    runtime_assignment(generation, 0)?;
+    let cold = matches!(
+        (generation, phase, boundary),
         (_, "worker_startup", "ready")
-        | (_, "worker_setup", "after_ready")
-        | (_, "refresh_replicas", "after_ready") => 0,
-        (0, "online_namespace", "before") => 0,
-        (0, _, _) => (0..capacity)
-            .filter(|drive| drive % super::SERVERS == server)
-            .count(),
-        (_, "routes_and_scope", "before") => 0,
-        _ => capacity,
-    };
+            | (_, "worker_setup", "after_ready")
+            | (_, "refresh_replicas", "after_ready")
+            | (0, "online_namespace", "before")
+            | (1, "routes_and_scope", "before" | "after")
+            | (1, "assigned_warmup", "before")
+    ) || (generation >= 2 && phase == "crossnode_routes" && boundary == "after_ready");
+    let mut wanted = 0_u64;
     let observations = value["runtime_activation"]["observations"]
         .as_array()
         .ok_or("runtime observations missing")?;
-    let cold = wanted == 0;
     for (drive, observation) in observations.iter().enumerate() {
-        let selected = !cold && (generation != 0 || drive % super::SERVERS == server);
+        let selected = !cold && runtime_assignment(generation, drive)? == server;
+        wanted += u64::from(selected);
         if observation["constructed"] != u64::from(selected) {
             return Err("runtime boundary selected Drive mismatch".into());
         }
     }
     let pool = &value["runtime_activation"]["pool"];
-    if pool["open_success"] != wanted as u64
-        || pool["resident"] != wanted as u64
-        || pool["ready"] != wanted as u64
-    {
+    if pool["open_success"] != wanted || pool["resident"] != wanted || pool["ready"] != wanted {
         return Err("runtime boundary activation geometry mismatch".into());
     }
     Ok(())
@@ -829,9 +840,13 @@ fn runtime_closed_boundary(
     let observations = value["runtime_activation"]["observations"]
         .as_array()
         .ok_or("runtime observations missing")?;
+    if server >= super::SERVERS {
+        return Err("closed runtime server outside fixture proof".into());
+    }
+    runtime_assignment(generation, 0)?;
     let mut wanted = 0_u64;
     for (drive, observation) in observations.iter().enumerate() {
-        let selected = generation != 0 || drive % super::SERVERS == server;
+        let selected = runtime_assignment(generation, drive)? == server;
         wanted += u64::from(selected);
         if observation["constructed"] != u64::from(selected) {
             return Err("closed runtime selected Drive mismatch".into());
@@ -1531,6 +1546,105 @@ mod tests {
         assert!(runtime_delta(&cold, &next).is_err());
     }
     #[test]
+    fn lazy_target_timed_modes_accept_only_balanced_assigned_runtime_owners() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let runtime = runtime_fixture(1, 10, 1);
+        let frame = json!({"identity":{"generation":1},"runtime_activation":runtime});
+        for mode in ["mostly_idle", "all_active"] {
+            for pattern in super::super::config::PATTERNS {
+                for boundary in ["before_active", "after_active", "after_idle"] {
+                    runtime_boundary(&frame, &expected, &format!("{mode}/{pattern}"), boundary, 0)
+                        .expect("balanced assigned runtime owners must qualify both timed modes");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_target_timed_modes_reject_unassigned_crossnode_runtime_replication() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let runtime = runtime_fixture(1, 10, 10);
+        let frame = json!({"identity":{"generation":1},"runtime_activation":runtime});
+        for mode in ["mostly_idle", "all_active"] {
+            assert!(
+                runtime_boundary(
+                    &frame,
+                    &expected,
+                    &format!("{mode}/sequential_read"),
+                    "before_active",
+                    0
+                )
+                .is_err(),
+                "unassigned replicas must not qualify the balanced production traffic profile"
+            );
+        }
+    }
+
+    #[test]
+    fn lazy_target_nonactivating_route_checks_require_zero_opened_owners() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let cold =
+            json!({"identity":{"generation":1},"runtime_activation":runtime_fixture(1,10,0)});
+        runtime_boundary(&cold, &expected, "routes_and_scope", "after", 0)
+            .expect("registration/auth route coverage must leave providers dormant");
+        let opened =
+            json!({"identity":{"generation":1},"runtime_activation":runtime_fixture(1,10,1)});
+        assert!(runtime_boundary(&opened, &expected, "routes_and_scope", "after", 0).is_err());
+    }
+
+    #[test]
+    fn lazy_target_postprofile_rotation_requires_only_its_exact_assigned_owners() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        // g2 is the first post-profile batch, offset1: Drive9 belongs to server0.
+        let mut rotated = runtime_fixture(2, 10, 1);
+        rotated["observations"][0]["constructed"] = json!(0);
+        rotated["observations"][0]["observed_backing"] = Value::Null;
+        rotated["observations"][9]["constructed"] = json!(1);
+        rotated["observations"][9]["observed_backing"] = json!(expected[9]);
+        let frame = |runtime: Value| json!({"identity":{"generation":runtime["generation"]},"runtime_activation":runtime});
+        let cold = frame(runtime_fixture(2, 10, 0));
+        runtime_boundary(&cold, &expected, "crossnode_routes", "after_ready", 0)
+            .expect("acknowledged next generation must be cold before its rotated I/O batch");
+        runtime_boundary(
+            &frame(rotated.clone()),
+            &expected,
+            "crossnode_routes",
+            "after_batch",
+            0,
+        )
+        .expect("only the exact rotated assignment may qualify this actual crossnode batch");
+        let wrong = frame(runtime_fixture(2, 10, 1));
+        assert!(runtime_boundary(&wrong, &expected, "crossnode_routes", "after_batch", 0).is_err());
+        let mut closed = rotated;
+        closed["pool"]["resident"] = json!(0);
+        closed["pool"]["ready"] = json!(0);
+        assert_eq!(
+            runtime_closed_boundary(&frame(closed.clone()), &expected, 0),
+            Ok(true)
+        );
+        closed["pool"]["resident"] = json!(1);
+        assert_ne!(
+            runtime_closed_boundary(&frame(closed), &expected, 0),
+            Ok(true),
+            "next batch must not reuse an unproven previous generation close"
+        );
+    }
+
+    #[test]
+    fn lazy_target_closed_measured_generation_rejects_unassigned_replication() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let mut runtime = runtime_fixture(1, 10, 10);
+        runtime["pool"]["resident"] = json!(0);
+        runtime["pool"]["ready"] = json!(0);
+        let frame = json!({"identity":{"generation":1},"runtime_activation":runtime});
+        assert_ne!(
+            runtime_closed_boundary(&frame, &expected, 0),
+            Ok(true),
+            "a successfully closed replicated profile is still the wrong production traffic geometry"
+        );
+    }
+
+    #[test]
     fn lazy_target_runtime_boundary_requires_actual_primary_and_all_route_activations() {
         let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
         let frame = |runtime: Value| json!({"identity":{"generation":runtime["generation"]},"runtime_activation":runtime});
@@ -1557,11 +1671,12 @@ mod tests {
             0,
         )
         .unwrap();
-        assert!(
-            runtime_boundary(&generation1cold, &expected, "routes_and_scope", "after", 0).is_err()
-        );
+        // Route/auth coverage no longer constructs every replica before timing.
+        runtime_boundary(&generation1cold, &expected, "routes_and_scope", "after", 0).unwrap();
+        let assigned = frame(runtime_fixture(1, 10, 1));
+        runtime_boundary(&assigned, &expected, "assigned_warmup", "after", 0).unwrap();
         let all = frame(runtime_fixture(1, 10, 10));
-        runtime_boundary(&all, &expected, "routes_and_scope", "after", 0).unwrap();
+        assert!(runtime_boundary(&all, &expected, "assigned_warmup", "after", 0).is_err());
     }
 
     #[tokio::test(start_paused = true)]

@@ -58,12 +58,14 @@ impl CacheMetrics {
 }
 struct Maintenance {
     scope: Arc<CacheScope>,
+    lease: ScopeLease,
     id: BlockId,
     bytes: Arc<[u8]>,
     _reservation: Arc<PendingReservation>,
 }
 struct Advertisement {
     scope: Arc<CacheScope>,
+    lease: ScopeLease,
     id: BlockId,
 }
 /// Bounded placement workers and miss budget shared by all server drives.
@@ -131,12 +133,17 @@ impl DistributedRuntime {
                         let d=d.clone(); let t=t.clone(); let p=p.clone();
                         placements.spawn(async move {
                             let _=timeout(deadline,async {
+                                if !item.lease.is_current().unwrap_or(false) { return; }
                                 let targets=distributed::unique(d.placement(&item.scope,&item.id),&p,2);
                                 let put=|target: PeerId| {
                                     let d=d.clone(); let t=t.clone(); let scope=item.scope.clone();
                                     let id=item.id.clone(); let bytes=item.bytes.clone();
+                                    let lease=item.lease.clone();
                                     async move {
-                                        if t.put_shared(&target,&scope,&id,bytes).await.is_ok() {
+                                        if !lease.is_current().unwrap_or(false) { return; }
+                                        if t.put_shared(&target,&scope,&id,bytes).await.is_ok()
+                                            && lease.is_current().unwrap_or(false)
+                                        {
                                             let _=d.advertise(&scope,&id,&target).await;
                                         }
                                     }
@@ -145,12 +152,17 @@ impl DistributedRuntime {
                                 let first_target=targets.next(); let second_target=targets.next();
                                 let first=async {if let Some(target)=first_target{put(target).await;}};
                                 let second=async {if let Some(target)=second_target{put(target).await;}};
-                                let _=tokio::join!(first,second,d.advertise(&item.scope,&item.id,&p));
+                                let local_advertise=async {
+                                    if item.lease.is_current().unwrap_or(false) {
+                                        let _=d.advertise(&item.scope,&item.id,&p).await;
+                                    }
+                                };
+                                let _=tokio::join!(first,second,local_advertise);
                             }).await;
                             drop(item);
                         });
                     }
-                    hint=hints.recv()=>{let Some(hint)=hint else{break};let _=timeout(deadline,d.advertise(&hint.scope,&hint.id,&p)).await;}
+                    hint=hints.recv()=>{let Some(hint)=hint else{break};if hint.lease.is_current().unwrap_or(false) {let _=timeout(deadline,d.advertise(&hint.scope,&hint.id,&p)).await;}}
                     _=heartbeat.tick()=>{let _=timeout(deadline,d.heartbeat(&p)).await;}
                 }
             }
@@ -181,8 +193,18 @@ impl DistributedRuntime {
             failure: Mutex::new(None),
         }))
     }
-    fn touch(&self, cache: &LocalCache, scope: &Arc<CacheScope>, id: &BlockId, key: &CacheKey) {
-        if self.stopping.load(Ordering::Acquire) || id.0.len() > 1024 {
+    fn touch(
+        &self,
+        cache: &LocalCache,
+        scope: &Arc<CacheScope>,
+        lease: &ScopeLease,
+        id: &BlockId,
+        key: &CacheKey,
+    ) {
+        if self.stopping.load(Ordering::Acquire)
+            || id.0.len() > 1024
+            || !lease.is_current().unwrap_or(false)
+        {
             return;
         }
         if let Some(period) = self.advertisement_period
@@ -190,6 +212,7 @@ impl DistributedRuntime {
         {
             let _ = self.advertisements.try_send(Advertisement {
                 scope: scope.clone(),
+                lease: lease.clone(),
                 id: id.clone(),
             });
         }
@@ -198,34 +221,37 @@ impl DistributedRuntime {
         &self,
         cache: &LocalCache,
         scope: Arc<CacheScope>,
+        lease: ScopeLease,
         id: BlockId,
         bytes: Arc<[u8]>,
         metrics: &CacheMetrics,
     ) {
-        if self.stopping.load(Ordering::Acquire) {
+        if self.stopping.load(Ordering::Acquire) || !lease.is_current().unwrap_or(false) {
             return;
         }
         let Some(reservation) = cache.reserve_pending(bytes.len()) else {
             metrics.maintenance_dropped.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        self.enqueue_reserved(scope, id, bytes, Arc::new(reservation), metrics);
+        self.enqueue_reserved(scope, lease, id, bytes, Arc::new(reservation), metrics);
     }
     fn enqueue_reserved(
         &self,
         scope: Arc<CacheScope>,
+        lease: ScopeLease,
         id: BlockId,
         bytes: Arc<[u8]>,
         reservation: Arc<PendingReservation>,
         metrics: &CacheMetrics,
     ) {
-        if self.stopping.load(Ordering::Acquire) {
+        if self.stopping.load(Ordering::Acquire) || !lease.is_current().unwrap_or(false) {
             return;
         }
         if self
             .queue
             .try_send(Maintenance {
                 scope,
+                lease,
                 id,
                 bytes,
                 _reservation: reservation,
@@ -279,6 +305,7 @@ impl Drop for DistributedRuntime {
 }
 struct PendingBlob {
     scope: Arc<CacheScope>,
+    lease: ScopeLease,
     id: BlockId,
     bytes: Arc<[u8]>,
     _reservation: Arc<PendingReservation>,
@@ -288,7 +315,7 @@ pub struct CachedBlockStore {
     cache: Arc<LocalCache>,
     identity: ScopeIdentity,
     policy: IntegrityPolicy,
-    scope: Mutex<Option<(Arc<CacheScope>, CacheKey)>>,
+    scope: Mutex<Option<(Arc<CacheScope>, CacheKey, ScopeLease)>>,
     distributed: Option<Arc<DistributedRuntime>>,
     metrics: Arc<CacheMetrics>,
     pending: Mutex<Vec<PendingBlob>>,
@@ -354,12 +381,17 @@ impl CachedBlockStore {
         self.metrics.clone()
     }
     fn current(&self) -> Option<Arc<CacheScope>> {
-        self.current_hashed().map(|(scope, _)| scope)
+        self.current_hashed().map(|(scope, _, _)| scope)
     }
-    fn current_hashed(&self) -> Option<(Arc<CacheScope>, CacheKey)> {
-        self.scope.lock().ok()?.clone()
+    fn current_hashed(&self) -> Option<(Arc<CacheScope>, CacheKey, ScopeLease)> {
+        let mut active = self.scope.lock().ok()?;
+        if !active.as_ref()?.2.is_current().unwrap_or(false) {
+            active.take();
+            return None;
+        }
+        active.clone()
     }
-    fn activate(&self, backing: ConcurrentBackingId) -> Result<()> {
+    fn activate(&self, backing: ConcurrentBackingId, verified_from: IdentityEpoch) -> Result<()> {
         if [
             &self.identity.cluster,
             &self.identity.partition,
@@ -370,33 +402,56 @@ impl CachedBlockStore {
         {
             return Err(error());
         }
+        // Serialize this store's publication before the shared epoch CAS. No
+        // late successful attempt can overwrite a newer store-owned lease.
         let mut active = self.scope.lock().map_err(|_| error())?;
-        if active.as_ref().is_some_and(|(s, _)| s.backing == backing) {
+        if let Some((scope, _, lease)) = active.as_ref()
+            && scope.backing == backing
+            && lease.accepts_verified_epoch(&verified_from)?
+        {
             return Ok(());
         }
         let scope = Arc::new(CacheScope {
             identity: self.identity.clone(),
             backing,
         });
-        self.cache.register_scope((*scope).clone(), self.policy)?;
-        if let Some((previous, _)) = active.take() {
-            self.cache.unregister_scope(&previous);
-        }
+        let lease =
+            self.cache
+                .register_scope_lease((*scope).clone(), self.policy, verified_from)?;
         let fingerprint = LocalCache::scope_hash(&scope);
-        *active = Some((scope, fingerprint));
+        *active = Some((scope, fingerprint, lease));
         Ok(())
     }
     fn deactivate(&self) {
-        if let Ok(mut s) = self.scope.lock()
-            && let Some((scope, _)) = s.take()
-        {
-            self.cache.unregister_scope(&scope);
+        if let Ok(mut active) = self.scope.lock() {
+            active.take();
         }
-        if let Ok(mut p) = self.pending.lock() {
-            p.clear();
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
         }
     }
-    async fn disk_get(&self, scope: &Arc<CacheScope>, id: &BlockId) -> Option<Vec<u8>> {
+    fn deactivate_if_stale(&self) {
+        // A losing old epoch may finish after a newer verifier published a
+        // current lease on this same store. Preserve that newer valid owner.
+        if let Ok(mut active) = self.scope.lock() {
+            if active
+                .as_ref()
+                .is_some_and(|(_, _, lease)| lease.is_current().unwrap_or(false))
+            {
+                return;
+            }
+            active.take();
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
+    }
+    async fn disk_get(
+        &self,
+        scope: &Arc<CacheScope>,
+        lease: &ScopeLease,
+        id: &BlockId,
+    ) -> Option<Vec<u8>> {
         let deadline = self
             .distributed
             .as_ref()
@@ -405,10 +460,16 @@ impl CachedBlockStore {
         let mut span = Span::new(Operation::BlobCacheDiskLookup);
         let result = timeout(deadline, async {
             let scope = scope.clone();
+            let lease = lease.clone();
             let id = id.clone();
             let policy = self.policy;
             self.cache
-                .run_blocking(move |cache| cache.get_disk(&scope, &id, policy))
+                .run_blocking(move |cache| {
+                    if !lease.is_current().unwrap_or(false) {
+                        return None;
+                    }
+                    cache.get_disk(&scope, &id, policy)
+                })
                 .await
                 .ok()
                 .flatten()
@@ -432,11 +493,12 @@ impl CachedBlockStore {
     async fn fill(
         &self,
         scope: &Arc<CacheScope>,
+        lease: &ScopeLease,
         id: &BlockId,
         bytes: Arc<[u8]>,
         reservation: Option<Arc<PendingReservation>>,
     ) {
-        if bytes.len() > self.cache.max_blob_bytes() {
+        if bytes.len() > self.cache.max_blob_bytes() || !lease.is_current().unwrap_or(false) {
             return;
         }
         if self
@@ -458,6 +520,7 @@ impl CachedBlockStore {
             return;
         };
         let scope = scope.clone();
+        let lease = lease.clone();
         let id = id.clone();
         let policy = self.policy;
         let metrics = self.metrics.clone();
@@ -465,6 +528,9 @@ impl CachedBlockStore {
             .cache
             .try_spawn_blocking(move |cache| {
                 let _reservation = reservation;
+                if !lease.is_current().unwrap_or(false) {
+                    return;
+                }
                 if cache.insert_shared(&scope, &id, bytes, policy).is_err() {
                     metrics.cache_errors.fetch_add(1, Ordering::Relaxed);
                 }
@@ -476,7 +542,16 @@ impl CachedBlockStore {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
-    async fn fetch(&self, scope: &Arc<CacheScope>, id: &BlockId) -> Result<Vec<u8>> {
+    async fn fetch(
+        &self,
+        scope: &Arc<CacheScope>,
+        lease: &ScopeLease,
+        id: &BlockId,
+    ) -> Result<Vec<u8>> {
+        if !lease.is_current().unwrap_or(false) {
+            self.metrics.backing_fetches.fetch_add(1, Ordering::Relaxed);
+            return self.backing.get(id).await;
+        }
         let bytes = {
             let mut span = Span::new(Operation::BlobCacheRamLookup);
             let bytes = self.cache.get_memory(scope, id, self.policy);
@@ -487,24 +562,30 @@ impl CachedBlockStore {
             }
             bytes
         };
-        if let Some(bytes) = bytes {
+        if let Some(bytes) = bytes.filter(|_| lease.is_current().unwrap_or(false)) {
             self.metrics.local_hit(bytes.len());
             if let Some(d) = &self.distributed {
                 d.touch(
                     &self.cache,
                     scope,
+                    lease,
                     id,
                     &LocalCache::key_hashed(&LocalCache::scope_hash(scope), id),
                 );
             }
             return Ok(bytes);
         }
-        if let Some(bytes) = self.disk_get(scope, id).await {
+        if let Some(bytes) = self
+            .disk_get(scope, lease, id)
+            .await
+            .filter(|_| lease.is_current().unwrap_or(false))
+        {
             self.metrics.local_hit(bytes.len());
             if let Some(d) = &self.distributed {
                 d.touch(
                     &self.cache,
                     scope,
+                    lease,
                     id,
                     &LocalCache::key_hashed(&LocalCache::scope_hash(scope), id),
                 );
@@ -530,6 +611,7 @@ impl CachedBlockStore {
                         }
                     }
                 };
+                if !lease.is_current().unwrap_or(false) { return Ok(None); }
                 let mut peers=distributed::unique(peers,&d.local,d.config.max_peer_queries).into_iter();
                 type Query<'a> = Pin<Box<dyn Future<Output=Result<Option<bytes::Bytes>>> + Send + 'a>>;
                 let mut queries: Vec<Query<'_>>=Vec::with_capacity(2);
@@ -541,6 +623,7 @@ impl CachedBlockStore {
                 tokio::pin!(hedge);
                 let mut hedged=false;
                 while !queries.is_empty() {
+                    if !lease.is_current().unwrap_or(false) { return Ok(None); }
                     tokio::select! {
                         _=&mut hedge, if !hedged=>{
                             hedged=true;
@@ -573,15 +656,19 @@ impl CachedBlockStore {
                 Ok::<_, mount_rs_core::FsError>(None)
             })
             .await;
-            if let Ok(Ok(Some(bytes))) = peer_result {
+            if let Ok(Ok(Some(bytes))) = peer_result
+                && lease.is_current().unwrap_or(false)
+            {
                 self.metrics.peer_hits.fetch_add(1, Ordering::Relaxed);
                 self.metrics
                     .hit_bytes
                     .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                self.fill(scope, id, Arc::from(bytes.as_ref()), None).await;
+                self.fill(scope, lease, id, Arc::from(bytes.as_ref()), None)
+                    .await;
                 d.touch(
                     &self.cache,
                     scope,
+                    lease,
                     id,
                     &LocalCache::key_hashed(&LocalCache::scope_hash(scope), id),
                 );
@@ -591,13 +678,17 @@ impl CachedBlockStore {
         self.metrics.backing_fetches.fetch_add(1, Ordering::Relaxed);
         let bytes = self.backing.get(id).await?;
         self.policy.verify(id, &bytes)?;
-        if !self.dirty.load(Ordering::Acquire) && bytes.len() <= self.cache.max_blob_bytes() {
+        if !self.dirty.load(Ordering::Acquire)
+            && bytes.len() <= self.cache.max_blob_bytes()
+            && lease.is_current().unwrap_or(false)
+        {
             let shared = Arc::from(bytes.as_slice());
-            self.fill(scope, id, Arc::clone(&shared), None).await;
+            self.fill(scope, lease, id, Arc::clone(&shared), None).await;
             if let Some(d) = &self.distributed {
                 d.enqueue(
                     &self.cache,
                     scope.clone(),
+                    lease.clone(),
                     id.clone(),
                     shared,
                     &self.metrics,
@@ -618,32 +709,51 @@ impl BlockStore for CachedBlockStore {
         self.backing.durable()
     }
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+        let epoch = self.cache.identity_epoch(&self.identity);
         match self.backing.prepare_concurrent_backing().await {
             Ok(id) => {
-                if self.activate(id).is_err() {
+                if epoch.and_then(|epoch| self.activate(id, epoch)).is_err() {
                     self.metrics.cache_errors.fetch_add(1, Ordering::Relaxed);
-                    self.deactivate();
+                    self.deactivate_if_stale();
                 }
                 Ok(id)
             }
-            Err(e) => {
+            Err(error) => {
+                if self
+                    .cache
+                    .revoke_identity_admission(&self.identity)
+                    .is_err()
+                {
+                    self.metrics.cache_errors.fetch_add(1, Ordering::Relaxed);
+                }
                 self.deactivate();
-                Err(e)
+                Err(error)
             }
         }
     }
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
+        let epoch = self.cache.identity_epoch(&self.identity);
         match self.backing.verify_concurrent_backing(expected).await {
             Ok(()) => {
-                if self.activate(expected).is_err() {
+                if epoch
+                    .and_then(|epoch| self.activate(expected, epoch))
+                    .is_err()
+                {
                     self.metrics.cache_errors.fetch_add(1, Ordering::Relaxed);
-                    self.deactivate();
+                    self.deactivate_if_stale();
                 }
                 Ok(())
             }
-            Err(e) => {
+            Err(error) => {
+                if self
+                    .cache
+                    .revoke_identity_admission(&self.identity)
+                    .is_err()
+                {
+                    self.metrics.cache_errors.fetch_add(1, Ordering::Relaxed);
+                }
                 self.deactivate();
-                Err(e)
+                Err(error)
             }
         }
     }
@@ -654,12 +764,13 @@ impl BlockStore for CachedBlockStore {
         let _gate = self.write_gate.read().await;
         self.dirty.store(true, Ordering::Release);
         let id = self.backing.put(bytes).await?;
-        if let Some(scope) = self.current()
+        if let Some((scope, _, lease)) = self.current_hashed()
             && let Some(reservation) = self.cache.reserve_pending(bytes.len())
             && self.policy.verify(&id, bytes).is_ok()
         {
             self.pending.lock().map_err(|_| error())?.push(PendingBlob {
                 scope,
+                lease,
                 id: id.clone(),
                 bytes: Arc::from(bytes),
                 _reservation: Arc::new(reservation),
@@ -676,7 +787,7 @@ impl BlockStore for CachedBlockStore {
         'life1: 'async_trait,
         Self: 'async_trait,
     {
-        let Some((scope, fingerprint)) = self.current_hashed() else {
+        let Some((scope, fingerprint, lease)) = self.current_hashed() else {
             return self.backing.get(id);
         };
         let key = LocalCache::key_hashed(&fingerprint, id);
@@ -690,10 +801,10 @@ impl BlockStore for CachedBlockStore {
             }
             bytes
         };
-        if let Some(bytes) = bytes {
+        if let Some(bytes) = bytes.filter(|_| lease.is_current().unwrap_or(false)) {
             self.metrics.local_hit(bytes.len());
             if let Some(d) = &self.distributed {
-                d.touch(&self.cache, &scope, id, &key);
+                d.touch(&self.cache, &scope, &lease, id, &key);
             }
             // The hit future holds only the ready result, not the cold-path state machine.
             return Box::pin(std::future::ready(Ok(bytes)));
@@ -720,9 +831,9 @@ impl BlockStore for CachedBlockStore {
                     span.finish_success(0);
                     guard
                 };
-                return self.fetch(&scope, id).await;
+                return self.fetch(&scope, &lease, id).await;
             }
-            self.fetch(&scope, id).await
+            self.fetch(&scope, &lease, id).await
         })
     }
     async fn flush(&self) -> Result<()> {
@@ -734,12 +845,10 @@ impl BlockStore for CachedBlockStore {
         self.dirty.store(false, Ordering::Release);
         drop(writes);
         for blob in pending {
-            if self
-                .current()
-                .is_some_and(|s| s.backing == blob.scope.backing)
-            {
+            if blob.lease.is_current().unwrap_or(false) {
                 self.fill(
                     &blob.scope,
+                    &blob.lease,
                     &blob.id,
                     blob.bytes.clone(),
                     Some(blob._reservation.clone()),
@@ -748,6 +857,7 @@ impl BlockStore for CachedBlockStore {
                 if let Some(d) = &self.distributed {
                     d.enqueue_reserved(
                         blob.scope,
+                        blob.lease,
                         blob.id,
                         blob.bytes,
                         blob._reservation,
@@ -1226,9 +1336,17 @@ mod tests {
             },
             backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
         });
+        let lease = cache
+            .register_scope_lease(
+                (*scope).clone(),
+                IntegrityPolicy::Opaque,
+                cache.identity_epoch(&scope.identity).unwrap(),
+            )
+            .unwrap();
         runtime.enqueue(
             &cache,
             scope.clone(),
+            lease.clone(),
             BlockId("held".into()),
             Arc::from(b"bytes".as_slice()),
             &CacheMetrics::default(),
@@ -1251,6 +1369,7 @@ mod tests {
         runtime.enqueue(
             &cache,
             scope,
+            lease,
             BlockId("closed".into()),
             Arc::from(b"bytes".as_slice()),
             &CacheMetrics::default(),
@@ -1307,9 +1426,17 @@ mod tests {
             },
             backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
         });
+        let lease = cache
+            .register_scope_lease(
+                (*scope).clone(),
+                IntegrityPolicy::Opaque,
+                cache.identity_epoch(&scope.identity).unwrap(),
+            )
+            .unwrap();
         runtime.enqueue(
             &cache,
             scope,
+            lease,
             BlockId("panic".into()),
             Arc::from(b"bytes".as_slice()),
             &CacheMetrics::default(),
@@ -1435,11 +1562,19 @@ mod tests {
             },
             backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
         });
+        let lease = cache
+            .register_scope_lease(
+                (*scope).clone(),
+                IntegrityPolicy::Opaque,
+                cache.identity_epoch(&scope.identity).unwrap(),
+            )
+            .unwrap();
         let metrics = CacheMetrics::default();
         for n in 0..16 {
             runtime.enqueue(
                 &cache,
                 scope.clone(),
+                lease.clone(),
                 BlockId(n.to_string()),
                 Arc::from(b"bytes".as_slice()),
                 &metrics,
@@ -1459,5 +1594,331 @@ mod tests {
         peer.release.notify_waiters();
         runtime.shutdown().await.unwrap();
         assert_eq!(peer.active.load(Ordering::Relaxed), 0);
+    }
+
+    // Authority transition regressions retain an independent holder registration.
+    // They exercise acknowledged provider outcomes and positively joined held
+    // operations rather than inspecting the proposed epoch implementation.
+    type HeldAuthorityCall = (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    );
+    struct AuthorityBacking {
+        backing: Arc<Backing>,
+        next: std::sync::atomic::AtomicU8,
+        refuse: AtomicBool,
+        held_prepare: Mutex<Option<HeldAuthorityCall>>,
+        held_get: Mutex<Option<HeldAuthorityCall>>,
+    }
+    impl AuthorityBacking {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                backing: Backing::new(),
+                next: std::sync::atomic::AtomicU8::new(1),
+                refuse: AtomicBool::new(false),
+                held_prepare: Mutex::new(None),
+                held_get: Mutex::new(None),
+            })
+        }
+    }
+    #[async_trait]
+    impl BlockStore for AuthorityBacking {
+        fn durable(&self) -> bool {
+            true
+        }
+        async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+            let held = self.held_prepare.lock().map_err(|_| error())?.take();
+            if let Some((entered, release)) = held {
+                let _ = entered.send(());
+                release.await.map_err(|_| error())?;
+            }
+            ConcurrentBackingId::from_bytes([self.next.load(Ordering::Acquire); 16])
+        }
+        async fn verify_concurrent_backing(&self, _: ConcurrentBackingId) -> Result<()> {
+            if self.refuse.load(Ordering::Acquire) {
+                Err(error())
+            } else {
+                Ok(())
+            }
+        }
+        async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
+            self.backing.put(bytes).await
+        }
+        async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
+            let held = self.held_get.lock().map_err(|_| error())?.take();
+            if let Some((entered, release)) = held {
+                let _ = entered.send(());
+                release.await.map_err(|_| error())?;
+            }
+            self.backing.get(id).await
+        }
+        async fn flush(&self) -> Result<()> {
+            self.backing.flush().await
+        }
+        async fn delete(&self, id: &BlockId) -> Result<()> {
+            self.backing.delete(id).await
+        }
+    }
+    fn authority_store(
+        backing: Arc<AuthorityBacking>,
+        cache: Arc<LocalCache>,
+    ) -> Arc<CachedBlockStore> {
+        Arc::new(CachedBlockStore::new(
+            backing,
+            cache,
+            ScopeIdentity {
+                cluster: "test".into(),
+                partition: "p".into(),
+                drive: "authority".into(),
+            },
+            IntegrityPolicy::Sha256Prefixed,
+        ))
+    }
+    #[tokio::test]
+    async fn observed_authority_failure_revokes_an_independent_holder_registration() {
+        let backing = AuthorityBacking::new();
+        let (_dir, cache, _) = fixture(Backing::new());
+        let store = authority_store(backing.clone(), cache.clone());
+        let scope = CacheScope {
+            identity: store.identity.clone(),
+            backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
+        };
+        let holder = cache
+            .register_scope_lease(
+                scope.clone(),
+                IntegrityPolicy::Sha256Prefixed,
+                cache.identity_epoch(&scope.identity).unwrap(),
+            )
+            .unwrap();
+        backing.refuse.store(true, Ordering::Release);
+        let refused = store.verify_concurrent_backing(scope.backing).await;
+        let holder_policy = cache.scope_policy(&scope);
+        drop(holder);
+        drop(store);
+        cache.shutdown().await.unwrap();
+        assert!(
+            refused.is_err(),
+            "actual provider must refuse the selected authority"
+        );
+        assert_eq!(
+            holder_policy, None,
+            "observed provider refusal left independent holder admission live"
+        );
+    }
+    #[tokio::test]
+    async fn authority_refusal_before_held_success_does_not_resurrect_empty_admission() {
+        let backing = AuthorityBacking::new();
+        let (_dir, cache, _) = fixture(Backing::new());
+        let old = authority_store(backing.clone(), cache.clone());
+        let observer = authority_store(backing.clone(), cache.clone());
+        let scope = CacheScope {
+            identity: old.identity.clone(),
+            backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
+        };
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *backing.held_prepare.lock().unwrap() = Some((entered_tx, release_rx));
+        let old_task = old.clone();
+        let owned = tokio::spawn(async move { old_task.prepare_concurrent_backing().await });
+        let entered = timeout(Duration::from_secs(1), entered_rx).await;
+        backing.refuse.store(true, Ordering::Release);
+        let refusal = observer.verify_concurrent_backing(scope.backing).await;
+        let was_empty = cache.scope_policy(&scope).is_none();
+        let _ = release_tx.send(());
+        let joined = owned.await;
+        let after = cache.scope_policy(&scope);
+        backing.refuse.store(false, Ordering::Release);
+        let fresh = observer.verify_concurrent_backing(scope.backing).await;
+        let fresh_policy = cache.scope_policy(&scope);
+        drop(old);
+        drop(observer);
+        cache.shutdown().await.unwrap();
+        assert!(
+            matches!(entered, Ok(Ok(()))),
+            "actual provider prepare was not held"
+        );
+        assert!(refusal.is_err(), "actual provider refusal not observed");
+        assert!(
+            was_empty,
+            "control needs an empty scope registry at revocation"
+        );
+        assert!(
+            matches!(joined, Ok(Ok(_))),
+            "actual held provider success did not join"
+        );
+        assert!(fresh.is_ok(), "fresh post-revocation provider proof failed");
+        assert_eq!(
+            fresh_policy,
+            Some(IntegrityPolicy::Sha256Prefixed),
+            "fresh proof after joined stale work was not admitted"
+        );
+        assert_eq!(
+            after, None,
+            "old successful await resurrected an authority already refused locally"
+        );
+    }
+    #[tokio::test]
+    async fn observed_different_backing_replaces_prior_holder_admission() {
+        let backing = AuthorityBacking::new();
+        let (_dir, cache, _) = fixture(Backing::new());
+        let old = authority_store(backing.clone(), cache.clone());
+        let next = authority_store(backing.clone(), cache.clone());
+        let first = old.prepare_concurrent_backing().await.unwrap();
+        let before = CacheScope {
+            identity: old.identity.clone(),
+            backing: first,
+        };
+        let holder = cache
+            .current_scope_lease(&before, IntegrityPolicy::Sha256Prefixed)
+            .unwrap()
+            .unwrap();
+        backing.next.store(2, Ordering::Release);
+        let second = next.prepare_concurrent_backing().await.unwrap();
+        let after = CacheScope {
+            identity: next.identity.clone(),
+            backing: second,
+        };
+        let old_policy = cache.scope_policy(&before);
+        let next_policy = cache.scope_policy(&after);
+        drop(holder);
+        drop(old);
+        drop(next);
+        cache.shutdown().await.unwrap();
+        assert_ne!(
+            first, second,
+            "actual provider did not acknowledge a backing transition"
+        );
+        assert_eq!(next_policy, Some(IntegrityPolicy::Sha256Prefixed));
+        assert_eq!(
+            old_policy, None,
+            "old holder admission survived the observed backing transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_old_epoch_cannot_deactivate_a_newer_lease_on_the_same_store() {
+        let backing = AuthorityBacking::new();
+        let (_dir, cache, _) = fixture(Backing::new());
+        let store = authority_store(backing.clone(), cache.clone());
+        let observer = authority_store(backing.clone(), cache.clone());
+        let id = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
+        let scope = CacheScope {
+            identity: store.identity.clone(),
+            backing: id,
+        };
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *backing.held_prepare.lock().unwrap() = Some((entered_tx, release_rx));
+        let owned_store = store.clone();
+        let owned = tokio::spawn(async move { owned_store.prepare_concurrent_backing().await });
+        let entered = timeout(Duration::from_secs(1), entered_rx).await;
+        backing.refuse.store(true, Ordering::Release);
+        let refusal = observer.verify_concurrent_backing(id).await;
+        backing.refuse.store(false, Ordering::Release);
+        let fresh = store.verify_concurrent_backing(id).await;
+        let before = store.current().is_some();
+        let _ = release_tx.send(());
+        let joined = owned.await;
+        let after = store.current().is_some();
+        let policy = cache.scope_policy(&scope);
+        drop(store);
+        drop(observer);
+        cache.shutdown().await.unwrap();
+        assert!(matches!(entered, Ok(Ok(()))));
+        assert!(refusal.is_err());
+        assert!(fresh.is_ok());
+        assert!(
+            matches!(joined, Ok(Ok(_))),
+            "underlying successful prepare must remain successful"
+        );
+        assert!(
+            before && after,
+            "losing old CAS removed a newer current lease on this store"
+        );
+        assert_eq!(policy, Some(IntegrityPolicy::Sha256Prefixed));
+    }
+    #[tokio::test]
+    async fn another_store_authority_refusal_bypasses_an_existing_warm_cache() {
+        let backing = AuthorityBacking::new();
+        let (_dir, cache, _) = fixture(Backing::new());
+        let store = authority_store(backing.clone(), cache.clone());
+        let observer = authority_store(backing.clone(), cache.clone());
+        let scope_id = store.prepare_concurrent_backing().await.unwrap();
+        let id = store.put(b"warm authority bytes").await.unwrap();
+        store.flush().await.unwrap();
+        assert_eq!(store.get(&id).await.unwrap(), b"warm authority bytes");
+        assert_eq!(
+            backing.backing.gets.load(Ordering::Relaxed),
+            0,
+            "warm control should hit cache"
+        );
+        backing.refuse.store(true, Ordering::Release);
+        assert!(observer.verify_concurrent_backing(scope_id).await.is_err());
+        let bytes = store.get(&id).await.unwrap();
+        let reads = backing.backing.gets.load(Ordering::Relaxed);
+        drop(store);
+        drop(observer);
+        cache.shutdown().await.unwrap();
+        assert_eq!(bytes, b"warm authority bytes");
+        assert_eq!(
+            reads, 1,
+            "revoked warm store used stale admission rather than backing"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_read_does_not_fill_a_new_same_backing_authority_generation() {
+        let backing = AuthorityBacking::new();
+        let (_dir, cache, _) = fixture(Backing::new());
+        let store = authority_store(backing.clone(), cache.clone());
+        let observer = authority_store(backing.clone(), cache.clone());
+        let authority = store.prepare_concurrent_backing().await.unwrap();
+        let id = backing.put(b"provider owned held read").await.unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *backing.held_get.lock().unwrap() = Some((entered_tx, release_rx));
+        let reader = store.clone();
+        let owned = tokio::spawn(async move { reader.get(&id).await });
+        let entered = timeout(Duration::from_secs(1), entered_rx).await;
+        backing.refuse.store(true, Ordering::Release);
+        let refused = observer.verify_concurrent_backing(authority).await;
+        backing.refuse.store(false, Ordering::Release);
+        let fresh = observer.verify_concurrent_backing(authority).await;
+        let fresh_current = observer.current().is_some();
+        let _ = release_tx.send(());
+        let joined = owned.await;
+        let entries = cache.usage().2;
+        drop(store);
+        drop(observer);
+        cache.shutdown().await.unwrap();
+        assert!(
+            matches!(entered, Ok(Ok(()))),
+            "actual backing read was not held"
+        );
+        assert!(refused.is_err());
+        assert!(fresh.is_ok() && fresh_current);
+        assert!(matches!(joined, Ok(Ok(ref bytes)) if bytes == b"provider owned held read"));
+        assert_eq!(
+            entries, 0,
+            "old generation read populated a fresh generation after revoke/restore"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_same_backing_verification_reuses_the_existing_registration_group() {
+        let backing = AuthorityBacking::new();
+        let (_dir, cache, _) = fixture(Backing::new());
+        let store = authority_store(backing, cache.clone());
+        let id = store.prepare_concurrent_backing().await.unwrap();
+        let before = store.scope.lock().unwrap().as_ref().unwrap().2.clone();
+        store.verify_concurrent_backing(id).await.unwrap();
+        let after = store.scope.lock().unwrap().as_ref().unwrap().2.clone();
+        // This checks the exact cache-registration allocation, rather than
+        // asserting that provider async futures or the entire operation allocate nothing.
+        assert!(before.same_group(&after));
+        drop(before);
+        drop(after);
+        drop(store);
+        cache.shutdown().await.unwrap();
     }
 }

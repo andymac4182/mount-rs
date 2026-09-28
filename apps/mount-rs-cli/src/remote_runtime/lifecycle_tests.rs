@@ -32,15 +32,17 @@ async fn context_usable(context: &StorageContext) -> bool {
 
 fn constructor(context: &StorageContext) -> Arc<CliRuntimeConstructor> {
     Arc::new(CliRuntimeConstructor {
-        plan: crate::runtime::DriverRuntime::prepare(
-            &crate::CliOptions {
-                driver: crate::DriverChoice::Memory,
-                ..crate::CliOptions::default()
-            },
-            111,
-            222,
-        )
-        .unwrap(),
+        plan: Arc::new(
+            crate::runtime::DriverRuntime::prepare(
+                &crate::CliOptions {
+                    driver: crate::DriverChoice::Memory,
+                    ..crate::CliOptions::default()
+                },
+                111,
+                222,
+            )
+            .unwrap(),
+        ),
         context: context.clone(),
         decorator: None,
     })
@@ -169,7 +171,7 @@ async fn lazy_prepared_cli_plans_preserve_persistent_bytes_and_backing_through_c
         };
         let constructor = Arc::new(RecordedConstructor {
             actual: CliRuntimeConstructor {
-                plan: crate::runtime::DriverRuntime::prepare(&options, 111, 222).unwrap(),
+                plan: Arc::new(crate::runtime::DriverRuntime::prepare(&options, 111, 222).unwrap()),
                 context: context.clone(),
                 decorator: None,
             },

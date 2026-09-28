@@ -42,8 +42,102 @@ struct State {
     tick: u64,
     generation: u64,
     quarantined: BTreeMap<String, usize>,
-    scopes: BTreeMap<CacheKey, (CacheScope, IntegrityPolicy, usize)>,
+    scopes: BTreeMap<CacheKey, ScopeRegistration>,
+    identities: BTreeMap<ScopeIdentity, IdentityRecord>,
+    admission_failed: bool,
 }
+
+struct AdmissionOwner;
+struct IdentityRecord {
+    identity: Arc<ScopeIdentity>,
+    epoch: u64,
+    backing: Option<ConcurrentBackingId>,
+}
+struct ScopeRegistration {
+    scope: Arc<CacheScope>,
+    policy: IntegrityPolicy,
+    groups: usize,
+    epoch: u64,
+}
+/// A trusted local identity reservation captured before provider verification.
+/// The cache-owner marker prevents a token from authorizing another cache.
+/// Reservations survive an empty scope registry and are never recycled.
+#[derive(Clone)]
+pub struct IdentityEpoch {
+    owner: Arc<AdmissionOwner>,
+    identity: Arc<ScopeIdentity>,
+    epoch: u64,
+}
+/// One independently owned registration group. Cloning shares its final Drop;
+/// it does not add a registration, allocate a new group, or change authority.
+#[derive(Clone)]
+pub struct ScopeLease {
+    inner: Arc<ScopeLeaseInner>,
+}
+struct ScopeLeaseInner {
+    cache: Arc<LocalCache>,
+    scope: Arc<CacheScope>,
+    key: CacheKey,
+    policy: IntegrityPolicy,
+    epoch: u64,
+}
+impl ScopeLease {
+    #[cfg(all(test, unix))]
+    pub(crate) fn same_group(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+    pub fn policy(&self) -> IntegrityPolicy {
+        self.inner.policy
+    }
+    pub(crate) fn accepts_verified_epoch(&self, verified_from: &IdentityEpoch) -> Result<bool> {
+        if !Arc::ptr_eq(&verified_from.owner, &self.inner.cache.admission_owner)
+            || *verified_from.identity != self.inner.scope.identity
+            || verified_from.epoch != self.inner.epoch
+        {
+            return Ok(false);
+        }
+        self.is_current()
+    }
+    pub fn is_current(&self) -> Result<bool> {
+        self.inner.cache.with_admission_state(|state| {
+            Ok(state
+                .identities
+                .get(&self.inner.scope.identity)
+                .is_some_and(|identity| {
+                    identity.epoch == self.inner.epoch
+                        && identity.backing == Some(self.inner.scope.backing)
+                        && state.scopes.get(&self.inner.key).is_some_and(|entry| {
+                            *entry.scope == *self.inner.scope
+                                && entry.policy == self.inner.policy
+                                && entry.epoch == self.inner.epoch
+                                && entry.groups != 0
+                        })
+                }))
+        })
+    }
+}
+impl Drop for ScopeLeaseInner {
+    fn drop(&mut self) {
+        // Drop is administrative metadata release, never a disk operation. An
+        // old generation cannot decrement a replacement with the same digest.
+        if let Ok(mut state) = self.cache.state.lock()
+            && let Some(entry) = state.scopes.get_mut(&self.key)
+            && *entry.scope == *self.scope
+            && entry.policy == self.policy
+            && entry.epoch == self.epoch
+        {
+            if let Some(remaining) = entry.groups.checked_sub(1) {
+                entry.groups = remaining;
+                if remaining == 0 {
+                    state.scopes.remove(&self.key);
+                }
+            } else {
+                state.admission_failed = true;
+            }
+        }
+    }
+}
+
 pub struct PendingReservation {
     used: Arc<AtomicUsize>,
     bytes: usize,
@@ -186,6 +280,8 @@ impl AdmittedCache {
 /// of the RAM index; no filesystem operation holds the index mutex.
 pub struct LocalCache {
     config: LocalCacheConfig,
+    max_scopes: usize,
+    admission_owner: Arc<AdmissionOwner>,
     state: Mutex<State>,
     disk_io: Mutex<()>,
     root: File,
@@ -199,15 +295,29 @@ pub struct LocalCache {
     pub(crate) test_fill_worker: Mutex<Option<tokio::sync::oneshot::Sender<Arc<OwnedTask>>>>,
 }
 impl LocalCache {
-    /// Secure descriptor-relative disk operations currently require Unix.
+    /// The original constructor keeps the historical distinct-scope bound.
+    pub fn new(config: LocalCacheConfig) -> Result<Arc<Self>> {
+        let max_scopes = config.max_entries;
+        Self::new_with_scope_capacity(config, max_scopes)
+    }
+    /// Scope/identity metadata has its own bound; this never changes blob entry,
+    /// RAM, disk, payload, pending-buffer or eight-worker IO budgets.
     #[cfg(not(unix))]
-    pub fn new(_config: LocalCacheConfig) -> Result<Arc<Self>> {
+    pub fn new_with_scope_capacity(
+        _config: LocalCacheConfig,
+        _max_scopes: usize,
+    ) -> Result<Arc<Self>> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("blob cache"))
     }
     #[cfg(unix)]
-    pub fn new(config: LocalCacheConfig) -> Result<Arc<Self>> {
+    pub fn new_with_scope_capacity(
+        config: LocalCacheConfig,
+        max_scopes: usize,
+    ) -> Result<Arc<Self>> {
         if config.max_entries == 0
             || config.max_entries > 1_000_000
+            || max_scopes == 0
+            || max_scopes > 1_000_000
             || config.max_blob_bytes == 0
             || config.max_blob_bytes > 256 * 1024 * 1024
             || config.memory_bytes > isize::MAX as usize
@@ -308,6 +418,8 @@ impl LocalCache {
         }
         Ok(Arc::new(Self {
             config,
+            max_scopes,
+            admission_owner: Arc::new(AdmissionOwner),
             state: Mutex::new(state),
             disk_io: Mutex::new(()),
             root,
@@ -481,50 +593,256 @@ impl LocalCache {
     fn key(scope: &CacheScope, id: &BlockId) -> CacheKey {
         Self::key_hashed(&Self::scope_hash(scope), id)
     }
-    pub fn register_scope(&self, scope: CacheScope, policy: IntegrityPolicy) -> Result<()> {
-        if [
-            &scope.identity.cluster,
-            &scope.identity.partition,
-            &scope.identity.drive,
-        ]
-        .iter()
-        .any(|s| s.is_empty() || s.len() > 1024)
+    fn valid_identity(identity: &ScopeIdentity) -> bool {
+        [&identity.cluster, &identity.partition, &identity.drive]
+            .iter()
+            .all(|part| !part.is_empty() && part.len() <= 1024)
+    }
+    fn with_admission_state<T>(&self, work: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+        // This short metadata operation shares the seal linearization point but
+        // acquires no disk permit. Lock order is always IO registry -> RAM index.
+        let mut io = self.io.lock();
+        self.io.reap(&mut io);
+        if let Some(failure) = &io.failure {
+            return Err(failure.clone());
+        }
+        if io.sealed {
+            return Err(FsError::new(ErrorCode::Ebusy).with_syscall("closed cache admission"));
+        }
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                io.sealed = true;
+                let failure = io.failure.get_or_insert_with(error).clone();
+                return Err(failure);
+            }
+        };
+        if state.admission_failed {
+            io.sealed = true;
+            let failure = io.failure.get_or_insert_with(error).clone();
+            return Err(failure);
+        }
+        let result = work(&mut state);
+        if state.admission_failed {
+            io.sealed = true;
+            let failure = io.failure.get_or_insert_with(error).clone();
+            return Err(failure);
+        }
+        result
+    }
+    /// Only trusted configured/runtime identities may reserve an epoch. Peer
+    /// request fields are not authority and must be checked by their route map.
+    pub fn identity_epoch(&self, identity: &ScopeIdentity) -> Result<IdentityEpoch> {
+        if !Self::valid_identity(identity) {
+            return Err(error());
+        }
+        self.with_admission_state(|state| {
+            // Existing reservations need only borrowed lookup and Arc clones.
+            if let Some(record) = state.identities.get(identity) {
+                return Ok(IdentityEpoch {
+                    owner: self.admission_owner.clone(),
+                    identity: record.identity.clone(),
+                    epoch: record.epoch,
+                });
+            }
+            if state.identities.len() >= self.max_scopes {
+                return Err(FsError::new(ErrorCode::Ebusy).with_syscall("cache identity capacity"));
+            }
+            let record =
+                state
+                    .identities
+                    .entry(identity.clone())
+                    .or_insert_with(|| IdentityRecord {
+                        identity: Arc::new(identity.clone()),
+                        epoch: 0,
+                        backing: None,
+                    });
+            Ok(IdentityEpoch {
+                owner: self.admission_owner.clone(),
+                identity: record.identity.clone(),
+                epoch: record.epoch,
+            })
+        })
+    }
+    /// Publish an acknowledged local proof only if its pre-await identity epoch
+    /// is still current. A different backing advances authority before capacity
+    /// admission and removes all older backing scopes of this exact identity.
+    pub fn register_scope_lease(
+        self: &Arc<Self>,
+        scope: CacheScope,
+        policy: IntegrityPolicy,
+        verified_from: IdentityEpoch,
+    ) -> Result<ScopeLease> {
+        if !Arc::ptr_eq(&verified_from.owner, &self.admission_owner)
+            || *verified_from.identity != scope.identity
+            || !Self::valid_identity(&scope.identity)
         {
             return Err(error());
         }
-        let mut state = self.state.lock().map_err(|_| error())?;
-        let key = Self::scope_hash(&scope);
-        if let Some((_, old, count)) = state.scopes.get_mut(&key) {
-            if *old != policy {
-                return Err(error());
+        self.with_admission_state(|state| {
+            let record = state.identities.get(&scope.identity).ok_or_else(error)?;
+            if record.epoch != verified_from.epoch {
+                return Err(FsError::new(ErrorCode::Estale).with_syscall("cache authority epoch"));
             }
-            *count = count.checked_add(1).ok_or_else(error)?;
-            return Ok(());
-        }
-        if state.scopes.len() >= self.config.max_entries {
-            return Err(error());
-        }
-        state.scopes.insert(key, (scope, policy, 1));
-        Ok(())
-    }
-    pub fn unregister_scope(&self, scope: &CacheScope) {
-        if let Ok(mut state) = self.state.lock() {
-            let key = Self::scope_hash(scope);
-            if let Some((_, _, count)) = state.scopes.get_mut(&key) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    state.scopes.remove(&key);
+            if record.backing != Some(scope.backing) {
+                let had_previous_backing = record.backing.is_some();
+                let Some(next) = record.epoch.checked_add(1) else {
+                    state.admission_failed = true;
+                    return Err(error());
+                };
+                let record = state
+                    .identities
+                    .get_mut(&scope.identity)
+                    .ok_or_else(error)?;
+                record.epoch = next;
+                record.backing = Some(scope.backing);
+                // None can arise only at initial reservation or after an
+                // exact identity revoke already removed every scope. Avoid
+                // quadratic first-admission scans across distinct cold Drives.
+                if had_previous_backing {
+                    state
+                        .scopes
+                        .retain(|_, entry| entry.scope.identity != scope.identity);
                 }
             }
+            let epoch = state
+                .identities
+                .get(&scope.identity)
+                .ok_or_else(error)?
+                .epoch;
+            let key = Self::scope_hash(&scope);
+            let shared_scope = if let Some(entry) = state.scopes.get_mut(&key) {
+                // Digest equality alone is never an authority match.
+                if *entry.scope != scope || entry.policy != policy || entry.epoch != epoch {
+                    return Err(error());
+                }
+                let Some(groups) = entry.groups.checked_add(1) else {
+                    state.admission_failed = true;
+                    return Err(error());
+                };
+                entry.groups = groups;
+                entry.scope.clone()
+            } else {
+                if state.scopes.len() >= self.max_scopes {
+                    return Err(FsError::new(ErrorCode::Ebusy).with_syscall("cache scope capacity"));
+                }
+                let shared_scope = Arc::new(scope);
+                state.scopes.insert(
+                    key,
+                    ScopeRegistration {
+                        scope: shared_scope.clone(),
+                        policy,
+                        groups: 1,
+                        epoch,
+                    },
+                );
+                shared_scope
+            };
+            Ok(ScopeLease {
+                inner: Arc::new(ScopeLeaseInner {
+                    cache: self.clone(),
+                    scope: shared_scope,
+                    key,
+                    policy,
+                    epoch,
+                }),
+            })
+        })
+    }
+    /// Acquire an independent group only from an already proven current scope.
+    /// This never verifies a backing, reserves an unknown identity or advances
+    /// authority. Normal holder reuse clones its retained group instead.
+    pub fn current_scope_lease(
+        self: &Arc<Self>,
+        scope: &CacheScope,
+        policy: IntegrityPolicy,
+    ) -> Result<Option<ScopeLease>> {
+        self.with_admission_state(|state| {
+            let Some(record) = state.identities.get(&scope.identity) else {
+                return Ok(None);
+            };
+            if record.backing != Some(scope.backing) {
+                return Ok(None);
+            }
+            let epoch = record.epoch;
+            let key = Self::scope_hash(scope);
+            let Some(entry) = state.scopes.get_mut(&key) else {
+                return Ok(None);
+            };
+            if *entry.scope != *scope || entry.policy != policy || entry.epoch != epoch {
+                return Ok(None);
+            }
+            let Some(groups) = entry.groups.checked_add(1) else {
+                state.admission_failed = true;
+                return Err(error());
+            };
+            entry.groups = groups;
+            Ok(Some(ScopeLease {
+                inner: Arc::new(ScopeLeaseInner {
+                    cache: self.clone(),
+                    scope: entry.scope.clone(),
+                    key,
+                    policy,
+                    epoch,
+                }),
+            }))
+        })
+    }
+    /// An observed local authority refusal revokes this exact identity, even
+    /// when no scope is registered. This is metadata-only and remains available
+    /// while every disk permit is held. Terminal admission still returns error.
+    pub fn revoke_identity_admission(&self, identity: &ScopeIdentity) -> Result<()> {
+        if !Self::valid_identity(identity) {
+            return Err(error());
         }
+        self.with_admission_state(|state| {
+            let identity_count = state.identities.len();
+            let record = match state.identities.entry(identity.clone()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    if identity_count >= self.max_scopes {
+                        return Err(
+                            FsError::new(ErrorCode::Ebusy).with_syscall("cache identity capacity")
+                        );
+                    }
+                    entry.insert(IdentityRecord {
+                        identity: Arc::new(identity.clone()),
+                        epoch: 0,
+                        backing: None,
+                    })
+                }
+            };
+            let Some(next) = record.epoch.checked_add(1) else {
+                state.admission_failed = true;
+                return Err(error());
+            };
+            record.epoch = next;
+            record.backing = None;
+            state
+                .scopes
+                .retain(|_, entry| entry.scope.identity != *identity);
+            Ok(())
+        })
     }
     pub fn scope_policy(&self, scope: &CacheScope) -> Option<IntegrityPolicy> {
-        self.state
-            .lock()
-            .ok()?
-            .scopes
-            .get(&Self::scope_hash(scope))
-            .map(|v| v.1)
+        self.with_admission_state(|state| {
+            let Some(record) = state.identities.get(&scope.identity) else {
+                return Ok(None);
+            };
+            let policy = state
+                .scopes
+                .get(&Self::scope_hash(scope))
+                .filter(|entry| {
+                    *entry.scope == *scope
+                        && entry.epoch == record.epoch
+                        && record.backing == Some(scope.backing)
+                        && entry.groups != 0
+                })
+                .map(|entry| entry.policy);
+            Ok(policy)
+        })
+        .ok()
+        .flatten()
     }
     pub fn path_for(&self, scope: &CacheScope, id: &BlockId) -> PathBuf {
         self.config.directory.join(hex_key(&Self::key(scope, id)))
@@ -1846,6 +2164,357 @@ mod tests {
         symlink(&outside, &path).unwrap();
         assert!(c.get(&s, &id, IntegrityPolicy::Opaque).unwrap().is_none());
         assert_eq!(fs::read(outside).unwrap(), b"secret");
+    }
+
+    fn proof_scope(drive: &str, backing: u8) -> CacheScope {
+        CacheScope {
+            identity: ScopeIdentity {
+                cluster: "epochs".into(),
+                partition: "p".into(),
+                drive: drive.into(),
+            },
+            backing: ConcurrentBackingId::from_bytes([backing; 16]).unwrap(),
+        }
+    }
+    fn proof_cache(dir: &tempfile::TempDir, name: &str, scope_capacity: usize) -> Arc<LocalCache> {
+        LocalCache::new_with_scope_capacity(
+            LocalCacheConfig {
+                directory: dir.path().join(name),
+                memory_bytes: 1024,
+                disk_bytes: 4096,
+                max_entries: 1,
+                max_blob_bytes: 1024,
+            },
+            scope_capacity,
+        )
+        .unwrap()
+    }
+    fn lease(cache: &Arc<LocalCache>, scope: CacheScope) -> ScopeLease {
+        let epoch = cache.identity_epoch(&scope.identity).unwrap();
+        cache
+            .register_scope_lease(scope, IntegrityPolicy::Opaque, epoch)
+            .unwrap()
+    }
+    #[test]
+    fn empty_identity_keeps_revocation_epoch_and_other_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "empty", 4);
+        let scope = proof_scope("revoked", 1);
+        let held = cache.identity_epoch(&scope.identity).unwrap();
+        let other_scope = proof_scope("unaffected", 1);
+        let other = lease(&cache, other_scope.clone());
+        cache.revoke_identity_admission(&scope.identity).unwrap();
+        let stale = cache.register_scope_lease(scope.clone(), IntegrityPolicy::Opaque, held);
+        assert!(stale.is_err_and(|e| e.code == ErrorCode::Estale));
+        assert!(other.is_current().unwrap());
+        assert_eq!(
+            cache.scope_policy(&other_scope),
+            Some(IntegrityPolicy::Opaque)
+        );
+        let fresh = lease(&cache, scope.clone());
+        assert!(fresh.is_current().unwrap());
+        assert_eq!(cache.scope_policy(&scope), Some(IntegrityPolicy::Opaque));
+    }
+    #[test]
+    fn lease_clones_share_one_group_and_independent_groups_release_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "groups", 2);
+        let scope = proof_scope("d", 1);
+        let first = lease(&cache, scope.clone());
+        let cloned = first.clone();
+        assert!(Arc::ptr_eq(&first.inner, &cloned.inner));
+        assert_eq!(
+            cache
+                .state
+                .lock()
+                .unwrap()
+                .scopes
+                .values()
+                .next()
+                .unwrap()
+                .groups,
+            1
+        );
+        let independent = cache
+            .current_scope_lease(&scope, IntegrityPolicy::Opaque)
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first.inner, &independent.inner));
+        assert_eq!(
+            cache
+                .state
+                .lock()
+                .unwrap()
+                .scopes
+                .values()
+                .next()
+                .unwrap()
+                .groups,
+            2
+        );
+        drop(first);
+        drop(cloned);
+        assert!(independent.is_current().unwrap());
+        assert_eq!(cache.scope_policy(&scope), Some(IntegrityPolicy::Opaque));
+        drop(independent);
+        assert_eq!(cache.scope_policy(&scope), None);
+        assert_eq!(cache.state.lock().unwrap().identities.len(), 1);
+    }
+    #[test]
+    fn stale_drop_cannot_remove_a_fresh_same_backing_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "drop", 2);
+        let scope = proof_scope("d", 1);
+        let stale = lease(&cache, scope.clone());
+        cache.revoke_identity_admission(&scope.identity).unwrap();
+        let fresh = lease(&cache, scope.clone());
+        assert!(!stale.is_current().unwrap());
+        assert!(fresh.is_current().unwrap());
+        drop(stale);
+        assert_eq!(cache.scope_policy(&scope), Some(IntegrityPolicy::Opaque));
+        assert!(fresh.is_current().unwrap());
+    }
+    #[test]
+    fn observed_backing_transition_invalidates_held_proofs_and_old_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "transition", 2);
+        let old_scope = proof_scope("d", 1);
+        let old = lease(&cache, old_scope.clone());
+        let held_epoch = cache.identity_epoch(&old_scope.identity).unwrap();
+        let next_scope = proof_scope("d", 2);
+        let next = lease(&cache, next_scope.clone());
+        assert!(!old.is_current().unwrap());
+        assert!(next.is_current().unwrap());
+        assert_eq!(cache.scope_policy(&old_scope), None);
+        assert!(
+            cache
+                .register_scope_lease(old_scope, IntegrityPolicy::Opaque, held_epoch)
+                .is_err()
+        );
+        drop(old);
+        assert_eq!(
+            cache.scope_policy(&next_scope),
+            Some(IntegrityPolicy::Opaque)
+        );
+    }
+    #[test]
+    fn epoch_cannot_cross_cache_owner_or_exact_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = proof_cache(&dir, "a", 2);
+        let b = proof_cache(&dir, "b", 2);
+        let scope = proof_scope("d", 1);
+        let token = a.identity_epoch(&scope.identity).unwrap();
+        let _ = b.identity_epoch(&scope.identity).unwrap();
+        assert!(
+            b.register_scope_lease(scope.clone(), IntegrityPolicy::Opaque, token.clone())
+                .is_err()
+        );
+        let mut wrong = scope.clone();
+        wrong.identity.partition = "other".into();
+        assert!(
+            a.register_scope_lease(wrong, IntegrityPolicy::Opaque, token.clone())
+                .is_err()
+        );
+        let good = a
+            .register_scope_lease(scope, IntegrityPolicy::Opaque, token)
+            .unwrap();
+        assert!(good.is_current().unwrap());
+    }
+    #[test]
+    fn scope_and_retained_identity_bounds_are_independent_of_blob_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "capacity", 3);
+        let scopes: Vec<_> = (0..3).map(|i| proof_scope(&format!("d{i}"), 1)).collect();
+        let leases: Vec<_> = scopes
+            .iter()
+            .map(|scope| lease(&cache, scope.clone()))
+            .collect();
+        assert_eq!(cache.state.lock().unwrap().scopes.len(), 3);
+        for scope in &scopes {
+            cache
+                .insert_memory_shared(
+                    scope,
+                    &BlockId("opaque".into()),
+                    Arc::from(b"bytes".as_slice()),
+                    IntegrityPolicy::Opaque,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            cache.usage().2,
+            1,
+            "blob entry capacity changed with scope capacity"
+        );
+        assert!(
+            cache
+                .identity_epoch(&proof_scope("one-too-many", 1).identity)
+                .is_err()
+        );
+        drop(leases);
+        assert!(cache.state.lock().unwrap().scopes.is_empty());
+        assert_eq!(
+            cache.state.lock().unwrap().identities.len(),
+            3,
+            "empty scopes forgot authority history"
+        );
+        assert!(
+            cache
+                .identity_epoch(&proof_scope("replacement", 1).identity)
+                .is_err()
+        );
+        assert!(
+            LocalCache::new_with_scope_capacity(
+                LocalCacheConfig {
+                    directory: dir.path().join("zero"),
+                    memory_bytes: 1,
+                    disk_bytes: 1,
+                    max_entries: 1,
+                    max_blob_bytes: 1
+                },
+                0
+            )
+            .is_err()
+        );
+        assert!(
+            LocalCache::new_with_scope_capacity(
+                LocalCacheConfig {
+                    directory: dir.path().join("too-many"),
+                    memory_bytes: 1,
+                    disk_bytes: 1,
+                    max_entries: 1,
+                    max_blob_bytes: 1
+                },
+                1_000_001
+            )
+            .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn administrative_revocation_works_with_eight_held_disk_permits_and_seals() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "saturated", 2);
+        let scope = proof_scope("d", 1);
+        let old = lease(&cache, scope.clone());
+        let token = cache.identity_epoch(&scope.identity).unwrap();
+        let mut permits = Vec::new();
+        for _ in 0..8 {
+            permits.push(cache.io_permit().await.unwrap());
+        }
+        cache.revoke_identity_admission(&scope.identity).unwrap();
+        assert!(!old.is_current().unwrap());
+        assert!(
+            cache
+                .register_scope_lease(scope.clone(), IntegrityPolicy::Opaque, token)
+                .is_err()
+        );
+        let current = lease(&cache, scope.clone());
+        assert!(current.is_current().unwrap());
+        drop(permits);
+        cache.shutdown().await.unwrap();
+        assert!(current.is_current().is_err());
+        assert!(cache.identity_epoch(&scope.identity).is_err());
+        assert!(
+            cache
+                .current_scope_lease(&scope, IntegrityPolicy::Opaque)
+                .is_err()
+        );
+        assert!(cache.revoke_identity_admission(&scope.identity).is_err());
+        assert_eq!(cache.scope_policy(&scope), None);
+    }
+    #[test]
+    fn authority_epoch_overflow_stays_failed_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "overflow", 2);
+        let scope = proof_scope("d", 1);
+        let retained = lease(&cache, scope.clone());
+        cache
+            .state
+            .lock()
+            .unwrap()
+            .identities
+            .get_mut(&scope.identity)
+            .unwrap()
+            .epoch = u64::MAX;
+        assert!(cache.revoke_identity_admission(&scope.identity).is_err());
+        assert!(retained.is_current().is_err());
+        assert_eq!(cache.scope_policy(&scope), None);
+        assert!(cache.identity_epoch(&scope.identity).is_err());
+    }
+    #[test]
+    fn poisoned_authority_index_stays_failed_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "poison", 2);
+        let scope = proof_scope("d", 1);
+        let retained = lease(&cache, scope.clone());
+        let held = cache.clone();
+        let joined = std::thread::spawn(move || {
+            let _index = held.state.lock().unwrap();
+            panic!("controlled admission index poison");
+        })
+        .join();
+        assert!(joined.is_err(), "actual poison thread must join");
+        assert!(retained.is_current().is_err());
+        assert_eq!(cache.scope_policy(&scope), None);
+        assert!(cache.identity_epoch(&scope.identity).is_err());
+    }
+
+    #[test]
+    fn twenty_thousand_scopes_fit_without_raising_the_single_blob_entry_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "production-shape-capacity", 20_000);
+        let leases: Vec<_> = (0..20_000)
+            .map(|i| lease(&cache, proof_scope(&format!("sandbox-{i}"), 1)))
+            .collect();
+        assert_eq!(cache.state.lock().unwrap().scopes.len(), 20_000);
+        assert_eq!(cache.state.lock().unwrap().identities.len(), 20_000);
+        assert!(
+            cache
+                .identity_epoch(&proof_scope("sandbox-one-too-many", 1).identity)
+                .is_err()
+        );
+        assert_eq!(cache.config.max_entries, 1);
+        assert_eq!(cache.io_permits.available_permits(), 8);
+        assert_eq!(cache.usage(), (0, 0, 0));
+        drop(leases);
+        assert!(cache.state.lock().unwrap().scopes.is_empty());
+        assert_eq!(cache.state.lock().unwrap().identities.len(), 20_000);
+    }
+
+    #[test]
+    fn adoption_refuses_unknown_scope_and_policy_mismatch_without_reserving_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "policy", 2);
+        let scope = proof_scope("known", 1);
+        let unknown = proof_scope("unknown", 1);
+        assert!(
+            cache
+                .current_scope_lease(&unknown, IntegrityPolicy::Opaque)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(cache.scope_policy(&unknown), None);
+        assert!(
+            cache.state.lock().unwrap().identities.is_empty(),
+            "lookup reserved an incoming unknown identity"
+        );
+        let retained = lease(&cache, scope.clone());
+        assert!(
+            cache
+                .current_scope_lease(&scope, IntegrityPolicy::Sha256Prefixed)
+                .unwrap()
+                .is_none()
+        );
+        let token = cache.identity_epoch(&scope.identity).unwrap();
+        assert!(
+            cache
+                .register_scope_lease(scope.clone(), IntegrityPolicy::Sha256Prefixed, token)
+                .is_err()
+        );
+        assert!(
+            retained.is_current().unwrap(),
+            "policy mismatch changed the already proven policy"
+        );
+        assert_eq!(cache.scope_policy(&scope), Some(IntegrityPolicy::Opaque));
     }
 }
 

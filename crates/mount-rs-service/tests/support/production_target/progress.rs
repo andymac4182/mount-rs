@@ -563,7 +563,7 @@ impl Drop for Progress {
     }
 }
 fn phase(value: &str) -> Option<&'static str> {
-    const FIXED: [&str; 13] = [
+    const FIXED: [&str; 15] = [
         "preflight",
         "empty_drive_initialization",
         "worker_setup",
@@ -574,6 +574,8 @@ fn phase(value: &str) -> Option<&'static str> {
         "initial_fresh_oracle",
         "refresh_replicas",
         "routes_and_scope",
+        "assigned_warmup",
+        "crossnode_routes",
         "final_fresh_oracle",
         "revocation",
         "terminal",
@@ -1133,6 +1135,69 @@ mod tests {
         assert!(!enabled.complete());
         enabled.finish(false, false);
     }
+    #[test]
+    fn lazy_target_balanced_validation_phases_preserve_closed_progress_accounting() {
+        let mut progress = Progress::new(true, &config());
+        progress.source(&resource_source());
+        assert!(progress.complete());
+        for name in ["assigned_warmup", "crossnode_routes"] {
+            progress.observe(&json!({"phase":name,"connected_clients":10000,
+                "initialization":{"initialized_drives":10000}}));
+            assert!(
+                progress.complete(),
+                "balanced validation phase must retain complete public accounting: {name}"
+            );
+            let mut bytes = Vec::new();
+            progress.emit_to("phase", &mut bytes);
+            assert!(bytes.len() <= LIMIT);
+            assert!(bytes.ends_with(b"\n"));
+            let record: Value =
+                serde_json::from_slice(bytes.strip_prefix(b"\ntarget_progress ").unwrap()).unwrap();
+            assert_eq!(record["phase"], name);
+            assert_eq!(record["accounting_complete"], true);
+            assert_eq!(record["source_verified"], true);
+            assert_eq!(record["clients"], 10000);
+            assert_eq!(record["connected_clients"], 10000);
+            assert_eq!(record["initialized_drives"], 10000);
+            assert_eq!(
+                (
+                    record["servers"].as_u64(),
+                    record["drives"].as_u64(),
+                    record["partitions"].as_u64(),
+                    record["files_per_drive"].as_u64(),
+                    record["phase_seconds"].as_u64()
+                ),
+                (Some(10), Some(10000), Some(5000), Some(1000), Some(30))
+            );
+            assert_eq!(record.as_object().unwrap().len(), 20);
+        }
+        let mut unknown = Progress::new(true, &config());
+        unknown.source(&resource_source());
+        unknown.observe(&json!({"phase":"crossnode_routes/private"}));
+        assert!(
+            !unknown.complete(),
+            "closed phase parser must still reject unknown phases"
+        );
+        unknown.observe(
+            &json!({"phase":"routes_and_scope","connected_clients":10000,
+            "initialization":{"initialized_drives":10000}}),
+        );
+        assert!(
+            !unknown.complete(),
+            "unknown phase accounting failure must stay sticky after a recognized phase"
+        );
+        let mut bytes = Vec::new();
+        unknown.emit_to("phase", &mut bytes);
+        let record: Value =
+            serde_json::from_slice(bytes.strip_prefix(b"\ntarget_progress ").unwrap()).unwrap();
+        assert_eq!(record["accounting_complete"], false);
+        assert!(
+            !String::from_utf8(bytes)
+                .unwrap()
+                .contains("crossnode_routes/private")
+        );
+    }
+
     #[test]
     fn phase_projection_is_closed_and_all_actual_patterns_are_supported() {
         assert!(phase("private/example").is_none());

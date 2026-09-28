@@ -29,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-async fn checked<T, F>(fleet: &mut Fleet, parent: Instant, future: F) -> Result<T>
+pub(super) async fn checked<T, F>(fleet: &mut Fleet, parent: Instant, future: F) -> Result<T>
 where
     F: Future<Output = Result<T>>,
 {
@@ -61,7 +61,7 @@ fn split(fixture: &Fixture, n: usize, owner: &str) -> SplitOptions {
     };
     options
 }
-async fn connect(
+pub(super) async fn connect(
     fleet: &mut Fleet,
     fixture: &Fixture,
     node: usize,
@@ -132,17 +132,17 @@ fn launch(
     )?;
     Ok(())
 }
-fn stop(fleet: &mut Fleet, node: usize, phase: Instant) -> Result<Bank> {
+pub(super) fn stop(fleet: &mut Fleet, node: usize, phase: Instant) -> Result<Bank> {
     let deadline = clipped(Instant::now(), phase, SHUTDOWN_SECONDS)?;
     fleet
         .stop_node(node, deadline)?
         .remove(&drive(0))
         .ok_or_else(|| "drive0 shutdown bank absent".into())
 }
-fn cache_path(fixture: &Fixture, name: &str) -> PathBuf {
+pub(super) fn cache_path(fixture: &Fixture, name: &str) -> PathBuf {
     fixture.root.join(format!("cache-{name}"))
 }
-fn entry(cache: &Path, scope: &CacheScope, id: &BlockId) -> PathBuf {
+pub(super) fn entry(cache: &Path, scope: &CacheScope, id: &BlockId) -> PathBuf {
     let key = LocalCache::key_hashed(&LocalCache::scope_hash(scope), id);
     let name = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
     cache.join(name)
@@ -155,7 +155,12 @@ fn complete_entry(path: &Path, body: &[u8]) -> Result<bool> {
     };
     Ok(bytes.len() == DISK_ENTRY_BYTES && &bytes[32..] == body)
 }
-async fn observe_entry(fleet: &mut Fleet, path: &Path, bytes: &[u8], phase: Instant) -> Result<()> {
+pub(super) async fn observe_entry(
+    fleet: &mut Fleet,
+    path: &Path,
+    bytes: &[u8],
+    phase: Instant,
+) -> Result<()> {
     loop {
         if Instant::now() >= phase {
             return Err("owned atomic cache admission deadline exhausted".into());
@@ -324,7 +329,7 @@ async fn fresh_oracle(
     Ok((scopes, ids, json!(receipts)))
 }
 
-async fn security(
+pub(super) async fn security(
     fleet: &mut Fleet,
     fixture: &mut Fixture,
     phase: Instant,
@@ -881,6 +886,14 @@ fn credential_cleanup(
 }
 
 pub fn worker() {
+    worker_selected(false);
+}
+
+pub fn worker_tidb_rustfs_cold() {
+    worker_selected(true);
+}
+
+fn worker_selected(tidb_rustfs_cold: bool) {
     let root = PathBuf::from(
         std::env::var_os("MOUNT_RS_TEN_PROCESS_ROOT").expect("private supervisor worker entry"),
     );
@@ -916,14 +929,33 @@ pub fn worker() {
         .expect("worker runtime");
     let mut phases = Vec::new();
     let credentials = Fixture::credential_inventory(&root);
+    // Retain actual provider jobs/resources before polling any private-fixture open.
+    let mut cold_owner = super::cold_retirement::OracleOwner::default();
     let mut result = Fixture::new(&root).and_then(|mut fixture| {
-        runtime.block_on(run(&mut fleet, &mut fixture, &mut phases, setup))
+        if tidb_rustfs_cold {
+            runtime.block_on(super::cold_retirement::run(
+                &mut fleet,
+                &mut fixture,
+                &mut cold_owner,
+                &mut phases,
+                setup,
+            ))
+        } else {
+            runtime.block_on(run(&mut fleet, &mut fixture, &mut phases, setup))
+        }
     });
     let cleanup_deadline = fleet.cleanup_deadline().unwrap_or_else(|_| Instant::now());
     let cleanup = fleet.stop_all(cleanup_deadline);
     if let Err(error) = cleanup {
         result = Err(format!(
             "{}; cleanup: {error}",
+            result.err().unwrap_or_default()
+        ));
+    }
+    let oracle_cleanup = runtime.block_on(cold_owner.settle(cleanup_deadline));
+    if let Err(error) = &oracle_cleanup {
+        result = Err(format!(
+            "{}; private oracle cleanup: {error}",
             result.err().unwrap_or_default()
         ));
     }
@@ -945,7 +977,8 @@ pub fn worker() {
         credential_cleanup(&root, &credentials, ownership_and_oracles_complete, audit);
     let complete = ownership_and_oracles_complete && credentials_complete;
     let receipt = json!({"schema":1,"complete":complete,"owned_cleanup_closed":owned_cleanup_closed,"failure":result.as_ref().err(),
-        "scope":"ten public CLI debug PIDs, SQLite MRC5, five partitions, ten drives, sixteen 4KiB files per drive",
+        "scope":if tidb_rustfs_cold {"ten public CLI debug PIDs, TiDB/RustFS MRC5 cold retirement, five partitions, ten drives, sixteen 4KiB files per drive"} else {"ten public CLI debug PIDs, SQLite MRC5, five partitions, ten drives, sixteen 4KiB files per drive"},
+        "private_oracle_owner":cold_owner.snapshot(),
         "debug_assertions":cfg!(debug_assertions),"local_oidc_fixture":cfg!(feature="local-oidc-fixture"),
         "worker_pid":std::process::id(),"supervisor_pid":supervisor,"process_group":unsafe { libc::getpgrp() },
         "limits":{"setup_seconds":SETUP_SECONDS,"work_seconds":WORK_SECONDS,"phase_seconds":PHASE_SECONDS,
@@ -959,10 +992,11 @@ pub fn worker() {
         "private_credential_cleanup":credentials_receipt,
         "unavailable":{"maintenance_quiescence":"CLI shutdown does not prove worker drain",
             "exact_phase_counters":"only cumulative generation shutdown banks are exported",
-            "raw_adapter_calls":"not exported by this SQLite CLI seam",
-            "backing_http_attempts_and_returned_bytes":"no HTTP fixture in this cell",
+            "raw_adapter_calls":"not exported by this CLI seam",
+            "backing_http_attempts_and_returned_bytes":"not counted; logical backing_fetches is not an HTTP attempt count",
             "physical_device_io":"not measured","quic_peer_bytes":"not exported by CLI",
-            "cpu_allocations":"not measured","tiDB_rustFS_redis":"separate lineage unqualified",
+            "cpu_allocations":"not measured","full_production_geometry":"unqualified; final target remains 10000 drives / 5000 partitions / 1000 files",
+            "redis":"not exercised",
             "enospc_and_real_lost_reply":"not exercised"}});
     write(
         &root.join("receipt.json"),

@@ -297,6 +297,42 @@ impl DriverRuntimePlan {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn split_plan_for_holder_tests(options: SplitOptions) -> Self {
+        Self {
+            driver: PreparedDriver::Split(Box::new(options)),
+            #[cfg(feature = "observability")]
+            telemetry: mount_rs_observability::global(),
+        }
+    }
+
+    /// Selected block policy is derived from this already prepared local plan.
+    pub(crate) fn cache_block_config(&self) -> Option<&mount_rs_sdk::StoreConfig> {
+        match &self.driver {
+            PreparedDriver::Split(options) => Some(&options.blocks),
+            _ => None,
+        }
+    }
+    /// Cold holders initially support literal TiDB metadata and RustFS blobs.
+    /// AWS remains eligible through existing verified active store admission.
+    pub(crate) fn cold_cache_options(&self) -> Option<&SplitOptions> {
+        match &self.driver {
+            PreparedDriver::Split(options)
+                if options.concurrent_writes
+                    && options.inode_updates
+                    && options.compact_inode_updates
+                    && !options.delegated
+                    && !options.writeback
+                    && options.checkout_path.is_none()
+                    && matches!(options.metadata, mount_rs_sdk::StoreConfig::Tidb { .. })
+                    && matches!(options.blocks, mount_rs_sdk::StoreConfig::RustFs { .. }) =>
+            {
+                Some(options)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) async fn open(&self) -> Result<DriverRuntime, CliError> {
         self.open_with_storage_context(None, None).await
     }

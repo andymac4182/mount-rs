@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use mount_rs_core::diagnostics::object_store::{BundleResidency, ClientRole, Observer};
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_object_store_blocks::{
@@ -25,6 +26,10 @@ pub use mount_rs_object_store_blocks::{
     ObjectStoreBlockStoreStats as RustFsBlockStoreStats,
 };
 
+mod http_observation;
+
+#[cfg(test)]
+mod http_observation_tests;
 #[cfg(test)]
 mod owned_prefix_tests;
 
@@ -98,15 +103,71 @@ impl RustFsConfig {
         self.build_store_with_probe_limits(false)
     }
 
-    fn build_probe_store(&self) -> Result<Arc<dyn ObjectStore>> {
-        self.build_store_with_probe_limits(true)
-    }
-
     fn build_store_with_probe_limits(&self, probe: bool) -> Result<Arc<dyn ObjectStore>> {
         Ok(Arc::new(self.build_client_with_probe_limits(probe)?))
     }
 
     fn build_client_with_probe_limits(&self, probe: bool) -> Result<AmazonS3> {
+        let observer = Observer::enabled();
+        self.build_client_with_observer(
+            probe,
+            if probe {
+                ClientRole::StandaloneProbe
+            } else {
+                ClientRole::StandaloneData
+            },
+            &observer,
+        )
+    }
+
+    fn build_store_with_observer(
+        &self,
+        probe: bool,
+        role: ClientRole,
+        observer: &Observer,
+    ) -> Result<Arc<dyn ObjectStore>> {
+        Ok(Arc::new(
+            self.build_client_with_observer(probe, role, observer)?,
+        ))
+    }
+
+    fn build_client_with_observer(
+        &self,
+        probe: bool,
+        role: ClientRole,
+        observer: &Observer,
+    ) -> Result<AmazonS3> {
+        let mut builder = self.client_builder(probe)?;
+        // Disabled diagnostics preserve the original default connector route.
+        if observer.is_enabled() {
+            builder = builder.with_http_connector(http_observation::ObservedConnector::new(
+                object_store::client::ReqwestConnector::default(),
+                observer.clone(),
+                role,
+            ));
+        }
+        builder.build().map_err(backend_error)
+    }
+
+    #[cfg(test)]
+    fn build_client_with_injected_connector<C: object_store::client::HttpConnector>(
+        &self,
+        probe: bool,
+        role: ClientRole,
+        observer: &Observer,
+        connector: C,
+    ) -> Result<AmazonS3> {
+        self.client_builder(probe)?
+            .with_http_connector(http_observation::ObservedConnector::new(
+                connector,
+                observer.clone(),
+                role,
+            ))
+            .build()
+            .map_err(backend_error)
+    }
+
+    fn client_builder(&self, probe: bool) -> Result<AmazonS3Builder> {
         self.validate()?;
         let endpoint = self.endpoint.trim_end_matches('/');
         let mut builder = AmazonS3Builder::new()
@@ -135,7 +196,7 @@ impl RustFsConfig {
         if endpoint.starts_with("http://") {
             builder = builder.with_allow_http(true);
         }
-        builder.build().map_err(backend_error)
+        Ok(builder)
     }
 }
 
@@ -349,6 +410,10 @@ pub struct RustFsBlockStore {
     blocks: ObjectStoreBlockStore,
     configured_probe: Option<Arc<dyn ObjectStore>>,
     qualification_clients: Option<SignedQualificationClients>,
+    http_observer: Observer,
+    // Last field: final facade release follows existing provider-field drops.
+    // This token is observation only, never an HTTP/socket shutdown acknowledgment.
+    _http_bundle: Option<Arc<BundleResidency>>,
 }
 
 #[derive(Clone)]
@@ -370,6 +435,8 @@ impl RustFsBlockStore {
             blocks: ObjectStoreBlockStore::new(store, prefix, durable)?,
             configured_probe: None,
             qualification_clients: None,
+            http_observer: Observer::disabled(),
+            _http_bundle: None,
         })
     }
 
@@ -379,19 +446,46 @@ impl RustFsBlockStore {
         prefix: impl Into<String>,
         durable: bool,
     ) -> Result<Self> {
-        let first_data = config.build_store()?;
-        let second_data = config.build_store()?;
-        let first_probe = config.build_probe_store()?;
-        let second_probe = config.build_probe_store()?;
-        let mut blocks = Self::new(first_data.clone(), prefix, durable)?;
-        blocks.configured_probe = Some(first_probe.clone());
-        blocks.qualification_clients = Some(SignedQualificationClients {
-            first_data,
-            second_data,
-            first_probe,
-            second_probe,
-        });
-        Ok(blocks)
+        let observer = Observer::enabled();
+        Self::from_config_with_builder(prefix, durable, observer, |probe, role, observer| {
+            config.build_store_with_observer(probe, role, observer)
+        })
+    }
+
+    fn from_config_with_builder(
+        prefix: impl Into<String>,
+        durable: bool,
+        observer: Observer,
+        mut build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
+    ) -> Result<Self> {
+        let build_span = observer.bundle_build();
+        let result: Result<Self> = (|| {
+            // Preserve all four independently configured clients and Arc sharing.
+            let first_data = build(false, ClientRole::PrimaryDataMixed, &observer)?;
+            let second_data = build(false, ClientRole::QualificationData, &observer)?;
+            let first_probe = build(true, ClientRole::PrimaryProbeMixed, &observer)?;
+            let second_probe = build(true, ClientRole::QualificationProbe, &observer)?;
+            let mut blocks = Self::new(first_data.clone(), prefix, durable)?;
+            blocks.configured_probe = Some(first_probe.clone());
+            blocks.qualification_clients = Some(SignedQualificationClients {
+                first_data,
+                second_data,
+                first_probe,
+                second_probe,
+            });
+            Ok(blocks)
+        })();
+        match result {
+            Ok(mut blocks) => {
+                blocks.http_observer = observer;
+                blocks._http_bundle = build_span.finish_success();
+                Ok(blocks)
+            }
+            Err(error) => {
+                build_span.finish_error();
+                Err(error)
+            }
+        }
     }
 
     pub fn prefix(&self) -> &str {
@@ -400,6 +494,12 @@ impl RustFsBlockStore {
 
     pub fn stats(&self) -> RustFsBlockStoreStats {
         self.blocks.stats()
+    }
+
+    /// Detached, metrics-only handle. It retains no provider, cache or client.
+    /// Counters describe object_store dispatches, not exact wire/server requests.
+    pub fn http_observer(&self) -> Observer {
+        self.http_observer.clone()
     }
 }
 

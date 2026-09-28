@@ -164,10 +164,17 @@ impl Drop for PeerRequest {
     }
 }
 // Sessions own resource data, never the lifecycle that owns their joins.
+/// Admission from an independently retained trusted local authority owner.
+/// The request may select a scope, but never provider options or credentials.
+#[async_trait]
+pub trait ScopeAdmission: Send + Sync {
+    async fn admit(&self, scope: &CacheScope) -> Result<ScopeLease>;
+}
 struct PeerCore {
     endpoint: quinn::Endpoint,
     config: QuicPeerConfig,
     cache: Arc<LocalCache>,
+    admission: Option<Arc<dyn ScopeAdmission>>,
     connections: BTreeMap<PeerId, Arc<PeerConnections>>,
     permits: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
@@ -347,6 +354,20 @@ pub struct QuicPeerTransport {
 }
 impl QuicPeerTransport {
     pub fn bind(config: QuicPeerConfig, cache: Arc<LocalCache>) -> Result<Arc<Self>> {
+        Self::bind_impl(config, cache, None)
+    }
+    pub fn bind_with_scope_admission(
+        config: QuicPeerConfig,
+        cache: Arc<LocalCache>,
+        admission: Arc<dyn ScopeAdmission>,
+    ) -> Result<Arc<Self>> {
+        Self::bind_impl(config, cache, Some(admission))
+    }
+    fn bind_impl(
+        config: QuicPeerConfig,
+        cache: Arc<LocalCache>,
+        admission: Option<Arc<dyn ScopeAdmission>>,
+    ) -> Result<Arc<Self>> {
         if config.deadline.is_zero()
             || config.deadline > Duration::from_secs(60)
             || config.max_blob_bytes > 256 * 1024 * 1024
@@ -436,6 +457,7 @@ impl QuicPeerTransport {
             transfer_charge,
             config,
             cache,
+            admission,
             connections,
             stop,
             requests: Arc::new(PeerRequests::default()),
@@ -710,15 +732,38 @@ impl PeerCore {
         if !peer.partitions.contains(&scope.identity.partition) {
             return Err(error());
         }
-        let policy = self.cache.scope_policy(&scope).ok_or_else(error)?;
+        let (policy, lease) = match &self.admission {
+            Some(admission) => {
+                let lease = admission.admit(&scope).await?;
+                (lease.policy(), Some(lease))
+            }
+            None => (self.cache.scope_policy(&scope).ok_or_else(error)?, None),
+        };
+        // A hook failure cannot fall back to a stale local registration. Check
+        // again after its await; ordinary in-flight disk work retains existing
+        // token admission and never opens metadata/provider state itself.
+        if self.cache.scope_policy(&scope) != Some(policy)
+            || lease
+                .as_ref()
+                .is_some_and(|lease| !matches!(lease.is_current(), Ok(true)))
+        {
+            return Err(error());
+        }
         let response = if op == 0 {
             let key = LocalCache::key_hashed(&LocalCache::scope_hash(&scope), &block);
             if let Some(bytes) = self.cache.get_memory_shared_hashed(&key) {
                 Some(Bytes::from_owner(bytes))
             } else {
                 let disk_charge = charge.clone();
+                let disk_lease = lease.clone();
                 bounded_cache_work(self.cache.clone(), move |cache| {
                     let _charge = disk_charge;
+                    if disk_lease
+                        .as_ref()
+                        .is_some_and(|lease| !matches!(lease.is_current(), Ok(true)))
+                    {
+                        return None;
+                    }
                     cache.get_disk(&scope, &block, policy).map(Bytes::from)
                 })
                 .await?
@@ -726,13 +771,28 @@ impl PeerCore {
         } else {
             let shared: Arc<[u8]> = Arc::from(bytes);
             let disk_charge = charge.clone();
+            let disk_lease = lease.clone();
             bounded_cache_work(self.cache.clone(), move |cache| {
                 let _charge = disk_charge;
+                if disk_lease
+                    .as_ref()
+                    .is_some_and(|lease| !matches!(lease.is_current(), Ok(true)))
+                {
+                    return Err(FsError::new(ErrorCode::Estale));
+                }
                 cache.insert_shared(&scope, &block, shared, policy)
             })
             .await??;
             Some(Bytes::new())
         };
+        // Authority failures observed during an awaited disk operation must
+        // prevent the old generation from sending data or placement success.
+        if lease
+            .as_ref()
+            .is_some_and(|lease| !matches!(lease.is_current(), Ok(true)))
+        {
+            return Err(error());
+        }
         let status = if response.is_some() {
             Bytes::from_static(&[1])
         } else {
@@ -1167,6 +1227,7 @@ mod tests {
         b_cache: Arc<LocalCache>,
         blackhole: std::net::UdpSocket,
         scope: CacheScope,
+        _scope_leases: [ScopeLease; 2],
     }
     impl MetricPeers {
         fn new(wrong_pin: bool, unknown_ca: bool) -> Self {
@@ -1205,11 +1266,19 @@ mod tests {
                 },
                 backing: ConcurrentBackingId::from_bytes([2; 16]).unwrap(),
             };
-            a_cache
-                .register_scope(scope.clone(), IntegrityPolicy::Opaque)
+            let a_scope = a_cache
+                .register_scope_lease(
+                    scope.clone(),
+                    IntegrityPolicy::Opaque,
+                    a_cache.identity_epoch(&scope.identity).unwrap(),
+                )
                 .unwrap();
-            b_cache
-                .register_scope(scope.clone(), IntegrityPolicy::Opaque)
+            let b_scope = b_cache
+                .register_scope_lease(
+                    scope.clone(),
+                    IntegrityPolicy::Opaque,
+                    b_cache.identity_epoch(&scope.identity).unwrap(),
+                )
                 .unwrap();
             let endpoint = |address, cert: &CertificateDer<'static>| PeerEndpoint {
                 address,
@@ -1279,6 +1348,7 @@ mod tests {
                 b_cache,
                 blackhole,
                 scope,
+                _scope_leases: [a_scope, b_scope],
             }
         }
         async fn shutdown(&self) -> Result<()> {
@@ -1912,11 +1982,19 @@ mod tests {
             },
             backing: ConcurrentBackingId::from_bytes([2; 16]).unwrap(),
         };
-        a_cache
-            .register_scope(s.clone(), IntegrityPolicy::Opaque)
+        let _a_scope = a_cache
+            .register_scope_lease(
+                s.clone(),
+                IntegrityPolicy::Opaque,
+                a_cache.identity_epoch(&s.identity).unwrap(),
+            )
             .unwrap();
-        b_cache
-            .register_scope(s.clone(), IntegrityPolicy::Opaque)
+        let _b_scope = b_cache
+            .register_scope_lease(
+                s.clone(),
+                IntegrityPolicy::Opaque,
+                b_cache.identity_epoch(&s.identity).unwrap(),
+            )
             .unwrap();
         let addr = || {
             let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -2085,11 +2163,19 @@ mod tests {
                 },
                 backing: ConcurrentBackingId::from_bytes([1; 16]).unwrap(),
             };
-            a_cache
-                .register_scope(scope.clone(), IntegrityPolicy::Opaque)
+            let _a_scope = a_cache
+                .register_scope_lease(
+                    scope.clone(),
+                    IntegrityPolicy::Opaque,
+                    a_cache.identity_epoch(&scope.identity).unwrap(),
+                )
                 .unwrap();
-            b_cache
-                .register_scope(scope.clone(), IntegrityPolicy::Opaque)
+            let _b_scope = b_cache
+                .register_scope_lease(
+                    scope.clone(),
+                    IntegrityPolicy::Opaque,
+                    b_cache.identity_epoch(&scope.identity).unwrap(),
+                )
                 .unwrap();
             let addr = || {
                 std::net::UdpSocket::bind("127.0.0.1:0")

@@ -13,7 +13,7 @@ use crate::runtime::DriverRuntimePlan;
 use crate::server_cache::DriveCacheDecorator;
 
 pub(crate) struct CliRuntimeConstructor {
-    pub(crate) plan: DriverRuntimePlan,
+    pub(crate) plan: Arc<DriverRuntimePlan>,
     pub(crate) context: StorageContext,
     pub(crate) decorator: Option<DriveCacheDecorator>,
 }
@@ -100,6 +100,7 @@ enum ClosePhase {
     Listeners,
     Pool,
     Factories,
+    Inspectors,
     Context,
     Cache,
     Complete,
@@ -113,6 +114,7 @@ struct OwnedResources {
     pool: Option<RuntimePool>,
     factories: Vec<Arc<SdkRuntimeFactory>>,
     context: Option<StorageContext>,
+    inspectors: Option<Arc<dyn crate::server_cache::InspectionOwner>>,
     cache: Option<Arc<dyn ConstructionResource>>,
     phase: ClosePhase,
     current: Option<CloseFuture>,
@@ -149,7 +151,17 @@ impl RemoteRuntimeLifecycle {
     }
 
     pub(crate) fn install_cache(&self, cache: Arc<ServerCache>) {
-        lock(&self.owned).cache = Some(cache);
+        let mut owned = lock(&self.owned);
+        owned.inspectors = cache.inspector_owner();
+        owned.cache = Some(cache);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_inspector_owner_for_test(
+        &self,
+        owner: Arc<dyn crate::server_cache::InspectionOwner>,
+    ) {
+        lock(&self.owned).inspectors = Some(owner);
     }
 
     pub(crate) fn install_pool(&self, pool: RuntimePool) {
@@ -188,6 +200,15 @@ impl RemoteRuntimeLifecycle {
     fn request_close(self: &Arc<Self>) {
         if self.closing.swap(true, Ordering::AcqRel) {
             return;
+        }
+        // Stop fresh holder inspections on the first shutdown request, before
+        // listener/pool/factory drains can await or fail. Invoke the separate
+        // owner outside the lifecycle mutex; retain actual joins for Inspectors.
+        let inspectors = { lock(&self.owned).inspectors.clone() };
+        if let Some(inspectors) = inspectors
+            && let Err(error) = inspectors.seal_admission()
+        {
+            lock(&self.owned).failure.get_or_insert(error);
         }
         let guard = DrainGuard {
             lifecycle: self.clone(),
@@ -256,6 +277,7 @@ impl RemoteRuntimeLifecycle {
                         owned.phase = match owned.phase {
                             ClosePhase::Pool => ClosePhase::Factories,
                             ClosePhase::Factories => ClosePhase::Factories,
+                            ClosePhase::Inspectors => ClosePhase::Context,
                             ClosePhase::Context => ClosePhase::Cache,
                             ClosePhase::Cache => ClosePhase::Complete,
                             _ => unreachable!("installed close phase"),
@@ -275,6 +297,16 @@ impl RemoteRuntimeLifecycle {
                     if let Some(factory) = owned.factories.get(owned.next_factory).cloned() {
                         owned.next_factory += 1;
                         owned.current = Some(Box::pin(async move { factory.close().await }));
+                    } else {
+                        owned.phase = ClosePhase::Inspectors;
+                    }
+                }
+                ClosePhase::Inspectors => {
+                    if let Some(error) = &owned.failure {
+                        return Poll::Ready(Err(error.clone()));
+                    }
+                    if let Some(inspectors) = owned.inspectors.clone() {
+                        owned.current = Some(Box::pin(async move { inspectors.close().await }));
                     } else {
                         owned.phase = ClosePhase::Context;
                     }

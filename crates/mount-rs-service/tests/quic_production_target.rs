@@ -15,6 +15,48 @@ async fn production_target_worker() {
     target::worker().await.unwrap();
 }
 
+fn assert_balanced_timed_runtime(directory: &std::path::Path, journal: &serde_json::Value) {
+    // Inspect actual retained runtime evidence, not a synthetic profile declaration.
+    let boundaries = journal["phase_metrics"]["boundaries"].as_array().unwrap();
+    let first = boundaries
+        .iter()
+        .find(|row| {
+            row["phase"] == "mostly_idle/sequential_read" && row["boundary"] == "before_active"
+        })
+        .expect("first timed runtime boundary must be retained");
+    let workers = first["workers"].as_array().unwrap();
+    assert_eq!(workers.len(), 10);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut opened_cluster = 0;
+    for worker in workers {
+        let server = worker["server"].as_u64().unwrap() as usize;
+        assert!(seen.insert(server), "duplicate measured worker");
+        let path = directory.join(worker["file"].as_str().unwrap());
+        let receipt = target::read_json(&path).unwrap();
+        assert_eq!(
+            target::file_digest(&path).unwrap(),
+            worker["sha256"].as_str().unwrap()
+        );
+        let runtime = &receipt["runtime_activation"];
+        let observations = runtime["observations"].as_array().unwrap();
+        assert_eq!(observations.len(), 10);
+        for (drive, observation) in observations.iter().enumerate() {
+            assert_eq!(
+                observation["constructed"],
+                u64::from(drive % 10 == server),
+                "timed phase contains a runtime on an unassigned worker"
+            );
+        }
+        assert_eq!(runtime["pool"]["open_success"], 1);
+        assert_eq!(runtime["pool"]["resident"], 1);
+        opened_cluster += runtime["pool"]["open_success"].as_u64().unwrap();
+    }
+    assert_eq!(
+        opened_cluster, 10,
+        "one opened runtime per sandbox, not every server"
+    );
+}
+
 #[test]
 #[ignore = "owned ten-process two-file diagnostic, explicitly invoked"]
 fn ten_process_online_smoke() {
@@ -51,6 +93,7 @@ fn ten_process_online_smoke() {
     assert_eq!(journal["namespace_files"], 20);
     assert_eq!(journal["population_bytes"], 81920);
     assert_eq!(journal["routes"], 100);
+    assert_balanced_timed_runtime(directory.as_path(), &journal);
     assert_eq!(journal["verified_passes"], 2);
 }
 
@@ -206,6 +249,7 @@ fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
     assert_eq!(journal["namespace_files"], 20);
     assert_eq!(journal["population_bytes"], 81920);
     assert_eq!(journal["routes"], 100);
+    assert_balanced_timed_runtime(directory.as_path(), &journal);
     assert_eq!(journal["scope_denials"]["sibling"], 10);
     assert_eq!(journal["scope_denials"]["partition"], 10);
     assert_eq!(journal["verified_passes"], 2);
