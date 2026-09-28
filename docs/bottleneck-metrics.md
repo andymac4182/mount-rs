@@ -1187,17 +1187,26 @@ MOUNT_RS_PROFILE_IO=1 /absolute/isolated-target/debug/mount-rs \
 
 After QUIC, WebSocket, filesystem runtime, storage context and cache cleanup,
 the CLI captures the local service and existing process banks and attempts one
-stderr line per enabled service observer, prefixed with
-`service_diagnostics `. Its envelope schema is
+complete JSON observation per enabled service observer. Its envelope schema is
 `mount-rs.cli-service-diagnostics.v2`, with the server PID and
 `capture_context=shutdown`. The closed transport labels select the nested
 snapshot: `transport=quic` uses the unchanged `mount-rs.service-quic.v1`, and
 `transport=websocket` uses `mount-rs.service-websocket.v1`. Added
 `process_diagnostics` banks cover instrumented work throughout the process,
 including SDK work shared by QUIC and WebSocket. The whole combined prefix,
-JSON and newline share one 1 MiB cap before output. Overflow or
+JSON and newline share one 1 MiB logical cap before output. Overflow or
 serialization failure produces a fixed `diagnostic_incomplete` record instead
-of partial snapshot JSON. Diagnostic serialization and output failures cannot
+of partial snapshot JSON. Each complete observation is then split into indexed
+`service_diagnostics_frame ` lines with schema
+`mount-rs.service-diagnostic-frame.v1`. Frames carry the original JSON as
+base64 chunks, the total byte length and count, and a SHA-256 digest of the
+complete JSON. Each physical line is at most 16 KiB. A complete group is written
+under one stderr lock; readers must reassemble and verify the entire group
+before interpreting its unchanged v2 JSON. The bounded decoder rejects missing,
+duplicate, reordered, mixed, oversized and corrupt frames. Framing retains all
+bank rows and raw integers, including the full enabled storage and profile
+banks that exceed 16 KiB as a single line. Native file and aggregate output
+limits remain unchanged. Diagnostic serialization and output failures cannot
 replace the service or cleanup outcome. Stderr output can block at the OS;
 the outer process controller owns the deadline. Forced termination can leave
 no final snapshot, which remains an evidence gap.

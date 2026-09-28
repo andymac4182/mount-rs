@@ -1013,10 +1013,35 @@ class NamedSuiteControls(unittest.TestCase):
 
     def test_current_cli_suite_requires_every_named_case(self):
         names = parent.EXPECTED_SUITES["clidiagnostics"]
-        self.assertEqual(len(names), 8)
-        output = "running 8 tests\n" + "".join(f"test {name} ... ok\n" for name in names) + "test result: ok. 8 passed; 0 failed; 0 ignored;\n"
+        required = tuple("remote::diagnostics::tests::" + name for name in (
+            "typed_process_banks_preserve_registry_scopes_and_raw_u64",
+            "disabled_process_banks_do_not_capture_or_export_zero_snapshots",
+            "only_exact_profile_one_selects_a_compiled_service_observer",
+            "generic_encoding_preserves_raw_u64_above_javascript_integer_precision",
+            "websocket_record_preserves_its_application_schema_and_raw_u64",
+            "full_current_banks_with_maximum_u64_fit_existing_record_limit",
+            "oversized_serializable_value_emits_only_a_bounded_incomplete_record",
+            "serialization_failure_uses_a_fixed_incomplete_record",
+            "periodic_interval_is_explicit_bounded_and_ignored_without_profiling",
+            "periodic_interval_rejects_non_unicode_only_when_selected",
+            "disabled_periodic_wait_needs_no_timer_driver_or_capture",
+            "periodic_wait_prefers_ready_stop_and_owns_callback_until_drop",
+            "periodic_wait_delays_first_capture_and_returns_original_stop_result",
+            "periodic_encoding_adds_capture_metadata_and_preserves_shutdown_v2",
+            "periodic_encoding_failure_is_bounded_without_losing_capture_identity",
+            "disabled_object_store_sideband_never_samples_or_exports_zero_rows",
+            "object_store_sideband_uses_exact_periodic_identity_and_one_real_snapshot",
+            "object_store_sideband_keeps_max_u64_and_legacy_schema_separate",
+            "actual_periodic_router_binds_one_sample_to_zero_one_or_two_listeners",
+            "shutdown_object_store_identity_is_lazy_unique_and_exhaustion_closed",
+        ))
+        self.assertEqual(set(names), set(required))
+        self.assertEqual(len(names), 20)
+        output = "running 20 tests\n" + "".join(f"test {name} ... ok\n" for name in required) + "test result: ok. 20 passed; 0 failed; 0 ignored;\n"
         self.assertTrue(parent.named_suite_passed(output, names))
         self.assertFalse(parent.named_suite_passed(output.replace(names[0], "other"), names))
+        old_subset = "running 8 tests\n" + "".join(f"test {name} ... ok\n" for name in required[:8]) + "test result: ok. 8 passed; 0 failed; 0 ignored;\n"
+        self.assertFalse(parent.named_suite_passed(old_subset, names))
 
     def test_successful_zero_test_run_cannot_qualify_cli_suite(self):
         self.assertFalse(parent.named_suite_passed("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", parent.EXPECTED_SUITES["clidiagnostics"]))

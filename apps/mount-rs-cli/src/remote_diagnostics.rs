@@ -3,6 +3,7 @@
 use crate::runtime::CliError;
 use mount_rs_core::diagnostics::{object_store, profile, storage};
 use mount_rs_service::object_store_diagnostics::{Capture, CaptureContext, CodecError, Sample};
+use mount_rs_service::service_diagnostics_frames;
 use serde::Serialize;
 use std::{
     ffi::OsStr,
@@ -13,7 +14,9 @@ use std::{
 };
 
 const RECORD_LIMIT: usize = 1024 * 1024;
-const PREFIX: &[u8] = b"service_diagnostics ";
+#[cfg(test)]
+const PREFIX: &[u8] = service_diagnostics_frames::PREFIX;
+const LOGICAL_PREFIX: &[u8] = b"service_diagnostics ";
 
 #[derive(Clone, Copy)]
 enum Transport {
@@ -274,7 +277,7 @@ fn encode_capture_record(
         snapshot,
         process_diagnostics,
     };
-    if output.write_all(PREFIX).is_ok()
+    let logical_record = if output.write_all(LOGICAL_PREFIX).is_ok()
         && serde_json::to_writer(&mut output, &record).is_ok()
         && output.write_all(b"\n").is_ok()
     {
@@ -290,7 +293,15 @@ fn encode_capture_record(
                 "service_diagnostics {{\"schema\":\"mount-rs.cli-service-diagnostics.v2\",\"pid\":{pid},\"transport\":\"{label}\",\"capture_context\":\"periodic\",\"capture\":{{\"sequence\":{sequence},\"observed_unix_ms\":{observed_unix_ms}}},\"diagnostic_incomplete\":true,\"reason\":\"serialization_failed_or_record_limit\"}}\n"
             ),
         }.into_bytes()
-    }
+    };
+    // Preserve the complete logical JSON observation, including every bank
+    // row and raw u64, while respecting the process controller's physical
+    // line bound. The caller writes this complete group under one stderr lock.
+    // Export allocations are outside the warmed-bank update guarantees.
+    service_diagnostics_frames::encode(
+        &logical_record[LOGICAL_PREFIX.len()..logical_record.len() - 1],
+    )
+    .unwrap_or_default()
 }
 
 // Shutdown sidebands are distinct process observations even when both
@@ -738,9 +749,14 @@ mod tests {
             "missing diagnostic record prefix"
         );
         assert_eq!(record.last(), Some(&b'\n'), "missing record terminator");
-        assert_eq!(record.iter().filter(|byte| **byte == b'\n').count(), 1);
-        assert!(record.len() <= RECORD_LIMIT);
-        serde_json::from_slice(&record[PREFIX.len()..]).unwrap()
+        assert!(
+            record
+                .split_inclusive(|byte| *byte == b'\n')
+                .all(|line| line.len() <= service_diagnostics_frames::LINE_LIMIT)
+        );
+        let logical = service_diagnostics_frames::decode(record).unwrap();
+        assert!(logical.len() + LOGICAL_PREFIX.len() < RECORD_LIMIT);
+        serde_json::from_slice(&logical).unwrap()
     }
 
     fn representative_storage(exact: u64) -> storage::Snapshot {
@@ -1057,6 +1073,12 @@ mod tests {
         );
         for transport in [Transport::Quic, Transport::WebSocket] {
             let record = encode_record(transport, &json!({}), 123, &process);
+            assert!(
+                record
+                    .split_inclusive(|byte| *byte == b'\n')
+                    .all(|line| line.len() <= 16 * 1024),
+                "complete enabled banks exceed the native controller's physical line limit"
+            );
             let value = parse_record(&record);
             assert_eq!(value["transport"], transport.label());
             assert!(value.get("diagnostic_incomplete").is_none());

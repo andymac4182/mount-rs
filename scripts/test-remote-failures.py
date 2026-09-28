@@ -357,6 +357,18 @@ EXPECTED_SUITES = {
         'full_current_banks_with_maximum_u64_fit_existing_record_limit',
         'oversized_serializable_value_emits_only_a_bounded_incomplete_record',
         'serialization_failure_uses_a_fixed_incomplete_record',
+        'periodic_interval_is_explicit_bounded_and_ignored_without_profiling',
+        'periodic_interval_rejects_non_unicode_only_when_selected',
+        'disabled_periodic_wait_needs_no_timer_driver_or_capture',
+        'periodic_wait_prefers_ready_stop_and_owns_callback_until_drop',
+        'periodic_wait_delays_first_capture_and_returns_original_stop_result',
+        'periodic_encoding_adds_capture_metadata_and_preserves_shutdown_v2',
+        'periodic_encoding_failure_is_bounded_without_losing_capture_identity',
+        'disabled_object_store_sideband_never_samples_or_exports_zero_rows',
+        'object_store_sideband_uses_exact_periodic_identity_and_one_real_snapshot',
+        'object_store_sideband_keeps_max_u64_and_legacy_schema_separate',
+        'actual_periodic_router_binds_one_sample_to_zero_one_or_two_listeners',
+        'shutdown_object_store_identity_is_lazy_unique_and_exhaustion_closed',
     )),
 }
 

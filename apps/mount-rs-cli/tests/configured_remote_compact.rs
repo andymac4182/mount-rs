@@ -14,6 +14,7 @@ use mount_rs_remote_client::{
     driver::RemoteFsDriver,
 };
 use mount_rs_remote_protocol::{Operation, OperationName};
+use mount_rs_service::service_diagnostics_frames;
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use ring::{
     rand::SystemRandom,
@@ -181,6 +182,7 @@ impl ServerProcess {
             u64,
             std::collections::BTreeMap<String, serde_json::Value>,
         >::new();
+        let mut decoder = service_diagnostics_frames::Decoder::default();
         loop {
             if self.child.try_wait().unwrap().is_some() {
                 return Err("server stopped before live capture".into());
@@ -201,11 +203,19 @@ impl ServerProcess {
                     ));
                 }
             };
-            let Some(raw) = line.strip_prefix("service_diagnostics ") else {
+            if line
+                .as_bytes()
+                .starts_with(service_diagnostics_frames::PREFIX)
+            {
+                assert!(line.len() < service_diagnostics_frames::LINE_LIMIT);
+            }
+            let Some(raw) = decoder
+                .push_line(&line)
+                .expect("valid contiguous live service diagnostic frames")
+            else {
                 continue;
             };
-            assert!(raw.len() + "service_diagnostics \n".len() <= 1024 * 1024);
-            let record: serde_json::Value = serde_json::from_str(raw).unwrap();
+            let record: serde_json::Value = serde_json::from_slice(&raw).unwrap();
             assert_eq!(
                 record["capture_context"], "periodic",
                 "shutdown record appeared before SIGINT"
@@ -392,18 +402,36 @@ impl ServerProcess {
 
     fn assert_diagnostics(&self, enabled: bool) {
         assert!(self.stdout_thread.is_none() && self.stderr_thread.is_none());
-        assert!(
-            self.stdout
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|line| !line.starts_with("service_diagnostics "))
-        );
+        assert!(self.stdout.lock().unwrap().iter().all(|line| {
+            !line.starts_with("service_diagnostics ")
+                && !line
+                    .as_bytes()
+                    .starts_with(service_diagnostics_frames::PREFIX)
+        }));
         let stderr = self.stderr.lock().unwrap();
-        let records: Vec<_> = stderr
-            .iter()
-            .filter_map(|line| line.strip_prefix("service_diagnostics "))
-            .collect();
+        let mut decoder = service_diagnostics_frames::Decoder::default();
+        let mut records = Vec::<serde_json::Value>::new();
+        for line in stderr.iter() {
+            assert!(
+                !line.starts_with("service_diagnostics "),
+                "service diagnostics bypassed physical framing"
+            );
+            if line
+                .as_bytes()
+                .starts_with(service_diagnostics_frames::PREFIX)
+            {
+                assert!(line.len() < service_diagnostics_frames::LINE_LIMIT);
+            }
+            if let Some(raw) = decoder
+                .push_line(line)
+                .expect("valid contiguous retained service diagnostic frames")
+            {
+                records.push(serde_json::from_slice(&raw).unwrap());
+            }
+        }
+        decoder
+            .finish()
+            .expect("complete retained service diagnostic frame groups");
         if !enabled {
             assert!(
                 records.is_empty(),
@@ -411,13 +439,6 @@ impl ServerProcess {
             );
             return;
         }
-        let records: Vec<serde_json::Value> = records
-            .iter()
-            .map(|record| {
-                assert!(record.len() + "service_diagnostics \n".len() <= 1024 * 1024);
-                serde_json::from_str(record).unwrap()
-            })
-            .collect();
         assert!(
             records
                 .iter()
