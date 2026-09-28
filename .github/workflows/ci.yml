@@ -162,7 +162,7 @@ jobs:
           napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
           mkdir -p "$napi_stage"
           pnpm --dir bindings/mount-rs-napi exec napi build \
-            --platform --release --no-js --output-dir "$napi_stage"
+            --platform --release --no-js --output-dir "$napi_stage" -- --locked
           native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
           test -n "$native_path"
           test "$(printf '%s\n' "$native_path" | wc -l | tr -d ' ')" = 1
@@ -227,7 +227,7 @@ jobs:
           napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
           mkdir -p "$napi_stage"
           pnpm --dir bindings/mount-rs-napi exec napi build \
-            --platform --release --no-js --output-dir "$napi_stage"
+            --platform --release --no-js --output-dir "$napi_stage" -- --locked
           native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
           test -n "$native_path"
           test "$(printf '%s\n' "$native_path" | wc -l | tr -d ' ')" = 1
