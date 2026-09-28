@@ -38,11 +38,21 @@ impl<C> fmt::Debug for ObservedConnector<C> {
 }
 impl<C: HttpConnector> HttpConnector for ObservedConnector<C> {
     fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
-        // Preserve the exact inner connector options and successful client instance.
-        let inner = self.inner.connect(options)?;
         if !self.observer.is_enabled() {
-            return Ok(inner);
+            return self.inner.connect(options);
         }
+        // Time only the actual inner construction, preserving options and typed errors.
+        let build = self.observer.client_build(self.role);
+        let inner = match self.inner.connect(options) {
+            Ok(inner) => {
+                build.finish_success();
+                inner
+            }
+            Err(error) => {
+                build.finish_error();
+                return Err(error);
+            }
+        };
         Ok(HttpClient::new(ObservedService::new(
             inner,
             self.observer.clone(),

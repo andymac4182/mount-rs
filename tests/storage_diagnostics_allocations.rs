@@ -166,6 +166,11 @@ fn warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations() {
     let bundle_clone = std::sync::Arc::clone(&bundle);
     let client = observer.client(ClientRole::PrimaryDataMixed);
     let inert_client = disabled.client(ClientRole::StandaloneData);
+    observer
+        .client_build(ClientRole::StandaloneProbe)
+        .finish_success();
+    let before_build =
+        observer.snapshot().unwrap().clients[ClientRole::StandaloneProbe.index()].build;
     let _ = observer.snapshot();
     ALLOCATION_CALLS.with(|calls| calls.set(0));
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
@@ -177,6 +182,20 @@ fn warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations() {
     ALLOCATION_CALLS.with(|calls| calls.set(0));
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
     for _ in 0..64 {
+        observer
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_success();
+        observer
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_error();
+        drop(observer.client_build(ClientRole::StandaloneProbe));
+        disabled
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_success();
+        disabled
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_error();
+        drop(disabled.client_build(ClientRole::StandaloneProbe));
         observer.known_extra_future_box(ClientRole::PrimaryDataMixed, HttpMethod::Get);
         observer.known_extra_response_body_box(ClientRole::PrimaryDataMixed, HttpMethod::Get);
         let mut body = client.attempt(HttpMethod::Get, Some(3)).headers(200);
@@ -208,6 +227,18 @@ fn warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations() {
         "warmed bank-only guard updates added allocations"
     );
     let final_state = observer.snapshot().unwrap();
+    let build = final_state.clients[ClientRole::StandaloneProbe.index()].build;
+    assert_eq!(
+        (
+            build.started - before_build.started,
+            build.succeeded - before_build.succeeded,
+            build.failed - before_build.failed,
+            build.abandoned - before_build.abandoned,
+            build.inflight
+        ),
+        (192, 64, 64, 64, 0)
+    );
+    assert!(disabled.snapshot().is_none());
     assert_eq!(final_state.cache.live, 0);
     assert_eq!(final_state.bundles.live, 0);
     assert_eq!(

@@ -3,9 +3,11 @@
 //! and samples retain no provider, service, endpoint, key or cached payload.
 //! Encoding/decoding allocations and I/O are outside warmed bank update claims.
 //! Cumulative observations are not transactional cuts or shutdown acknowledgments.
+//! Client build durations cover inner HTTP connector connect wall time, not
+//! whole-client/store construction, HTTP request duration, CPU time or physical I/O.
 
 use mount_rs_core::diagnostics::object_store::{
-    BundleSnapshot, CacheSnapshot, ClientSnapshot, HttpSnapshot, Snapshot,
+    BundleSnapshot, CacheSnapshot, ClientBuildSnapshot, ClientSnapshot, HttpSnapshot, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,7 +18,7 @@ use std::{
 pub const RECORD_LIMIT: usize = 16 * 1024;
 pub const FRAME_COUNT: usize = 7;
 pub const PREFIX: &[u8] = b"object_store_diagnostics ";
-pub const SCHEMA: &str = "mount-rs.object-store-diagnostics.v1";
+pub const SCHEMA: &str = "mount-rs.object-store-diagnostics.v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,10 +95,11 @@ macro_rules! fixed_label {
         }
     };
 }
-fixed_label!(Schema, "mount-rs.object-store-diagnostics.v1");
+fixed_label!(Schema, "mount-rs.object-store-diagnostics.v2");
 fixed_label!(Scope, "process_cumulative");
 fixed_label!(CacheScope, "all_generic_object_store_block_adapters");
 fixed_label!(HttpScope, "observed_rustfs_http_services");
+fixed_label!(ClientBuildScope, "inner_http_connector_connect_wall_time");
 fixed_label!(DurationScope, "inclusive_overlapping_wall_time");
 fixed_label!(
     AllocationScope,
@@ -116,6 +119,7 @@ fixed_label!(
 struct Coverage {
     cache_scope: CacheScope,
     http_scope: HttpScope,
+    client_build_scope: ClientBuildScope,
     duration_semantics: DurationScope,
     allocation_counts: AllocationScope,
     offered_bytes: OfferedScope,
@@ -127,6 +131,7 @@ struct Coverage {
 const COVERAGE: Coverage = Coverage {
     cache_scope: CacheScope::Expected,
     http_scope: HttpScope::Expected,
+    client_build_scope: ClientBuildScope::Expected,
     duration_semantics: DurationScope::Expected,
     allocation_counts: AllocationScope::Expected,
     offered_bytes: OfferedScope::Expected,
@@ -304,12 +309,16 @@ incoming_row!(IncomingBundle, BundleSnapshot,
 incoming_row!(IncomingCache, CacheSnapshot,
     created:u64, released:u64, live:u64, resident_entries:u64,
     payload_bytes:u64, unknown_live:u64);
+incoming_row!(IncomingClientBuild, ClientBuildSnapshot,
+    started:u64, inflight:u64, succeeded:u64, failed:u64, abandoned:u64,
+    elapsed_ns:u64, max_ns:u64);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IncomingClient {
     constructed: u64,
     released: u64,
     live: u64,
+    build: IncomingClientBuild,
     http: [IncomingHttp; 6],
 }
 impl From<IncomingClient> for ClientSnapshot {
@@ -318,6 +327,7 @@ impl From<IncomingClient> for ClientSnapshot {
             constructed: row.constructed,
             released: row.released,
             live: row.live,
+            build: row.build.into(),
             http: row.http.map(Into::into),
         }
     }

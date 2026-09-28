@@ -36,6 +36,10 @@ class ObjectStoreModuleSelectors(unittest.TestCase):
             'enabled_guards_read_clock_and_disabled_guards_do_not',
             'cache_unknown_and_final_release_remove_only_own_contribution',
             'fixed_bank_saturates_and_snapshot_discloses_active_update',
+            'client_build_success_error_and_abandonment_are_separate_and_role_bound',
+            'client_build_consuming_terminals_are_counted_once_after_drop',
+            'client_build_disabled_does_not_read_clock_or_allocate_bank',
+            'client_build_saturation_and_inflight_preserve_quality',
         )),
         'objectstorecacheunit': tuple('object_store_cache_diagnostics_tests::' + name for name in (
             'actual_cache_owner_releases_payload_without_observer_retaining_it',
@@ -59,6 +63,9 @@ class ObjectStoreModuleSelectors(unittest.TestCase):
             'disabled_connector_returns_original_service_without_wrapper_or_observation',
             'allocation_control::pending_call_adds_exactly_one_box_and_disabled_call_preserves_baseline',
             'allocation_control::ready_prebuilt_response_adds_one_future_box_and_one_body_box',
+            'connector_build_success_and_typed_error_are_observed_without_http_dispatch',
+            'connector_build_panic_unwind_is_abandoned_without_constructed_client_or_dispatch',
+            'connector_build_disabled_preserves_success_error_and_options_without_observation',
         )),
     }
     ignored_qualification = 'object_store_cache_diagnostics_tests::actual_qualification_temporary_adapters_release_both_observed_caches'
@@ -138,6 +145,8 @@ class NativeMonitorCoverageControls(unittest.TestCase):
         'frame_validation_final_rss_error_does_not_fabricate_frame_failure',
     ))
 
+    required += ('ten_process_cache_support::object_store_projection::tests::worker_client_build_windows_preserve_deltas_gauges_maxima_and_reject_resets',)
+
     def fixture(self, names, ignored=None):
         output = f'running {len(names)} tests\n'
         output += ''.join(f'test {name} ... {"ignored" if name == ignored else "ok"}\n' for name in names)
@@ -148,10 +157,10 @@ class NativeMonitorCoverageControls(unittest.TestCase):
         old = parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']
         return old + tuple(name for name in self.required if name not in old)
 
-    def test_native_monitor_inventory_requires_all_eleven_controls(self):
+    def test_native_monitor_inventory_requires_all_twelve_controls(self):
         names = parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']
-        self.assertEqual(len(names), 32)
-        self.assertEqual(len(set(names)), 32)
+        self.assertEqual(len(names), 33)
+        self.assertEqual(len(set(names)), 33)
         self.assertTrue(set(self.required).issubset(names))
 
     def test_native_monitor_complete_package_can_qualify(self):
@@ -1425,6 +1434,7 @@ class ObjectStoreExportSelectors(unittest.TestCase):
         'sink_failure_leaves_an_unacceptable_partial_set',
         'zero_sequence_and_generation_remain_exact_startup_identity',
         'valid_json_at_frame_limit_is_accepted_and_one_byte_over_is_rejected',
+        'complete_client_build_rows_round_trip_maximum_u64_and_reject_malformed_rows',
     ))
     CLI = tuple('remote::diagnostics::tests::' + name for name in (
         'disabled_object_store_sideband_never_samples_or_exports_zero_rows',

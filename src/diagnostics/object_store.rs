@@ -164,11 +164,24 @@ impl AtomicHttp {
     }
 }
 
+fixed_row!(
+    ClientBuildSnapshot,
+    AtomicClientBuild,
+    started,
+    inflight,
+    succeeded,
+    failed,
+    abandoned,
+    elapsed_ns,
+    max_ns
+);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ClientSnapshot {
     pub constructed: u64,
     pub released: u64,
     pub live: u64,
+    pub build: ClientBuildSnapshot,
     pub http: [HttpSnapshot; HTTP_METHODS],
 }
 
@@ -177,6 +190,7 @@ struct AtomicClient {
     constructed: AtomicU64,
     released: AtomicU64,
     live: AtomicU64,
+    build: AtomicClientBuild,
     http: [AtomicHttp; HTTP_METHODS],
 }
 
@@ -186,6 +200,7 @@ impl AtomicClient {
             constructed: self.constructed.load(Ordering::SeqCst),
             released: self.released.load(Ordering::SeqCst),
             live: self.live.load(Ordering::SeqCst),
+            build: self.build.snapshot(),
             http: std::array::from_fn(|index| self.http[index].snapshot()),
         }
     }
@@ -364,6 +379,10 @@ impl Observer {
     pub fn snapshot(&self) -> Option<Snapshot> {
         self.bank().map(Bank::snapshot)
     }
+    /// Bracket the actual synchronous HTTP connector construction only.
+    pub fn client_build(&self, role: ClientRole) -> ClientBuildSpan {
+        ClientBuildSpan::new(self, role)
+    }
     /// Call only after successful actual HTTP service construction.
     pub fn client(&self, role: ClientRole) -> HttpClientGuard {
         self.update(|bank| {
@@ -403,6 +422,72 @@ impl Observer {
                 1,
             )
         });
+    }
+}
+
+#[derive(Debug)]
+#[must_use = "retain until actual connector construction succeeds or fails"]
+pub struct ClientBuildSpan {
+    observer: Observer,
+    role: ClientRole,
+    started: Option<Instant>,
+    finished: bool,
+}
+enum ClientBuildOutcome {
+    Succeeded,
+    Failed,
+    Abandoned,
+}
+impl ClientBuildSpan {
+    fn new(observer: &Observer, role: ClientRole) -> Self {
+        Self::new_with_clock(observer, role, Instant::now)
+    }
+    fn new_with_clock(
+        observer: &Observer,
+        role: ClientRole,
+        clock: impl FnOnce() -> Instant,
+    ) -> Self {
+        let started = observer.is_enabled().then(clock);
+        observer.update(|bank| {
+            let row = &bank.clients[role.index()].build;
+            bank.add(&row.started, 1);
+            bank.add(&row.inflight, 1);
+        });
+        Self {
+            observer: observer.clone(),
+            role,
+            started,
+            finished: false,
+        }
+    }
+    pub fn finish_success(mut self) {
+        self.finished = true;
+        self.finish(ClientBuildOutcome::Succeeded);
+    }
+    pub fn finish_error(mut self) {
+        self.finished = true;
+        self.finish(ClientBuildOutcome::Failed);
+    }
+    fn finish(&self, outcome: ClientBuildOutcome) {
+        self.observer.update(|bank| {
+            let row = &bank.clients[self.role.index()].build;
+            let counter = match outcome {
+                ClientBuildOutcome::Succeeded => &row.succeeded,
+                ClientBuildOutcome::Failed => &row.failed,
+                ClientBuildOutcome::Abandoned => &row.abandoned,
+            };
+            bank.add(counter, 1);
+            bank.sub(&row.inflight, 1);
+            bank.elapsed(self.started, &row.elapsed_ns, &row.max_ns);
+        });
+    }
+}
+impl Drop for ClientBuildSpan {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            self.finish(ClientBuildOutcome::Abandoned);
+        }
     }
 }
 

@@ -164,6 +164,170 @@ async fn native_http_client_build_profile() {
     }
 }
 
+fn assert_connector_build_row(observer: &Observer, role: ClientRole, expected: [u64; 5]) {
+    let snapshot = serde_json::to_value(observer.snapshot().unwrap()).unwrap();
+    let build = &snapshot["clients"][role.index()]["build"];
+    assert!(
+        build.is_object(),
+        "actual connector construction must export its per-role build observation"
+    );
+    assert_eq!(build.as_object().unwrap().len(), 7);
+    for (field, expected) in ["started", "inflight", "succeeded", "failed", "abandoned"]
+        .into_iter()
+        .zip(expected)
+    {
+        assert_eq!(build[field].as_u64(), Some(expected), "{field}");
+    }
+    let elapsed = build["elapsed_ns"].as_u64().unwrap();
+    let maximum = build["max_ns"].as_u64().unwrap();
+    assert!(maximum <= elapsed);
+}
+
+#[test]
+fn connector_build_success_and_typed_error_are_observed_without_http_dispatch() {
+    let observer = Observer::isolated();
+    let successful = Fixture::new(Vec::new(), false);
+    let failed = Fixture::new(Vec::new(), false);
+    let options = ClientOptions::new()
+        .with_timeout(std::time::Duration::from_secs(8))
+        .with_connect_timeout(std::time::Duration::from_secs(3));
+    let expected_options = vec![(
+        options.get_config_value(&ClientConfigKey::Timeout),
+        options.get_config_value(&ClientConfigKey::ConnectTimeout),
+    )];
+    let client = ObservedConnector::new(
+        connector(&successful),
+        observer.clone(),
+        ClientRole::StandaloneProbe,
+    )
+    .connect(&options)
+    .expect("the actual fixture connector must return its original successful client");
+    let error = ObservedConnector::new(
+        FixtureConnector {
+            fixture: failed.clone(),
+            fail: true,
+        },
+        observer.clone(),
+        ClientRole::QualificationProbe,
+    )
+    .connect(&options)
+    .unwrap_err();
+    match error {
+        object_store::Error::Generic { store, source } => {
+            assert_eq!(store, "private-unit-connector");
+            assert_eq!(source.to_string(), "unit-construction-fault");
+        }
+        error => panic!("original fixture connector error type changed: {error:?}"),
+    }
+    assert_eq!(*successful.options.lock().unwrap(), expected_options);
+    assert_eq!(*failed.options.lock().unwrap(), expected_options);
+    assert_eq!(successful.entered.load(Ordering::SeqCst), 0);
+    assert_eq!(failed.entered.load(Ordering::SeqCst), 0);
+    let snapshot = observer.snapshot().unwrap();
+    let success = snapshot.clients[ClientRole::StandaloneProbe.index()];
+    let error = snapshot.clients[ClientRole::QualificationProbe.index()];
+    assert_eq!(
+        (success.constructed, success.released, success.live),
+        (1, 0, 1)
+    );
+    assert_eq!((error.constructed, error.released, error.live), (0, 0, 0));
+    assert!(
+        snapshot
+            .clients
+            .iter()
+            .all(|client| client.http.iter().all(|http| http.attempts_started == 0))
+    );
+    drop(client);
+    let released = observer.snapshot().unwrap().clients[ClientRole::StandaloneProbe.index()];
+    assert_eq!(
+        (released.constructed, released.released, released.live),
+        (1, 1, 0)
+    );
+    assert_connector_build_row(&observer, ClientRole::StandaloneProbe, [1, 0, 1, 0, 0]);
+    assert_connector_build_row(&observer, ClientRole::QualificationProbe, [1, 0, 0, 1, 0]);
+}
+
+#[derive(Debug)]
+struct BuildPanicConnector(FixtureConnector);
+impl HttpConnector for BuildPanicConnector {
+    fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
+        let _actual_client = self.0.connect(options)?;
+        panic!("fixed fixture connector construction panic");
+    }
+}
+
+#[test]
+fn connector_build_panic_unwind_is_abandoned_without_constructed_client_or_dispatch() {
+    let observer = Observer::isolated();
+    let fixture = Fixture::new(Vec::new(), false);
+    let options = ClientOptions::new();
+    let connector = ObservedConnector::new(
+        BuildPanicConnector(connector(&fixture)),
+        observer.clone(),
+        ClientRole::StandaloneData,
+    );
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| connector.connect(&options)));
+    assert!(
+        result.is_err(),
+        "the actual fixture panic must propagate unchanged"
+    );
+    assert_eq!(fixture.options.lock().unwrap().len(), 1);
+    assert_eq!(fixture.entered.load(Ordering::SeqCst), 0);
+    let snapshot = observer.snapshot().unwrap();
+    let row = snapshot.clients[ClientRole::StandaloneData.index()];
+    assert_eq!((row.constructed, row.released, row.live), (0, 0, 0));
+    assert!(
+        snapshot
+            .clients
+            .iter()
+            .all(|client| client.http.iter().all(|http| http.attempts_started == 0))
+    );
+    assert_connector_build_row(&observer, ClientRole::StandaloneData, [1, 0, 0, 0, 1]);
+}
+
+#[test]
+fn connector_build_disabled_preserves_success_error_and_options_without_observation() {
+    let observer = Observer::disabled();
+    let fixture = Fixture::new(Vec::new(), false);
+    let options = ClientOptions::new().with_timeout(std::time::Duration::from_secs(8));
+    let expected_options = (
+        options.get_config_value(&ClientConfigKey::Timeout),
+        options.get_config_value(&ClientConfigKey::ConnectTimeout),
+    );
+    let client = ObservedConnector::new(
+        connector(&fixture),
+        observer.clone(),
+        ClientRole::StandaloneProbe,
+    )
+    .connect(&options)
+    .unwrap();
+    drop(client);
+    let error = ObservedConnector::new(
+        FixtureConnector {
+            fixture: fixture.clone(),
+            fail: true,
+        },
+        observer.clone(),
+        ClientRole::StandaloneProbe,
+    )
+    .connect(&options)
+    .unwrap_err();
+    match error {
+        object_store::Error::Generic { store, source } => {
+            assert_eq!(store, "private-unit-connector");
+            assert_eq!(source.to_string(), "unit-construction-fault");
+        }
+        error => panic!("disabled fixture connector error type changed: {error:?}"),
+    }
+    assert_eq!(
+        *fixture.options.lock().unwrap(),
+        vec![expected_options.clone(), expected_options]
+    );
+    assert_eq!(fixture.entered.load(Ordering::SeqCst), 0);
+    assert!(observer.snapshot().is_none());
+}
+
 fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }

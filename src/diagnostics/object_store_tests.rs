@@ -9,6 +9,159 @@ fn row(observer: &Observer) -> HttpSnapshot {
 }
 
 #[test]
+fn client_build_success_error_and_abandonment_are_separate_and_role_bound() {
+    let observer = Observer::isolated();
+    let roles = [
+        ClientRole::PrimaryDataMixed,
+        ClientRole::PrimaryProbeMixed,
+        ClientRole::QualificationData,
+        ClientRole::QualificationProbe,
+        ClientRole::StandaloneData,
+        ClientRole::StandaloneProbe,
+    ];
+    for role in roles {
+        let start = Instant::now()
+            .checked_sub(Duration::from_millis(10))
+            .unwrap();
+        ClientBuildSpan::new_with_clock(&observer, role, || start).finish_success();
+        ClientBuildSpan::new_with_clock(&observer, role, || start).finish_error();
+        drop(ClientBuildSpan::new_with_clock(&observer, role, || start));
+        let snapshot = observer.snapshot().unwrap();
+        let client = snapshot.clients[role.index()];
+        let build = client.build;
+        assert_eq!(
+            (
+                build.started,
+                build.inflight,
+                build.succeeded,
+                build.failed,
+                build.abandoned
+            ),
+            (3, 0, 1, 1, 1)
+        );
+        assert!(build.max_ns >= 10_000_000 && build.elapsed_ns >= build.max_ns);
+        assert_eq!(
+            (client.constructed, client.released, client.live),
+            (0, 0, 0)
+        );
+        assert!(
+            client
+                .http
+                .iter()
+                .all(|http| *http == HttpSnapshot::default())
+        );
+    }
+    assert!(!observer.snapshot().unwrap().saturated);
+}
+
+#[test]
+fn client_build_consuming_terminals_are_counted_once_after_drop() {
+    let observer = Observer::isolated();
+    let role = ClientRole::StandaloneProbe;
+    let success = observer.client_build(role);
+    let error = observer.client_build(role);
+    let before = observer.snapshot().unwrap().clients[role.index()].build;
+    assert_eq!((before.started, before.inflight), (2, 2));
+    success.finish_success();
+    let middle = observer.snapshot().unwrap().clients[role.index()].build;
+    assert_eq!(
+        (
+            middle.started,
+            middle.inflight,
+            middle.succeeded,
+            middle.failed,
+            middle.abandoned
+        ),
+        (2, 1, 1, 0, 0)
+    );
+    error.finish_error();
+    let finished = observer.snapshot().unwrap().clients[role.index()].build;
+    assert_eq!(
+        (
+            finished.started,
+            finished.inflight,
+            finished.succeeded,
+            finished.failed,
+            finished.abandoned
+        ),
+        (2, 0, 1, 1, 0)
+    );
+    assert!(!observer.snapshot().unwrap().saturated);
+}
+
+#[test]
+fn client_build_disabled_does_not_read_clock_or_allocate_bank() {
+    let reads = Cell::new(0);
+    let clock = || {
+        reads.set(reads.get() + 1);
+        Instant::now()
+    };
+    let disabled = Observer::disabled();
+    ClientBuildSpan::new_with_clock(&disabled, ClientRole::StandaloneProbe, clock).finish_success();
+    ClientBuildSpan::new_with_clock(&disabled, ClientRole::StandaloneProbe, clock).finish_error();
+    drop(ClientBuildSpan::new_with_clock(
+        &disabled,
+        ClientRole::StandaloneProbe,
+        clock,
+    ));
+    assert_eq!(reads.get(), 0);
+    assert!(disabled.bank().is_none() && disabled.snapshot().is_none());
+    let enabled = Observer::isolated();
+    drop(ClientBuildSpan::new_with_clock(
+        &enabled,
+        ClientRole::StandaloneProbe,
+        clock,
+    ));
+    assert_eq!(
+        reads.get(),
+        1,
+        "enabled positive control must read the start clock once"
+    );
+    assert_eq!(
+        enabled.snapshot().unwrap().clients[ClientRole::StandaloneProbe.index()]
+            .build
+            .abandoned,
+        1
+    );
+}
+
+#[test]
+fn client_build_saturation_and_inflight_preserve_quality() {
+    let observer = Observer::isolated();
+    let role = ClientRole::QualificationData;
+    let bank = observer.bank().unwrap();
+    bank.clients[role.index()]
+        .build
+        .started
+        .store(u64::MAX, Ordering::SeqCst);
+    let guard = observer.client_build(role);
+    let held = observer.snapshot().unwrap();
+    assert_eq!(
+        (
+            held.clients[role.index()].build.started,
+            held.clients[role.index()].build.inflight
+        ),
+        (u64::MAX, 1)
+    );
+    assert!(held.saturated && held.concurrent_activity);
+    drop(guard);
+    let complete = observer.snapshot().unwrap();
+    assert_eq!(
+        (
+            complete.clients[role.index()].build.inflight,
+            complete.clients[role.index()].build.abandoned
+        ),
+        (0, 1)
+    );
+    assert!(complete.saturated && complete.concurrent_activity);
+    let clean = Observer::isolated();
+    let active = clean.bank().unwrap().begin_update();
+    assert!(clean.snapshot().unwrap().concurrent_activity);
+    drop(active);
+    assert!(!clean.snapshot().unwrap().concurrent_activity);
+}
+
+#[test]
 fn headers_and_body_completion_are_separate_observations() {
     let observer = Observer::isolated();
     let client = observer.client(ClientRole::PrimaryDataMixed);

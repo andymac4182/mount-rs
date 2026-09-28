@@ -2124,3 +2124,35 @@ checkout and observed server retry/latch metrics did not demonstrate a matching
 backend contention problem in these cells. Docker block-operation counts and
 physical device IOPS remained unavailable. The report retains timing boundaries,
 resource coverage, code hashes, and persistence/cleanup witnesses.
+
+## Native HTTP connector construction
+
+With `MOUNT_RS_PROFILE_IO=1`, object-store diagnostics v2 include a `build` row
+for each of the six existing client roles. It counts `started`, `succeeded`,
+`failed` and `abandoned` connector invocations, with an `inflight` gauge and
+inclusive `elapsed_ns`/`max_ns` wall times. The timed leaf is the actual inner
+`HttpConnector::connect` call, including native HTTP/TLS client construction.
+These fields exclude configuration validation, the rest of the S3 store build,
+HTTP requests, CPU attribution and physical I/O. A successful connector return
+does not prove a successful store open or backend operation.
+
+The seven-frame codec requires the complete typed v2 row and fixed construction
+scope. It rejects older schemas, missing fields and numeric coercion. Worker
+windows subtract cumulative counters with checked arithmetic; `inflight` and
+`max_ns` retain their before/after endpoints. Disabled observation uses the
+original connector route. Serialization and initial bank setup remain outside
+the warmed update allocation gate.
+
+The ignored native profile builds three probe clients using fake local
+configuration without performing an HTTP operation:
+
+```sh
+MOUNT_RS_PROFILE_IO=1 ./scripts/cargo-shared test -p mount-rs-rustfs --lib --locked \
+  -- --ignored --exact http_observation_tests::native_http_client_build_profile \
+  --nocapture --test-threads=1
+```
+
+Its per-construction wall times exclude Cargo, harness startup and client drop.
+Whole-program resource measurements include those native harness costs and
+must be collected separately from compilation. This profile alone cannot
+attribute a live prefix-observation stall or qualify steady-state throughput.

@@ -181,6 +181,7 @@ EXPECTED_PACKAGE_CASES['tidbcoldunit'] = tuple('ten_process_cache_support::cold_
     'worker_mixed_capture_pid_context_generation_or_order_is_rejected',
     'worker_reset_and_saturation_refuse_windows_but_quality_is_retained',
     'worker_reserved_sequence_rejects_callback_identity_drift_before_snapshot_or_write',
+    'worker_client_build_windows_preserve_deltas_gauges_maxima_and_reject_resets',
 )) + tuple('ten_process_cache_support::progress_trace::tests::' + name for name in (
     'native_progress_disabled_performs_no_output_or_clock_reads_and_requires_exact_opt_in',
     'native_progress_monotonic_pair_preserves_numeric_identity_and_physical_bounds',
@@ -213,6 +214,10 @@ EXPECTED_PACKAGE_CASES.update({
         'enabled_guards_read_clock_and_disabled_guards_do_not',
         'cache_unknown_and_final_release_remove_only_own_contribution',
         'fixed_bank_saturates_and_snapshot_discloses_active_update',
+        'client_build_success_error_and_abandonment_are_separate_and_role_bound',
+        'client_build_consuming_terminals_are_counted_once_after_drop',
+        'client_build_disabled_does_not_read_clock_or_allocate_bank',
+        'client_build_saturation_and_inflight_preserve_quality',
     )),
     'objectstorecacheunit': tuple('object_store_cache_diagnostics_tests::' + name for name in (
         'actual_cache_owner_releases_payload_without_observer_retaining_it',
@@ -236,6 +241,9 @@ EXPECTED_PACKAGE_CASES.update({
         'disabled_connector_returns_original_service_without_wrapper_or_observation',
         'allocation_control::pending_call_adds_exactly_one_box_and_disabled_call_preserves_baseline',
         'allocation_control::ready_prebuilt_response_adds_one_future_box_and_one_body_box',
+        'connector_build_success_and_typed_error_are_observed_without_http_dispatch',
+        'connector_build_panic_unwind_is_abandoned_without_constructed_client_or_dispatch',
+        'connector_build_disabled_preserves_success_error_and_options_without_observation',
     )),
 })
 EXPECTED_SUITES = {
@@ -388,7 +396,7 @@ EXPECTED_SUITES = {
 # Fixed export gates: all require one complete named harness, including singleton cases.
 OBJECT_STORE_EXPORT_SUITES = {
     'exportcodecred': ('object_store_diagnostics::tests::one_real_bank_capture_is_bound_to_all_seven_frames_before_later_changes',),
-    'exportcodecunit': ('object_store_diagnostics::tests::one_real_bank_capture_is_bound_to_all_seven_frames_before_later_changes', 'object_store_diagnostics::tests::disabled_and_unavailable_capture_publish_no_records_and_no_measured_zero', 'object_store_diagnostics::tests::every_maximum_u64_field_survives_all_seven_bounded_records', 'object_store_diagnostics::tests::complete_indexed_set_can_arrive_out_of_order', 'object_store_diagnostics::tests::decoder_rejects_missing_duplicate_conflicting_and_cross_capture_frames', 'object_store_diagnostics::tests::decoder_requires_exact_typed_fixed_rows_without_numeric_coercion', 'object_store_diagnostics::tests::bounded_serializer_never_publishes_partial_or_caller_error_text', 'object_store_diagnostics::tests::sink_failure_leaves_an_unacceptable_partial_set', 'object_store_diagnostics::tests::zero_sequence_and_generation_remain_exact_startup_identity', 'object_store_diagnostics::tests::valid_json_at_frame_limit_is_accepted_and_one_byte_over_is_rejected'),
+    'exportcodecunit': ('object_store_diagnostics::tests::one_real_bank_capture_is_bound_to_all_seven_frames_before_later_changes', 'object_store_diagnostics::tests::disabled_and_unavailable_capture_publish_no_records_and_no_measured_zero', 'object_store_diagnostics::tests::every_maximum_u64_field_survives_all_seven_bounded_records', 'object_store_diagnostics::tests::complete_indexed_set_can_arrive_out_of_order', 'object_store_diagnostics::tests::decoder_rejects_missing_duplicate_conflicting_and_cross_capture_frames', 'object_store_diagnostics::tests::decoder_requires_exact_typed_fixed_rows_without_numeric_coercion', 'object_store_diagnostics::tests::bounded_serializer_never_publishes_partial_or_caller_error_text', 'object_store_diagnostics::tests::sink_failure_leaves_an_unacceptable_partial_set', 'object_store_diagnostics::tests::zero_sequence_and_generation_remain_exact_startup_identity', 'object_store_diagnostics::tests::valid_json_at_frame_limit_is_accepted_and_one_byte_over_is_rejected', 'object_store_diagnostics::tests::complete_client_build_rows_round_trip_maximum_u64_and_reject_malformed_rows'),
     'exportclired': ('remote::diagnostics::tests::actual_periodic_router_binds_one_sample_to_zero_one_or_two_listeners',),
     'exportcliunit': ('remote::diagnostics::tests::disabled_object_store_sideband_never_samples_or_exports_zero_rows', 'remote::diagnostics::tests::object_store_sideband_uses_exact_periodic_identity_and_one_real_snapshot', 'remote::diagnostics::tests::object_store_sideband_keeps_max_u64_and_legacy_schema_separate', 'remote::diagnostics::tests::shutdown_object_store_identity_is_lazy_unique_and_exhaustion_closed'),
     'exportsdkred': ('target::metrics::tests::object_store_actual_local_capture_encloses_once_and_binds_worker_and_controller',),

@@ -133,6 +133,15 @@ fn maximum_snapshot() -> object_store::Snapshot {
             constructed: u64::MAX,
             released: u64::MAX,
             live: u64::MAX,
+            build: object_store::ClientBuildSnapshot {
+                started: u64::MAX,
+                inflight: u64::MAX,
+                succeeded: u64::MAX,
+                failed: u64::MAX,
+                abandoned: u64::MAX,
+                elapsed_ns: u64::MAX,
+                max_ns: u64::MAX,
+            },
             http: [maximum_http(); 6],
         }; 6],
         bundles: object_store::BundleSnapshot {
@@ -401,4 +410,157 @@ fn valid_json_at_frame_limit_is_accepted_and_one_byte_over_is_rejected() {
         decode(&over).is_err(),
         "valid JSON frame over16KiB must fail closed"
     );
+}
+
+const CLIENT_BUILD_FIELDS: [&str; 7] = [
+    "started",
+    "inflight",
+    "succeeded",
+    "failed",
+    "abandoned",
+    "elapsed_ns",
+    "max_ns",
+];
+
+fn maximum_client_build_records() -> Vec<Value> {
+    let sample = capture(true, metadata(), || Some(object_store::Snapshot::default()))
+        .unwrap()
+        .unwrap();
+    let mut records = frames(&sample);
+    let build = json!({
+        "started":u64::MAX, "inflight":u64::MAX, "succeeded":u64::MAX,
+        "failed":u64::MAX, "abandoned":u64::MAX, "elapsed_ns":u64::MAX,
+        "max_ns":u64::MAX,
+    });
+    for record in records.iter_mut().take(6) {
+        assert_eq!(record["kind"], "http_role");
+        record["snapshot"]["build"] = build.clone();
+    }
+    records
+}
+
+#[test]
+fn complete_client_build_rows_round_trip_maximum_u64_and_reject_malformed_rows() {
+    let records = maximum_client_build_records();
+    let sample = decode(&wire(&records))
+        .expect("complete per-role client build rows must decode without numeric coercion");
+    let round_trip = frames(&sample);
+    assert_eq!(round_trip, records);
+    assert_eq!(sample.capture(), &metadata());
+    assert_eq!(decode(&wire(&round_trip)).unwrap(), sample);
+    for record in round_trip.iter().take(6) {
+        assert_eq!(record["schema"], SCHEMA);
+        assert_eq!(
+            record["coverage"]["client_build_scope"],
+            "inner_http_connector_connect_wall_time"
+        );
+        assert_eq!(record["snapshot"]["build"].as_object().unwrap().len(), 7);
+        for field in CLIENT_BUILD_FIELDS {
+            assert_eq!(record["snapshot"]["build"][field].as_u64(), Some(u64::MAX));
+        }
+    }
+    assert_eq!(
+        round_trip[6], records[6],
+        "aggregate frame must be unchanged"
+    );
+    assert_eq!(SCHEMA, "mount-rs.object-store-diagnostics.v2");
+    for role in 0..FRAME_COUNT {
+        let mut old_schema = records.clone();
+        old_schema[role]["schema"] = json!("mount-rs.object-store-diagnostics.v1");
+        assert!(
+            decode(&wire(&old_schema)).is_err(),
+            "old schema at frame {role}"
+        );
+        let mut missing_scope = records.clone();
+        missing_scope[role]["coverage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_build_scope");
+        assert!(
+            decode(&wire(&missing_scope)).is_err(),
+            "missing client build scope at frame {role}"
+        );
+        let mut unknown_scope = records.clone();
+        unknown_scope[role]["coverage"]["client_build_scope"] = json!("whole_store_or_cpu_time");
+        assert!(
+            decode(&wire(&unknown_scope)).is_err(),
+            "unknown client build scope at frame {role}"
+        );
+    }
+    let original = records;
+    for role in 0..6 {
+        let mut records = original.clone();
+        records[role]["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("build");
+        assert!(
+            decode(&wire(&records)).is_err(),
+            "missing build row at role {role}"
+        );
+        for malformed in [Value::Null, json!([]), json!(0), json!("build")] {
+            let mut records = original.clone();
+            records[role]["snapshot"]["build"] = malformed;
+            assert!(
+                decode(&wire(&records)).is_err(),
+                "invalid build row at role {role}"
+            );
+        }
+        for field in CLIENT_BUILD_FIELDS {
+            let mut records = original.clone();
+            records[role]["snapshot"]["build"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                decode(&wire(&records)).is_err(),
+                "missing {field} at role {role}"
+            );
+            for malformed in [
+                json!("18446744073709551615"),
+                json!(-1),
+                json!(1.0),
+                json!(true),
+                Value::Null,
+                json!([]),
+                json!({}),
+            ] {
+                let mut records = original.clone();
+                records[role]["snapshot"]["build"][field] = malformed;
+                assert!(
+                    decode(&wire(&records)).is_err(),
+                    "invalid {field} at role {role}"
+                );
+            }
+        }
+        let mut records = original.clone();
+        records[role]["snapshot"]["build"]["unexpected"] = json!(0);
+        assert!(
+            decode(&wire(&records)).is_err(),
+            "unknown build field at role {role}"
+        );
+    }
+    let raw = String::from_utf8(wire(&original)).unwrap();
+    let build = serde_json::to_string(&original[0]["snapshot"]["build"]).unwrap();
+    let duplicate = raw.replacen("\"build\":", &format!("\"build\":{build},\"build\":"), 1);
+    assert_ne!(
+        duplicate, raw,
+        "duplicate build fixture must change the raw frame"
+    );
+    assert!(
+        decode(duplicate.as_bytes()).is_err(),
+        "duplicate build row must fail closed"
+    );
+    for field in CLIENT_BUILD_FIELDS {
+        let member = format!("\"{field}\":{}", u64::MAX);
+        let duplicate = raw.replacen(&member, &format!("{member},{member}"), 1);
+        assert_ne!(
+            duplicate, raw,
+            "duplicate member fixture must change the raw frame"
+        );
+        assert!(
+            decode(duplicate.as_bytes()).is_err(),
+            "duplicate {field} must fail closed"
+        );
+    }
 }

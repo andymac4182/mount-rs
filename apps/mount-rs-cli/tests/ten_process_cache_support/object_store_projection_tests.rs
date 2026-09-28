@@ -804,3 +804,130 @@ fn worker_reserved_sequence_rejects_callback_identity_drift_before_snapshot_or_w
     assert_eq!(output.calls, 0);
     assert!(output.bytes.is_empty());
 }
+
+fn held_client_build(capture: Capture, builds: &[Value; 6]) -> Captured {
+    let original = encoded(capture, Snapshot::default());
+    let mut records: Vec<Value> = original
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(|line| {
+            assert!(line.starts_with(codec::PREFIX));
+            assert_eq!(line.last(), Some(&b'\n'));
+            serde_json::from_slice(&line[codec::PREFIX.len()..]).unwrap()
+        })
+        .collect();
+    assert_eq!(records.len(), 7);
+    for (record, build) in records.iter_mut().take(6).zip(builds) {
+        assert_eq!(record["kind"], "http_role");
+        record["snapshot"]["build"] = build.clone();
+    }
+    let mut bytes = Vec::new();
+    for record in records {
+        let row = serde_json::to_vec(&record).unwrap();
+        assert!(codec::PREFIX.len() + row.len() < codec::RECORD_LIMIT);
+        bytes.extend_from_slice(codec::PREFIX);
+        bytes.extend_from_slice(&row);
+        bytes.push(b'\n');
+    }
+    let sample = codec::decode(&bytes)
+        .expect("complete per-role client build rows must decode before projection");
+    assert_eq!(sample.capture(), &capture);
+    Captured {
+        sample: Some(sample),
+        evidence: json!({"status":"observed","capture":capture,
+            "raw_export_sha256":wire_hash(&bytes),
+            "quality":{"saturated":false,"concurrent_activity":false,"cache_unknown_live":0}}),
+    }
+}
+
+fn client_build_rows(after: bool) -> [Value; 6] {
+    std::array::from_fn(|role| {
+        let role = role as u64;
+        let delta = if after { role + 1 } else { 0 };
+        let started = if role == 5 {
+            u64::MAX - u64::from(!after)
+        } else {
+            1_000 + role * 100 + delta
+        };
+        json!({
+            "started":started, "inflight":if after { 3 + role } else { 10 + role },
+            "succeeded":100 + role * 10 + delta * 2,
+            "failed":20 + role + delta * 3,
+            "abandoned":10 + role + delta * 4,
+            "elapsed_ns":5_000 + role * 100 + delta * 5,
+            "max_ns":if after { 200 + role } else { 100 + role },
+        })
+    })
+}
+
+#[test]
+fn worker_client_build_windows_preserve_deltas_gauges_maxima_and_reject_resets() {
+    let pid = std::process::id();
+    let before_rows = client_build_rows(false);
+    let before = held_client_build(
+        identity(pid, 1, CaptureContext::WorkerBoundary),
+        &before_rows,
+    );
+    let after = held_client_build(
+        identity(pid, 2, CaptureContext::WorkerBoundary),
+        &client_build_rows(true),
+    );
+    let binding = WorkerBinding {
+        pid,
+        job: 7,
+        phase: json!({"name":"client-build-window"}),
+    };
+    let result = project_worker(&binding, &before, &after);
+    assert_eq!(result["status"], "observed");
+    assert_eq!(result["owner"]["pid"].as_u64(), Some(pid as u64));
+    assert_eq!(result["owner"]["job"].as_u64(), Some(7));
+    assert_eq!(result["owner"]["phase"], binding.phase);
+    assert_eq!(result["before"], before.evidence);
+    assert_eq!(result["after"], after.evidence);
+    let clients = result["window"]["clients"].as_array().unwrap();
+    assert_eq!(clients.len(), 6);
+    for (role, client) in clients.iter().enumerate() {
+        let role_value = role as u64;
+        let delta = role_value + 1;
+        assert_eq!(client["role"], ROLES[role]);
+        assert_eq!(
+            client["build"],
+            json!({
+                "counters":{"started":if role == 5 { 1 } else { delta },
+                    "succeeded":delta * 2,"failed":delta * 3,"abandoned":delta * 4,
+                    "elapsed_ns":delta * 5},
+                "gauges":{"inflight":{"before":10 + role_value,"after":3 + role_value}},
+                "maxima":{"max_ns":{"before":100 + role_value,"after":200 + role_value}},
+            })
+        );
+        assert_eq!(client["http"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            client["http"][0]["counters"]["attempts_started"].as_u64(),
+            Some(0)
+        );
+    }
+    for role in 0..6 {
+        for field in [
+            "started",
+            "succeeded",
+            "failed",
+            "abandoned",
+            "elapsed_ns",
+            "max_ns",
+        ] {
+            let mut after_rows = client_build_rows(true);
+            after_rows[role][field] = json!(before_rows[role][field].as_u64().unwrap() - 1);
+            let after = held_client_build(
+                identity(pid, 2, CaptureContext::WorkerBoundary),
+                &after_rows,
+            );
+            let result = project_worker(&binding, &before, &after);
+            refused(&result, "counter_reset");
+            assert!(
+                result.get("window").is_none(),
+                "reset {field} at role {role} published a window"
+            );
+            assert_eq!(result["before"], before.evidence);
+            assert_eq!(result["after"], after.evidence);
+        }
+    }
+}

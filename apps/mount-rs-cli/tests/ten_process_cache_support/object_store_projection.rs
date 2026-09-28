@@ -1,5 +1,6 @@
 //! Fixed observations for the owned ten-CLI qualification. These are process
-//! cumulative HTTP-service counters, never device IOPS or close acknowledgments.
+//! cumulative HTTP-service counters and leaf connector build wall time, never
+//! CPU time, device IOPS or close acknowledgments.
 //! Raw complete frames remain in the existing bounded stderr artifacts.
 use super::config::sha256;
 use super::contracts::{FILE_CAP, LINE_CAP};
@@ -50,7 +51,7 @@ const ROLES: [&str; 6] = [
     "standalone_probe",
 ];
 const METHODS: [&str; 6] = ["get", "head", "put", "delete", "post", "other"];
-const SCOPE: &str = "same owned process and sample context; inclusive cumulative HTTP-service observations; body bytes precede adapter validation and retries; gauges/maxima are endpoints; not storage API calls, transactional cuts, close proof, allocator calls, or physical IOPS";
+const SCOPE: &str = "same owned process and sample context; inclusive cumulative HTTP-service observations; connector build durations cover inner HTTP connector connect wall time, not whole-client/store construction, HTTP request duration, CPU time or physical I/O; body bytes precede adapter validation and retries; gauges/maxima are endpoints; not storage API calls, transactional cuts, close proof, allocator calls, or physical IOPS";
 
 fn quality(snapshot: &Snapshot) -> Result<(), &'static str> {
     if snapshot.saturated {
@@ -70,6 +71,7 @@ fn comparable(before: &Snapshot, after: &Snapshot) -> Result<(), &'static str> {
     quality(after)?;
     for (a, b) in before.clients.iter().zip(&after.clients) {
         monotonic!(a,b; constructed,released);
+        monotonic!(&a.build,&b.build; started,succeeded,failed,abandoned,elapsed_ns,max_ns);
         for (a, b) in a.http.iter().zip(&b.http) {
             monotonic!(a,b; attempts_started,header_responses,transport_errors,cancelled_before_headers,
                 offered_bytes,offered_known,offered_unknown,known_extra_future_boxes,known_extra_response_body_boxes,
@@ -100,6 +102,7 @@ fn window(before: &Snapshot, after: &Snapshot) -> Result<Value, &'static str> {
     let clients = before.clients.iter().zip(&after.clients).enumerate().map(|(role,(a,b))| {
         let mut value = row!(a,b; counters[constructed,released]; gauges[live]; maxima[]);
         value["role"] = json!(ROLES[role]);
+        value["build"] = row!(&a.build,&b.build; counters[started,succeeded,failed,abandoned,elapsed_ns]; gauges[inflight]; maxima[max_ns]);
         let http = a.http.iter().zip(&b.http).enumerate().map(|(method,(a,b))| {
             let mut value = row!(a,b; counters[attempts_started,header_responses,transport_errors,cancelled_before_headers,
                 offered_bytes,offered_known,offered_unknown,known_extra_future_boxes,known_extra_response_body_boxes,
