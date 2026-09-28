@@ -1,6 +1,7 @@
 //! Explicit MRC5 transactions; MRC4 authority and guards remain distinct.
 use super::*;
 use mount_rs_core::storage::{NodeData, compact::*};
+use mysql_async::{Row, Value, from_value_opt, prelude::FromValue};
 
 const TABLE: &str = "mount_rs_tidb_compact_guards";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
@@ -12,6 +13,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
     node LONGTEXT NOT NULL,
     PRIMARY KEY(volume_key,inode)
 )";
+
+const SELECTED_JOINED_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,g.inode,g.incarnation,g.epoch,g.revision,g.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_guards AS g ON g.volume_key=m.volume_key AND g.inode=? WHERE m.volume_key=?";
 
 type GuardRow = (i64, i64, i64, i64, String);
 type AnchorRow = (
@@ -125,22 +128,87 @@ async fn guards<C: Queryable>(
         .await
         .map_err(|e| db_error("read TiDB compact guards", e))?;
     let mut guards = BTreeMap::new();
-    for (inode, incarnation, epoch, revision, json) in rows {
-        profile::add(Event::InodeReturned, json.len() as u64);
-        let inode = nonnegative(inode, "compact inode")?;
-        let guard = CompactGuard {
-            identity: PhysicalInodeIdentity {
-                incarnation: nonnegative(incarnation, "compact incarnation")?,
-                epoch: nonnegative(epoch, "compact epoch")?,
-                revision: nonnegative(revision, "compact revision")?,
-            },
-            node: serde_json::from_str(&json).map_err(backend_error)?,
-        };
+    for row in rows {
+        let (inode, guard) = decode_guard_row(row)?;
         if guards.insert(inode, guard).is_some() {
             return Err(backend_error("duplicate TiDB compact guard"));
         }
     }
     Ok(guards)
+}
+
+fn decode_guard_row(row: GuardRow) -> Result<(u64, CompactGuard)> {
+    let (inode, incarnation, epoch, revision, json) = row;
+    profile::add(Event::InodeReturned, json.len() as u64);
+    let inode = nonnegative(inode, "compact inode")?;
+    let guard = CompactGuard {
+        identity: PhysicalInodeIdentity {
+            incarnation: nonnegative(incarnation, "compact incarnation")?,
+            epoch: nonnegative(epoch, "compact epoch")?,
+            revision: nonnegative(revision, "compact revision")?,
+        },
+        node: serde_json::from_str(&json).map_err(backend_error)?,
+    };
+    Ok((inode, guard))
+}
+
+fn joined_field<T: FromValue>(values: &mut [Option<Value>], index: usize) -> Result<T> {
+    let value = values
+        .get_mut(index)
+        .and_then(Option::take)
+        .ok_or_else(|| backend_error("incomplete TiDB compact joined row"))?;
+    from_value_opt(value).map_err(|_| backend_error("invalid TiDB compact joined field"))
+}
+
+fn decode_joined_rows(
+    rows: impl IntoIterator<Item = Vec<Option<Value>>>,
+    backing: ConcurrentBackingId,
+    inode: u64,
+) -> Result<LoadedCompactInode> {
+    let mut rows = rows.into_iter();
+    let mut values = rows.next().ok_or_else(stale)?;
+    if rows.next().is_some() {
+        return Err(backend_error("duplicate TiDB compact joined row"));
+    }
+    if values.len() != 13 {
+        return Err(backend_error("invalid TiDB compact joined row shape"));
+    }
+    // mysql_common's typed tuples stop at 12 columns. Decode all 13 fields
+    // without cloning bodies or allowing conversion failures to panic.
+    // Authority precedes missing, malformed or out-of-range guard handling.
+    let anchor = decode_anchor_row(
+        (
+            joined_field(&mut values, 0)?,
+            joined_field(&mut values, 1)?,
+            joined_field(&mut values, 2)?,
+            joined_field(&mut values, 3)?,
+            joined_field(&mut values, 4)?,
+            joined_field(&mut values, 5)?,
+            joined_field(&mut values, 6)?,
+            joined_field(&mut values, 7)?,
+        ),
+        backing,
+    )?;
+    signed(inode, "compact inode")?;
+    // A LEFT JOIN without a guard produces five NULLs. Partial NULL rows are
+    // corrupt and must reach checked conversion rather than look absent.
+    if values[8..]
+        .iter()
+        .all(|value| matches!(value, Some(Value::NULL)))
+    {
+        return Err(stale());
+    }
+    let (selected, guard) = decode_guard_row((
+        joined_field(&mut values, 8)?,
+        joined_field(&mut values, 9)?,
+        joined_field(&mut values, 10)?,
+        joined_field(&mut values, 11)?,
+        joined_field(&mut values, 12)?,
+    ))?;
+    if selected != inode {
+        return Err(stale());
+    }
+    LoadedCompactInode::from_guard(&anchor, inode, guard)
 }
 
 fn encode_anchor(anchor: &CompactAnchor) -> Result<Vec<u8>> {
@@ -431,12 +499,18 @@ impl TidbMetadataStore {
             .await
             .map_err(|e| db_error("load TiDB compact inode", e))?;
         let mut tx = read_transaction(&mut conn).await?;
-        let anchor = anchor(&mut tx, &self.0.volume_key, backing).await?;
-        let guard = guards(&mut tx, &self.0.volume_key, Some(inode), false)
-            .await?
-            .remove(&inode)
-            .ok_or_else(stale)?;
-        let loaded = LoadedCompactInode::from_guard(&anchor, inode, guard)?;
+        // Preserve authority-before-range-error precedence from the two-query
+        // path. The decoder rejects an out-of-range inode before guard use.
+        let selected = signed(inode, "compact inode").unwrap_or(0);
+        let rows: Vec<Row> = tx
+            .exec_observed(
+                StorageOperation::TidbSqlInodeRead,
+                SELECTED_JOINED_SQL,
+                (selected, &self.0.volume_key),
+            )
+            .await
+            .map_err(|e| db_error("read TiDB compact inode", e))?;
+        let loaded = decode_joined_rows(rows.into_iter().map(Row::unwrap_raw), backing, inode)?;
         observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
             .map_err(|e| db_error("finish TiDB compact inode", e))?;
@@ -563,6 +637,245 @@ impl TidbMetadataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn joined_fixture() -> (CompactAnchor, CompactGuard, Vec<Option<Value>>) {
+        use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
+        use mount_rs_core::storage::FileLayout;
+        use mount_rs_core::{S_IFREG, Stats};
+
+        let chunker = FixedSizeChunker::new(4096).unwrap().config();
+        let anchor = CompactAnchor {
+            backing: ConcurrentBackingId::from_bytes([0x65; 16]).unwrap(),
+            generation: 7,
+            root: 1,
+            next_inode: 3,
+            default_uid: 0,
+            default_gid: 0,
+            umask: 0o022,
+            default_chunker: chunker.clone(),
+            members: vec![1, 2],
+        };
+        let guard = CompactGuard {
+            identity: PhysicalInodeIdentity {
+                incarnation: 2,
+                epoch: 6,
+                revision: 9,
+            },
+            node: NodeMetadata {
+                stats: Stats {
+                    dev: 0,
+                    ino: 2,
+                    mode: S_IFREG | 0o644,
+                    nlink: 1,
+                    uid: 0,
+                    gid: 0,
+                    rdev: 0,
+                    size: 0,
+                    blksize: 4096,
+                    blocks: 0,
+                    atime_ms: 0,
+                    mtime_ms: 0,
+                    ctime_ms: 0,
+                    birthtime_ms: 0,
+                },
+                data: NodeData::File(FileLayout {
+                    chunker,
+                    extents: vec![],
+                }),
+            },
+        };
+        let row = vec![
+            Some(Value::Int(7)),
+            Some(Value::Bytes(b"MRC5".to_vec())),
+            Some(Value::Bytes(anchor.backing.to_hex().into_bytes())),
+            Some(Value::NULL),
+            Some(Value::Int(CONCURRENT_FENCE_SENTINEL)),
+            Some(Value::Int(0)),
+            Some(Value::Bytes(encode_compact_anchor(&anchor).unwrap())),
+            Some(Value::NULL),
+            Some(Value::Int(2)),
+            Some(Value::Int(2)),
+            Some(Value::Int(6)),
+            Some(Value::Int(9)),
+            Some(Value::Bytes(serde_json::to_vec(&guard.node).unwrap())),
+        ];
+        (anchor, guard, row)
+    }
+
+    #[test]
+    fn joined_selected_decodes_exact_body_and_physical_identity() {
+        let (anchor, guard, row) = joined_fixture();
+        let loaded = decode_joined_rows([row], anchor.backing, 2).unwrap();
+        assert_eq!(
+            loaded,
+            LoadedCompactInode {
+                generation: 7,
+                guard,
+            }
+        );
+    }
+
+    #[test]
+    fn joined_selected_missing_authority_or_guard_is_stale() {
+        let (anchor, _, mut row) = joined_fixture();
+        assert!(
+            decode_joined_rows(Vec::new(), anchor.backing, 2)
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        row[8..].fill(Some(Value::NULL));
+        assert!(
+            decode_joined_rows([row], anchor.backing, 2)
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+    }
+
+    #[test]
+    fn joined_selected_checks_authority_before_malformed_guard() {
+        let (anchor, _, original) = joined_fixture();
+        let invalid_authority = [
+            (1, Value::Bytes(b"MRC4".to_vec())),
+            (2, Value::Bytes(vec![b'0'; 32])),
+            (3, Value::Bytes(b"owner".to_vec())),
+            (4, Value::Int(0)),
+            (5, Value::Int(1)),
+            (6, Value::NULL),
+            (7, Value::Bytes(b"{}".to_vec())),
+        ];
+        for (index, value) in invalid_authority {
+            let mut row = original.clone();
+            row[index] = Some(value);
+            row[8] = Some(Value::NULL);
+            row[9] = Some(Value::Bytes(b"invalid integer".to_vec()));
+            row[12] = Some(Value::Bytes(vec![0xff]));
+            assert!(
+                decode_joined_rows([row], anchor.backing, 2)
+                    .unwrap_err()
+                    .is(ErrorCode::Estale),
+                "authority column {index} did not fail first"
+            );
+        }
+    }
+
+    #[test]
+    fn joined_selected_preserves_authority_before_inode_range_error() {
+        let (anchor, _, row) = joined_fixture();
+        assert!(
+            decode_joined_rows([row.clone()], anchor.backing, u64::MAX)
+                .unwrap_err()
+                .is(ErrorCode::Eoverflow)
+        );
+        let mut stale_row = row;
+        stale_row[1] = Some(Value::Bytes(b"MRC4".to_vec()));
+        assert!(
+            decode_joined_rows([stale_row], anchor.backing, u64::MAX)
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+    }
+
+    #[test]
+    fn joined_selected_rejects_partial_null_and_unconvertible_cells() {
+        let (anchor, _, row) = joined_fixture();
+        for index in 8..13 {
+            let mut partial = row.clone();
+            partial[index] = Some(Value::NULL);
+            assert!(
+                decode_joined_rows([partial], anchor.backing, 2)
+                    .unwrap_err()
+                    .is(ErrorCode::Eio),
+                "partial NULL in guard column {index} accepted"
+            );
+        }
+        let mut invalid_number = row.clone();
+        invalid_number[9] = Some(Value::Bytes(b"not an integer".to_vec()));
+        let mut invalid_utf8 = row.clone();
+        invalid_utf8[12] = Some(Value::Bytes(vec![0xff]));
+        let mut incomplete = row.clone();
+        incomplete[10] = None;
+        let mut short = row.clone();
+        short.pop();
+        let mut extra = row;
+        extra.push(Some(Value::NULL));
+        for invalid in [invalid_number, invalid_utf8, incomplete, short, extra] {
+            assert!(
+                decode_joined_rows([invalid], anchor.backing, 2)
+                    .unwrap_err()
+                    .is(ErrorCode::Eio)
+            );
+        }
+    }
+
+    #[test]
+    fn joined_selected_rejects_duplicate_rows_and_wrong_selected_inode() {
+        let (anchor, _, row) = joined_fixture();
+        assert!(
+            decode_joined_rows([row.clone(), row.clone()], anchor.backing, 2)
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
+        let mut wrong = row;
+        wrong[8] = Some(Value::Int(1));
+        assert!(
+            decode_joined_rows([wrong], anchor.backing, 2)
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+    }
+
+    #[test]
+    fn joined_selected_rejects_negative_identity_and_malformed_body() {
+        let (anchor, _, row) = joined_fixture();
+        for index in 8..12 {
+            let mut negative = row.clone();
+            negative[index] = Some(Value::Int(-1));
+            assert!(
+                decode_joined_rows([negative], anchor.backing, 2)
+                    .unwrap_err()
+                    .is(ErrorCode::Eio),
+                "negative guard column {index} accepted"
+            );
+        }
+        let mut malformed = row;
+        malformed[12] = Some(Value::Bytes(b"{".to_vec()));
+        assert!(
+            decode_joined_rows([malformed], anchor.backing, 2)
+                .unwrap_err()
+                .is(ErrorCode::Eio)
+        );
+    }
+
+    #[test]
+    fn joined_selected_keeps_membership_body_and_epoch_validation() {
+        let (anchor, mut guard, row) = joined_fixture();
+        let mut missing_membership = row.clone();
+        let mut absent = anchor.clone();
+        absent.members = vec![1];
+        missing_membership[6] = Some(Value::Bytes(encode_compact_anchor(&absent).unwrap()));
+        let mut future_epoch = row.clone();
+        future_epoch[10] = Some(Value::Int(8));
+        let mut wrong_body_inode = row.clone();
+        guard.node.stats.ino = 1;
+        wrong_body_inode[12] = Some(Value::Bytes(serde_json::to_vec(&guard.node).unwrap()));
+        let mut generation_mismatch = row.clone();
+        generation_mismatch[0] = Some(Value::Int(8));
+        let mut malformed_anchor = row;
+        malformed_anchor[6] = Some(Value::Bytes(b"{".to_vec()));
+        for (invalid, expected_code) in [
+            (missing_membership, ErrorCode::Einval),
+            (future_epoch, ErrorCode::Einval),
+            (wrong_body_inode, ErrorCode::Einval),
+            (generation_mismatch, ErrorCode::Eio),
+            (malformed_anchor, ErrorCode::Eio),
+        ] {
+            assert!(
+                decode_joined_rows([invalid], anchor.backing, 2)
+                    .unwrap_err()
+                    .is(expected_code)
+            );
+        }
+    }
     #[tokio::test]
     #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
     async fn actual_compact_schema_rejects_incompatible_scoped_tables() {

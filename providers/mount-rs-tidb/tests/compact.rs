@@ -1139,3 +1139,68 @@ async fn actual_compact_captured_delta_preserves_new_unrelated_body_and_full_con
     assert_eq!(after.anchor.generation, base.anchor.generation + 1);
     f.store.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB, MOUNT_RS_TIDB_URL and MOUNT_RS_PROFILE_IO=1; run serial"]
+async fn actual_compact_selected_load_uses_one_joined_query_and_retains_read_transaction() {
+    use mount_rs_core::diagnostics::storage;
+    assert!(
+        storage::enabled(),
+        "run this actual control with MOUNT_RS_PROFILE_IO=1"
+    );
+    let f = fixture(true).await;
+    let inode = create(&f, "joined-read").await;
+    let expected = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    // Warm the owned pool/session and prepared statement outside measurement.
+    reader.load_compact_inode(f.backing, inode).await.unwrap();
+    proxy.begin();
+    let before = storage::snapshot();
+    let loaded = reader.load_compact_inode(f.backing, inode).await.unwrap();
+    let delta = storage::snapshot().delta(&before).unwrap();
+    let (queries, rows) = proxy.end();
+    // Expected semantic RED must still explicitly settle owned provider resources.
+    reader.close().await.unwrap();
+    f.store.close().await.unwrap();
+
+    assert_eq!(loaded.generation, expected.anchor.generation);
+    assert_eq!(loaded.guard, expected.guards[&inode]);
+    assert_eq!(rows, 1, "one complete selected guard row must be observed");
+    let selects: Vec<_> = queries
+        .iter()
+        .filter(|sql| sql.starts_with("SELECT "))
+        .collect();
+    assert_eq!(
+        selects.len(),
+        1,
+        "one actual SQL SELECT must supply anchor and selected guard"
+    );
+    assert!(selects[0].contains("mount_rs_tidb_metadata"));
+    assert!(selects[0].contains("LEFT JOIN mount_rs_tidb_compact_guards"));
+    assert!(
+        !selects[0].contains("FOR UPDATE"),
+        "selected read remains nonlocking"
+    );
+    for (name, calls) in [
+        ("tidb.pool.checkout", 1),
+        ("tidb.tx.begin.compact_read", 1),
+        ("tidb.tx.rollback", 1),
+        ("tidb.sql.inode_read", 1),
+        ("tidb.sql.metadata_read", 0),
+        ("tidb.tx.commit", 0),
+    ] {
+        let row = delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap();
+        assert_eq!(row.calls, calls, "{name}");
+        assert_eq!(row.success, calls, "{name}");
+        assert_eq!(row.error, 0, "{name}");
+        assert_eq!(row.cancelled, 0, "{name}");
+    }
+    assert_eq!(delta.in_flight, 0);
+}
