@@ -430,6 +430,38 @@ struct SignedQualificationClients {
     second_probe: Arc<dyn ObjectStore>,
 }
 
+// A context may retain these immutable, independently signed clients across
+// Drive facades. Prefix, durability, cache and in-flight writes stay in each
+// ObjectStoreBlockStore rather than in this shared owner.
+pub(crate) struct SignedClientBundle {
+    clients: SignedQualificationClients,
+    observer: Observer,
+}
+
+impl SignedClientBundle {
+    fn build(config: &RustFsConfig) -> Result<Arc<Self>> {
+        let observer = Observer::enabled();
+        Self::build_with(observer, |probe, role, observer| {
+            config.build_store_with_observer(probe, role, observer)
+        })
+    }
+
+    fn build_with(
+        observer: Observer,
+        mut build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
+    ) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            clients: SignedQualificationClients {
+                first_data: build(false, ClientRole::PrimaryDataMixed, &observer)?,
+                second_data: build(false, ClientRole::QualificationData, &observer)?,
+                first_probe: build(true, ClientRole::PrimaryProbeMixed, &observer)?,
+                second_probe: build(true, ClientRole::QualificationProbe, &observer)?,
+            },
+            observer,
+        }))
+    }
+}
+
 impl RustFsBlockStore {
     /// Wrap a client and declare whether its backing service is durable.
     pub fn new(
@@ -462,25 +494,11 @@ impl RustFsBlockStore {
         prefix: impl Into<String>,
         durable: bool,
         observer: Observer,
-        mut build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
+        build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
     ) -> Result<Self> {
         let build_span = observer.bundle_build();
-        let result: Result<Self> = (|| {
-            // Preserve all four independently configured clients and Arc sharing.
-            let first_data = build(false, ClientRole::PrimaryDataMixed, &observer)?;
-            let second_data = build(false, ClientRole::QualificationData, &observer)?;
-            let first_probe = build(true, ClientRole::PrimaryProbeMixed, &observer)?;
-            let second_probe = build(true, ClientRole::QualificationProbe, &observer)?;
-            let mut blocks = Self::new(first_data.clone(), prefix, durable)?;
-            blocks.configured_probe = Some(first_probe.clone());
-            blocks.qualification_clients = Some(SignedQualificationClients {
-                first_data,
-                second_data,
-                first_probe,
-                second_probe,
-            });
-            Ok(blocks)
-        })();
+        let result = SignedClientBundle::build_with(observer.clone(), build)
+            .and_then(|bundle| Self::from_client_bundle(&bundle, prefix, durable));
         match result {
             Ok(mut blocks) => {
                 blocks.http_observer = observer;
@@ -492,6 +510,18 @@ impl RustFsBlockStore {
                 Err(error)
             }
         }
+    }
+
+    fn from_client_bundle(
+        bundle: &SignedClientBundle,
+        prefix: impl Into<String>,
+        durable: bool,
+    ) -> Result<Self> {
+        let mut blocks = Self::new(bundle.clients.first_data.clone(), prefix, durable)?;
+        blocks.configured_probe = Some(bundle.clients.first_probe.clone());
+        blocks.qualification_clients = Some(bundle.clients.clone());
+        blocks.http_observer = bundle.observer.clone();
+        Ok(blocks)
     }
 
     pub fn prefix(&self) -> &str {

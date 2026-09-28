@@ -640,6 +640,354 @@ fn retained_file_create_capture_checks_generation_and_allocation_overflow() {
     );
 }
 
+fn root_create_proposal(base: &CompactSnapshot, name: &str) -> CompactRootFileCreate {
+    let (_, structure, parent) = retained_create_inputs(base);
+    let mut created = base.guards[&2].node.clone();
+    created.stats.ino = base.anchor.next_inode;
+    CompactRootFileCreate::capture(
+        &structure,
+        &parent,
+        parent.guard.identity,
+        name.into(),
+        created,
+        parent.guard.node.stats.mtime_ms + 1,
+        parent.guard.node.stats.ctime_ms + 1,
+    )
+    .unwrap()
+}
+
+#[test]
+fn audited_root_proposal_matches_full_reference_and_extends_graph_inductively() {
+    let mut current = fixture();
+    for name in ["new", "next"] {
+        let proposal = root_create_proposal(&current, name);
+        let mut candidate = create_candidate(&current, name);
+        candidate.nodes.get_mut(&1).unwrap().stats.mtime_ms += 1;
+        candidate.nodes.get_mut(&1).unwrap().stats.ctime_ms += 1;
+        let reference =
+            CompactStructuralDelta::capture(&current, &candidate, StructuralScope::FileCreate)
+                .unwrap();
+        let read_set = BTreeMap::from([(1, current.guards[&1].clone())]);
+        let receipt = proposal
+            .delta()
+            .validate_current(&current.anchor, &read_set)
+            .unwrap();
+        assert_eq!(
+            receipt,
+            reference
+                .validate_current(&current.anchor, &read_set)
+                .unwrap()
+        );
+        let next = proposal.validate_publication(&receipt).unwrap();
+        assert_eq!(next.anchor(), &receipt.anchor);
+        assert_eq!(next.root.as_ref(), &receipt.upserts[&1]);
+        current = proposal.delta().evaluate(&current).unwrap();
+        current.namespace().unwrap();
+        assert_eq!(next.anchor(), &current.anchor);
+        assert_eq!(next.root.as_ref(), &current.guards[&1]);
+        // The next create consumes the proof that the prior acknowledged
+        // constructor extended, rather than attaching a new arbitrary tree.
+        let parent =
+            LoadedCompactInode::from_guard(&current.anchor, 1, current.guards[&1].clone()).unwrap();
+        let mut created = current.guards[&2].node.clone();
+        created.stats.ino = current.anchor.next_inode;
+        let next_proposal = CompactRootFileCreate::capture(
+            &next,
+            &parent,
+            parent.guard.identity,
+            "inductive".into(),
+            created,
+            parent.guard.node.stats.mtime_ms + 1,
+            parent.guard.node.stats.ctime_ms + 1,
+        )
+        .unwrap();
+        assert_eq!(next_proposal.delta().expected().len(), 1);
+        next_proposal
+            .delta()
+            .evaluate(&current)
+            .unwrap()
+            .namespace()
+            .unwrap();
+    }
+}
+
+#[test]
+fn audited_root_proposal_rejects_equal_identity_body_grafting_and_wrong_witnesses() {
+    let base = fixture();
+    let (_, structure, parent) = retained_create_inputs(&base);
+    for change in 0..5 {
+        let mut loaded = parent.clone();
+        let mut expected = parent.guard.identity;
+        match change {
+            0 => loaded.guard.node.stats.mode ^= 1,
+            1 => {
+                let NodeData::Directory { entries } = &mut loaded.guard.node.data else {
+                    panic!()
+                };
+                entries.swap(0, 1);
+            }
+            2 => loaded.generation += 1,
+            3 => loaded.guard.identity.revision += 1,
+            _ => expected.revision += 1,
+        }
+        let mut created = base.guards[&2].node.clone();
+        created.stats.ino = base.anchor.next_inode;
+        code(
+            CompactRootFileCreate::capture(
+                &structure,
+                &loaded,
+                expected,
+                "new".into(),
+                created,
+                1,
+                1,
+            ),
+            if change < 2 {
+                ErrorCode::Einval
+            } else {
+                ErrorCode::Eagain
+            },
+        );
+    }
+}
+
+#[test]
+fn audited_root_proposal_rejects_nonempty_or_nondefault_new_files_and_invalid_names() {
+    let base = fixture();
+    let (_, structure, parent) = retained_create_inputs(&base);
+    for change in 0..8 {
+        let mut created = base.guards[&2].node.clone();
+        created.stats.ino = base.anchor.next_inode;
+        match change {
+            0 => created.stats.ino += 1,
+            1 => created.stats.nlink = 0,
+            2 => created.stats.uid += 1,
+            3 => created.stats.gid += 1,
+            4 => created.stats.size = 1,
+            5 => created.stats.blocks = 1,
+            6 => {
+                let NodeData::File(layout) = &mut created.data else {
+                    panic!()
+                };
+                layout.chunker.parameters.insert("chunk_size".into(), 16);
+            }
+            _ => {
+                created.stats.mode = S_IFLNK | 0o777;
+                created.stats.size = 1;
+                created.data = NodeData::Symlink { target: "a".into() };
+            }
+        }
+        assert!(
+            CompactRootFileCreate::capture(
+                &structure,
+                &parent,
+                parent.guard.identity,
+                "new".into(),
+                created,
+                1,
+                1,
+            )
+            .is_err()
+        );
+    }
+    for name in ["", ".", "..", "a/b", "a\0b", "a"] {
+        let mut created = base.guards[&2].node.clone();
+        created.stats.ino = base.anchor.next_inode;
+        assert!(
+            CompactRootFileCreate::capture(
+                &structure,
+                &parent,
+                parent.guard.identity,
+                name.into(),
+                created,
+                1,
+                1,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn audited_root_proposal_rejects_overflow_timestamps_and_forged_acknowledgements() {
+    for change in 0..4 {
+        let mut base = fixture();
+        match change {
+            0 => base.anchor.generation = u64::MAX,
+            1 => base.anchor.next_inode = u64::MAX,
+            2 => base.guards.get_mut(&1).unwrap().node.stats.mtime_ms = i64::MAX,
+            _ => base.guards.get_mut(&1).unwrap().node.stats.ctime_ms = i64::MAX,
+        }
+        let (_, structure, parent) = retained_create_inputs(&base);
+        let mut created = base.guards[&2].node.clone();
+        created.stats.ino = base.anchor.next_inode;
+        code(
+            CompactRootFileCreate::capture(
+                &structure,
+                &parent,
+                parent.guard.identity,
+                "new".into(),
+                created,
+                i64::MAX,
+                i64::MAX,
+            ),
+            ErrorCode::Eoverflow,
+        );
+    }
+    let base = fixture();
+    let proposal = root_create_proposal(&base, "new");
+    let receipt = proposal
+        .delta()
+        .validate_current(
+            &base.anchor,
+            &BTreeMap::from([(1, base.guards[&1].clone())]),
+        )
+        .unwrap();
+    for change in 0..3 {
+        let mut forged = receipt.clone();
+        match change {
+            0 => forged.anchor.default_uid += 1,
+            1 => forged.upserts.get_mut(&1).unwrap().node.stats.atime_ms += 1,
+            _ => {
+                forged.upserts.insert(2, base.guards[&2].clone());
+            }
+        }
+        assert!(proposal.validate_publication(&forged).is_err());
+    }
+    let (_, structure, parent) = retained_create_inputs(&base);
+    let mut created = base.guards[&2].node.clone();
+    created.stats.ino = base.anchor.next_inode;
+    assert!(
+        CompactRootFileCreate::capture(
+            &structure,
+            &parent,
+            parent.guard.identity,
+            "new".into(),
+            created,
+            0,
+            1,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn full_next_witness_cannot_attach_a_different_valid_candidate_root() {
+    let base = fixture();
+    let (_, structure, _) = retained_create_inputs(&base);
+    let candidate = create_candidate(&base, "new");
+    let delta = CompactStructuralDelta::capture(&base, &candidate, StructuralScope::Full).unwrap();
+    let receipt = delta.validate_current(&base.anchor, &base.guards).unwrap();
+    let mut grafted = candidate;
+    let NodeData::Directory { entries } = &mut grafted.nodes.get_mut(&1).unwrap().data else {
+        panic!()
+    };
+    entries[0].name = "different-valid-name".into();
+    grafted.validate().unwrap();
+    assert!(
+        delta
+            .validate_next_structure(&structure, &receipt, &grafted)
+            .is_err()
+    );
+}
+
+#[test]
+fn opaque_root_create_preserves_audited_root_after_unchanged_root_full_publication() {
+    let mut base = fixture();
+    let mut directory = base.guards[&1].clone();
+    directory.node.stats.ino = 4;
+    directory.node.stats.nlink = 2;
+    directory.node.data = NodeData::Directory {
+        entries: vec![DirectoryEntry {
+            name: "nested".into(),
+            inode: 5,
+        }],
+    };
+    let mut nested_file = base.guards[&2].clone();
+    nested_file.node.stats.ino = 5;
+    base.guards.insert(4, directory);
+    base.guards.insert(5, nested_file);
+    let root = base.guards.get_mut(&1).unwrap();
+    root.node.stats.nlink += 1;
+    let NodeData::Directory { entries } = &mut root.node.data else {
+        panic!()
+    };
+    entries.push(DirectoryEntry {
+        name: "directory".into(),
+        inode: 4,
+    });
+    base.anchor.members.extend([4, 5]);
+    base.anchor.next_inode = 6;
+    let (cached, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let audited_root = base.guards[&1].clone();
+
+    // A Full rename inside a nested directory advances the authority while
+    // leaving the root guard physically and logically unchanged.
+    let mut candidate = cached;
+    let NodeData::Directory { entries } = &mut candidate.nodes.get_mut(&4).unwrap().data else {
+        panic!()
+    };
+    entries[0].name = "renamed".into();
+    let full = CompactStructuralDelta::capture(&base, &candidate, StructuralScope::Full).unwrap();
+    let receipt = full.validate_current(&base.anchor, &base.guards).unwrap();
+    assert!(!receipt.upserts.contains_key(&1));
+    assert_eq!(receipt.upserts.keys().copied().collect::<Vec<_>>(), vec![4]);
+    let next_structure = full
+        .validate_next_structure(&structure, &receipt, &candidate)
+        .unwrap();
+    assert_eq!(next_structure.root.as_ref(), &audited_root);
+    let after_full = full.evaluate(&base).unwrap();
+    assert_eq!(after_full.guards[&1], audited_root);
+    assert_eq!(after_full.anchor.generation, base.anchor.generation + 1);
+
+    let parent =
+        LoadedCompactInode::from_guard(&after_full.anchor, 1, after_full.guards[&1].clone())
+            .unwrap();
+    let mut created = after_full.guards[&2].node.clone();
+    created.stats.ino = after_full.anchor.next_inode;
+    let proposal = CompactRootFileCreate::capture(
+        &next_structure,
+        &parent,
+        parent.guard.identity,
+        "new-root-file".into(),
+        created,
+        audited_root.node.stats.mtime_ms + 1,
+        audited_root.node.stats.ctime_ms + 1,
+    )
+    .unwrap();
+    let root_receipt = proposal
+        .delta()
+        .validate_current(&after_full.anchor, &BTreeMap::from([(1, parent.guard)]))
+        .unwrap();
+    let final_structure = proposal.validate_publication(&root_receipt).unwrap();
+    let final_snapshot = proposal.delta().evaluate(&after_full).unwrap();
+    let final_namespace = final_snapshot.namespace().unwrap();
+    assert_eq!(final_structure.anchor(), &final_snapshot.anchor);
+    assert_eq!(final_structure.root.as_ref(), &final_snapshot.guards[&1]);
+    assert_eq!(final_snapshot.guards[&4], after_full.guards[&4]);
+    assert_eq!(final_snapshot.guards[&5], after_full.guards[&5]);
+    let NodeData::Directory { entries } = &final_namespace.nodes[&4].data else {
+        panic!()
+    };
+    assert_eq!(
+        entries,
+        &vec![DirectoryEntry {
+            name: "renamed".into(),
+            inode: 5
+        }]
+    );
+    let NodeData::Directory { entries } = &final_namespace.nodes[&1].data else {
+        panic!()
+    };
+    assert_eq!(
+        entries.last(),
+        Some(&DirectoryEntry {
+            name: "new-root-file".into(),
+            inode: after_full.anchor.next_inode,
+        })
+    );
+}
+
 #[test]
 fn full_structure_handles_rename_hardlink_orphan_removal_and_defaults() {
     let mut current = fixture();

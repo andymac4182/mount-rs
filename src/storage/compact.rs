@@ -211,6 +211,10 @@ pub struct CompactSnapshot {
 #[derive(Debug, Clone)]
 pub struct ValidatedCompactStructure {
     anchor: std::sync::Arc<CompactAnchor>,
+    // Retain only the audited root guard, never a Namespace Arc. Exact root
+    // equality binds a root-child proposal to the graph that was audited;
+    // selected file updates cannot change this directory or its identity.
+    root: std::sync::Arc<CompactGuard>,
 }
 
 impl ValidatedCompactStructure {
@@ -253,11 +257,16 @@ impl CompactSnapshot {
             namespace.nodes.insert(inode, guard.node);
         }
         namespace.validate()?;
+        let root = CompactGuard {
+            identity: identities[&anchor.root],
+            node: namespace.nodes[&anchor.root].clone(),
+        };
         Ok((
             namespace,
             identities,
             ValidatedCompactStructure {
                 anchor: std::sync::Arc::new(anchor),
+                root: std::sync::Arc::new(root),
             },
         ))
     }
@@ -410,6 +419,146 @@ pub struct CompactPublication {
     pub removed: BTreeSet<InodeId>,
 }
 
+/// A root-child empty regular-file create constructed from an audited graph.
+/// There is no arbitrary cached/candidate Namespace input: unchanged topology
+/// is inherited from the opaque structural witness and the constructor builds
+/// the only permitted parent/new-file delta. Membership and parent entries
+/// still require O(N) copying in the current durable format.
+#[derive(Debug, Clone)]
+pub struct CompactRootFileCreate {
+    delta: CompactStructuralDelta,
+}
+
+impl CompactRootFileCreate {
+    pub fn capture(
+        structure: &ValidatedCompactStructure,
+        parent: &LoadedCompactInode,
+        expected_parent: PhysicalInodeIdentity,
+        name: String,
+        created: NodeMetadata,
+        mtime_ms: i64,
+        ctime_ms: i64,
+    ) -> Result<Self> {
+        let _profile = Span::new(Event::CompactStructuralDeltaCaptureNodes).units(2);
+        let fail = || invalid_namespace("proposal is not an audited root-child file create");
+        let anchor = structure.anchor();
+        anchor.validate()?;
+        if parent.generation != anchor.generation
+            || parent.guard.identity != expected_parent
+            || parent.guard.identity != structure.root.identity
+        {
+            return Err(FsError::new(ErrorCode::Eagain));
+        }
+        if &parent.guard != structure.root.as_ref() {
+            return Err(invalid_namespace(
+                "compact root body differs from audited graph",
+            ));
+        }
+        parent.guard.validate(anchor.root, anchor)?;
+        validate_entry_name(&name)?;
+        let NodeData::Directory { entries } = &parent.guard.node.data else {
+            return Err(fail());
+        };
+        if entries.iter().any(|entry| entry.name == name) {
+            return Err(FsError::new(ErrorCode::Eexist));
+        }
+        validate_node_kind(&created)?;
+        let NodeData::File(layout) = &created.data else {
+            return Err(fail());
+        };
+        if created.stats.ino != anchor.next_inode
+            || created.stats.mode & S_IFMT != S_IFREG
+            || created.stats.nlink != 1
+            || created.stats.uid != anchor.default_uid
+            || created.stats.gid != anchor.default_gid
+            || created.stats.size != 0
+            || created.stats.blocks != 0
+            || !layout.extents.is_empty()
+            || layout.chunker != anchor.default_chunker
+        {
+            return Err(fail());
+        }
+        let minimum_mtime = parent
+            .guard
+            .node
+            .stats
+            .mtime_ms
+            .checked_add(1)
+            .ok_or_else(|| overflow_namespace("compact parent modification time exhausted"))?;
+        let minimum_ctime = parent
+            .guard
+            .node
+            .stats
+            .ctime_ms
+            .checked_add(1)
+            .ok_or_else(|| overflow_namespace("compact parent change time exhausted"))?;
+        if mtime_ms < minimum_mtime || ctime_ms < minimum_ctime {
+            return Err(fail());
+        }
+        let generation = anchor
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| overflow_namespace("compact structural generation exhausted"))?;
+        let next_inode = anchor
+            .next_inode
+            .checked_add(1)
+            .ok_or_else(|| overflow_namespace("compact inode allocation exhausted"))?;
+        let mut next = anchor.clone();
+        next.generation = generation;
+        next.next_inode = next_inode;
+        next.members.push(anchor.next_inode);
+        let mut changed = parent.guard.node.clone();
+        let NodeData::Directory { entries } = &mut changed.data else {
+            return Err(fail());
+        };
+        entries.push(DirectoryEntry {
+            name: name.clone(),
+            inode: anchor.next_inode,
+        });
+        changed.stats.mtime_ms = mtime_ms;
+        changed.stats.ctime_ms = ctime_ms;
+        let delta = CompactStructuralDelta {
+            base: anchor.clone(),
+            next,
+            expected: BTreeMap::from([(anchor.root, expected_parent)]),
+            changed: BTreeMap::from([(anchor.root, changed)]),
+            created: BTreeMap::from([(anchor.next_inode, created)]),
+            removed: BTreeSet::new(),
+            entries: vec![ParentEntryPrecondition {
+                parent: anchor.root,
+                name,
+                expected: None,
+            }],
+            parent_body: Some(parent.guard.node.clone()),
+            scope: StructuralScope::FileCreate,
+        };
+        delta.validate_file_create_parent(&parent.guard.node)?;
+        profile::add(Event::CompactStructuralExpectedGuardNodes, 1);
+        Ok(Self { delta })
+    }
+
+    pub fn delta(&self) -> &CompactStructuralDelta {
+        &self.delta
+    }
+
+    /// Exact acknowledgement of this constructor-built delta extends the
+    /// audited graph inductively. No unrelated body is asserted fresh.
+    pub fn validate_publication(
+        &self,
+        receipt: &CompactPublication,
+    ) -> Result<ValidatedCompactStructure> {
+        self.delta.validate_receipt(receipt)?;
+        let root = receipt
+            .upserts
+            .get(&receipt.anchor.root)
+            .ok_or_else(|| invalid_namespace("root-child receipt omits its parent"))?;
+        Ok(ValidatedCompactStructure {
+            anchor: std::sync::Arc::new(receipt.anchor.clone()),
+            root: std::sync::Arc::new(root.clone()),
+        })
+    }
+}
+
 impl CompactStructuralDelta {
     /// Derive structural provenance only after exact receipt validation and
     /// a complete candidate graph check. The witness says nothing about
@@ -443,8 +592,18 @@ impl CompactStructuralDelta {
                 "compact structural receipt differs from candidate",
             ));
         }
+        let root = receipt
+            .upserts
+            .get(&receipt.anchor.root)
+            .unwrap_or(base.root.as_ref());
+        if candidate.nodes.get(&receipt.anchor.root) != Some(&root.node) {
+            return Err(invalid_namespace(
+                "compact structural candidate root differs from receipt",
+            ));
+        }
         Ok(ValidatedCompactStructure {
             anchor: std::sync::Arc::new(receipt.anchor.clone()),
+            root: std::sync::Arc::new(root.clone()),
         })
     }
 

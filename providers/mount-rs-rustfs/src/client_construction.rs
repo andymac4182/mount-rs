@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 
 use async_trait::async_trait;
@@ -13,12 +13,330 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use super::{
-    OWNED_PREFIX_OBSERVATION_DEADLINE, RustFsBlockStore, RustFsConfig,
+    OWNED_PREFIX_OBSERVATION_DEADLINE, RustFsBlockStore, RustFsConfig, SignedClientBundle,
     observe_owned_prefix_absence_with, validate_owned_prefix,
 };
 
 fn sealed_error() -> FsError {
     FsError::new(ErrorCode::Estale).with_message("RustFS client construction admission is sealed")
+}
+
+// This bounds retained configurations, independently of concurrent constructor
+// capacity. A miss when full uses the original owned, uncached construction.
+const MAX_CACHED_CLIENT_BUNDLES: usize = 64;
+
+// No Debug implementation: exact credentials participate in equality but must
+// never enter a diagnostic, error or metrics label. Client policy is immutable
+// within a context; changes to transport defaults require a fresh context.
+struct ClientBundleKey(RustFsConfig);
+
+impl ClientBundleKey {
+    fn matches(&self, config: &RustFsConfig) -> bool {
+        self.0.endpoint == config.endpoint
+            && self.0.bucket == config.bucket
+            && self.0.region == config.region
+            && self.0.access_key_id == config.access_key_id
+            && self.0.secret_access_key == config.secret_access_key
+    }
+}
+
+enum BundleRecipe {
+    Config(RustFsConfig),
+    #[cfg(test)]
+    Test(Box<dyn FnOnce() -> Result<Arc<SignedClientBundle>> + Send>),
+}
+
+impl BundleRecipe {
+    fn build(self) -> Result<Arc<SignedClientBundle>> {
+        match self {
+            Self::Config(config) => SignedClientBundle::build(&config),
+            #[cfg(test)]
+            Self::Test(factory) => factory(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SharedBundleState {
+    registered: bool,
+    sealed: bool,
+    quarantined: bool,
+    waiters: usize,
+    handle: Option<JoinHandle<Result<Arc<SignedClientBundle>>>>,
+    ready: Option<Result<Arc<SignedClientBundle>>>,
+    joined: bool,
+    disposing: bool,
+    receipt: Option<Result<()>>,
+}
+
+struct SharedBundleTicket {
+    key: ClientBundleKey,
+    state: Mutex<SharedBundleState>,
+    signals: Arc<Signals>,
+}
+
+impl SharedBundleTicket {
+    fn lock(&self) -> MutexGuard<'_, SharedBundleState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poison) => {
+                let mut state = poison.into_inner();
+                let newly_quarantined = !state.quarantined;
+                state.quarantined = true;
+                state.sealed = true;
+                if state.receipt.is_some() {
+                    state.receipt = Some(Err(quarantine_error()));
+                }
+                if newly_quarantined {
+                    self.signals.changed();
+                }
+                state
+            }
+        }
+    }
+
+    fn charged(&self) -> bool {
+        let state = self.lock();
+        state.quarantined || !state.joined || state.disposing
+    }
+
+    fn removable(&self) -> bool {
+        let state = self.lock();
+        matches!(state.receipt, Some(Ok(())))
+            || (state.joined
+                && state.waiters == 0
+                && !state.quarantined
+                && matches!(state.ready, Some(Err(_))))
+    }
+
+    fn seal(&self) {
+        let changed = {
+            let mut state = self.lock();
+            let changed = !state.sealed;
+            state.sealed = true;
+            changed
+        };
+        if changed {
+            self.signals.changed();
+        }
+    }
+
+    fn drive(&self) {
+        let discarded = {
+            let mut state = self.lock();
+            if state.receipt.is_some() || state.disposing || !state.registered {
+                return;
+            }
+            if let Some(handle) = state.handle.as_mut() {
+                let waker = Waker::from(self.signals.clone());
+                let mut cx = Context::from_waker(&waker);
+                match Pin::new(handle).poll(&mut cx) {
+                    Poll::Pending => return,
+                    Poll::Ready(result) => {
+                        state.handle = None;
+                        state.joined = true;
+                        match result {
+                            Ok(product) => state.ready = Some(product),
+                            Err(_) => {
+                                state.quarantined = true;
+                                state.sealed = true;
+                            }
+                        }
+                        // The entry already belongs to the context. A complete
+                        // joined result releases constructor capacity even when
+                        // every caller canceled; no publisher task is detached.
+                        self.signals.changed();
+                    }
+                }
+            }
+            if !state.sealed && !state.quarantined {
+                return;
+            }
+            state.disposing = true;
+            state.ready.take()
+        };
+        let disposed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(discarded)));
+        {
+            let mut state = self.lock();
+            state.quarantined |= disposed.is_err();
+            state.disposing = false;
+            state.joined = true;
+            state.receipt = Some(if state.quarantined {
+                Err(quarantine_error())
+            } else {
+                Ok(())
+            });
+        }
+        self.signals.changed();
+    }
+
+    // A caller journal owns an acquisition/join, not the context's cached
+    // clients. Its close cannot cancel another caller or evict a ready bundle.
+    async fn drain_acquisition(&self) -> Result<()> {
+        loop {
+            let changed = self.signals.ticket.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            self.drive();
+            let result = {
+                let state = self.lock();
+                if let Some(receipt) = &state.receipt {
+                    Some(receipt.clone())
+                } else if state.joined && !state.sealed && !state.quarantined {
+                    Some(Ok(()))
+                } else {
+                    None
+                }
+            };
+            if let Some(result) = result {
+                return result;
+            }
+            changed.await;
+        }
+    }
+}
+
+struct SharedWaiter(Arc<SharedBundleTicket>);
+
+impl Drop for SharedWaiter {
+    fn drop(&mut self) {
+        self.0.lock().waiters -= 1;
+        self.0.signals.changed();
+    }
+}
+
+struct SharedRegistration<'a> {
+    ticket: &'a SharedBundleTicket,
+    leader: bool,
+    completed: bool,
+}
+
+impl Drop for SharedRegistration<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let mut state = self.ticket.lock();
+            if self.leader {
+                state.registered = true;
+            }
+            state.sealed = true;
+            state.quarantined = true;
+            drop(state);
+            self.ticket.signals.changed();
+        }
+    }
+}
+
+struct SharedLeaseState {
+    entry: Option<Arc<SharedBundleTicket>>,
+    receipt: Option<Result<()>>,
+    releasing: bool,
+    quarantined: bool,
+}
+
+struct SharedLease {
+    state: Mutex<SharedLeaseState>,
+    changed: Notify,
+    ticket: Weak<SharedBundleTicket>,
+}
+
+impl SharedLease {
+    fn lock(&self) -> MutexGuard<'_, SharedLeaseState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poison) => {
+                let mut state = poison.into_inner();
+                let newly_quarantined = !state.quarantined;
+                state.quarantined = true;
+                state.receipt = Some(Err(quarantine_error()));
+                if newly_quarantined {
+                    if let Some(entry) = self.ticket.upgrade() {
+                        let mut shared = entry.lock();
+                        shared.quarantined = true;
+                        shared.sealed = true;
+                        if shared.receipt.is_some() {
+                            shared.receipt = Some(Err(quarantine_error()));
+                        }
+                        drop(shared);
+                        entry.signals.changed();
+                    }
+                    self.changed.notify_waiters();
+                }
+                state
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ConstructionResource for SharedLease {
+    async fn close(&self) -> Result<()> {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let entry = {
+                let state = self.lock();
+                if let Some(receipt) = &state.receipt {
+                    return receipt.clone();
+                }
+                (!state.releasing).then(|| {
+                    state
+                        .entry
+                        .as_ref()
+                        .expect("unclosed shared lease owns its entry")
+                        .clone()
+                })
+            };
+            let Some(entry) = entry else {
+                changed.await;
+                continue;
+            };
+            let result = entry.drain_acquisition().await;
+            let release = {
+                let mut state = self.lock();
+                if let Some(receipt) = &state.receipt {
+                    return receipt.clone();
+                }
+                if state.releasing {
+                    None
+                } else {
+                    state.releasing = true;
+                    Some(if result.is_ok() {
+                        state.entry.take()
+                    } else {
+                        None
+                    })
+                }
+            };
+            let Some(released) = release else {
+                drop(entry);
+                changed.await;
+                continue;
+            };
+            // No await separates actual lease release from its receipt. A
+            // failed cleanup preserves the same retained entry for diagnosis.
+            drop(released);
+            drop(entry);
+            {
+                let mut state = self.lock();
+                if state.quarantined {
+                    return Err(quarantine_error());
+                }
+                state.releasing = false;
+                state.receipt = Some(result.clone());
+            }
+            self.changed.notify_waiters();
+            return result;
+        }
+    }
+}
+
+enum BundleReservation {
+    Shared {
+        entry: Arc<SharedBundleTicket>,
+        leader: bool,
+    },
+    Uncached,
 }
 
 fn quarantine_error() -> FsError {
@@ -260,6 +578,7 @@ impl Drop for Registration<'_> {
 #[derive(Default)]
 struct Registry {
     tickets: Vec<Arc<Ticket>>,
+    bundles: Vec<Arc<SharedBundleTicket>>,
     sealed: bool,
     quarantined: bool,
 }
@@ -284,33 +603,72 @@ impl Owner {
             .tickets
             .iter()
             .any(|ticket| ticket.lock().quarantined);
+        registry.quarantined |= registry
+            .bundles
+            .iter()
+            .any(|entry| entry.lock().quarantined);
         registry.sealed |= registry.quarantined;
         if registry.sealed {
             for ticket in &registry.tickets {
                 ticket.seal();
             }
+            for entry in &registry.bundles {
+                entry.seal();
+            }
         }
         registry.tickets.retain(|ticket| !ticket.acknowledged());
+        registry.bundles.retain(|entry| !entry.removable());
         registry
     }
 
     fn drive(&self) {
-        let tickets = self.lock().tickets.clone();
+        let (tickets, bundles) = {
+            let registry = self.lock();
+            (registry.tickets.clone(), registry.bundles.clone())
+        };
         for ticket in tickets {
             ticket.drive();
+        }
+        for entry in bundles {
+            entry.drive();
         }
     }
 }
 
 impl Drop for Owner {
     fn drop(&mut self) {
-        let registry = self.registry.get_mut().unwrap_or_else(|p| p.into_inner());
+        let registry = match self.registry.get_mut() {
+            Ok(registry) => registry,
+            Err(poison) => {
+                let registry = poison.into_inner();
+                registry.quarantined = true;
+                registry.sealed = true;
+                registry
+            }
+        };
         for ticket in registry.tickets.drain(..) {
             if !ticket.acknowledged() {
                 // Explicit close is required. Keep unproven ownership alive for
                 // process lifetime, including an actual pending join handle.
                 ticket.seal();
                 std::mem::forget(ticket);
+            }
+        }
+        for entry in registry.bundles.drain(..) {
+            if registry.quarantined {
+                let mut state = entry.lock();
+                state.quarantined = true;
+                state.sealed = true;
+                if state.receipt.is_some() {
+                    state.receipt = Some(Err(quarantine_error()));
+                }
+            }
+            entry.seal();
+            entry.drive();
+            if !matches!(entry.lock().receipt, Some(Ok(()))) {
+                // Preserve pending or quarantined native ownership just as the
+                // original independently owned constructor path does.
+                std::mem::forget(entry);
             }
         }
     }
@@ -320,6 +678,11 @@ impl Drop for Owner {
 ///
 /// Cleanup acknowledges constructor join and result transfer/disposal, not an
 /// HTTP connection or socket shutdown. Panic and poison remain quarantined.
+/// Exact configurations reuse four immutable signed clients across independent
+/// Drive facades. At most 64 configurations are cached; additional configurations
+/// use the independently owned construction path rather than rejecting drives.
+/// Transport policy is fixed for this context's lifetime. Create a new context
+/// after changing transport defaults, credentials or endpoint policy.
 #[derive(Clone)]
 pub struct RustFsConstructionContext {
     owner: Arc<Owner>,
@@ -347,6 +710,9 @@ impl RustFsConstructionContext {
         for ticket in &registry.tickets {
             ticket.seal();
         }
+        for entry in &registry.bundles {
+            entry.seal();
+        }
         let failed = registry.quarantined;
         drop(registry);
         self.owner.changed.notify_waiters();
@@ -372,6 +738,10 @@ impl RustFsConstructionContext {
                     .tickets
                     .iter()
                     .all(|ticket| ticket.lock().receipt.is_some())
+                    && registry
+                        .bundles
+                        .iter()
+                        .all(|entry| entry.lock().receipt.is_some())
                 {
                     Some(if registry.quarantined {
                         Err(quarantine_error())
@@ -403,7 +773,12 @@ impl RustFsConstructionContext {
                 if registry.sealed {
                     return Err(sealed_error());
                 }
-                if registry.tickets.len() < self.owner.max_builds {
+                let charged_bundles = registry
+                    .bundles
+                    .iter()
+                    .filter(|entry| entry.charged())
+                    .count();
+                if registry.tickets.len() + charged_bundles < self.owner.max_builds {
                     let ticket = Arc::new(Ticket {
                         state: Mutex::new(TicketState::default()),
                         signals: Arc::new(Signals {
@@ -414,6 +789,124 @@ impl RustFsConstructionContext {
                     registry.tickets.push(ticket.clone());
                     return Ok(ticket);
                 }
+            }
+            changed.await;
+        }
+    }
+
+    async fn reserve_bundle(&self, config: &RustFsConfig) -> Result<BundleReservation> {
+        loop {
+            let changed = self.owner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            self.owner.drive();
+            {
+                let mut registry = self.owner.lock();
+                if registry.quarantined {
+                    return Err(quarantine_error());
+                }
+                if registry.sealed {
+                    return Err(sealed_error());
+                }
+                if let Some(entry) = registry
+                    .bundles
+                    .iter()
+                    .find(|entry| entry.key.matches(config))
+                {
+                    entry.lock().waiters += 1;
+                    return Ok(BundleReservation::Shared {
+                        entry: entry.clone(),
+                        leader: false,
+                    });
+                }
+                if registry.bundles.len() == MAX_CACHED_CLIENT_BUNDLES {
+                    return Ok(BundleReservation::Uncached);
+                }
+                let charged_bundles = registry
+                    .bundles
+                    .iter()
+                    .filter(|entry| entry.charged())
+                    .count();
+                if registry.tickets.len() + charged_bundles < self.owner.max_builds {
+                    let entry = Arc::new(SharedBundleTicket {
+                        key: ClientBundleKey(config.clone()),
+                        state: Mutex::new(SharedBundleState {
+                            waiters: 1,
+                            ..Default::default()
+                        }),
+                        signals: Arc::new(Signals {
+                            ticket: Notify::new(),
+                            registry: self.owner.changed.clone(),
+                        }),
+                    });
+                    registry.bundles.push(entry.clone());
+                    return Ok(BundleReservation::Shared {
+                        entry,
+                        leader: true,
+                    });
+                }
+            }
+            changed.await;
+        }
+    }
+
+    async fn acquire_bundle(
+        &self,
+        entry: Arc<SharedBundleTicket>,
+        leader: bool,
+        recipe: BundleRecipe,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<Arc<SignedClientBundle>> {
+        let _waiter = SharedWaiter(entry.clone());
+        let mut registration = SharedRegistration {
+            ticket: &entry,
+            leader,
+            completed: false,
+        };
+        if let Some(observer) = observer {
+            observer.retain(Arc::new(SharedLease {
+                state: Mutex::new(SharedLeaseState {
+                    entry: Some(entry.clone()),
+                    receipt: None,
+                    releasing: false,
+                    quarantined: false,
+                }),
+                changed: Notify::new(),
+                ticket: Arc::downgrade(&entry),
+            }));
+        }
+        {
+            let registry = self.owner.lock();
+            let mut state = entry.lock();
+            if registry.sealed || state.sealed || state.quarantined {
+                state.sealed = true;
+            } else if leader {
+                state.handle = Some(tokio::task::spawn_blocking(move || recipe.build()));
+            }
+            if leader {
+                state.registered = true;
+            }
+            registration.completed = true;
+        }
+        entry.signals.changed();
+        loop {
+            let changed = entry.signals.ticket.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            entry.drive();
+            let result = {
+                let registry = self.owner.lock();
+                let state = entry.lock();
+                if state.quarantined {
+                    return Err(quarantine_error());
+                }
+                if registry.sealed || state.sealed {
+                    return Err(sealed_error());
+                }
+                state.ready.clone()
+            };
+            if let Some(result) = result {
+                return result;
             }
             changed.await;
         }
@@ -500,19 +993,43 @@ impl RustFsConstructionContext {
         durable: bool,
         observer: Option<&dyn ConstructionObserver>,
     ) -> Result<RustFsBlockStore> {
-        match self
-            .build(
-                Recipe::BlockStore {
-                    config,
-                    prefix,
-                    durable,
-                },
-                observer,
-            )
-            .await?
-        {
-            Product::BlockStore(store) => Ok(*store),
-            Product::OwnedPrefixProbe(_) => unreachable!("closed block-store recipe"),
+        match self.reserve_bundle(&config).await? {
+            BundleReservation::Uncached => {
+                match self
+                    .build(
+                        Recipe::BlockStore {
+                            config,
+                            prefix,
+                            durable,
+                        },
+                        observer,
+                    )
+                    .await?
+                {
+                    Product::BlockStore(store) => Ok(*store),
+                    Product::OwnedPrefixProbe(_) => unreachable!("closed block-store recipe"),
+                }
+            }
+            BundleReservation::Shared { entry, leader } => {
+                let metrics = mount_rs_core::diagnostics::object_store::Observer::enabled();
+                let span = metrics.bundle_build();
+                let result = self
+                    .acquire_bundle(entry, leader, BundleRecipe::Config(config), observer)
+                    .await
+                    .and_then(|bundle| {
+                        RustFsBlockStore::from_client_bundle(&bundle, prefix, durable)
+                    });
+                match result {
+                    Ok(mut store) => {
+                        store._http_bundle = span.finish_success();
+                        Ok(store)
+                    }
+                    Err(error) => {
+                        span.finish_error();
+                        Err(error)
+                    }
+                }
+            }
         }
     }
 
@@ -533,6 +1050,99 @@ impl RustFsConstructionContext {
     }
 
     #[cfg(test)]
+    pub(crate) async fn build_shared_test(
+        &self,
+        config: RustFsConfig,
+        factory: Box<dyn FnOnce() -> Result<Arc<SignedClientBundle>> + Send>,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<RustFsBlockStore> {
+        self.build_shared_test_with_prefix(config, "shared-test".into(), false, factory, observer)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn build_shared_test_with_prefix(
+        &self,
+        config: RustFsConfig,
+        prefix: String,
+        durable: bool,
+        factory: Box<dyn FnOnce() -> Result<Arc<SignedClientBundle>> + Send>,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<RustFsBlockStore> {
+        match self.reserve_bundle(&config).await? {
+            BundleReservation::Shared { entry, leader } => {
+                let bundle = self
+                    .acquire_bundle(entry, leader, BundleRecipe::Test(factory), observer)
+                    .await?;
+                RustFsBlockStore::from_client_bundle(&bundle, prefix, durable)
+            }
+            BundleReservation::Uncached => {
+                self.build_test(
+                    Box::new(move || {
+                        let bundle = factory()?;
+                        RustFsBlockStore::from_client_bundle(&bundle, prefix, durable)
+                    }),
+                    observer,
+                )
+                .await
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_shared_lease_releasing(
+        &self,
+        index: usize,
+    ) -> (Arc<dyn ConstructionResource>, impl Fn() + use<>) {
+        let entry = self.owner.lock().bundles[index].clone();
+        let lease = Arc::new(SharedLease {
+            state: Mutex::new(SharedLeaseState {
+                entry: Some(entry.clone()),
+                receipt: None,
+                releasing: true,
+                quarantined: false,
+            }),
+            changed: Notify::new(),
+            ticket: Arc::downgrade(&entry),
+        });
+        let controlled = lease.clone();
+        (lease, move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = controlled.state.lock().unwrap();
+                panic!("controlled shared lease release poison");
+            }));
+            drop(controlled.lock());
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_shared_snapshot(&self) -> (usize, usize, usize) {
+        let registry = self.owner.lock();
+        (
+            registry.bundles.len(),
+            registry
+                .bundles
+                .iter()
+                .filter(|entry| entry.charged())
+                .count(),
+            registry
+                .bundles
+                .iter()
+                .map(|entry| entry.lock().waiters)
+                .sum(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_poison_shared_ticket(&self, index: usize) {
+        let entry = self.owner.lock().bundles[index].clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = entry.state.lock().unwrap();
+            panic!("controlled shared construction ticket poison");
+        }));
+    }
+
+    #[cfg(test)]
     pub(crate) async fn build_test(
         &self,
         factory: Box<dyn FnOnce() -> Result<RustFsBlockStore> + Send>,
@@ -549,7 +1159,12 @@ impl RustFsConstructionContext {
         let registry = self.owner.lock();
         TestSnapshot {
             retained: registry.tickets.len(),
-            charged: registry.tickets.len(),
+            charged: registry.tickets.len()
+                + registry
+                    .bundles
+                    .iter()
+                    .filter(|entry| entry.charged())
+                    .count(),
             sealed: registry.sealed,
         }
     }

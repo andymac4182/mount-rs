@@ -21,7 +21,7 @@ use object_store::{
 use tokio::sync::{Notify, oneshot};
 
 use super::client_construction::RustFsConstructionContext;
-use super::{RustFsBlockStore, RustFsConfig};
+use super::{RustFsBlockStore, RustFsConfig, SignedClientBundle};
 
 const SAFETY_DEADLINE: Duration = Duration::from_secs(5);
 type Factory = Box<dyn FnOnce() -> Result<RustFsBlockStore> + Send>;
@@ -806,4 +806,769 @@ async fn final_context_drop_retains_actual_ticket_without_retaining_owner_cycle(
     bounded(close).await.unwrap();
     held.assert_disposed();
     assert!(!owner_alive());
+}
+
+fn reusable_config() -> RustFsConfig {
+    RustFsConfig {
+        endpoint: "http://127.0.0.1:1".into(),
+        bucket: "context-client-reuse".into(),
+        access_key_id: "unit-reuse-key".into(),
+        secret_access_key: "unit-reuse-secret".into(),
+        region: "us-east-1".into(),
+    }
+}
+
+type BundleFactory = Box<dyn FnOnce() -> Result<Arc<SignedClientBundle>> + Send>;
+
+fn memory_bundle() -> Result<Arc<SignedClientBundle>> {
+    SignedClientBundle::build_with(
+        mount_rs_core::diagnostics::object_store::Observer::disabled(),
+        |_, _, _| Ok(Arc::new(InMemory::new())),
+    )
+}
+
+struct HeldBundleFactory {
+    gate: Arc<Gate>,
+    calls: Arc<AtomicUsize>,
+    products: Arc<Mutex<Vec<Weak<InMemory>>>>,
+}
+
+impl HeldBundleFactory {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new(Gate::default()),
+            calls: Arc::new(AtomicUsize::new(0)),
+            products: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn factory(&self) -> BundleFactory {
+        let gate = self.gate.clone();
+        let calls = self.calls.clone();
+        let products = self.products.clone();
+        Box::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            gate.hold();
+            SignedClientBundle::build_with(
+                mount_rs_core::diagnostics::object_store::Observer::disabled(),
+                |_, _, _| {
+                    let client = Arc::new(InMemory::new());
+                    products.lock().unwrap().push(Arc::downgrade(&client));
+                    Ok(client)
+                },
+            )
+        })
+    }
+
+    async fn entered(&self) {
+        bounded(self.gate.entered.notified()).await;
+        assert_eq!(self.calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn assert_disposed(&self) {
+        let clients = self.products.lock().unwrap();
+        assert_eq!(clients.len(), 4);
+        assert!(clients.iter().all(|client| client.upgrade().is_none()));
+    }
+}
+
+impl Drop for HeldBundleFactory {
+    fn drop(&mut self) {
+        self.gate.release();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_constructor_survives_first_caller_and_observer_cleanup_cancellation() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let held = HeldBundleFactory::new();
+    let journal = Arc::new(RecordingObserver::default());
+    let owner = context.clone();
+    let observer = journal.clone();
+    let factory = held.factory();
+    let first = tokio::spawn(async move {
+        owner
+            .build_shared_test(reusable_config(), factory, Some(&*observer))
+            .await
+    });
+    held.entered().await;
+    let follower_calls = Arc::new(AtomicUsize::new(0));
+    let calls = follower_calls.clone();
+    let mut follower = Box::pin(context.build_shared_test(
+        reusable_config(),
+        Box::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            memory_bundle()
+        }),
+        None,
+    ));
+    assert!(poll_once(follower.as_mut()).await.is_pending());
+    assert_eq!(context.test_shared_snapshot(), (1, 1, 2));
+    cancel_build(first).await;
+    assert_eq!(context.test_shared_snapshot(), (1, 1, 1));
+    let resource = journal.resource();
+    let mut cleanup = Box::pin(resource.close());
+    assert!(poll_once(cleanup.as_mut()).await.is_pending());
+    drop(cleanup);
+    held.gate.release();
+    let store = bounded(follower).await.unwrap();
+    bounded(resource.close()).await.unwrap();
+    assert_eq!(follower_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(context.test_shared_snapshot(), (1, 0, 0));
+    drop(store);
+    assert!(
+        held.products
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|client| client.upgrade().is_some())
+    );
+    bounded(context.close()).await.unwrap();
+    held.assert_disposed();
+}
+
+#[tokio::test]
+async fn shared_constructor_with_every_caller_canceled_is_joined_and_reused_once() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let held = HeldBundleFactory::new();
+    let observer = Arc::new(RecordingObserver::default());
+    let owner = context.clone();
+    let journal = observer.clone();
+    let factory = held.factory();
+    let first = tokio::spawn(async move {
+        owner
+            .build_shared_test(reusable_config(), factory, Some(&*journal))
+            .await
+    });
+    held.entered().await;
+    let mut follower =
+        Box::pin(context.build_shared_test(reusable_config(), Box::new(memory_bundle), None));
+    assert!(poll_once(follower.as_mut()).await.is_pending());
+    drop(follower);
+    cancel_build(first).await;
+    assert_eq!(context.test_shared_snapshot(), (1, 1, 0));
+    held.gate.release();
+    bounded(observer.resource().close()).await.unwrap();
+    let store = bounded(context.build_shared_test(
+        reusable_config(),
+        Box::new(|| panic!("joined shared result was rebuilt after all callers canceled")),
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(held.calls.load(Ordering::SeqCst), 1);
+    drop(store);
+    bounded(context.close()).await.unwrap();
+    held.assert_disposed();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_lease_close_survives_latest_waiter_cancellation() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let held = HeldBundleFactory::new();
+    let observer = Arc::new(RecordingObserver::default());
+    let owner = context.clone();
+    let journal = observer.clone();
+    let factory = held.factory();
+    let opening = tokio::spawn(async move {
+        owner
+            .build_shared_test(reusable_config(), factory, Some(&*journal))
+            .await
+    });
+    held.entered().await;
+    cancel_build(opening).await;
+    let resource = observer.resource();
+    let earlier_resource = resource.clone();
+    let (parked_tx, parked_rx) = oneshot::channel();
+    let earlier = tokio::spawn(async move {
+        let mut close = Box::pin(earlier_resource.close());
+        let mut parked_tx = Some(parked_tx);
+        poll_fn(|cx| {
+            let result = close.as_mut().poll(cx);
+            if result.is_pending()
+                && let Some(signal) = parked_tx.take()
+            {
+                let _ = signal.send(());
+            }
+            result
+        })
+        .await
+    });
+    bounded(parked_rx).await.unwrap();
+    let mut latest = Box::pin(resource.close());
+    assert!(poll_once(latest.as_mut()).await.is_pending());
+    drop(latest);
+    held.gate.release();
+    bounded(earlier).await.unwrap().unwrap();
+    bounded(resource.close()).await.unwrap();
+    assert_eq!(context.test_shared_snapshot(), (1, 0, 0));
+    bounded(context.close()).await.unwrap();
+    held.assert_disposed();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_context_close_cancellation_retains_the_join_and_rejects_ready_hits() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let held = HeldBundleFactory::new();
+    let owner = context.clone();
+    let factory = held.factory();
+    let first = tokio::spawn(async move {
+        owner
+            .build_shared_test(reusable_config(), factory, None)
+            .await
+    });
+    held.entered().await;
+    let earlier = spawn_pending_close(&context).await;
+    let mut latest = Box::pin(context.close());
+    assert!(poll_once(latest.as_mut()).await.is_pending());
+    drop(latest);
+    failed(
+        bounded(context.build_shared_test(reusable_config(), Box::new(memory_bundle), None)).await,
+        ErrorCode::Estale,
+    );
+    failed(bounded(first).await.unwrap(), ErrorCode::Estale);
+    assert_eq!(context.test_shared_snapshot(), (1, 1, 0));
+    held.gate.release();
+    bounded(earlier).await.unwrap().unwrap();
+    bounded(context.close()).await.unwrap();
+    held.assert_disposed();
+    assert_eq!(context.test_shared_snapshot(), (0, 0, 0));
+    // A ready cache hit must use the same post-seal admission check as a miss.
+    let ready = RustFsConstructionContext::new(1).unwrap();
+    drop(
+        bounded(ready.build_shared_test(reusable_config(), Box::new(memory_bundle), None))
+            .await
+            .unwrap(),
+    );
+    ready.seal_admission().unwrap();
+    failed(
+        bounded(ready.build_shared_test(reusable_config(), Box::new(memory_bundle), None)).await,
+        ErrorCode::Estale,
+    );
+    bounded(ready.close()).await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_fourth_role_failure_disposes_partial_clients_without_automatic_retry() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let built = Arc::new(Mutex::new(Vec::<Weak<InMemory>>::new()));
+    let counter = calls.clone();
+    let weak = built.clone();
+    let observer = RecordingObserver::default();
+    let failure = bounded(context.build_shared_test(
+        reusable_config(),
+        Box::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut role = 0;
+            SignedClientBundle::build_with(
+                mount_rs_core::diagnostics::object_store::Observer::disabled(),
+                |_, _, _| {
+                    role += 1;
+                    if role == 4 {
+                        return Err(FsError::new(ErrorCode::Enospc)
+                            .with_message("controlled fourth role failure"));
+                    }
+                    let client = Arc::new(InMemory::new());
+                    weak.lock().unwrap().push(Arc::downgrade(&client));
+                    Ok(client)
+                },
+            )
+        }),
+        Some(&observer),
+    ))
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(failure.code, ErrorCode::Enospc);
+    assert_eq!(failure.to_string(), "controlled fourth role failure");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(built.lock().unwrap().len(), 3);
+    assert!(
+        built
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|client| client.upgrade().is_none())
+    );
+    bounded(observer.resource().close()).await.unwrap();
+    assert_eq!(context.test_shared_snapshot(), (0, 0, 0));
+    drop(
+        bounded(context.build_shared_test(reusable_config(), Box::new(memory_bundle), None))
+            .await
+            .unwrap(),
+    );
+    bounded(context.close()).await.unwrap();
+}
+
+async fn shared_quarantine_drains_healthy_peer(poison: bool) {
+    let context = RustFsConstructionContext::new(2).unwrap();
+    let bad = HeldBundleFactory::new();
+    let bad_factory: BundleFactory = if poison {
+        bad.factory()
+    } else {
+        let gate = bad.gate.clone();
+        let calls = bad.calls.clone();
+        Box::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            gate.hold();
+            panic!("controlled shared native constructor panic")
+        })
+    };
+    let owner = context.clone();
+    let bad_build = tokio::spawn(async move {
+        owner
+            .build_shared_test(reusable_config(), bad_factory, None)
+            .await
+    });
+    bad.entered().await;
+    let good = HeldBundleFactory::new();
+    let owner = context.clone();
+    let factory = good.factory();
+    let mut config = reusable_config();
+    config.bucket = "healthy-peer".into();
+    let good_build =
+        tokio::spawn(async move { owner.build_shared_test(config, factory, None).await });
+    good.entered().await;
+    if poison {
+        context.test_poison_shared_ticket(0);
+        assert_eq!(context.test_shared_snapshot().1, 2);
+        failed(bounded(bad_build).await.unwrap(), ErrorCode::Eio);
+        assert!(bad.products.lock().unwrap().is_empty());
+        bad.gate.release();
+    } else {
+        bad.gate.release();
+        failed(bounded(bad_build).await.unwrap(), ErrorCode::Eio);
+    }
+    let closing = spawn_pending_close(&context).await;
+    assert!(!closing.is_finished());
+    good.gate.release();
+    assert!(bounded(good_build).await.unwrap().is_err());
+    failed(bounded(closing).await.unwrap(), ErrorCode::Eio);
+    good.assert_disposed();
+    if poison {
+        bad.assert_disposed();
+    }
+    failed(bounded(context.close()).await, ErrorCode::Eio);
+    failed(
+        bounded(context.build_shared_test(reusable_config(), Box::new(memory_bundle), None)).await,
+        ErrorCode::Eio,
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_constructor_poison_stays_quarantined_and_joins_healthy_peer() {
+    shared_quarantine_drains_healthy_peer(true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_constructor_panic_stays_quarantined_and_joins_healthy_peer() {
+    shared_quarantine_drains_healthy_peer(false).await;
+}
+
+#[tokio::test]
+async fn shared_configuration_cache_bound_falls_back_without_limiting_live_drives() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let first =
+        bounded(context.build_shared_test(reusable_config(), Box::new(memory_bundle), None))
+            .await
+            .unwrap();
+    for index in 1..64 {
+        let mut config = reusable_config();
+        config.bucket = format!("cached-config-{index}");
+        drop(
+            bounded(context.build_shared_test(config, Box::new(memory_bundle), None))
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(context.test_shared_snapshot(), (64, 0, 0));
+    let mut overflow_config = reusable_config();
+    overflow_config.bucket = "uncached-overflow".into();
+    let overflow_one =
+        bounded(context.build_shared_test(overflow_config.clone(), Box::new(memory_bundle), None))
+            .await
+            .unwrap();
+    let overflow_two =
+        bounded(context.build_shared_test(overflow_config, Box::new(memory_bundle), None))
+            .await
+            .unwrap();
+    assert!(!Arc::ptr_eq(
+        &overflow_one
+            .qualification_clients
+            .as_ref()
+            .unwrap()
+            .first_data,
+        &overflow_two
+            .qualification_clients
+            .as_ref()
+            .unwrap()
+            .first_data,
+    ));
+    let cached = bounded(context.build_shared_test(
+        reusable_config(),
+        Box::new(|| panic!("full cache lost existing key")),
+        None,
+    ))
+    .await
+    .unwrap();
+    assert!(Arc::ptr_eq(
+        &first.qualification_clients.as_ref().unwrap().first_data,
+        &cached.qualification_clients.as_ref().unwrap().first_data,
+    ));
+    assert_eq!(context.test_shared_snapshot(), (64, 0, 0));
+    drop(first);
+    drop(cached);
+    drop(overflow_one);
+    drop(overflow_two);
+    bounded(context.close()).await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_key_compares_every_exact_configuration_field() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let first =
+        bounded(context.build_shared_test(reusable_config(), Box::new(memory_bundle), None))
+            .await
+            .unwrap();
+    for field in 0..5 {
+        let mut config = reusable_config();
+        match field {
+            0 => config.endpoint = "http://127.0.0.1:2".into(),
+            1 => config.bucket = "changed-bucket".into(),
+            2 => config.region = "us-west-2".into(),
+            3 => config.access_key_id = "changed-access".into(),
+            _ => config.secret_access_key = "changed-secret".into(),
+        }
+        let next = bounded(context.build_shared_test(config, Box::new(memory_bundle), None))
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            &first.qualification_clients.as_ref().unwrap().first_data,
+            &next.qualification_clients.as_ref().unwrap().first_data
+        ));
+        drop(next);
+    }
+    assert_eq!(context.test_shared_snapshot(), (6, 0, 0));
+    drop(first);
+    bounded(context.close()).await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_clients_keep_prefix_caches_and_durability_independent() {
+    use mount_rs_core::storage::BlockStore;
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let first = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "drive-one/blocks".into(),
+        false,
+        Box::new(memory_bundle),
+        None,
+    ))
+    .await
+    .unwrap();
+    let second = bounded(context.build_shared_test_with_prefix(
+        reusable_config(),
+        "drive-two/blocks".into(),
+        true,
+        Box::new(|| panic!("prefix and durability must not split the signed client key")),
+        None,
+    ))
+    .await
+    .unwrap();
+    assert!(!first.durable());
+    assert!(second.durable());
+    let id = first.put(b"one scoped immutable block").await.unwrap();
+    assert_eq!(first.get(&id).await.unwrap(), b"one scoped immutable block");
+    assert!(
+        second.get(&id).await.is_err(),
+        "one Drive must not read another prefix's cache entry"
+    );
+    assert_eq!(first.stats().cache_hits, 1);
+    assert_eq!(second.stats().cache_hits, 0);
+    assert_eq!(second.put(b"one scoped immutable block").await.unwrap(), id);
+    assert_eq!(
+        second.get(&id).await.unwrap(),
+        b"one scoped immutable block"
+    );
+    assert_eq!(first.stats().puts, 1);
+    assert_eq!(second.stats().puts, 1);
+    drop(first);
+    drop(second);
+    bounded(context.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_seal_during_initial_observer_registration_prevents_native_spawn() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let gate = Arc::new(Gate::default());
+    let observer = Arc::new(HeldObserver {
+        journal: RecordingObserver::default(),
+        gate: gate.clone(),
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let owner = context.clone();
+    let journal = observer.clone();
+    let opening = tokio::spawn(async move {
+        owner
+            .build_shared_test(
+                reusable_config(),
+                Box::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    memory_bundle()
+                }),
+                Some(&*journal),
+            )
+            .await
+    });
+    bounded(gate.entered.notified()).await;
+    context.seal_admission().unwrap();
+    let mut closing = Box::pin(context.close());
+    assert!(poll_once(closing.as_mut()).await.is_pending());
+    assert_eq!(context.test_shared_snapshot().1, 1);
+    gate.release();
+    failed(bounded(opening).await.unwrap(), ErrorCode::Estale);
+    bounded(closing).await.unwrap();
+    bounded(observer.journal.resource().close()).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_ready_hit_rechecks_seal_after_observer_registration() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    drop(
+        bounded(context.build_shared_test(reusable_config(), Box::new(memory_bundle), None))
+            .await
+            .unwrap(),
+    );
+    let gate = Arc::new(Gate::default());
+    let observer = Arc::new(HeldObserver {
+        journal: RecordingObserver::default(),
+        gate: gate.clone(),
+    });
+    let owner = context.clone();
+    let journal = observer.clone();
+    let opening = tokio::spawn(async move {
+        owner
+            .build_shared_test(
+                reusable_config(),
+                Box::new(|| panic!("ready hit rebuilt clients")),
+                Some(&*journal),
+            )
+            .await
+    });
+    bounded(gate.entered.notified()).await;
+    context.seal_admission().unwrap();
+    bounded(context.close()).await.unwrap();
+    gate.release();
+    failed(bounded(opening).await.unwrap(), ErrorCode::Estale);
+    bounded(observer.journal.resource().close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_lease_poison_wakes_close_waiting_on_release_and_retains_uncertainty() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    drop(
+        bounded(context.build_shared_test(reusable_config(), Box::new(memory_bundle), None))
+            .await
+            .unwrap(),
+    );
+    // Inject the valid releasing state to park at the exact lease notification
+    // boundary. Poison recovery must wake this existing close, not just return
+    // an error to the recovery caller.
+    let (lease, poison) = context.test_shared_lease_releasing(0);
+    let retained = lease.clone();
+    let (parked_tx, parked_rx) = oneshot::channel();
+    let closing = tokio::spawn(async move {
+        let mut close = Box::pin(retained.close());
+        let mut parked_tx = Some(parked_tx);
+        poll_fn(|cx| {
+            let result = close.as_mut().poll(cx);
+            if result.is_pending()
+                && let Some(signal) = parked_tx.take()
+            {
+                let _ = signal.send(());
+            }
+            result
+        })
+        .await
+    });
+    bounded(parked_rx).await.unwrap();
+    poison();
+    failed(bounded(closing).await.unwrap(), ErrorCode::Eio);
+    failed(bounded(lease.close()).await, ErrorCode::Eio);
+    failed(bounded(context.close()).await, ErrorCode::Eio);
+}
+
+#[tokio::test]
+async fn final_shared_context_drop_preserves_registry_poison_quarantine() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let held = HeldBundleFactory::new();
+    held.gate.release();
+    let observer = RecordingObserver::default();
+    drop(
+        bounded(context.build_shared_test(reusable_config(), held.factory(), Some(&observer)))
+            .await
+            .unwrap(),
+    );
+    let alive = context.test_owner_liveness();
+    let resource = observer.resource();
+    context.test_poison_registry();
+    // Do not call a context accessor after poison: final Drop must discover it.
+    drop(context);
+    assert!(!alive());
+    failed(bounded(resource.close()).await, ErrorCode::Eio);
+    held.assert_disposed();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn final_shared_context_drop_retains_unjoined_handle_without_owner_cycle() {
+    let context = RustFsConstructionContext::new(1).unwrap();
+    let held = HeldBundleFactory::new();
+    let observer = Arc::new(RecordingObserver::default());
+    let owner = context.clone();
+    let journal = observer.clone();
+    let factory = held.factory();
+    let opening = tokio::spawn(async move {
+        owner
+            .build_shared_test(reusable_config(), factory, Some(&*journal))
+            .await
+    });
+    held.entered().await;
+    cancel_build(opening).await;
+    let alive = context.test_owner_liveness();
+    let resource = observer.resource();
+    drop(observer);
+    drop(context);
+    assert!(
+        !alive(),
+        "retained shared ticket must not cycle to its context"
+    );
+    let mut closing = Box::pin(resource.close());
+    assert!(poll_once(closing.as_mut()).await.is_pending());
+    assert!(held.products.lock().unwrap().is_empty());
+    held.gate.release();
+    bounded(closing).await.unwrap();
+    held.assert_disposed();
+}
+
+#[tokio::test]
+async fn public_context_reuses_four_clients_across_independent_drive_facades() {
+    use mount_rs_core::storage::BlockStore;
+
+    let context = RustFsConstructionContext::new(2).unwrap();
+    let config = reusable_config();
+    let first = context
+        .block_store(
+            config.clone(),
+            "partition-one/drive-one/blocks".into(),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    let second = context
+        .block_store(config, "partition-two/drive-two/blocks".into(), true, None)
+        .await
+        .unwrap();
+    let one = first.qualification_clients.as_ref().unwrap();
+    let two = second.qualification_clients.as_ref().unwrap();
+    let shared = [
+        Arc::ptr_eq(&one.first_data, &two.first_data),
+        Arc::ptr_eq(&one.second_data, &two.second_data),
+        Arc::ptr_eq(&one.first_probe, &two.first_probe),
+        Arc::ptr_eq(&one.second_probe, &two.second_probe),
+    ];
+    let roles_independent = !Arc::ptr_eq(&one.first_data, &one.second_data)
+        && !Arc::ptr_eq(&one.first_probe, &one.second_probe)
+        && !Arc::ptr_eq(&one.first_data, &one.first_probe);
+    let scopes = (
+        first.prefix().to_owned(),
+        second.prefix().to_owned(),
+        first.durable(),
+        second.durable(),
+    );
+    drop(first);
+    drop(second);
+    context.close().await.unwrap();
+
+    assert!(
+        roles_independent,
+        "qualification roles must remain independently constructed"
+    );
+    assert_eq!(
+        scopes,
+        (
+            "partition-one/drive-one/blocks".to_owned(),
+            "partition-two/drive-two/blocks".to_owned(),
+            false,
+            true,
+        )
+    );
+    assert_eq!(
+        shared, [true; 4],
+        "one context must reuse its four configured clients across Drive facades"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MOUNT_RS_PROFILE_IO=1 and an isolated exact test process"]
+async fn public_context_builds_four_native_clients_for_two_scoped_opens() {
+    use mount_rs_core::diagnostics::object_store::{ClientRole, Observer};
+
+    // This invokes the existing public API and actual ReqwestConnector. No test
+    // constructor or mocked counter can turn eight native builds into four.
+    let observer = Observer::enabled();
+    let before = observer.snapshot().expect("set MOUNT_RS_PROFILE_IO=1");
+    let context = RustFsConstructionContext::new(2).unwrap();
+    let first = context
+        .block_store(reusable_config(), "drive-one/blocks".into(), false, None)
+        .await
+        .unwrap();
+    let second = context
+        .block_store(reusable_config(), "drive-two/blocks".into(), true, None)
+        .await
+        .unwrap();
+    let opened = observer.snapshot().unwrap();
+    drop(first);
+    drop(second);
+    let facades_released = observer.snapshot().unwrap();
+    context.close().await.unwrap();
+    let closed = observer.snapshot().unwrap();
+
+    // Facade and cache accounting retains its existing per-prefix meaning.
+    assert_eq!(opened.bundles.committed - before.bundles.committed, 2);
+    assert_eq!(opened.cache.created - before.cache.created, 2);
+    assert_eq!(facades_released.bundles.live, before.bundles.live);
+    assert_eq!(facades_released.cache.live, before.cache.live);
+    for role in [
+        ClientRole::PrimaryDataMixed,
+        ClientRole::QualificationData,
+        ClientRole::PrimaryProbeMixed,
+        ClientRole::QualificationProbe,
+    ] {
+        let prior = before.clients[role.index()];
+        let actual = opened.clients[role.index()];
+        assert_eq!(actual.build.started - prior.build.started, 1, "{role:?}");
+        assert_eq!(
+            actual.build.succeeded - prior.build.succeeded,
+            1,
+            "{role:?}"
+        );
+        assert_eq!(actual.constructed - prior.constructed, 1, "{role:?}");
+        assert_eq!(actual.build.failed, prior.build.failed, "{role:?}");
+        assert_eq!(actual.build.inflight, prior.build.inflight, "{role:?}");
+        assert_eq!(closed.clients[role.index()].live, prior.live, "{role:?}");
+        assert!(
+            actual
+                .http
+                .iter()
+                .zip(prior.http)
+                .all(|(after, before)| { after.attempts_started == before.attempts_started }),
+            "construction must issue no backing requests"
+        );
+    }
+    assert!(!closed.saturated);
 }

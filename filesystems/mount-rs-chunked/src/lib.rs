@@ -37,8 +37,8 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::compact::{
-    CompactInodeCapability, CompactSnapshot, CompactStructuralDelta, LoadedCompactInode,
-    PhysicalInodeIdentity, StructuralScope, ValidatedCompactStructure,
+    CompactInodeCapability, CompactRootFileCreate, CompactSnapshot, CompactStructuralDelta,
+    LoadedCompactInode, PhysicalInodeIdentity, StructuralScope, ValidatedCompactStructure,
 };
 use mount_rs_core::storage::{
     BlockExtent, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
@@ -2742,16 +2742,26 @@ where
     ) -> Result<(Arc<Namespace>, Entry)> {
         let _refresh = phase.phase(GatePhase::Refresh);
         for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
-            let structure_is_current = {
+            let fresh_root = if self.inner.options.compact_inode_updates {
                 let _profile = Span::new(Event::FilesystemRefreshPathStructure);
-                self.refresh_inode_structure_for_read().await?
+                let Some(root) = self.load_current_compact_root().await? else {
+                    continue;
+                };
+                Some(root)
+            } else {
+                let _profile = Span::new(Event::FilesystemRefreshPathStructure);
+                if !self.refresh_inode_structure_for_read().await? {
+                    continue;
+                }
+                None
             };
-            if !structure_is_current {
-                continue;
-            }
-            let (namespace, generation) = {
+            let (namespace, generation, revision) = {
                 let state = self.lock_state()?;
-                (Arc::clone(&state.namespace), state.persisted_revision)
+                (
+                    Arc::clone(&state.namespace),
+                    state.persisted_revision,
+                    state.revision,
+                )
             };
             let mut traversed = Vec::new();
             let entry = walk_traced(&namespace, path, follow, syscall, 0, Some(&mut traversed));
@@ -2759,8 +2769,46 @@ where
                 walk_traced(&namespace, extra, false, syscall, 0, Some(&mut traversed))
             });
 
+            // Keep the initial unconditional root check, including equal-token
+            // corruption detection. Only an ordinary root-child file lookup
+            // can reuse that exact body/identity; nested paths, symlinks and
+            // additional guarded paths retain their existing traversal checks.
+            let reuse_root = fresh_root.as_ref().filter(|root| {
+                extra_path.is_none()
+                    && traversed.len() == 2
+                    && entry.as_ref().is_ok_and(|entry| {
+                        entry.parent == namespace.root
+                            && entry.node.is_some_and(|inode| {
+                                namespace
+                                    .nodes
+                                    .get(&inode)
+                                    .is_some_and(|node| matches!(node.data, NodeData::File(_)))
+                            })
+                    })
+                    && root.generation == generation
+            });
+
             let mut retry = false;
             for inode in traversed {
+                if inode == namespace.root
+                    && let Some(root) = reuse_root
+                {
+                    let state = self.lock_state()?;
+                    if state.revision != revision
+                        || state.persisted_revision != generation
+                        || !Arc::ptr_eq(&state.namespace, &namespace)
+                        || state.namespace.nodes.get(&inode) != Some(&root.guard.node)
+                        || state
+                            .compact
+                            .as_ref()
+                            .and_then(|compact| compact.physical.get(&inode))
+                            != Some(&root.guard.identity)
+                    {
+                        retry = true;
+                        break;
+                    }
+                    continue;
+                }
                 let _profile = Span::new(Event::InodePathGuard);
                 let base_is_usable = namespace
                     .nodes
@@ -2953,9 +3001,7 @@ where
     async fn publish_compact_file_create(
         &self,
         revision: u64,
-        namespace: Namespace,
-        structure: ValidatedCompactStructure,
-        delta: CompactStructuralDelta,
+        proposal: CompactRootFileCreate,
     ) -> Result<()> {
         self.check_inode_runtime()?;
         if self.lock_state()?.revision != revision {
@@ -2972,7 +3018,12 @@ where
             .await
             .map_err(|error| self.fail_closed(error))?;
         let mut publication = PublicationGuard::new(&self.inner.state, &self.inner.failed);
-        let receipt = match self.inner.metadata.publish_compact_structure(&delta).await {
+        let receipt = match self
+            .inner
+            .metadata
+            .publish_compact_structure(proposal.delta())
+            .await
+        {
             Ok(receipt) => receipt,
             Err(error) if error.code == ErrorCode::Eagain => {
                 publication.disarm();
@@ -2980,8 +3031,8 @@ where
             }
             Err(error) => return Err(self.fail_closed(error)),
         };
-        let next_structure = delta
-            .validate_next_structure(&structure, &receipt, &namespace)
+        let next_structure = proposal
+            .validate_publication(&receipt)
             .map_err(|error| self.fail_closed(error))?;
         if !self.inner.metadata.publish_includes_flush_barrier() {
             self.inner
@@ -2996,6 +3047,27 @@ where
             if state.revision != revision {
                 return Err(FsError::new(ErrorCode::Estale));
             }
+            let next_revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            // The proposal never retained our Namespace Arc. Only a genuine
+            // reader of the old namespace makes this an O(N) copy-on-write.
+            let cloned_nodes = if Arc::strong_count(&state.namespace) > 1 {
+                state.namespace.nodes.len() as u64
+            } else {
+                0
+            };
+            {
+                let namespace = {
+                    let _clone = Span::new(Event::MutationCandidateCloneNodes).units(cloned_nodes);
+                    Arc::make_mut(&mut state.namespace)
+                };
+                namespace.next_inode = receipt.anchor.next_inode;
+                for (&inode, guard) in &receipt.upserts {
+                    namespace.nodes.insert(inode, guard.node.clone());
+                }
+            }
             let compact = state.compact.as_mut().ok_or_else(stale_inode_structure)?;
             for (&inode, guard) in &receipt.upserts {
                 compact.physical.insert(inode, guard.identity);
@@ -3005,11 +3077,7 @@ where
             for inode in receipt.upserts.keys() {
                 state.selected_inodes.remove(inode);
             }
-            state.namespace = Arc::new(namespace);
-            state.revision = state
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.revision = next_revision;
             state.persisted_revision = receipt.anchor.generation;
             // Untouched physical revisions are now projected at the new
             // generation. Selected reloads must derive logical tokens afresh.
@@ -5727,63 +5795,63 @@ where
             let Some(parent) = parent else {
                 continue;
             };
-            let (cached, revision, structure, expected_parent) = {
+            let (proposal, revision, inode) = {
                 let state = self.lock_state()?;
                 let compact = state.compact.as_ref().ok_or_else(stale_inode_structure)?;
-                (
-                    state.namespace.clone(),
-                    state.revision,
-                    compact.structure.clone(),
-                    *compact
-                        .physical
-                        .get(&state.namespace.root)
-                        .ok_or_else(stale_inode_structure)?,
-                )
-            };
-            let mut namespace = cached.as_ref().clone();
-            let entry = walk(&namespace, &path, false, "open", 0)?;
-            validate_open_guard(&namespace, &path, &entry, flags, guard)?;
-            if entry.node.is_some() {
-                return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
-            }
-            if entry.parent != namespace.root {
-                return Err(error_with_path(ErrorCode::Estale, "open", &entry.path));
-            }
-            let inode = namespace.next_inode;
-            namespace.next_inode = inode
-                .checked_add(1)
-                .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "open", &entry.path))?;
-            let mode = S_IFREG | (mode & !namespace.umask & 0o7777);
-            namespace.nodes.insert(
-                inode,
-                new_file_node(
+                let namespace = state.namespace.as_ref();
+                let anchor = compact.structure.anchor();
+                // This runtime namespace was installed together with its
+                // opaque Full-audited witness. Selected file overlays cannot
+                // alter these structural fields or the audited root body.
+                if namespace.format_version != NAMESPACE_FORMAT_VERSION
+                    || namespace.root != anchor.root
+                    || namespace.next_inode != anchor.next_inode
+                    || namespace.default_uid != anchor.default_uid
+                    || namespace.default_gid != anchor.default_gid
+                    || namespace.umask != anchor.umask
+                    || namespace.default_chunker != anchor.default_chunker
+                    || namespace.nodes.len() != anchor.members.len()
+                    || namespace.nodes.contains_key(&anchor.next_inode)
+                {
+                    drop(state);
+                    return Err(self.fail_closed(stale_inode_structure()));
+                }
+                let entry = walk(namespace, &path, false, "open", 0)?;
+                validate_open_guard(namespace, &path, &entry, flags, guard)?;
+                if entry.node.is_some() {
+                    return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
+                }
+                if entry.parent != namespace.root {
+                    return Err(error_with_path(ErrorCode::Estale, "open", &entry.path));
+                }
+                let inode = namespace.next_inode;
+                let mode = S_IFREG | (mode & !namespace.umask & 0o7777);
+                let created = new_file_node(
                     inode,
                     mode,
                     namespace.default_uid,
                     namespace.default_gid,
                     namespace.default_chunker.clone(),
-                ),
-            );
-            add_entry(
-                &mut namespace,
-                entry.parent,
-                entry.name,
-                inode,
-                "open",
-                &entry.path,
-                true,
-            )?;
-            let delta = CompactStructuralDelta::capture_file_create(
-                &structure,
-                &cached,
-                &parent,
-                expected_parent,
-                &namespace,
-            )?;
+                );
+                let mut parent_stats = parent.guard.node.stats.clone();
+                touch_modified(&mut parent_stats, true)?;
+                let proposal = CompactRootFileCreate::capture(
+                    &compact.structure,
+                    &parent,
+                    *compact
+                        .physical
+                        .get(&namespace.root)
+                        .ok_or_else(stale_inode_structure)?,
+                    entry.name,
+                    created,
+                    parent_stats.mtime_ms,
+                    parent_stats.ctime_ms,
+                )?;
+                (proposal, state.revision, inode)
+            };
             let result = {
                 let _publication = phase.phase(GatePhase::Publication);
-                self.publish_compact_file_create(revision, namespace, structure, delta)
-                    .await
+                self.publish_compact_file_create(revision, proposal).await
             };
             match result {
                 Ok(()) => return self.open_inode_handle(inode, path, flags),
@@ -11843,6 +11911,60 @@ mod compact_preparation_tests {
             handle.close().await.unwrap();
             peer.shutdown().await.unwrap();
             fs.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn targeted_create_mutates_unique_namespace_and_preserves_genuine_pinned_reader() {
+        block_on(async {
+            let volume = Volume::new();
+            let fs = volume.open("targeted-cow").await;
+            fs.write_file("/old", b"preserved bytes").await.unwrap();
+            let original_pointer = Arc::as_ptr(&fs.lock_state().unwrap().namespace);
+            let created = FsDriver::open(&fs, "/unique", "wx+", 0o600).await.unwrap();
+            assert_eq!(
+                Arc::as_ptr(&fs.lock_state().unwrap().namespace),
+                original_pointer,
+                "an unpinned namespace must not be cloned or replaced"
+            );
+            created.write(b"first body", Some(0)).await.unwrap();
+            created.close().await.unwrap();
+            let pinned = fs.lock_state().unwrap().namespace.clone();
+            let pinned_root = pinned.nodes[&pinned.root].clone();
+            let pinned_members: Vec<_> = pinned.nodes.keys().copied().collect();
+            let before = profile::snapshot();
+            let created = FsDriver::open(&fs, "/pinned", "wx+", 0o600).await.unwrap();
+            let delta = profile::snapshot().delta(&before).unwrap();
+            let clone_counter = delta
+                .entries
+                .iter()
+                .find(|entry| entry.name == "filesystem.mutation.candidate_clone_nodes");
+            if profile::enabled() {
+                assert_eq!(
+                    clone_counter.map(|entry| (entry.calls, entry.units)),
+                    Some((1, pinned_members.len() as u64)),
+                    "the actual pinned-reader clone must be counted"
+                );
+            }
+            assert_eq!(pinned.nodes[&pinned.root], pinned_root);
+            assert_eq!(
+                pinned.nodes.keys().copied().collect::<Vec<_>>(),
+                pinned_members
+            );
+            assert!(!Arc::ptr_eq(&pinned, &fs.lock_state().unwrap().namespace));
+            created.write(b"second body", Some(0)).await.unwrap();
+            created.close().await.unwrap();
+            drop(pinned);
+            fs.shutdown().await.unwrap();
+            oracle(
+                &volume,
+                &[
+                    ("/old", b"preserved bytes"),
+                    ("/unique", b"first body"),
+                    ("/pinned", b"second body"),
+                ],
+            )
+            .await;
         });
     }
 

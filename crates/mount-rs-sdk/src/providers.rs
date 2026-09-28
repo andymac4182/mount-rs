@@ -173,7 +173,8 @@ impl StorageContext {
         self.rustfs.seal_admission()
     }
 
-    /// Seal and join retained pure RustFS client builds.
+    /// Seal and join retained pure RustFS client builds and release the context's
+    /// cached signed clients. Prefix-specific provider facades remain independent.
     ///
     /// This does not close TiDB pools or acknowledge cleanup of an abandoned
     /// outer provider operation. Its construction journal remains authoritative.
@@ -2011,6 +2012,76 @@ mod rustfs_construction_async_tests {
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MOUNT_RS_PROFILE_IO=1 and an isolated exact test process"]
+    async fn public_context_fresh_inspections_reuse_four_native_rustfs_clients() {
+        use mount_rs_core::diagnostics::object_store::{ClientRole, Observer};
+
+        let observer = Observer::enabled();
+        let before = observer.snapshot().expect("set MOUNT_RS_PROFILE_IO=1");
+        let context = StorageContext::new(1).unwrap();
+        let first = config("http://127.0.0.1:1".into(), false);
+        let mut second = config("http://127.0.0.1:1".into(), true);
+        let StoreConfig::RustFs { prefix, .. } = &mut second else {
+            unreachable!()
+        };
+        *prefix = "another-drive/blocks".into();
+        // Each in-memory SQLite metadata provider recognizes a fresh noncompact
+        // layout. This public inspection opens/cleans up fresh providers without
+        // a persisted backing marker or any remote request.
+        let metadata = StoreConfig::Sqlite {
+            path: ":memory:".into(),
+        };
+        assert!(
+            context
+                .inspect_compact_layout(&metadata, &first)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            context
+                .inspect_compact_layout(&metadata, &second)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let inspected = observer.snapshot().unwrap();
+        context.close().await.unwrap();
+        let closed = observer.snapshot().unwrap();
+
+        assert_eq!(inspected.bundles.committed - before.bundles.committed, 2);
+        assert_eq!(inspected.bundles.live, before.bundles.live);
+        assert_eq!(inspected.cache.created - before.cache.created, 2);
+        assert_eq!(inspected.cache.live, before.cache.live);
+        for role in [
+            ClientRole::PrimaryDataMixed,
+            ClientRole::QualificationData,
+            ClientRole::PrimaryProbeMixed,
+            ClientRole::QualificationProbe,
+        ] {
+            let prior = before.clients[role.index()];
+            let actual = inspected.clients[role.index()];
+            assert_eq!(actual.build.started - prior.build.started, 1, "{role:?}");
+            assert_eq!(
+                actual.build.succeeded - prior.build.succeeded,
+                1,
+                "{role:?}"
+            );
+            assert_eq!(actual.constructed - prior.constructed, 1, "{role:?}");
+            assert_eq!(closed.clients[role.index()].live, prior.live, "{role:?}");
+            assert!(
+                actual
+                    .http
+                    .iter()
+                    .zip(prior.http)
+                    .all(|(after, before)| { after.attempts_started == before.attempts_started }),
+                "fresh unmarked inspection must issue no backing requests"
+            );
+        }
+        assert!(!closed.saturated);
     }
 
     #[tokio::test]

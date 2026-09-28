@@ -68,6 +68,8 @@ mod sqlite_runtime {
         submitted: Arc<Mutex<Vec<PhysicalInodeIdentity>>>,
         old_calls: Arc<AtomicU64>,
         selected_calls: Arc<AtomicU64>,
+        loaded_inodes: Arc<Mutex<Vec<u64>>>,
+        hold_before_load_inode_once: Arc<AtomicU64>,
         full_calls: Arc<AtomicU64>,
         snapshot_loads: Arc<AtomicU64>,
         structural_submissions: Arc<Mutex<Vec<CompactStructuralDelta>>>,
@@ -101,6 +103,8 @@ mod sqlite_runtime {
                 submitted: Arc::new(Mutex::new(Vec::new())),
                 old_calls: Arc::new(AtomicU64::new(0)),
                 selected_calls: Arc::new(AtomicU64::new(0)),
+                loaded_inodes: Arc::new(Mutex::new(Vec::new())),
+                hold_before_load_inode_once: Arc::new(AtomicU64::new(0)),
                 full_calls: Arc::new(AtomicU64::new(0)),
                 snapshot_loads: Arc::new(AtomicU64::new(0)),
                 structural_submissions: Arc::new(Mutex::new(Vec::new())),
@@ -188,6 +192,16 @@ mod sqlite_runtime {
             backing: ConcurrentBackingId,
             inode: u64,
         ) -> mount_rs_core::Result<LoadedCompactInode> {
+            self.loaded_inodes.lock().unwrap().push(inode);
+            if inode != 0
+                && self
+                    .hold_before_load_inode_once
+                    .compare_exchange(inode, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
+                self.load_entered.notify_one();
+                self.load_resume.notified().await;
+            }
             if let Some(snapshot) = self.modeled.lock().unwrap().as_ref() {
                 assert_eq!(snapshot.anchor.backing, backing);
                 return LoadedCompactInode::from_guard(
@@ -1395,6 +1409,292 @@ mod sqlite_runtime {
             assert_eq!(reader.read(&mut byte, Some(0)).await.unwrap(), 0);
             reader.close().await.unwrap();
             fs.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn root_child_read_cycle_reuses_one_exact_fresh_parent_witness() {
+        futures_lite::future::block_on(async {
+            let volume = Volume::new();
+            let setup = volume.open("root-witness-setup").await;
+            setup
+                .write_file("/file", b"the complete unchanged file")
+                .await
+                .unwrap();
+            let root = setup.stat("/").await.unwrap().ino;
+            let inode = setup.stat("/file").await.unwrap().ino;
+            setup.shutdown().await.unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("root-witness", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            recorder.loaded_inodes.lock().unwrap().clear();
+            let handle = FsDriver::open(&fs, "/file", "r+", 0).await.unwrap();
+            let mut bytes = [0; 64];
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], b"the complete unchanged file");
+            handle.close().await.unwrap();
+            let loaded = recorder.loaded_inodes.lock().unwrap().clone();
+            fs.shutdown().await.unwrap();
+            let fresh = volume.open("root-witness-fresh").await;
+            assert_eq!(fresh.stat("/file").await.unwrap().ino, inode);
+            let handle = fresh.open("/file", "r", 0).await.unwrap();
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], b"the complete unchanged file");
+            handle.close().await.unwrap();
+            fresh.shutdown().await.unwrap();
+            assert_eq!(
+                loaded,
+                vec![root, inode, inode, inode],
+                "one exact root check at open and the selected file checks at open/before/after read"
+            );
+        });
+    }
+
+    #[test]
+    fn root_child_open_keeps_initial_equal_token_parent_corruption_check() {
+        futures_lite::future::block_on(async {
+            let volume = Volume::new();
+            let setup = volume.open("root-corruption-setup").await;
+            setup
+                .write_file("/file", b"unchanged authority")
+                .await
+                .unwrap();
+            let root = setup.stat("/").await.unwrap().ino;
+            setup.shutdown().await.unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("root-corruption", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            recorder.loaded_inodes.lock().unwrap().clear();
+            recorder.corrupt_parent_body.store(true, Ordering::SeqCst);
+            assert!(FsDriver::open(&fs, "/file", "r+", 0).await.is_err());
+            assert!(fs.failed());
+            let loaded = recorder.loaded_inodes.lock().unwrap().clone();
+            let _ = fs.shutdown().await;
+            let fresh = volume.open("root-corruption-fresh").await;
+            let handle = fresh.open("/file", "r", 0).await.unwrap();
+            let mut bytes = [0; 64];
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], b"unchanged authority");
+            handle.close().await.unwrap();
+            fresh.shutdown().await.unwrap();
+            assert_eq!(
+                loaded,
+                vec![root],
+                "corruption must fail at the first root check"
+            );
+        });
+    }
+
+    #[test]
+    fn root_child_open_recaptures_after_root_to_leaf_generation_and_path_replacement() {
+        futures_lite::future::block_on(futures_lite::future::race(
+            async {
+                let volume = Volume::new();
+                let setup = volume.open("root-leaf-race-setup").await;
+                setup.write_file("/file", b"old inode bytes").await.unwrap();
+                let old_inode = setup.stat("/file").await.unwrap().ino;
+                setup.shutdown().await.unwrap();
+                let recorder = RecordingMetadata::new(volume.metadata());
+                let fs = ChunkedFs::open(
+                    recorder.clone(),
+                    volume.blocks(),
+                    ChunkedOptions::fixed("root-leaf-race", 16)
+                        .unwrap()
+                        .with_compact_inode_updates(true),
+                )
+                .await
+                .unwrap();
+                let peer = volume.open("root-leaf-race-peer").await;
+                let before = recorder.snapshot_loads.load(Ordering::SeqCst);
+                recorder
+                    .hold_before_load_inode_once
+                    .store(old_inode, Ordering::SeqCst);
+                let (handle, replacement_inode) = futures_lite::future::zip(
+                    async { FsDriver::open(&fs, "/file", "r+", 0).await },
+                    async {
+                        recorder.load_entered.notified().await;
+                        peer.rename("/file", "/moved").await.unwrap();
+                        peer.write_file("/file", b"replacement inode bytes")
+                            .await
+                            .unwrap();
+                        let inode = peer.stat("/file").await.unwrap().ino;
+                        recorder.load_resume.notify_one();
+                        inode
+                    },
+                )
+                .await;
+                let handle = handle.unwrap();
+                assert_ne!(replacement_inode, old_inode);
+                assert_eq!(handle.stat().await.unwrap().ino, replacement_inode);
+                let mut bytes = [0; 64];
+                let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+                assert_eq!(&bytes[..count], b"replacement inode bytes");
+                handle.close().await.unwrap();
+                assert_eq!(recorder.snapshot_loads.load(Ordering::SeqCst) - before, 1);
+                assert!(!fs.failed());
+                peer.shutdown().await.unwrap();
+                fs.shutdown().await.unwrap();
+                let fresh = volume.open("root-leaf-race-fresh").await;
+                for (path, inode, expected) in [
+                    (
+                        "/file",
+                        replacement_inode,
+                        b"replacement inode bytes".as_slice(),
+                    ),
+                    ("/moved", old_inode, b"old inode bytes".as_slice()),
+                ] {
+                    let handle = fresh.open(path, "r", 0).await.unwrap();
+                    assert_eq!(handle.stat().await.unwrap().ino, inode);
+                    let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+                    assert_eq!(&bytes[..count], expected);
+                    handle.close().await.unwrap();
+                }
+                fresh.shutdown().await.unwrap();
+            },
+            async {
+                async_io::Timer::after(Duration::from_secs(10)).await;
+                panic!("root-to-leaf replacement must settle without losing its wakeup");
+            },
+        ));
+    }
+
+    #[test]
+    #[ignore = "run alone with MOUNT_RS_PROFILE_IO=1 and --test-threads=1"]
+    fn targeted_create_capture_visits_only_affected_bodies_at_128_and_1000_siblings() {
+        use mount_rs_core::diagnostics::profile;
+        assert!(profile::enabled(), "start with MOUNT_RS_PROFILE_IO=1");
+        futures_lite::future::block_on(async {
+            let mut observations = Vec::new();
+            for siblings in [128, 1000] {
+                let volume = Volume::new();
+                let setup = volume.open("capture-work-setup").await;
+                let mut files = Vec::new();
+                for index in 0..siblings {
+                    let path = format!("/sibling-{index}");
+                    let expected = format!("payload-{index}").into_bytes();
+                    let handle = FsDriver::open(&setup, &path, "wx+", 0o600).await.unwrap();
+                    let inode = handle.stat().await.unwrap().ino;
+                    handle.write(&expected, Some(0)).await.unwrap();
+                    handle.close().await.unwrap();
+                    files.push((path, inode, expected));
+                }
+                setup.shutdown().await.unwrap();
+                let metadata = volume.metadata();
+                let backing = metadata
+                    .compact_inode_mode_state()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .backing;
+                let original = metadata.load_compact_snapshot(backing).await.unwrap();
+                let recorder = RecordingMetadata::new(volume.metadata());
+                let fs = ChunkedFs::open(
+                    recorder.clone(),
+                    volume.blocks(),
+                    ChunkedOptions::fixed("capture-work", 16)
+                        .unwrap()
+                        .with_compact_inode_updates(true),
+                )
+                .await
+                .unwrap();
+                let before_loads = recorder.snapshot_loads.load(Ordering::SeqCst);
+                let before = profile::snapshot();
+                let created = FsDriver::open(&fs, "/created", "wx+", 0o600).await.unwrap();
+                let delta = profile::snapshot().delta(&before).unwrap();
+                let capture = delta
+                    .entries
+                    .iter()
+                    .find(|e| e.name == "compact.structure.delta_capture_nodes");
+                let guard = delta
+                    .entries
+                    .iter()
+                    .find(|e| e.name == "compact.structure.expected_guard_nodes");
+                let clones = delta
+                    .entries
+                    .iter()
+                    .find(|e| e.name == "filesystem.mutation.candidate_clone_nodes");
+                let observed = (
+                    siblings,
+                    capture.map(|e| (e.calls, e.units)),
+                    guard.map(|e| (e.calls, e.units)),
+                    clones.map(|e| (e.calls, e.units)),
+                    recorder.snapshot_loads.load(Ordering::SeqCst) - before_loads,
+                );
+                let inode = created.stat().await.unwrap().ino;
+                created.write(b"new payload", Some(0)).await.unwrap();
+                created.close().await.unwrap();
+                files.push(("/created".into(), inode, b"new payload".to_vec()));
+                fs.shutdown().await.unwrap();
+                let snapshot = metadata.load_compact_snapshot(backing).await.unwrap();
+                let namespace = snapshot.namespace().unwrap();
+                assert_eq!(snapshot.guards.len(), siblings + 2);
+                let NodeData::Directory { entries } = &namespace.nodes[&namespace.root].data else {
+                    panic!("fresh root is not a directory")
+                };
+                let expected_entries: Vec<_> = files
+                    .iter()
+                    .map(|(path, inode, _)| mount_rs_core::storage::DirectoryEntry {
+                        name: path[1..].into(),
+                        inode: *inode,
+                    })
+                    .collect();
+                assert_eq!(
+                    entries, &expected_entries,
+                    "fresh insertion order at {siblings} siblings"
+                );
+                for (_, inode, _) in files.iter().take(siblings) {
+                    assert_eq!(
+                        snapshot.guards[inode], original.guards[inode],
+                        "untouched physical/body pair changed"
+                    );
+                }
+                let fresh = volume.open("capture-work-fresh").await;
+                for (path, inode, expected) in files {
+                    let handle = fresh.open(&path, "r", 0).await.unwrap();
+                    assert_eq!(handle.stat().await.unwrap().ino, inode);
+                    let mut bytes = vec![0; expected.len() + 1];
+                    let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+                    assert_eq!(&bytes[..count], expected);
+                    handle.close().await.unwrap();
+                }
+                fresh.shutdown().await.unwrap();
+                observations.push(observed);
+            }
+            for (siblings, capture, guard, clones, full_loads) in observations {
+                assert_eq!(
+                    full_loads, 0,
+                    "clean targeted create recaptured Full at {siblings} siblings"
+                );
+                assert_eq!(
+                    guard,
+                    Some((1, 1)),
+                    "one affected parent guard must be observed"
+                );
+                assert_eq!(
+                    capture,
+                    Some((1, 2)),
+                    "create capture visited unrelated bodies at {siblings} siblings"
+                );
+                assert_eq!(
+                    clones,
+                    Some((1, 0)),
+                    "a clean create must observe its install without cloning unrelated namespace nodes"
+                );
+            }
         });
     }
 
