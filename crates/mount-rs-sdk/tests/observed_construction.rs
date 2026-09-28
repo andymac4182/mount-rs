@@ -4,13 +4,23 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use mount_rs_core::construction::ConstructionObserver;
-use mount_rs_core::storage::{BlockStore, MetadataStore};
+use mount_rs_core::storage::BlockStore;
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+use mount_rs_core::storage::MetadataStore;
 use mount_rs_core::{ErrorCode, FsError, Result};
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+use mount_rs_sdk::StorageContext;
 use mount_rs_sdk::{
     BlockStoreDecorator, ConstructionJournal, Filesystem, HostOptions, MemoryOptions, SplitOptions,
-    StorageContext, StoreConfig,
+    StoreConfig,
 };
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    all(target_os = "linux", target_env = "gnu")
+))]
 use rusqlite::Connection;
 
 struct Fixture(PathBuf);
@@ -47,6 +57,42 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+// Keep native fixture files if cleanup or ownership release is unacknowledged.
+#[cfg(windows)]
+struct WindowsRefusalFixture {
+    fixture: Option<Fixture>,
+    cleanup_acknowledged: bool,
+}
+
+#[cfg(windows)]
+impl WindowsRefusalFixture {
+    fn new() -> Self {
+        Self {
+            fixture: Some(Fixture::new()),
+            cleanup_acknowledged: false,
+        }
+    }
+
+    fn fixture(&self) -> &Fixture {
+        self.fixture.as_ref().unwrap()
+    }
+
+    fn acknowledge_cleanup(&mut self) {
+        self.cleanup_acknowledged = true;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsRefusalFixture {
+    fn drop(&mut self) {
+        if !self.cleanup_acknowledged
+            && let Some(fixture) = self.fixture.take()
+        {
+            std::mem::forget(fixture);
+        }
     }
 }
 
@@ -151,6 +197,7 @@ async fn decorator_failure_keeps_real_block_owner_until_owned_cleanup() {
     );
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 #[tokio::test]
 async fn observed_handoff_retains_actual_owner_and_persisted_compact_backing() {
     let fixture = Fixture::new();
@@ -240,6 +287,7 @@ async fn eviction_qualification_rejects_volatile_and_noncompact_owners() {
     drop(volatile);
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 #[tokio::test]
 async fn observed_failed_publication_rejects_provider_shutdown_and_preserves_old_bytes() {
     let fixture = Fixture::new();
@@ -303,6 +351,7 @@ async fn observed_failed_publication_rejects_provider_shutdown_and_preserves_old
     drop((fresh, filesystem));
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 #[tokio::test]
 async fn retained_unobserved_split_resource_rejects_failed_authority() {
     let fixture = Fixture::new();
@@ -355,6 +404,119 @@ async fn retained_unobserved_split_resource_rejects_failed_authority() {
     full_bytes(&fresh, "/acknowledged", &original).await;
     fresh.shutdown().await.unwrap();
     drop((fresh, filesystem));
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn observed_compact_sqlite_refusal_retains_owners_until_cleanup_without_publication() {
+    let mut fixture = WindowsRefusalFixture::new();
+    let captured = CaptureBlocks::default();
+    let journal = ConstructionJournal::new();
+    let attempt = journal.begin().unwrap();
+    let result = Filesystem::split_with_construction_observer(
+        fixture.fixture().options(true),
+        None,
+        Some(&captured),
+        &journal,
+    )
+    .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(filesystem) => {
+            attempt.handoff().unwrap();
+            filesystem.shutdown().await.unwrap();
+            drop(filesystem);
+            assert!(!captured.alive());
+            fixture.acknowledge_cleanup();
+            panic!("unsupported Windows compact SQLite construction unexpectedly succeeded");
+        }
+    };
+    let before_cleanup = journal.snapshot();
+    let owner_alive_before_cleanup = captured.alive();
+    attempt.fail();
+    let cleanup = journal.close().await;
+    let after_cleanup = journal.snapshot();
+    let owner_alive_after_cleanup = captured.alive();
+
+    // Settle owned cleanup before asserting the refusal or opening inspections.
+    cleanup.unwrap();
+    assert!(after_cleanup.cleanup_complete);
+    assert!(!after_cleanup.uncertain);
+    assert_eq!(after_cleanup.retained_resources, 0);
+    assert!(!owner_alive_after_cleanup);
+    fixture.acknowledge_cleanup();
+    assert_eq!(error.code, ErrorCode::Enotsup);
+    assert!(before_cleanup.opening);
+    assert!(!before_cleanup.uncertain);
+    assert_eq!(before_cleanup.retained_resources, 2);
+    assert!(owner_alive_before_cleanup);
+
+    // Constructors create schemas; unsupported compact mode must not publish
+    // metadata, claim block authority, or write content. Read-only connections
+    // inspect those existing databases after the actual owners are released.
+    let metadata = Connection::open_with_flags(
+        fixture.fixture().0.join("metadata.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let blocks = Connection::open_with_flags(
+        fixture.fixture().0.join("blocks.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let stored_metadata: (
+        i64,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = metadata
+        .query_row(
+            "SELECT revision, namespace, owner, fence, expires, write_mode, backing_id
+             FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    let compact_rows: i64 = metadata
+        .query_row("SELECT count(*) FROM mount_rs_compact_guards", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let inode_rows: i64 = metadata
+        .query_row("SELECT count(*) FROM mount_rs_inode_guards", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let block_authority_rows: i64 = blocks
+        .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let content_rows: i64 = blocks
+        .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+        .unwrap();
+    let metadata_closed = metadata.close().map_err(|(_, error)| error);
+    let blocks_closed = blocks.close().map_err(|(_, error)| error);
+    metadata_closed.unwrap();
+    blocks_closed.unwrap();
+    assert_eq!(stored_metadata, (0, None, None, 0, 0, None, None));
+    assert_eq!(compact_rows, 0);
+    assert_eq!(inode_rows, 0);
+    assert_eq!(block_authority_rows, 0);
+    assert_eq!(content_rows, 0);
 }
 
 #[tokio::test]

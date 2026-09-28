@@ -767,7 +767,11 @@ mod tests {
             "blocks":{"kind":"sqlite", "path":"blocks.db", "journal_mode":"wal"}
         }});
         resolve_catalog_driver(&mut value, Path::new("/tmp/catalog")).unwrap();
-        assert_eq!(value["storage"]["metadata"]["path"], "/tmp/catalog/meta.db");
+        let expected_metadata_path = Path::new("/tmp/catalog").join("meta.db");
+        assert_eq!(
+            value["storage"]["metadata"]["path"],
+            expected_metadata_path.to_string_lossy().as_ref()
+        );
         let parsed = parse_config_str(
             &serde_json::json!({"version":1,"driver":value}).to_string(),
             Path::new("/tmp/catalog"),

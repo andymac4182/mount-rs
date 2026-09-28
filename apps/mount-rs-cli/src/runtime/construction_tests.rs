@@ -1,6 +1,11 @@
 //! Actual CLI filesystem ownership across construction and postconfiguration.
 
 use super::*;
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    all(target_os = "linux", target_env = "gnu")
+))]
 use crate::config::SplitStorageConfig;
 use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_sdk::ConstructionJournal;
@@ -69,6 +74,11 @@ fn sqlite_plan(root: &Path, uid: u32, gid: u32, read_only: bool) -> DriverRuntim
     .unwrap()
 }
 
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    all(target_os = "linux", target_env = "gnu")
+))]
 fn compact_plan(root: &Path) -> DriverRuntimePlan {
     let options = CliOptions {
         driver: DriverChoice::SplitStore,
@@ -210,6 +220,7 @@ async fn observed_sqlite_postconfiguration_failure_retains_actual_owner_until_jo
     reopened.shutdown().await.unwrap();
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 #[tokio::test]
 async fn observed_compact_split_registers_sdk_group_authority_and_actual_filesystem_before_handoff()
 {
@@ -258,6 +269,125 @@ async fn observed_compact_split_registers_sdk_group_authority_and_actual_filesys
     let root_stat = reopened.driver().stat("/").await.unwrap();
     assert_eq!((root_stat.uid, root_stat.gid), (111, 222));
     reopened.shutdown().await.unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_invalid_compact_options_fail_before_provider_open() {
+    let root = ProtectedFixture::new();
+    let mut plan = compact_plan(root.path());
+    let PreparedDriver::Split(split) = &mut plan.driver else {
+        unreachable!("the fixture prepares a split filesystem");
+    };
+    split.inode_updates = false;
+    let journal = ConstructionJournal::new();
+    let observer = RecordingObserver::new(journal.clone());
+    let attempt = journal.begin().unwrap();
+    let error = match plan
+        .open_with_construction_observer(None, None, &observer)
+        .await
+    {
+        Ok(_) => panic!("contradictory compact options must fail before provider open"),
+        Err(error) => error,
+    };
+    assert_eq!(error.exit_code(), 1);
+    assert!(
+        error.to_string().contains(
+            "compact_inode_updates requires shared write-through inode updates without checkout"
+        ),
+        "{error}"
+    );
+    assert!(observer.registrations().is_empty());
+    assert_eq!(journal.snapshot().retained_resources, 0);
+    assert!(!root.path().join("metadata.db").exists());
+    assert!(!root.path().join("blocks.db").exists());
+    attempt.fail();
+    journal.close().await.unwrap();
+    assert!(journal.snapshot().cleanup_complete);
+    assert!(!journal.snapshot().uncertain);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_compact_refusal_retains_owners_until_cleanup_without_publication() {
+    let root = ProtectedFixture::new();
+    let plan = compact_plan(root.path());
+    let journal = ConstructionJournal::new();
+    let observer = RecordingObserver::new(journal.clone());
+    let attempt = journal.begin().unwrap();
+    let error = match plan
+        .open_with_construction_observer(None, None, &observer)
+        .await
+    {
+        Ok(_) => panic!("Windows SQLite compact capability must refuse construction"),
+        Err(error) => error,
+    };
+    assert_eq!(error.exit_code(), 1);
+    assert_eq!(
+        error.to_string(),
+        FsError::new(ErrorCode::Enotsup).to_string()
+    );
+    let retained = observer.registrations();
+    assert_eq!(
+        retained.len(),
+        2,
+        "SDK provider group and pre-publication authority, without a filesystem"
+    );
+    assert!(retained.iter().all(|owner| owner.upgrade().is_some()));
+    assert_eq!(journal.snapshot().retained_resources, 2);
+    assert!(!journal.snapshot().cleanup_complete);
+    assert!(!journal.snapshot().uncertain);
+    attempt.fail();
+    journal.close().await.unwrap();
+    assert!(journal.snapshot().cleanup_complete);
+    assert_eq!(journal.snapshot().retained_resources, 0);
+    assert!(!journal.snapshot().uncertain);
+    assert!(retained.iter().all(|owner| owner.upgrade().is_none()));
+
+    // Schema initialization may create the databases. Fresh read-only owners
+    // prove refusal did not publish a namespace or claim backing authority.
+    let metadata = rusqlite::Connection::open_with_flags(
+        root.path().join("metadata.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let unpublished: bool = metadata
+        .query_row(
+            "SELECT revision=0 AND namespace IS NULL AND write_mode IS NULL
+                AND backing_id IS NULL AND owner IS NULL AND fence=0 AND expires=0
+                AND physical_dev IS NULL AND physical_ino IS NULL AND physical_path IS NULL
+             FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        unpublished,
+        "refused construction changed metadata authority"
+    );
+    for table in ["mount_rs_inode_guards", "mount_rs_compact_guards"] {
+        let count: i64 = metadata
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "refused construction populated {table}");
+    }
+    metadata.close().unwrap();
+    let blocks = rusqlite::Connection::open_with_flags(
+        root.path().join("blocks.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    for table in ["mount_rs_blocks", "mount_rs_block_authority"] {
+        let count: i64 = blocks
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "refused construction populated {table}");
+    }
+    blocks.close().unwrap();
 }
 
 #[tokio::test]
