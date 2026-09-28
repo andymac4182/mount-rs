@@ -10,6 +10,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use mount_rs_auto::{AutoMount, AutoMountError, AutoMountOptions, AutoTransport};
+use mount_rs_core::construction::ConstructionObserver;
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, Loopback, Result as FsResult};
 use mount_rs_http::{
@@ -33,6 +34,10 @@ use crate::parser::{
 };
 use crate::stale::{stale_command_line, unmount_stale};
 use crate::watch::{WatchOptions, watch_driver};
+
+#[cfg(test)]
+#[path = "runtime/construction_tests.rs"]
+mod construction_tests;
 
 #[derive(Debug, Clone)]
 pub struct CliError {
@@ -149,7 +154,7 @@ impl From<FsError> for CliError {
 
 #[derive(Clone)]
 pub(crate) struct DriverRuntime {
-    filesystem: Filesystem,
+    filesystem: Arc<Filesystem>,
     driver: Arc<dyn FsDriver>,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
@@ -157,8 +162,8 @@ pub(crate) struct DriverRuntime {
 
 /// An owned construction choice that can be reopened without resolving CLI
 /// environment references, local paths, owner defaults or process identity.
-/// Preparation opens no providers. Opening still has the SDK's existing
-/// partial-construction cleanup contract, including postconfiguration errors.
+/// Preparation opens no providers. The observer-aware entrypoint lets the
+/// caller retain construction owners across errors after opening.
 ///
 /// AWS S3 remains a specific exception: the provider calls `from_env` on each
 /// open, so its endpoint and credential-source choices are not frozen here.
@@ -263,29 +268,81 @@ impl DriverRuntimePlan {
         decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
         context: Option<&mount_rs_sdk::StorageContext>,
     ) -> Result<DriverRuntime, CliError> {
+        self.open_impl(decorator, context, None).await
+    }
+
+    /// Open with the application's construction observer. The caller must own
+    /// its journal and attempt before polling this future. After an acknowledged
+    /// error it seals the attempt and awaits journal-owned cleanup; after success
+    /// it retains the returned runtime while handing off the attempt. Dropping
+    /// the future leaves the journal uncertain. This method creates no worker
+    /// or admission fence independent of cancellation.
+    ///
+    /// Split construction forwards this observer to the SDK for provider and
+    /// authority ownership. Snapshot SQLite can register its actual filesystem
+    /// only after its native constructor returns, before root postconfiguration
+    /// awaits. The SDK's SlateDB dependency also has a pre-return interval that
+    /// this journal does not cover.
+    #[allow(dead_code)] // The lifecycle caller is activated in a later phase.
+    pub(crate) async fn open_with_construction_observer(
+        &self,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: Option<&mount_rs_sdk::StorageContext>,
+        observer: &dyn ConstructionObserver,
+    ) -> Result<DriverRuntime, CliError> {
+        self.open_impl(decorator, context, Some(observer)).await
+    }
+
+    async fn open_impl(
+        &self,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: Option<&mount_rs_sdk::StorageContext>,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<DriverRuntime, CliError> {
         let filesystem = match &self.driver {
             PreparedDriver::Memory(options) => Filesystem::memory(*options),
             PreparedDriver::Host { root, options } => Filesystem::host(root, *options),
             PreparedDriver::Sqlite { database, .. } => Filesystem::sqlite(database).await?,
-            PreparedDriver::Split(split) => match (context, decorator) {
-                (Some(context), Some(decorator)) => {
-                    Filesystem::split_with_context_and_block_decorator(
+            PreparedDriver::Split(split) => {
+                if let Some(observer) = observer {
+                    Filesystem::split_with_construction_observer(
                         split.as_ref().clone(),
                         context,
                         decorator,
+                        observer,
                     )
                     .await?
+                } else {
+                    match (context, decorator) {
+                        (Some(context), Some(decorator)) => {
+                            Filesystem::split_with_context_and_block_decorator(
+                                split.as_ref().clone(),
+                                context,
+                                decorator,
+                            )
+                            .await?
+                        }
+                        (Some(context), None) => {
+                            Filesystem::split_with_context(split.as_ref().clone(), context).await?
+                        }
+                        (None, Some(decorator)) => {
+                            Filesystem::split_with_block_decorator(
+                                split.as_ref().clone(),
+                                decorator,
+                            )
+                            .await?
+                        }
+                        (None, None) => Filesystem::split(split.as_ref().clone()).await?,
+                    }
                 }
-                (Some(context), None) => {
-                    Filesystem::split_with_context(split.as_ref().clone(), context).await?
-                }
-                (None, Some(decorator)) => {
-                    Filesystem::split_with_block_decorator(split.as_ref().clone(), decorator)
-                        .await?
-                }
-                (None, None) => Filesystem::split(split.as_ref().clone()).await?,
-            },
+            }
         };
+        let filesystem = Arc::new(filesystem);
+        if let Some(observer) = observer {
+            // The journal takes the actual SDK owner synchronously, before
+            // telemetry wrapping or SQLite root stat/chown can await or fail.
+            observer.retain(filesystem.clone());
+        }
         let driver = {
             #[cfg(feature = "observability")]
             {
@@ -340,6 +397,23 @@ impl DriverRuntime {
     ) -> Result<Self, CliError> {
         Self::prepare(options, uid, gid)?
             .open_with_storage_context(decorator, context)
+            .await
+    }
+
+    /// Prepare options, then open with an application-owned construction
+    /// observer. The caller must begin and settle its journal attempt; this
+    /// convenience entrypoint does not own cleanup or cancellation.
+    #[allow(dead_code)] // The lifecycle caller is activated in a later phase.
+    pub(crate) async fn open_with_construction_observer(
+        options: &CliOptions,
+        uid: u32,
+        gid: u32,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: Option<&mount_rs_sdk::StorageContext>,
+        observer: &dyn ConstructionObserver,
+    ) -> Result<Self, CliError> {
+        Self::prepare(options, uid, gid)?
+            .open_with_construction_observer(decorator, context, observer)
             .await
     }
 
