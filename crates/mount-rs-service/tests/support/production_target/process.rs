@@ -288,13 +288,36 @@ impl Fleet {
         self.project_resources_with(progress, |progress, owner, root| {
             progress.resource(owner, || read_resource_file(&root.join("resources.json")))
         });
+        self.project_checkpoints_with(progress, |progress, owner, root| {
+            progress.checkpoint(owner, || {
+                super::checkpoints::read_latest(&root.join("checkpoint-latest.json"))
+            });
+        });
+    }
+    fn project_checkpoints_with(
+        &self,
+        progress: &mut super::progress::Progress,
+        mut project: impl FnMut(&mut super::progress::Progress, super::progress::ResourceOwner, &Path),
+    ) {
         for child in &self.children {
             if self.resource_expected[child.server] && !child.reaped {
-                progress.checkpoint(self.resource_owner(child), || {
-                    super::checkpoints::read_latest(&child.root.join("checkpoint-latest.json"))
-                });
+                project(progress, self.checkpoint_owner(child), &child.root);
             }
         }
+    }
+    fn checkpoint_owner(&self, child: &OwnedChild) -> super::progress::ResourceOwner {
+        let mut owner = self.resource_owner(child);
+        if owner.generation_context.is_none() {
+            // Fleet::ready retains validated receipts independently of the
+            // throttled startup emission that owns legacy resource context.
+            owner.generation_context = child.ready.as_ref().and_then(|ready| {
+                (ready.pid == child.child.id()
+                    && ready.server == child.server
+                    && Some(ready.generation) == self.resource_generation)
+                    .then_some(ready.generation)
+            });
+        }
+        owner
     }
     fn resource_owner(&self, child: &OwnedChild) -> super::progress::ResourceOwner {
         let context = self.resource_generation_seen[child.server]
@@ -524,6 +547,97 @@ fn read_resource_file(path: &Path) -> Result<Option<Value>, String> {
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|_| "resource receipt invalid".into())
+}
+#[test]
+fn checkpoint_projection_uses_matching_ready_before_startup_emission() {
+    let root = tempfile::tempdir().unwrap();
+    let child = Command::new("/bin/sh")
+        .args(["-c", "read ignored || true"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let mut fleet = Fleet::new();
+    fleet.children.push(OwnedChild {
+        child,
+        server: 0,
+        ready: None,
+        exited: None,
+        reaped: false,
+        signal: None,
+        forced: false,
+        root: root.path().to_owned(),
+    });
+    let mut progress = super::progress::Progress::disabled();
+    let mut records = Vec::new();
+    let mut capture = |label, fleet: &Fleet| {
+        fleet.project_checkpoints_with(&mut progress, |_, owner, path| {
+            records.push((
+                label,
+                owner.pid,
+                owner.worker,
+                owner.generation_context,
+                path == root.path(),
+            ));
+        });
+    };
+    capture("unconfigured", &fleet);
+    fleet.resource_expected[0] = true;
+    fleet.resource_generation = Some(0);
+    // Model a fast Ready receipt already retained by Fleet::ready while the
+    // independent startup progress throttle has not emitted any generation.
+    fleet.startup_next = Some(Instant::now() + Duration::from_secs(5));
+    capture("missing_ready", &fleet);
+    let mut ready = example_ready();
+    ready.pid = pid;
+    ready.resources = super::resources::example_sample(pid);
+    fleet.children[0].ready = Some(ready.clone());
+    capture("ready_g0", &fleet);
+    let legacy_g0 = fleet.resource_owner(&fleet.children[0]).generation_context;
+    fleet.resource_generation = Some(1);
+    capture("old_ready_after_reopen", &fleet);
+    ready.generation = 1;
+    ready.runtime_activation = super::metrics::example_runtime(1, 10);
+    fleet.children[0].ready = Some(ready.clone());
+    capture("ready_g1", &fleet);
+    let legacy_g1 = fleet.resource_owner(&fleet.children[0]).generation_context;
+    fleet.children[0].ready.as_mut().unwrap().pid = pid.wrapping_add(1);
+    capture("foreign_pid", &fleet);
+    fleet.children[0].ready = Some(ready.clone());
+    fleet.children[0].ready.as_mut().unwrap().server = 1;
+    capture("foreign_server", &fleet);
+    fleet.children[0].ready = Some(ready);
+    fleet.resource_generation = None;
+    capture("no_requested_generation", &fleet);
+    fleet.resource_generation = Some(1);
+    fleet.resource_generation_seen[0] = Some(1);
+    fleet.children[0].ready = None;
+    capture("startup_context", &fleet);
+    let startup_accounting = (fleet.startup_seen[0], fleet.resource_generation_seen[0]);
+    // Always settle the actual owned child before the expected RED assertion.
+    fleet.children[0].child.stdin.take();
+    let status = fleet.children[0].child.wait().unwrap();
+    fleet.children[0].record_status(status);
+    capture("reaped", &fleet);
+    assert!(fleet.children[0].reaped);
+    assert_eq!(legacy_g0, None);
+    assert_eq!(legacy_g1, None);
+    assert_eq!(startup_accounting, (None, Some(1)));
+    assert_eq!(
+        records,
+        vec![
+            ("missing_ready", pid, Some(0), None, true),
+            ("ready_g0", pid, Some(0), Some(0), true),
+            ("old_ready_after_reopen", pid, Some(0), None, true),
+            ("ready_g1", pid, Some(0), Some(1), true),
+            ("foreign_pid", pid, Some(0), None, true),
+            ("foreign_server", pid, Some(0), None, true),
+            ("no_requested_generation", pid, Some(0), None, true),
+            ("startup_context", pid, Some(0), Some(1), true),
+        ]
+    );
 }
 #[test]
 fn resource_progress_owned_expectation_and_generation_context_do_not_reset_sampler() {
