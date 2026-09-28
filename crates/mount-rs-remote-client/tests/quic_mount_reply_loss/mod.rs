@@ -3,7 +3,10 @@
 
 use super::{Keys, token};
 use futures_util::{SinkExt, StreamExt};
-use mount_rs_core::Stats;
+use mount_rs_core::{
+    Stats,
+    storage::{BlockStore, InodeModeState, MetadataStore, NodeData, compact::CompactSnapshot},
+};
 use mount_rs_remote_client::{
     connection::{ClientError, ConnectionTransport, RemoteConnection},
     credentials::CredentialSource,
@@ -12,6 +15,9 @@ use mount_rs_remote_client::{
 use mount_rs_remote_protocol::{
     Message, Operation, OperationName, PROTOCOL_VERSION,
     binary::{self, Header, Incoming, Kind},
+};
+use mount_rs_sdk::{
+    Filesystem, SplitOptions, SqliteJournalMode, SqliteStorageOptions, StoreConfig,
 };
 use mount_rs_service::{
     auth::CatalogAuthenticator,
@@ -22,6 +28,7 @@ use mount_rs_service::{
     dispatch::DriveDispatcher,
     websocket::WebSocketServer,
 };
+use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -65,6 +72,112 @@ impl Selection {
         }
     }
 }
+#[derive(PartialEq, Eq)]
+struct CompactCheckpoint {
+    mode: InodeModeState,
+    snapshot: CompactSnapshot,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Storage {
+    Snapshot,
+    Compact,
+}
+
+impl Storage {
+    fn compact_options(database: &Path) -> SplitOptions {
+        let mut options =
+            SplitOptions::memory("reply-loss-compact", 4096).with_compact_inode_updates(true);
+        let sqlite_options = SqliteStorageOptions {
+            journal_mode: SqliteJournalMode::Wal,
+        };
+        options.metadata = StoreConfig::SqliteWithOptions {
+            path: database.to_path_buf(),
+            options: sqlite_options,
+        };
+        options.blocks = StoreConfig::SqliteWithOptions {
+            path: database.with_file_name("blocks.sqlite"),
+            options: sqlite_options,
+        };
+        options
+    }
+
+    fn definition(self, database: &Path) -> serde_json::Value {
+        match self {
+            Self::Snapshot => json!({"kind":"sqlite","database":database}),
+            Self::Compact => json!({"kind":"splitstore","storage":{
+                "metadata":{"kind":"sqlite","path":database,"journal_mode":"wal"},
+                "blocks":{"kind":"sqlite","path":database.with_file_name("blocks.sqlite"),"journal_mode":"wal"},
+                "chunk_size_bytes":4096,"compact_inode_updates":true
+            }}),
+        }
+    }
+
+    async fn open(self, database: &Path) -> TestResult<Filesystem> {
+        let opened = match self {
+            Self::Snapshot => Filesystem::sqlite(database).await,
+            Self::Compact => Filesystem::split(Self::compact_options(database)).await,
+        }
+        .map_err(|_| "durable fixture SQLite open failed")?;
+        ensure(
+            self != Self::Compact || opened.persistent_eviction_allowed(),
+            "actual compact fixture did not select durable MRC5 storage",
+        )?;
+        Ok(opened)
+    }
+
+    async fn compact_checkpoint(
+        self,
+        database: &Path,
+        stats: &Stats,
+    ) -> TestResult<Option<CompactCheckpoint>> {
+        if self == Self::Snapshot {
+            return Ok(None);
+        }
+        // The actual provider inspector returns Some only for persisted MRC5
+        // and validates its physical metadata stamp and authority. It does not
+        // enroll, publish, repair a marker or replay the intercepted write.
+        let metadata = SqliteMetadataStore::open(database)
+            .map_err(|_| "fresh compact metadata open failed")?;
+        let mode = metadata
+            .compact_inode_mode_state()
+            .await
+            .map_err(|_| "fresh compact mode inspection failed")?
+            .ok_or("fresh metadata is not persisted MRC5")?;
+        let blocks = SqliteBlockStore::open(database.with_file_name("blocks.sqlite"))
+            .map_err(|_| "fresh compact block store open failed")?;
+        blocks
+            .verify_concurrent_backing(mode.backing)
+            .await
+            .map_err(|_| "fresh compact backing verification failed")?;
+        let snapshot = metadata
+            .load_compact_snapshot(mode.backing)
+            .await
+            .map_err(|_| "fresh compact snapshot read failed")?;
+        ensure(
+            snapshot.anchor.generation == mode.structural_generation
+                && snapshot.anchor.members.len() == 2,
+            "fresh compact anchor differs from exact fixture membership",
+        )?;
+        let namespace = snapshot
+            .namespace()
+            .map_err(|_| "fresh compact namespace validation failed")?;
+        ensure(
+            namespace.nodes.len() == 2
+                && namespace.nodes.get(&stats.ino).is_some_and(|node| {
+                    node.stats == *stats && matches!(node.data, NodeData::File(_))
+                })
+                && namespace.nodes.get(&namespace.root).is_some_and(|node| {
+                    matches!(&node.data, NodeData::Directory { entries }
+                        if entries.len() == 1 && entries[0].name == FILE.trim_start_matches('/')
+                            && entries[0].inode == stats.ino)
+                }),
+            "fresh compact namespace or complete target metadata mismatch",
+        )?;
+        Ok(Some(CompactCheckpoint { mode, snapshot }))
+    }
+}
+
 const STEP_TIMEOUT: Duration = Duration::from_secs(3);
 const REPLY_HOLD_TIMEOUT: Duration = Duration::from_secs(10);
 const WORK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -204,6 +317,39 @@ struct ReplyBarrier {
     release: oneshot::Receiver<()>,
 }
 
+/// Keep observing the caller while the complete durable reply remains owned.
+/// A ready application message must win over an already-ready release signal.
+async fn hold_reply_until_release<S: AsyncRead + AsyncWrite + Unpin>(
+    downstream: &mut WebSocketStream<S>,
+    mut release: oneshot::Receiver<()>,
+) -> TestResult<()> {
+    tokio::time::timeout(REPLY_HOLD_TIMEOUT, async {
+        loop {
+            tokio::select! {
+                biased;
+                message = downstream.next() => match message {
+                    Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {
+                        downstream.flush().await
+                            .map_err(|_| "held reply protocol flush failed")?;
+                        // Control traffic cannot keep this future continuously
+                        // ready and prevent its original timeout being polled.
+                        tokio::task::yield_now().await;
+                    }
+                    Some(Ok(WsMessage::Binary(_))) => {
+                        return Err("application message arrived while the write reply was held".into());
+                    }
+                    _ => return Err("caller closed or sent invalid traffic while the write reply was held".into()),
+                },
+                released = &mut release => {
+                    return released.map_err(|_| "held reply release was canceled".into());
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "held reply release deadline exceeded")?
+}
+
 struct DeferredCredential {
     path: PathBuf,
     token: String,
@@ -242,6 +388,8 @@ impl Callback for RelayUpgrade {
 struct PrecloseReceipt {
     verified_bytes: usize,
     eof_count: usize,
+    stats: Stats,
+    compact_checkpoint: Option<CompactCheckpoint>,
 }
 
 async fn relay(
@@ -348,8 +496,9 @@ async fn relay(
                         && data == *expected,
                     "relay target write differs from exact submission",
                 )?;
-                // Production dispatch awaits PersistedHandle::write and the FULL
-                // SQLite autocommit save before constructing this actual reply.
+                // Production dispatch awaits the actual durable driver write
+                // before constructing this reply. The held fresh-store oracle
+                // below must prove the commit before any service handle close.
                 forward(&mut upstream, &request_envelope).await?;
                 let reply = envelope(&mut upstream).await?;
                 ensure(
@@ -367,10 +516,7 @@ async fn relay(
                     .held
                     .send(reply.header.count)
                     .map_err(|_| "held reply observer disappeared")?;
-                tokio::time::timeout(REPLY_HOLD_TIMEOUT, barrier.release)
-                    .await
-                    .map_err(|_| "held reply release deadline exceeded")?
-                    .map_err(|_| "held reply release was canceled")?;
+                hold_reply_until_release(&mut downstream, barrier.release).await?;
                 // The complete production reply and terminator were received;
                 // the observer has now explicitly released the fault. None of
                 // these messages are forwarded to the original caller.
@@ -445,13 +591,12 @@ async fn call(
 }
 
 async fn preclose_read_only_oracle(
+    storage: Storage,
     database: &Path,
     before: &Stats,
     payload: &[u8],
 ) -> TestResult<PrecloseReceipt> {
-    let fresh = mount_rs_sdk::Filesystem::sqlite(database)
-        .await
-        .map_err(|_| "preclose fresh SQLite open failed")?;
+    let fresh = storage.open(database).await?;
     let driver = fresh.driver();
     let handle = driver
         .open(FILE, "r", 0)
@@ -473,6 +618,7 @@ async fn preclose_read_only_oracle(
                 && stats.size == payload.len() as u64,
             "preclose oracle metadata mismatch",
         )?;
+        let compact_checkpoint = storage.compact_checkpoint(database, &stats).await?;
         let mut offset = 0;
         let mut buffer = [0; 4096];
         while offset < payload.len() {
@@ -496,12 +642,15 @@ async fn preclose_read_only_oracle(
         Ok::<_, String>(PrecloseReceipt {
             verified_bytes: offset,
             eof_count,
+            stats,
+            compact_checkpoint,
         })
     }
     .await;
-    // Existing snapshot + flags="r", stat and read never save. Neither handle
-    // nor filesystem Drop persists. Do not call close/sync/shutdown on this
-    // observer: close would write a snapshot while the original owner is live.
+    // The snapshot reader does not save; established shared compact reads
+    // verify authority and read guards/blocks without recording atime. Neither
+    // reader's Drop publishes. Do not close, sync or shutdown this observer
+    // while the original writer and reply are held.
     drop((handle, driver, fresh));
     observation
 }
@@ -591,7 +740,192 @@ async fn ready_quic_contact_cannot_be_hidden_by_completed_observation() {
     .expect("bounded real ready-contact control");
 }
 
+async fn held_monitor_socket_pair()
+-> TestResult<(WebSocketStream<TcpStream>, WebSocketStream<TcpStream>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|_| "held monitor listener bind failed")?;
+    let address = listener
+        .local_addr()
+        .map_err(|_| "held monitor address failed")?;
+    let caller = async {
+        let tcp = TcpStream::connect(address)
+            .await
+            .map_err(|_| "held monitor caller connect failed")?;
+        let mut request = format!("ws://{address}/mount-rs")
+            .into_client_request()
+            .map_err(|_| "held monitor caller request failed")?;
+        request
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", SUBPROTOCOL.parse().unwrap());
+        let (socket, response) =
+            tokio_tungstenite::client_async_with_config(request, tcp, Some(socket_config()))
+                .await
+                .map_err(|_| "held monitor caller upgrade failed")?;
+        ensure(
+            response
+                .headers()
+                .get("Sec-WebSocket-Protocol")
+                .and_then(|value| value.to_str().ok())
+                == Some(SUBPROTOCOL),
+            "held monitor caller subprotocol mismatch",
+        )?;
+        Ok::<_, String>(socket)
+    };
+    let downstream = async {
+        let (tcp, _) = listener
+            .accept()
+            .await
+            .map_err(|_| "held monitor accept failed")?;
+        tokio_tungstenite::accept_hdr_async_with_config(tcp, upgrade, Some(socket_config()))
+            .await
+            .map_err(|_| "held monitor downstream upgrade failed".into())
+    };
+    let (caller, downstream) = tokio::try_join!(caller, downstream)?;
+    Ok((downstream, caller))
+}
+
+async fn second_write_envelope() -> TestResult<Envelope> {
+    let mut encoded = Vec::new();
+    binary::write_request(
+        &mut encoded,
+        2,
+        &binary::IoRequest {
+            drive_id: "data",
+            handle: 7,
+            position: Some(0),
+        },
+        0,
+        Some(&[0x51; 17]),
+    )
+    .await
+    .map_err(|_| "second write encoding failed")?;
+    let header = Header::decode(encoded[..binary::HEADER_BYTES].try_into().unwrap())
+        .map_err(|_| "second write header invalid")?;
+    ensure(
+        header.kind == Kind::Write,
+        "negative monitor control did not encode a write",
+    )?;
+    Ok(Envelope {
+        header,
+        body: encoded[binary::HEADER_BYTES..].to_vec(),
+        messages: vec![
+            encoded[..binary::HEADER_BYTES].to_vec().into(),
+            encoded[binary::HEADER_BYTES..].to_vec().into(),
+            Bytes::new(),
+        ],
+    })
+}
+
+#[tokio::test]
+async fn held_reply_monitor_rejects_second_write_even_when_release_is_ready() {
+    tokio::time::timeout(STEP_TIMEOUT, async {
+        for release_ready in [false, true] {
+            let (mut downstream, mut caller) = held_monitor_socket_pair().await?;
+            let write = second_write_envelope().await?;
+            let (release, receiver) = oneshot::channel();
+            let mut release = Some(release);
+            let observed = if release_ready {
+                forward(&mut caller, &write).await?;
+                // The handshake has finished before sending this unfragmented
+                // masked 32-byte header. Peek keeps its complete actual frame
+                // queued, making both branches ready without consuming replay.
+                let mut frame = [0; binary::HEADER_BYTES + 6];
+                loop {
+                    let available = downstream
+                        .get_ref()
+                        .peek(&mut frame)
+                        .await
+                        .map_err(|_| "buffered second write observation failed")?;
+                    ensure(
+                        available != 0,
+                        "second write socket ended before the header",
+                    )?;
+                    if available == frame.len() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                ensure(
+                    frame[0] == 0x82 && frame[1] == 0xa0,
+                    "negative monitor control did not queue its complete masked binary header",
+                )?;
+                release
+                    .take()
+                    .ok_or("negative monitor release missing")?
+                    .send(())
+                    .map_err(|_| "negative monitor release receiver disappeared")?;
+                hold_reply_until_release(&mut downstream, receiver).await
+            } else {
+                // Poll the real monitor while the caller sends its second
+                // complete write. Keep the release sender owned and pending.
+                let (observed, sent) = tokio::join!(
+                    hold_reply_until_release(&mut downstream, receiver),
+                    forward(&mut caller, &write),
+                );
+                sent?;
+                observed
+            };
+            ensure(
+                matches!(observed, Err(ref error)
+                if error == "application message arrived while the write reply was held"),
+                "held monitor missed a second write or returned the wrong failure",
+            )?;
+            drop((release, caller, downstream));
+        }
+        Ok::<_, String>(())
+    })
+    .await
+    .expect("bounded real second-write monitor control")
+    .unwrap();
+}
+
+#[tokio::test]
+async fn held_reply_monitor_flushes_ping_and_accepts_pong_before_release() {
+    tokio::time::timeout(STEP_TIMEOUT, async {
+        let (mut downstream, mut caller) = held_monitor_socket_pair().await?;
+        let (release, receiver) = oneshot::channel();
+        let control = async {
+            caller
+                .send(WsMessage::Pong(Bytes::from_static(b"prior")))
+                .await
+                .map_err(|_| "held monitor control pong failed")?;
+            caller
+                .send(WsMessage::Ping(Bytes::from_static(b"release")))
+                .await
+                .map_err(|_| "held monitor control ping failed")?;
+            ensure(
+                matches!(caller.next().await, Some(Ok(WsMessage::Pong(bytes)))
+                if bytes.as_ref() == b"release"),
+                "held monitor did not flush the actual protocol pong",
+            )?;
+            release
+                .send(())
+                .map_err(|_| "held monitor control release failed")?;
+            Ok::<_, String>(())
+        };
+        let (observed, control) =
+            tokio::join!(hold_reply_until_release(&mut downstream, receiver), control,);
+        observed?;
+        control?;
+        drop((caller, downstream));
+        Ok::<_, String>(())
+    })
+    .await
+    .expect("bounded real ping/pong monitor control")
+    .unwrap();
+}
+
 pub(super) async fn run(selection: Selection) -> TestResult<()> {
+    run_with_storage(selection, Storage::Snapshot).await
+}
+
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+pub(super) async fn run_compact_auto() -> TestResult<()> {
+    run_with_storage(Selection::Auto, Storage::Compact).await
+}
+
+async fn run_with_storage(selection: Selection, storage: Storage) -> TestResult<()> {
     ensure(
         std::env::var("MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS").as_deref() == Ok("1"),
         "durable reply loss control requires the explicit owned runtime gate",
@@ -664,7 +998,7 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
                     (
                         "data".into(),
                         DriveDefinition {
-                            driver: json!({"kind":"sqlite","database":db}),
+                            driver: storage.definition(&db),
                         },
                     ),
                     (
@@ -697,9 +1031,8 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
         .compare_and_swap(0, snapshot)
         .await
         .map_err(|_| "fixture catalog publication failed")?;
-    let filesystem = mount_rs_sdk::Filesystem::sqlite(&db)
-        .await
-        .map_err(|_| "fixture SQLite open failed")?;
+    let filesystem = storage.open(&db).await?;
+    let opened_backing = filesystem.concurrent_backing_id();
     filesystem
         .driver()
         .chmod("/", 0o777)
@@ -708,12 +1041,7 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
     let memory = mount_rs_sdk::Filesystem::memory(Default::default());
     let mut dispatcher = DriveDispatcher::new(catalog.clone());
     dispatcher
-        .register_definition(
-            "red",
-            "data",
-            json!({"kind":"sqlite","database":db}),
-            filesystem.driver(),
-        )
+        .register_definition("red", "data", storage.definition(&db), filesystem.driver())
         .map_err(|_| "fixture data registration failed")?;
     dispatcher
         .register_definition("red", "logs", json!({"kind":"memory"}), memory.driver())
@@ -859,6 +1187,9 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
             .map_err(|_| "target metadata request failed")?).map_err(|_| "target metadata invalid")?;
         ensure(before.is_file() && before.mode & 0o7777 == MODE && before.size == 0,
             "target initial metadata mismatch")?;
+        let compact_before = storage.compact_checkpoint(&db, &before).await?;
+        ensure(compact_before.as_ref().map(|checkpoint| checkpoint.mode.backing) == opened_backing,
+            "fresh compact authority differs from the actual writer")?;
         write_task = Some(tokio::spawn({
             let payload = payload.clone();
             let connected = connected.clone();
@@ -872,8 +1203,11 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
             && relay_task.as_ref().is_some_and(|task| !task.is_finished()),
             "caller or relay completed before the preclose oracle")?;
         let preclose = tokio::time::timeout(STEP_TIMEOUT,
-            preclose_read_only_oracle(&db, &before, &payload)).await
+            preclose_read_only_oracle(storage, &db, &before, &payload)).await
             .map_err(|_| "preclose oracle deadline exceeded")??;
+        ensure(preclose.compact_checkpoint.as_ref().map(|checkpoint| checkpoint.mode)
+            == compact_before.as_ref().map(|checkpoint| checkpoint.mode),
+            "durable write changed the compact backing or structural generation")?;
         ensure(write_task.as_ref().is_some_and(|task| !task.is_finished())
             && relay_task.as_ref().is_some_and(|task| !task.is_finished()),
             "caller or relay completed during the preclose oracle")?;
@@ -921,12 +1255,22 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
     // Aborting this wrapper only ends its waiter. It does not prove the actual
     // service or separately spawned handle closes released storage ownership.
     let server_waiter_cancel = cancel_owned(&mut server_close).await;
-    let storage_cleanup = filesystem
-        .shutdown()
-        .await
-        .map_err(|_| "original SQLite shutdown failed");
-    // SQLite shutdown is currently a no-op. After a successful close wait,
-    // drop the original SDK owner before the fresh reader persists on close.
+    let storage_cleanup = if storage == Storage::Snapshot {
+        filesystem
+            .shutdown()
+            .await
+            .map_err(|_| "original SQLite shutdown failed")
+    } else if server_close_wait.is_ok() {
+        // Compact shutdown takes lifecycle/gate ownership. Start it only after
+        // actual service close is acknowledged and retain the existing bound.
+        tokio::time::timeout(STEP_TIMEOUT, filesystem.shutdown())
+            .await
+            .map_err(|_| "original compact shutdown deadline exceeded")
+            .and_then(|result| result.map_err(|_| "original compact shutdown failed"))
+    } else {
+        Err("actual service close unobserved; compact fixture retained")
+    };
+    // Drop the original SDK owner before the fresh reader persists on close.
     // Unknown service ownership on failure never triggers directory removal.
     drop(filesystem);
     write_cleanup?;
@@ -935,9 +1279,7 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
     server_waiter_cancel?;
     storage_cleanup?;
     let (before, relay_receipt, preclose, initial_quic_datagrams, contact_elapsed) = work?;
-    let reopened = mount_rs_sdk::Filesystem::sqlite(&db)
-        .await
-        .map_err(|_| "fresh SQLite reopen failed")?;
+    let reopened = storage.open(&db).await?;
     let driver = reopened.driver();
     let handle = driver
         .open(FILE, "r", 0)
@@ -959,6 +1301,16 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
                 && stats.size == payload.len() as u64,
             "fresh oracle metadata mismatch",
         )?;
+        if storage == Storage::Compact {
+            ensure(
+                stats == preclose.stats,
+                "fresh compact full metadata differs from held commit",
+            )?;
+            ensure(
+                storage.compact_checkpoint(&db, &stats).await? == preclose.compact_checkpoint,
+                "fresh compact publication differs from the held durable commit",
+            )?;
+        }
         let mut offset = 0;
         let mut buffer = [0; 4096];
         while offset < payload.len() {
@@ -992,39 +1344,57 @@ pub(super) async fn run(selection: Selection) -> TestResult<()> {
         .map_err(|_| "fresh oracle handle cleanup deadline exceeded".to_owned())
         .and_then(|result| result.map_err(|_| "fresh oracle handle cleanup failed".to_owned()));
     drop((handle, driver));
-    let oracle_shutdown = reopened
-        .shutdown()
-        .await
-        .map_err(|_| "fresh oracle shutdown failed");
+    let oracle_shutdown = if storage == Storage::Snapshot {
+        reopened
+            .shutdown()
+            .await
+            .map_err(|_| "fresh oracle shutdown failed")
+    } else {
+        tokio::time::timeout(STEP_TIMEOUT, reopened.shutdown())
+            .await
+            .map_err(|_| "fresh compact oracle shutdown deadline exceeded")
+            .and_then(|result| result.map_err(|_| "fresh compact oracle shutdown failed"))
+    };
     drop(reopened);
     oracle_close?;
     oracle_shutdown?;
     let verified_bytes = observation?;
-    eprintln!(
-        "MOUNT_RS_SQLITE_REPLY_LOSS {}",
-        json!({
-            "schema_version":2,"connection_selection":selection.label(),
-            "initial_quic_datagrams":initial_quic_datagrams,"initial_quic_responses":0,
-            "websocket_contact_elapsed_us":contact_elapsed.as_micros(),
-            "initial_quic_settlement_quiet_ms":QUIET_WINDOW.as_millis(),
-            "deferred_credential_issues":credential_issues.load(Ordering::Relaxed),
-            "protocol_version":PROTOCOL_VERSION,"client_hellos":1,
-            "denied_partition_hellos":1,"denied_untrusted_tls":1,"drive_permission_denials":2,
-            "write_submissions":relay_receipt.write_submissions,"completed_write_replies":1,
-            "held_reply":1,"preclose_metadata_checks":1,
-            "preclose_verified_bytes":preclose.verified_bytes,"preclose_eof":preclose.eof_count,
-            "suppressed_response_envelopes":1,"suppressed_response_bytes":relay_receipt.committed_reply_bytes,
-            "completed_write_count":relay_receipt.committed_write_count,
-            "suppressed_response_messages":relay_receipt.suppressed_messages,
-            "downstream_write_response_messages":0,"uncertain_results":1,"fail_closed_followups":3,
-            "replayed_write_submissions":0,"reconnects":0,"quic_datagrams":0,
-            "quic_observation_scope":"after_initial_settlement_through_post_loss_quiet",
-            "no_contact_window_ms":QUIET_WINDOW.as_millis(),"oracle_metadata_checks":1,
-            "oracle_verified_bytes":verified_bytes,"oracle_size_bytes":PAYLOAD_BYTES,"oracle_eof_count":0,
-            "request_cleanup_completed":1,"relay_cleanup_completed":1,"oracle_cleanup_completed":1,
-            "server_close_wait_completed":1,"process_cleanup_observed":0,
-            "directory_retained":1,"directory_removed":0
-        })
-    );
+    let mut receipt = json!({
+        "schema_version":2,"connection_selection":selection.label(),
+        "initial_quic_datagrams":initial_quic_datagrams,"initial_quic_responses":0,
+        "websocket_contact_elapsed_us":contact_elapsed.as_micros(),
+        "initial_quic_settlement_quiet_ms":QUIET_WINDOW.as_millis(),
+        "deferred_credential_issues":credential_issues.load(Ordering::Relaxed),
+        "protocol_version":PROTOCOL_VERSION,"client_hellos":1,
+        "denied_partition_hellos":1,"denied_untrusted_tls":1,"drive_permission_denials":2,
+        "write_submissions":relay_receipt.write_submissions,"completed_write_replies":1,
+        "held_reply":1,"preclose_metadata_checks":1,
+        "preclose_verified_bytes":preclose.verified_bytes,"preclose_eof":preclose.eof_count,
+        "suppressed_response_envelopes":1,"suppressed_response_bytes":relay_receipt.committed_reply_bytes,
+        "completed_write_count":relay_receipt.committed_write_count,
+        "suppressed_response_messages":relay_receipt.suppressed_messages,
+        "downstream_write_response_messages":0,"uncertain_results":1,"fail_closed_followups":3,
+        "replayed_write_submissions":0,"reconnects":0,"quic_datagrams":0,
+        "quic_observation_scope":"after_initial_settlement_through_post_loss_quiet",
+        "no_contact_window_ms":QUIET_WINDOW.as_millis(),"oracle_metadata_checks":1,
+        "oracle_verified_bytes":verified_bytes,"oracle_size_bytes":PAYLOAD_BYTES,"oracle_eof_count":0,
+        "request_cleanup_completed":1,"relay_cleanup_completed":1,"oracle_cleanup_completed":1,
+        "server_close_wait_completed":1,"process_cleanup_observed":0,
+        "directory_retained":1,"directory_removed":0
+    });
+    if storage == Storage::Compact {
+        receipt["schema_version"] = json!(3);
+        receipt["storage_mode"] = json!("MRC5");
+        receipt["metadata_provider"] = json!("sqlite");
+        receipt["block_provider"] = json!("sqlite");
+        receipt["configured_cli_child"] = json!(0);
+        receipt["compact_metadata_checkpoints"] = json!(3);
+        receipt["compact_backing_and_generation_preserved"] = json!(1);
+        receipt["compact_publication_preserved_from_held_commit"] = json!(1);
+        receipt["full_metadata_preserved_from_held_commit"] = json!(1);
+        eprintln!("MOUNT_RS_COMPACT_SQLITE_REPLY_LOSS {receipt}");
+    } else {
+        eprintln!("MOUNT_RS_SQLITE_REPLY_LOSS {receipt}");
+    }
     Ok(())
 }

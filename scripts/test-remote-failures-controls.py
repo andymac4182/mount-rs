@@ -354,9 +354,146 @@ class SqliteReplyLossSelectors(unittest.TestCase):
                         and target.value.id == "env" and isinstance(target.slice, ast.Constant)
                         and target.slice.value == "MOUNT_RS_TRACE_SERVICE"):
                     service_trace_gates.append((kinds, ast.literal_eval(assignment.value)))
-        self.assertEqual(gates, [({"wsloss", "wsautoloss"}, "1")])
-        self.assertTrue(any({"wsloss", "wsautoloss"} <= kinds and value == "0" for kinds, value in service_trace_gates))
+        self.assertEqual(gates, [({"wsloss", "wsautoloss", "wscompactloss", "wsheldmonitor"}, "1")])
+        self.assertTrue(any({"wsloss", "wsautoloss", "wscompactloss", "wsheldmonitor"} <= kinds and value == "0" for kinds, value in service_trace_gates))
 
+
+# Independent compact schema-3 oracle: derived only from the literal test
+# schema-2 Auto fixture above, never from parent parser constants or projection.
+COMPACT_SQLITE_REPLY_LOSS_PREFIX = b"MOUNT_RS_COMPACT_SQLITE_REPLY_LOSS "
+COMPACT_SQLITE_REPLY_LOSS_FIXTURE = {
+    **SQLITE_REPLY_LOSS_FIXTURES["wsautoloss"],
+    "schema_version": 3,
+    "storage_mode": "MRC5",
+    "metadata_provider": "sqlite",
+    "block_provider": "sqlite",
+    "configured_cli_child": 0,
+    "compact_metadata_checkpoints": 3,
+    "compact_backing_and_generation_preserved": 1,
+    "compact_publication_preserved_from_held_commit": 1,
+    "full_metadata_preserved_from_held_commit": 1,
+}
+
+
+class CompactSqliteReplyLossControls(unittest.TestCase):
+    def fixture(self):
+        return COMPACT_SQLITE_REPLY_LOSS_FIXTURE.copy()
+
+    def wire(self, record):
+        return COMPACT_SQLITE_REPLY_LOSS_PREFIX + json.dumps(record, separators=(",", ":")).encode() + b"\n"
+
+    def parsed(self, raw, kind="wscompactloss"):
+        return getattr(parent, "compact_sqlite_reply_loss_record", lambda *args: None)(raw, kind)
+
+    def gated(self, raw, unknown, kind="wscompactloss"):
+        return getattr(parent, "compact_sqlite_reply_loss_gate_record", lambda *args: None)(kind, raw, unknown)
+
+    def test_complete_literal_schema_three_record_is_observed(self):
+        expected = self.fixture()
+        self.assertEqual(self.parsed(b"compile status\n" + self.wire(expected) + b"finished\n"), expected)
+
+    def test_exact_closed_fields_types_and_values(self):
+        variable = {"initial_quic_datagrams", "websocket_contact_elapsed_us"}
+        for key, value in self.fixture().items():
+            record = self.fixture(); del record[key]
+            with self.subTest(omitted=key): self.assertIsNone(self.parsed(self.wire(record)))
+            for invalid in [None, True, False, 0.5, float("nan"), float("inf"), [], {}, "private-value"]:
+                record = self.fixture(); record[key] = invalid
+                with self.subTest(key=key, invalid=invalid): self.assertIsNone(self.parsed(self.wire(record)))
+            if key not in variable:
+                record = self.fixture(); record[key] = value + 1 if type(value) is int else value.upper() + "X"
+                with self.subTest(changed=key): self.assertIsNone(self.parsed(self.wire(record)))
+        record = self.fixture(); record["private_path"] = "/private/token.jwt"
+        self.assertIsNone(self.parsed(self.wire(record)))
+
+    def test_auto_probe_and_elapsed_closed_bounds(self):
+        for probes in [1, 32]:
+            for elapsed in [3000000, 30000000]:
+                record = self.fixture(); record.update(initial_quic_datagrams=probes, websocket_contact_elapsed_us=elapsed)
+                self.assertEqual(self.parsed(self.wire(record)), record)
+        for key, invalid in {"initial_quic_datagrams": [-1, 0, 33, 1 << 64], "websocket_contact_elapsed_us": [-1, 2999999, 30000001, 1 << 64]}.items():
+            for value in invalid:
+                record = self.fixture(); record[key] = value
+                self.assertIsNone(self.parsed(self.wire(record)))
+
+    def test_one_complete_physical_frame_and_no_favorable_duplicates(self):
+        valid = self.wire(self.fixture())
+        malformed = COMPACT_SQLITE_REPLY_LOSS_PREFIX + b"{invalid}\n"
+        legacy = SQLITE_REPLY_LOSS_PREFIX + json.dumps(SQLITE_REPLY_LOSS_FIXTURES["wsautoloss"]).encode() + b"\n"
+        duplicate_key = valid.replace(b'{"schema_version":3,', b'{"schema_version":3,"schema_version":3,', 1)
+        self.assertNotEqual(duplicate_key, valid)
+        samples = [b"", malformed, valid[:-1], valid + valid, valid + malformed, malformed + valid, valid + legacy,
+                   b"private-prefix " + valid, valid.replace(COMPACT_SQLITE_REPLY_LOSS_PREFIX, COMPACT_SQLITE_REPLY_LOSS_PREFIX.lower()),
+                   duplicate_key, self.wire(None), self.wire([]), self.wire(True), self.wire("private-text"),
+                   COMPACT_SQLITE_REPLY_LOSS_PREFIX + b" " * 4096 + b"{}\n", valid[:-1] + b"\xff\n"]
+        samples += [valid[:-1] + separator for separator in [b"\r\n", b"\r", b"\v", b"\f", b"\xc2\x85", b"\xe2\x80\xa8"]]
+        nested = b"[" * 1100 + b"0" + b"]" * 1100
+        samples.append(valid.replace(b'"schema_version":3', b'"schema_version":' + nested))
+        for raw in samples:
+            with self.subTest(raw=raw[:80]): self.assertIsNone(self.parsed(raw))
+        self.assertIsNone(self.parsed(legacy))
+        self.assertIsNone(parent.sqlite_reply_loss_record(valid, "wsautoloss"))
+
+    def test_sticky_failure_and_unrelated_selector_separation(self):
+        unknown = ["owned_group_unsettled"]
+        self.assertIsNone(self.gated(b"", unknown))
+        self.assertIsNone(self.gated(b"invalid\n", unknown))
+        self.assertEqual(unknown, ["owned_group_unsettled", "compact_sqlite_reply_loss_not_observed_valid"])
+        expected = self.fixture()
+        self.assertEqual(self.gated(self.wire(expected), unknown), expected)
+        self.assertEqual(unknown, ["owned_group_unsettled", "compact_sqlite_reply_loss_not_observed_valid"])
+        for kind in ["wsloss", "wsautoloss", "wsheldmonitor", "unknown"]:
+            self.assertIsNone(self.parsed(self.wire(expected), kind))
+            self.assertIsNone(self.gated(self.wire(expected), unknown, kind))
+            self.assertEqual(unknown, ["owned_group_unsettled", "compact_sqlite_reply_loss_not_observed_valid"])
+
+
+class CompactSqliteRunnerSelectors(unittest.TestCase):
+    def test_fixed_compact_and_monitor_commands_and_case_inventory(self):
+        compact = "automatic_fallback_compact_sqlite_commit_survives_lost_wire_reply_without_replay"
+        names = ("quic_mount_reply_loss::held_reply_monitor_rejects_second_write_even_when_release_is_ready",
+                 "quic_mount_reply_loss::held_reply_monitor_flushes_ping_and_accepts_pong_before_release")
+        for kind in ["wscompactloss", "wsheldmonitor"]:
+            self.assertIn(kind, parent.COMMANDS)
+            command, limit, profile, trace = parent.COMMANDS[kind]
+            self.assertEqual((limit, profile, trace), (180, 0, 0))
+            if kind == "wscompactloss":
+                self.assertEqual(command, ["./scripts/cargo-shared", "test", "-p", "mount-rs-remote-client", "--test", "quic_mount", "--locked", "--offline", "--", "--ignored", "--exact", compact, "--test-threads=1", "--nocapture"])
+                self.assertEqual(parent.EXACT_CASES[kind], compact)
+            else:
+                self.assertEqual(command, ["./scripts/cargo-shared", "test", "-p", "mount-rs-remote-client", "--test", "quic_mount", "--locked", "--offline", "--", "quic_mount_reply_loss::held_reply_monitor_", "--test-threads=1", "--nocapture"])
+                self.assertEqual(parent.EXPECTED_SUITES[kind], names)
+                self.assertNotIn(kind, parent.EXACT_CASES)
+
+    def test_compact_requires_one_exact_actual_executed_case(self):
+        name = "automatic_fallback_compact_sqlite_commit_survives_lost_wire_reply_without_replay"
+        valid = f"running 1 test\ntest {name} ... controlled output\nok\n{SUMMARY}"
+        check = getattr(parent, "compact_sqlite_named_case_passed", lambda *args: False)
+        self.assertTrue(check(valid))
+        for output in [valid.replace(name, "other"), valid + valid, valid + "test other ... ok\n",
+                       valid.replace("1 passed; 0 failed; 0 ignored", "0 passed; 0 failed; 1 ignored"),
+                       "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n"]:
+            self.assertFalse(check(output))
+
+    def test_monitor_requires_both_exact_actual_executed_names(self):
+        names = ("quic_mount_reply_loss::held_reply_monitor_rejects_second_write_even_when_release_is_ready",
+                 "quic_mount_reply_loss::held_reply_monitor_flushes_ping_and_accepts_pong_before_release")
+        valid = "running 2 tests\n" + "".join(f"test {name} ... ok\n" for name in names) + "test result: ok. 2 passed; 0 failed; 0 ignored;\n"
+        check = getattr(parent, "held_reply_monitor_suite_passed", lambda *args: False)
+        self.assertTrue(check(valid))
+        for output in [valid.replace(names[0], "other"), valid.replace(names[0], names[1]), valid + valid,
+                       valid + "test other ... ok\n", valid.replace("2 passed", "1 passed"),
+                       valid.replace("0 ignored", "1 ignored"), valid.replace("running 2 tests", "running 0 tests")]:
+            self.assertFalse(check(output))
+
+    def test_parent_keeps_source_and_process_cleanup_separate_from_fixture_claim(self):
+        record = COMPACT_SQLITE_REPLY_LOSS_FIXTURE
+        self.assertEqual((record["configured_cli_child"], record["process_cleanup_observed"], record["directory_retained"], record["directory_removed"]), (0, 0, 1, 0))
+        source = path.read_text()
+        for term in ["start_new_session=True", "os.WNOWAIT", "owned_child_reaped", "owned_group_absent", "pipes_eof",
+                     "source-before.json", "source-after.json", "fixture_tmp.mkdir(mode=0o700)", "env['TMPDIR']=str(fixture_tmp)",
+                     "'automatic_retry':False", "before==after", "if code is not None and absent is True and eof:"]:
+            self.assertIn(term, source)
 
 class ResultControls(unittest.TestCase):
     def test_single_line_pass(self):
@@ -444,6 +581,28 @@ class CacheStageSelectors(unittest.TestCase):
                 self.assertFalse(parent.lazy_suite_passed(output.replace('0 failed', '1 failed', 1), kind))
                 self.assertFalse(parent.lazy_suite_passed(output+f'test {names[0]} ... ok\n', kind))
                 self.assertFalse(parent.lazy_suite_passed(output.replace('running 8 tests', 'running 7 tests'), kind) if kind == 'lazyservice' else parent.lazy_suite_passed('running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n', kind))
+
+    def test_target_lazy_fixed_selectors_preserve_owned_bounds_and_named_evidence(self):
+        for kind in ['targetlazy','targetlazyunit']:
+            command,limit,profile,trace=parent.COMMANDS[kind]
+            self.assertEqual((limit,profile,trace),(180,1,0))
+            self.assertEqual(command[command.index('--features')+1],'sdk-runtime,resource-profiling')
+            self.assertEqual(command[command.index('--test')+1],'quic_production_target')
+            for value in ['--locked','--offline','--test-threads=1','--nocapture']:
+                self.assertIn(value,command)
+        command=parent.COMMANDS['targetlazy'][0]
+        self.assertIn('--ignored',command);self.assertIn('--exact',command)
+        self.assertEqual(parent.EXACT_CASES['targetlazy'],'ten_process_lazy_startup_preserves_exact_backing_and_workload')
+        self.assertIn(parent.EXACT_CASES['targetlazy'],command)
+        command=parent.COMMANDS['targetlazyunit'][0]
+        self.assertIn('lazy_target_',command);self.assertNotIn('--ignored',command)
+        names=parent.EXPECTED_SUITES['targetlazyunit']
+        self.assertEqual(len(names),13);self.assertEqual(len(set(names)),13)
+        output='running 13 tests\n'+''.join(f'test {name} ... fixture output\nok\n' for name in names)+'test result: ok. 13 passed; 0 failed; 0 ignored;\n'
+        self.assertTrue(parent.named_suite_passed(output,names,nocapture=True))
+        self.assertFalse(parent.named_suite_passed(output.replace(names[0],'unrelated'),names,nocapture=True))
+        self.assertFalse(parent.named_suite_passed(output.replace('13 passed','12 passed'),names,nocapture=True))
+        self.assertFalse(parent.named_suite_passed('running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n',names,nocapture=True))
 
     def test_websocket_client_metrics_requires_one_profiled_case(self):
         name = "websocket::metrics_tests::websocket_stages_preserve_serialized_transactions"

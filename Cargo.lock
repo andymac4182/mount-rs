@@ -2070,6 +2070,7 @@ dependencies = [
  "mount-rs-remote-protocol",
  "mount-rs-sdk",
  "mount-rs-service",
+ "mount-rs-sqlite",
  "quinn",
  "rcgen",
  "ring",

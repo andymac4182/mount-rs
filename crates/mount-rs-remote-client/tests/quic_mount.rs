@@ -82,6 +82,13 @@ async fn automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_repla
 }
 
 #[tokio::test]
+#[ignore = "requires MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS=1, private TMPDIR and an owned process gate"]
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+async fn automatic_fallback_compact_sqlite_commit_survives_lost_wire_reply_without_replay() {
+    quic_mount_reply_loss::run_compact_auto().await.unwrap();
+}
+
+#[tokio::test]
 async fn udp_unavailable_falls_back_before_oidc_and_roundtrips() {
     signed_oidc_roundtrip(2).await;
 }

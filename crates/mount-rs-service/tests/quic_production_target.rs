@@ -147,3 +147,91 @@ fn process_failures_retain_partial_evidence_and_reap_children() {
         );
     }
 }
+
+#[test]
+#[ignore = "owned ten-process cold registration regression; explicitly invoked"]
+fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
+    let directory = tempfile::Builder::new()
+        .prefix("mount-rs-target-lazy-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    eprintln!("retained lazy control: {}", directory.display());
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "production_target_controller",
+            "--nocapture",
+        ])
+        .env("MOUNT_RS_TARGET_MODE", "control")
+        .env("MOUNT_RS_TARGET_PROVIDER", "sqlite")
+        .env("MOUNT_RS_TARGET_BLOCK_PROVIDER", "metadata")
+        .env("MOUNT_RS_TARGET_DRIVES", "10")
+        .env("MOUNT_RS_TARGET_FILES", "2")
+        .env("MOUNT_RS_TARGET_SECONDS", "1")
+        .env("MOUNT_RS_PROFILE_IO", "1")
+        .env_remove("MOUNT_RS_TARGET_INJECT")
+        .env("MOUNT_RS_TARGET_OUTPUT", directory.as_path())
+        .status()
+        .unwrap();
+    let journal = target::read_json(&directory.join("terminal.json")).unwrap();
+    if !status.success() {
+        // Retain fixed public flags before parent cleanup, without raw storage
+        // errors, credentials, checkout text or private paths.
+        eprintln!(
+            "MOUNT_RS_TARGET_CONTROL_FAILURE {}",
+            serde_json::json!({
+                "schema_version":1,
+                "checkout_clean":journal["source"]["checkout_status"].as_str() == Some(""),
+                "revision_shape_valid":journal["source"]["revision"].as_str()
+                    .is_some_and(|revision| revision.len() == 40 && revision.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))),
+                "workload_complete":journal["workload_complete"].as_bool(),
+                "metrics_complete":journal["metrics_complete"].as_bool(),
+                "error_present":!journal["error"].is_null(),
+                "cleanup_error_count":journal["cleanup_errors"].as_array().map(Vec::len),
+                "observer_complete":journal["observer_accounting"]["_status"]["complete"].as_bool(),
+                "oracle_complete":journal["oracle_accounting"]["_status"]["complete"].as_bool(),
+                "initialization_complete":journal["initialization_accounting"]["_status"]["complete"].as_bool()
+            })
+        );
+    }
+    assert!(
+        status.success(),
+        "must finish the real signed workload and owned cleanup before the cold assertion"
+    );
+    assert_eq!(journal["full_target"], false);
+    assert_eq!(journal["outcome"], "success");
+    assert_eq!(journal["metrics_complete"], true);
+    assert_eq!(journal["namespace_files"], 20);
+    assert_eq!(journal["population_bytes"], 81920);
+    assert_eq!(journal["routes"], 100);
+    assert_eq!(journal["scope_denials"]["sibling"], 10);
+    assert_eq!(journal["scope_denials"]["partition"], 10);
+    assert_eq!(journal["verified_passes"], 2);
+    let workers = journal["workers"].as_array().unwrap();
+    assert_eq!(workers.len(), 10);
+    assert!(
+        workers
+            .iter()
+            .all(|worker| worker["reap_confirmed"] == true && worker["exit_code"] == 0)
+    );
+    assert!(journal["cleanup_errors"].as_array().unwrap().is_empty());
+    assert!(!directory.join("private/worker-config.json").exists());
+    for (index, worker) in workers.iter().enumerate() {
+        let ready =
+            target::read_json(&directory.join(format!("worker-{index}/ready-generation-0.json")))
+                .unwrap();
+        assert_eq!(ready["pid"], worker["pid"]);
+        assert_eq!(ready["generation"], 0);
+        assert_eq!(ready["source_digest"], journal["source"]["digest"]);
+        assert_eq!(ready["binary_digest"], journal["source"]["binary_sha256"]);
+        let actual_opens = ready["startup_diagnostics"]["open_success"]
+            .as_u64()
+            .expect("actual enabled startup evidence must precede cold assertion");
+        assert_eq!(
+            actual_opens, 0,
+            "registered Drive plans must not eagerly open providers on worker {index}"
+        );
+    }
+}
