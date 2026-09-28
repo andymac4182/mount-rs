@@ -77,6 +77,13 @@ use mount_rs_core::Loopback;
 use mount_rs_remote_protocol::{OperationName, binary::IoRequest};
 #[path = "support/saturation_backend.rs"]
 mod backend;
+#[cfg(unix)]
+#[allow(dead_code)]
+#[path = "support/production_target/command.rs"]
+mod command;
+#[allow(dead_code)]
+#[path = "support/remote_blocks.rs"]
+mod remote_blocks;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -220,6 +227,33 @@ fn source_binary_receipt() -> Result<Value, String> {
         &std::fs::read(BACKEND_SOURCE_PATH).map_err(|_| "backend source read failed")?,
     );
     require_matching_runner_source(&compiled_source_sha256, &current_source_sha256)?;
+    let mut supplemental_source_sha256 = serde_json::Map::new();
+    for (name, compiled) in [
+        (
+            "support/remote_blocks.rs",
+            include_bytes!("support/remote_blocks.rs").as_slice(),
+        ),
+        (
+            "support/production_target/command.rs",
+            include_bytes!("support/production_target/command.rs").as_slice(),
+        ),
+    ] {
+        let actual = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join(name),
+        )
+        .map_err(|_| "supplemental runner source read failed")?;
+        if actual != compiled {
+            return Err("supplemental runner source changed since executable compilation".into());
+        }
+        let digest: String = ring::digest::digest(&ring::digest::SHA256, compiled)
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        supplemental_source_sha256.insert(name.into(), json!(digest));
+    }
     let executable = std::env::current_exe().map_err(|_| "executable path unavailable")?;
     let mut input = std::fs::File::open(&executable).map_err(|_| "executable read failed")?;
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
@@ -268,6 +302,7 @@ fn source_binary_receipt() -> Result<Value, String> {
         "compiled_revision_env":option_env!("MOUNT_RS_SATURATION_SOURCE_REVISION"),
         "compiled_runner_source_sha256":compiled_source_sha256,
         "current_runner_source_sha256":current_source_sha256,
+        "supplemental_source_sha256":supplemental_source_sha256,
         "features":{"resource_profiling":cfg!(feature="resource-profiling"),"allocation_profiling":cfg!(feature="allocation-profiling"),"foundationdb":cfg!(feature="saturation-foundationdb")},
     }))
 }
@@ -1853,6 +1888,11 @@ async fn packet() -> Result<(), String> {
     let snapshot_verification =
         std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1");
     let mut artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate && snapshot_verification {"all stored and fresh driver files"} else if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":backend.inode_mode.inode_updates(),"compact_inode_updates":backend.inode_mode.compact_inode_updates(),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    artifact["metadata_provider"] = json!(backend.name);
+    artifact["block_provider"] = json!(backend.block_provider());
+    artifact["block_provider_selection"] = json!({"selector":"MOUNT_RS_REMOTE_SATURATION_BLOCK_PROVIDER",
+        "requested":if backend.block_provider() == "rustfs" { "rustfs" } else { "metadata" }});
+    artifact["rustfs_preflight"] = json!(backend.rustfs_preflight());
     artifact["runtime"] = runtime_worker_receipt();
     artifact["file_blocks"] = json!(blocks);
     artifact["hot_blocks"] = json!(hot_blocks);

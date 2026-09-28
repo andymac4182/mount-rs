@@ -36,6 +36,7 @@ mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 mount-rs-sdk = { path = "../mount-rs-sdk" }
 mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }
+mount-rs-rustfs = { path = "../../providers/mount-rs-rustfs" }
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

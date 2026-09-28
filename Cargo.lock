@@ -2168,6 +2168,7 @@ dependencies = [
  "mount-rs-core",
  "mount-rs-memfs",
  "mount-rs-remote-protocol",
+ "mount-rs-rustfs",
  "mount-rs-sdk",
  "mount-rs-sqlite",
  "mount-rs-tidb",

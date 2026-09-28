@@ -1,0 +1,225 @@
+{
+  "schema": "mount-rs.remote-rustfs-selector-qualification.v2",
+  "base_head": "b4f8bed8d15eafe090ca1f9970bf75403c241a5d",
+  "source_freeze_sha256": "3af43219b5834a4ba84e397d88eb4d0a607aab167a01c55a96cd148ed64a029e",
+  "source_freeze_paths": {
+    "Cargo.lock": "fabbefa571cd60c3ca564955744fd6aaa182000c588cf32505e9e01b3e370275",
+    "crates/mount-rs-service/Cargo.toml": "4dab0cf90964caefcebe90bc5cd16fc8de5582a1329e4e3879a758805dfc55fd",
+    "crates/mount-rs-service/tests/quic_tidb_saturation.rs": "33d716fce609af78c5e153e71452a30911744c0e86037e586df62e26b2e60de1",
+    "crates/mount-rs-service/tests/remote_block_selection.rs": "87856c2dd3ff9acab455914980b84bfbe6795c98cf307c49389084a81ec23cf0",
+    "crates/mount-rs-service/tests/support/remote_blocks.rs": "bbf1c7a79ff4d09e22965b534a99f368aab4eee94bae1f601c42dfbdb82e170e",
+    "crates/mount-rs-service/tests/support/saturation_backend.rs": "c9da629c75530b6b0e484e51be5eb5b97ca82c9c4c477945d7c085f6adfa93f6",
+    "crates/mount-rs-service/tests/support/production_target/backend.rs": "4e61a014c1d3af7f73ef5315dc01002434eeb32e585707b7eb94b40c3304c003",
+    "crates/mount-rs-service/tests/support/production_target/mod.rs": "9344b074efe08f032041d44152d5df98af76e59dc01a1d5890046b3e9f87d3b5",
+    "crates/mount-rs-service/tests/support/production_target/process.rs": "a8c62fd61fca2372beeb2ecdff3e232b5381e1cd2c0954b31d50c12be44ef320"
+  },
+  "gates": [
+    {
+      "gate": "remoteblocksurfaces",
+      "mode": "default",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--all-targets",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "4b37530acf8b7741640881b7c9de1d868d92d7b57267e514b24bf18fd6811bbd",
+      "source_count": 739,
+      "source_before_after_equal": true,
+      "v2_source_pins_match": true,
+      "terminal_owner_reaped_group_absent_pipes_eof": true,
+      "owned_fixture_children_empty_and_temp_removed": true,
+      "logs_hashes_verified_without_overflow": true,
+      "summary_count": 25,
+      "tests": {
+        "passed": 297,
+        "failed": 0,
+        "ignored": 17,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      "focused_cases": [
+        "absent_or_metadata_selection_preserves_existing_roles_without_rustfs_configuration",
+        "explicit_rustfs_uses_rustfs_blocks_with_a_distinct_owned_prefix",
+        "selected_rustfs_requires_every_explicit_setting_without_r2_fallback",
+        "rustfs_selection_rejects_other_metadata_roles_before_configuration_lookup",
+        "rustfs_selection_requires_explicit_durability_and_rejects_malformed_configuration",
+        "separate_drives_keep_rustfs_configuration_and_get_distinct_block_prefixes",
+        "rustfs_rejects_offline_tidb_block_preseed_before_preparation",
+        "rustfs_owned_fixture_requires_exact_creation_cid_labels_pinned_image_and_endpoint",
+        "command::canceled_observer_remains_owned_and_is_reaped"
+      ],
+      "focused_passed": 9
+    },
+    {
+      "gate": "remoteblocksprofiled",
+      "mode": "io-profiling",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "io-profiling",
+        "--all-targets",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "9a26e4ac66c954a8ba3a80d6900aa7b17d57d5b9932929dac4ed2261eb259b17",
+      "source_count": 739,
+      "source_before_after_equal": true,
+      "v2_source_pins_match": true,
+      "terminal_owner_reaped_group_absent_pipes_eof": true,
+      "owned_fixture_children_empty_and_temp_removed": true,
+      "logs_hashes_verified_without_overflow": true,
+      "summary_count": 25,
+      "tests": {
+        "passed": 329,
+        "failed": 0,
+        "ignored": 17,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      "focused_cases": [
+        "absent_or_metadata_selection_preserves_existing_roles_without_rustfs_configuration",
+        "explicit_rustfs_uses_rustfs_blocks_with_a_distinct_owned_prefix",
+        "selected_rustfs_requires_every_explicit_setting_without_r2_fallback",
+        "rustfs_selection_rejects_other_metadata_roles_before_configuration_lookup",
+        "rustfs_selection_requires_explicit_durability_and_rejects_malformed_configuration",
+        "separate_drives_keep_rustfs_configuration_and_get_distinct_block_prefixes",
+        "rustfs_rejects_offline_tidb_block_preseed_before_preparation",
+        "rustfs_owned_fixture_requires_exact_creation_cid_labels_pinned_image_and_endpoint",
+        "command::canceled_observer_remains_owned_and_is_reaped"
+      ],
+      "focused_passed": 9
+    },
+    {
+      "gate": "remoteblocksclippy",
+      "mode": "default",
+      "command": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "72801550a3bece47595d98c15b39c99d2248a087578bba6c2d09f005234921ef",
+      "source_count": 739,
+      "source_before_after_equal": true,
+      "v2_source_pins_match": true,
+      "terminal_owner_reaped_group_absent_pipes_eof": true,
+      "owned_fixture_children_empty_and_temp_removed": true,
+      "logs_hashes_verified_without_overflow": true
+    },
+    {
+      "gate": "remoteblocksprofiledclippy",
+      "mode": "io-profiling",
+      "command": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "io-profiling",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "f68260aa5a27fee0d37f62a52912c9008dd9a0402235619b82fd6d136c2f6e6b",
+      "source_count": 739,
+      "source_before_after_equal": true,
+      "v2_source_pins_match": true,
+      "terminal_owner_reaped_group_absent_pipes_eof": true,
+      "owned_fixture_children_empty_and_temp_removed": true,
+      "logs_hashes_verified_without_overflow": true
+    },
+    {
+      "gate": "format",
+      "command": [
+        "./scripts/cargo-shared",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "9e52bf121e780e7af4322e54ed35126745178d1cf2cfa4acc0fb955da4b22379",
+      "source_before_after_equal": true,
+      "scoped_v2_source_pins_independently_verified_after_gate": true,
+      "terminal_owner_reaped_group_absent_pipes_eof": true,
+      "scope": "Cargo formatting checks all Rust sources; receipt does not individually pin the two new untracked source files."
+    }
+  ],
+  "scope": "Service all-target tests and strict Clippy with default and io-profiling configurations; eight role/config/fixture cases plus the existing owned subprocess cancellation case.",
+  "live_remote_throughput": "not_run",
+  "throughput_claim": "none",
+  "configuration": {
+    "saturation_selector": "MOUNT_RS_REMOTE_SATURATION_BLOCK_PROVIDER=rustfs",
+    "production_selector": "MOUNT_RS_TARGET_BLOCK_PROVIDER=rustfs",
+    "metadata_provider": "tidb",
+    "explicit_rustfs_settings": [
+      "MOUNT_RS_RUSTFS_ENDPOINT",
+      "MOUNT_RS_RUSTFS_BUCKET",
+      "MOUNT_RS_RUSTFS_REGION",
+      "MOUNT_RS_RUSTFS_ACCESS_KEY_ID",
+      "MOUNT_RS_RUSTFS_SECRET_ACCESS_KEY",
+      "MOUNT_RS_RUSTFS_DURABLE=1"
+    ],
+    "owned_fixture_settings": [
+      "MOUNT_RS_REMOTE_RUSTFS_CID",
+      "MOUNT_RS_BACKING_RUSTFS_OWNER"
+    ],
+    "default_selector": "absent or metadata",
+    "owned_fixture_gate": "Configured loopback RustFS endpoint, full original container ID and matching ownership, pinned image, writable persistent bind, local Unix Docker socket, measured VM >=10 GiB and >=4 CPUs; existing durable TiDB 3PD/3TiKV gate retained."
+  },
+  "limitations": [
+    "No live remote throughput or production capacity claim for this harness increment.",
+    "RustFS durability flag is a caller assertion; this gate does not prove crash or power-loss durability.",
+    "TiDB SQL blob counts are unavailable with RustFS selection; no RustFS residency inference.",
+    "Ignored tests and hosted CI remain separate gates."
+  ],
+  "retained_failures": [
+    {
+      "gate": "semantic_red",
+      "tests": {
+        "passed": 2,
+        "failed": 7
+      },
+      "receipt_sha256": "eecbf19d4fa8146fa3c4bea8847f0849f55d56e2f822e69cbab34203012b7123"
+    },
+    {
+      "gate": "initial_sandbox_observation_refusal",
+      "tests_executed": 0,
+      "receipt_sha256": "41b21c1e87ac70b705bcb9c4b152e28ab4bf69b34669dceb1eb9497b026f379b"
+    },
+    {
+      "gate": "initial_strict_clippy",
+      "errors": "Two focused err().expect() assertions corrected to expect_err(); final v2 broad suites and strict lints rerun.",
+      "receipt_sha256": "98d667819b0e2093421476a7a986797b2d77fc2a8a1f192452ee415099b28279"
+    }
+  ],
+  "independent_source_review": {
+    "result": "pass",
+    "receipt_sha256": "7f0c1f1d85605493d9dda7f0dfd7be2320656d552793e2fdbe6be888f39067fa",
+    "scope": "Implementation patch before Rustfmt; v2 final tests additionally include the two assertion-style corrections."
+  }
+}

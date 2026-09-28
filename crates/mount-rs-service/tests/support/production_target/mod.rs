@@ -12,6 +12,9 @@ mod preflight;
 mod process;
 mod progress;
 #[allow(dead_code)]
+#[path = "../remote_blocks.rs"]
+mod remote_blocks;
+#[allow(dead_code)]
 #[path = "../resource_profile.rs"]
 mod resource_profile;
 mod resources;
@@ -93,6 +96,10 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
         ("state.rs", include_bytes!("state.rs").as_slice()),
         ("resources.rs", include_bytes!("resources.rs").as_slice()),
         ("backend.rs", include_bytes!("backend.rs").as_slice()),
+        (
+            "../remote_blocks.rs",
+            include_bytes!("../remote_blocks.rs").as_slice(),
+        ),
         ("process.rs", include_bytes!("process.rs").as_slice()),
         ("workload.rs", include_bytes!("workload.rs").as_slice()),
         ("oracle.rs", include_bytes!("oracle.rs").as_slice()),
@@ -425,6 +432,14 @@ pub async fn controller() -> Result<(), String> {
         let setup = async {
             phase_metrics=Some(metrics::Collector::new()?);
             let config = Config::environment()?;
+            let block_provider = remote_blocks::selector_from_environment("MOUNT_RS_TARGET_BLOCK_PROVIDER")?
+                .unwrap_or_else(|| "metadata".into());
+            // Validate roles and all explicit settings before identity/open/provisioning.
+            let selected_blocks = remote_blocks::resolve_blocks(&config.provider, "target-preflight/blocks",
+                Some(&block_provider), |name| std::env::var(name).ok())?;
+            journal.value["metadata_provider"] = json!(config.provider);
+            journal.value["block_provider"] = json!(if selected_blocks.is_some() { "rustfs" } else { config.provider.as_str() });
+            journal.value["block_provider_selection"] = json!({"selector":"MOUNT_RS_TARGET_BLOCK_PROVIDER","requested":block_provider});
             journal.progress = progress::Progress::new(mount_rs_core::diagnostics::profile::enabled(), &config);
             journal.progress.start();
             journal.value["full_target"] = json!(config.full_target);
@@ -462,6 +477,11 @@ pub async fn controller() -> Result<(), String> {
                         "scope":"owned local SQLite diagnostic; no TiDB capacity claim"}
                 );
             }
+            if let Some(blocks) = &selected_blocks {
+                let receipt = remote_blocks::preflight(&mut commands, blocks).await?;
+                write_json(&output.join("rustfs-preflight.json"), &receipt)?;
+                journal.value["rustfs_preflight"] = receipt;
+            }
             let directory = output.join("private");
             std::fs::create_dir(&directory).map_err(|_| "private fixture directory unavailable")?;
             use std::os::unix::fs::PermissionsExt;
@@ -469,6 +489,7 @@ pub async fn controller() -> Result<(), String> {
                 .map_err(|_| "private directory permissions failed")?;
             let backend = backend::Backend {
                 provider: config.provider.clone(),
+                block_provider,
                 root: directory.clone(),
                 prefix: format!("production-target-{}-{}", std::process::id(), utc_ms()),
             };

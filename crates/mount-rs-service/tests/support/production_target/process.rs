@@ -1326,6 +1326,7 @@ fn wrong_readiness_identities_are_rejected() {
         },
         backend: Backend {
             provider: "sqlite".into(),
+            block_provider: "metadata".into(),
             root: PathBuf::new(),
             prefix: "owned".into(),
         },

@@ -57,6 +57,8 @@ pub struct Backend {
     pub topology: Option<String>,
     pub inode_mode: InodeMode,
     store: StoreConfig,
+    blocks: Option<StoreConfig>,
+    rustfs_preflight: Option<serde_json::Value>,
     // Keep disposable local state until the fresh coordinator has verified it.
     _directory: Option<TempDir>,
 }
@@ -93,6 +95,8 @@ impl Backend {
             topology: self.topology.clone(),
             inode_mode: self.inode_mode,
             store,
+            blocks: super::remote_blocks::child_blocks(&self.blocks, index),
+            rustfs_preflight: self.rustfs_preflight.clone(),
             _directory: directory,
         })
     }
@@ -332,6 +336,25 @@ impl Backend {
                 let metadata = TidbMetadataStore::connect_with_options(connection, options.clone())
                     .await
                     .map_err(|_| "verification metadata open failed")?;
+                if let Some(blocks) = &self.blocks {
+                    let result: Result<(), String> = async {
+                        let blocks =
+                            std::sync::Arc::new(super::remote_blocks::open_rustfs(blocks)?);
+                        verify_stored_snapshot(
+                            &metadata,
+                            blocks,
+                            self.inode_mode,
+                            first_client,
+                            expected,
+                        )
+                        .await
+                    }
+                    .await;
+                    let closed = metadata.close().await;
+                    result?;
+                    closed.map_err(|_| "verification metadata close failed")?;
+                    return Ok(());
+                }
                 let blocks = std::sync::Arc::new(
                     TidbBlockStore::connect_with_options(connection, options)
                         .await
@@ -375,6 +398,7 @@ impl Backend {
 
     /// Offline fixture preparation, not a measurement of online file creation.
     pub async fn preseed_empty_files(&self, count: usize) -> Result<(), String> {
+        super::remote_blocks::require_online_preparation(&self.blocks)?;
         if self.inode_mode == InodeMode::Compact {
             return Err("offline empty-file preseed does not support compact mode".into());
         }
@@ -486,6 +510,32 @@ impl Backend {
         if inode_mode == InodeMode::Compact && name != "tidb" && name != "sqlite" {
             return Err("compact saturation requires TiDB or SQLite stored-mode oracle".into());
         }
+        let selector = super::remote_blocks::selector_from_environment(
+            "MOUNT_RS_REMOTE_SATURATION_BLOCK_PROVIDER",
+        )?;
+        let blocks = super::remote_blocks::resolve_blocks(
+            &name,
+            &format!("{key}/blocks"),
+            selector.as_deref(),
+            |name| std::env::var(name).ok(),
+        )?;
+        let rustfs_preflight = if let Some(_blocks) = &blocks {
+            #[cfg(unix)]
+            {
+                let mut commands = super::command::Commands::default();
+                let observed = super::remote_blocks::preflight(&mut commands, _blocks).await;
+                let cleaned = commands.cleanup().await;
+                observed.as_ref().map_err(Clone::clone)?;
+                cleaned?;
+                Some(observed?)
+            }
+            #[cfg(not(unix))]
+            {
+                return Err("owned RustFS harness preflight requires Unix".into());
+            }
+        } else {
+            None
+        };
         let mut directory = None;
         let (store, identity, version, topology) = match name.as_str() {
             "tidb" => {
@@ -586,6 +636,8 @@ impl Backend {
             topology,
             inode_mode,
             store,
+            blocks,
+            rustfs_preflight,
             _directory: directory,
         })
     }
@@ -604,7 +656,12 @@ impl Backend {
         let pool = Pool::from_url(connection).map_err(|_| "owned counts pool failed")?;
         let result = async {
             let mut connection = pool.get_conn().await.map_err(|_| "owned counts connection failed")?;
-            let (blocks, bytes): (u64, u64) = connection.exec_first("SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(bytes)), 0) FROM mount_rs_tidb_blocks WHERE volume_key = ?", (volume_key.as_bytes(),)).await.map_err(|_| "owned block count failed")?.ok_or("owned block counts missing")?;
+            let (blocks, bytes) = if self.blocks.is_some() {
+                (None, None)
+            } else {
+                let (blocks, bytes): (u64, u64) = connection.exec_first("SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(bytes)), 0) FROM mount_rs_tidb_blocks WHERE volume_key = ?", (volume_key.as_bytes(),)).await.map_err(|_| "owned block count failed")?.ok_or("owned block counts missing")?;
+                (Some(blocks), Some(bytes))
+            };
             let (anchor_rows, anchor_namespace_bytes): (u64, u64) = connection.exec_first(
                 "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(namespace)),0) FROM mount_rs_tidb_metadata WHERE volume_key=?",
                 (volume_key.as_bytes(),),
@@ -626,7 +683,15 @@ impl Backend {
                 }
                 InodeMode::Legacy => serde_json::json!({}),
             };
-            Ok(serde_json::json!({"owned_volume_key":volume_key,"blocks":blocks,"logical_block_bytes":bytes,"anchor_rows":anchor_rows,"anchor_namespace_json_bytes":anchor_namespace_bytes,"mode_rows":rows,"scope":"exact owned key; SQL logical bytes, not physical SSD bytes or IOPS"}))
+            let mut observed = serde_json::json!({"owned_volume_key":volume_key,"blocks":blocks,"logical_block_bytes":bytes,"anchor_rows":anchor_rows,"anchor_namespace_json_bytes":anchor_namespace_bytes,"mode_rows":rows,"scope":"exact owned key; SQL logical bytes, not physical SSD bytes or IOPS"});
+            if self.blocks.is_some() {
+                observed["block_provider"] = serde_json::json!("rustfs");
+                observed["tidb_block_counts"] = serde_json::json!({"available":false,
+                    "reason":"RustFS selection does not open or query TiDB block storage"});
+                observed["rustfs_blob_residency"] = serde_json::json!({"available":false,
+                    "reason":"TiDB SQL counts do not observe RustFS blobs; zero TiDB rows do not prove RustFS residency"});
+            }
+            Ok(observed)
         }.await;
         let closed = pool
             .disconnect()
@@ -636,6 +701,18 @@ impl Backend {
             (Ok(result), Ok(())) => Ok(result),
             (Err(error), _) | (_, Err(error)) => Err(error),
         }
+    }
+
+    pub fn block_provider(&self) -> &str {
+        if self.blocks.is_some() {
+            "rustfs"
+        } else {
+            &self.name
+        }
+    }
+
+    pub fn rustfs_preflight(&self) -> Option<&serde_json::Value> {
+        self.rustfs_preflight.as_ref()
     }
 
     pub async fn open(&self, index: usize) -> Result<Filesystem, String> {
@@ -652,7 +729,7 @@ impl Backend {
             .with_inode_updates(self.inode_mode.inode_updates())
             .with_compact_inode_updates(self.inode_mode.compact_inode_updates());
         options.metadata = self.store.clone();
-        options.blocks = self.store.clone();
+        options.blocks = self.blocks.as_ref().unwrap_or(&self.store).clone();
         let result = match context {
             Some(context) => Filesystem::split_with_context(options, context).await,
             None => Filesystem::split(options).await,
@@ -776,16 +853,27 @@ impl Backend {
                 let metadata = TidbMetadataStore::connect_with_options(connection, options.clone())
                     .await
                     .map_err(|_| "mode receipt metadata open failed")?;
-                let blocks = TidbBlockStore::connect_with_options(connection, options)
-                    .await
-                    .map_err(|_| "mode receipt block open failed")?;
-                let verified =
-                    verify_mode_backing(&metadata, &blocks, self.inode_mode, backing).await;
-                let metadata_closed = metadata.close().await;
-                let blocks_closed = blocks.close().await;
-                verified?;
-                metadata_closed.map_err(|_| "mode receipt metadata close failed")?;
-                blocks_closed.map_err(|_| "mode receipt block close failed")?;
+                if let Some(blocks) = &self.blocks {
+                    let verified: Result<(), String> = async {
+                        let blocks = super::remote_blocks::open_rustfs(blocks)?;
+                        verify_mode_backing(&metadata, &blocks, self.inode_mode, backing).await
+                    }
+                    .await;
+                    let closed = metadata.close().await;
+                    verified?;
+                    closed.map_err(|_| "mode receipt metadata close failed")?;
+                } else {
+                    let blocks = TidbBlockStore::connect_with_options(connection, options)
+                        .await
+                        .map_err(|_| "mode receipt block open failed")?;
+                    let verified =
+                        verify_mode_backing(&metadata, &blocks, self.inode_mode, backing).await;
+                    let metadata_closed = metadata.close().await;
+                    let blocks_closed = blocks.close().await;
+                    verified?;
+                    metadata_closed.map_err(|_| "mode receipt metadata close failed")?;
+                    blocks_closed.map_err(|_| "mode receipt block close failed")?;
+                }
             }
             StoreConfig::Sqlite { path } => {
                 let metadata = SqliteMetadataStore::open(path)
@@ -1046,6 +1134,8 @@ mod tests {
             store: StoreConfig::Sqlite {
                 path: directory.path().join("drive.sqlite"),
             },
+            blocks: None,
+            rustfs_preflight: None,
             _directory: Some(directory),
         }
     }
