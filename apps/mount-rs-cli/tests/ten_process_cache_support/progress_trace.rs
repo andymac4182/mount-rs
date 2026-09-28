@@ -29,6 +29,9 @@ pub enum Label {
     FleetChildSample,
     OracleCaptureBefore,
     OracleActionPoll,
+    OracleNamespacePoll,
+    OraclePrefixPoll,
+    OracleSdkOpenPoll,
     OracleCleanupPoll,
     OracleCaptureAfter,
 }
@@ -43,6 +46,9 @@ impl Label {
             Self::FleetChildSample => "fleet_child_sample",
             Self::OracleCaptureBefore => "oracle_capture_before",
             Self::OracleActionPoll => "oracle_action_poll",
+            Self::OracleNamespacePoll => "oracle_namespace_poll",
+            Self::OraclePrefixPoll => "oracle_prefix_poll",
+            Self::OracleSdkOpenPoll => "oracle_sdk_open_poll",
             Self::OracleCleanupPoll => "oracle_cleanup_poll",
             Self::OracleCaptureAfter => "oracle_capture_after",
         }

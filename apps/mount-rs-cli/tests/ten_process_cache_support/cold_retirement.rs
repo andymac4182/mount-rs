@@ -480,12 +480,18 @@ async fn open_sdk(
     let attempt = journal
         .begin()
         .map_err(|_| "private SDK construction journal unavailable")?;
-    let opened = Filesystem::split_with_context_and_construction_observer(
-        backing.split(n, "owned-ten-cli-fresh-oracle"),
-        &context,
-        &journal,
-    )
-    .await;
+    let opened = {
+        let opened = Filesystem::split_with_context_and_construction_observer(
+            backing.split(n, "owned-ten-cli-fresh-oracle"),
+            &context,
+            &journal,
+        );
+        tokio::pin!(opened);
+        std::future::poll_fn(|context| {
+            progress_trace::poll(opened.as_mut(), context, Label::OracleSdkOpenPoll)
+        })
+        .await
+    };
     match opened {
         Ok(filesystem) => {
             let filesystem = Arc::new(filesystem);
@@ -505,16 +511,28 @@ async fn initialize(backing: Backing, n: usize, owner: Arc<Mutex<Retained>>) -> 
     let pool = TidbPoolContext::new(&backing.connection, 16)
         .map_err(|_| "private TiDB context creation failed")?;
     retain(&owner, Resource::Pool(pool.clone()))?;
-    if !pool
-        .inspect_namespace_presence(&backing.key(n))
+    let namespace_absent = {
+        let key = backing.key(n);
+        let observation = pool.inspect_namespace_presence(&key);
+        tokio::pin!(observation);
+        std::future::poll_fn(|context| {
+            progress_trace::poll(observation.as_mut(), context, Label::OracleNamespacePoll)
+        })
         .await
         .map_err(|_| "private namespace absence observation failed")?
         .is_absent()
-        || !backing
-            .blocks
-            .observe_owned_prefix_absence(&backing.prefix(n))
+    };
+    if !namespace_absent
+        || !{
+            let prefix = backing.prefix(n);
+            let observation = backing.blocks.observe_owned_prefix_absence(&prefix);
+            tokio::pin!(observation);
+            std::future::poll_fn(|context| {
+                progress_trace::poll(observation.as_mut(), context, Label::OraclePrefixPoll)
+            })
             .await
             .map_err(|_| "private block prefix absence observation failed")?
+        }
     {
         return Err("generated owned namespace/prefix is not absent; no overwrite".into());
     }
