@@ -301,13 +301,29 @@ impl Journal {
         result
     }
     fn phase(&mut self, name: &str) -> Result<(), String> {
-        if Instant::now() >= self.phase_deadline {
+        self.phase_at(name, Instant::now(), utc_ms())
+    }
+    fn phase_at(&mut self, name: &str, now: Instant, now_unix_ms: u64) -> Result<(), String> {
+        self.phase_with_budget_at(name, PHASE_SECONDS, now, now_unix_ms)
+    }
+    fn phase_with_budget(&mut self, name: &str, seconds: u64) -> Result<(), String> {
+        self.phase_with_budget_at(name, seconds, Instant::now(), utc_ms())
+    }
+    fn phase_with_budget_at(
+        &mut self,
+        name: &str,
+        seconds: u64,
+        now: Instant,
+        now_unix_ms: u64,
+    ) -> Result<(), String> {
+        if now >= self.phase_deadline {
             return Err("previous phase exhausted its inherited deadline".into());
         }
+        // A phase allowance never renews the enclosing work deadline.
         self.phase_deadline = self
             .enclosing_deadline
-            .min(Instant::now() + Duration::from_secs(PHASE_SECONDS));
-        let now = utc_ms();
+            .min(now + Duration::from_secs(seconds));
+        let now = now_unix_ms;
         let previous = self.value["phase"].clone();
         let began = self.value["phase_started_unix_ms"]
             .as_u64()
@@ -456,6 +472,7 @@ pub async fn controller() -> Result<(), String> {
                 "scope":"local loopback, signed local ES256 fixture authentication; not external issuer or cross-host capacity",
                 "budgets":{
                     "phase_seconds":PHASE_SECONDS,
+                    "population_seconds":null,
                     "work_seconds":WORK_SECONDS,
                     "request_seconds":REQUEST_SECONDS,
                     "setup_seconds":600,
@@ -490,6 +507,7 @@ pub async fn controller() -> Result<(), String> {
         let setup = async {
             phase_metrics=Some(metrics::Collector::new()?);
             let config = Config::environment()?;
+            journal.value["budgets"]["population_seconds"] = json!(config.population_seconds);
             let block_provider = remote_blocks::selector_from_environment("MOUNT_RS_TARGET_BLOCK_PROVIDER")?
                 .unwrap_or_else(|| "metadata".into());
             // Validate roles and all explicit settings before identity/open/provisioning.
@@ -689,9 +707,9 @@ pub async fn controller() -> Result<(), String> {
                 Ok::<_, String>(())
             }).await.map_err(|_| "signed connections inherited phase deadline")??;
             journal.value["connected_clients"] = json!(lanes.len());
-            journal.phase("online_namespace")?;
+            journal.phase_with_budget("online_namespace", config.population_seconds)?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_namespace","before"),&oracle_owner).await?;
-            supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
+            supervised(&mut fleet, resource, &mut journal, config.population_seconds, async {
                 futures_util::future::try_join_all(
                     lanes.iter_mut().map(|l| l.populate(config.files, false)),
                 )
@@ -701,9 +719,9 @@ pub async fn controller() -> Result<(), String> {
             .await?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_namespace","after"),&oracle_owner).await?;
             journal.value["namespace_files"] = json!(lanes.iter().map(|l|l.expected.files.len()as u64).sum::<u64>());
-            journal.phase("online_payload")?;
+            journal.phase_with_budget("online_payload", config.population_seconds)?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_payload","before"),&oracle_owner).await?;
-            supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
+            supervised(&mut fleet, resource, &mut journal, config.population_seconds, async {
                 futures_util::future::try_join_all(
                     lanes.iter_mut().map(|l| l.populate(config.files, true)),
                 )
@@ -1332,4 +1350,118 @@ fn audit_missing_or_expired_is_unknown_not_zero() {
         observe_audit(&path, Instant::now() + Duration::from_secs(1))["remote_access_events"],
         1
     );
+}
+
+#[cfg(test)]
+mod population_budget_tests {
+    use super::*;
+
+    fn journal_at(now: Instant, remaining: u64) -> (tempfile::TempDir, Journal) {
+        let directory = tempfile::tempdir().unwrap();
+        let enclosing_deadline = now + Duration::from_secs(remaining);
+        let journal = Journal {
+            value: json!({
+                "phase":"signed_connections","created_unix_ms":1000,
+                "phase_started_unix_ms":2000
+            }),
+            output: directory.path().to_owned(),
+            counts: vec![],
+            enclosing_deadline,
+            phase_deadline: enclosing_deadline,
+            progress: progress::Progress::disabled(),
+        };
+        (directory, journal)
+    }
+
+    fn assert_published_phase(directory: &tempfile::TempDir, journal: &Journal, name: &str) {
+        let published = read_json(&directory.path().join("terminal.json")).unwrap();
+        assert_eq!(published, journal.value);
+        assert_eq!(published["phase"], name);
+        assert_eq!(published["phase_started_unix_ms"], 5000);
+        assert_eq!(
+            published["phase_history"],
+            json!([
+                {"phase":"signed_connections","elapsed_ms":3000,"ended_unix_ms":5000}
+            ])
+        );
+    }
+
+    #[test]
+    fn production_population_budget_extends_actual_journal_beyond_ordinary_600() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, WORK_SECONDS);
+        let enclosing = journal.enclosing_deadline;
+        journal
+            .phase_with_budget_at("online_payload", 900, now, 5000)
+            .unwrap();
+        assert_published_phase(&directory, &journal, "online_payload");
+        assert_eq!(journal.enclosing_deadline, enclosing);
+        assert_eq!(
+            journal.phase_deadline,
+            now + Duration::from_secs(900),
+            "population allowance must change the actual inherited deadline"
+        );
+    }
+
+    #[test]
+    fn production_population_budget_shrinks_actual_journal_to_60() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, WORK_SECONDS);
+        journal
+            .phase_with_budget_at("online_namespace", 60, now, 5000)
+            .unwrap();
+        assert_published_phase(&directory, &journal, "online_namespace");
+        assert_eq!(
+            journal.phase_deadline,
+            now + Duration::from_secs(60),
+            "population allowance must also enforce a smaller configured cap"
+        );
+    }
+
+    #[test]
+    fn production_population_budget_clips_actual_journal_to_120_remaining() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, 120);
+        let enclosing = journal.enclosing_deadline;
+        journal
+            .phase_with_budget_at("online_payload", 900, now, 5000)
+            .unwrap();
+        assert_published_phase(&directory, &journal, "online_payload");
+        assert_eq!(journal.phase_deadline, enclosing);
+        assert_eq!(journal.enclosing_deadline, enclosing);
+    }
+
+    #[test]
+    fn production_population_budget_preserves_ordinary_phase_600() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, WORK_SECONDS);
+        journal.phase_at("initial_fresh_oracle", now, 5000).unwrap();
+        assert_published_phase(&directory, &journal, "initial_fresh_oracle");
+        assert_eq!(
+            journal.phase_deadline,
+            now + Duration::from_secs(PHASE_SECONDS)
+        );
+    }
+
+    #[test]
+    fn production_population_budget_refuses_expired_predecessor_without_mutating_history() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, WORK_SECONDS);
+        journal.phase_deadline = now;
+        journal.flush().unwrap();
+        let previous_value = journal.value.clone();
+        let previous_receipt = std::fs::read(directory.path().join("terminal.json")).unwrap();
+        let enclosing = journal.enclosing_deadline;
+        let error = journal
+            .phase_with_budget_at("online_payload", 900, now, 5000)
+            .unwrap_err();
+        assert_eq!(error, "previous phase exhausted its inherited deadline");
+        assert_eq!(journal.phase_deadline, now);
+        assert_eq!(journal.enclosing_deadline, enclosing);
+        assert_eq!(journal.value, previous_value);
+        assert_eq!(
+            std::fs::read(directory.path().join("terminal.json")).unwrap(),
+            previous_receipt
+        );
+    }
 }

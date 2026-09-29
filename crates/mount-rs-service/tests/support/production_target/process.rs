@@ -668,6 +668,7 @@ fn resource_progress_owned_expectation_and_generation_context_do_not_reset_sampl
             drives: 10,
             files: 2,
             seconds: 1,
+            population_seconds: super::config::PHASE_SECONDS,
             provider: "sqlite".into(),
         },
     );
@@ -754,6 +755,7 @@ async fn resource_progress_cleanup_captures_owned_terminal_once_and_preserves_li
                     drives: 10,
                     files: 2,
                     seconds: 1,
+                    population_seconds: super::config::PHASE_SECONDS,
                     provider: "sqlite".into(),
                 },
             );
@@ -832,6 +834,7 @@ async fn resource_progress_cleanup_captures_owned_terminal_once_and_preserves_li
             drives: 10,
             files: 2,
             seconds: 1,
+            population_seconds: super::config::PHASE_SECONDS,
             provider: "sqlite".into(),
         },
     );
@@ -1539,6 +1542,7 @@ fn wrong_readiness_identities_are_rejected() {
             drives: 10,
             files: 2,
             seconds: 1,
+            population_seconds: super::config::PHASE_SECONDS,
             provider: "sqlite".into(),
         },
         backend: Backend {

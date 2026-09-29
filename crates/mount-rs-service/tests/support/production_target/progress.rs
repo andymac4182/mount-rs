@@ -686,6 +686,7 @@ mod tests {
             drives: 10000,
             files: 1000,
             seconds: 30,
+            population_seconds: super::super::config::PHASE_SECONDS,
             provider: "sqlite".into(),
         }
     }
