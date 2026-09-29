@@ -522,8 +522,8 @@ test("current 118-row inventory accepts the independently declared compact-root 
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => compactRootNames.includes(name)), false)
   assert.equal(value.measurement.tidb_coverage.pool_checkout_sites, "38")
   assert.equal(value.measurement.tidb_coverage.transaction_begin_sites, "4")
-  assert.equal(value.measurement.tidb_coverage.transaction_rollback_sites, "10")
-  assert.equal(value.measurement.tidb_coverage.sql_statement_sites, "79")
+  assert.equal(value.measurement.tidb_coverage.transaction_rollback_sites, "11")
+  assert.equal(value.measurement.tidb_coverage.sql_statement_sites, "80")
 })
 test("old 116-row observation stays incomplete without invented compact-root SDK rows", () => {
   const before = snapshot({ preCompactRoot: true }), after = snapshot({ preCompactRoot: true })

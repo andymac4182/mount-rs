@@ -320,3 +320,6 @@ impl CompactRootDentryCursor<'_> {
 
 #[cfg(all(test, not(kani)))]
 mod tests;
+
+#[cfg(kani)]
+mod verification;

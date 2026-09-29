@@ -15,6 +15,12 @@ cd "$(dirname "$0")/.."
 ./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_transition_conserves_exact_write_frame
 ./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_receipt_rejects_single_field_tampering
 ./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_checked_times_and_generation_do_not_wrap
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_materialized_file_match_and_fallback
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_materialized_fallback_preserves_error_precedence
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_materialized_audited_root_and_provenance
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_borrowed_root_members_match_complete_authority
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_borrowed_root_guard_and_dentries_require_exact_match
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_borrowed_root_stages_reject_incomplete_and_preserve_provenance
 ./scripts/cargo-shared kani -p mount-rs-core --harness directory_link_count_boundaries
 ./scripts/cargo-shared kani -p mount-rs-core --harness namespace_path_boundaries
 ./scripts/cargo-shared kani -p mount-rs-core --harness decoded_truncation_requires_write

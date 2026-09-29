@@ -19,7 +19,7 @@ use crate::{
 };
 
 #[cfg(test)]
-mod borrowed_allocations;
+pub(crate) mod borrowed_allocations;
 #[cfg(test)]
 mod borrowed_tests;
 pub mod result_set_stream;

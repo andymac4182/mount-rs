@@ -7675,8 +7675,8 @@ mod tests {
         assert_eq!(coverage["status"], "source_sites_instrumented");
         assert_eq!(coverage["pool_checkout_sites"], "38");
         assert_eq!(coverage["transaction_begin_sites"], "4");
-        assert_eq!(coverage["transaction_rollback_sites"], "10");
-        assert_eq!(coverage["sql_statement_sites"], "79");
+        assert_eq!(coverage["transaction_rollback_sites"], "11");
+        assert_eq!(coverage["sql_statement_sites"], "80");
         assert_eq!(
             coverage["operations"],
             json!(mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE.operations)

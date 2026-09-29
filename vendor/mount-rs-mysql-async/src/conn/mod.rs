@@ -15,9 +15,9 @@ use mysql_common::{
     crypto,
     io::ParseBuf,
     packets::{
-        AuthPlugin, AuthSwitchRequest, CommonOkPacket, ErrPacket, HandshakePacket,
-        HandshakeResponse, OkPacket, OkPacketDeserializer, OldAuthSwitchRequest, OldEofPacket,
-        ResultSetTerminator, SslRequest,
+        AuthPlugin, AuthSwitchRequest, CommonOkPacket, ErrPacket, ErrPacketHeader, HandshakePacket,
+        HandshakeResponse, OkPacket, OkPacketDeserializer, OkPacketKind, OldAuthSwitchRequest,
+        OldEofPacket, ResultSetTerminator, SslRequest,
     },
     proto::MySerialize,
     row::Row,
@@ -872,6 +872,24 @@ impl Conn {
 
     /// Returns `true` for ProgressReport packet.
     fn handle_packet(&mut self, packet: &PooledBuf) -> Result<bool> {
+        if let Some(&header) = packet.first() {
+            let ok_header = if self.has_pending_result() {
+                if self.has_capabilities(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
+                    ResultSetTerminator::HEADER
+                } else {
+                    OldEofPacket::HEADER
+                }
+            } else {
+                CommonOkPacket::HEADER
+            };
+            // Ordinary row and metadata packets cannot pass either parser's
+            // header check. Avoid allocating their discarded mismatch errors;
+            // matching headers and empty packets retain the original parsers.
+            if header != ok_header && header != ErrPacketHeader::new().value() {
+                return Ok(false);
+            }
+        }
+
         let ok_packet = if self.has_pending_result() {
             if self.has_capabilities(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
                 ParseBuf(packet)
@@ -2846,6 +2864,328 @@ mod test {
             });
 
             runtime.block_on(conn.disconnect()).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod borrowed_packet_classification_tests {
+    use super::*;
+    use crate::{
+        buffer_pool::BufferPool,
+        queryable::{query_result::borrowed_allocations::Window, Protocol},
+        Column,
+    };
+    use mysql_common::{constants::ColumnType, packets::SqlState};
+
+    fn columns() -> Arc<[Column]> {
+        vec![Column::new(ColumnType::MYSQL_TYPE_LONGLONG)].into()
+    }
+
+    /// No socket, query setup, asynchronous executor or pool checkout enters
+    /// these classifier windows. This fixture marks itself disconnected so its
+    /// destruction cannot spawn ordinary connection cleanup.
+    fn connection(pending: u8, capabilities: CapabilityFlags, handshake: bool) -> Conn {
+        let mut inner = ConnInner::empty(OptsBuilder::default().into());
+        inner.disconnected = true;
+        inner.handshake_complete = handshake;
+        inner.capabilities = capabilities;
+        inner.status =
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_MORE_RESULTS_EXISTS;
+        let seed = [0, 1, 2, 2, 0, 3, 0];
+        inner.last_ok_packet = Some(
+            ParseBuf(&seed)
+                .parse::<OkPacketDeserializer<CommonOkPacket>>(CapabilityFlags::CLIENT_PROTOCOL_41)
+                .unwrap()
+                .into_inner()
+                .into_owned(),
+        );
+        inner.last_err_packet = Some(
+            mysql_common::packets::ServerError::new(
+                1999,
+                Some(SqlState::new(*b"HY000")),
+                &b"retained error"[..],
+            )
+            .into_owned(),
+        );
+        inner.pending_result = match pending {
+            0 => Ok(None),
+            1 => Ok(Some(PendingResult::Pending(ResultSetMeta::Binary(
+                columns(),
+            )))),
+            2 => Ok(Some(PendingResult::Pending(ResultSetMeta::Text(columns())))),
+            3 => Ok(Some(PendingResult::Taken(Arc::new(ResultSetMeta::Binary(
+                columns(),
+            ))))),
+            4 => Ok(Some(PendingResult::Taken(Arc::new(ResultSetMeta::Text(
+                columns(),
+            ))))),
+            5 => Err(ServerError {
+                code: 2000,
+                state: "HY000".into(),
+                message: "retained pending error".into(),
+            }),
+            _ => panic!("invalid pending fixture"),
+        };
+        Conn {
+            inner: Box::new(inner),
+        }
+    }
+
+    type PendingState = std::result::Result<Option<(u8, Arc<[Column]>)>, ServerError>;
+
+    #[derive(Debug, PartialEq)]
+    struct State {
+        status: StatusFlags,
+        ok: Option<OkPacket<'static>>,
+        error: Option<mysql_common::packets::ServerError<'static>>,
+        pending: PendingState,
+        disconnected: bool,
+    }
+
+    fn state(conn: &Conn) -> State {
+        let pending = conn
+            .inner
+            .pending_result
+            .as_ref()
+            .map(|pending| {
+                pending.as_ref().map(|pending| {
+                    let (taken, meta) = match pending {
+                        PendingResult::Pending(meta) => (0, meta),
+                        PendingResult::Taken(meta) => (2, meta.as_ref()),
+                    };
+                    match meta {
+                        ResultSetMeta::Text(columns) => (taken, columns.clone()),
+                        ResultSetMeta::Binary(columns) => (taken + 1, columns.clone()),
+                    }
+                })
+            })
+            .map_err(Clone::clone);
+        State {
+            status: conn.inner.status,
+            ok: conn.inner.last_ok_packet.clone(),
+            error: conn.inner.last_err_packet.clone(),
+            pending,
+            disconnected: conn.inner.disconnected,
+        }
+    }
+
+    // Retained upstream classifier is an allocating differential control. It
+    // exercises the actual pinned deserializers and state handlers, including
+    // all suppressed parse failures; it is not used by production code.
+    fn upstream_handle_packet(conn: &mut Conn, packet: &PooledBuf) -> Result<bool> {
+        let ok_packet = if conn.has_pending_result() {
+            if conn.has_capabilities(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
+                ParseBuf(packet)
+                    .parse::<OkPacketDeserializer<ResultSetTerminator>>(conn.capabilities())
+                    .map(|x| x.into_inner())
+            } else {
+                ParseBuf(packet)
+                    .parse::<OkPacketDeserializer<OldEofPacket>>(conn.capabilities())
+                    .map(|x| x.into_inner())
+            }
+        } else {
+            ParseBuf(packet)
+                .parse::<OkPacketDeserializer<CommonOkPacket>>(conn.capabilities())
+                .map(|x| x.into_inner())
+        };
+        if let Ok(ok_packet) = ok_packet {
+            conn.handle_ok(ok_packet.into_owned());
+        } else {
+            let capabilities = if conn.inner.handshake_complete {
+                conn.capabilities()
+            } else {
+                CapabilityFlags::empty()
+            };
+            if let Ok(err_packet) = ParseBuf(packet).parse::<ErrPacket>(capabilities) {
+                conn.handle_err(err_packet)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn outcome(result: Result<bool>) -> std::result::Result<bool, ServerError> {
+        match result {
+            Ok(progress) => Ok(progress),
+            Err(Error::Server(error)) => Err(error),
+            other => panic!("unexpected classifier outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn borrowed_packet_binary_row_classification_allocates_nothing() {
+        const ROWS: usize = 16;
+        let pool = Arc::new(BufferPool::new());
+        let mut payload = vec![0, 0]; // Valid one-column binary row, no NULL value.
+        payload.extend_from_slice(&123_i64.to_le_bytes());
+        let packet = pool.get_with(&payload);
+        let columns = columns();
+        let mut conn = connection(1, CapabilityFlags::CLIENT_PROTOCOL_41, true);
+
+        // Warm metadata, fixed packet storage, both actual decoder/classifier
+        // paths and the thread-local meter before recording either window.
+        assert!(!conn.handle_packet(&packet).unwrap());
+        let row = BinaryProtocol::read_result_set_row(&packet, columns.clone()).unwrap();
+        assert_eq!(crate::from_row::<(i64,)>(row), (123,));
+        let before = state(&conn);
+        let mut owned_values = [0_i64; ROWS];
+        let mut classification = [true; ROWS];
+
+        let window = Window::begin();
+        for value in &mut owned_values {
+            let row = BinaryProtocol::read_result_set_row(&packet, columns.clone()).unwrap();
+            *value = crate::from_row::<(i64,)>(std::hint::black_box(row)).0;
+        }
+        let owned_counts = window.finish();
+        let window = Window::begin();
+        for is_progress in &mut classification {
+            *is_progress = conn.handle_packet(std::hint::black_box(&packet)).unwrap();
+        }
+        let classifier_counts = window.finish();
+
+        assert_eq!(owned_values, [123; ROWS]);
+        assert_eq!(classification, [false; ROWS]);
+        assert_eq!(
+            state(&conn),
+            before,
+            "row classification must preserve connection state"
+        );
+        assert!(
+            owned_counts.calls >= ROWS,
+            "owned allocating control: {owned_counts:?}"
+        );
+        eprintln!("rows={ROWS} owned={owned_counts:?} classifier={classifier_counts:?}");
+        assert_eq!(
+            classifier_counts.calls, 0,
+            "normal row classification constructed discarded errors: {classifier_counts:?}"
+        );
+        assert_eq!(classifier_counts.bytes, 0);
+    }
+
+    #[test]
+    fn borrowed_packet_classification_preserves_ok_and_both_eof_modes() {
+        let pool = Arc::new(BufferPool::new());
+        let status = (StatusFlags::SERVER_STATUS_AUTOCOMMIT
+            | StatusFlags::SERVER_MORE_RESULTS_EXISTS)
+            .bits()
+            .to_le_bytes();
+        for (pending, capabilities, payload, affected, insert_id, warnings, info) in [
+            (
+                0,
+                CapabilityFlags::CLIENT_PROTOCOL_41,
+                vec![0, 7, 9, status[0], status[1], 5, 0, 3, b'y', b'e', b's'],
+                7,
+                Some(9),
+                5,
+                Some(&b"yes"[..]),
+            ),
+            (
+                1,
+                CapabilityFlags::CLIENT_PROTOCOL_41,
+                vec![0xfe, 2, 0, status[0], status[1]],
+                0,
+                None,
+                2,
+                None,
+            ),
+            (
+                1,
+                CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF,
+                vec![0xfe, 0, 0, status[0], status[1], 3, 0, 3, b'y', b'e', b's'],
+                0,
+                None,
+                3,
+                Some(&b"yes"[..]),
+            ),
+        ] {
+            let mut conn = connection(pending, capabilities, true);
+            let packet = pool.get_with(payload);
+            let pending_before = state(&conn).pending;
+            assert!(!conn.handle_packet(&packet).unwrap());
+            assert_eq!(conn.affected_rows(), affected);
+            assert_eq!(conn.last_insert_id(), insert_id);
+            assert_eq!(conn.get_warnings(), warnings);
+            assert_eq!(conn.last_ok_packet().unwrap().info_ref(), info);
+            assert!(conn.more_results_exists());
+            assert!(conn.inner.last_err_packet.is_none());
+            assert_eq!(state(&conn).pending, pending_before);
+        }
+    }
+
+    #[test]
+    fn borrowed_packet_classification_preserves_handshake_error_capabilities_and_progress() {
+        let pool = Arc::new(BufferPool::new());
+        for (handshake, message, sql_state) in [
+            (true, &b"#42000statement failed"[..], "42000"),
+            (false, &b"handshake failed"[..], "HY000"),
+        ] {
+            let mut payload = vec![0xff];
+            payload.extend_from_slice(&1064_u16.to_le_bytes());
+            payload.extend_from_slice(message);
+            let mut conn = connection(1, CapabilityFlags::CLIENT_PROTOCOL_41, handshake);
+            let pending_before = state(&conn).pending;
+            let result = outcome(conn.handle_packet(&pool.get_with(payload)));
+            let error = result.unwrap_err();
+            assert_eq!(error.code, 1064);
+            assert_eq!(error.state, sql_state);
+            assert_eq!(
+                error.message,
+                if handshake {
+                    "statement failed"
+                } else {
+                    "handshake failed"
+                }
+            );
+            assert!(conn.inner.status.is_empty());
+            assert!(conn.inner.last_ok_packet.is_none());
+            assert_eq!(
+                conn.inner.last_err_packet.as_ref().unwrap().error_code(),
+                1064
+            );
+            assert_eq!(state(&conn).pending, pending_before);
+        }
+
+        // MariaDB progress uses the ERR marker and reserved code. It is consumed
+        // by read_packet without clearing status/OK/ERR/pending result state.
+        let progress = pool.get_with([0xff, 0xff, 0xff, 1, 1, 2, 0, 0, 0, 1, b'x']);
+        let mut conn = connection(
+            1,
+            CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_PROGRESS_OBSOLETE,
+            true,
+        );
+        let before = state(&conn);
+        assert!(conn.handle_packet(&progress).unwrap());
+        assert_eq!(state(&conn), before);
+    }
+
+    #[test]
+    fn borrowed_packet_classification_matches_upstream_for_markers_truncation_and_state() {
+        let pool = Arc::new(BufferPool::new());
+        let capabilities = [
+            CapabilityFlags::CLIENT_PROTOCOL_41,
+            CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF,
+            CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_SESSION_TRACK,
+            CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_PROGRESS_OBSOLETE,
+        ];
+        let mut body = [0_u8; 12];
+        for pending in 0..=5 {
+            for capabilities in capabilities {
+                for handshake in [false, true] {
+                    for marker in 0..=u8::MAX {
+                        body[0] = marker;
+                        for length in [0, 1, 2, 3, 5, 7, 12] {
+                            let packet = pool.get_with(&body[..length]);
+                            let mut conn = connection(pending, capabilities, handshake);
+                            let mut original = connection(pending, capabilities, handshake);
+                            let expected = outcome(upstream_handle_packet(&mut original, &packet));
+                            let actual = outcome(conn.handle_packet(&packet));
+                            assert_eq!(actual, expected, "pending={pending} capabilities={capabilities:?} handshake={handshake} marker={marker:#x} length={length}");
+                            assert_eq!(state(&conn), state(&original), "pending={pending} capabilities={capabilities:?} handshake={handshake} marker={marker:#x} length={length}");
+                        }
+                    }
+                }
+            }
         }
     }
 }

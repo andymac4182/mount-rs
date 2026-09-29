@@ -31,6 +31,8 @@ pub use borrowed_root::{
     CompactRootMemberCursor,
 };
 
+#[cfg(kani)]
+mod materialized_verification;
 mod root_file;
 pub use root_file::{
     CompactRootFileCapability, CompactRootFileIntent, CompactRootFileRead, CompactRootFileTimes,

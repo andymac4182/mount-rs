@@ -15,9 +15,9 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, Default)]
-struct Counts {
-    calls: usize,
-    bytes: usize,
+pub(crate) struct Counts {
+    pub(crate) calls: usize,
+    pub(crate) bytes: usize,
 }
 
 thread_local! {
@@ -69,15 +69,15 @@ unsafe impl GlobalAlloc for Meter {
 #[global_allocator]
 static ALLOCATOR: Meter = Meter;
 
-struct Window;
+pub(crate) struct Window;
 impl Window {
-    fn begin() -> Self {
+    pub(crate) fn begin() -> Self {
         assert!(!ACTIVE.with(Cell::get));
         COUNTS.with(|counts| counts.set(Counts::default()));
         ACTIVE.with(|active| active.set(true));
         Self
     }
-    fn finish(self) -> Counts {
+    pub(crate) fn finish(self) -> Counts {
         drop(self);
         COUNTS.with(Cell::get)
     }
