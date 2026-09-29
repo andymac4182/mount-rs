@@ -109,3 +109,7 @@ CPU sums cover eleven separate boundary windows including observers/background, 
 The extractor's `source_digest` covers a limited harness seam and is identical in both runs. The complete release binding is the measured revision, distinct binary digest and immutable archive manifest in `witness.json`; the current archive contains 565 source rows.
 
 The observed improvement is large for structural writes. The next metadata scaling limit is the complete range proof and its SQL/decode work; these results do not yet establish 1,000 logical operations/s or production capacity.
+
+## Subsequent 100-client attempt
+
+The current source was also exercised with 100 clients, 100 Drives, 50 Partitions and 100,000 files. That attempt stopped during payload population when sampled host free disk fell below the unchanged 64 GiB reserve. No timed cell or fresh full-corpus oracle completed. [The scale attempt report](scale-100.md) preserves the failure, settlement and partial TiDB/TiKV CPU, network and guest block I/O observations. It establishes no 100-client throughput result.
