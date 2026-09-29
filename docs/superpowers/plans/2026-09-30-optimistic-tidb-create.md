@@ -63,8 +63,8 @@ Commands (set the explicit target and Rust toolchain in the environment):
 ## Task 3: Review, publication and performance qualification
 
 - [x] Independently review production fences, SDK forwarding and persisted-row controls.
-- [ ] Commit and push the tested change to PR #34; preserve earlier revision-bound results.
-- [ ] Freeze a new native binary/source closure and compare matched population
+- [x] Commit and push the tested change to PR #34; preserve earlier revision-bound results.
+- [x] Freeze a new native binary/source closure and compare the same population
   and churn profiles. Verify actual SQL/marker call reduction and full fresh oracles.
 - [ ] Reattempt D100 only after the preceding correctness/performance gates pass.
 
@@ -86,3 +86,12 @@ locked SQL reads, refuse before DML/COMMIT, settle both providers and proxy, and
 compare every raw table projection through an independent observer. Their
 metadata is retained; dataset absence has not been proven. These controls do
 not measure physical IOPS or establish production capacity.
+
+The release measurement on `6fdaabf3` completed all 16 D10/F1000 cells, both
+full-content oracles, 100 cross-server read/close pairs and clean worker exits.
+The report is in `docs/benchmarks/tidb-rustfs-optimistic-create-20260930`.
+Namespace inode SQL traffic halved exactly, but elapsed time improved only 2.88%.
+All-active churn was slower, with mean observed COMMIT waits rising from
+50.487 ms to 704.581 ms. This is a descriptive comparison with a historical
+run; backing-store cause and source causality remain unproven. D100 has not
+been repeated: the remaining publication/COMMIT stall needs investigation.

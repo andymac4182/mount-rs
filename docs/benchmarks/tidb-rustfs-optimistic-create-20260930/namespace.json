@@ -1,0 +1,409 @@
+{
+  "counter_scope": "complete before/after closed deltas across controller and ten workers",
+  "physical_iops": false,
+  "runs": [
+    {
+      "boundaries": [
+        {
+          "boundary": "before",
+          "complete": true,
+          "controller": {
+            "file": "metrics/g0-s2.json.gz",
+            "metrics_complete": true,
+            "sha256": "59c763a1096245c263e76c60760722e2a460a40ed1bcf4a5134bf0d2ffa316a2"
+          },
+          "deadline_seconds": 30,
+          "effective_observer_seconds": 30.0,
+          "elapsed_seconds": 0.128776875,
+          "error": null,
+          "generation": 0,
+          "issued_workers": 10,
+          "metrics_complete": true,
+          "phase": "online_namespace",
+          "readiness_metrics": [],
+          "remaining_enclosing_seconds": 599.998711791,
+          "sequence": 2,
+          "workers": [
+            {
+              "file": "worker-0/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84253,
+              "server": 0,
+              "sha256": "b21b7ac3d75f2f2251ebd18a921fc72b860ae9a5473865d1697853e556763d01"
+            },
+            {
+              "file": "worker-1/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84254,
+              "server": 1,
+              "sha256": "2cb92f7b49a1a3b87cbdccee74930c1c4c053d376b1392dd52e412d28ad4b672"
+            },
+            {
+              "file": "worker-2/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84255,
+              "server": 2,
+              "sha256": "8b646f5b6172716cf767c0d4ef24509015d6d964641f920def431f2038249bf8"
+            },
+            {
+              "file": "worker-3/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84256,
+              "server": 3,
+              "sha256": "a17aa98adf59598d73ececa34efe16dd78103026484d36b8129417f114c61697"
+            },
+            {
+              "file": "worker-4/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84257,
+              "server": 4,
+              "sha256": "cb1b2041d8174d76d33b805a70a520b3fa81551cd16c7d7b1b535c724ee41229"
+            },
+            {
+              "file": "worker-5/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84258,
+              "server": 5,
+              "sha256": "014f348448fac719de6d68dcd157c59346a36f9ec10e46f5b605b5dc537a7ebd"
+            },
+            {
+              "file": "worker-6/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84259,
+              "server": 6,
+              "sha256": "528e57305d4ce30453ae501a3b344d8bbcfa290a61152cf26460c5b9f44fa069"
+            },
+            {
+              "file": "worker-7/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84260,
+              "server": 7,
+              "sha256": "3dedc78c00ed4f48aadfe1fc114a835ae39c02777286fd424908705219bdafaa"
+            },
+            {
+              "file": "worker-8/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84261,
+              "server": 8,
+              "sha256": "bdb3bcd1f97aadf7e02625f2bedb827a755cc58ac52a46517e330496fed3dad7"
+            },
+            {
+              "file": "worker-9/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 84262,
+              "server": 9,
+              "sha256": "96bad0a0fb64df9d3c57ed137bfb920c37a4cf197c882e5f90739da041ddb888"
+            }
+          ]
+        },
+        {
+          "boundary": "after",
+          "complete": true,
+          "controller": {
+            "file": "metrics/g0-s3.json.gz",
+            "metrics_complete": true,
+            "sha256": "2d303b50262a4ac9ad54cf95732d1314da9717a45d227606c7d9b2b2588b41a7"
+          },
+          "deadline_seconds": 30,
+          "effective_observer_seconds": 30.0,
+          "elapsed_seconds": 0.128123125,
+          "error": null,
+          "generation": 0,
+          "issued_workers": 10,
+          "metrics_complete": true,
+          "phase": "online_namespace",
+          "readiness_metrics": [],
+          "remaining_enclosing_seconds": 435.284081375,
+          "sequence": 3,
+          "workers": [
+            {
+              "file": "worker-0/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84253,
+              "server": 0,
+              "sha256": "1f493cfe2e75c888a81f53b11f7c9703f691f46c874958ea3ac1936ae57eb386"
+            },
+            {
+              "file": "worker-1/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84254,
+              "server": 1,
+              "sha256": "93e1c6aa0884331bbb9c18e6358a16bef557222b2e5766c5648d3d9032683c38"
+            },
+            {
+              "file": "worker-2/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84255,
+              "server": 2,
+              "sha256": "a1ee87d628c3e7045e2b680622153826d3e8fd70d2a57ea614228a499ff4a6c7"
+            },
+            {
+              "file": "worker-3/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84256,
+              "server": 3,
+              "sha256": "d284846db662ada16c576335dfbea30b1cefe18745569e56918827bbf210db5f"
+            },
+            {
+              "file": "worker-4/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84257,
+              "server": 4,
+              "sha256": "175c9fa7c56661a94c1ef48bd28d57481d74e4ba7b74f0c8e4a9e70e0d89ca40"
+            },
+            {
+              "file": "worker-5/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84258,
+              "server": 5,
+              "sha256": "8df22e6159c43cac5274d4e154dfbe9add8fb554e21866686dcae6090a4ba010"
+            },
+            {
+              "file": "worker-6/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84259,
+              "server": 6,
+              "sha256": "3a144614489f480347060b41e8b59a594389efd42d78f0f91ee00d90fea999c6"
+            },
+            {
+              "file": "worker-7/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84260,
+              "server": 7,
+              "sha256": "02a61fe0d8ac2b69b0ffb2ba7bbeeaf0eefd988e6bc4fa48078410de6e024e95"
+            },
+            {
+              "file": "worker-8/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84261,
+              "server": 8,
+              "sha256": "18a5b9182c7addd653a0891e71144928afec21c84d9aea422fab29281d2eefd6"
+            },
+            {
+              "file": "worker-9/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 84262,
+              "server": 9,
+              "sha256": "c19fb46b6f7a2f604c39282bff9b5f0a36bc3fff9b4e8dcaa085ae52b81769aa"
+            }
+          ]
+        }
+      ],
+      "data_and_probe_marker_gets_each": 20010,
+      "elapsed_ms": 164849,
+      "inclusive_commit_ns": 229132751308,
+      "inclusive_inode_sql_ns": 978103009384,
+      "inclusive_structural_wrapper_ns": 1176821552418,
+      "inode_sql_calls": 60030,
+      "inode_sql_rows": 20020020,
+      "metadata_reads": 30080,
+      "name": "baseline",
+      "pool_checkouts": 20040,
+      "read_begin_and_rollback_each": 10020,
+      "root_preflight_loads": 10000,
+      "structural_publications_and_commits_each": 10000
+    },
+    {
+      "boundaries": [
+        {
+          "boundary": "before",
+          "complete": true,
+          "controller": {
+            "file": "metrics/g0-s2.json.gz",
+            "metrics_complete": true,
+            "sha256": "1ba97f14e6864bdb555cb9990c364a1102ed9a3074dbf8b1600a08d61b2be3c5"
+          },
+          "deadline_seconds": 30,
+          "effective_observer_seconds": 30.0,
+          "elapsed_seconds": 0.140049666,
+          "error": null,
+          "generation": 0,
+          "issued_workers": 10,
+          "metrics_complete": true,
+          "phase": "online_namespace",
+          "readiness_metrics": [],
+          "remaining_enclosing_seconds": 599.998844416,
+          "sequence": 2,
+          "workers": [
+            {
+              "file": "worker-0/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31474,
+              "server": 0,
+              "sha256": "3398d000d7074be3cdaf495004018e2d9e939e737a6a0215a420126e7cfe4ad0"
+            },
+            {
+              "file": "worker-1/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31475,
+              "server": 1,
+              "sha256": "54b50ec21cb6f5a10962f54c1dbade0d2bc77ca0047a3dd07e5cd497c1849b2b"
+            },
+            {
+              "file": "worker-2/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31476,
+              "server": 2,
+              "sha256": "77e345207f909e7bf559f1e017495000d402eca6f9d2ec3b03f48adb871552dc"
+            },
+            {
+              "file": "worker-3/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31477,
+              "server": 3,
+              "sha256": "a72178d3e9b6b49908aa9b88efedfa333b5a72eb15a8a18c7691bc6844099034"
+            },
+            {
+              "file": "worker-4/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31478,
+              "server": 4,
+              "sha256": "660b26b8409e28a7d8fd14baef57cf7c5b0818dee9a1482e06f066d11b1e571e"
+            },
+            {
+              "file": "worker-5/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31479,
+              "server": 5,
+              "sha256": "3ecbcca5da524b0a1cb57bdfc0edd7a7308df775f254c0e46fcf02ea0997ae27"
+            },
+            {
+              "file": "worker-6/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31480,
+              "server": 6,
+              "sha256": "f5807783dd7a95cac5a117a4c8f1d97865cb47c934ab7251003d076f8362d668"
+            },
+            {
+              "file": "worker-7/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31481,
+              "server": 7,
+              "sha256": "9c4e33e8071a719b1c3bfc4e850cf4a2429867a1859df0a83583a1f39570f566"
+            },
+            {
+              "file": "worker-8/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31482,
+              "server": 8,
+              "sha256": "99411ef3519e057fc4e264fe8137a2ef65fbd3ad8e8226a6d10ee5be790a8cdb"
+            },
+            {
+              "file": "worker-9/metrics/g0-s2.json.gz",
+              "metrics_complete": true,
+              "pid": 31483,
+              "server": 9,
+              "sha256": "affff6cd7377a2904dc957fb3495d81e33aa7b51936d29a35ff900152561ac48"
+            }
+          ]
+        },
+        {
+          "boundary": "after",
+          "complete": true,
+          "controller": {
+            "file": "metrics/g0-s3.json.gz",
+            "metrics_complete": true,
+            "sha256": "fa437e46eac0745abf100498a7a8a64b42d936521cc4b76b7a3712c18b157f65"
+          },
+          "deadline_seconds": 30,
+          "effective_observer_seconds": 30.0,
+          "elapsed_seconds": 0.148050375,
+          "error": null,
+          "generation": 0,
+          "issued_workers": 10,
+          "metrics_complete": true,
+          "phase": "online_namespace",
+          "readiness_metrics": [],
+          "remaining_enclosing_seconds": 440.049069916,
+          "sequence": 3,
+          "workers": [
+            {
+              "file": "worker-0/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31474,
+              "server": 0,
+              "sha256": "3891137fe8f952184b14e52170dc61c3c2cf5fd5df557e5b633c8609afc969b2"
+            },
+            {
+              "file": "worker-1/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31475,
+              "server": 1,
+              "sha256": "afe27c82067c03a4182dd9248bec098b195969f275dc66cd391ebfd5ec1b9c86"
+            },
+            {
+              "file": "worker-2/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31476,
+              "server": 2,
+              "sha256": "1d05f4483eaf7078ef5fe1b8a6da872579514d983cd31e5d45aad0a412955ede"
+            },
+            {
+              "file": "worker-3/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31477,
+              "server": 3,
+              "sha256": "e9b023054dee48521dee9686abd9c9711446cd12c1cf192261cb923f26d0e132"
+            },
+            {
+              "file": "worker-4/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31478,
+              "server": 4,
+              "sha256": "044e3930ac3c319fe482567ce3711532806c8760a0134370fe013cbb0a8e22d1"
+            },
+            {
+              "file": "worker-5/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31479,
+              "server": 5,
+              "sha256": "a239a74257c9f703e53020577479b48e64aa7b068b329bbe415bcf6aaebf06c7"
+            },
+            {
+              "file": "worker-6/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31480,
+              "server": 6,
+              "sha256": "bf69b08e3dba57c5a5071d6fbd807f94b0144f48f81a4cb5e75c96db6ef58440"
+            },
+            {
+              "file": "worker-7/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31481,
+              "server": 7,
+              "sha256": "86519829f4d077cd1af9845d6653bf5be0f541c3db4d2d1651ae46a25711b5e7"
+            },
+            {
+              "file": "worker-8/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31482,
+              "server": 8,
+              "sha256": "198e7767a9170a05244997aa7b944aa54199b94af7d19999fa882dd7e715ee8c"
+            },
+            {
+              "file": "worker-9/metrics/g0-s3.json.gz",
+              "metrics_complete": true,
+              "pid": 31483,
+              "server": 9,
+              "sha256": "2c5b9a8bdb485c08a5d1c83aa1a371416c17cb0749bb0edff2c33d73f6c5eae7"
+            }
+          ]
+        }
+      ],
+      "data_and_probe_marker_gets_each": 10010,
+      "elapsed_ms": 160104,
+      "inclusive_commit_ns": 456801646953,
+      "inclusive_inode_sql_ns": 721211180314,
+      "inclusive_structural_wrapper_ns": 1509949387578,
+      "inode_sql_calls": 30030,
+      "inode_sql_rows": 10010020,
+      "metadata_reads": 20080,
+      "name": "candidate",
+      "pool_checkouts": 10040,
+      "read_begin_and_rollback_each": 20,
+      "root_preflight_loads": 0,
+      "structural_publications_and_commits_each": 10000
+    }
+  ],
+  "schema": "mount-rs.namespace-benchmark-comparison.v1"
+}
