@@ -25,15 +25,59 @@ fn root_namespace() -> Namespace {
     ns
 }
 
+fn compact_test_key(prefix: &str, pid: u32, nanos: u128) -> String {
+    assert!(
+        !prefix.is_empty()
+            && prefix.len() <= 96
+            && prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "compact test prefix must contain 1..=96 ASCII alphanumeric or hyphen bytes"
+    );
+    format!("{prefix}-{pid}-{nanos}")
+}
+
+#[test]
+fn compact_test_keys_keep_legacy_default_and_reject_unsafe_owned_prefixes() {
+    assert_eq!(
+        compact_test_key("compact-tidb", 17, 42),
+        "compact-tidb-17-42"
+    );
+    assert_eq!(compact_test_key("owned-4f1A", 17, 42), "owned-4f1A-17-42");
+    assert!(compact_test_key(&"x".repeat(96), 17, 42).starts_with(&"x".repeat(96)));
+    for prefix in [
+        "",
+        "has space",
+        "wild%",
+        "wild_",
+        "slash/",
+        "quote'",
+        "雪",
+        &"x".repeat(97),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| compact_test_key(prefix, 17, 42)).is_err(),
+            "invalid prefix was accepted: {prefix:?}"
+        );
+    }
+}
+
 async fn fixture(enroll: bool) -> Fixture {
     let url = std::env::var("MOUNT_RS_TIDB_URL").expect("explicit actual TiDB URL required");
-    let key = format!(
-        "compact-tidb-{}-{}",
+    let prefix = match std::env::var("MOUNT_RS_TIDB_COMPACT_TEST_PREFIX") {
+        Ok(prefix) => prefix,
+        Err(std::env::VarError::NotPresent) => "compact-tidb".to_owned(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("compact test prefix must be Unicode ASCII")
+        }
+    };
+    let key = compact_test_key(
+        &prefix,
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
     );
     let store = TidbMetadataStore::connect_with_key(&url, &key)
         .await
@@ -1828,6 +1872,10 @@ async fn raw(f: &Fixture) -> Raw {
 
 #[path = "support/indexed_compact.rs"]
 mod indexed_compact;
+#[path = "support/indexed_point_scope.rs"]
+mod indexed_point_scope;
+#[path = "support/indexed_write_query.rs"]
+mod indexed_write_query;
 async fn corrupt(f: &Fixture, sql: &str) {
     let pool = Pool::from_url(&f.url).unwrap();
     let mut conn = pool.get_conn().await.unwrap();

@@ -45,6 +45,11 @@ function local(phase) {
 const stringify = (value) => JSON.stringify(value)
 
 test("modeled raw phase independently satisfies original validator", () => assert.deepEqual(validateRawPhaseDiagnostics(model(), "rustfs"), ["7"]))
+test("indexed compact root-file diagnostics occupy the appended operation slots", () => {
+  assert.equal(STORAGE_OPERATION_NAMES.length, 118)
+  assert.equal(STORAGE_OPERATION_NAMES[116], "sdk.metadata.compact_root_file_capability")
+  assert.equal(STORAGE_OPERATION_NAMES[117], "sdk.metadata.load_compact_root_file")
+})
 test("retains exact SQL calls, returned-row observations and histograms", () => {
   const source = model(), before = structuredClone(source), value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
@@ -68,7 +73,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
   Object.assign(entry, { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "9007199254740995", latency_log2_us: ["1", ...Array(31).fill("0")] })
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
-  assert.equal(value.storage.entries.length, 116)
+  assert.equal(value.storage.entries.length, 118)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)
   assert.deepEqual(value.storage.instrumented_operations.filter((name) => name.startsWith("foundationdb.")), FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations)
   const projected = value.storage.entries.find((row) => row.name === "foundationdb.read.get")
@@ -78,7 +83,7 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
 })
 test("feature-off fixed FoundationDB rows retain explicit unavailable coverage", () => {
   const value = projectOwnedLayoutPhaseMetrics(model())
-  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 116)
+  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 118)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)
   assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.match(value.storage.scope, /audited_instrumented_operations_separately_declared/u)
@@ -93,7 +98,7 @@ test("declared WebSocket rows retain exact large counters without entering addon
   })
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
-  assert.equal(value.storage.entries.length, 116)
+  assert.equal(value.storage.entries.length, 118)
   assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("client.")), false)
   for (const name of names) {
     const row = value.storage.entries.find((entry) => entry.name === name)
@@ -392,7 +397,7 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
-  assert.equal(value.storage.entries.length, 116)
+  assert.equal(value.storage.entries.length, 118)
   source.native.profile.entries = source.native.profile.entries.slice(0, 134)
   const previousCacheSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(previousCacheSnapshot.status, "observed")

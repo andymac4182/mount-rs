@@ -3,26 +3,37 @@
 //! backing-savings gates require actual CLI servers and durable providers.
 use super::*;
 use mount_rs_blob_cache::LocalCacheConfig;
+#[cfg(unix)]
 use mount_rs_core::storage::ConcurrentBackingId;
-use mount_rs_sdk::{Filesystem, SplitOptions, StoreConfig};
+#[cfg(unix)]
+use mount_rs_sdk::Filesystem;
+use mount_rs_sdk::{SplitOptions, StoreConfig};
+#[cfg(unix)]
 use mount_rs_service::catalog::{
     CatalogError, CatalogSnapshot, DriveDefinition, PartitionDefinition,
 };
+#[cfg(unix)]
 use std::collections::VecDeque;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicUsize};
+#[cfg(unix)]
 use tokio::sync::Semaphore;
+#[cfg(unix)]
 const BOUND: Duration = Duration::from_secs(5);
+#[cfg(unix)]
 async fn bounded<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(BOUND, future)
         .await
         .expect("holder control did not settle")
 }
+#[cfg(unix)]
 fn failed<T>(result: Result<T>, code: ErrorCode) {
     match result {
         Err(error) => assert_eq!(error.code, code),
         Ok(_) => panic!("expected typed refusal"),
     }
 }
+#[cfg(unix)]
 fn backing(value: u8) -> ConcurrentBackingId {
     ConcurrentBackingId::from_bytes([value; 16]).unwrap()
 }
@@ -56,6 +67,7 @@ fn options(aws: bool) -> SplitOptions {
     options.compact_inode_updates = true;
     options
 }
+#[cfg(unix)]
 struct Catalog {
     value: Mutex<Arc<CatalogSnapshot>>,
     fail: AtomicBool,
@@ -65,6 +77,7 @@ struct Catalog {
     entered: Semaphore,
     release: Semaphore,
 }
+#[cfg(unix)]
 impl Catalog {
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -90,6 +103,7 @@ impl Catalog {
             .insert(drive.into(), DriveDefinition { driver: definition });
     }
 }
+#[cfg(unix)]
 #[async_trait]
 impl CatalogStore for Catalog {
     async fn load_current(&self) -> std::result::Result<CatalogSnapshot, CatalogError> {
@@ -116,6 +130,7 @@ impl CatalogStore for Catalog {
         Err(CatalogError::Conflict)
     }
 }
+#[cfg(unix)]
 struct Resource {
     closes: AtomicUsize,
     fail: AtomicBool,
@@ -123,6 +138,7 @@ struct Resource {
     entered: Semaphore,
     release: Semaphore,
 }
+#[cfg(unix)]
 impl Resource {
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -134,6 +150,7 @@ impl Resource {
         })
     }
 }
+#[cfg(unix)]
 #[async_trait]
 impl ConstructionResource for Resource {
     async fn close(&self) -> Result<()> {
@@ -149,12 +166,14 @@ impl ConstructionResource for Resource {
         }
     }
 }
+#[cfg(unix)]
 enum Reply {
     Mode(u8),
     Failure(ErrorCode),
     None,
     Panic,
 }
+#[cfg(unix)]
 struct ControlledInspector {
     calls: AtomicUsize,
     replies: Mutex<VecDeque<Reply>>,
@@ -163,6 +182,7 @@ struct ControlledInspector {
     entered: Semaphore,
     release: Semaphore,
 }
+#[cfg(unix)]
 impl ControlledInspector {
     fn new(replies: impl IntoIterator<Item = Reply>) -> Arc<Self> {
         Arc::new(Self {
@@ -175,6 +195,7 @@ impl ControlledInspector {
         })
     }
 }
+#[cfg(unix)]
 #[async_trait]
 impl Inspector for ControlledInspector {
     async fn inspect(
@@ -210,6 +231,7 @@ impl Inspector for ControlledInspector {
         }
     }
 }
+#[cfg(unix)]
 struct Fixture {
     path: std::path::PathBuf,
     local: Arc<LocalCache>,
@@ -218,6 +240,7 @@ struct Fixture {
     inspector: Arc<ControlledInspector>,
     registry: Arc<ConfiguredHolderRegistry>,
 }
+#[cfg(unix)]
 impl Fixture {
     fn new(
         replies: impl IntoIterator<Item = Reply>,
@@ -292,6 +315,7 @@ impl Fixture {
         std::fs::remove_dir_all(self.path).unwrap();
     }
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn cold_holder_admission_uses_configured_scope_and_survives_active_store_eviction() {
     let f = Fixture::new([Reply::Mode(1)], 2, 1);
@@ -320,6 +344,7 @@ async fn cold_holder_admission_uses_configured_scope_and_survives_active_store_e
     failed(f.registry.admit(&other).await, ErrorCode::Eacces);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn wrong_peer_backing_does_not_select_the_verified_backing_or_repeat_inspection() {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
@@ -334,6 +359,7 @@ async fn wrong_peer_backing_does_not_select_the_verified_backing_or_repeat_inspe
     assert_eq!(f.inspector.calls.load(Ordering::Acquire), 1);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn cancelled_waiter_retains_actual_task_and_coalesces_without_new_provider_work() {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
@@ -359,6 +385,7 @@ async fn cancelled_waiter_retains_actual_task_and_coalesces_without_new_provider
     assert_eq!(f.inspector.calls.load(Ordering::Acquire), 1);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn simultaneous_waiters_reuse_one_successful_publication() {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
@@ -390,6 +417,7 @@ async fn simultaneous_waiters_reuse_one_successful_publication() {
     assert_eq!(f.inspector.calls.load(Ordering::Acquire), 1);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn inspection_limit_has_no_wait_queue_and_cancellation_does_not_release_capacity() {
     let f = Fixture::new([Reply::Mode(1), Reply::Mode(1)], 2, 1);
@@ -415,6 +443,7 @@ async fn inspection_limit_has_no_wait_queue_and_cancellation_does_not_release_ca
     assert_eq!(f.inspector.calls.load(Ordering::Acquire), 2);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn revoked_old_await_cannot_publish_after_exact_catalog_restore() {
     let f = Fixture::new([Reply::Mode(1), Reply::Mode(1)], 1, 1);
@@ -447,6 +476,7 @@ async fn revoked_old_await_cannot_publish_after_exact_catalog_restore() {
     assert_eq!(f.inspector.calls.load(Ordering::Acquire), 2);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn observed_authority_failure_invalidates_retained_proof_and_later_fresh_admission_survives_old_drop()
  {
@@ -464,6 +494,7 @@ async fn observed_authority_failure_invalidates_retained_proof_and_later_fresh_a
     drop(fresh);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn newer_locally_verified_backing_is_adopted_before_older_retained_proof() {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
@@ -488,6 +519,7 @@ async fn newer_locally_verified_backing_is_adopted_before_older_retained_proof()
     assert_eq!(f.inspector.calls.load(Ordering::Acquire), 1);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn cold_aws_is_excluded_but_existing_verified_active_aws_proof_is_retained() {
     let f = Fixture::new([], 1, 1);
@@ -512,6 +544,7 @@ async fn cold_aws_is_excluded_but_existing_verified_active_aws_proof_is_retained
     assert_eq!(f.inspector.calls.load(Ordering::Acquire), 0);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn no_metadata_inspection_starts_when_catalog_wait_resumes_after_shutdown_seal() {
     let f = Fixture::new([], 1, 1);
@@ -530,6 +563,7 @@ async fn no_metadata_inspection_starts_when_catalog_wait_resumes_after_shutdown_
     failed(f.registry.admit(&scope).await, ErrorCode::Ebusy);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn provider_cleanup_failure_keeps_actual_owner_and_inspection_capacity() {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
@@ -563,6 +597,7 @@ async fn provider_cleanup_failure_keeps_actual_owner_and_inspection_capacity() {
     // Retain actual unknown owner state until the owned process exits.
     std::mem::forget(f);
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn actual_task_failure_keeps_registered_resource_and_never_qualifies_as_drained() {
     let f = Fixture::new([Reply::Panic], 1, 1);
@@ -585,6 +620,7 @@ async fn actual_task_failure_keeps_registered_resource_and_never_qualifies_as_dr
     );
     std::mem::forget(f);
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn missing_mode_and_typed_authority_refusal_never_publish_a_scope() {
     let f = Fixture::new(
@@ -606,6 +642,7 @@ async fn missing_mode_and_typed_authority_refusal_never_publish_a_scope() {
     assert_eq!(f.inspector.resource.closes.load(Ordering::Acquire), 3);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn configured_route_capacity_is_independent_of_three_blob_lru_entries() {
     let f = Fixture::new([], 10_000, 1);
@@ -636,6 +673,7 @@ async fn configured_route_capacity_is_independent_of_three_blob_lru_entries() {
     f.close().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn completed_cancelled_inspection_releases_capacity_without_revisiting_its_route() {
     let f = Fixture::new([Reply::Mode(1), Reply::Mode(1)], 2, 1);
@@ -667,6 +705,7 @@ async fn completed_cancelled_inspection_releases_capacity_without_revisiting_its
     assert_eq!(f.inspector.calls.load(Ordering::Acquire), 2);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn cancelled_refusal_revokes_authority_before_held_cleanup_completes() {
     let f = Fixture::new([Reply::Failure(ErrorCode::Eacces)], 1, 1);
@@ -702,6 +741,7 @@ async fn cancelled_refusal_revokes_authority_before_held_cleanup_completes() {
     drop(active);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn poisoned_registry_owner_state_cannot_qualify_a_clean_empty_drain() {
     let f = Fixture::new([], 1, 1);
@@ -717,6 +757,7 @@ async fn poisoned_registry_owner_state_cannot_qualify_a_clean_empty_drain() {
     std::mem::forget(f);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn actual_registry_drain_precedes_context_close_even_when_close_waiter_is_cancelled() {
     use crate::remote_runtime::RemoteRuntimeKeeper;
@@ -768,6 +809,7 @@ async fn actual_registry_drain_precedes_context_close_even_when_close_waiter_is_
     failed(f.registry.admit(&scope).await, ErrorCode::Ebusy);
     f.close().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn failed_actual_registry_drain_retains_keeper_and_blocks_context_close() {
     use crate::remote_runtime::RemoteRuntimeKeeper;
@@ -800,6 +842,7 @@ async fn failed_actual_registry_drain_retains_keeper_and_blocks_context_close() 
     std::mem::forget(keeper);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn canceled_failed_owner_cannot_adopt_a_later_verified_active_scope() {
     for reply in [Reply::Mode(1), Reply::Panic] {
@@ -840,6 +883,7 @@ async fn canceled_failed_owner_cannot_adopt_a_later_verified_active_scope() {
         std::mem::forget(f);
     }
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn owner_state_poison_during_actual_cleanup_blocks_positive_drain() {
     for poison_registry in [false, true] {
@@ -928,6 +972,7 @@ fn cold_inspection_is_limited_to_exact_prepared_tidb_rustfs_mrc5_options() {
 // Causal unchanged-API RED: first-poll close must synchronously seal holders,
 // even while an actual failed constructor journal/factory close is held. This
 // is an application ownership control, not real TiDB/RustFS qualification.
+#[cfg(unix)]
 #[tokio::test]
 async fn first_close_request_seals_holders_before_held_failed_factory_cleanup() {
     use crate::remote_runtime::RemoteRuntimeKeeper;
@@ -1014,6 +1059,7 @@ async fn first_close_request_seals_holders_before_held_failed_factory_cleanup() 
 
 // The catalog and inspector are controlled models. The route mutex, actual
 // inspector JoinHandle, construction journal, admission and drain are real.
+#[cfg(unix)]
 async fn hold_final_catalog_check_after_actual_inspector_join(
     f: &Fixture,
     scope: &CacheScope,
@@ -1045,6 +1091,7 @@ async fn hold_final_catalog_check_after_actual_inspector_join(
     (route, ticket, admission)
 }
 
+#[cfg(unix)]
 fn poison_actual_route_state(route: Arc<Route>) {
     assert!(
         std::thread::spawn(move || {
@@ -1056,6 +1103,7 @@ fn poison_actual_route_state(route: Arc<Route>) {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn route_poison_during_final_catalog_check_blocks_new_proof_publication() {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
@@ -1085,6 +1133,7 @@ async fn route_poison_during_final_catalog_check_blocks_new_proof_publication() 
     std::mem::forget(f);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn route_poison_during_final_catalog_check_blocks_coalesced_proof_reuse() {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
@@ -1119,6 +1168,7 @@ async fn route_poison_during_final_catalog_check_blocks_coalesced_proof_reuse() 
     std::mem::forget(f);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn first_drain_ack_rejects_registry_poison_at_terminal_publication() {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
@@ -1186,6 +1236,7 @@ async fn first_drain_ack_rejects_registry_poison_at_terminal_publication() {
     std::mem::forget(f);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn terminal_publication_poison_preserves_an_existing_typed_drain_error() {
     let f = Fixture::new([], 1, 1);
@@ -1244,6 +1295,7 @@ impl Drop for ReleaseProofGateOnDrop {
     }
 }
 
+#[cfg(unix)]
 async fn assert_final_proof_release_refuses_new_poison(boundary: ProofReleaseBoundary) {
     let f = Fixture::new([Reply::Mode(1)], 1, 1);
     let scope = f.route("partition", "drive", false);
@@ -1327,12 +1379,44 @@ async fn assert_final_proof_release_refuses_new_poison(boundary: ProofReleaseBou
     std::mem::forget(f);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn proof_release_refuses_registry_poison_after_final_owner_query() {
     assert_final_proof_release_refuses_new_poison(ProofReleaseBoundary::Registry).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn proof_release_refuses_route_poison_before_final_proof_take() {
     assert_final_proof_release_refuses_new_poison(ProofReleaseBoundary::Route).await;
+}
+
+#[cfg(not(unix))]
+#[test]
+fn cold_holder_cache_refusal_preserves_uncreated_directory_for_each_tier() {
+    let root = tempfile::tempdir().unwrap();
+    for (memory_bytes, disk_bytes) in [(64, 0), (0, 128), (64, 128)] {
+        let directory = root
+            .path()
+            .join(format!("cache-{memory_bytes}-{disk_bytes}"));
+        let result = LocalCache::new_with_scope_capacity(
+            LocalCacheConfig {
+                directory: directory.clone(),
+                memory_bytes,
+                disk_bytes,
+                max_entries: 3,
+                max_blob_bytes: 64,
+            },
+            20_000,
+        );
+        let error = match result {
+            Ok(_) => panic!("unsupported platform constructed a local cache"),
+            Err(error) => error,
+        };
+        assert!(error.is(ErrorCode::Enotsup));
+        assert!(
+            !directory.exists(),
+            "refused cache must not create its directory"
+        );
+    }
 }

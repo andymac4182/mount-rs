@@ -2388,6 +2388,44 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    async fn prepared_compact_sqlite_runtime_refuses_unsupported_physical_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let options = CliOptions {
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Sqlite {
+                    path: "metadata.db".into(),
+                },
+                blocks: StorageProvider::Sqlite {
+                    path: "blocks.db".into(),
+                },
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: None,
+                concurrent_writes: true,
+                inode_updates: true,
+                compact_inode_updates: true,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
+                owner: Some("unsupported-platform-owner".into()),
+            })),
+            ..CliOptions::default()
+        };
+        let plan = prepared_for_test(&options, 111, 222, root.path(), root.path());
+        assert_eq!(prepared_split(&plan).owner, "unsupported-platform-owner");
+        for _ in 0..2 {
+            let error = match plan.clone().open().await {
+                Ok(_) => panic!("unsupported platform opened compact physical authority"),
+                Err(error) => error,
+            };
+            assert_eq!(error.exit_code(), 1);
+            assert!(error.to_string().starts_with("ENOTSUP:"), "{error}");
+        }
+    }
+
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[tokio::test]
     async fn prepared_compact_sqlite_runtime_reopens_same_bytes_eof_backing_and_owner() {
         let root = tempfile::tempdir().unwrap();
         let mut cwd = root.path().join("original");

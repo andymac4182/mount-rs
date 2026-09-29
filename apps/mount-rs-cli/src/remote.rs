@@ -909,8 +909,11 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    async fn assert_lazy_ready_raw_cache_policy(cache_limits: Option<(usize, usize)>) {
-        use mount_rs_service::startup::{Identity, Outcome, Startup};
+    async fn assert_lazy_ready_raw_cache_policy(
+        cache_limits: Option<(usize, usize)>,
+        block_cache_directory: bool,
+    ) {
+        use mount_rs_service::startup::{CleanupOutcome, Identity, Outcome, Stage, Startup};
         let root = tempfile::tempdir().unwrap().keep();
         let path = lazy_service_fixture(
             &root,
@@ -946,10 +949,14 @@ mod tests {
             });
             std::fs::write(&path, config.to_string()).unwrap();
         }
+        if block_cache_directory {
+            assert!(cache_limits.is_some());
+            std::fs::write(root.join("cache"), b"owned non-directory cache fixture").unwrap();
+        }
         let keeper = Arc::new(RemoteRuntimeKeeper::default());
         let startup = Arc::new(Startup::new_lazy(true, Identity::cli()));
         let ready = Arc::new(tokio::sync::Notify::new());
-        let serving = tokio::spawn({
+        let mut serving = tokio::spawn({
             let keeper = keeper.clone();
             let startup = startup.clone();
             let ready = ready.clone();
@@ -968,9 +975,53 @@ mod tests {
                 .await
             }
         });
-        tokio::time::timeout(std::time::Duration::from_secs(5), ready.notified())
-            .await
-            .unwrap();
+        let early_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut serving => Some(result.expect("service task panicked")),
+                _ = ready.notified() => None,
+            }
+        })
+        .await
+        .expect("service neither became ready nor returned its startup error");
+        let expected_refusal = block_cache_directory || (cache_limits.is_some() && cfg!(not(unix)));
+        if let Some(result) = early_result {
+            let error = result.expect_err("service completed before readiness without an error");
+            let snapshot = startup.snapshot().unwrap();
+            assert!(
+                keeper.is_empty(),
+                "startup refusal must drain retained owners"
+            );
+            assert!(!root.join("cold-metadata.sqlite").exists());
+            assert!(!root.join("cold-blocks.sqlite").exists());
+            if block_cache_directory {
+                assert_eq!(
+                    std::fs::read(root.join("cache")).unwrap(),
+                    b"owned non-directory cache fixture",
+                );
+            } else {
+                assert!(!root.join("cache").exists());
+            }
+            std::fs::remove_dir_all(&root).unwrap();
+            assert!(expected_refusal, "unexpected startup failure: {error}");
+            assert_eq!(error.exit_code(), 1);
+            assert!(
+                error
+                    .to_string()
+                    .starts_with(if cfg!(unix) { "EIO:" } else { "ENOTSUP:" }),
+                "{error}",
+            );
+            assert_eq!(snapshot.terminal_outcome, Outcome::Error);
+            assert_eq!(snapshot.cleanup_outcome, Some(CleanupOutcome::Success));
+            assert_eq!(snapshot.open_started, 0);
+            let cache = snapshot.stages[Stage::CacheStart as usize];
+            assert_eq!(
+                (cache.started, cache.error, cache.success, cache.in_flight),
+                (1, 1, 0, 0)
+            );
+            assert_eq!(snapshot.stages[Stage::ListenerBind as usize].started, 0);
+            assert_eq!(snapshot.stages[Stage::Ready as usize].started, 0);
+            return;
+        }
         let lifecycle = keeper.retained().unwrap();
         let retained_limits = lifecycle.raw_cache_limits_for_test().unwrap();
         assert_eq!(lifecycle.listener_count(), 2);
@@ -990,6 +1041,10 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
         // Check policy after the actual listeners and retained owners have drained,
         // so a behavioral RED cannot leave a running service behind.
+        assert!(
+            !expected_refusal,
+            "refused cache configuration reported Ready"
+        );
         assert_eq!(
             retained_limits,
             if cache_limits.is_some() {
@@ -1000,24 +1055,40 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn lazy_ready_raw_cache_ram_tier_disables_inner_cache() {
-        assert_lazy_ready_raw_cache_policy(Some((4096, 0))).await;
+        assert_lazy_ready_raw_cache_policy(Some((4096, 0)), false).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn lazy_ready_raw_cache_disk_tier_disables_inner_cache() {
-        assert_lazy_ready_raw_cache_policy(Some((0, 4096))).await;
+        assert_lazy_ready_raw_cache_policy(Some((0, 4096)), false).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn lazy_ready_raw_cache_both_tiers_disable_inner_cache() {
-        assert_lazy_ready_raw_cache_policy(Some((4096, 4096))).await;
+        assert_lazy_ready_raw_cache_policy(Some((4096, 4096)), false).await;
     }
 
     #[tokio::test]
     async fn lazy_ready_raw_cache_without_server_cache_keeps_common_default() {
-        assert_lazy_ready_raw_cache_policy(None).await;
+        assert_lazy_ready_raw_cache_policy(None, false).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_cache_start_refusal_closes_resources_without_opening_drives() {
+        assert_lazy_ready_raw_cache_policy(Some((4096, 4096)), true).await;
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn lazy_cache_start_refuses_unsupported_platform_before_drives_or_listeners() {
+        for limits in [(4096, 0), (0, 4096), (4096, 4096)] {
+            assert_lazy_ready_raw_cache_policy(Some(limits), false).await;
+        }
     }
 
     #[tokio::test]

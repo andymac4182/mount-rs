@@ -1847,6 +1847,41 @@ mod tests {
     use crate::parser::{Command, parse_args};
 
     #[tokio::test]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    async fn sqlite_wal_runtime_refuses_unsupported_platform_without_claiming_wal() {
+        let directory = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({
+            "version": 1,
+            "driver": { "kind": "splitstore", "storage": {
+                "metadata": { "kind": "sqlite", "path": "metadata.db", "journal_mode": "wal" },
+                "blocks": { "kind": "sqlite", "path": "blocks.db", "journal_mode": "wal" }
+            }}
+        });
+        let config = parse_config_str(&value.to_string(), directory.path()).unwrap();
+        let error = match crate::runtime::DriverRuntime::open(&config.to_options(), 0, 0).await {
+            Ok(_) => panic!("unsupported platform opened a WAL runtime"),
+            Err(error) => error,
+        };
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            error
+                .to_string()
+                .contains("SQLite WAL requires a qualified local Linux or macOS file")
+        );
+        for name in ["metadata.db", "blocks.db"] {
+            let path = directory.path().join(name);
+            if path.exists() {
+                let connection = rusqlite::Connection::open(path).unwrap();
+                let mode: String = connection
+                    .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                    .unwrap();
+                assert_ne!(mode, "wal", "refused construction must not configure WAL");
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
     async fn sqlite_journal_mode_reaches_normal_split_provider() {
         let directory = tempfile::tempdir().unwrap();
         let value = serde_json::json!({

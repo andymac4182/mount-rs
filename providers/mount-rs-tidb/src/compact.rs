@@ -18,8 +18,14 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
     PRIMARY KEY(volume_key,inode)
 )";
 const AUTHORITY_SQL: &str = "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?";
-const FILE_POINT_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,s.inode,g.inode,g.incarnation,g.epoch,g.revision,g.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS s ON s.volume_key=m.volume_key AND s.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS g ON g.volume_key=m.volume_key AND g.inode=? WHERE m.volume_key=?";
-const ROOT_ENTRY_POINT_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,rm.inode,r.inode,r.incarnation,r.epoch,r.revision,r.node,d.parent,d.ordinal,d.name,d.inode,fm.inode,f.inode,f.incarnation,f.epoch,f.revision,f.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS rm ON rm.volume_key=m.volume_key AND rm.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS r ON r.volume_key=m.volume_key AND r.inode=? LEFT JOIN mount_rs_tidb_compact_dentries AS d ON d.volume_key=m.volume_key AND d.parent=? AND d.name_hash=? AND d.name=? LEFT JOIN mount_rs_tidb_compact_members AS fm ON fm.volume_key=m.volume_key AND fm.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS f ON f.volume_key=m.volume_key AND f.inode=? WHERE m.volume_key=?";
+// Explicit bindings let TiDB plan each composite key as a point access rather
+// than a dynamic index join. Every binding is the same configured volume.
+const FILE_POINT_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,s.inode,g.inode,g.incarnation,g.epoch,g.revision,g.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS s ON s.volume_key=? AND s.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS g ON g.volume_key=? AND g.inode=? WHERE m.volume_key=?";
+// The name index avoids scanning every sibling when TiDB estimates one row
+// for the parent range. Full binary-name equality and all matching rows remain
+// required, so a hash collision or duplicate cannot become an admitted hit.
+const ROOT_ENTRY_POINT_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,rm.inode,r.inode,r.incarnation,r.epoch,r.revision,r.node,d.parent,d.ordinal,d.name,d.inode,fm.inode,f.inode,f.incarnation,f.epoch,f.revision,f.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS rm ON rm.volume_key=? AND rm.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS r ON r.volume_key=? AND r.inode=? LEFT JOIN mount_rs_tidb_compact_dentries AS d FORCE INDEX(name_lookup) ON d.volume_key=? AND d.parent=? AND d.name_hash=? AND d.name=? LEFT JOIN mount_rs_tidb_compact_members AS fm ON fm.volume_key=? AND fm.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS f ON f.volume_key=? AND f.inode=? WHERE m.volume_key=?";
+const FILE_AUTHORITY_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,s.inode FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS s ON s.volume_key=? AND s.inode=? WHERE m.volume_key=?";
 type GuardRow = (i64, i64, i64, i64, String);
 type DentryRow = (i64, i64, Vec<u8>, Vec<u8>, i64);
 type AnchorRow = (
@@ -189,16 +195,29 @@ async fn members<C: Queryable>(conn: &mut C, volume: &str) -> Result<Vec<u64>> {
         .map(|v| nonnegative(v, "compact member"))
         .collect()
 }
-async fn member<C: Queryable>(conn: &mut C, volume: &str, inode: u64) -> Result<Option<u64>> {
-    let row: Option<i64> = conn
+async fn file_authority<C: Queryable>(
+    conn: &mut C,
+    volume: &str,
+    backing: ConcurrentBackingId,
+    inode: u64,
+) -> Result<(CompactAuthority, Option<u64>)> {
+    let row: Row = conn
         .exec_first_observed(
-            StorageOperation::TidbSqlInodeRead,
-            "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? AND inode=?",
-            (volume, signed(inode, "compact member")?),
+            StorageOperation::TidbSqlMetadataRead,
+            FILE_AUTHORITY_SQL,
+            (volume, signed(inode, "compact member")?, volume),
         )
         .await
-        .map_err(|e| db_error("read indexed TiDB compact member", e))?;
-    row.map(|v| nonnegative(v, "compact member")).transpose()
+        .map_err(|e| db_error("read indexed TiDB compact file authority", e))?
+        .ok_or_else(stale)?;
+    let mut values = row.unwrap_raw();
+    // Authority refusals precede selected membership conversion. The validated
+    // primary keys give one authority and at most one member in this read view.
+    let authority = joined_authority(&mut values, backing)?;
+    if values.len() != 9 {
+        return Err(backend_error("invalid indexed TiDB file authority shape"));
+    }
+    Ok((authority, optional_member(&mut values, 8)?))
 }
 async fn anchor<C: Queryable>(
     conn: &mut C,
@@ -1015,7 +1034,13 @@ impl TidbMetadataStore {
             .exec_observed(
                 StorageOperation::TidbSqlInodeRead,
                 FILE_POINT_SQL,
-                (selected, selected, &self.0.volume_key),
+                (
+                    &self.0.volume_key,
+                    selected,
+                    &self.0.volume_key,
+                    selected,
+                    &self.0.volume_key,
+                ),
             )
             .await
             .map_err(|e| db_error("read TiDB compact file point", e))?;
@@ -1039,16 +1064,21 @@ impl TidbMetadataStore {
             .exec_observed(
                 StorageOperation::TidbSqlInodeRead,
                 ROOT_ENTRY_POINT_SQL,
-                (
-                    root,
-                    root,
-                    root,
-                    name_hash(name).to_vec(),
-                    name.as_bytes(),
-                    file,
-                    file,
-                    &self.0.volume_key,
-                ),
+                Params::Positional(vec![
+                    Value::from(&self.0.volume_key),
+                    Value::from(root),
+                    Value::from(&self.0.volume_key),
+                    Value::from(root),
+                    Value::from(&self.0.volume_key),
+                    Value::from(root),
+                    Value::Bytes(name_hash(name).to_vec()),
+                    Value::Bytes(name.as_bytes().to_vec()),
+                    Value::from(&self.0.volume_key),
+                    Value::from(file),
+                    Value::from(&self.0.volume_key),
+                    Value::from(file),
+                    Value::from(&self.0.volume_key),
+                ]),
             )
             .await
             .map_err(|e| db_error("read TiDB compact root-entry point", e))?;
@@ -1075,8 +1105,8 @@ impl TidbMetadataStore {
             .await?
             .remove(&inode)
             .ok_or_else(stale)?;
-        let authority = authority(&mut tx, &self.0.volume_key, backing).await?;
-        let selected_member = member(&mut tx, &self.0.volume_key, inode).await?;
+        let (authority, selected_member) =
+            file_authority(&mut tx, &self.0.volume_key, backing, inode).await?;
         let (guard, next_ordinal) = match stored.body {
             StoredBody::Node(current_node) if matches!(current_node.data, NodeData::File(_)) => {
                 let current = CompactGuard {
