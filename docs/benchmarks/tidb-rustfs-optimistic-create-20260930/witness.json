@@ -50,6 +50,7 @@
   "metrics_gzip_bytes": 134220,
   "metrics_gzip_sha256": "a1cc7876f7871f01ecfaa97e3bcd7b2168585762ffddc328c95fd45d743ddd0e",
   "original_container_mutations": false,
+  "original_container_mutations_scope": "Docker container control plane only; owned data was written to the original TiDB fixture and retained",
   "owner_receipt_sha256": "12ae6f4f345a473356e3f64f6af2ae0ef2f1711ef7884dc62248affd5110ec8f",
   "owner_status": "benchmarked",
   "parallel_harness_gate": {

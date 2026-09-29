@@ -64,7 +64,7 @@ CPU sums cover eleven separate boundary windows including observers/background, 
 - All 16 cells completed; mostly-idle mode retained ten connected clients with one active client. Exact per-cell counters and clocks for both modes are in `metrics.json.gz`.
 - Independent initial and final oracles compared every file byte, EOF and membership: 10,000 files / 62,832,640 initial bytes, and 10,000 files / 62,857,216 final bytes.
 - All 100 Drive/server read-and-close pairs passed; authorization/revocation checks passed. All ten workers were cleanly reaped with no forced termination.
-- The fresh capped RustFS fixture and collector stopped. Original containers were not mutated; source pins stayed identical. Owned data is retained; dataset absence is unproven.
+- The fresh capped RustFS fixture and collector stopped. Original container identities, resource settings and lifecycle were unchanged; source pins stayed identical. Owned data is retained; dataset absence is unproven.
 - This is macOS, the raw SDK RAM-cache configuration, and a local signed-token test. It does not qualify Linux/macOS OS mounts, the composed peer RAM/disk cache, an external OIDC issuer, crash durability, physical IOPS, or the 10,000-client production target.
 - The parallel release harness gate had one unresolved resource-sampler `process counter reset` failure (169 passed). Its serial gate passed all 170 enabled cases with six opt-in cases ignored. No production counter check was weakened.
 
