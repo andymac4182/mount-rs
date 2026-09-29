@@ -2,6 +2,7 @@
 #[path = "remote_diagnostics.rs"]
 mod diagnostics;
 
+use crate::remote_runtime::{CliRuntimeConstructor, RemoteRuntimeKeeper, RemoteRuntimeLifecycle};
 use crate::{
     CliError,
     config::parse_config_str,
@@ -33,6 +34,8 @@ struct ServiceConfig {
     private_key: PathBuf,
     #[serde(default = "default_connection_limit")]
     max_connections: usize,
+    #[serde(default)]
+    max_active_drives: Option<usize>,
     #[serde(default = "default_tidb_pool_max_connections")]
     tidb_pool_max_connections: usize,
     #[serde(default)]
@@ -261,14 +264,7 @@ pub(crate) async fn apply(path: &Path) -> Result<(), CliError> {
     // Reuse the normal CLI backend parser for every independent Drive.
     for partition in document.partitions.values_mut() {
         for drive in partition.drives.values_mut() {
-            resolve_backend_paths(&mut drive.driver, &document_base);
-            let spec = parse_config_str(
-                &serde_json::json!({"version":1,"driver":drive.driver}).to_string(),
-                document_path.parent().unwrap_or(Path::new(".")),
-            )?;
-            if spec.driver.is_none() {
-                return Err(CliError::usage("Drive requires a storage driver"));
-            }
+            resolve_catalog_driver(&mut drive.driver, &document_base)?;
         }
     }
     let catalog = SqliteCatalog::open(relative(path, &config.catalog))
@@ -283,23 +279,48 @@ pub(crate) async fn apply(path: &Path) -> Result<(), CliError> {
 }
 
 pub(crate) async fn serve(path: &Path) -> Result<(), CliError> {
-    let startup = mount_rs_service::startup::Startup::new(
+    let startup = mount_rs_service::startup::Startup::new_lazy(
         diagnostics::enabled(std::env::var_os("MOUNT_RS_PROFILE_IO").as_deref()),
         mount_rs_service::startup::Identity::cli(),
     );
-    serve_observed(path, &startup, &mut |snapshot| {
-        mount_rs_service::startup::Startup::write_record(&mut std::io::stderr().lock(), snapshot)
-    })
+    #[cfg(not(test))]
+    static KEEPER: std::sync::OnceLock<Arc<RemoteRuntimeKeeper>> = std::sync::OnceLock::new();
+    #[cfg(not(test))]
+    let keeper = KEEPER
+        .get_or_init(|| Arc::new(RemoteRuntimeKeeper::default()))
+        .clone();
+    #[cfg(test)]
+    let keeper = Arc::new(RemoteRuntimeKeeper::default());
+    serve_observed(
+        path,
+        &startup,
+        &mut |snapshot| {
+            mount_rs_service::startup::Startup::write_record(
+                &mut std::io::stderr().lock(),
+                snapshot,
+            )
+        },
+        &keeper,
+    )
     .await
+}
+
+#[derive(Default)]
+struct RemoteObservers {
+    quic: Option<mount_rs_service::server::ServerDiagnostics>,
+    websocket: Option<mount_rs_service::websocket::WebSocketDiagnostics>,
 }
 
 async fn serve_observed(
     path: &Path,
     startup: &mount_rs_service::startup::Startup,
     sink: &mut impl FnMut(&mount_rs_service::startup::Snapshot) -> std::io::Result<()>,
+    keeper: &Arc<RemoteRuntimeKeeper>,
 ) -> Result<(), CliError> {
+    let scope = keeper.reserve().map_err(CliError::from)?;
+    let mut observers = RemoteObservers::default();
     startup.publish(sink);
-    let result = serve_resources(path, startup, sink).await;
+    let result = serve_resources(path, startup, sink, &scope.0, &mut observers).await;
     startup.finish_startup(result.is_ok());
     if result.is_err()
         && startup
@@ -308,14 +329,26 @@ async fn serve_observed(
     {
         let _ = startup.write_banks(&mut std::io::stderr().lock());
     }
+    let cleanup = startup.begin(mount_rs_service::startup::Stage::Cleanup);
+    let shutdown = scope.0.close().await;
+    cleanup.finish(shutdown.is_ok());
+    startup.finish_cleanup(shutdown.is_ok());
     startup.publish(sink);
-    result
+    if let Some(observer) = observers.quic {
+        diagnostics::emit(&observer);
+    }
+    if let Some(observer) = observers.websocket {
+        diagnostics::emit_websocket(&observer);
+    }
+    result.and(shutdown.map_err(CliError::from))
 }
 
 async fn serve_resources(
     path: &Path,
     startup: &mount_rs_service::startup::Startup,
     sink: &mut impl FnMut(&mount_rs_service::startup::Snapshot) -> std::io::Result<()>,
+    lifecycle: &Arc<RemoteRuntimeLifecycle>,
+    observers: &mut RemoteObservers,
 ) -> Result<(), CliError> {
     use mount_rs_service::startup::Stage;
     let configuration = startup
@@ -328,15 +361,22 @@ async fn serve_resources(
                     max_connections: config.max_connections,
                 };
                 server_options.validate().map_err(CliError::usage)?;
+                if config.max_active_drives == Some(0) {
+                    return Err(CliError::usage("max_active_drives must be positive"));
+                }
                 if let Some(cache) = &config.cache {
                     cache.validate()?;
                 }
-                Ok::<_, CliError>((config, server_options))
+                let diagnostic_interval = diagnostics::diagnostic_interval(
+                    startup.enabled(),
+                    std::env::var_os("MOUNT_RS_DIAGNOSTIC_INTERVAL_MS").as_deref(),
+                )?;
+                Ok::<_, CliError>((config, server_options, diagnostic_interval))
             },
             sink,
         )
         .await?;
-    let (config, server_options) = configuration;
+    let (config, server_options, diagnostic_interval) = configuration;
     #[cfg(all(feature = "local-oidc-fixture", debug_assertions))]
     let local_oidc_fixture = startup
         .observe(
@@ -348,10 +388,23 @@ async fn serve_resources(
     let context = startup
         .observe(
             Stage::Configuration,
-            async { mount_rs_sdk::StorageContext::new(config.tidb_pool_max_connections) },
+            async {
+                if config.cache.is_some() {
+                    mount_rs_sdk::StorageContext::new_with_raw_cache_limits(
+                        config.tidb_pool_max_connections,
+                        0,
+                        0,
+                    )
+                } else {
+                    mount_rs_sdk::StorageContext::new(config.tidb_pool_max_connections)
+                }
+            },
             sink,
         )
         .await?;
+    lifecycle
+        .install_context(context.clone())
+        .map_err(CliError::from)?;
     let catalog = Arc::new(
         startup
             .observe(
@@ -377,16 +430,32 @@ async fn serve_resources(
             sink,
         )
         .await?;
-    if startup.enabled() {
-        startup.plan(
+    let drive_count = snapshot
+        .partitions
+        .values()
+        .try_fold(0usize, |total, partition| {
+            total.checked_add(partition.drives.len())
+        })
+        .ok_or_else(|| CliError::usage("Drive registration count overflow"))?;
+    let capacity = config.max_active_drives.unwrap_or(drive_count.max(1));
+    startup
+        .plan_lazy(
             snapshot.partitions.len() as u64,
-            snapshot
-                .partitions
-                .values()
-                .map(|p| p.drives.len() as u64)
-                .sum(),
-        );
-    }
+            drive_count as u64,
+            capacity as u64,
+        )
+        .map_err(|_| CliError::usage("invalid lazy Drive plan"))?;
+    let runtime_diagnostics = if startup.enabled() {
+        mount_rs_service::runtime_diagnostics::RuntimeDiagnostics::new(false)
+    } else {
+        mount_rs_service::runtime_diagnostics::RuntimeDiagnostics::default()
+    };
+    let pool = mount_rs_service::runtime_pool::RuntimePool::with_diagnostics(
+        capacity,
+        runtime_diagnostics,
+    )
+    .map_err(CliError::from)?;
+    lifecycle.install_pool(pool.clone());
     let (certs, key) = startup
         .observe(
             Stage::TlsMaterial,
@@ -414,19 +483,29 @@ async fn serve_resources(
                 config
                     .cache
                     .as_ref()
-                    .map(|cache| crate::server_cache::ServerCache::start(cache, path))
+                    .map(|cache| {
+                        crate::server_cache::ServerCache::start_with_configured_holders(
+                            cache,
+                            path,
+                            catalog.clone(),
+                            context.clone(),
+                            drive_count,
+                        )
+                    })
                     .transpose()
             },
             sink,
         )
         .await?;
-    let mut runtimes = Vec::new();
-    let mut observer = None;
+    let cache = cache.map(Arc::new);
+    if let Some(cache) = &cache {
+        lifecycle.install_cache(cache.clone());
+    }
     let result = async {
         let mut dispatcher = mount_rs_service::dispatch::DriveDispatcher::new(catalog.clone());
         for (partition_id, partition) in &snapshot.partitions {
             for (drive_id, drive) in &partition.drives {
-                let (options, decorator) = startup.observe(Stage::DriveConfig, async {
+                let (plan, decorator) = startup.observe(Stage::DriveConfig, async {
                 let spec = parse_config_str(
                     &serde_json::json!({"version":1,"driver":drive.driver}).to_string(),
                     path.parent().unwrap_or(Path::new(".")),
@@ -434,7 +513,8 @@ async fn serve_resources(
                 let options = spec.to_options();
                 let decorator = cache
                     .as_ref()
-                    .map(|cache| cache.decorator(partition_id, drive_id));
+                    .map(|cache| cache.decorator(partition_id, drive_id))
+                    .transpose()?;
                 if decorator.is_some()
                     && options.driver == crate::DriverChoice::SplitStore
                     && !options
@@ -446,34 +526,37 @@ async fn serve_resources(
                         "server blob cache requires concurrent_writes for split-storage drives",
                     ));
                 }
-                Ok::<_, CliError>((options, decorator))
+                Ok::<_, CliError>((DriverRuntime::prepare(&options, uid, gid)?, decorator))
                 }, sink).await?;
-                let runtime = startup
-                    .observe(
-                        Stage::DriveOpen,
-                        DriverRuntime::open_with_storage_context(
-                            &options,
-                            uid,
-                            gid,
-                            decorator
-                                .as_ref()
-                                .map(|d| d as &dyn mount_rs_sdk::BlockStoreDecorator),
-                            Some(&context),
-                        ),
-                        sink,
-                    )
-                    .await?;
-                runtimes.push(runtime);
+                let plan = Arc::new(plan);
+                if let Some(cache) = &cache {
+                    cache.register_holder_route(
+                        partition_id,
+                        drive_id,
+                        drive.driver.clone(),
+                        plan.clone(),
+                    )?;
+                }
+                startup.construction_plan();
+                let factory = mount_rs_service::filesystem_runtime::SdkRuntimeFactory::new(
+                    Arc::new(CliRuntimeConstructor {
+                        plan,
+                        context: context.clone(),
+                        decorator,
+                    }),
+                );
+                lifecycle.retain_factory(factory.clone());
+                let registration = pool.register(factory).map_err(CliError::from)?;
                 startup
                     .observe(
                         Stage::DriveRegister,
                         async {
                             dispatcher
-                                .register_definition(
+                                .register_lazy_definition(
                                     partition_id,
                                     drive_id,
                                     drive.driver.clone(),
-                                    runtimes.last().expect("just opened runtime").driver(),
+                                    registration,
                                 )
                                 .map_err(CliError::usage)
                         },
@@ -505,13 +588,15 @@ async fn serve_resources(
                     .observe(
                         Stage::ListenerBind,
                         async {
-                            mount_rs_service::websocket::WebSocketServer::bind_with_options(
+                            mount_rs_service::websocket::WebSocketServer::bind_with_diagnostics(
                                 address,
                                 certs.clone(),
                                 key.clone_key(),
                                 dispatcher.clone(),
                                 authenticator.clone(),
                                 server_options,
+                                mount_rs_service::server::RemoteTransferLimits::default(),
+                                startup.enabled(),
                             )
                             .await
                             .map_err(|_| CliError::runtime("cannot start TLS websocket service"))
@@ -523,6 +608,13 @@ async fn serve_resources(
         } else {
             None
         };
+        observers.websocket = websocket
+            .as_ref()
+            .and_then(mount_rs_service::websocket::WebSocketServer::diagnostics);
+        let websocket_address = websocket.as_ref().map(|server| server.local_addr());
+        if let Some(websocket) = websocket {
+            lifecycle.install_websocket(websocket);
+        }
         let server = match startup
             .observe(
                 Stage::ListenerBind,
@@ -542,28 +634,26 @@ async fn serve_resources(
         {
             Ok(server) => server,
             Err(_) => {
-                if let Some(websocket) = websocket {
-                    websocket.close().await;
-                }
                 return Err(CliError::runtime("cannot start remote service"));
             }
         };
-        observer = server.diagnostics();
+        observers.quic = server.diagnostics();
+        let quic_address = server.local_addr();
+        lifecycle.install_quic(server);
         startup.finish_startup(true);
         startup.publish(sink);
-        if let Some(websocket) = &websocket {
-            println!(
-                "remote TLS websocket listening at {}",
-                websocket.local_addr()
+        if let Some(websocket) = websocket_address {
+            println!("remote TLS websocket listening at {}", websocket);
+        }
+        println!("remote listening at {}", quic_address);
+        diagnostics::wait_with_periodic_capture(signal.wait(), diagnostic_interval, |capture| {
+            diagnostics::emit_periodic(
+                observers.quic.as_ref(),
+                observers.websocket.as_ref(),
+                capture,
             );
-        }
-        println!("remote listening at {}", server.local_addr());
-        let result = signal.wait().await;
-        server.close().await;
-        if let Some(websocket) = websocket {
-            websocket.close().await;
-        }
-        result
+        })
+        .await
     }
     .await;
     if result.is_err() {
@@ -571,26 +661,7 @@ async fn serve_resources(
         startup.publish(sink);
         let _ = startup.write_banks(&mut std::io::stderr().lock());
     }
-    let cleanup = startup.begin(Stage::Cleanup);
-    let mut shutdown_error = None;
-    for runtime in runtimes.iter().rev() {
-        if let Err(error) = runtime.shutdown().await {
-            shutdown_error.get_or_insert_with(|| CliError::from(error));
-        }
-    }
-    if let Err(error) = context.close().await {
-        shutdown_error.get_or_insert_with(|| CliError::from(error));
-    }
-    if let Some(cache) = cache {
-        cache.shutdown().await;
-    }
-    cleanup.finish(shutdown_error.is_none());
-    startup.finish_cleanup(shutdown_error.is_none());
-    let outcome = result.and(shutdown_error.map_or(Ok(()), Err));
-    if let Some(observer) = observer {
-        diagnostics::emit(&observer);
-    }
-    outcome
+    result
 }
 
 pub(crate) async fn mount(path: &Path) -> Result<(), CliError> {
@@ -683,6 +754,20 @@ pub(crate) async fn mount(path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
+fn resolve_catalog_driver(value: &mut serde_json::Value, base: &Path) -> Result<(), CliError> {
+    // Validate the original lexical paths before catalog rebasing can turn a
+    // refused SQLite URI or :memory: selection into an ordinary filename.
+    let spec = parse_config_str(
+        &serde_json::json!({"version":1,"driver":value}).to_string(),
+        base,
+    )?;
+    if spec.driver.is_none() {
+        return Err(CliError::usage("Drive requires a storage driver"));
+    }
+    resolve_backend_paths(value, base);
+    Ok(())
+}
+
 fn resolve_backend_paths(value: &mut serde_json::Value, base: &Path) {
     if let Some(object) = value.as_object_mut() {
         for (key, value) in object {
@@ -722,8 +807,299 @@ pub(crate) fn validate(path: &Path) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn lazy_service_fixture(
+        root: &Path,
+        listen: SocketAddr,
+        websocket: SocketAddr,
+    ) -> PathBuf {
+        use base64::Engine;
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let pem = |label: &str, bytes: &[u8]| {
+            format!(
+                "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )
+        };
+        std::fs::write(
+            root.join("cert.pem"),
+            pem("CERTIFICATE", certificate.cert.der()),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("key.pem"),
+            pem("PRIVATE KEY", &certificate.signing_key.serialize_der()),
+        )
+        .unwrap();
+        let catalog = SqliteCatalog::open(root.join("catalog.sqlite"))
+            .await
+            .unwrap();
+        let document = serde_json::json!({"revision":0,"partitions":{"p":{"drives":{"d":{"driver":{
+            "kind":"splitstore","storage":{
+                "metadata":{"kind":"sqlite","path":root.join("cold-metadata.sqlite"),"journal_mode":"wal"},
+                "blocks":{"kind":"sqlite","path":root.join("cold-blocks.sqlite"),"journal_mode":"wal"},
+                "compact_inode_updates":true
+            }
+        }}}}},"issuer_policies":{},"grants":{}});
+        catalog
+            .compare_and_swap(0, serde_json::from_value(document).unwrap())
+            .await
+            .unwrap();
+        let path = root.join("service.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version":1,"catalog":"catalog.sqlite","listen":listen,"websocket_listen":websocket,
+                "certificate":"cert.pem","private_key":"key.pem","max_active_drives":1
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path
+    }
+
     #[tokio::test]
-    async fn startup_failure_reports_real_memory_and_sqlite_opens_before_bind() {
+    async fn lazy_cancelled_actual_ready_service_drains_both_retained_listeners_with_cold_providers()
+     {
+        use mount_rs_service::startup::{Identity, Outcome, Startup};
+        let root = tempfile::tempdir().unwrap().keep();
+        let path = lazy_service_fixture(
+            &root,
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await;
+        let keeper = Arc::new(RemoteRuntimeKeeper::default());
+        let startup = Arc::new(Startup::new_lazy(true, Identity::cli()));
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let serving = tokio::spawn({
+            let keeper = keeper.clone();
+            let startup = startup.clone();
+            let ready = ready.clone();
+            async move {
+                serve_observed(
+                    &path,
+                    &startup,
+                    &mut |snapshot| {
+                        if snapshot.terminal_outcome == Outcome::Ready {
+                            ready.notify_one();
+                        }
+                        Ok(())
+                    },
+                    &keeper,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready.notified())
+            .await
+            .unwrap();
+        let lifecycle = keeper.retained().unwrap();
+        assert_eq!(lifecycle.listener_count(), 2);
+        assert_eq!(startup.snapshot().unwrap().open_started, 0);
+        assert_eq!(startup.snapshot().unwrap().construction_plans, Some(1));
+        assert!(!root.join("cold-metadata.sqlite").exists());
+        assert!(!root.join("cold-blocks.sqlite").exists());
+        serving.abort();
+        assert!(serving.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), lifecycle.close())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(keeper.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn assert_lazy_ready_raw_cache_policy(cache_limits: Option<(usize, usize)>) {
+        use mount_rs_service::startup::{Identity, Outcome, Startup};
+        let root = tempfile::tempdir().unwrap().keep();
+        let path = lazy_service_fixture(
+            &root,
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await;
+        if let Some((ram_bytes, disk_bytes)) = cache_limits {
+            let catalog = SqliteCatalog::open(root.join("catalog.sqlite"))
+                .await
+                .unwrap();
+            let mut snapshot = catalog.load_current().await.unwrap();
+            snapshot
+                .partitions
+                .get_mut("p")
+                .unwrap()
+                .drives
+                .get_mut("d")
+                .unwrap()
+                .driver["storage"]["concurrent_writes"] = serde_json::json!(true);
+            catalog
+                .compare_and_swap(snapshot.revision, snapshot)
+                .await
+                .unwrap();
+            let mut config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            config["cache"] = serde_json::json!({
+                "cluster":"test", "node_id":"node", "disk_path":"cache",
+                "ram_bytes":ram_bytes, "disk_bytes":disk_bytes, "max_entries":16,
+                "peer_listen":"127.0.0.1:0", "ca_certificate":"cert.pem",
+                "certificate":"cert.pem", "private_key":"key.pem",
+                "discovery":"peer-query", "peers":[]
+            });
+            std::fs::write(&path, config.to_string()).unwrap();
+        }
+        let keeper = Arc::new(RemoteRuntimeKeeper::default());
+        let startup = Arc::new(Startup::new_lazy(true, Identity::cli()));
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let serving = tokio::spawn({
+            let keeper = keeper.clone();
+            let startup = startup.clone();
+            let ready = ready.clone();
+            async move {
+                serve_observed(
+                    &path,
+                    &startup,
+                    &mut |snapshot| {
+                        if snapshot.terminal_outcome == Outcome::Ready {
+                            ready.notify_one();
+                        }
+                        Ok(())
+                    },
+                    &keeper,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), ready.notified())
+            .await
+            .unwrap();
+        let lifecycle = keeper.retained().unwrap();
+        let retained_limits = lifecycle.raw_cache_limits_for_test().unwrap();
+        assert_eq!(lifecycle.listener_count(), 2);
+        assert_eq!(startup.snapshot().unwrap().open_started, 0);
+        assert_eq!(startup.snapshot().unwrap().construction_plans, Some(1));
+        assert!(!root.join("cold-metadata.sqlite").exists());
+        assert!(!root.join("cold-blocks.sqlite").exists());
+        serving.abort();
+        assert!(serving.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), lifecycle.close())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(keeper.is_empty());
+        assert!(!root.join("cold-metadata.sqlite").exists());
+        assert!(!root.join("cold-blocks.sqlite").exists());
+        std::fs::remove_dir_all(root).unwrap();
+        // Check policy after the actual listeners and retained owners have drained,
+        // so a behavioral RED cannot leave a running service behind.
+        assert_eq!(
+            retained_limits,
+            if cache_limits.is_some() {
+                (0, 0)
+            } else {
+                (64 * 1024 * 1024, 4096)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_ready_raw_cache_ram_tier_disables_inner_cache() {
+        assert_lazy_ready_raw_cache_policy(Some((4096, 0))).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_ready_raw_cache_disk_tier_disables_inner_cache() {
+        assert_lazy_ready_raw_cache_policy(Some((0, 4096))).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_ready_raw_cache_both_tiers_disable_inner_cache() {
+        assert_lazy_ready_raw_cache_policy(Some((4096, 4096))).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_ready_raw_cache_without_server_cache_keeps_common_default() {
+        assert_lazy_ready_raw_cache_policy(None).await;
+    }
+
+    #[tokio::test]
+    async fn lazy_actual_listener_bind_failures_close_created_resources_without_opening_drives() {
+        use mount_rs_service::startup::{CleanupOutcome, Identity, Outcome, Startup};
+        for fail_quic in [true, false] {
+            let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let root = tempfile::tempdir().unwrap().keep();
+            let path = lazy_service_fixture(
+                &root,
+                if fail_quic {
+                    udp.local_addr().unwrap()
+                } else {
+                    "127.0.0.1:0".parse().unwrap()
+                },
+                if fail_quic {
+                    "127.0.0.1:0".parse().unwrap()
+                } else {
+                    tcp.local_addr().unwrap()
+                },
+            )
+            .await;
+            let keeper = Arc::new(RemoteRuntimeKeeper::default());
+            let startup = Startup::new_lazy(true, Identity::cli());
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                serve_observed(&path, &startup, &mut |_| Ok(()), &keeper),
+            )
+            .await
+            .unwrap();
+            assert!(result.is_err());
+            let snapshot = startup.snapshot().unwrap();
+            assert_eq!(snapshot.terminal_outcome, Outcome::Error);
+            assert_eq!(snapshot.cleanup_outcome, Some(CleanupOutcome::Success));
+            assert_eq!(snapshot.open_started, 0);
+            assert_eq!(snapshot.registered_drives, 1);
+            assert_eq!(snapshot.stages[10].started, if fail_quic { 3 } else { 2 });
+            assert_eq!(snapshot.stages[10].error, 1);
+            assert!(keeper.is_empty());
+            assert!(!root.join("cold-metadata.sqlite").exists());
+            assert!(!root.join("cold-blocks.sqlite").exists());
+            drop(udp);
+            drop(tcp);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn sqlite_wal_catalog_rejects_special_paths_before_rebasing_both_roles() {
+        for role in ["metadata", "blocks"] {
+            for path in ["", ":memory:", "file:memory?mode=memory"] {
+                let mut value = serde_json::json!({"kind":"splitstore", "storage": {
+                    "metadata":{"kind":"memory"}, "blocks":{"kind":"memory"}
+                }});
+                value["storage"][role] =
+                    serde_json::json!({"kind":"sqlite", "path":path, "journal_mode":"wal"});
+                assert!(resolve_catalog_driver(&mut value, Path::new("/tmp/catalog")).is_err());
+                assert_eq!(value["storage"][role]["path"], path);
+            }
+        }
+        let mut value = serde_json::json!({"kind":"splitstore", "storage": {
+            "metadata":{"kind":"sqlite", "path":"meta.db", "journal_mode":"wal"},
+            "blocks":{"kind":"sqlite", "path":"blocks.db", "journal_mode":"wal"}
+        }});
+        resolve_catalog_driver(&mut value, Path::new("/tmp/catalog")).unwrap();
+        let expected_metadata_path = Path::new("/tmp/catalog").join("meta.db");
+        assert_eq!(
+            value["storage"]["metadata"]["path"],
+            expected_metadata_path.to_string_lossy().as_ref()
+        );
+        let parsed = parse_config_str(
+            &serde_json::json!({"version":1,"driver":value}).to_string(),
+            Path::new("/tmp/catalog"),
+        )
+        .unwrap();
+        assert!(
+            matches!(parsed.storage.unwrap().blocks, crate::config::StorageProvider::SqliteWithOptions { path, .. } if path == Path::new("/tmp/catalog/blocks.db"))
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_invalid_drive_plan_preserves_cold_providers_and_reports_prepared_routes() {
         use base64::Engine;
         use mount_rs_service::startup::{Identity, Outcome, Startup};
         let directory = tempfile::tempdir().unwrap();
@@ -752,7 +1128,7 @@ mod tests {
         let document = serde_json::json!({"revision":0,"partitions":{"private_partition":{"drives":{
             "a_private_memory":{"driver":{"kind":"memory"}},
             "b_private_sqlite":{"driver":{"kind":"sqlite","database":"good.sqlite","uid":uid,"gid":gid}},
-            "c_private_failure":{"driver":{"kind":"sqlite","database":"blocked.sqlite"}}
+            "c_private_failure":{"driver":{"kind":"unknown_fixture_driver"}}
         }}},"issuer_policies":{},"grants":{}});
         catalog
             .compare_and_swap(0, serde_json::from_value(document).unwrap())
@@ -760,21 +1136,31 @@ mod tests {
             .unwrap();
         let path = directory.path().join("service.json");
         std::fs::write(&path, serde_json::json!({"version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:0","certificate":"cert.pem","private_key":"key.pem"}).to_string()).unwrap();
-        let startup = Startup::new(true, Identity::cli());
+        let startup = Startup::new_lazy(true, Identity::cli());
+        let keeper = Arc::new(RemoteRuntimeKeeper::default());
         let mut output = Vec::new();
-        let result = serve_observed(&path, &startup, &mut |snapshot| {
-            Startup::write_record(&mut output, snapshot)
-        })
+        let result = serve_observed(
+            &path,
+            &startup,
+            &mut |snapshot| Startup::write_record(&mut output, snapshot),
+            &keeper,
+        )
         .await;
         let error = result.unwrap_err();
         let snapshot = startup.snapshot().unwrap();
-        assert_eq!(snapshot.open_started, 3, "{error}");
-        assert_eq!(snapshot.open_success, 2);
-        assert_eq!(snapshot.open_error, 1);
+        assert_eq!(snapshot.open_started, 0, "{error}");
+        assert_eq!(snapshot.open_success, 0);
+        assert_eq!(snapshot.open_error, 0);
+        assert_eq!(snapshot.construction_plans, Some(2));
+        assert_eq!(snapshot.max_active_drives, Some(3));
         assert_eq!(snapshot.registered_drives, 2);
         assert_eq!(snapshot.terminal_outcome, Outcome::Error);
         assert_eq!(snapshot.stages[10].started, 0);
-        assert!(directory.path().join("good.sqlite").is_file());
+        assert!(!directory.path().join("good.sqlite").exists());
+        assert!(
+            keeper.is_empty(),
+            "acknowledged cold cleanup retained the slot"
+        );
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("startup_diagnostics "));
         for secret in [
@@ -816,10 +1202,33 @@ mod tests {
         let mut value = serde_json::json!({"version":1,"catalog":"catalog.sqlite","listen":"127.0.0.1:4433","certificate":"cert.pem","private_key":"key.pem"});
         let config: ServiceConfig = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(config.max_connections, 128);
+        assert_eq!(config.max_active_drives, None);
         assert_eq!(config.tidb_pool_max_connections, 16);
         value["max_connections"] = serde_json::json!(1024);
         let config: ServiceConfig = serde_json::from_value(value).unwrap();
         assert_eq!(config.max_connections, 1024);
+    }
+
+    #[tokio::test]
+    async fn lazy_zero_active_drive_capacity_fails_before_opening_any_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("service.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version":1,"catalog":"absent/catalog.sqlite","listen":"127.0.0.1:0",
+                "certificate":"absent.pem","private_key":"absent-key.pem","max_active_drives":0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let error = serve(&path).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("max_active_drives must be positive")
+        );
+        assert!(!directory.path().join("absent").exists());
     }
 
     #[tokio::test]

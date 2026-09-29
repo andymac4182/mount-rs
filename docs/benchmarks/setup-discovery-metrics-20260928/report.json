@@ -1,0 +1,1191 @@
+{
+  "base_head": "d8c59b0b2408e32bc994d81e586f5fa0ca426ed8",
+  "client_setup_phases": [
+    {
+      "available": "true",
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 3130667,
+      "error": 0,
+      "histogram": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "histogram_total": 1,
+      "in_flight": 0,
+      "phase": "negotiated_success",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 1
+    },
+    {
+      "available": "true",
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 5044042,
+      "error": 1,
+      "histogram": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "histogram_total": 1,
+      "in_flight": 0,
+      "phase": "tls_name_error",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "available": "true",
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 3723417,
+      "error": 1,
+      "histogram": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "histogram_total": 1,
+      "in_flight": 0,
+      "phase": "alpn_error",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "available": "true",
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 1,
+      "elapsed_ns": 1130834,
+      "error": 0,
+      "histogram": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "histogram_total": 1,
+      "in_flight": 0,
+      "phase": "caller_cancellation",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "available": "true",
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 102156000,
+      "error": 1,
+      "histogram": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "histogram_total": 1,
+      "in_flight": 0,
+      "phase": "internal_deadline",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    }
+  ],
+  "discovery_observations": [
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 72916,
+      "error": 0,
+      "global_in_flight": 0,
+      "histogram_total": 1,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "nonempty",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 1
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "global_in_flight": 0,
+      "histogram_total": 0,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "warm_ram",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 64333,
+      "error": 0,
+      "global_in_flight": 0,
+      "histogram_total": 1,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "empty",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 1
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "global_in_flight": 0,
+      "histogram_total": 0,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "warm_ram",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 64917,
+      "error": 1,
+      "global_in_flight": 0,
+      "histogram_total": 1,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "error",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "global_in_flight": 0,
+      "histogram_total": 0,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "warm_ram",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 1,
+      "elapsed_ns": 100708,
+      "error": 0,
+      "global_in_flight": 0,
+      "histogram_total": 1,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "caller_cancel",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 2500,
+      "error": 0,
+      "global_in_flight": 0,
+      "histogram_total": 1,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "same_id_retry",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 1
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 1,
+      "elapsed_ns": 603469917,
+      "error": 0,
+      "global_in_flight": 0,
+      "histogram_total": 1,
+      "in_flight": 0,
+      "kind": "storage_delta",
+      "name": "blob_cache.discovery.locate",
+      "phase": "existing_peer_deadline",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "in_flight": 1,
+      "kind": "pending_global",
+      "phase": "nonempty"
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "histogram_total": 0,
+      "in_flight": 1,
+      "kind": "pending_row",
+      "name": "blob_cache.discovery.locate",
+      "phase": "nonempty",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    {
+      "in_flight": 1,
+      "kind": "pending_global",
+      "phase": "empty"
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "elapsed_ns": 72916,
+      "error": 0,
+      "histogram_total": 1,
+      "in_flight": 1,
+      "kind": "pending_row",
+      "name": "blob_cache.discovery.locate",
+      "phase": "empty",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 1
+    },
+    {
+      "in_flight": 1,
+      "kind": "pending_global",
+      "phase": "error"
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 2,
+      "cancelled": 0,
+      "elapsed_ns": 137249,
+      "error": 0,
+      "histogram_total": 2,
+      "in_flight": 1,
+      "kind": "pending_row",
+      "name": "blob_cache.discovery.locate",
+      "phase": "error",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 2
+    },
+    {
+      "in_flight": 1,
+      "kind": "pending_global",
+      "phase": "caller_cancel"
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 3,
+      "cancelled": 0,
+      "elapsed_ns": 202166,
+      "error": 1,
+      "histogram_total": 3,
+      "in_flight": 1,
+      "kind": "pending_row",
+      "name": "blob_cache.discovery.locate",
+      "phase": "caller_cancel",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 2
+    },
+    {
+      "in_flight": 1,
+      "kind": "pending_global",
+      "phase": "existing_peer_deadline"
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 5,
+      "cancelled": 1,
+      "elapsed_ns": 305374,
+      "error": 1,
+      "histogram_total": 5,
+      "in_flight": 1,
+      "kind": "pending_row",
+      "name": "blob_cache.discovery.locate",
+      "phase": "existing_peer_deadline",
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 3
+    }
+  ],
+  "expected_semantic_reds": [
+    {
+      "kind": "coremetrics",
+      "purpose": "expected semantic RED before its producer/inventory fix; not a passing runtime qualification",
+      "qualified": false,
+      "receipt_sha256": "96c80087e9b7f6a316ea36aafc3e4f82f5bf896b9934bda5bcc65cf71d6b0f43"
+    },
+    {
+      "kind": "clientsetupmetrics",
+      "purpose": "expected semantic RED before its producer/inventory fix; not a passing runtime qualification",
+      "qualified": false,
+      "receipt_sha256": "1cee3a56a2fd15d817ac4292bb49a8a4edd0dd5e5543628cd9443f378c42a974"
+    },
+    {
+      "kind": "discoverymetrics",
+      "purpose": "expected semantic RED before its producer/inventory fix; not a passing runtime qualification",
+      "qualified": false,
+      "receipt_sha256": "79c54945a35662b12b11a0c18780e90467da51be46838c1368889dfe20d49dcf"
+    }
+  ],
+  "frozen_sources": {
+    ".github/workflows/remote-drives.yml": {
+      "bytes": 70566,
+      "sha256": "3a12b42c8265bfb8f6d5e1033d1ee558dad0a4dca04db1c3eff8272ed60a0ac9"
+    },
+    "apps/mount-rs-cli/src/remote_diagnostics.rs": {
+      "bytes": 21412,
+      "sha256": "c793d235452c43a97c4684351c69422736258f9286bfe5a31d4769f5e5776372"
+    },
+    "apps/mount-rs-cli/tests/configured_remote_compact.rs": {
+      "bytes": 38115,
+      "sha256": "49c6df6942a03b85e06aef507bce90e3445e17681646c174c65f109777202ad1"
+    },
+    "benchmarks/storage/diagnostics.mjs": {
+      "bytes": 90723,
+      "sha256": "d6425ac6e281baaa5bec2e3fe5ac34791f0849b51d81e376782eef14dfa7d334"
+    },
+    "benchmarks/storage/foundationdb-diagnostics.test.mjs": {
+      "bytes": 48552,
+      "sha256": "4d07129d5b905877b8cf6ac456f12e24b04e6ea92cfbfe20ba7ea6fee68eaa90"
+    },
+    "benchmarks/storage/owned-backing-pilot.test.mjs": {
+      "bytes": 86230,
+      "sha256": "0280a0246772565838f4f8bb0fde7f755dae3beaaa3c1b2901b3df505b90bbdb"
+    },
+    "benchmarks/storage/owned-layout-metrics.test.mjs": {
+      "bytes": 31806,
+      "sha256": "d11d5579ff2778e972bda5b614bef2af76d009fc1783a2dfaeeefb8fe374f354"
+    },
+    "benchmarks/storage/test.mjs": {
+      "bytes": 148240,
+      "sha256": "3f8c24e1573ec76a9ed7d2cc86b002f85dd7eb4a0081e54de3f2dc77c257da85"
+    },
+    "bindings/mount-rs-napi/src/lib.rs": {
+      "bytes": 309931,
+      "sha256": "1d5302dcbe403af37fdc6d3e7d378fd713fae5e7d8e34e2d2bcd7c1e34780265"
+    },
+    "crates/mount-rs-blob-cache/src/store.rs": {
+      "bytes": 42820,
+      "sha256": "52d6c8ea81ed2c2df5fe796d87a9a49cbb0b272826fc31e966564542ab0945dd"
+    },
+    "crates/mount-rs-blob-cache/tests/discovery_metrics.rs": {
+      "bytes": 13510,
+      "sha256": "8cf77a09d69da56308b4e9ad69163f7521f2eb92f3cf12e192bf5120d45e9da2"
+    },
+    "crates/mount-rs-remote-client/src/connection.rs": {
+      "bytes": 27013,
+      "sha256": "1169ffccdabeb4dcdc50093653d16b8f580fe676d2a773019febb96b61e7f47b"
+    },
+    "crates/mount-rs-remote-client/src/connection_metrics_tests.rs": {
+      "bytes": 30355,
+      "sha256": "da9477816e644942ae8c38238eef7a0e3ffeb5aa91f899d9d2ccfb03418de851"
+    },
+    "crates/mount-rs-remote-client/src/websocket_metrics_tests.rs": {
+      "bytes": 19683,
+      "sha256": "b15c61dd20f71ab24c002bf82d3073dc75e8cc8c758eef7c92f3fdc6e057429d"
+    },
+    "docs/bottleneck-metrics.md": {
+      "bytes": 130658,
+      "sha256": "db0ba858c5146c48a4f29d6f501a6c7a2de288cf57e0e0489554f4101633593a"
+    },
+    "docs/superpowers/plans/2026-09-28-setup-discovery-metrics.md": {
+      "bytes": 1815,
+      "sha256": "3a5942df19e3229f038cffcbecb0aed457675243d974e7b1778b3a73135f515a"
+    },
+    "scripts/test-remote-failures-controls.py": {
+      "bytes": 56195,
+      "sha256": "74fc128966e30163bcdd29a800511f5832922999a28c22a96882b977d47d324b"
+    },
+    "scripts/test-remote-failures.py": {
+      "bytes": 52140,
+      "sha256": "ab3fe251328189c4a1ecb4acaadb55aab8703fbe5cfe1bd0adc3c6dc0e021147"
+    },
+    "scripts/verify-owned-backing-pilot.test.mjs": {
+      "bytes": 28021,
+      "sha256": "87da5500b668ed9fbc236275ee2af19a5f6d10226ce103d99fc3ec971e32c2bb"
+    },
+    "src/diagnostics/storage.rs": {
+      "bytes": 30866,
+      "sha256": "e23aacfec4e56cbd4679c2b4afaf2ea8f05c711ebb4abd3ac0ca1dbd95d27db7"
+    },
+    "tests/storage_diagnostics_allocations.rs": {
+      "bytes": 5766,
+      "sha256": "52e5a5aed6febfd8254ad963c1ab813371cb5ba105bd8f59f4a7689937bc3b1b"
+    }
+  },
+  "gate_source_union_count": 536,
+  "gate_source_union_sha256": "8c9722dcc50baa35de431880694f6528e10d4e7e8f57c8b9410eeca8dcd6eab3",
+  "gates": [
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 11.834950832999311,
+      "exact_named_case_observed_passed": true,
+      "kind": "clientsetupmetrics",
+      "logs": {
+        "stderr": {
+          "bytes": 3120,
+          "sha256": "0c1fd662e03af7595a372a87e989e5f19ad82fd3cab8c9cc28a55b329fb7d81a"
+        },
+        "stdout": {
+          "bytes": 2049,
+          "sha256": "d3cedbabe12981151e0211a1e3e5d6e65e0bdc0471fb8248ca6f588b1407cdbf"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "ffc7d46271393d2e8081fcab60d88d22f4ac2f19e4b82081b6b5a478ebd63138",
+      "rust_binaries": [
+        {
+          "ignored": 0,
+          "passed": 1
+        }
+      ],
+      "rust_case_executions": 1,
+      "selected_test": "connection::metrics_tests::quic_connection_setup_metrics_preserve_outcomes",
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 6.44212449999759,
+      "exact_named_case_observed_passed": true,
+      "kind": "discoverymetrics",
+      "logs": {
+        "stderr": {
+          "bytes": 1126,
+          "sha256": "bfe7fd1c961cb61ac6e3727a5cf8805a4416d909e0eda114d11c5e614e240908"
+        },
+        "stdout": {
+          "bytes": 4668,
+          "sha256": "5d5669ec26dc85cf8dcbd43076ebd2e683ea7de1bb820488ee7a6c009ace4dc7"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "52b71477413e07b9d896ac547eea4771fecdb40d1c8fc0b616e40e84ea941b98",
+      "rust_binaries": [
+        {
+          "ignored": 0,
+          "passed": 1
+        }
+      ],
+      "rust_case_executions": 1,
+      "selected_test": "discovery_locate_metrics_preserve_bytes_outcomes_and_cancellation",
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 9.165153542009648,
+      "exact_named_case_observed_passed": null,
+      "kind": "coremetrics",
+      "logs": {
+        "stderr": {
+          "bytes": 2860,
+          "sha256": "8f5e1fb3fbab0f68a57a715f9ac62b6f7416fa57888515dc51a17cf295ff86f6"
+        },
+        "stdout": {
+          "bytes": 2011,
+          "sha256": "cdabe2bc7a3ad0caaa762cda6bccf25be6086ef17ca7dd1d288a9b1e9dedeeb1"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "8d8475fa92b20d0f288321d2e7d68f27ad2d7d1a621ee2a8d4ef41d93aaa50d5",
+      "rust_binaries": [
+        {
+          "ignored": 0,
+          "passed": 20
+        }
+      ],
+      "rust_case_executions": 20,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 3.252614291966893,
+      "exact_named_case_observed_passed": true,
+      "kind": "storagealloc",
+      "logs": {
+        "stderr": {
+          "bytes": 348,
+          "sha256": "fc57a983bce3849af52b6ccdf0a521b626e843273685922244cc8654ed068373"
+        },
+        "stdout": {
+          "bytes": 277,
+          "sha256": "5ad236597de2feb093e467d8c5e387c100430b64f5bfaa86039994c6b4b53fa3"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "2841d7d61c1f2bc2c03d0731b563251b92eff455466207725c9766c6fd6705e5",
+      "rust_binaries": [
+        {
+          "ignored": 0,
+          "passed": 1
+        }
+      ],
+      "rust_case_executions": 1,
+      "selected_test": "warmed_core_spans_record_without_added_allocations",
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 4.073736208025366,
+      "exact_named_case_observed_passed": null,
+      "kind": "cacheconsumers",
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 33995,
+          "sha256": "2aee487dab37a7d8156d20a1b0f59454572ae32c436e300ee06d72738d9c87e9"
+        }
+      },
+      "modeled_node_tests": 242,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "9bc1cdb28a9a2d445df4b7f3cedc2df4be1657c0e3d6e8814e21fe37c6e5a596",
+      "rust_binaries": [],
+      "rust_case_executions": 0,
+      "selected_test": null,
+      "source_count": 104,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 9.857499999983702,
+      "exact_named_case_observed_passed": null,
+      "kind": "clidiagnostics",
+      "logs": {
+        "stderr": {
+          "bytes": 1629,
+          "sha256": "eb5eb1a021ad207020931560b46b95ae42c5a60c080da92c52e54b3a4024ea62"
+        },
+        "stdout": {
+          "bytes": 929,
+          "sha256": "10c7cceacc066c81d8cd5397c9e6eb12845f2062b3b1daf842407ef0367048c3"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "9f804c46b740b3c75cdaf1e1dffd2f9c7486e07cde43a83af26b2c85595cee4b",
+      "rust_binaries": [
+        {
+          "ignored": 0,
+          "passed": 8
+        }
+      ],
+      "rust_case_executions": 8,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 11.284328249981627,
+      "exact_named_case_observed_passed": null,
+      "kind": "napimetrics",
+      "logs": {
+        "stderr": {
+          "bytes": 1623,
+          "sha256": "d9fd05ad93763938054f3db7eb189da57d9d102aca072cbf2b55ae10b33f638c"
+        },
+        "stdout": {
+          "bytes": 5350,
+          "sha256": "38a61b62f254e4462544e12ca59cf2c19bb6dcd976943ee74c6b1a0877e7192a"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "e188da97538ad8c7f6ff707eb0e83de4e93370806f18c15ff237297be2d9374f",
+      "rust_binaries": [
+        {
+          "ignored": 6,
+          "passed": 53
+        }
+      ],
+      "rust_case_executions": 53,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 8.168713040999137,
+      "exact_named_case_observed_passed": true,
+      "kind": "clicompact",
+      "logs": {
+        "stderr": {
+          "bytes": 353,
+          "sha256": "09b7f63cf9d596b73d18c9d8aa47c8517ecd062ebb05434f19c3381a17cd87fd"
+        },
+        "stdout": {
+          "bytes": 133566,
+          "sha256": "0b7203675c5dc841a2df18539323ea921f68810860e75b727d9e79e420d1d5bb"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "c32c0ce469f887d736514e5b338e576830ed044d8db491adf3cf28eeb06f240b",
+      "rust_binaries": [
+        {
+          "ignored": 0,
+          "passed": 1
+        }
+      ],
+      "rust_case_executions": 1,
+      "selected_test": "configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen",
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 14.418418459012173,
+      "exact_named_case_observed_passed": null,
+      "kind": "cachetests",
+      "logs": {
+        "stderr": {
+          "bytes": 942,
+          "sha256": "92eb0db50fc7a056e65530de6171e24402469d87553bc597261b75b03b34d030"
+        },
+        "stdout": {
+          "bytes": 6203,
+          "sha256": "990956ef3b2ada7f976408188687a1b37eec392e55a61068a8ed65c77e39c0d5"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "244c0081460c8f83058205f8231ff58941bb4ee92800da119b273df7891598a3",
+      "rust_binaries": [
+        {
+          "ignored": 4,
+          "passed": 33
+        },
+        {
+          "ignored": 1,
+          "passed": 0
+        },
+        {
+          "ignored": 6,
+          "passed": 13
+        },
+        {
+          "ignored": 1,
+          "passed": 2
+        },
+        {
+          "ignored": 0,
+          "passed": 0
+        }
+      ],
+      "rust_case_executions": 48,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 28.869814291014336,
+      "exact_named_case_observed_passed": null,
+      "kind": "remotetests",
+      "logs": {
+        "stderr": {
+          "bytes": 12728,
+          "sha256": "bab54dc2793db2fa5d9e4fb8b4a9fdc2addfd03f61f02d85ac8512f72e703b87"
+        },
+        "stdout": {
+          "bytes": 4162,
+          "sha256": "f0e08fdeec9f3a7a8046b2fec573947af26bd72cd489d9ee71a63cdeea0fe86d"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "6274d06ea4d816ecd0a974f71a76fe13fe8d8565cdea6dac2310b791d9d8369e",
+      "rust_binaries": [
+        {
+          "ignored": 3,
+          "passed": 14
+        },
+        {
+          "ignored": 0,
+          "passed": 8
+        },
+        {
+          "ignored": 2,
+          "passed": 4
+        },
+        {
+          "ignored": 0,
+          "passed": 12
+        }
+      ],
+      "rust_case_executions": 38,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 2.540637790982146,
+      "exact_named_case_observed_passed": true,
+      "kind": "wsclientmetrics",
+      "logs": {
+        "stderr": {
+          "bytes": 220,
+          "sha256": "74138686bb5cd873def1d4013e8341c7862b0df1fa5ebb2ef3099f587e1bb7a2"
+        },
+        "stdout": {
+          "bytes": 424263,
+          "sha256": "c18ceb897e7f4decc932c3948df4de53dbc6e7876c2b32151d9a77583b417de3"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "a9668818bfca8ed9ed7afed745ce727c89cf3cdc19335db0ee6c1dd14d8114cf",
+      "rust_binaries": [
+        {
+          "ignored": 0,
+          "passed": 1
+        }
+      ],
+      "rust_case_executions": 1,
+      "selected_test": "websocket::metrics_tests::websocket_stages_preserve_serialized_transactions",
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 3.233760583039839,
+      "exact_named_case_observed_passed": true,
+      "kind": "cachemetrics",
+      "logs": {
+        "stderr": {
+          "bytes": 406,
+          "sha256": "f521c1d58f5a49ce1deb6ce0bec7cce3826ebda0d8a47ceec98dc545680f1fe9"
+        },
+        "stdout": {
+          "bytes": 17504,
+          "sha256": "8af029a9c55a1cfad5141e0bd2d03cc5b9f06a8c2ec4122dd841fbc41bf05707"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "c87aa7303679e953166c9750a1997d714fc2b03d87cdf125d146cac1f10bcfad",
+      "rust_binaries": [
+        {
+          "ignored": 0,
+          "passed": 1
+        }
+      ],
+      "rust_case_executions": 1,
+      "selected_test": "cache_lookup_stage_metrics_preserve_bytes_and_cancellation",
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 12.69879645796027,
+      "exact_named_case_observed_passed": null,
+      "kind": "cachemetricsclippy",
+      "logs": {
+        "stderr": {
+          "bytes": 3351,
+          "sha256": "2090f8f554fbaf1a1c2baa44109ad815762fb715653ba36089dc51ef5a469e63"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "54c8a19b0ed6a02164c21c121d59f07cc72c9c1e30ec1abe195ec58e370e594a",
+      "rust_binaries": [],
+      "rust_case_executions": 0,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 9.664820790989324,
+      "exact_named_case_observed_passed": null,
+      "kind": "faultclippy",
+      "logs": {
+        "stderr": {
+          "bytes": 3104,
+          "sha256": "cd0fe97c2fc8d8c2e2317c26d27f22d9ca322ff73ae7922a9302c1fb85b7a093"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "6bff64a9d9c623c4f3e6d01a39707963c9c536d8e0fa26ac9faca4682618bfe0",
+      "rust_binaries": [],
+      "rust_case_executions": 0,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 8.860377207980491,
+      "exact_named_case_observed_passed": null,
+      "kind": "consumerclippy",
+      "logs": {
+        "stderr": {
+          "bytes": 2120,
+          "sha256": "398b21e7c8f1a918eb87c206ece080332e4a67aee38b49f3f978ea9260b10b79"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "50efee327adf6897ebc5f19b8ab8bb6e14a2902598596f2045d30a6763baf6be",
+      "rust_binaries": [],
+      "rust_case_executions": 0,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    },
+    {
+      "automatic_retry": false,
+      "deadline_exceeded": false,
+      "elapsed_seconds": 3.9404154589865357,
+      "exact_named_case_observed_passed": null,
+      "kind": "fmt",
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "modeled_node_tests": null,
+      "owned_child_reaped": true,
+      "owned_group_absent": true,
+      "pipes_eof": true,
+      "receipt_sha256": "4226d78535d9cd52c308dc031a13250f845827f26e855b141aadd77f4cdfdef6",
+      "rust_binaries": [],
+      "rust_case_executions": 0,
+      "selected_test": null,
+      "source_count": 511,
+      "source_unchanged": true,
+      "sticky_unknown": []
+    }
+  ],
+  "inventory": {
+    "core_rows": 136,
+    "napi_audited_default_rows": 78,
+    "napi_audited_foundationdb_rows": 85,
+    "new_rows": [
+      "client.quic.connection_setup",
+      "blob_cache.discovery.locate"
+    ],
+    "preserved_storage_prefix_rows": 108,
+    "storage_families": 23,
+    "storage_rows": 110
+  },
+  "limitations": [
+    "Single local macOS run with generated loopback TLS; no cross-host or full-capacity qualification.",
+    "QUIC uses the actual production setup helper but fixture transport establishment excludes OIDC and ClientHello. The separate signed CLI gate checks ClientHello and signed authentication with local JWKS; public OIDC discovery and network performance remain unmeasured.",
+    "Discovery uses controlled trait adapters and public cache reads, not Redis or an external directory.",
+    "Discovery timings include artificial fixture holds and are not deployment latency benchmarks.",
+    "Setup and discovery bytes and SQL returned rows are unavailable. Inclusive wall durations overlap other stages and are not exclusive CPU/network time.",
+    "Incoming peer setup and dedicated client CLI shutdown export remain measurement gaps.",
+    "Zero added warmed recorder allocations do not establish zero async, metadata, payload or whole-client allocations.",
+    "No crash, power-loss, native mount, physical-device IOPS or backing-store daemon IOPS qualification.",
+    "No hosted CI pass or merge claim."
+  ],
+  "modeled_node_tests_total": 242,
+  "modeled_parent_controls": {
+    "returncode": 0,
+    "scope": "104 pure modeled owned-parent controls; no runtime service qualification",
+    "source_unchanged": true,
+    "stderr_sha256": "b02cfe2aea078e9fd2b3b999b25fe45b7aea4e8be054d9965f04fdc57a97de02",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests": 104
+  },
+  "observed_utc": "2026-09-27T21:02:33.111697+00:00",
+  "recorder_allocation_control": {
+    "allocation_calls": 0,
+    "declared_rows": 110,
+    "measured_span_invocations": 96,
+    "scope": "warmed actual synchronous core Span success/error/drop only; excludes initialization, snapshots, logging, transport/discovery async bodies and payloads",
+    "selected_rows": 32
+  },
+  "rust_case_executions_total": 173,
+  "schema": "mount-rs.setup-discovery-instrumentation-qualification.v1",
+  "scope": "local observer correctness controls; not throughput or production capacity",
+  "source_freeze_sha256": "6b50886445d86aeecbf002c5eea47694bdd8ee4dc95268ea465ededadf7e0666",
+  "tested_source_state": "exact frozen source bytes with uncommitted edits at qualification time"
+}

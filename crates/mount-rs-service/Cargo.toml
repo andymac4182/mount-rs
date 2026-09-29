@@ -6,12 +6,14 @@ rust-version = "1.95"
 license = "Apache-2.0"
 
 [features]
+sdk-runtime = ["dep:mount-rs-sdk"]
 io-profiling = ["dep:mount-rs-sqlite", "mount-rs-remote-protocol/io-profiling"]
 resource-profiling = ["io-profiling"]
 allocation-profiling = ["resource-profiling"]
 saturation-foundationdb = ["mount-rs-sdk/foundationdb"]
 
 [dependencies]
+mount-rs-sdk = { path = "../mount-rs-sdk", optional = true }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 futures-util = { version = "0.3", features = ["sink"] }
@@ -36,6 +38,7 @@ mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 mount-rs-sdk = { path = "../mount-rs-sdk" }
 mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }
+mount-rs-rustfs = { path = "../../providers/mount-rs-rustfs" }
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
@@ -47,3 +50,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[[test]]
+name = "quic_production_target"
+required-features = ["sdk-runtime"]

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use mount_rs_core::diagnostics::object_store::{BundleResidency, ClientRole, Observer};
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_object_store_blocks::{
@@ -23,8 +24,21 @@ use object_store::{ClientOptions, ObjectStore, RetryConfig};
 pub use mount_rs_object_store_blocks::{
     ObjectStoreBlockStoreErrorClass as RustFsBlockStoreErrorClass,
     ObjectStoreBlockStoreStats as RustFsBlockStoreStats,
+    // These are the common adapter's capacity types, not RustFS-specific credit.
+    RawBlockCacheBudget,
+    RawBlockCacheBudgetSnapshot,
 };
 
+mod client_construction;
+mod http_observation;
+
+pub use client_construction::{OwnedPrefixProbe, RustFsConstructionContext};
+
+#[cfg(test)]
+mod client_construction_tests;
+
+#[cfg(test)]
+mod http_observation_tests;
 #[cfg(test)]
 mod owned_prefix_tests;
 
@@ -98,15 +112,71 @@ impl RustFsConfig {
         self.build_store_with_probe_limits(false)
     }
 
-    fn build_probe_store(&self) -> Result<Arc<dyn ObjectStore>> {
-        self.build_store_with_probe_limits(true)
-    }
-
     fn build_store_with_probe_limits(&self, probe: bool) -> Result<Arc<dyn ObjectStore>> {
         Ok(Arc::new(self.build_client_with_probe_limits(probe)?))
     }
 
     fn build_client_with_probe_limits(&self, probe: bool) -> Result<AmazonS3> {
+        let observer = Observer::enabled();
+        self.build_client_with_observer(
+            probe,
+            if probe {
+                ClientRole::StandaloneProbe
+            } else {
+                ClientRole::StandaloneData
+            },
+            &observer,
+        )
+    }
+
+    fn build_store_with_observer(
+        &self,
+        probe: bool,
+        role: ClientRole,
+        observer: &Observer,
+    ) -> Result<Arc<dyn ObjectStore>> {
+        Ok(Arc::new(
+            self.build_client_with_observer(probe, role, observer)?,
+        ))
+    }
+
+    fn build_client_with_observer(
+        &self,
+        probe: bool,
+        role: ClientRole,
+        observer: &Observer,
+    ) -> Result<AmazonS3> {
+        let mut builder = self.client_builder(probe)?;
+        // Disabled diagnostics preserve the original default connector route.
+        if observer.is_enabled() {
+            builder = builder.with_http_connector(http_observation::ObservedConnector::new(
+                object_store::client::ReqwestConnector::default(),
+                observer.clone(),
+                role,
+            ));
+        }
+        builder.build().map_err(backend_error)
+    }
+
+    #[cfg(test)]
+    fn build_client_with_injected_connector<C: object_store::client::HttpConnector>(
+        &self,
+        probe: bool,
+        role: ClientRole,
+        observer: &Observer,
+        connector: C,
+    ) -> Result<AmazonS3> {
+        self.client_builder(probe)?
+            .with_http_connector(http_observation::ObservedConnector::new(
+                connector,
+                observer.clone(),
+                role,
+            ))
+            .build()
+            .map_err(backend_error)
+    }
+
+    fn client_builder(&self, probe: bool) -> Result<AmazonS3Builder> {
         self.validate()?;
         let endpoint = self.endpoint.trim_end_matches('/');
         let mut builder = AmazonS3Builder::new()
@@ -135,7 +205,7 @@ impl RustFsConfig {
         if endpoint.starts_with("http://") {
             builder = builder.with_allow_http(true);
         }
-        builder.build().map_err(backend_error)
+        Ok(builder)
     }
 }
 
@@ -349,6 +419,10 @@ pub struct RustFsBlockStore {
     blocks: ObjectStoreBlockStore,
     configured_probe: Option<Arc<dyn ObjectStore>>,
     qualification_clients: Option<SignedQualificationClients>,
+    http_observer: Observer,
+    // Last field: final facade release follows existing provider-field drops.
+    // This token is observation only, never an HTTP/socket shutdown acknowledgment.
+    _http_bundle: Option<Arc<BundleResidency>>,
 }
 
 #[derive(Clone)]
@@ -359,6 +433,38 @@ struct SignedQualificationClients {
     second_probe: Arc<dyn ObjectStore>,
 }
 
+// A context may retain these immutable, independently signed clients across
+// Drive facades. Prefix, durability, cache and in-flight writes stay in each
+// ObjectStoreBlockStore rather than in this shared owner.
+pub(crate) struct SignedClientBundle {
+    clients: SignedQualificationClients,
+    observer: Observer,
+}
+
+impl SignedClientBundle {
+    fn build(config: &RustFsConfig) -> Result<Arc<Self>> {
+        let observer = Observer::enabled();
+        Self::build_with(observer, |probe, role, observer| {
+            config.build_store_with_observer(probe, role, observer)
+        })
+    }
+
+    fn build_with(
+        observer: Observer,
+        mut build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
+    ) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            clients: SignedQualificationClients {
+                first_data: build(false, ClientRole::PrimaryDataMixed, &observer)?,
+                second_data: build(false, ClientRole::QualificationData, &observer)?,
+                first_probe: build(true, ClientRole::PrimaryProbeMixed, &observer)?,
+                second_probe: build(true, ClientRole::QualificationProbe, &observer)?,
+            },
+            observer,
+        }))
+    }
+}
+
 impl RustFsBlockStore {
     /// Wrap a client and declare whether its backing service is durable.
     pub fn new(
@@ -366,11 +472,31 @@ impl RustFsBlockStore {
         prefix: impl Into<String>,
         durable: bool,
     ) -> Result<Self> {
-        Ok(Self {
-            blocks: ObjectStoreBlockStore::new(store, prefix, durable)?,
+        Ok(Self::from_blocks(ObjectStoreBlockStore::new(
+            store, prefix, durable,
+        )?))
+    }
+
+    /// Wrap one scoped client using the common adapter's shared capacity owner.
+    pub fn new_with_cache_budget(
+        store: Arc<dyn ObjectStore>,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        Ok(Self::from_blocks(
+            ObjectStoreBlockStore::new_with_cache_budget(store, prefix, durable, budget)?,
+        ))
+    }
+
+    fn from_blocks(blocks: ObjectStoreBlockStore) -> Self {
+        Self {
+            blocks,
             configured_probe: None,
             qualification_clients: None,
-        })
+            http_observer: Observer::disabled(),
+            _http_bundle: None,
+        }
     }
 
     /// Build RustFS blocks with the caller's explicit durability assertion.
@@ -379,19 +505,98 @@ impl RustFsBlockStore {
         prefix: impl Into<String>,
         durable: bool,
     ) -> Result<Self> {
-        let first_data = config.build_store()?;
-        let second_data = config.build_store()?;
-        let first_probe = config.build_probe_store()?;
-        let second_probe = config.build_probe_store()?;
-        let mut blocks = Self::new(first_data.clone(), prefix, durable)?;
-        blocks.configured_probe = Some(first_probe.clone());
-        blocks.qualification_clients = Some(SignedQualificationClients {
-            first_data,
-            second_data,
-            first_probe,
-            second_probe,
-        });
-        Ok(blocks)
+        let observer = Observer::enabled();
+        Self::from_config_with_builder(prefix, durable, observer, |probe, role, observer| {
+            config.build_store_with_observer(probe, role, observer)
+        })
+    }
+
+    /// Build signed clients while retaining the supplied common raw capacity.
+    /// Standalone `from_config` retains its private bounded cache policy.
+    pub fn from_config_with_cache_budget(
+        config: &RustFsConfig,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        let observer = Observer::enabled();
+        Self::from_config_with_builder_and_cache_budget(
+            prefix,
+            durable,
+            observer,
+            Some(budget),
+            |probe, role, observer| config.build_store_with_observer(probe, role, observer),
+        )
+    }
+
+    fn from_config_with_builder(
+        prefix: impl Into<String>,
+        durable: bool,
+        observer: Observer,
+        build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
+    ) -> Result<Self> {
+        Self::from_config_with_builder_and_cache_budget(prefix, durable, observer, None, build)
+    }
+
+    fn from_config_with_builder_and_cache_budget(
+        prefix: impl Into<String>,
+        durable: bool,
+        observer: Observer,
+        budget: Option<RawBlockCacheBudget>,
+        build: impl FnMut(bool, ClientRole, &Observer) -> Result<Arc<dyn ObjectStore>>,
+    ) -> Result<Self> {
+        let build_span = observer.bundle_build();
+        let result =
+            SignedClientBundle::build_with(observer.clone(), build).and_then(
+                |bundle| match budget {
+                    Some(budget) => {
+                        Self::from_client_bundle_with_cache_budget(&bundle, prefix, durable, budget)
+                    }
+                    None => Self::from_client_bundle(&bundle, prefix, durable),
+                },
+            );
+        match result {
+            Ok(mut blocks) => {
+                blocks.http_observer = observer;
+                blocks._http_bundle = build_span.finish_success();
+                Ok(blocks)
+            }
+            Err(error) => {
+                build_span.finish_error();
+                Err(error)
+            }
+        }
+    }
+
+    fn from_client_bundle(
+        bundle: &SignedClientBundle,
+        prefix: impl Into<String>,
+        durable: bool,
+    ) -> Result<Self> {
+        let blocks = Self::new(bundle.clients.first_data.clone(), prefix, durable)?;
+        Ok(Self::attach_client_bundle(blocks, bundle))
+    }
+
+    fn from_client_bundle_with_cache_budget(
+        bundle: &SignedClientBundle,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        let blocks = Self::new_with_cache_budget(
+            bundle.clients.first_data.clone(),
+            prefix,
+            durable,
+            budget,
+        )?;
+        Ok(Self::attach_client_bundle(blocks, bundle))
+    }
+
+    fn attach_client_bundle(mut blocks: Self, bundle: &SignedClientBundle) -> Self {
+        blocks.configured_probe = Some(bundle.clients.first_probe.clone());
+        blocks.qualification_clients = Some(bundle.clients.clone());
+        blocks.http_observer = bundle.observer.clone();
+        blocks
     }
 
     pub fn prefix(&self) -> &str {
@@ -400,6 +605,12 @@ impl RustFsBlockStore {
 
     pub fn stats(&self) -> RustFsBlockStoreStats {
         self.blocks.stats()
+    }
+
+    /// Detached, metrics-only handle. It retains no provider, cache or client.
+    /// Counters describe object_store dispatches, not exact wire/server requests.
+    pub fn http_observer(&self) -> Observer {
+        self.http_observer.clone()
     }
 }
 

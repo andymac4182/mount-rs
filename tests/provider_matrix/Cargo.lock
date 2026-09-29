@@ -1526,6 +1526,8 @@ name = "mount-rs-rustfs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "http-body",
  "mount-rs-core",
  "mount-rs-object-store-blocks",
  "object_store 0.12.5",
@@ -1551,6 +1553,7 @@ dependencies = [
  "mount-rs-sqlite",
  "mount-rs-sqlite-fs",
  "mount-rs-tidb",
+ "tokio",
 ]
 
 [[package]]

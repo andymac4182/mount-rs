@@ -112,6 +112,16 @@ Run `CARGO_TARGET_DIR=/path/to/isolated-target scripts/test-cache-redis.py` for 
 
 Peer requests use separately owned headers and shared immutable payloads. Successful GET replies read the status separately and retain the received payload without a slicing copy. The ordinary block provider still returns a `Vec`, so it requires a caller copy. Deterministic ranking hashes the scope once and evaluates each peer once.
 
+Each trusted peer has independent read and replica-placement negotiation slots.
+Requests wait only for their own role's slot; an immediately available live,
+authenticated connection from the other slot is reused. Healthy sequential roles
+share one connection, while simultaneous cold roles can establish two. Shared
+request, stream and byte admission remain unchanged, and cancelled Quinn attempts
+can retain additional draining state. The
+[controlled reconnection qualification](benchmarks/peer-reconnect-isolation-20260927/README.md)
+records the avoided connection wait and backing GET, with its test and resource
+limits.
+
 Placement runs at most `placement_concurrency` jobs (default 4, maximum 32), with at most two replica PUTs per job. The maintenance queue and pending-byte reservation remain bounded. Reads start one peer query, then hedge after `hedge_delay_ms` (default 25 ms, clamped to one quarter of the overall deadline); at most two queries run simultaneously and `peer_query_limit` bounds total attempts. The first valid response wins and cancels outstanding queries. Directory hints and individual corrupt/missing replicas remain best effort.
 
 `peer_transfer_bytes` defaults to 128 MiB and is split equally between incoming and outgoing work. Each admitted transfer reserves twice the maximum blob plus header bound before allocating a body, and queued QUIC payload owners retain their charges. The budget must fit one such reservation in each half and cannot exceed 1 GiB. Cache RAM, staging, transport receive windows, provider buffers and bookkeeping are separate limits; this is not a whole-process RSS cap.
@@ -136,13 +146,89 @@ backing flush before real peer placement. Peer trust grants Partitions; exact
 scope registration determines cache availability. Client per-Drive OIDC grants
 are enforced separately by the service. A split SQLite SDK write is acknowledged,
 all cache/peer owners are closed, and a fresh undecorated SDK reopens the exact
-persisted file bytes. Cancellation checks owned directory removal and UDP socket
-reuse. Tests have 15-second outer bounds and explicit cleanup; cache workers are
-drained before invalidation so a late fill cannot hide a peer failure.
+persisted file bytes. Cancellation waits for an explicit endpoint/cache cleanup
+receipt before checking owned directory removal and UDP socket reuse. Fixture
+drop synchronously retains its directory before scheduling cleanup, including
+after an explicit shutdown call. Removal requires all tracked cache owners to
+be gone because the cache shutdown timeout alone does not prove worker drain.
+An unknown drain, cancelled cleanup or runtime teardown retains the directory
+for removal after the parent observes test-process exit. Tests have 15-second
+outer bounds and explicit cold-cache assertions before forced peer failures.
 
 Run `scripts/cargo-shared test -p mount-rs-blob-cache --all-targets --locked`.
 These are loopback qualification tests. Capacity eviction is not OS ENOSPC;
 the synthetic flush barrier is not power-loss testing; the SQLite check is an
-orderly fresh reopen; and Redis's separate live fixtures do not compose Redis
-with the real-peer failure suite. Cross-host and production capacity remain
-separate qualification work.
+orderly fresh reopen. Cross-host and production capacity remain separate
+qualification work.
+
+The explicit `redis_directory_real_peer_failures_preserve_exact_backing` fixture
+composes an owned credentialed loopback Redis process with the authenticated
+QUIC peers. Its one-peer query limit makes directory steering observable: the
+chosen fallback selects local requester B for the healthy, stale-holder and
+peer-outage phases, so only Redis's advertised holder A can avoid a backing GET.
+For both directory-outage phases, the fallback selects A, allowing a persisted
+peer hit or an observed failed peer attempt before backing fallback. Five distinct cold binary blocks exercise a healthy
+directory, an advertised holder lacking bytes, a stopped peer with a retained
+Redis hint, Redis unavailability with a restarted peer's persisted disk bytes,
+and simultaneous Redis/peer unavailability. Each phase asserts full returned
+bytes, one counted QUIC GET attempt, backing GET calls and returned backing
+bytes, with elapsed time and cache counters printed for diagnosis. The total
+oracle is five logical reads, two peer hits and three backing GET calls.
+
+The sequential fault phases observe the stale-holder replica PUT succeeding
+before stopping A, then the outage replica PUT returning its transport error
+while A is still stopped, before restart. Each wait requires the exact block's
+normal completion; cancellation is rejected. Before restart, two attempts are
+complete with one error and no cancelled or in-flight PUTs. These barriers keep
+background placement from overlapping the recovered-peer read.
+
+The earlier diagnostic failure without those barriers verified all recovered
+disk bytes with zero RAM usage, but an earlier placement PUT remained in flight.
+That PUT failed after about 402 ms and the overlapping GET exhausted its 400 ms
+budget, adding a backing GET. GET/PUT outcome and timing logs expose this overlap;
+they do not separately measure connection-mutex wait and handshake time. The
+connection mutex was held across establishment. The subsequent
+[reconnect comparison](benchmarks/peer-reconnect-isolation-20260927/README.md)
+separates read and replica connection roles and tests a read while replica
+establishment remains pending. Its single controlled observation reduced the
+read from 402.80 ms and one backing GET to 6.04 ms and zero backing GETs.
+The direct disk oracle also warms the OS page cache, so these elapsed times do
+not qualify cold physical disk latency.
+
+This backing is the test's in-memory `BlockStore` fixture; its GET counts are
+calls at the provider boundary, not physical SSD IOPS, an object-store request
+count, or provider durability evidence. The SQLite fresh-reopen test remains a
+separate persistence check. Redis uses a unique temporary directory, a generated
+fixture credential and authenticated PING readiness, with three-second startup
+and kill/reap bounds and a 15-second test bound. Before asynchronous cleanup is
+scheduled, the directory is synchronously retained; it is removed only after
+an observed child reap. Cancellation awaits a cleanup receipt carrying the
+child's actual exit status before checking directory removal and TCP socket
+reuse. Failure reports an error and retains the path; a cancelled cleanup
+closes the receipt without claiming an observed reap. Ordinary tests also cover
+unpolled cleanup cancellation, an injected reap failure and cache owners held
+through cleanup. Both Redis composition tests are ignored by ordinary Cargo
+runs and fail explicitly if the Redis binary is unavailable; they never use a
+global Redis service.
+
+Run these gates serially through the owned Unix parent:
+
+```sh
+export CARGO_TARGET_DIR=/path/to/dedicated-cargo-cache
+export MOUNT_RS_CACHE_REDIS_SERVER=/absolute/path/to/redis-server
+python3 -B scripts/test-remote-failures.py redisfault
+python3 -B scripts/test-remote-failures.py rediscleanup
+```
+
+The parent requires an explicit absolute Redis executable, pins its resolved
+bytes before and after the run, creates a private fixture directory and captures
+bounded output. It keeps its leader unreaped through process-group signal
+decisions, then requires leader reap, group absence and output EOF before
+removing retained fixture directories. Darwin can return `EPERM` for a group
+containing only the pinned zombie leader; the original errors stay in the
+receipt and can be reconciled only after those independent final observations.
+This parent containment is separate from the fixture's own child-reap receipt.
+`python3 -B scripts/test-remote-failures-controls.py` checks modeled result and
+portability decisions without starting a child. CI extracts its owned Redis
+binary without installing or starting a service and exports only receipts and
+source pins, excluding raw output and fixture contents.

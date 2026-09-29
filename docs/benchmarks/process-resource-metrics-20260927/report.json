@@ -1,0 +1,226 @@
+{
+  "arms": [
+    {
+      "acknowledged_operations": 1200,
+      "cleanup_failures": 0,
+      "core_stages": [
+        {
+          "calls": "3670",
+          "elapsed_ns": "30172139",
+          "name": "sqlite.compact.authority_query",
+          "units": "0"
+        },
+        {
+          "calls": "3670",
+          "elapsed_ns": "90164592",
+          "name": "sqlite.compact.authority_path",
+          "units": "0"
+        },
+        {
+          "calls": "3670",
+          "elapsed_ns": "5284246",
+          "name": "sqlite.compact.anchor_query_bytes",
+          "units": "4029382"
+        },
+        {
+          "calls": "3670",
+          "elapsed_ns": "9086184",
+          "name": "sqlite.compact.anchor_decode_bytes",
+          "units": "4029382"
+        },
+        {
+          "calls": "3200",
+          "elapsed_ns": "13307087",
+          "name": "sqlite.compact.guard_selected_rows",
+          "units": "3200"
+        },
+        {
+          "calls": "470",
+          "elapsed_ns": "77786673",
+          "name": "sqlite.compact.guard_full_rows",
+          "units": "83387"
+        },
+        {
+          "calls": "3200",
+          "elapsed_ns": "4893179",
+          "name": "sqlite.compact.guard_selected_decode_bytes",
+          "units": "6063550"
+        },
+        {
+          "calls": "83387",
+          "elapsed_ns": "55657043",
+          "name": "sqlite.compact.guard_full_decode_bytes",
+          "units": "38342736"
+        },
+        {
+          "calls": "3635",
+          "elapsed_ns": "95894",
+          "name": "sqlite.compact.read_lock_wait",
+          "units": "0"
+        },
+        {
+          "calls": "3635",
+          "elapsed_ns": "920402",
+          "name": "sqlite.compact.read_begin",
+          "units": "0"
+        },
+        {
+          "calls": "400",
+          "elapsed_ns": "34881461",
+          "name": "filesystem.refresh.replace_probe",
+          "units": "0"
+        },
+        {
+          "calls": "400",
+          "elapsed_ns": "183479621",
+          "name": "filesystem.refresh.create_capture",
+          "units": "0"
+        },
+        {
+          "calls": "35",
+          "elapsed_ns": "18963916",
+          "name": "filesystem.refresh.batch_capture",
+          "units": "0"
+        },
+        {
+          "calls": "400",
+          "elapsed_ns": "37896176",
+          "name": "filesystem.refresh.path_structure",
+          "units": "0"
+        },
+        {
+          "calls": "800",
+          "elapsed_ns": "37978755",
+          "name": "filesystem.refresh.read_before",
+          "units": "0"
+        },
+        {
+          "calls": "800",
+          "elapsed_ns": "37012707",
+          "name": "filesystem.refresh.read_after",
+          "units": "0"
+        }
+      ],
+      "elapsed_ms": 626.8082919999999,
+      "errors": 0,
+      "floor_met": true,
+      "logical_floor": 1000,
+      "logical_operations_per_second": 1914.460952919238,
+      "native_phase_complete": true,
+      "observer_snapshot_ms": 1.0740000000000194,
+      "phase_elapsed_ms": 627.714917,
+      "process": {
+        "cpu_observer": {
+          "system_us": "25",
+          "user_us": "1115"
+        },
+        "cpu_work": {
+          "system_us": "332648",
+          "user_us": "268475"
+        },
+        "js_allocation_count": "unavailable",
+        "lifetime_peak_rss_bytes": {
+          "end": "93306880",
+          "scope": "process_lifetime_high_water_mark; not_phase_peak",
+          "start": "77627392"
+        },
+        "memory_delta_bytes": {
+          "arrayBuffers": "-240",
+          "external": "1113872",
+          "heapTotal": "1048576",
+          "heapUsed": "2227952",
+          "rss": "15794176"
+        },
+        "memory_end_bytes": {
+          "arrayBuffers": "146611",
+          "external": "5086378",
+          "heapTotal": "19415040",
+          "heapUsed": "12871392",
+          "rss": "93421568"
+        },
+        "memory_start_bytes": {
+          "arrayBuffers": "146851",
+          "external": "3972506",
+          "heapTotal": "18366464",
+          "heapUsed": "10643440",
+          "rss": "77627392"
+        },
+        "native_allocation_count": "unavailable",
+        "resource_measurement": {
+          "filesystem_operations": "process_getrusage_block_accounting; not_syscalls_or_device_iops",
+          "memory": "endpoint_gauges; signed_delta_not_allocation_churn",
+          "page_faults": "process_getrusage_minor_and_major_faults",
+          "peak_rss": "process_lifetime_high_water_mark; not_phase_peak",
+          "schema": "mount-rs.process-resources.v1"
+        },
+        "resources_observer": {
+          "filesystem_input_operations": "0",
+          "filesystem_output_operations": "0",
+          "major_page_faults": "0",
+          "minor_page_faults": "7"
+        },
+        "resources_work": {
+          "filesystem_input_operations": "0",
+          "filesystem_output_operations": "0",
+          "involuntary_context_switches": "4592",
+          "major_page_faults": "2",
+          "minor_page_faults": "1072",
+          "voluntary_context_switches": "2438"
+        }
+      },
+      "profile_enabled": true,
+      "raw_stderr_sha256": "77ad1e64c7f51c1caa1840f3777f4d51203035380b1fc990adcebcdc09f337d0",
+      "raw_stdout_sha256": "381925ef91bebb8f4b2722dca8da6b53d0a91d4e4250844ef8b00c760e70c9a2",
+      "receipt_sha256": "986e858d84ec33eb516ca9f66e488332d33f165eb54824ba1c399f241e753e76",
+      "sqlite": {
+        "pager_cache_misses": 0,
+        "pager_page_writes": 2112,
+        "scope": "provider_statements_and_pager_observations; not_device_iops",
+        "statement_calls": 22525
+      },
+      "successful_lifecycles": 400,
+      "timeouts": 0,
+      "verified_reads": 400
+    },
+    {
+      "acknowledged_operations": 1200,
+      "cleanup_failures": 0,
+      "diagnostics_reason": "profiling_disabled",
+      "elapsed_ms": 616.213833,
+      "errors": 0,
+      "floor_met": true,
+      "logical_floor": 1000,
+      "logical_operations_per_second": 1947.375952529128,
+      "native_phase_complete": "unavailable",
+      "process": "unavailable",
+      "profile_enabled": false,
+      "raw_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "raw_stdout_sha256": "0ca44e918549808afacfe04f7c1c3a63f12dab35c19db5c34f019e5c0034351b",
+      "receipt_sha256": "b572ebca42822705d161b469179a2f409708776113e98ca79e83ad7929ee98e1",
+      "successful_lifecycles": 400,
+      "timeouts": 0,
+      "verified_reads": 400
+    }
+  ],
+  "chunk_size_bytes": 65536,
+  "concurrency": 64,
+  "iterations_per_arm": 400,
+  "layout": "compact",
+  "limits": [
+    "two_serial_arms_not_causal_speedup_or_isolated_observer_overhead",
+    "OS_and_remote_caches_uncontrolled",
+    "no_QUIC_WebSocket_kernel_mount_or_full_production_target",
+    "process_block_accounting_not_device_IOPS",
+    "memory_endpoint_deltas_not_allocation_churn_or_phase_peak",
+    "native_and_JS_total_allocations_unavailable",
+    "selected_host_device_unselected_in_separate_OS_control",
+    "profile_off_arm_has_no_resource_or_native_phase_snapshot"
+  ],
+  "native_artifact_unchanged": true,
+  "native_sha256": "4ce499fbb023cc8e482373528ac61073faa7776f807cc8f05e4d06e541bd8d0d",
+  "payload_bytes": 4096,
+  "provider": "mount-rs-split-sqlite",
+  "schema": "mount-rs.process-resource-metrics-actual.v1",
+  "source_base": "0eaf0a5d1d47e91219c6decb0acb9e12d6d9c2a4",
+  "surface": "public_napi_direct_api"
+}

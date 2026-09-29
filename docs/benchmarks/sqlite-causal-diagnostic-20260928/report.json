@@ -1,0 +1,4319 @@
+{
+  "schema": "mount-rs.causal-sqlite-diagnostic-analysis.v1",
+  "scope": "100 connections;10coordinators in1process;100Drives;1Partition;1file per active client;synthetic auth; warm randomized4KiB; not production capacity",
+  "timing": "inclusive nested/parallel rows overlap; do not sum as CPU",
+  "physical_io_scope": "whole disk0 driver counters include all host traffic; process accounting is distinct; not physical SSD IOPS",
+  "sqlite_counters_scope": "end totals since reset; not end minus begin; pager excludes WAL/checkpoint/sync; observer work may be included",
+  "runs": [
+    {
+      "kind": "saturation",
+      "artifact_sha256": "5d2fd6bad9e1465c26f68636a71946516dc5b2c17ed54b379577a93a65cfcc92",
+      "receipt_sha256": "3ed530078576b2f0469adfea1a80e44ec935fc9f37df4754229ffeb32d386488",
+      "binding": {
+        "checkout_dirty_at_run": true,
+        "checkout_revision_at_run": "37ed91349695f03cbd4a7a8ea475539c364fe037",
+        "compiled_revision_env": null,
+        "compiled_runner_source_sha256": "915e8407494ed54b00c3c032074488fb99a5d530924f86fc0a28b9ae267fef9a",
+        "current_runner_source_sha256": "915e8407494ed54b00c3c032074488fb99a5d530924f86fc0a28b9ae267fef9a",
+        "executable": "/private/tmp/mount-rs-causal-metrics-target-20260927/release/deps/quic_tidb_saturation-3af625c11eb78d85",
+        "executable_sha256": "faeab25e594ce62fbe3c7b24ec8599bffe94314dac21123cdbf1788a153c2bbc",
+        "features": {
+          "allocation_profiling": false,
+          "foundationdb": false,
+          "resource_profiling": true
+        }
+      },
+      "verified_files": 100,
+      "active_clients": 100,
+      "driver_replicas": 1000,
+      "stages": [
+        {
+          "mode": "Read",
+          "read_acks": 62949,
+          "write_acks": 0,
+          "elapsed_seconds_including_drain": 3.002983792,
+          "read_iops": 20962.151100414594,
+          "write_iops": 0.0,
+          "total_iops": 20962.151100414594,
+          "read_latency": {
+            "completed": 62949,
+            "p50_us_upper": 8192,
+            "p95_us_upper": 8192,
+            "p99_us_upper": 16384
+          },
+          "write_latency": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "process_average_cores": 10.665312974822742,
+          "process_cpu_us_per_ack": 508.7890514543519,
+          "rss_start_bytes": 355647488,
+          "rss_end_bytes": 355680256,
+          "sqlite_heap_start_bytes": 233101600,
+          "sqlite_heap_end_bytes": 233101600,
+          "storage_boundary_status": "complete",
+          "storage_boundary_complete": true,
+          "core_rows": 29,
+          "storage_rows": 100,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 266694618,
+            "rx_datagrams": 199498,
+            "rx_ios": 199498,
+            "sent_packets": 127125,
+            "tx_bytes": 8058997,
+            "tx_datagrams": 127125,
+            "tx_ios": 127125
+          },
+          "os_io": {
+            "enabled_end": true,
+            "enabled_start": true,
+            "host_block_device": {
+              "after": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25707879059456",
+                    "read_operations_processed": "5558390745",
+                    "write_bytes": "3191427547136",
+                    "write_operations_processed": "143559433"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4111,
+                      "start_token": "9875151761648"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25707878928384",
+                    "read_operations_processed": "5558390728",
+                    "write_bytes": "3191417634816",
+                    "write_operations_processed": "143559174"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4111,
+                      "start_token": "9875151761648"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "read_bytes": "131072",
+                "read_operations_processed": "17",
+                "write_bytes": "9912320",
+                "write_operations_processed": "259"
+              },
+              "reason": null,
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "available"
+            },
+            "interval_ns": "3003639625",
+            "observer_elapsed_end_ns": "588250",
+            "observer_elapsed_start_ns": "628333",
+            "process_disk": {
+              "after": {
+                "sample": {
+                  "identity": {
+                    "pid": 4111,
+                    "start_token": "9875151761648"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "1056768",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "363298816"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "identity": {
+                    "pid": 4111,
+                    "start_token": "9875151761648"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "1056768",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "363298816"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "linux_counters": null,
+                "read_bytes": "0",
+                "write_bytes": "0"
+              },
+              "reason": null,
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "available"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4364.701822109962,
+          "selected_core": {
+            "catalog.backing_verify": {
+              "calls": 125898,
+              "elapsed_ns": 582565327,
+              "name": "catalog.backing_verify",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 9.254560469586492
+            },
+            "filesystem.gate_wait": {
+              "calls": 125898,
+              "elapsed_ns": 44401411,
+              "name": "filesystem.gate_wait",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.7053553034996585
+            },
+            "provider.blocks.get_bytes": {
+              "calls": 62949,
+              "elapsed_ns": 4209669760,
+              "name": "provider.blocks.get_bytes",
+              "units": 257839104,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 4096.0,
+              "inclusive_us_per_ack": 66.87429125164816
+            },
+            "filesystem.gate_wait.read": {
+              "calls": 125898,
+              "elapsed_ns": 17967437,
+              "name": "filesystem.gate_wait.read",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.2854284738439054
+            },
+            "filesystem.gate_hold.read": {
+              "calls": 125898,
+              "elapsed_ns": 26629474879,
+              "name": "filesystem.gate_hold.read",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 423.0325323515862
+            }
+          },
+          "selected_storage": {
+            "sdk.metadata.load_compact_inode": {
+              "bytes": 0,
+              "calls": 125898,
+              "cancelled": 0,
+              "elapsed_ns": 26205158064,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                81,
+                55509,
+                48131,
+                16229,
+                4427,
+                1144,
+                286,
+                68,
+                21,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.load_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 125898,
+              "calls_per_ack": 2.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 416.2918880998904
+            },
+            "sdk.blocks.get": {
+              "bytes": 257839104,
+              "calls": 62949,
+              "cancelled": 0,
+              "elapsed_ns": 4218452107,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                693,
+                36143,
+                14498,
+                6131,
+                3015,
+                1558,
+                653,
+                182,
+                49,
+                19,
+                7,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.get",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 62949,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 4096.0,
+              "inclusive_us_per_ack": 67.01380652591781
+            }
+          },
+          "highest_core_inclusive_per_ack": [
+            {
+              "calls": 62949,
+              "name": "service.dispatch",
+              "units": 0,
+              "inclusive_us_per_ack": 619.504155093806
+            },
+            {
+              "calls": 125898,
+              "name": "filesystem.gate_hold.read",
+              "units": 0,
+              "inclusive_us_per_ack": 423.0325323515862
+            },
+            {
+              "calls": 125898,
+              "name": "filesystem.gate_phase.refresh",
+              "units": 0,
+              "inclusive_us_per_ack": 422.13894146054747
+            },
+            {
+              "calls": 125898,
+              "name": "provider.inode.load",
+              "units": 0,
+              "inclusive_us_per_ack": 416.004901586999
+            },
+            {
+              "calls": 62949,
+              "name": "filesystem.refresh.read_before",
+              "units": 0,
+              "inclusive_us_per_ack": 215.92041451015902
+            },
+            {
+              "calls": 62949,
+              "name": "filesystem.refresh.read_after",
+              "units": 0,
+              "inclusive_us_per_ack": 206.5297378195047
+            },
+            {
+              "calls": 125898,
+              "name": "sqlite.compact.authority_path",
+              "units": 0,
+              "inclusive_us_per_ack": 154.66237951357448
+            },
+            {
+              "calls": 125898,
+              "name": "sqlite.compact.authority_query",
+              "units": 0,
+              "inclusive_us_per_ack": 94.81307467950246
+            },
+            {
+              "calls": 62949,
+              "name": "service.authorization",
+              "units": 0,
+              "inclusive_us_per_ack": 94.39906857932613
+            },
+            {
+              "calls": 125898,
+              "name": "sqlite.compact.guard_selected_rows",
+              "units": 125898,
+              "inclusive_us_per_ack": 92.66998303388458
+            },
+            {
+              "calls": 62949,
+              "name": "catalog.load",
+              "units": 0,
+              "inclusive_us_per_ack": 85.10955457592654
+            },
+            {
+              "calls": 62949,
+              "name": "provider.blocks.get_bytes",
+              "units": 257839104,
+              "inclusive_us_per_ack": 66.87429125164816
+            }
+          ],
+          "sqlite_stage_reset_counters": {
+            "matched_connections": 2000,
+            "complete": true,
+            "sql_statements": 692439,
+            "statements_per_ack": 11.0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "BEGIN": 125898,
+              "ROLLBACK": 125898,
+              "SELECT": 440643
+            },
+            "pager": {
+              "cache_hits": 881286,
+              "cache_misses": 0,
+              "page_writes": 0,
+              "cache_spills": 0
+            },
+            "pager_per_ack": {
+              "cache_hits": 14.0,
+              "cache_misses": 0.0,
+              "page_writes": 0.0,
+              "cache_spills": 0.0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0
+          },
+          "sdk_read_payload_amplification": 1.0,
+          "selected_metadata_bytes_per_ack": {
+            "provider.inode_returned_bytes": 8860.0,
+            "provider.compact_anchor_returned_bytes": 630.3659152647381
+          },
+          "whole_host_driver_operations_per_second": {
+            "read_operations_processed": 5.659800149959734,
+            "write_operations_processed": 86.22871993173948
+          },
+          "sqlite_journal_mode_observed": false
+        },
+        {
+          "mode": "Write",
+          "read_acks": 0,
+          "write_acks": 4275,
+          "elapsed_seconds_including_drain": 3.035579916,
+          "read_iops": 0.0,
+          "write_iops": 1408.2976295459189,
+          "total_iops": 1408.2976295459189,
+          "read_latency": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write_latency": {
+            "completed": 4275,
+            "p50_us_upper": 131072,
+            "p95_us_upper": 131072,
+            "p99_us_upper": 262144
+          },
+          "process_average_cores": 4.976352268104807,
+          "process_cpu_us_per_ack": 3533.5941520467836,
+          "rss_start_bytes": 365821952,
+          "rss_end_bytes": 365969408,
+          "sqlite_heap_start_bytes": 232594720,
+          "sqlite_heap_end_bytes": 233209120,
+          "storage_boundary_status": "complete",
+          "storage_boundary_complete": true,
+          "core_rows": 35,
+          "storage_rows": 100,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 435221,
+            "rx_datagrams": 8748,
+            "rx_ios": 8748,
+            "sent_packets": 13651,
+            "tx_bytes": 18231912,
+            "tx_datagrams": 13651,
+            "tx_ios": 13651
+          },
+          "os_io": {
+            "enabled_end": true,
+            "enabled_start": true,
+            "host_block_device": {
+              "after": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25707882885120",
+                    "read_operations_processed": "5558391652",
+                    "write_bytes": "3192481415168",
+                    "write_operations_processed": "143657078"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4111,
+                      "start_token": "9875151761648"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25707880034304",
+                    "read_operations_processed": "5558390981",
+                    "write_bytes": "3191677779968",
+                    "write_operations_processed": "143585029"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4111,
+                      "start_token": "9875151761648"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "read_bytes": "2850816",
+                "read_operations_processed": "671",
+                "write_bytes": "803635200",
+                "write_operations_processed": "72049"
+              },
+              "reason": null,
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "available"
+            },
+            "interval_ns": "3035827333",
+            "observer_elapsed_end_ns": "513292",
+            "observer_elapsed_start_ns": "225292",
+            "process_disk": {
+              "after": {
+                "sample": {
+                  "identity": {
+                    "pid": 4111,
+                    "start_token": "9875151761648"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "4648960",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "1364234240"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "identity": {
+                    "pid": 4111,
+                    "start_token": "9875151761648"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "2015232",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "610435072"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "linux_counters": null,
+                "read_bytes": "2633728",
+                "write_bytes": "753799168"
+              },
+              "reason": null,
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "available"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4366.58081871345,
+          "selected_core": {
+            "catalog.backing_verify": {
+              "calls": 8550,
+              "elapsed_ns": 66169605,
+              "name": "catalog.backing_verify",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 15.478270175438595
+            },
+            "provider.blocks.put_bytes": {
+              "calls": 4275,
+              "elapsed_ns": 23364175635,
+              "name": "provider.blocks.put_bytes",
+              "units": 17510400,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 4096.0,
+              "inclusive_us_per_ack": 5465.304242105263
+            },
+            "provider.blocks.flush": {
+              "calls": 4275,
+              "elapsed_ns": 1574159,
+              "name": "provider.blocks.flush",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.36822432748538014
+            },
+            "provider.blocks.verify_authority": {
+              "calls": 4275,
+              "elapsed_ns": 787660735,
+              "name": "provider.blocks.verify_authority",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 184.24812514619884
+            },
+            "provider.inode.publish_cas": {
+              "calls": 4275,
+              "elapsed_ns": 22277546831,
+              "name": "provider.inode.publish_cas",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 5211.122065730995
+            },
+            "filesystem.gate_wait.write_prepare": {
+              "calls": 4275,
+              "elapsed_ns": 1083247,
+              "name": "filesystem.gate_wait.write_prepare",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.2533911111111111
+            },
+            "filesystem.gate_hold.write_prepare": {
+              "calls": 4275,
+              "elapsed_ns": 886315511,
+              "name": "filesystem.gate_hold.write_prepare",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 207.32526573099415
+            },
+            "filesystem.gate_wait.write_commit": {
+              "calls": 4275,
+              "elapsed_ns": 1946632,
+              "name": "filesystem.gate_wait.write_commit",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.455352514619883
+            },
+            "filesystem.gate_hold.write_commit": {
+              "calls": 4275,
+              "elapsed_ns": 23111190577,
+              "name": "filesystem.gate_hold.write_commit",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 5406.126450760235
+            }
+          },
+          "selected_storage": {
+            "sdk.metadata.load_compact_inode": {
+              "bytes": 0,
+              "calls": 4275,
+              "cancelled": 0,
+              "elapsed_ns": 863820363,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1504,
+                1758,
+                877,
+                127,
+                8,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.load_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 4275,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 202.06324280701756
+            },
+            "sdk.metadata.publish_compact_inode": {
+              "bytes": 0,
+              "calls": 4275,
+              "cancelled": 0,
+              "elapsed_ns": 22278740558,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                4,
+                65,
+                1375,
+                2468,
+                362,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.publish_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 4275,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 5211.401300116959
+            },
+            "sdk.metadata.publish_includes_flush_barrier": {
+              "bytes": 0,
+              "calls": 4275,
+              "cancelled": 0,
+              "elapsed_ns": 501345,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                4263,
+                5,
+                0,
+                1,
+                3,
+                0,
+                2,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.publish_includes_flush_barrier",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 4275,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.11727368421052631
+            },
+            "sdk.blocks.verify_concurrent_backing": {
+              "bytes": 0,
+              "calls": 4275,
+              "cancelled": 0,
+              "elapsed_ns": 788130845,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                88,
+                1701,
+                1681,
+                687,
+                110,
+                7,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.verify_concurrent_backing",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 4275,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 184.35809239766084
+            },
+            "sdk.blocks.put": {
+              "bytes": 17510400,
+              "calls": 4275,
+              "cancelled": 0,
+              "elapsed_ns": 23365259820,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                2,
+                44,
+                1113,
+                2742,
+                372,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.put",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 4275,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 4096.0,
+              "inclusive_us_per_ack": 5465.557852631579
+            },
+            "sdk.blocks.flush": {
+              "bytes": 0,
+              "calls": 4275,
+              "cancelled": 0,
+              "elapsed_ns": 2169834,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                4128,
+                101,
+                11,
+                9,
+                4,
+                8,
+                9,
+                4,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.flush",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 4275,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.5075635087719298
+            }
+          },
+          "highest_core_inclusive_per_ack": [
+            {
+              "calls": 4275,
+              "name": "service.dispatch",
+              "units": 0,
+              "inclusive_us_per_ack": 12630.404137309943
+            },
+            {
+              "calls": 4275,
+              "name": "filesystem.block_put.initial",
+              "units": 17510400,
+              "inclusive_us_per_ack": 5466.741624093567
+            },
+            {
+              "calls": 4275,
+              "name": "provider.blocks.put_bytes",
+              "units": 17510400,
+              "inclusive_us_per_ack": 5465.304242105263
+            },
+            {
+              "calls": 4275,
+              "name": "filesystem.gate_hold.write_commit",
+              "units": 0,
+              "inclusive_us_per_ack": 5406.126450760235
+            },
+            {
+              "calls": 4275,
+              "name": "filesystem.gate_phase.publication",
+              "units": 0,
+              "inclusive_us_per_ack": 5405.650732865497
+            },
+            {
+              "calls": 4275,
+              "name": "provider.inode.publish_cas",
+              "units": 0,
+              "inclusive_us_per_ack": 5211.122065730995
+            },
+            {
+              "calls": 4275,
+              "name": "service.authorization",
+              "units": 0,
+              "inclusive_us_per_ack": 1509.8237843274853
+            },
+            {
+              "calls": 4275,
+              "name": "catalog.load",
+              "units": 0,
+              "inclusive_us_per_ack": 1492.5201335672516
+            },
+            {
+              "calls": 4275,
+              "name": "filesystem.gate_hold.write_prepare",
+              "units": 0,
+              "inclusive_us_per_ack": 207.32526573099415
+            },
+            {
+              "calls": 4275,
+              "name": "filesystem.gate_phase.refresh",
+              "units": 0,
+              "inclusive_us_per_ack": 206.9461216374269
+            },
+            {
+              "calls": 4275,
+              "name": "provider.inode.load",
+              "units": 0,
+              "inclusive_us_per_ack": 201.86808023391814
+            },
+            {
+              "calls": 4275,
+              "name": "provider.blocks.verify_authority",
+              "units": 0,
+              "inclusive_us_per_ack": 184.24812514619884
+            }
+          ],
+          "sqlite_stage_reset_counters": {
+            "matched_connections": 2000,
+            "complete": true,
+            "sql_statements": 72675,
+            "statements_per_ack": 17.0,
+            "sql_categories": {
+              "PRAGMA": 4275,
+              "BEGIN": 12825,
+              "COMMIT": 8550,
+              "ROLLBACK": 4275,
+              "SELECT": 34200,
+              "UPDATE": 4275,
+              "INSERT": 4275
+            },
+            "pager": {
+              "cache_hits": 42850,
+              "cache_misses": 50198,
+              "page_writes": 30531,
+              "cache_spills": 0
+            },
+            "pager_per_ack": {
+              "cache_hits": 10.023391812865498,
+              "cache_misses": 11.742222222222223,
+              "page_writes": 7.141754385964912,
+              "cache_spills": 0.0
+            },
+            "pager_read_bytes_estimate": 205611008,
+            "pager_write_bytes_estimate": 125054976
+          },
+          "sdk_write_payload_amplification": 1.0,
+          "sdk_write_old_blob_read_bytes_per_ack": 0.0,
+          "filesystem_old_chunk_read_bytes_per_ack": 0.0,
+          "selected_metadata_bytes_per_ack": {
+            "provider.inode_returned_bytes": 8860.0,
+            "provider.inode_serialized_bytes": 4430.0,
+            "provider.compact_anchor_returned_bytes": 630.3635087719298
+          },
+          "process_disk_write_accounting_bytes_per_ack": 176327.2907602339,
+          "process_disk_write_accounting_to_payload_ratio": 43.04865497076023,
+          "whole_host_driver_operations_per_second": {
+            "read_operations_processed": 221.02706326743518,
+            "write_operations_processed": 23732.904443152664
+          },
+          "sqlite_journal_mode_observed": false
+        },
+        {
+          "mode": "Mixed",
+          "read_acks": 5482,
+          "write_acks": 5438,
+          "elapsed_seconds_including_drain": 3.074298292,
+          "read_iops": 1783.171143237912,
+          "write_iops": 1768.8589341349443,
+          "total_iops": 3552.0300773728563,
+          "read_latency": {
+            "completed": 5482,
+            "p50_us_upper": 32768,
+            "p95_us_upper": 65536,
+            "p99_us_upper": 65536
+          },
+          "write_latency": {
+            "completed": 5438,
+            "p50_us_upper": 32768,
+            "p95_us_upper": 65536,
+            "p99_us_upper": 131072
+          },
+          "process_average_cores": 6.686398341205598,
+          "process_cpu_us_per_ack": 1882.4160256410257,
+          "rss_start_bytes": 375472128,
+          "rss_end_bytes": 375586816,
+          "sqlite_heap_start_bytes": 233086240,
+          "sqlite_heap_end_bytes": 233229600,
+          "storage_boundary_status": "complete",
+          "storage_boundary_complete": true,
+          "core_rows": 41,
+          "storage_rows": 100,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 23781047,
+            "rx_datagrams": 28539,
+            "rx_ios": 28539,
+            "sent_packets": 28402,
+            "tx_bytes": 23891165,
+            "tx_datagrams": 28402,
+            "tx_ios": 28402
+          },
+          "os_io": {
+            "enabled_end": true,
+            "enabled_start": true,
+            "host_block_device": {
+              "after": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25707884134400",
+                    "read_operations_processed": "5558391943",
+                    "write_bytes": "3193760600064",
+                    "write_operations_processed": "143776702"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4111,
+                      "start_token": "9875151761648"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25707883384832",
+                    "read_operations_processed": "5558391771",
+                    "write_bytes": "3192770326528",
+                    "write_operations_processed": "143684109"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4111,
+                      "start_token": "9875151761648"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "read_bytes": "749568",
+                "read_operations_processed": "172",
+                "write_bytes": "990273536",
+                "write_operations_processed": "92593"
+              },
+              "reason": null,
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "available"
+            },
+            "interval_ns": "3074634334",
+            "observer_elapsed_end_ns": "566458",
+            "observer_elapsed_start_ns": "314959",
+            "process_disk": {
+              "after": {
+                "sample": {
+                  "identity": {
+                    "pid": 4111,
+                    "start_token": "9875151761648"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "5758976",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "2607611904"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "identity": {
+                    "pid": 4111,
+                    "start_token": "9875151761648"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "5107712",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "1637474304"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "linux_counters": null,
+                "read_bytes": "651264",
+                "write_bytes": "970137600"
+              },
+              "reason": null,
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "available"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4365.587179487179,
+          "selected_core": {
+            "catalog.backing_verify": {
+              "calls": 21840,
+              "elapsed_ns": 170400829,
+              "name": "catalog.backing_verify",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 15.60447152014652
+            },
+            "filesystem.gate_wait": {
+              "calls": 10964,
+              "elapsed_ns": 5765222,
+              "name": "filesystem.gate_wait",
+              "units": 0,
+              "calls_per_ack": 1.004029304029304,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.5279507326007327
+            },
+            "provider.blocks.get_bytes": {
+              "calls": 5482,
+              "elapsed_ns": 462903584,
+              "name": "provider.blocks.get_bytes",
+              "units": 22454272,
+              "calls_per_ack": 0.502014652014652,
+              "units_per_ack": 2056.2520146520146,
+              "inclusive_us_per_ack": 42.390438095238096
+            },
+            "provider.blocks.put_bytes": {
+              "calls": 5438,
+              "elapsed_ns": 21478443823,
+              "name": "provider.blocks.put_bytes",
+              "units": 22274048,
+              "calls_per_ack": 0.497985347985348,
+              "units_per_ack": 2039.7479853479854,
+              "inclusive_us_per_ack": 1966.8904599816851
+            },
+            "provider.blocks.flush": {
+              "calls": 5438,
+              "elapsed_ns": 1399956,
+              "name": "provider.blocks.flush",
+              "units": 0,
+              "calls_per_ack": 0.497985347985348,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.1282010989010989
+            },
+            "provider.blocks.verify_authority": {
+              "calls": 5438,
+              "elapsed_ns": 1012016776,
+              "name": "provider.blocks.verify_authority",
+              "units": 0,
+              "calls_per_ack": 0.497985347985348,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 92.67552893772894
+            },
+            "provider.inode.publish_cas": {
+              "calls": 5438,
+              "elapsed_ns": 20069376400,
+              "name": "provider.inode.publish_cas",
+              "units": 0,
+              "calls_per_ack": 0.497985347985348,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 1837.8549816849816
+            },
+            "filesystem.gate_wait.read": {
+              "calls": 10964,
+              "elapsed_ns": 2694382,
+              "name": "filesystem.gate_wait.read",
+              "units": 0,
+              "calls_per_ack": 1.004029304029304,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.2467382783882784
+            },
+            "filesystem.gate_hold.read": {
+              "calls": 10964,
+              "elapsed_ns": 2200165274,
+              "name": "filesystem.gate_hold.read",
+              "units": 0,
+              "calls_per_ack": 1.004029304029304,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 201.48033644688644
+            },
+            "filesystem.gate_wait.write_prepare": {
+              "calls": 5438,
+              "elapsed_ns": 1235425,
+              "name": "filesystem.gate_wait.write_prepare",
+              "units": 0,
+              "calls_per_ack": 0.497985347985348,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.1131341575091575
+            },
+            "filesystem.gate_hold.write_prepare": {
+              "calls": 5438,
+              "elapsed_ns": 1095257184,
+              "name": "filesystem.gate_hold.write_prepare",
+              "units": 0,
+              "calls_per_ack": 0.497985347985348,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 100.29827692307691
+            },
+            "filesystem.gate_wait.write_commit": {
+              "calls": 5438,
+              "elapsed_ns": 3265826,
+              "name": "filesystem.gate_wait.write_commit",
+              "units": 0,
+              "calls_per_ack": 0.497985347985348,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.299068315018315
+            },
+            "filesystem.gate_hold.write_commit": {
+              "calls": 5438,
+              "elapsed_ns": 21136455856,
+              "name": "filesystem.gate_hold.write_commit",
+              "units": 0,
+              "calls_per_ack": 0.497985347985348,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 1935.5728805860804
+            }
+          },
+          "selected_storage": {
+            "sdk.metadata.load_compact_inode": {
+              "bytes": 0,
+              "calls": 16402,
+              "cancelled": 0,
+              "elapsed_ns": 3219571652,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                248,
+                6162,
+                6251,
+                3192,
+                507,
+                39,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.load_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 16402,
+              "calls_per_ack": 1.502014652014652,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 294.8325688644689
+            },
+            "sdk.metadata.publish_compact_inode": {
+              "bytes": 0,
+              "calls": 5438,
+              "cancelled": 0,
+              "elapsed_ns": 20070415443,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                11,
+                383,
+                3443,
+                1540,
+                54,
+                1,
+                6,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.publish_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 5438,
+              "calls_per_ack": 0.497985347985348,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 1837.9501321428572
+            },
+            "sdk.metadata.publish_includes_flush_barrier": {
+              "bytes": 0,
+              "calls": 5438,
+              "cancelled": 0,
+              "elapsed_ns": 586992,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                5431,
+                2,
+                0,
+                2,
+                1,
+                0,
+                0,
+                1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.publish_includes_flush_barrier",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 5438,
+              "calls_per_ack": 0.497985347985348,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.05375384615384615
+            },
+            "sdk.blocks.verify_concurrent_backing": {
+              "bytes": 0,
+              "calls": 5438,
+              "cancelled": 0,
+              "elapsed_ns": 1012926686,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                79,
+                2203,
+                2064,
+                935,
+                147,
+                10,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.verify_concurrent_backing",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 5438,
+              "calls_per_ack": 0.497985347985348,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 92.75885402930403
+            },
+            "sdk.blocks.put": {
+              "bytes": 22274048,
+              "calls": 5438,
+              "cancelled": 0,
+              "elapsed_ns": 21480138282,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                16,
+                351,
+                3105,
+                1880,
+                73,
+                3,
+                10,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.put",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 5438,
+              "calls_per_ack": 0.497985347985348,
+              "successful_bytes_per_ack": 2039.7479853479854,
+              "inclusive_us_per_ack": 1967.0456302197802
+            },
+            "sdk.blocks.get": {
+              "bytes": 22454272,
+              "calls": 5482,
+              "cancelled": 0,
+              "elapsed_ns": 463842065,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1589,
+                1600,
+                1345,
+                682,
+                206,
+                58,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.get",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 5482,
+              "calls_per_ack": 0.502014652014652,
+              "successful_bytes_per_ack": 2056.2520146520146,
+              "inclusive_us_per_ack": 42.47637957875458
+            },
+            "sdk.blocks.flush": {
+              "bytes": 0,
+              "calls": 5438,
+              "cancelled": 0,
+              "elapsed_ns": 2089005,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                5303,
+                91,
+                9,
+                3,
+                11,
+                12,
+                7,
+                1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.flush",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 5438,
+              "calls_per_ack": 0.497985347985348,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.19130082417582417
+            }
+          },
+          "highest_core_inclusive_per_ack": [
+            {
+              "calls": 10920,
+              "name": "service.dispatch",
+              "units": 0,
+              "inclusive_us_per_ack": 4970.144498076923
+            },
+            {
+              "calls": 5438,
+              "name": "filesystem.block_put.initial",
+              "units": 22274048,
+              "inclusive_us_per_ack": 1967.6101905677656
+            },
+            {
+              "calls": 5438,
+              "name": "provider.blocks.put_bytes",
+              "units": 22274048,
+              "inclusive_us_per_ack": 1966.8904599816851
+            },
+            {
+              "calls": 5438,
+              "name": "filesystem.gate_hold.write_commit",
+              "units": 0,
+              "inclusive_us_per_ack": 1935.5728805860804
+            },
+            {
+              "calls": 5438,
+              "name": "filesystem.gate_phase.publication",
+              "units": 0,
+              "inclusive_us_per_ack": 1935.3548593406592
+            },
+            {
+              "calls": 5438,
+              "name": "provider.inode.publish_cas",
+              "units": 0,
+              "inclusive_us_per_ack": 1837.8549816849816
+            },
+            {
+              "calls": 10920,
+              "name": "service.authorization",
+              "units": 0,
+              "inclusive_us_per_ack": 692.6765950549451
+            },
+            {
+              "calls": 10920,
+              "name": "catalog.load",
+              "units": 0,
+              "inclusive_us_per_ack": 677.6242577838827
+            },
+            {
+              "calls": 16402,
+              "name": "filesystem.gate_phase.refresh",
+              "units": 0,
+              "inclusive_us_per_ack": 301.13015824175824
+            },
+            {
+              "calls": 16402,
+              "name": "provider.inode.load",
+              "units": 0,
+              "inclusive_us_per_ack": 294.6072175824176
+            },
+            {
+              "calls": 10964,
+              "name": "filesystem.gate_hold.read",
+              "units": 0,
+              "inclusive_us_per_ack": 201.48033644688644
+            },
+            {
+              "calls": 21840,
+              "name": "sqlite.compact.authority_path",
+              "units": 0,
+              "inclusive_us_per_ack": 167.76847463369964
+            }
+          ],
+          "sqlite_stage_reset_counters": {
+            "matched_connections": 2000,
+            "complete": true,
+            "sql_statements": 152748,
+            "statements_per_ack": 13.987912087912088,
+            "sql_categories": {
+              "PRAGMA": 5438,
+              "BEGIN": 27278,
+              "COMMIT": 10876,
+              "ROLLBACK": 16402,
+              "SELECT": 81878,
+              "UPDATE": 5438,
+              "INSERT": 5438
+            },
+            "pager": {
+              "cache_hits": 129063,
+              "cache_misses": 73739,
+              "page_writes": 39626,
+              "cache_spills": 0
+            },
+            "pager_per_ack": {
+              "cache_hits": 11.818956043956044,
+              "cache_misses": 6.752655677655678,
+              "page_writes": 3.6287545787545787,
+              "cache_spills": 0.0
+            },
+            "pager_read_bytes_estimate": 302034944,
+            "pager_write_bytes_estimate": 162308096
+          },
+          "selected_metadata_bytes_per_ack": {
+            "provider.inode_returned_bytes": 8860.0,
+            "provider.inode_serialized_bytes": 2206.0750915750914,
+            "provider.compact_anchor_returned_bytes": 630.3681318681319
+          },
+          "whole_host_driver_operations_per_second": {
+            "read_operations_processed": 55.94161168955449,
+            "write_operations_processed": 30115.125878900693
+          },
+          "sqlite_journal_mode_observed": false
+        }
+      ]
+    },
+    {
+      "kind": "satdisabled",
+      "artifact_sha256": "480dc79ab6200f24273811029692ec4de6a1cfa7abd8f51987a9b33f49a01cea",
+      "receipt_sha256": "c4c7b0d6457d2062bd425489c48e4eac8ff9c08967f26ab21b12aa26bb753316",
+      "binding": {
+        "checkout_dirty_at_run": true,
+        "checkout_revision_at_run": "37ed91349695f03cbd4a7a8ea475539c364fe037",
+        "compiled_revision_env": null,
+        "compiled_runner_source_sha256": "915e8407494ed54b00c3c032074488fb99a5d530924f86fc0a28b9ae267fef9a",
+        "current_runner_source_sha256": "915e8407494ed54b00c3c032074488fb99a5d530924f86fc0a28b9ae267fef9a",
+        "executable": "/private/tmp/mount-rs-causal-metrics-target-20260927/release/deps/quic_tidb_saturation-3af625c11eb78d85",
+        "executable_sha256": "faeab25e594ce62fbe3c7b24ec8599bffe94314dac21123cdbf1788a153c2bbc",
+        "features": {
+          "allocation_profiling": false,
+          "foundationdb": false,
+          "resource_profiling": true
+        }
+      },
+      "verified_files": 100,
+      "active_clients": 100,
+      "driver_replicas": 1000,
+      "stages": [
+        {
+          "mode": "Read",
+          "read_acks": 64616,
+          "write_acks": 0,
+          "elapsed_seconds_including_drain": 3.002989791,
+          "read_iops": 21517.222667108294,
+          "write_iops": 0.0,
+          "total_iops": 21517.222667108294,
+          "read_latency": {
+            "completed": 64616,
+            "p50_us_upper": 8192,
+            "p95_us_upper": 8192,
+            "p99_us_upper": 16384
+          },
+          "write_latency": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "process_average_cores": 11.080248790629337,
+          "process_cpu_us_per_ack": 514.9479076389748,
+          "rss_start_bytes": 344506368,
+          "rss_end_bytes": 344752128,
+          "sqlite_heap_start_bytes": 233101600,
+          "sqlite_heap_end_bytes": 233101600,
+          "storage_boundary_status": "disabled",
+          "storage_boundary_complete": false,
+          "core_rows": 0,
+          "storage_rows": 0,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 273758473,
+            "rx_datagrams": 204789,
+            "rx_ios": 204789,
+            "sent_packets": 130554,
+            "tx_bytes": 8277544,
+            "tx_datagrams": 130554,
+            "tx_ios": 130554
+          },
+          "os_io": {
+            "enabled_end": false,
+            "enabled_start": false,
+            "host_block_device": {
+              "after": {
+                "status": "disabled"
+              },
+              "before": {
+                "status": "disabled"
+              },
+              "complete": false,
+              "counters": null,
+              "reason": "OS I/O profiling disabled",
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "disabled"
+            },
+            "interval_ns": null,
+            "observer_elapsed_end_ns": null,
+            "observer_elapsed_start_ns": null,
+            "process_disk": {
+              "after": {
+                "status": "disabled"
+              },
+              "before": {
+                "status": "disabled"
+              },
+              "complete": false,
+              "counters": null,
+              "reason": "OS I/O profiling disabled",
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "disabled"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4364.801550699517,
+          "selected_core": {},
+          "selected_storage": {},
+          "highest_core_inclusive_per_ack": [],
+          "selected_metadata_bytes_per_ack": {},
+          "sqlite_journal_mode_observed": false
+        },
+        {
+          "mode": "Write",
+          "read_acks": 0,
+          "write_acks": 5479,
+          "elapsed_seconds_including_drain": 3.043058084,
+          "read_iops": 0.0,
+          "write_iops": 1800.4914295944145,
+          "total_iops": 1800.4914295944145,
+          "read_latency": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write_latency": {
+            "completed": 5479,
+            "p50_us_upper": 65536,
+            "p95_us_upper": 131072,
+            "p99_us_upper": 131072
+          },
+          "process_average_cores": 6.537891308945517,
+          "process_cpu_us_per_ack": 3631.170469063698,
+          "rss_start_bytes": 345505792,
+          "rss_end_bytes": 345653248,
+          "sqlite_heap_start_bytes": 232666400,
+          "sqlite_heap_end_bytes": 233239840,
+          "storage_boundary_status": "disabled",
+          "storage_boundary_complete": false,
+          "core_rows": 0,
+          "storage_rows": 0,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 557406,
+            "rx_datagrams": 11189,
+            "rx_ios": 11189,
+            "sent_packets": 17451,
+            "tx_bytes": 23365018,
+            "tx_datagrams": 17451,
+            "tx_ios": 17451
+          },
+          "os_io": {
+            "enabled_end": false,
+            "enabled_start": false,
+            "host_block_device": {
+              "after": {
+                "status": "disabled"
+              },
+              "before": {
+                "status": "disabled"
+              },
+              "complete": false,
+              "counters": null,
+              "reason": "OS I/O profiling disabled",
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "disabled"
+            },
+            "interval_ns": null,
+            "observer_elapsed_end_ns": null,
+            "observer_elapsed_start_ns": null,
+            "process_disk": {
+              "after": {
+                "status": "disabled"
+              },
+              "before": {
+                "status": "disabled"
+              },
+              "complete": false,
+              "counters": null,
+              "reason": "OS I/O profiling disabled",
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "disabled"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4366.202591713816,
+          "selected_core": {},
+          "selected_storage": {},
+          "highest_core_inclusive_per_ack": [],
+          "selected_metadata_bytes_per_ack": {},
+          "sqlite_journal_mode_observed": false
+        },
+        {
+          "mode": "Mixed",
+          "read_acks": 4964,
+          "write_acks": 4923,
+          "elapsed_seconds_including_drain": 3.026624792,
+          "read_iops": 1640.1107970571334,
+          "write_iops": 1626.5643541322054,
+          "total_iops": 3266.6751511893385,
+          "read_latency": {
+            "completed": 4964,
+            "p50_us_upper": 32768,
+            "p95_us_upper": 65536,
+            "p99_us_upper": 131072
+          },
+          "write_latency": {
+            "completed": 4923,
+            "p50_us_upper": 32768,
+            "p95_us_upper": 65536,
+            "p99_us_upper": 131072
+          },
+          "process_average_cores": 6.3022750789652555,
+          "process_cpu_us_per_ack": 1929.262870435926,
+          "rss_start_bytes": 345718784,
+          "rss_end_bytes": 345751552,
+          "sqlite_heap_start_bytes": 233265440,
+          "sqlite_heap_end_bytes": 233326880,
+          "storage_boundary_status": "disabled",
+          "storage_boundary_complete": false,
+          "core_rows": 0,
+          "storage_rows": 0,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 21542181,
+            "rx_datagrams": 26106,
+            "rx_ios": 26106,
+            "sent_packets": 25564,
+            "tx_bytes": 21626541,
+            "tx_datagrams": 25564,
+            "tx_ios": 25564
+          },
+          "os_io": {
+            "enabled_end": false,
+            "enabled_start": false,
+            "host_block_device": {
+              "after": {
+                "status": "disabled"
+              },
+              "before": {
+                "status": "disabled"
+              },
+              "complete": false,
+              "counters": null,
+              "reason": "OS I/O profiling disabled",
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "disabled"
+            },
+            "interval_ns": null,
+            "observer_elapsed_end_ns": null,
+            "observer_elapsed_start_ns": null,
+            "process_disk": {
+              "after": {
+                "status": "disabled"
+              },
+              "before": {
+                "status": "disabled"
+              },
+              "complete": false,
+              "counters": null,
+              "reason": "OS I/O profiling disabled",
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "disabled"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4366.210377263073,
+          "selected_core": {},
+          "selected_storage": {},
+          "highest_core_inclusive_per_ack": [],
+          "selected_metadata_bytes_per_ack": {},
+          "sqlite_journal_mode_observed": false
+        }
+      ]
+    },
+    {
+      "kind": "satidle",
+      "artifact_sha256": "1b2713c8aeeddf5fc0d42727ced0b0e42b199ecb52047b25bc63e7862938aa5e",
+      "receipt_sha256": "a1f513c2bd90609dee843308821db11178b7cc68d83f208c32385171050c98d6",
+      "binding": {
+        "checkout_dirty_at_run": true,
+        "checkout_revision_at_run": "37ed91349695f03cbd4a7a8ea475539c364fe037",
+        "compiled_revision_env": null,
+        "compiled_runner_source_sha256": "915e8407494ed54b00c3c032074488fb99a5d530924f86fc0a28b9ae267fef9a",
+        "current_runner_source_sha256": "915e8407494ed54b00c3c032074488fb99a5d530924f86fc0a28b9ae267fef9a",
+        "executable": "/private/tmp/mount-rs-causal-metrics-target-20260927/release/deps/quic_tidb_saturation-3af625c11eb78d85",
+        "executable_sha256": "faeab25e594ce62fbe3c7b24ec8599bffe94314dac21123cdbf1788a153c2bbc",
+        "features": {
+          "allocation_profiling": false,
+          "foundationdb": false,
+          "resource_profiling": true
+        }
+      },
+      "verified_files": 1,
+      "active_clients": 1,
+      "driver_replicas": 1000,
+      "stages": [
+        {
+          "mode": "Read",
+          "read_acks": 12171,
+          "write_acks": 0,
+          "elapsed_seconds_including_drain": 3.000237583,
+          "read_iops": 4056.6787340321107,
+          "write_iops": 0.0,
+          "total_iops": 4056.6787340321107,
+          "read_latency": {
+            "completed": 12171,
+            "p50_us_upper": 256,
+            "p95_us_upper": 512,
+            "p99_us_upper": 512
+          },
+          "write_latency": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "process_average_cores": 1.097754397405667,
+          "process_cpu_us_per_ack": 270.6042231533974,
+          "rss_start_bytes": 289030144,
+          "rss_end_bytes": 289030144,
+          "sqlite_heap_start_bytes": 232589968,
+          "sqlite_heap_end_bytes": 232589968,
+          "storage_boundary_status": "complete",
+          "storage_boundary_complete": true,
+          "core_rows": 29,
+          "storage_rows": 100,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 51661313,
+            "rx_datagrams": 38546,
+            "rx_ios": 38546,
+            "sent_packets": 24513,
+            "tx_bytes": 1625725,
+            "tx_datagrams": 24513,
+            "tx_ios": 24513
+          },
+          "os_io": {
+            "enabled_end": true,
+            "enabled_start": true,
+            "host_block_device": {
+              "after": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25709054033920",
+                    "read_operations_processed": "5558437128",
+                    "write_bytes": "3198011215872",
+                    "write_operations_processed": "144082037"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4408,
+                      "start_token": "9877888355578"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25708827414528",
+                    "read_operations_processed": "5558433452",
+                    "write_bytes": "3198009995264",
+                    "write_operations_processed": "144081861"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4408,
+                      "start_token": "9877888355578"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "read_bytes": "226619392",
+                "read_operations_processed": "3676",
+                "write_bytes": "1220608",
+                "write_operations_processed": "176"
+              },
+              "reason": null,
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "available"
+            },
+            "interval_ns": "3000580083",
+            "observer_elapsed_end_ns": "492708",
+            "observer_elapsed_start_ns": "318583",
+            "process_disk": {
+              "after": {
+                "sample": {
+                  "identity": {
+                    "pid": 4408,
+                    "start_token": "9877888355578"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "4096",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "53825536"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "identity": {
+                    "pid": 4408,
+                    "start_token": "9877888355578"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "4096",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "53825536"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "linux_counters": null,
+                "read_bytes": "0",
+                "write_bytes": "0"
+              },
+              "reason": null,
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "available"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4378.197190041903,
+          "selected_core": {
+            "catalog.backing_verify": {
+              "calls": 24342,
+              "elapsed_ns": 74378056,
+              "name": "catalog.backing_verify",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 6.1110883247062695
+            },
+            "filesystem.gate_wait": {
+              "calls": 24342,
+              "elapsed_ns": 2903265,
+              "name": "filesystem.gate_wait",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.23853956125215678
+            },
+            "provider.blocks.get_bytes": {
+              "calls": 12171,
+              "elapsed_ns": 115182110,
+              "name": "provider.blocks.get_bytes",
+              "units": 49852416,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 4096.0,
+              "inclusive_us_per_ack": 9.463652123901076
+            },
+            "filesystem.gate_wait.read": {
+              "calls": 24342,
+              "elapsed_ns": 1111482,
+              "name": "filesystem.gate_wait.read",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.09132215923095884
+            },
+            "filesystem.gate_hold.read": {
+              "calls": 24342,
+              "elapsed_ns": 1348900776,
+              "name": "filesystem.gate_hold.read",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 110.82908355928026
+            }
+          },
+          "selected_storage": {
+            "sdk.metadata.load_compact_inode": {
+              "bytes": 0,
+              "calls": 24342,
+              "cancelled": 0,
+              "elapsed_ns": 1326020808,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                22147,
+                2170,
+                24,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.load_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 24342,
+              "calls_per_ack": 2.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 108.94920778900666
+            },
+            "sdk.blocks.get": {
+              "bytes": 49852416,
+              "calls": 12171,
+              "cancelled": 0,
+              "elapsed_ns": 115782639,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                1850,
+                10161,
+                146,
+                14,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.get",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 12171,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 4096.0,
+              "inclusive_us_per_ack": 9.512993098348534
+            }
+          },
+          "highest_core_inclusive_per_ack": [
+            {
+              "calls": 12171,
+              "name": "service.dispatch",
+              "units": 0,
+              "inclusive_us_per_ack": 149.8992197847342
+            },
+            {
+              "calls": 24342,
+              "name": "filesystem.gate_hold.read",
+              "units": 0,
+              "inclusive_us_per_ack": 110.82908355928026
+            },
+            {
+              "calls": 24342,
+              "name": "filesystem.gate_phase.refresh",
+              "units": 0,
+              "inclusive_us_per_ack": 110.52584463067947
+            },
+            {
+              "calls": 24342,
+              "name": "provider.inode.load",
+              "units": 0,
+              "inclusive_us_per_ack": 108.85014805685645
+            },
+            {
+              "calls": 12171,
+              "name": "filesystem.refresh.read_before",
+              "units": 0,
+              "inclusive_us_per_ack": 58.53027261523293
+            },
+            {
+              "calls": 24342,
+              "name": "sqlite.compact.authority_path",
+              "units": 0,
+              "inclusive_us_per_ack": 56.03561063182976
+            },
+            {
+              "calls": 12171,
+              "name": "filesystem.refresh.read_after",
+              "units": 0,
+              "inclusive_us_per_ack": 52.102674882918414
+            },
+            {
+              "calls": 12171,
+              "name": "service.authorization",
+              "units": 0,
+              "inclusive_us_per_ack": 25.31938000164325
+            },
+            {
+              "calls": 12171,
+              "name": "catalog.load",
+              "units": 0,
+              "inclusive_us_per_ack": 20.72590230876674
+            },
+            {
+              "calls": 24342,
+              "name": "sqlite.compact.authority_query",
+              "units": 0,
+              "inclusive_us_per_ack": 18.943317886780054
+            },
+            {
+              "calls": 24342,
+              "name": "sqlite.compact.guard_selected_rows",
+              "units": 24342,
+              "inclusive_us_per_ack": 14.89973091775532
+            },
+            {
+              "calls": 12171,
+              "name": "provider.blocks.get_bytes",
+              "units": 49852416,
+              "inclusive_us_per_ack": 9.463652123901076
+            }
+          ],
+          "sqlite_stage_reset_counters": {
+            "matched_connections": 2000,
+            "complete": true,
+            "sql_statements": 133881,
+            "statements_per_ack": 11.0,
+            "sql_categories": {
+              "PRAGMA": 0,
+              "BEGIN": 24342,
+              "ROLLBACK": 24342,
+              "SELECT": 85197
+            },
+            "pager": {
+              "cache_hits": 170394,
+              "cache_misses": 0,
+              "page_writes": 0,
+              "cache_spills": 0
+            },
+            "pager_per_ack": {
+              "cache_hits": 14.0,
+              "cache_misses": 0.0,
+              "page_writes": 0.0,
+              "cache_spills": 0.0
+            },
+            "pager_read_bytes_estimate": 0,
+            "pager_write_bytes_estimate": 0
+          },
+          "sdk_read_payload_amplification": 1.0,
+          "selected_metadata_bytes_per_ack": {
+            "provider.inode_returned_bytes": 8860.0,
+            "provider.compact_anchor_returned_bytes": 630.0
+          },
+          "whole_host_driver_operations_per_second": {
+            "read_operations_processed": 1225.0964474591563,
+            "write_operations_processed": 58.65532501436656
+          },
+          "sqlite_journal_mode_observed": false
+        },
+        {
+          "mode": "Write",
+          "read_acks": 0,
+          "write_acks": 2406,
+          "elapsed_seconds_including_drain": 3.000881209,
+          "read_iops": 0.0,
+          "write_iops": 801.7644926377357,
+          "total_iops": 801.7644926377357,
+          "read_latency": {
+            "completed": 0,
+            "p50_us_upper": 0,
+            "p95_us_upper": 0,
+            "p99_us_upper": 0
+          },
+          "write_latency": {
+            "completed": 2406,
+            "p50_us_upper": 2048,
+            "p95_us_upper": 2048,
+            "p99_us_upper": 2048
+          },
+          "process_average_cores": 0.7339304179701036,
+          "process_cpu_us_per_ack": 915.3940149625935,
+          "rss_start_bytes": 298418176,
+          "rss_end_bytes": 298434560,
+          "sqlite_heap_start_bytes": 232589968,
+          "sqlite_heap_end_bytes": 232595088,
+          "storage_boundary_status": "complete",
+          "storage_boundary_complete": true,
+          "core_rows": 35,
+          "storage_rows": 100,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 253391,
+            "rx_datagrams": 4849,
+            "rx_ios": 4849,
+            "sent_packets": 7656,
+            "tx_bytes": 10280197,
+            "tx_datagrams": 7656,
+            "tx_ios": 7656
+          },
+          "os_io": {
+            "enabled_end": true,
+            "enabled_start": true,
+            "host_block_device": {
+              "after": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25709056253952",
+                    "read_operations_processed": "5558437284",
+                    "write_bytes": "3198615904256",
+                    "write_operations_processed": "144135694"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4408,
+                      "start_token": "9877888355578"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25709056032768",
+                    "read_operations_processed": "5558437254",
+                    "write_bytes": "3198164672512",
+                    "write_operations_processed": "144095775"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4408,
+                      "start_token": "9877888355578"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "read_bytes": "221184",
+                "read_operations_processed": "30",
+                "write_bytes": "451231744",
+                "write_operations_processed": "39919"
+              },
+              "reason": null,
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "available"
+            },
+            "interval_ns": "3001157416",
+            "observer_elapsed_end_ns": "529875",
+            "observer_elapsed_start_ns": "248375",
+            "process_disk": {
+              "after": {
+                "sample": {
+                  "identity": {
+                    "pid": 4408,
+                    "start_token": "9877888355578"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "4096",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "653565952"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "identity": {
+                    "pid": 4408,
+                    "start_token": "9877888355578"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "4096",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "206913536"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "linux_counters": null,
+                "read_bytes": "0",
+                "write_bytes": "446652416"
+              },
+              "reason": null,
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "available"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4378.049875311721,
+          "selected_core": {
+            "catalog.backing_verify": {
+              "calls": 4812,
+              "elapsed_ns": 16304182,
+              "name": "catalog.backing_verify",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 6.776467996674979
+            },
+            "provider.blocks.put_bytes": {
+              "calls": 2406,
+              "elapsed_ns": 1074814133,
+              "name": "provider.blocks.put_bytes",
+              "units": 9854976,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 4096.0,
+              "inclusive_us_per_ack": 446.7224160432253
+            },
+            "provider.blocks.flush": {
+              "calls": 2406,
+              "elapsed_ns": 129629,
+              "name": "provider.blocks.flush",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.05387738985868662
+            },
+            "provider.blocks.verify_authority": {
+              "calls": 2406,
+              "elapsed_ns": 113335179,
+              "name": "provider.blocks.verify_authority",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 47.10522817955112
+            },
+            "provider.inode.publish_cas": {
+              "calls": 2406,
+              "elapsed_ns": 1107488983,
+              "name": "provider.inode.publish_cas",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 460.30298545303407
+            },
+            "filesystem.gate_wait.write_prepare": {
+              "calls": 2406,
+              "elapsed_ns": 121773,
+              "name": "filesystem.gate_wait.write_prepare",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.05061221945137157
+            },
+            "filesystem.gate_hold.write_prepare": {
+              "calls": 2406,
+              "elapsed_ns": 161792766,
+              "name": "filesystem.gate_hold.write_prepare",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 67.2455386533666
+            },
+            "filesystem.gate_wait.write_commit": {
+              "calls": 2406,
+              "elapsed_ns": 132866,
+              "name": "filesystem.gate_wait.write_commit",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.05522277639235245
+            },
+            "filesystem.gate_hold.write_commit": {
+              "calls": 2406,
+              "elapsed_ns": 1224995852,
+              "name": "filesystem.gate_hold.write_commit",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 509.1420831255195
+            }
+          },
+          "selected_storage": {
+            "sdk.metadata.load_compact_inode": {
+              "bytes": 0,
+              "calls": 2406,
+              "cancelled": 0,
+              "elapsed_ns": 158960737,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1043,
+                1346,
+                17,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.load_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 2406,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 66.06846924355777
+            },
+            "sdk.metadata.publish_compact_inode": {
+              "bytes": 0,
+              "calls": 2406,
+              "cancelled": 0,
+              "elapsed_ns": 1107608237,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                2236,
+                162,
+                2,
+                2,
+                2,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.publish_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 2406,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 460.3525507065669
+            },
+            "sdk.metadata.publish_includes_flush_barrier": {
+              "bytes": 0,
+              "calls": 2406,
+              "cancelled": 0,
+              "elapsed_ns": 94042,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                2406,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.publish_includes_flush_barrier",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 2406,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.03908645054031588
+            },
+            "sdk.blocks.verify_concurrent_backing": {
+              "bytes": 0,
+              "calls": 2406,
+              "cancelled": 0,
+              "elapsed_ns": 113443228,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                2341,
+                60,
+                4,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.verify_concurrent_backing",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 2406,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 47.15013632585204
+            },
+            "sdk.blocks.put": {
+              "bytes": 9854976,
+              "calls": 2406,
+              "cancelled": 0,
+              "elapsed_ns": 1074920098,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                2263,
+                137,
+                1,
+                2,
+                2,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.put",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 2406,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 4096.0,
+              "inclusive_us_per_ack": 446.76645802161266
+            },
+            "sdk.blocks.flush": {
+              "bytes": 0,
+              "calls": 2406,
+              "cancelled": 0,
+              "elapsed_ns": 234238,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                2406,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.flush",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 2406,
+              "calls_per_ack": 1.0,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.09735577722360765
+            }
+          },
+          "highest_core_inclusive_per_ack": [
+            {
+              "calls": 2406,
+              "name": "service.dispatch",
+              "units": 0,
+              "inclusive_us_per_ack": 1058.5625461346633
+            },
+            {
+              "calls": 2406,
+              "name": "filesystem.gate_hold.write_commit",
+              "units": 0,
+              "inclusive_us_per_ack": 509.1420831255195
+            },
+            {
+              "calls": 2406,
+              "name": "filesystem.gate_phase.publication",
+              "units": 0,
+              "inclusive_us_per_ack": 509.0610943474647
+            },
+            {
+              "calls": 2406,
+              "name": "provider.inode.publish_cas",
+              "units": 0,
+              "inclusive_us_per_ack": 460.30298545303407
+            },
+            {
+              "calls": 2406,
+              "name": "filesystem.block_put.initial",
+              "units": 9854976,
+              "inclusive_us_per_ack": 446.88369950124684
+            },
+            {
+              "calls": 2406,
+              "name": "provider.blocks.put_bytes",
+              "units": 9854976,
+              "inclusive_us_per_ack": 446.7224160432253
+            },
+            {
+              "calls": 2406,
+              "name": "filesystem.gate_hold.write_prepare",
+              "units": 0,
+              "inclusive_us_per_ack": 67.2455386533666
+            },
+            {
+              "calls": 2406,
+              "name": "filesystem.gate_phase.refresh",
+              "units": 0,
+              "inclusive_us_per_ack": 67.13059393183708
+            },
+            {
+              "calls": 2406,
+              "name": "provider.inode.load",
+              "units": 0,
+              "inclusive_us_per_ack": 66.01963507896923
+            },
+            {
+              "calls": 4812,
+              "name": "sqlite.compact.authority_path",
+              "units": 0,
+              "inclusive_us_per_ack": 58.56055694098088
+            },
+            {
+              "calls": 2406,
+              "name": "provider.blocks.verify_authority",
+              "units": 0,
+              "inclusive_us_per_ack": 47.10522817955112
+            },
+            {
+              "calls": 2406,
+              "name": "service.authorization",
+              "units": 0,
+              "inclusive_us_per_ack": 28.93890606816293
+            }
+          ],
+          "sqlite_stage_reset_counters": {
+            "matched_connections": 2000,
+            "complete": true,
+            "sql_statements": 40902,
+            "statements_per_ack": 17.0,
+            "sql_categories": {
+              "PRAGMA": 2406,
+              "BEGIN": 7218,
+              "COMMIT": 4812,
+              "ROLLBACK": 2406,
+              "SELECT": 19248,
+              "UPDATE": 2406,
+              "INSERT": 2406
+            },
+            "pager": {
+              "cache_hits": 24406,
+              "cache_misses": 30151,
+              "page_writes": 18159,
+              "cache_spills": 0
+            },
+            "pager_per_ack": {
+              "cache_hits": 10.14380714879468,
+              "cache_misses": 12.53158769742311,
+              "page_writes": 7.547381546134663,
+              "cache_spills": 0.0
+            },
+            "pager_read_bytes_estimate": 123498496,
+            "pager_write_bytes_estimate": 74379264
+          },
+          "sdk_write_payload_amplification": 1.0,
+          "sdk_write_old_blob_read_bytes_per_ack": 0.0,
+          "filesystem_old_chunk_read_bytes_per_ack": 0.0,
+          "selected_metadata_bytes_per_ack": {
+            "provider.inode_returned_bytes": 8860.0,
+            "provider.inode_serialized_bytes": 4430.0,
+            "provider.compact_anchor_returned_bytes": 630.0
+          },
+          "process_disk_write_accounting_bytes_per_ack": 185641.0706566916,
+          "process_disk_write_accounting_to_payload_ratio": 45.322527015793845,
+          "whole_host_driver_operations_per_second": {
+            "read_operations_processed": 9.996143434550186,
+            "write_operations_processed": 13301.201658793629
+          },
+          "sqlite_journal_mode_observed": false
+        },
+        {
+          "mode": "Mixed",
+          "read_acks": 1962,
+          "write_acks": 1962,
+          "elapsed_seconds_including_drain": 3.000177667,
+          "read_iops": 653.9612708876284,
+          "write_iops": 653.9612708876284,
+          "total_iops": 1307.9225417752568,
+          "read_latency": {
+            "completed": 1962,
+            "p50_us_upper": 512,
+            "p95_us_upper": 512,
+            "p99_us_upper": 512
+          },
+          "write_latency": {
+            "completed": 1962,
+            "p50_us_upper": 2048,
+            "p95_us_upper": 2048,
+            "p99_us_upper": 2048
+          },
+          "process_average_cores": 0.806824217987221,
+          "process_cpu_us_per_ack": 616.8746177370031,
+          "rss_start_bytes": 307953664,
+          "rss_end_bytes": 307953664,
+          "sqlite_heap_start_bytes": 232605328,
+          "sqlite_heap_end_bytes": 232610448,
+          "storage_boundary_status": "complete",
+          "storage_boundary_complete": true,
+          "core_rows": 41,
+          "storage_rows": 100,
+          "quic_client_side": {
+            "congestion_events": 0,
+            "lost_bytes": 0,
+            "lost_packets": 0,
+            "rx_bytes": 8546185,
+            "rx_datagrams": 10495,
+            "rx_ios": 10495,
+            "sent_packets": 9844,
+            "tx_bytes": 8631753,
+            "tx_datagrams": 9844,
+            "tx_ios": 9844
+          },
+          "os_io": {
+            "enabled_end": true,
+            "enabled_start": true,
+            "host_block_device": {
+              "after": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25709059280896",
+                    "read_operations_processed": "5558437584",
+                    "write_bytes": "3199120248832",
+                    "write_operations_processed": "144178353"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4408,
+                      "start_token": "9877888355578"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "counters": {
+                    "read_bytes": "25709059207168",
+                    "read_operations_processed": "5558437573",
+                    "write_bytes": "3198751850496",
+                    "write_operations_processed": "144146540"
+                  },
+                  "identity": {
+                    "observer_process": {
+                      "pid": 4408,
+                      "start_token": "9877888355578"
+                    },
+                    "registry_entry_id": "4294970374"
+                  },
+                  "source": "darwin_io_kit_statistics"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "read_bytes": "73728",
+                "read_operations_processed": "11",
+                "write_bytes": "368398336",
+                "write_operations_processed": "31813"
+              },
+              "reason": null,
+              "scope": "one explicitly selected block device or driver, shared by all processes and kernel writeback; identity does not establish datastore/file/VM mapping; no summation or physical-flash attribution",
+              "status": "available"
+            },
+            "interval_ns": "3000468458",
+            "observer_elapsed_end_ns": "517292",
+            "observer_elapsed_start_ns": "266250",
+            "process_disk": {
+              "after": {
+                "sample": {
+                  "identity": {
+                    "pid": 4408,
+                    "start_token": "9877888355578"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "4096",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "1138257920"
+                },
+                "status": "available"
+              },
+              "before": {
+                "sample": {
+                  "identity": {
+                    "pid": 4408,
+                    "start_token": "9877888355578"
+                  },
+                  "linux_counters": null,
+                  "read_bytes": "4096",
+                  "source": "darwin_proc_pid_rusage_v2",
+                  "write_bytes": "773771264"
+                },
+                "status": "available"
+              },
+              "complete": true,
+              "counters": {
+                "linux_counters": null,
+                "read_bytes": "0",
+                "write_bytes": "364486656"
+              },
+              "reason": null,
+              "scope": "OS accounting for one observer PID; character/syscall counters include cached and non-disk I/O; Linux write bytes are charged when dirtied and cancelled bytes remain separate; no child/container/remote-datastore or physical-flash attribution implied",
+              "status": "available"
+            },
+            "sampling_window": "boundary capture start to start; sequential observations, observer work included; no atomic multi-counter or API wall-time bound",
+            "schema": "mount-rs-os-io-v1"
+          },
+          "quic_udp_bytes_per_ack": 4377.66004077472,
+          "selected_core": {
+            "catalog.backing_verify": {
+              "calls": 7848,
+              "elapsed_ns": 25118108,
+              "name": "catalog.backing_verify",
+              "units": 0,
+              "calls_per_ack": 2.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 6.401148827726809
+            },
+            "filesystem.gate_wait": {
+              "calls": 3924,
+              "elapsed_ns": 449908,
+              "name": "filesystem.gate_wait",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.11465545361875637
+            },
+            "provider.blocks.get_bytes": {
+              "calls": 1962,
+              "elapsed_ns": 33052011,
+              "name": "provider.blocks.get_bytes",
+              "units": 8036352,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 2048.0,
+              "inclusive_us_per_ack": 8.423040519877675
+            },
+            "provider.blocks.put_bytes": {
+              "calls": 1962,
+              "elapsed_ns": 837139869,
+              "name": "provider.blocks.put_bytes",
+              "units": 8036352,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 2048.0,
+              "inclusive_us_per_ack": 213.33839678899082
+            },
+            "provider.blocks.flush": {
+              "calls": 1962,
+              "elapsed_ns": 102343,
+              "name": "provider.blocks.flush",
+              "units": 0,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.026081294597349643
+            },
+            "provider.blocks.verify_authority": {
+              "calls": 1962,
+              "elapsed_ns": 92666676,
+              "name": "provider.blocks.verify_authority",
+              "units": 0,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 23.615360856269113
+            },
+            "provider.inode.publish_cas": {
+              "calls": 1962,
+              "elapsed_ns": 837913960,
+              "name": "provider.inode.publish_cas",
+              "units": 0,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 213.53566768603466
+            },
+            "filesystem.gate_wait.read": {
+              "calls": 3924,
+              "elapsed_ns": 175220,
+              "name": "filesystem.gate_wait.read",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.04465341488277268
+            },
+            "filesystem.gate_hold.read": {
+              "calls": 3924,
+              "elapsed_ns": 230815678,
+              "name": "filesystem.gate_hold.read",
+              "units": 0,
+              "calls_per_ack": 1.0,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 58.821528542303774
+            },
+            "filesystem.gate_wait.write_prepare": {
+              "calls": 1962,
+              "elapsed_ns": 90172,
+              "name": "filesystem.gate_wait.write_prepare",
+              "units": 0,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.022979612640163096
+            },
+            "filesystem.gate_hold.write_prepare": {
+              "calls": 1962,
+              "elapsed_ns": 118762640,
+              "name": "filesystem.gate_hold.write_prepare",
+              "units": 0,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 30.265708460754333
+            },
+            "filesystem.gate_wait.write_commit": {
+              "calls": 1962,
+              "elapsed_ns": 88536,
+              "name": "filesystem.gate_wait.write_commit",
+              "units": 0,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.02256269113149847
+            },
+            "filesystem.gate_hold.write_commit": {
+              "calls": 1962,
+              "elapsed_ns": 933963013,
+              "name": "filesystem.gate_hold.write_commit",
+              "units": 0,
+              "calls_per_ack": 0.5,
+              "units_per_ack": 0.0,
+              "inclusive_us_per_ack": 238.01300025484198
+            }
+          },
+          "selected_storage": {
+            "sdk.metadata.load_compact_inode": {
+              "bytes": 0,
+              "calls": 5886,
+              "cancelled": 0,
+              "elapsed_ns": 343653021,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                5158,
+                711,
+                17,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.load_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 5886,
+              "calls_per_ack": 1.5,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 87.57722247706423
+            },
+            "sdk.metadata.publish_compact_inode": {
+              "bytes": 0,
+              "calls": 1962,
+              "cancelled": 0,
+              "elapsed_ns": 838016430,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1876,
+                86,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.publish_compact_inode",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 1962,
+              "calls_per_ack": 0.5,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 213.56178134556575
+            },
+            "sdk.metadata.publish_includes_flush_barrier": {
+              "bytes": 0,
+              "calls": 1962,
+              "cancelled": 0,
+              "elapsed_ns": 58212,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                1962,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.metadata.publish_includes_flush_barrier",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 1962,
+              "calls_per_ack": 0.5,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.0148348623853211
+            },
+            "sdk.blocks.verify_concurrent_backing": {
+              "bytes": 0,
+              "calls": 1962,
+              "cancelled": 0,
+              "elapsed_ns": 92757198,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1909,
+                53,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.verify_concurrent_backing",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 1962,
+              "calls_per_ack": 0.5,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 23.638429663608562
+            },
+            "sdk.blocks.put": {
+              "bytes": 8036352,
+              "calls": 1962,
+              "cancelled": 0,
+              "elapsed_ns": 837238024,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1898,
+                63,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.put",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 1962,
+              "calls_per_ack": 0.5,
+              "successful_bytes_per_ack": 2048.0,
+              "inclusive_us_per_ack": 213.36341080530073
+            },
+            "sdk.blocks.get": {
+              "bytes": 8036352,
+              "calls": 1962,
+              "cancelled": 0,
+              "elapsed_ns": 33144523,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                0,
+                0,
+                0,
+                0,
+                778,
+                1182,
+                1,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.get",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 1962,
+              "calls_per_ack": 0.5,
+              "successful_bytes_per_ack": 2048.0,
+              "inclusive_us_per_ack": 8.446616462793068
+            },
+            "sdk.blocks.flush": {
+              "bytes": 0,
+              "calls": 1962,
+              "cancelled": 0,
+              "elapsed_ns": 188585,
+              "error": 0,
+              "in_flight": 0,
+              "latency_log2_us": [
+                1962,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "name": "sdk.blocks.flush",
+              "returned_row_observations": 0,
+              "returned_rows": 0,
+              "success": 1962,
+              "calls_per_ack": 0.5,
+              "successful_bytes_per_ack": 0.0,
+              "inclusive_us_per_ack": 0.04805937818552498
+            }
+          },
+          "highest_core_inclusive_per_ack": [
+            {
+              "calls": 3924,
+              "name": "service.dispatch",
+              "units": 0,
+              "inclusive_us_per_ack": 580.6690998980632
+            },
+            {
+              "calls": 1962,
+              "name": "filesystem.gate_hold.write_commit",
+              "units": 0,
+              "inclusive_us_per_ack": 238.01300025484198
+            },
+            {
+              "calls": 1962,
+              "name": "filesystem.gate_phase.publication",
+              "units": 0,
+              "inclusive_us_per_ack": 237.97232900101935
+            },
+            {
+              "calls": 1962,
+              "name": "provider.inode.publish_cas",
+              "units": 0,
+              "inclusive_us_per_ack": 213.53566768603466
+            },
+            {
+              "calls": 1962,
+              "name": "filesystem.block_put.initial",
+              "units": 8036352,
+              "inclusive_us_per_ack": 213.44639449541285
+            },
+            {
+              "calls": 1962,
+              "name": "provider.blocks.put_bytes",
+              "units": 8036352,
+              "inclusive_us_per_ack": 213.33839678899082
+            },
+            {
+              "calls": 5886,
+              "name": "filesystem.gate_phase.refresh",
+              "units": 0,
+              "inclusive_us_per_ack": 88.87235601427115
+            },
+            {
+              "calls": 5886,
+              "name": "provider.inode.load",
+              "units": 0,
+              "inclusive_us_per_ack": 87.50622604485218
+            },
+            {
+              "calls": 3924,
+              "name": "filesystem.gate_hold.read",
+              "units": 0,
+              "inclusive_us_per_ack": 58.821528542303774
+            },
+            {
+              "calls": 7848,
+              "name": "sqlite.compact.authority_path",
+              "units": 0,
+              "inclusive_us_per_ack": 57.501946228338426
+            },
+            {
+              "calls": 1962,
+              "name": "filesystem.refresh.read_before",
+              "units": 0,
+              "inclusive_us_per_ack": 31.40885983690112
+            },
+            {
+              "calls": 1962,
+              "name": "filesystem.gate_hold.write_prepare",
+              "units": 0,
+              "inclusive_us_per_ack": 30.265708460754333
+            }
+          ],
+          "sqlite_stage_reset_counters": {
+            "matched_connections": 2000,
+            "complete": true,
+            "sql_statements": 54936,
+            "statements_per_ack": 14.0,
+            "sql_categories": {
+              "PRAGMA": 1962,
+              "BEGIN": 9810,
+              "COMMIT": 3924,
+              "ROLLBACK": 5886,
+              "SELECT": 29430,
+              "UPDATE": 1962,
+              "INSERT": 1962
+            },
+            "pager": {
+              "cache_hits": 48398,
+              "cache_misses": 32537,
+              "page_writes": 14824,
+              "cache_spills": 0
+            },
+            "pager_per_ack": {
+              "cache_hits": 12.333843017329256,
+              "cache_misses": 8.291794087665647,
+              "page_writes": 3.7777777777777777,
+              "cache_spills": 0.0
+            },
+            "pager_read_bytes_estimate": 133271552,
+            "pager_write_bytes_estimate": 60719104
+          },
+          "selected_metadata_bytes_per_ack": {
+            "provider.inode_returned_bytes": 8860.0,
+            "provider.inode_serialized_bytes": 2215.0,
+            "provider.compact_anchor_returned_bytes": 630.0
+          },
+          "whole_host_driver_operations_per_second": {
+            "read_operations_processed": 3.666094196281666,
+            "write_operations_processed": 10602.67769693715
+          },
+          "sqlite_journal_mode_observed": false
+        }
+      ]
+    }
+  ],
+  "excluded_failed_launches": [
+    {
+      "kind": "saturation",
+      "receipt_sha256": "6606d294468463729c3a9b321f3473d5794d431e94722839323d4be08f2f0f7c",
+      "reason": "failed launch; excluded from performance data"
+    },
+    {
+      "kind": "saturation",
+      "receipt_sha256": "a68a06b3a9575aee67531629eca53ffb108639b431e3d6597eb0d2157ea699c4",
+      "failure_diagnostic": {
+        "deadline_exceeded": false,
+        "failure_class": "unclassified",
+        "kind": "saturation",
+        "lifecycle_unsettled": false,
+        "output_overflow": true,
+        "returncode": -15,
+        "source_changed": false,
+        "sticky_unknown": true
+      },
+      "reason": "failed launch; excluded from performance data"
+    },
+    {
+      "kind": "saturation",
+      "receipt_sha256": "ffdf92f33c626ef0a2aac6860eced43073c374ec0231a75090582b9855a96f9c",
+      "failure_diagnostic": {
+        "deadline_exceeded": false,
+        "failure_class": "exact_test_failed",
+        "kind": "saturation",
+        "lifecycle_unsettled": false,
+        "output_overflow": false,
+        "returncode": 101,
+        "source_changed": false,
+        "sticky_unknown": true
+      },
+      "reason": "failed launch; excluded from performance data"
+    }
+  ],
+  "source": {
+    "base_head_at_run": "37ed91349695f03cbd4a7a8ea475539c364fe037",
+    "checkout_dirty_at_run": true,
+    "change": "only quic_tidb_saturation.rs export seam; all scoped Rust source bytes frozen before/after validation and compared before publication",
+    "tested_rust_closure_files": 505,
+    "tested_rust_closure_sha256": "41cd3bcad20474004d08a76bf9cc9b25d123e830f77a6402201165bb3cdc3184",
+    "runner_sha256": "f1791c574e64f7205fbf67242bb40f7f288b6b01604037e36c359f3c14b7426b"
+  },
+  "controls": {
+    "clients": 100,
+    "servers_in_one_process": 10,
+    "drive_count": 100,
+    "partitions": 1,
+    "files_per_active_client": 1,
+    "file_bytes": 131072,
+    "chunk_bytes": 4096,
+    "per_client_depth": 1,
+    "warmup_seconds": 1,
+    "measured_seconds": 3,
+    "runtime_workers": 16,
+    "provision_empty_drives_before_parallel_start": true,
+    "file_creation": "online QUIC",
+    "offline_file_preseed": false,
+    "audit": "real per-request stderr audit retained; cost included; parent CPU excluded from process CPU, parent logwrites included in shared hostdriver counters"
+  },
+  "qualification": {
+    "distinct_regular_controls_passed": 66,
+    "semantic_export_gate_passed": true,
+    "three_storage_oracle_runs_passed": true,
+    "fmt": "passed all-workspace check",
+    "strict_scoped_clippy_passed": true,
+    "production_capacity_qualified": false,
+    "external_oidc_qualified_by_these_runs": false,
+    "production_remote_client_timings_available": false,
+    "peer_cache_timings_available": false,
+    "service_stage_observer_available": false,
+    "allocator_trace_enabled": false,
+    "idle_liveness": "100 connections retained; inactive clients only initial Stat; recurring liveness not qualified",
+    "client_driver_release_before_fresh_oracle": "not qualified; server wait_idle awaited, terminal process containment proved"
+  },
+  "validation_receipts": [
+    {
+      "kind": "satred",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "resource-profiling",
+        "--test",
+        "quic_tidb_saturation",
+        "--",
+        "--ignored",
+        "--exact",
+        "storage_stage_artifact_preserves_public_spans_and_disabled_coverage",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "receipt_sha256": "0b7eba6ec9c6098309b9ac99f70bcfb37c3998e0725381c3f920739c38a33a63",
+      "elapsed_seconds": 2.5764619159745052,
+      "source_count": 506,
+      "selected_test": "storage_stage_artifact_preserves_public_spans_and_disabled_coverage",
+      "exact_named_case_observed_passed": true,
+      "source_unchanged": true,
+      "containment_settled": true,
+      "fixture_root_removed": true,
+      "profile": "1",
+      "controlled_environment": {
+        "MOUNT_RS_PROFILE_IO": "1",
+        "MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID": "4294970374",
+        "MOUNT_RS_TRACE_REQUESTS": "0",
+        "MOUNT_RS_TRACE_SERVICE": "0",
+        "MOUNT_RS_TRACE_STORAGE": "0"
+      },
+      "logs": {
+        "stderr": {
+          "bytes": 220,
+          "sha256": "9eae3c8e9530595d55c25e48af92f28f886723b323822d556730ba7603f44699",
+          "overflow": false
+        },
+        "stdout": {
+          "bytes": 406,
+          "sha256": "d7fd4a8fc820746be765b52b82dd487eb0075d64a0fa4eea5bc74bf936453f47",
+          "overflow": false
+        }
+      },
+      "repository_closure_files": 505,
+      "excluded_private_pin": "@private/owned-parent; pinned separately by private_parent_sha256"
+    },
+    {
+      "kind": "satunit",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "resource-profiling",
+        "--test",
+        "quic_tidb_saturation"
+      ],
+      "receipt_sha256": "97f2a95b3ce27f1d259aafe18d9dad9d1bd8f2fc5d9376037746831aedca9867",
+      "elapsed_seconds": 5.871651000052225,
+      "source_count": 506,
+      "selected_test": null,
+      "exact_named_case_observed_passed": null,
+      "source_unchanged": true,
+      "containment_settled": true,
+      "fixture_root_removed": true,
+      "profile": "0",
+      "controlled_environment": {
+        "MOUNT_RS_PROFILE_IO": "0",
+        "MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID": "4294970374",
+        "MOUNT_RS_TRACE_REQUESTS": "0",
+        "MOUNT_RS_TRACE_SERVICE": "0",
+        "MOUNT_RS_TRACE_STORAGE": "0"
+      },
+      "logs": {
+        "stderr": {
+          "bytes": 6696,
+          "sha256": "325b0483de8110ca31e6e29a9ce53cb169544a5f38f99bd1a8f82649bef24c3c",
+          "overflow": false
+        },
+        "stdout": {
+          "bytes": 7624,
+          "sha256": "b5faa1285a54e37989c00b25541cae125c016cb3b59749a314c5a83f4e13c424",
+          "overflow": false
+        }
+      },
+      "repository_closure_files": 505,
+      "excluded_private_pin": "@private/owned-parent; pinned separately by private_parent_sha256"
+    },
+    {
+      "kind": "satclippy",
+      "command": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "resource-profiling",
+        "--test",
+        "quic_tidb_saturation",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "receipt_sha256": "0a7fa058e7f728703bc7ec4df25b9c990b960d467c195dd0c6084b86f378807b",
+      "elapsed_seconds": 5.2363058339688,
+      "source_count": 506,
+      "selected_test": null,
+      "exact_named_case_observed_passed": null,
+      "source_unchanged": true,
+      "containment_settled": true,
+      "fixture_root_removed": true,
+      "profile": "0",
+      "controlled_environment": {
+        "MOUNT_RS_PROFILE_IO": "0",
+        "MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID": "4294970374",
+        "MOUNT_RS_TRACE_REQUESTS": "0",
+        "MOUNT_RS_TRACE_SERVICE": "0",
+        "MOUNT_RS_TRACE_STORAGE": "0"
+      },
+      "logs": {
+        "stderr": {
+          "bytes": 340,
+          "sha256": "f55cc784d936b6a34b6d469766b512136514c7a481eb7e0fed015a2b0c8f8210",
+          "overflow": false
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "overflow": false
+        }
+      },
+      "repository_closure_files": 505,
+      "excluded_private_pin": "@private/owned-parent; pinned separately by private_parent_sha256"
+    },
+    {
+      "kind": "saturation",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "resource-profiling",
+        "--test",
+        "quic_tidb_saturation",
+        "--",
+        "--ignored",
+        "--exact",
+        "actual_tidb_100_clients_10_servers_saturation",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "receipt_sha256": "3ed530078576b2f0469adfea1a80e44ec935fc9f37df4754229ffeb32d386488",
+      "elapsed_seconds": 18.08163779199822,
+      "source_count": 506,
+      "selected_test": "actual_tidb_100_clients_10_servers_saturation",
+      "exact_named_case_observed_passed": true,
+      "source_unchanged": true,
+      "containment_settled": true,
+      "fixture_root_removed": true,
+      "profile": "1",
+      "controlled_environment": {
+        "MOUNT_RS_PROFILE_IO": "1",
+        "MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID": "4294970374",
+        "MOUNT_RS_REMOTE_SATURATION_ACTIVE_CLIENTS": "100",
+        "MOUNT_RS_REMOTE_SATURATION_CLIENTS": "100",
+        "MOUNT_RS_REMOTE_SATURATION_COMPACT_INODE_UPDATES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES": "0",
+        "MOUNT_RS_REMOTE_SATURATION_PRESEED": "0",
+        "MOUNT_RS_REMOTE_SATURATION_PROVIDER": "sqlite",
+        "MOUNT_RS_REMOTE_SATURATION_PROVISION_DRIVES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_SEPARATE_DRIVES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_SERVERS": "10",
+        "MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_BLOCKS": "32",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_MIXED": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_MODES": "read,write",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT": "/private/tmp/mount-rs-diagnostic-stage-export-20260928-h836s42w/mount-rs-owned-fault-saturation-hzqp_3qi/artifact.json",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_REQUEST_TIMEOUT_SECONDS": "10",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_SECONDS": "3",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_WARMUP_SECONDS": "1",
+        "MOUNT_RS_TRACE_REQUESTS": "0",
+        "MOUNT_RS_TRACE_SERVICE": "0",
+        "MOUNT_RS_TRACE_STORAGE": "0"
+      },
+      "logs": {
+        "stderr": {
+          "bytes": 20092287,
+          "sha256": "6ac15e6ac1e33e5d08fad00ed4e74c46a97598fd9d8c7ea0a646e52ccb008852",
+          "overflow": false
+        },
+        "stdout": {
+          "bytes": 172,
+          "sha256": "396c3f6f372731fdefd28a5b26f35a783a68a424f2d7578082eea6b190f7887d",
+          "overflow": false
+        }
+      },
+      "repository_closure_files": 505,
+      "excluded_private_pin": "@private/owned-parent; pinned separately by private_parent_sha256"
+    },
+    {
+      "kind": "satdisabled",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "resource-profiling",
+        "--test",
+        "quic_tidb_saturation",
+        "--",
+        "--ignored",
+        "--exact",
+        "actual_tidb_100_clients_10_servers_saturation",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "receipt_sha256": "c4c7b0d6457d2062bd425489c48e4eac8ff9c08967f26ab21b12aa26bb753316",
+      "elapsed_seconds": 17.628712959005497,
+      "source_count": 506,
+      "selected_test": "actual_tidb_100_clients_10_servers_saturation",
+      "exact_named_case_observed_passed": true,
+      "source_unchanged": true,
+      "containment_settled": true,
+      "fixture_root_removed": true,
+      "profile": "0",
+      "controlled_environment": {
+        "MOUNT_RS_PROFILE_IO": "0",
+        "MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID": "4294970374",
+        "MOUNT_RS_REMOTE_SATURATION_ACTIVE_CLIENTS": "100",
+        "MOUNT_RS_REMOTE_SATURATION_CLIENTS": "100",
+        "MOUNT_RS_REMOTE_SATURATION_COMPACT_INODE_UPDATES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES": "0",
+        "MOUNT_RS_REMOTE_SATURATION_PRESEED": "0",
+        "MOUNT_RS_REMOTE_SATURATION_PROVIDER": "sqlite",
+        "MOUNT_RS_REMOTE_SATURATION_PROVISION_DRIVES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_SEPARATE_DRIVES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_SERVERS": "10",
+        "MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_BLOCKS": "32",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_MIXED": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_MODES": "read,write",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT": "/private/tmp/mount-rs-diagnostic-stage-export-20260928-h836s42w/mount-rs-owned-fault-satdisabled-94uzbinv/artifact.json",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_REQUEST_TIMEOUT_SECONDS": "10",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_SECONDS": "3",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_WARMUP_SECONDS": "1",
+        "MOUNT_RS_TRACE_REQUESTS": "0",
+        "MOUNT_RS_TRACE_SERVICE": "0",
+        "MOUNT_RS_TRACE_STORAGE": "0"
+      },
+      "logs": {
+        "stderr": {
+          "bytes": 17555872,
+          "sha256": "244f8bd8bb712c29371e7dd73c20ae1520ac48b59bdf68060c3af8851f70f60f",
+          "overflow": false
+        },
+        "stdout": {
+          "bytes": 172,
+          "sha256": "3c74778042aaebf1f5f4dfaa54b960c59050fd64c5b0c8f8096d96757bc97ad4",
+          "overflow": false
+        }
+      },
+      "repository_closure_files": 505,
+      "excluded_private_pin": "@private/owned-parent; pinned separately by private_parent_sha256"
+    },
+    {
+      "kind": "satidle",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--release",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "resource-profiling",
+        "--test",
+        "quic_tidb_saturation",
+        "--",
+        "--ignored",
+        "--exact",
+        "actual_tidb_100_clients_10_servers_saturation",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "receipt_sha256": "a1f513c2bd90609dee843308821db11178b7cc68d83f208c32385171050c98d6",
+      "elapsed_seconds": 16.244375207985286,
+      "source_count": 506,
+      "selected_test": "actual_tidb_100_clients_10_servers_saturation",
+      "exact_named_case_observed_passed": true,
+      "source_unchanged": true,
+      "containment_settled": true,
+      "fixture_root_removed": true,
+      "profile": "1",
+      "controlled_environment": {
+        "MOUNT_RS_PROFILE_IO": "1",
+        "MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID": "4294970374",
+        "MOUNT_RS_REMOTE_SATURATION_ACTIVE_CLIENTS": "1",
+        "MOUNT_RS_REMOTE_SATURATION_CLIENTS": "100",
+        "MOUNT_RS_REMOTE_SATURATION_COMPACT_INODE_UPDATES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES": "0",
+        "MOUNT_RS_REMOTE_SATURATION_PRESEED": "0",
+        "MOUNT_RS_REMOTE_SATURATION_PROVIDER": "sqlite",
+        "MOUNT_RS_REMOTE_SATURATION_PROVISION_DRIVES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_SEPARATE_DRIVES": "1",
+        "MOUNT_RS_REMOTE_SATURATION_SERVERS": "10",
+        "MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_BLOCKS": "32",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_DEPTHS": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_MIXED": "1",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_MODES": "read,write",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_OUTPUT": "/private/tmp/mount-rs-diagnostic-stage-export-20260928-h836s42w/mount-rs-owned-fault-satidle-i5rrg59j/artifact.json",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_REQUEST_TIMEOUT_SECONDS": "10",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_SECONDS": "3",
+        "MOUNT_RS_REMOTE_TIDB_SATURATION_WARMUP_SECONDS": "1",
+        "MOUNT_RS_TRACE_REQUESTS": "0",
+        "MOUNT_RS_TRACE_SERVICE": "0",
+        "MOUNT_RS_TRACE_STORAGE": "0"
+      },
+      "logs": {
+        "stderr": {
+          "bytes": 7171519,
+          "sha256": "3741cf45450e0f6eac430f1fd50340e527e04c363486e5e612ddca3396eec9f7",
+          "overflow": false
+        },
+        "stdout": {
+          "bytes": 172,
+          "sha256": "fca31f2dc293ab4dc514a9d76894634fedd84a7bce69136487aaff8819686780",
+          "overflow": false
+        }
+      },
+      "repository_closure_files": 505,
+      "excluded_private_pin": "@private/owned-parent; pinned separately by private_parent_sha256"
+    },
+    {
+      "kind": "fmt",
+      "command": [
+        "./scripts/cargo-shared",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "receipt_sha256": "e5b47b5d04121b2ae743f5848fb4745152e670f5bdc416a928eaed4078a7ee5c",
+      "source_unchanged": true,
+      "containment_settled": true,
+      "source_count": 506,
+      "repository_closure_files": 505,
+      "excluded_private_pin": "@private/owned-parent; pinned separately by private_parent_sha256"
+    }
+  ],
+  "interpretation": {
+    "logical_blob_payload_amplification": "1x in separate pure-read and pure-write profiled stages; no old blob reads or rewritten chunks on aligned4KiBoverwrite",
+    "metadata_body": "read and write stages load2selected inode JSON bodies=8860B/ACK; write serializes4430B/ACK; full32-extent layout retained",
+    "sqlite_write_accounting": "43.04865497076023x processOS bytes/payload;7.141754385964912x estimated SQLite pagerwritebytes/payload; different accounting layers, cannot infer physical SSDbytes/IOPS",
+    "journal_mode": "actual PRAGMA journal_mode not captured; source only sets synchronousFULL, not WAL; no WAL/checkpoint attribution",
+    "blocking_worker_model": {
+      "status": "source-supported falsifiable scheduling model; not offCPUtrace or exactfsync attribution",
+      "blocking_sequential_put_and_publish_us_per_ack": 10676.959152748539,
+      "mean_worker_occupancy_from_these_two_stages": 15.036336265574372,
+      "implied16worker_upper_iops": 1498.5540144059805,
+      "observed_iops": 1408.2976295459189,
+      "source_paths": [
+        "providers/mount-rs-sqlite/src/storage.rs",
+        "providers/mount-rs-sqlite/src/compact.rs",
+        "crates/mount-rs-sdk/src/stores.rs",
+        "crates/mount-rs-service/src/dispatch.rs"
+      ]
+    },
+    "profile_control": "one sequential3s sample perconfiguration; different filesystem histories/host activity; not an isolated instrumentation-overhead estimate",
+    "next_measurements": [
+      "record actual journal/durability configuration and SQLite VFS file-role write/sync counters",
+      "vary Tokio workers16/32/64 at fixed workload to test blocking-worker ceiling",
+      "compare32/128/256file extents under4KiBoverwrite to measure metadata layout cost"
+    ]
+  },
+  "evidence_collection": {
+    "private_parent_sha256": "bf1e732e5e07f1ba1b18b68e563052b20ea39a7e0c12626060048ecb6bd79e3b",
+    "analysis_script_sha256": "ade580affb9b7613d37a89a72619e70ac904b5cf4d40e09933c943cdd6657e49",
+    "logs_per_stream_cap_bytes": 67108864,
+    "parent_limit_seconds": 300,
+    "retained_root": "/private/tmp/mount-rs-diagnostic-stage-export-20260928-h836s42w",
+    "full_raw_logs_public": false,
+    "mode_receipts": "100 distinct Drive indexes and requested/persistedMRC5/backingverified validated for every successfulrun",
+    "provider_version": "3.51.3 bundled linkedSQLite as reportedbyfixture; systemCLI3.51.0 not used"
+  }
+}

@@ -56,6 +56,246 @@ jobs:
         with:
           name: remote-quic-soak-${{ matrix.os }}
           path: remote-quic-soak.log
+  failure-e2e:
+    if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - name: Prepare private failure evidence and require clean source
+        id: failure-evidence
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-remote-failure-target
+          MOUNT_RS_FAILURE_EVIDENCE_ROOT: ${{ runner.temp }}/mount-rs-remote-failure-evidence
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -m 700 "$CARGO_TARGET_DIR" "$MOUNT_RS_FAILURE_EVIDENCE_ROOT"
+          printf 'CARGO_TARGET_DIR=%s\nMOUNT_RS_FAILURE_EVIDENCE_ROOT=%s\n' \
+            "$CARGO_TARGET_DIR" "$MOUNT_RS_FAILURE_EVIDENCE_ROOT" >> "$GITHUB_ENV"
+          git status --porcelain=v1 --untracked-files=all > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-before.txt"
+          test ! -s "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-before.txt"
+      - name: Verify modeled owned failure parent controls
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures-controls.py
+      - name: Extract an owned Redis executable without starting a service
+        timeout-minutes: 5
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          redis_phase=prepare
+          redis_prerequisite_failed() {
+            redis_failure_status=$?
+            printf '::error title=Owned Redis prerequisite::phase=%s status=%s\n' "$redis_phase" "$redis_failure_status" >&2
+            if [ "$redis_phase" = version ]; then
+              python3 - "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-version.txt" 2>/dev/null <<'PY' || true
+          import pathlib, sys
+          try:
+              with pathlib.Path(sys.argv[1]).open("rb") as diagnostic:
+                  data = diagnostic.read(4096)
+          except OSError:
+              data = b""
+          for library in [b"liblzf.so.1", b"libjemalloc.so.2", b"libatomic.so.1"]:
+              marker = (b"error while loading shared libraries: " + library
+                        + b": cannot open shared object file: No such file or directory")
+              if marker in data:
+                  print("::error title=Owned Redis loader::missing_shared_library=" + library.decode("ascii"))
+                  break
+          PY
+            fi
+            exit "$redis_failure_status"
+          }
+          trap redis_prerequisite_failed ERR
+          redis_root="$RUNNER_TEMP/mount-rs-remote-failure-redis"
+          mkdir -m 700 "$redis_root"
+          mkdir -m 700 "$redis_root/downloads" "$redis_root/unpacked"
+          redis_phase=package_update
+          sudo apt-get update > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
+          redis_phase=package_download
+          (
+            cd "$redis_root/downloads"
+            apt-get download redis-server redis-tools liblzf1 libjemalloc2 >> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
+          )
+          redis_phase=package_extract
+          for package in "$redis_root/downloads"/*.deb; do
+            test -f "$package"
+            dpkg-deb --extract "$package" "$redis_root/unpacked" >> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" 2>&1
+          done
+          redis_phase=binary_select
+          redis_source="$redis_root/unpacked/usr/bin/redis-server"
+          if [ -L "$redis_source" ]; then
+            case "$(readlink "$redis_source")" in
+              redis-check-rdb|/usr/bin/redis-check-rdb) redis_source="$redis_root/unpacked/usr/bin/redis-check-rdb" ;;
+              *) echo 'unsupported extracted Redis executable target' >&2; exit 1 ;;
+            esac
+          fi
+          test -f "$redis_source"
+          test ! -L "$redis_source"
+          test -x "$redis_source"
+          # A regular file named redis-server preserves server mode after path resolution.
+          install -m 700 "$redis_source" "$redis_root/redis-server"
+          redis_phase=library_select
+          redis_library_root=$(python3 - "$redis_root/unpacked" 2>> "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-package.log" <<'PY'
+          import pathlib, sys
+          root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+          candidates = list(root.rglob("liblzf.so.1"))
+          assert len(candidates) == 1, "one owned liblzf required"
+          target = candidates[0].resolve(strict=True)
+          assert target.is_relative_to(root) and target.is_file(), "owned liblzf target required"
+          print(candidates[0].parent)
+          PY
+          )
+          redis_phase=version
+          LD_LIBRARY_PATH="$redis_library_root${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$redis_root/redis-server" --version > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/redis-version.txt" 2>&1
+          redis_phase=export
+          printf 'MOUNT_RS_CACHE_REDIS_SERVER=%s\nMOUNT_RS_CACHE_REDIS_LIBRARY_DIRECTORY=%s\n' \
+            "$redis_root/redis-server" "$redis_library_root" >> "$GITHUB_ENV"
+      - name: Warm locked failure and allocation test targets online
+        run: |
+          set -euo pipefail
+          umask 077
+          ./scripts/cargo-shared test --locked -p mount-rs-blob-cache --test distributed_failure --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-cache.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-blob-cache --lib --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-peer-metrics.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-remote-client --test quic_mount --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-remote.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-remote-client --lib --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-client-metrics.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features io-profiling --test websocket_diagnostics --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-websocket-service-metrics.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features io-profiling --lib --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-websocket-auth-metrics.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-blob-cache --test quinn_close --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-quinn-close.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-core --test storage_diagnostics_allocations --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-storage-allocations.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-core --test filesystem_causal_profile_allocations --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-core-allocations.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-chunked --test current_path_create_rebase --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-create-path.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-chunked --test compact_snapshot_revision --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-create-guard.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-chunked --lib --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-create-unit.log" 2>&1
+          ./scripts/cargo-shared test --locked -p mount-rs-chunked --test filesystem_causal_metrics --no-run \
+            > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/warmup-filesystem-metrics.log" 2>&1
+      - name: Verify ordinary QUIC close natural drain through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py quinnordinary
+      - name: Verify first Initial CLOSE natural drain through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py quinnclose
+      - name: Verify real UDP first CLOSE endpoint shutdown through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py quinnruntimeclose
+      - name: Verify guarded create preparation and current-path races through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py createpath
+      - name: Verify compact create publication scans through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py createguard
+      - name: Verify create gate, occupied body and corruption controls through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py createunit
+      - name: Verify dedicated filesystem causal metrics through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py filesystemmetrics
+      - name: Verify cache stage counts and cancellation through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py cachemetrics
+      - name: Verify discovery outcomes and deadline attribution through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py discoverymetrics
+      - name: Verify persistent SQLite cache faults and backing savings through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py sqlitecache
+      - name: Verify authenticated peer connection stages through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py peermetrics
+      - name: Verify peer request stages and byte units through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py peeriometrics
+      - name: Verify bounded peer timeout slow logging through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py peeriometricstrace
+      - name: Verify peer read reconnect bypasses pending replica handshake through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py peerreconnect
+      - name: Verify real UDP stopped-peer port release through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py peerport
+      - name: Verify client QUIC stream, send and receive outcomes through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py clientmetrics
+      - name: Verify QUIC setup outcomes through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py clientsetupmetrics
+      - name: Verify client WebSocket stages and cancellation through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsclientmetrics
+      - name: Verify ordinary WebSocket constructors keep diagnostics disabled
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsservicedefault
+      - name: Verify WebSocket service lifetimes and unchanged deadlines
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsserviceon
+      - name: Verify WebSocket authentication scopes and allocation helpers
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsserviceunit
+      - name: Verify warmed storage recorder allocations through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py storagealloc
+      - name: Verify warmed core recorder allocations through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py corealloc
+      - name: Verify opt-in cache slow logging through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py cachemetricstrace
+      - name: Verify Redis directory and peer failures through the owned parent
+        timeout-minutes: 5
+        run: |
+          LD_LIBRARY_PATH="$MOUNT_RS_CACHE_REDIS_LIBRARY_DIRECTORY${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            python3 -B scripts/test-remote-failures.py redisfault
+      - name: Verify cancelled Redis fixture cleanup through the owned parent
+        timeout-minutes: 5
+        run: |
+          LD_LIBRARY_PATH="$MOUNT_RS_CACHE_REDIS_LIBRARY_DIRECTORY${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            python3 -B scripts/test-remote-failures.py rediscleanup
+      - name: Verify SQLite commit after lost WebSocket reply through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsloss
+      - name: Verify Auto fallback SQLite commit after lost WebSocket reply through the owned parent
+        timeout-minutes: 5
+        run: python3 -B scripts/test-remote-failures.py wsautoloss
+      - name: Verify final failure source state
+        if: always() && steps.failure-evidence.outcome == 'success'
+        run: |
+          set -euo pipefail
+          umask 077
+          git status --porcelain=v1 --untracked-files=all > "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-after.txt"
+          test ! -s "$MOUNT_RS_FAILURE_EVIDENCE_ROOT/source-after.txt"
+      - name: Retain only bounded failure receipts and source pins
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-failure-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/source-before.txt
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/source-after.txt
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/mount-rs-owned-fault-*/receipt.json
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/mount-rs-owned-fault-*/source-before.json
+            ${{ env.MOUNT_RS_FAILURE_EVIDENCE_ROOT }}/mount-rs-owned-fault-*/source-after.json
+          if-no-files-found: warn
   native-linux:
     if: github.event_name != 'workflow_dispatch' || !(inputs.native_qualification || inputs.production_target || inputs.owned_backing_pilot || inputs.formal_qualification)
     runs-on: ubuntu-latest
@@ -315,7 +555,7 @@ jobs:
           git status --porcelain=v1 --untracked-files=all > "$EVIDENCE_DIR/source-before.txt"
           test ! -s "$EVIDENCE_DIR/source-before.txt"
           python3 -B scripts/test-filter-startup-diagnostics.py
-          ./scripts/cargo-shared test --locked -p mount-rs-service --features resource-profiling \
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling \
             --test quic_production_target --no-run --message-format=json \
             > "$EVIDENCE_DIR/build.jsonl" 2> "$EVIDENCE_DIR/build.log"
           python3 - <<'PY'

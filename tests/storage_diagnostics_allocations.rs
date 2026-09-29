@@ -46,6 +46,14 @@ fn selected_bytes(operation: Operation) -> u64 {
         Operation::FoundationDbReadGet
             | Operation::FoundationDbReadGetKey
             | Operation::FoundationDbReadGetRangePage
+            | Operation::BlobCacheRamLookup
+            | Operation::BlobCacheDiskLookup
+            | Operation::BlobCachePeerRequestSend
+            | Operation::BlobCachePeerResponseReceive
+            | Operation::BlobCachePeerGet
+            | Operation::ObjectStoreBackingMarkerProbeBodyRead
+            | Operation::ObjectStoreBackingMarkerDataBodyRead
+            | Operation::ObjectStoreBackingMarkerProbeCreate
     ) {
         3
     } else {
@@ -74,6 +82,37 @@ fn warmed_core_spans_record_without_added_allocations() {
         Operation::FoundationDbReadGetRangePage,
         Operation::FoundationDbTransactionCommit,
         Operation::FoundationDbTransactionOnError,
+        Operation::BlobCacheMissAdmissionWait,
+        Operation::BlobCacheMissSingleflightWait,
+        Operation::BlobCacheRamLookup,
+        Operation::BlobCacheDiskLookup,
+        Operation::BlobCachePeerConnectionLockWait,
+        Operation::BlobCachePeerConnectionEstablish,
+        Operation::RemoteClientQuicOpenBi,
+        Operation::RemoteClientQuicRequestSend,
+        Operation::RemoteClientQuicResponseReceive,
+        Operation::BlobCachePeerRequestByteAdmissionWait,
+        Operation::BlobCachePeerOpenBi,
+        Operation::BlobCachePeerRequestSend,
+        Operation::BlobCachePeerResponseReceive,
+        Operation::BlobCachePeerGet,
+        Operation::BlobCachePeerGetMiss,
+        Operation::RemoteClientWebSocketTcpConnect,
+        Operation::RemoteClientWebSocketTlsHandshake,
+        Operation::RemoteClientWebSocketUpgrade,
+        Operation::RemoteClientWebSocketSocketLockWait,
+        Operation::RemoteClientWebSocketRequestEncode,
+        Operation::RemoteClientWebSocketRequestSend,
+        Operation::RemoteClientWebSocketResponseReceive,
+        Operation::RemoteClientWebSocketResponseDecode,
+        Operation::RemoteClientQuicConnectionSetup,
+        Operation::BlobCacheDiscoveryLocate,
+        Operation::ObjectStoreBackingMarkerProbeGet,
+        Operation::ObjectStoreBackingMarkerProbeBodyRead,
+        Operation::ObjectStoreBackingMarkerDataGet,
+        Operation::ObjectStoreBackingMarkerDataBodyRead,
+        Operation::ObjectStoreBackingMarkerProbeCreate,
+        Operation::ObjectStoreBackingMarkerRetryBackoff,
     ];
     ALLOCATION_CALLS.with(|calls| calls.set(0));
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
@@ -85,12 +124,18 @@ fn warmed_core_spans_record_without_added_allocations() {
         drop(Span::new(operation));
     }
     COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let allocation_calls = ALLOCATION_CALLS.with(Cell::get);
+    println!(
+        "MOUNT_RS_CACHE_RECORDER_ALLOCATION bank=storage selected_rows={} declared_rows={} allocation_calls={allocation_calls}",
+        operations.len(),
+        before.entries.len()
+    );
     assert_eq!(
-        ALLOCATION_CALLS.with(Cell::get),
-        0,
+        allocation_calls, 0,
         "warmed actual core Span added an allocation"
     );
     let delta = storage::snapshot().delta(&before).unwrap();
+    assert_eq!(before.entries.len(), 116);
     assert_eq!(delta.in_flight, 0);
     for operation in operations {
         let row = &delta.entries[operation as usize];
@@ -108,4 +153,100 @@ fn warmed_core_spans_record_without_added_allocations() {
         assert_eq!(row.bytes, selected_bytes(operation));
         assert_eq!((row.returned_rows, row.returned_row_observations), (0, 0));
     }
+}
+
+#[test]
+fn warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations() {
+    use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+    // Isolated bank and owner token construction are deliberately outside the window.
+    let observer = Observer::isolated();
+    let disabled = Observer::disabled();
+    let cache = observer.cache_residency();
+    let bundle = observer.bundle_build().finish_success().unwrap();
+    let bundle_clone = std::sync::Arc::clone(&bundle);
+    let client = observer.client(ClientRole::PrimaryDataMixed);
+    let inert_client = disabled.client(ClientRole::StandaloneData);
+    observer
+        .client_build(ClientRole::StandaloneProbe)
+        .finish_success();
+    let before_build =
+        observer.snapshot().unwrap().clients[ClientRole::StandaloneProbe.index()].build;
+    let _ = observer.snapshot();
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    let positive = std::hint::black_box(Box::new([7u8; 1024]));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let positive_calls = ALLOCATION_CALLS.with(Cell::get);
+    drop(positive);
+    assert!(positive_calls > 0, "allocator positive control failed");
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    for _ in 0..64 {
+        observer
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_success();
+        observer
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_error();
+        drop(observer.client_build(ClientRole::StandaloneProbe));
+        disabled
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_success();
+        disabled
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_error();
+        drop(disabled.client_build(ClientRole::StandaloneProbe));
+        observer.known_extra_future_box(ClientRole::PrimaryDataMixed, HttpMethod::Get);
+        observer.known_extra_response_body_box(ClientRole::PrimaryDataMixed, HttpMethod::Get);
+        let mut body = client.attempt(HttpMethod::Get, Some(3)).headers(200);
+        body.data(3);
+        body.eof();
+        client.attempt(HttpMethod::Get, None).transport_error();
+        drop(client.attempt(HttpMethod::Get, None));
+        drop(client.attempt(HttpMethod::Get, None).headers(404));
+        cache.publish(2, 3);
+        cache.publish(1, 2);
+        observer.bundle_build().finish_error();
+        drop(observer.bundle_build());
+        inert_client
+            .attempt(HttpMethod::Get, None)
+            .headers(200)
+            .eof();
+        drop(disabled.bundle_build().finish_success());
+        let _ = std::hint::black_box(observer.snapshot());
+    }
+    drop(bundle);
+    drop(bundle_clone);
+    drop(client);
+    drop(inert_client);
+    drop(cache);
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let recorded_calls = ALLOCATION_CALLS.with(Cell::get);
+    assert_eq!(
+        recorded_calls, 0,
+        "warmed bank-only guard updates added allocations"
+    );
+    let final_state = observer.snapshot().unwrap();
+    let build = final_state.clients[ClientRole::StandaloneProbe.index()].build;
+    assert_eq!(
+        (
+            build.started - before_build.started,
+            build.succeeded - before_build.succeeded,
+            build.failed - before_build.failed,
+            build.abandoned - before_build.abandoned,
+            build.inflight
+        ),
+        (192, 64, 64, 64, 0)
+    );
+    assert!(disabled.snapshot().is_none());
+    assert_eq!(final_state.cache.live, 0);
+    assert_eq!(final_state.bundles.live, 0);
+    assert_eq!(
+        final_state.clients[ClientRole::PrimaryDataMixed.index()].live,
+        0
+    );
+    assert!(!final_state.saturated);
+    assert_eq!(storage::snapshot().entries.len(), 116);
+    // Excludes serialization, startup Arc/token construction, wrapper Box sites,
+    // backing clients and the existing allocating storage::snapshot() above.
 }

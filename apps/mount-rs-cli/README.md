@@ -526,3 +526,24 @@ MRC3 shared configurations.
 ## Remote Drive provider
 
 `mount-rs mount --config <path>` accepts a remote provider that selects one Partition and mounts several granted Drives through the existing native adapters. `serve-remote --config <path>` starts the authenticated QUIC service; `catalog-apply --config <path>` updates its persistent metadata definitions and grants using a revision check. Tokens come from a file or an argv command. See [Remote Drives](../../docs/remote-drives.md) for setup, examples and qualification boundaries.
+
+### SQLite journal configuration
+
+Normal split-store SQLite provider objects accept optional `journal_mode`:
+`"preserve"` (the default) or `"wal"`. See
+[`examples/config-sqlite-wal.json`](examples/config-sqlite-wal.json).
+The same objects work in remote Drive catalog JSON. The legacy whole-snapshot
+`driver.kind: "sqlite"` does not accept this option.
+
+Preserve executes no journal-mode assignment: fresh files use DELETE and
+existing WAL files stay in WAL. Explicit WAL requires qualified local Linux
+or macOS files on one host; empty, `:memory:` and `file:` URI paths are rejected
+before path resolution. Physical identity, single-hard-link, local filesystem
+and auxiliary-path authority checks still apply. Canonical symlinks work.
+WAL persists across reopen and creates `-wal`/`-shm` sidecars. Keep the complete
+live SQLite file set together and use SQLite-aware backup procedures.
+
+Both modes retain `synchronous=FULL` (`2`), the existing checkpoint policy, and
+a durable block commit before the separate metadata publication commit.
+The measured small fixture does not qualify production capacity or power-loss
+recovery.

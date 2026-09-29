@@ -3,6 +3,7 @@ use crate::connection::{ClientError, Transport};
 use crate::decisions::TransactionCompletion;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
+use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_remote_protocol::{
     Message,
     binary::{self, Header, IoRequest},
@@ -50,32 +51,63 @@ impl WebSocketTransport {
         .with_no_client_auth();
         let server_name = rustls::pki_types::ServerName::try_from(name.to_owned())
             .map_err(|_| ClientError::Protocol)?;
-        let tcp = TcpStream::connect(address)
-            .await
-            .map_err(|_| ClientError::Transport)?;
+        let tcp = {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketTcpConnect);
+            match TcpStream::connect(address).await {
+                Ok(tcp) => {
+                    span.finish_success(0);
+                    tcp
+                }
+                Err(_) => {
+                    span.finish_error();
+                    return Err(ClientError::Transport);
+                }
+            }
+        };
         tcp.set_nodelay(true).map_err(|_| ClientError::Transport)?;
-        let tls = tokio_rustls::TlsConnector::from(Arc::new(tls))
-            .connect(server_name, tcp)
-            .await
-            .map_err(|_| ClientError::Authentication)?;
+        let tls = {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketTlsHandshake);
+            match tokio_rustls::TlsConnector::from(Arc::new(tls))
+                .connect(server_name, tcp)
+                .await
+            {
+                Ok(tls) => {
+                    span.finish_success(0);
+                    tls
+                }
+                Err(_) => {
+                    span.finish_error();
+                    return Err(ClientError::Authentication);
+                }
+            }
+        };
         let mut request = format!("wss://{address}/mount-rs")
             .into_client_request()
             .map_err(|_| ClientError::Protocol)?;
         request
             .headers_mut()
             .insert("Sec-WebSocket-Protocol", SUBPROTOCOL.parse().unwrap());
-        let (socket, response) =
-            tokio_tungstenite::client_async_with_config(request, tls, Some(config()))
-                .await
-                .map_err(|_| ClientError::Protocol)?;
-        if response
-            .headers()
-            .get("Sec-WebSocket-Protocol")
-            .and_then(|v| v.to_str().ok())
-            != Some(SUBPROTOCOL)
-        {
-            return Err(ClientError::Protocol);
-        }
+        let socket = {
+            let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketUpgrade);
+            let (socket, response) =
+                tokio_tungstenite::client_async_with_config(request, tls, Some(config()))
+                    .await
+                    .map_err(|_| {
+                        span.finish_error();
+                        ClientError::Protocol
+                    })?;
+            if response
+                .headers()
+                .get("Sec-WebSocket-Protocol")
+                .and_then(|v| v.to_str().ok())
+                != Some(SUBPROTOCOL)
+            {
+                span.finish_error();
+                return Err(ClientError::Protocol);
+            }
+            span.finish_success(0);
+            socket
+        };
         let (shutdown, _) = watch::channel(false);
         Ok(Arc::new(Self {
             socket: Mutex::new(Some(socket)),
@@ -83,13 +115,18 @@ impl WebSocketTransport {
         }))
     }
     async fn transact(&self, request: Request<'_>) -> Result<Vec<u8>, ClientError> {
+        let mut wait = StorageSpan::new(StorageOperation::RemoteClientWebSocketSocketLockWait);
         let mut shutdown = self.shutdown.subscribe();
         if *shutdown.borrow() {
+            wait.finish_error();
             return Err(ClientError::Transport);
         }
         let guard = tokio::select! {
             biased;
-            _ = shutdown.changed() => return Err(ClientError::Transport),
+            _ = shutdown.changed() => {
+                wait.finish_error();
+                return Err(ClientError::Transport);
+            },
             guard = self.socket.lock() => guard,
         };
         let mut transaction = Transaction {
@@ -97,31 +134,61 @@ impl WebSocketTransport {
             shutdown: &self.shutdown,
             completion: TransactionCompletion::default(),
         };
-        let socket = transaction.socket.as_mut().ok_or(ClientError::Transport)?;
+        let socket = match transaction.socket.as_mut() {
+            Some(socket) => {
+                wait.finish_success(0);
+                socket
+            }
+            None => {
+                wait.finish_error();
+                return Err(ClientError::Transport);
+            }
+        };
+        drop(wait);
         let result = tokio::select! {
             biased;
             _ = shutdown.changed() => Err(ClientError::Transport),
             result = async {
                 let mut bytes = Vec::new();
-                match &request {
-                    Request::Control(message) => binary::write_control(&mut bytes, message).await,
-                    Request::Io{id, request, length, data} => binary::write_request(&mut bytes, *id, *request, *length, *data).await,
-                }.map_err(|_| ClientError::Protocol)?;
-                send(socket, &bytes).await?;
-                let header = receive(socket).await?;
-                let header: [u8; binary::HEADER_BYTES] = header.as_ref().try_into().map_err(|_| ClientError::Protocol)?;
-                let decoded = Header::decode(header).map_err(|_| ClientError::Protocol)?;
-                let length = decoded.control_len + decoded.payload_len;
-                let mut bytes = Vec::with_capacity(binary::HEADER_BYTES + length);
-                bytes.extend_from_slice(&header);
-                while bytes.len() < binary::HEADER_BYTES + length {
-                    let chunk = receive(socket).await?;
-                    if chunk.is_empty() || chunk.len() > binary::HEADER_BYTES + length - bytes.len() {return Err(ClientError::Protocol);}
-                    bytes.extend_from_slice(&chunk);
+                {
+                    let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketRequestEncode);
+                    match &request {
+                        Request::Control(message) => binary::write_control(&mut bytes, message).await,
+                        Request::Io{id, request, length, data} => binary::write_request(&mut bytes, *id, *request, *length, *data).await,
+                    }.map_err(|_| {
+                        span.finish_error();
+                        ClientError::Protocol
+                    })?;
+                    span.finish_success(0);
                 }
-                if !receive(socket).await?.is_empty() {return Err(ClientError::Protocol);}
-                request.validate_response(decoded, &bytes[binary::HEADER_BYTES..])?;
-                Ok(bytes)
+                {
+                    let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketRequestSend);
+                    send(socket, &bytes).await.inspect_err(|_| span.finish_error())?;
+                    span.finish_success(0);
+                }
+                let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketResponseReceive);
+                let result = async {
+                    let header = receive(socket).await?;
+                    let header: [u8; binary::HEADER_BYTES] = header.as_ref().try_into().map_err(|_| ClientError::Protocol)?;
+                    let decoded = Header::decode(header).map_err(|_| ClientError::Protocol)?;
+                    let length = decoded.control_len + decoded.payload_len;
+                    let mut bytes = Vec::with_capacity(binary::HEADER_BYTES + length);
+                    bytes.extend_from_slice(&header);
+                    while bytes.len() < binary::HEADER_BYTES + length {
+                        let chunk = receive(socket).await?;
+                        if chunk.is_empty() || chunk.len() > binary::HEADER_BYTES + length - bytes.len() {return Err(ClientError::Protocol);}
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    if !receive(socket).await?.is_empty() {return Err(ClientError::Protocol);}
+                    request.validate_response(decoded, &bytes[binary::HEADER_BYTES..])?;
+                    Ok(bytes)
+                }.await;
+                if result.is_ok() {
+                    span.finish_success(0);
+                } else {
+                    span.finish_error();
+                }
+                result
             } => result,
         };
         if result.is_ok() {
@@ -232,13 +299,17 @@ async fn send(socket: &mut Socket, bytes: &[u8]) -> Result<(), ClientError> {
 impl Transport for WebSocketTransport {
     async fn exchange(&self, message: Message) -> Result<Message, ClientError> {
         let bytes = self.transact(Request::Control(message)).await?;
+        let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketResponseDecode);
         let mut cursor = bytes.as_slice();
-        let response = binary::read_control(&mut cursor)
-            .await
-            .map_err(|_| ClientError::Protocol)?;
+        let response = binary::read_control(&mut cursor).await.map_err(|_| {
+            span.finish_error();
+            ClientError::Protocol
+        })?;
         if !cursor.is_empty() {
+            span.finish_error();
             return Err(ClientError::Protocol);
         }
+        span.finish_success(0);
         Ok(response)
     }
     async fn read(
@@ -255,13 +326,19 @@ impl Transport for WebSocketTransport {
                 data: None,
             })
             .await?;
+        let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketResponseDecode);
         let mut cursor = bytes.as_slice();
         let result = binary::read_result(&mut cursor, id, true, buffer, 0)
             .await
-            .map_err(|_| ClientError::Protocol)?;
+            .map_err(|_| {
+                span.finish_error();
+                ClientError::Protocol
+            })?;
         if cursor.read_u8().await.is_ok() {
+            span.finish_error();
             return Err(ClientError::Protocol);
         }
+        span.finish_success(0);
         result.map_err(|e| ClientError::Remote(e.code))
     }
     async fn write(
@@ -278,13 +355,19 @@ impl Transport for WebSocketTransport {
                 data: Some(data),
             })
             .await?;
+        let mut span = StorageSpan::new(StorageOperation::RemoteClientWebSocketResponseDecode);
         let mut cursor = bytes.as_slice();
         let result = binary::read_result(&mut cursor, id, false, &mut [], data.len())
             .await
-            .map_err(|_| ClientError::Protocol)?;
+            .map_err(|_| {
+                span.finish_error();
+                ClientError::Protocol
+            })?;
         if !cursor.is_empty() {
+            span.finish_error();
             return Err(ClientError::Protocol);
         }
+        span.finish_success(0);
         result.map_err(|e| ClientError::Remote(e.code))
     }
     fn close(&self) {
@@ -294,3 +377,7 @@ impl Transport for WebSocketTransport {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "websocket_metrics_tests.rs"]
+mod metrics_tests;

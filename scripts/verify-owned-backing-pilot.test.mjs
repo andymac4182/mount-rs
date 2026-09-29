@@ -126,7 +126,134 @@ const profileNames = [
   "filesystem.mutation.create_guard.revision_mismatch",
   "filesystem.mutation.create_guard.allocation_mismatch",
   "filesystem.mutation.create_guard.path_present",
+  "compact.namespace.materialize_nodes",
+  "filesystem.mutation.candidate_clone_nodes",
+  "compact.structure.delta_capture_nodes",
+  "compact.structure.expected_guard_nodes",
+  "sqlite.compact.authority_query",
+  "sqlite.compact.authority_path",
+  "sqlite.compact.anchor_query_bytes",
+  "sqlite.compact.anchor_decode_bytes",
+  "sqlite.compact.guard_selected_rows",
+  "sqlite.compact.guard_full_rows",
+  "sqlite.compact.guard_selected_decode_bytes",
+  "sqlite.compact.guard_full_decode_bytes",
+  "sqlite.compact.read_lock_wait",
+  "sqlite.compact.read_begin",
+  "filesystem.refresh.replace_probe",
+  "filesystem.refresh.create_capture",
+  "filesystem.refresh.batch_capture",
+  "filesystem.refresh.path_structure",
+  "filesystem.refresh.read_before",
+  "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ]
+// Fixed historical names keep incomplete fixtures independent of current order.
+const historical85Names = Object.freeze([
+  "metadata.load",
+  "metadata.load_if_changed",
+  "metadata.snapshot",
+  "metadata.publish",
+  "metadata.flush",
+  "blocks.put",
+  "blocks.get",
+  "blocks.flush",
+  "blocks.verify_backing",
+  "blocks.prepare_backing",
+  "blocks.delete",
+  "blocks.reconcile",
+  "pglite.client_lock_wait",
+  "sdk.metadata.compact_inode_capability",
+  "sdk.metadata.compact_inode_mode_state",
+  "sdk.metadata.prepare_compact_inode_mode",
+  "sdk.metadata.load_compact_snapshot",
+  "sdk.metadata.load_compact_inode",
+  "sdk.metadata.publish_compact_inode",
+  "sdk.metadata.publish_compact_structure",
+  "sdk.metadata.inode_mode_state",
+  "sdk.metadata.prepare_inode_mode",
+  "sdk.metadata.load_inode_snapshot_if_changed",
+  "sdk.metadata.load_inode_snapshot",
+  "sdk.metadata.load_inode",
+  "sdk.metadata.load_inode_if_changed",
+  "sdk.metadata.publish_inode_if_version",
+  "sdk.metadata.publish_structure_if_versions",
+  "sdk.metadata.delegation_state",
+  "sdk.metadata.prepare_delegated_mode",
+  "sdk.metadata.checkout",
+  "sdk.metadata.publish_delegated",
+  "sdk.metadata.checkin",
+  "sdk.metadata.recover",
+  "sdk.metadata.durable",
+  "sdk.metadata.publish_includes_flush_barrier",
+  "sdk.metadata.load",
+  "sdk.metadata.load_if_changed",
+  "sdk.metadata.concurrent_mode_state",
+  "sdk.metadata.preflight_new_bound_mode",
+  "sdk.metadata.prepare_bound_concurrent_mode",
+  "sdk.metadata.acquire_writer",
+  "sdk.metadata.renew_writer",
+  "sdk.metadata.release_writer",
+  "sdk.metadata.publish",
+  "sdk.metadata.publish_bound_if_revision",
+  "sdk.metadata.migrate_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_trusted_unstamped_mrc1",
+  "sdk.metadata.migrate_trusted_unstamped_mrc1",
+  "sdk.metadata.flush",
+  "sdk.blocks.durable",
+  "sdk.blocks.prepare_concurrent_backing",
+  "sdk.blocks.verify_concurrent_backing",
+  "sdk.blocks.get_for_migration",
+  "sdk.blocks.put",
+  "sdk.blocks.get",
+  "sdk.blocks.flush",
+  "sdk.blocks.delete",
+  "sdk.blocks.reconcile",
+  "tidb.pool.checkout",
+  "tidb.session.configure",
+  "tidb.open.schema",
+  "tidb.open.metadata_row",
+  "tidb.tx.begin.metadata",
+  "tidb.tx.begin.inode",
+  "tidb.tx.begin.compact_read",
+  "tidb.tx.commit",
+  "tidb.tx.rollback",
+  "tidb.sql.session",
+  "tidb.sql.ddl",
+  "tidb.sql.metadata_read",
+  "tidb.sql.metadata_write",
+  "tidb.sql.inode_read",
+  "tidb.sql.inode_write",
+  "tidb.sql.block_read",
+  "tidb.sql.block_write",
+  "tidb.sql.flush_probe",
+  "foundationdb.transaction.create",
+  "foundationdb.transaction.closure_attempt",
+  "foundationdb.read.get",
+  "foundationdb.read.get_key",
+  "foundationdb.read.get_range_page",
+  "foundationdb.transaction.commit",
+  "foundationdb.transaction.on_error",
+])
+const historical92Names = Object.freeze([
+  ...historical85Names,
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
+])
+function historicalStorageRows(rows, names) {
+  return names.map((name) => {
+    const row = rows.find((entry) => entry.name === name)
+    assert.ok(row, `missing modeled historical storage row: ${name}`)
+    return structuredClone(row)
+  })
+}
 const roles = ["pd-1", "pd-2", "pd-3", "tikv-1", "tikv-2", "tikv-3", "tidb", "rustfs-service"]
 const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
 const claims = ["leader_claims", "leader_success", "leader_error", "leader_cancelled", "follower_claims", "follower_success", "follower_error", "follower_cancelled"]
@@ -284,13 +411,13 @@ test("the actual CLI returns a bounded fixed verdict and rejects untrusted build
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test("causal exact contract retains the old prefix and accepts zero new rows losslessly", () => {
+test("causal exact contract retains the old prefix and accepts appended rows losslessly", () => {
   const { pilot, build } = model()
   const entries = pilot.native_phases.phases[0].core_profile.entries
-  assert.equal(entries.length, 114)
+  assert.equal(entries.length, 136)
   assert.equal(entries[46].name, "provider.inode_serialized_bytes")
   assert.equal(entries[47].name, "filesystem.block_put.initial")
-  assert.deepEqual(entries.slice(108).map((row) => row.name), [
+  assert.deepEqual(entries.slice(108, 114).map((row) => row.name), [
     "filesystem.mutation.create_guard.evaluated",
     "filesystem.mutation.create_guard.passed",
     "filesystem.mutation.create_guard.conflict",
@@ -298,19 +425,108 @@ test("causal exact contract retains the old prefix and accepts zero new rows los
     "filesystem.mutation.create_guard.allocation_mismatch",
     "filesystem.mutation.create_guard.path_present",
   ])
+  assert.deepEqual(entries.slice(114, 118).map((row) => row.name), [
+    "compact.namespace.materialize_nodes",
+    "filesystem.mutation.candidate_clone_nodes",
+    "compact.structure.delta_capture_nodes",
+    "compact.structure.expected_guard_nodes",
+  ])
+  assert.deepEqual(entries.slice(118, 134).map((row) => row.name), [
+    "sqlite.compact.authority_query",
+    "sqlite.compact.authority_path",
+    "sqlite.compact.anchor_query_bytes",
+    "sqlite.compact.anchor_decode_bytes",
+    "sqlite.compact.guard_selected_rows",
+    "sqlite.compact.guard_full_rows",
+    "sqlite.compact.guard_selected_decode_bytes",
+    "sqlite.compact.guard_full_decode_bytes",
+    "sqlite.compact.read_lock_wait",
+    "sqlite.compact.read_begin",
+    "filesystem.refresh.replace_probe",
+    "filesystem.refresh.create_capture",
+    "filesystem.refresh.batch_capture",
+    "filesystem.refresh.path_structure",
+    "filesystem.refresh.read_before",
+    "filesystem.refresh.read_after",
+  ])
+  assert.deepEqual(entries.slice(134).map((row) => row.name), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
   for (const row of entries.slice(47)) Object.assign(row, { calls: "0", elapsed_ns: "0", units: "0" })
   entries[47].units = "9007199254740993"
+  for (const [index, row] of entries.slice(114).entries()) Object.assign(row, {
+    elapsed_ns: String(9007199254740993n + BigInt(index)), units: String(18446744073709551615n - BigInt(index)),
+  })
+  entries[134].units = "18446744073709551615"
+  entries[135].units = "9007199254740993"
+  const before = structuredClone(entries)
   assert.equal(verifyPilot(pilot, build).status, "verified")
   assert.equal(entries[47].units, "9007199254740993")
+  assert.deepEqual(entries.slice(134).map((row) => row.units), ["18446744073709551615", "9007199254740993"])
+  assert.deepEqual(entries, before)
 })
-for (const kind of ["old47", "old108", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
+test("current verifier refuses a complete historical 134-core / 85-storage snapshot", () => {
+  const { pilot, build } = model()
+  const workload = pilot.native_phases.phases[0]
+  assert.equal(workload.core_profile.entries.length, 136)
+  assert.equal(workload.storage.length, 116)
+  workload.core_profile.entries.splice(134)
+  workload.storage = historicalStorageRows(workload.storage, historical85Names)
+  assert.equal(workload.core_profile.entries.length, 134)
+  assert.equal(workload.storage.length, 85)
+  assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
+})
+test("current verifier refuses a complete historical 136-core / 92-storage snapshot", () => {
+  const { pilot, build } = model()
+  const workload = pilot.native_phases.phases[0]
+  assert.equal(workload.core_profile.entries.length, 136)
+  assert.equal(workload.storage.length, 116)
+  workload.storage = historicalStorageRows(workload.storage, historical92Names)
+  assert.equal(workload.core_profile.entries.length, 136)
+  assert.equal(workload.storage.length, 92)
+  assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
+})
+for (const kind of ["old47", "old108", "old114", "old118", "old134", "missing", "missing_create_guard", "duplicate", "unknown"]) test(`causal exact ${kind} rows reject qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].core_profile.entries
   if (kind === "old47") rows.splice(47)
   else if (kind === "old108") rows.splice(108)
+  else if (kind === "old114") rows.splice(114)
+  else if (kind === "old118") rows.splice(118)
+  else if (kind === "old134") rows.splice(134)
   else if (kind === "missing") rows.splice(47, 1)
   else if (kind === "missing_create_guard") rows.splice(110, 1)
   else if (kind === "duplicate") rows[48] = { ...rows[47] }
   else rows[47].name = "PRIVATE_CAUSAL_LABEL"
+  assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
+})
+for (const name of profileNames.slice(114)) test(`current exact missing ${name} rejects qualification`, () => {
+  const { pilot, build } = model()
+  const rows = pilot.native_phases.phases[0].core_profile.entries
+  rows.splice(rows.findIndex((row) => row.name === name), 1)
+  assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
+})
+for (const name of [
+  "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup", "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
+  "client.quic.request_send", "client.quic.response_receive",
+  "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
+  "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
+  "blob_cache.peer.get", "blob_cache.peer.get_miss",
+  "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+  "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+  "client.websocket.request_encode", "client.websocket.request_send",
+  "client.websocket.response_receive", "client.websocket.response_decode",
+  "client.quic.connection_setup", "blob_cache.discovery.locate",
+  "object_store.backing_marker.probe.get", "object_store.backing_marker.probe.body_read",
+  "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",
+  "object_store.backing_marker.probe.create", "object_store.backing_marker.retry_backoff",
+]) test(`current exact missing ${name} storage row rejects qualification`, () => {
+  const { pilot, build } = model()
+  const rows = pilot.native_phases.phases[0].storage
+  assert.equal(rows.length, 116)
+  const index = rows.findIndex((row) => row.name === name)
+  assert.notEqual(index, -1)
+  rows.splice(index, 1)
   assert.throws(() => verifyPilot(pilot, build), { code: "pilot_evidence_rejected", reason: "native_evidence" })
 })

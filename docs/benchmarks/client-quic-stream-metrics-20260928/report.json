@@ -1,0 +1,569 @@
+{
+  "allocations": {
+    "actual_allocation_calls": 0,
+    "boxed_trait_future_bytes": {
+      "baseline": {
+        "exchange_bytes": 608,
+        "read_bytes": 464,
+        "write_bytes": 464
+      },
+      "instrumented": {
+        "exchange_bytes": 608,
+        "read_bytes": 464,
+        "write_bytes": 464
+      }
+    },
+    "counted_methods": [
+      "alloc",
+      "alloc_zeroed",
+      "realloc"
+    ],
+    "declared_storage_rows": 92,
+    "future_size_environment": "Debug aarch64-apple-darwin, rustc 1.95.0 (59807616e 2026-04-14)",
+    "future_size_limit": "No observed object size increase in this build; client future allocation counts unmeasured. Existing async-trait boxing remains.",
+    "scope": "Warmed public storage Span success/error/drop paths; excludes initialization, snapshots, output and whole client operations.",
+    "warm_recorder_selected_rows": 14
+  },
+  "base_commit": "f2466b00dd30d46eee97cf9b4a37b8f5ea2834db",
+  "baseline_red": {
+    "failure_class": "exact_test_failed",
+    "lifecycle_settled": true,
+    "logs": {
+      "stderr": {
+        "bytes": 743,
+        "sha256": "41361eb12891178781a72e2f7c40f42e7b7a9f2a29282fee2cfa007b0ba507cc"
+      },
+      "stdout": {
+        "bytes": 942,
+        "sha256": "d970306ceeeb59afed9ce6b38ac2ce144302cf81c22b1eaad3721278fb9a4e6e"
+      }
+    },
+    "only_sticky_unknown": [
+      "exact_named_case_not_observed_passed"
+    ],
+    "oracle": "Full binary, reuse, close, explicit endpoint shutdown and wait_idle behavior oracles completed before the literal missing client metric assertion failed. All five phase rows were unavailable.",
+    "receipt_sha256": "ee1a97d67de783459a5f3c4c79923a9d1fb583799701347b71ac3842fd93c85e",
+    "returncode": 101,
+    "source_count": 505,
+    "source_manifest_sha256": "14e290f3561fc273288c8c3145ab1b7a8b5b4d298275e1eadf51c3392b3874b8",
+    "source_unchanged": true
+  },
+  "behavior_controls": {
+    "all_three_methods_error_on_closed_connection": true,
+    "complete_binary_equality": true,
+    "complete_read_write_payload_bytes": 65543,
+    "control_cancel_after_acquisition_closes_connection": true,
+    "endpoint_cleanup": "All four endpoints explicitly closed, then bounded five-second wait_idle; handles dropped before metric assertions. This observes idle connections after shutdown, not application drain, joined drivers or UDP port release.",
+    "fixture_security": "Generated TLS certificates; private transport fixture bypasses public OIDC and ALPN negotiation.",
+    "malformed_response_after_acquisition_closes_connection": true,
+    "pending_cancel_reuses_connection": true,
+    "request_fields_and_eof_checked": true
+  },
+  "change": "Measure the existing client QUIC open_bi await in exchange, read and write with one opt-in fixed storage row.",
+  "exports": {
+    "addon_client_family_available": false,
+    "cli_mount_client_shutdown_export": "not implemented in this slice; library process snapshots remain available",
+    "cli_server_export": "Current 92-row registry in server process shutdown bank; does not observe a separate client process.",
+    "client_family": "client_quic",
+    "historical_91_row_client_fields": "null/unavailable, including all 32 histogram buckets",
+    "napi_audited_storage_rows_default": 78,
+    "napi_audited_storage_rows_foundationdb": 85,
+    "strict_current_pilot_rejects_missing_client_row": true
+  },
+  "final_phase_observations": [
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 3,
+      "cancelled": 3,
+      "error": 0,
+      "histogram_total": 3,
+      "in_flight": 0,
+      "phase": "cancel_before_acquisition",
+      "success": 0
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 3,
+      "cancelled": 0,
+      "error": 0,
+      "histogram_total": 3,
+      "in_flight": 0,
+      "phase": "successful_reuse",
+      "success": 3
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "error": 0,
+      "histogram_total": 1,
+      "in_flight": 0,
+      "phase": "protocol_error_after_acquisition",
+      "success": 1
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 3,
+      "cancelled": 0,
+      "error": 3,
+      "histogram_total": 3,
+      "in_flight": 0,
+      "phase": "closed_connection_acquisition_error",
+      "success": 0
+    },
+    {
+      "available": true,
+      "bytes": 0,
+      "calls": 1,
+      "cancelled": 0,
+      "error": 0,
+      "histogram_total": 1,
+      "in_flight": 0,
+      "phase": "cancel_after_acquisition",
+      "success": 1
+    }
+  ],
+  "gates": [
+    {
+      "elapsed_seconds": 18.296044084010646,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "clientmetrics",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 3114,
+          "sha256": "bb66c37dd83b405ab071dd772d87f2d861abbef7e1f5930997b9f1423336a1c9"
+        },
+        "stdout": {
+          "bytes": 1201,
+          "sha256": "24104baac500f2ca0eefae6731a58cacb6dfb94cc3f2f76471aa6b5dcb81d792"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "2c3355527888cbdc2901a4102d2f49b0145bc48459dffa6056bc99957acea507",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "connection::metrics_tests::quic_stream_acquisition_outcomes_preserve_transactions",
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 13.62176583398832,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "storagealloc",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 2892,
+          "sha256": "c69fc7754fda99ce00452c9b81bb9cc7dea3da7a6494662b51a21112a6d90834"
+        },
+        "stdout": {
+          "bytes": 276,
+          "sha256": "fa657306942c42e5e5ed0f789cdffdac2ad951446b29cd5ad094acd1390a64bf"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "de7c82ce7d364c13a8a682f66c6bec8510b64df76c77b64b0334825da07f171f",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "warmed_core_spans_record_without_added_allocations",
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.814580374979414,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "coremetrics",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 303,
+          "sha256": "0f5c941afc5861e69f021f08b4110848762fe5be3cc7f2ba959440b1e726f124"
+        },
+        "stdout": {
+          "bytes": 2011,
+          "sha256": "081c2b0e7d045a311462e2895545784f91b56359398b352510aeded9aafd8f12"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "3dc19f09bc18e81d7a520bc0ec161ea352fd83cd14be6111c0267408b956d103",
+      "returncode": 0,
+      "rust_test_executions": 20,
+      "selected_test": null,
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 35.70421774999704,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "remotetests",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 12701,
+          "sha256": "dab598cc0de5c36551e475743b2b56c806958fb3e4d58c00150844d28fc47e00"
+        },
+        "stdout": {
+          "bytes": 3569,
+          "sha256": "1d480e08b321b4512e5b2e8d765370053b51089e925f4841daee21c86cee4f3b"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "113adcd5040a77c732523c61fe0a95ebe9ee64e3ba09b4768878931b0afdfa4e",
+      "returncode": 0,
+      "rust_test_executions": 37,
+      "selected_test": null,
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 2.6311232919688337,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "wsloss",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 1695,
+          "sha256": "9124779247bd42d7d32f7b429c2e27da49c882341e2eb990de99cbcb38f660c5"
+        },
+        "stdout": {
+          "bytes": 188,
+          "sha256": "fa5b023756d28cff1d1e7a00f6e270b336221f22a3c185027fc18b52770a2b29"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "4d9be38315f89ff8e09596147520a94a14ad3c34b33b74dfef54b8c86c907c07",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "websocket_sqlite_commit_survives_lost_wire_reply_without_replay",
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 19.28242208302254,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "clidiagnostics",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 1755,
+          "sha256": "52b6f980bc52997d84f1f5c3fc34e10e162c76c18e21283e85ed396c23b8c0f5"
+        },
+        "stdout": {
+          "bytes": 826,
+          "sha256": "ff5b69c5a0f45c74ea45fe2c22ab055f58291be845e2a23d620f47313c34edb9"
+        }
+      },
+      "named_suite_observed_passed": true,
+      "node_test_executions": 0,
+      "receipt_sha256": "86e7c15ae7e03602ce75eeb67a182e44aafc6bbdecddf6798d81c3001a8bf1d8",
+      "returncode": 0,
+      "rust_test_executions": 7,
+      "selected_test": null,
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 11.300630500016268,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "clicompact",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 346,
+          "sha256": "d86aa09724e8674d97ce01f3268ce500051d4d7f179bb2850aa6ebc941b47f1a"
+        },
+        "stdout": {
+          "bytes": 69500,
+          "sha256": "5fb2f99fc8b6e151304a9142b4e5296c607cd2fe91bd81e12311de10a5e21e3f"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "80529ff4e5c44fa8c8cc77a542a00ce772a9a6edcad1681fc88f4874b79f2d49",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen",
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 49.30410300003132,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "napimetrics",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 2483,
+          "sha256": "658a8ab15da5068abb843bb1135934b322557f79869c229e2c12e194189ee878"
+        },
+        "stdout": {
+          "bytes": 5264,
+          "sha256": "c73619fa1fc9b01dbaa68b8414dfac0e2a2ceb04d82d2a5bc4b768c1302fdb58"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "b1fade95ddff51e03260b4e6682a266e81fcdc484c0864029c0be04fe40233b9",
+      "returncode": 0,
+      "rust_test_executions": 52,
+      "selected_test": null,
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.9376700409920886,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "cacheconsumers",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 23453,
+          "sha256": "006059f353ef8e5a9602d875a7e1cf79bc02c5945e9618bc245daf9133e73502"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 181,
+      "receipt_sha256": "2d7b373e1abc103c5e094841c534d6d583cf0549f629234304267c4378716ef7",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 93,
+      "source_manifest_sha256": "1e40721090aa0e53f172e360b41a6732def50c00a01a610306d0d6cd4ae1a811",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 15.56638379098149,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "faultclippy",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 3105,
+          "sha256": "c72f9212aa68303b0f0c3ec6157b9770e7d69afe566717aa6ed86ee36882f472"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "5dbc97c499d996a271b93f1d4b4a9142a67fb466c96698a59ca806505c7db43d",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 23.068474458006676,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "cachemetricsclippy",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 3505,
+          "sha256": "69724d0550960a45f3f6601e3b77c33fac57a175124f5859dc9aa0265c80ab16"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "c6bf54a14c6ea4dcebbc7d240f5cbac898e0096034dbbbdb1871e6ceefacf76a",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 45.09911608300172,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "consumerclippy",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 3293,
+          "sha256": "8e8325217d433f68cf617be2202da11a43485e88699b47eb5c393087eef0a9fd"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "ba229e78e93ebfe9252ec7dbd51546cdc165bc8e0d5ec32dafabd702ab68b7d2",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.982861166994553,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "fmt",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "node_test_executions": 0,
+      "receipt_sha256": "74b468559f9f7675bacb5ed3eeb1346b97f241fc81143f9b04baaa21b59cf1f2",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 505,
+      "source_manifest_sha256": "f74c487678dec8a51304607999ed3dce1f8528527e63e7176d17c7aea7ef36af",
+      "source_unchanged": true
+    }
+  ],
+  "limits": [
+    "Inclusive nested times are not exclusive CPU cost.",
+    "No client send/receive, socket, WebSocket or peer stream-stage timings are added here.",
+    "No new throughput, physical IOPS, backing datastore resources, compression/chunk-format or full production-capacity measurements.",
+    "The warm recorder allocation result does not establish zero allocation for a whole RPC or metadata operation.",
+    "Public OIDC, negotiated QUIC/WebSocket and lost-reply behavior are covered by separate existing remote and configured CLI gates, not the private stream-credit fixture.",
+    "No attribution of an earlier hosted CI failure; Actions raw logs and artifacts were not accessed."
+  ],
+  "metric_contract": {
+    "bytes": "unavailable; fixed zero",
+    "calls": "stream acquisition invocations, not acknowledged requests",
+    "cancelled": "pending acquisition future dropped, including cancellation by the outer request deadline",
+    "duration": "inclusive open_bi await wall nanoseconds; not exclusive CPU or network time",
+    "error": "existing acquisition transport error",
+    "histogram": "32 logarithmic latency buckets",
+    "returned_rows": "unavailable; no row observation",
+    "scope": "process-local; control exchanges including authentication and renewal, reads and writes",
+    "success": "local bidirectional stream handles acquired",
+    "trace": "existing fixed-label bounded slow logs; no paths, keys, payloads or raw errors"
+  },
+  "pending_gauge_controls": {
+    "after_acquisition": 0,
+    "before_acquisition": 3
+  },
+  "qualification": {
+    "bank_index_sha256": "8fb9d6e17a1732f810604ef66142726d8feb2071526b18163b8c3130bfaa5177",
+    "controls_logs": {
+      "controls.stderr": {
+        "bytes": 164,
+        "sha256": "8b69923e2967f82d17f11db3cae8dcd0728a678649e2e56e74c4b6e62b04725f"
+      },
+      "controls.stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "controls_receipt_sha256": "abb3b0f1336fe57705cff6a1c571bb334781e04b6f63b72a325614e75e46f524",
+    "hosted_ci": "Exact new source requires separate hosted qualification.",
+    "modeled_parent_controls": 65,
+    "node_source_count": 93,
+    "owned_gate_count": 13,
+    "pure_node_test_executions": 181,
+    "rust_source_count": 505,
+    "rust_test_executions": 120,
+    "source_pins_unchanged_across_all_qualified_gates": true,
+    "source_union_count": 530,
+    "source_union_sha256": "8b948fdcc139f87e8373465ebc4f6f3ed38c28316b638e53c705ff03f562eb23",
+    "strict_clippy_and_format_passed": true
+  },
+  "registry": {
+    "client_ordinal": 91,
+    "client_row": "client.quic.open_bi",
+    "core_rows": 136,
+    "original_prefix_unchanged": true,
+    "original_storage_prefix_rows": 91,
+    "server_quic_rows": 21,
+    "storage_rows": 92
+  },
+  "retained_unqualified_consumer": {
+    "cause": "Two stale 91-row assertions in the JavaScript verifier test failed. Changed them to 92 and added the missing-client-row rejection control.",
+    "excluded_from_final_counts": true,
+    "failed": 7,
+    "logs": {
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 30027,
+        "sha256": "815bfaa8a42791ea46f4261d1c126d49ba9d272d7fb198eddb50449fd86966f3"
+      }
+    },
+    "passed": 173,
+    "receipt_sha256": "3a004de0244a768436761537318ee569aa93be9b73e82a2f7ad1bbddfed0c70e",
+    "returncode": 1,
+    "scope_of_correction": "JavaScript test only; the 505 Rust gate inputs remained unchanged.",
+    "source_count": 93,
+    "source_unchanged": true,
+    "test_executions": 180
+  },
+  "schema": "mount-rs.client-quic-stream-metrics.v1",
+  "source_inputs": {
+    ".github/workflows/remote-drives.yml": "fead6088e00925a6199be5a9272e4d0924655ed03165b417758110e8a20dcc09",
+    "apps/mount-rs-cli/src/remote_diagnostics.rs": "72a39173caa4f76bac70343acd0c1c6be5145338f8945203e0208ebdfce60d37",
+    "apps/mount-rs-cli/tests/configured_remote_compact.rs": "20bd321517ff486a7ba728c8cb5b23cc3c43c06817234ba2a1ee4bf40d4bc3ae",
+    "benchmarks/storage/diagnostics.mjs": "1c73101e5fbc971b098b919e89f47faa15d925fb1095b692fa7b034451f5fc18",
+    "benchmarks/storage/foundationdb-diagnostics.test.mjs": "d7abfc151f5f62ed02cae9a3c66fe7c592e680c72b631853eaf46514fe03d236",
+    "benchmarks/storage/owned-backing-pilot.test.mjs": "1762c63e0c6ab36ceae2a159c7eff9a92ae8522b9cb30f9a548658ba72673d6b",
+    "benchmarks/storage/owned-layout-metrics.test.mjs": "2e1e02d1152d018673da69c20a14d930dd3d655c0a41ec47af5b9c0219d0076f",
+    "benchmarks/storage/test.mjs": "e46cfe5e8f171026be435e483b0ab8dc39ab11a3a9819da9b2c4707b528458a4",
+    "bindings/mount-rs-napi/src/lib.rs": "57cf9b2387af935fa0e6089fbbe2070eddc3a9d5679642d391913311975c8273",
+    "crates/mount-rs-remote-client/src/connection.rs": "2d0ebb2bd56923ee26386e87ddfcc1d9f06b46fb6849a5820f70afebb97f7437",
+    "crates/mount-rs-remote-client/src/connection_metrics_tests.rs": "690fcfcaadd5902411b5af97a1fd47d67dbce63186ff5c29ba3310fb98188f9a",
+    "scripts/test-remote-failures-controls.py": "850cd93b7dfc6c209abd90c6e14fff547c9aff349201ba89c0112b3863761a05",
+    "scripts/test-remote-failures.py": "27337c3b84761ce52f52111b42d1d9d90177dae7efd013c356238eb157769eb1",
+    "scripts/verify-owned-backing-pilot.test.mjs": "48133bcda1e3ee84514ccfb45c247a4f8f06bb676f30c620626e08c2fc74da77",
+    "src/diagnostics/storage.rs": "9e758e771ab6d6c22528d4654d8476a63505eb2b00566788294e058d70f90151",
+    "tests/storage_diagnostics_allocations.rs": "e89b302ddb46eb2642c5646e8d083b0784e941b074550046c5e409c55f45a69b"
+  }
+}

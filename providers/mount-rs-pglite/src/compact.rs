@@ -665,6 +665,12 @@ impl PgliteMetadataStore {
         &self,
         delta: &CompactStructuralDelta,
     ) -> Result<CompactPublication> {
+        if matches!(
+            delta.scope(),
+            StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink
+        ) {
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
         let volume = &self.0.volume_key;
         key(volume)?;
         anchor_bounds(delta.base_anchor())?;
@@ -729,6 +735,9 @@ impl PgliteMetadataStore {
                     rows.extend(guards(&tx, volume, Some(id), true, 1, &mut reads).await?);
                 }
                 rows
+            }
+            StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink => {
+                return Err(FsError::new(ErrorCode::Enotsup));
             }
         };
         // FileCreate checks new-key absence independently of anchor membership,

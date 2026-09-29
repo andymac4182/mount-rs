@@ -211,6 +211,318 @@ async fn actual_compact_selected_physical_identity_survives_independent_structur
 
 #[tokio::test]
 #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
+async fn actual_compact_selected_streaming_certifies_full_audited_root_and_file() {
+    let f = fixture(true).await;
+    let inode = create(&f, "streamed-file").await;
+    create(&f, "unrequested-sibling").await;
+    let snapshot = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let (_, _, audited) = snapshot.clone().into_validated_namespace().unwrap();
+    let file = &snapshot.guards[&inode];
+    let root_read = f
+        .store
+        .read_compact_inode(f.backing, snapshot.anchor.root, audited.expect_root())
+        .await;
+    let file_read = f
+        .store
+        .read_compact_inode(
+            f.backing,
+            inode,
+            CompactInodeExpectation::selected(
+                snapshot.anchor.generation,
+                file.identity,
+                &file.node,
+            ),
+        )
+        .await;
+    let root_owned = f
+        .store
+        .load_compact_inode(f.backing, snapshot.anchor.root)
+        .await;
+    let file_owned = f.store.load_compact_inode(f.backing, inode).await;
+    f.store.close().await.unwrap();
+
+    let CompactInodeRead::Unchanged(root) = root_read.unwrap() else {
+        panic!("canonical fresh root bytes must use streamed certification")
+    };
+    assert_eq!(root.generation(), snapshot.anchor.generation);
+    assert_eq!(root.inode(), snapshot.anchor.root);
+    assert_eq!(
+        root.identity(),
+        snapshot.guards[&snapshot.anchor.root].identity
+    );
+    let verified = root
+        .into_verified_root()
+        .expect("Full-audited root receipt required");
+    assert_eq!(verified.generation(), snapshot.anchor.generation);
+    assert_eq!(verified.guard(), &snapshot.guards[&snapshot.anchor.root]);
+    assert_eq!(verified.guard(), &root_owned.unwrap().guard);
+    let CompactInodeRead::Unchanged(file_read) = file_read.unwrap() else {
+        panic!("canonical fresh file bytes must use streamed certification")
+    };
+    assert_eq!(file_read.generation(), snapshot.anchor.generation);
+    assert_eq!(file_read.inode(), inode);
+    assert_eq!(file_read.identity(), file.identity);
+    assert!(file_read.into_verified_root().is_none());
+    assert_eq!(file_owned.unwrap().guard, *file);
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_selected_streaming_fallback_reuses_one_fresh_joined_row() {
+    let f = fixture(true).await;
+    let inode = create(&f, "streamed-fallback").await;
+    let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
+    let mut changed = original.guard.node.clone();
+    changed.stats.mtime_ms += 17;
+    let acknowledged = f
+        .store
+        .publish_compact_inode(
+            f.backing,
+            inode,
+            original.generation,
+            original.guard.identity,
+            changed,
+        )
+        .await
+        .unwrap();
+    let stale_expectation = CompactInodeExpectation::selected(
+        original.generation,
+        original.guard.identity,
+        &original.guard.node,
+    );
+    let revision_read = f
+        .store
+        .read_compact_inode(f.backing, inode, stale_expectation)
+        .await;
+    let revision_owned = f.store.load_compact_inode(f.backing, inode).await;
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    // Warm the joined statement on canonical bytes before the encoding control.
+    reader.load_compact_inode(f.backing, inode).await.unwrap();
+
+    // Derived Serde accepts positional struct representations. The conservative
+    // map-only seed must decline this encoding and decode this exact fresh row.
+    let sequence = serde_json::to_string(&serde_json::json!([
+        &acknowledged.guard.node.stats,
+        &acknowledged.guard.node.data,
+    ]))
+    .unwrap();
+    let sequence_reference =
+        serde_json::from_str::<mount_rs_core::storage::NodeMetadata>(&sequence);
+    let pool = Pool::from_url(&f.url).unwrap();
+    let mut connection = pool.get_conn().await.unwrap();
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_compact_guards SET node=? WHERE volume_key=? AND inode=?",
+            (&sequence, &f.key, inode as i64),
+        )
+        .await
+        .unwrap();
+    drop(connection);
+    pool.disconnect().await.unwrap();
+    let before = raw(&f).await;
+    proxy.begin();
+    let sequence_read = reader
+        .read_compact_inode(
+            f.backing,
+            inode,
+            CompactInodeExpectation::selected(
+                acknowledged.generation,
+                acknowledged.guard.identity,
+                &acknowledged.guard.node,
+            ),
+        )
+        .await;
+    let (queries, rows) = proxy.end();
+    let sequence_owned = f.store.load_compact_inode(f.backing, inode).await;
+    let after = raw(&f).await;
+    reader.close().await.unwrap();
+    f.store.close().await.unwrap();
+    proxy.shutdown().await;
+
+    let CompactInodeRead::Loaded(revision_read) = revision_read.unwrap() else {
+        panic!("changed physical revision must return the fresh owned result")
+    };
+    assert_eq!(revision_read, revision_owned.unwrap());
+    assert_eq!(revision_read, acknowledged);
+    assert_ne!(revision_read.guard.identity, original.guard.identity);
+    assert_eq!(sequence_reference.unwrap(), acknowledged.guard.node);
+    assert_eq!(
+        before, after,
+        "fallback must preserve the same authority and guard bytes"
+    );
+    assert_eq!(
+        before.1.iter().find(|row| row.0 == inode as i64).unwrap().4,
+        sequence,
+        "the actual server row retains the positional representation",
+    );
+    let CompactInodeRead::Loaded(sequence_read) = sequence_read.unwrap() else {
+        panic!("accepted sequence encoding must use the same-byte owned fallback")
+    };
+    assert_eq!(sequence_read, sequence_owned.unwrap());
+    assert_eq!(sequence_read, acknowledged);
+    assert_eq!(rows, 1);
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("SELECT "))
+            .count(),
+        1
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql.contains("LEFT JOIN mount_rs_tidb_compact_guards"))
+    );
+    assert!(queries.iter().all(|sql| {
+        !sql.contains("FOR UPDATE")
+            && !sql.starts_with("START TRANSACTION")
+            && !sql.eq_ignore_ascii_case("COMMIT")
+            && !sql.eq_ignore_ascii_case("ROLLBACK")
+    }));
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_selected_streaming_preserves_authority_anchor_guard_error_precedence() {
+    for case in [
+        "stale-authority",
+        "unsupported-anchor",
+        "bad-guard",
+        "missing-guard",
+    ] {
+        let f = fixture(true).await;
+        let inode = create(&f, "streamed-precedence").await;
+        let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
+        let proxy = compact_proxy::Proxy::new(&f.url).await;
+        let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+            .await
+            .unwrap();
+        reader.load_compact_inode(f.backing, inode).await.unwrap();
+        let pool = Pool::from_url(&f.url).unwrap();
+        let mut connection = pool.get_conn().await.unwrap();
+        if case == "missing-guard" {
+            connection
+                .exec_drop(
+                    "DELETE FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode=?",
+                    (&f.key, inode as i64),
+                )
+                .await
+                .unwrap();
+        } else {
+            connection.exec_drop(
+                "UPDATE mount_rs_tidb_compact_guards SET node='{}' WHERE volume_key=? AND inode=?",
+                (&f.key, inode as i64),
+            ).await.unwrap();
+        }
+        if case == "stale-authority" {
+            connection
+                .exec_drop(
+                    "UPDATE mount_rs_tidb_metadata SET write_mode='MRC4' WHERE volume_key=?",
+                    (&f.key,),
+                )
+                .await
+                .unwrap();
+        } else if case == "unsupported-anchor" {
+            let (anchor,): (String,) = connection
+                .exec_first(
+                    "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                    (&f.key,),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let mut anchor: serde_json::Value = serde_json::from_str(&anchor).unwrap();
+            anchor["anchor"]["default_chunker"]["algorithm"] =
+                serde_json::json!("unsupported-streamed-precedence-chunker");
+            connection
+                .exec_drop(
+                    "UPDATE mount_rs_tidb_metadata SET namespace=? WHERE volume_key=?",
+                    (serde_json::to_string(&anchor).unwrap(), &f.key),
+                )
+                .await
+                .unwrap();
+        }
+        drop(connection);
+        pool.disconnect().await.unwrap();
+        let before = raw(&f).await;
+        let owned = f.store.load_compact_inode(f.backing, inode).await;
+        proxy.begin();
+        let streamed = reader
+            .read_compact_inode(
+                f.backing,
+                inode,
+                CompactInodeExpectation::selected(
+                    original.generation,
+                    original.guard.identity,
+                    &original.guard.node,
+                ),
+            )
+            .await;
+        let (queries, rows) = proxy.end();
+        let after = raw(&f).await;
+        reader.close().await.unwrap();
+        f.store.close().await.unwrap();
+        proxy.shutdown().await;
+
+        let owned = owned.unwrap_err();
+        let streamed = streamed.unwrap_err();
+        let expected_code = match case {
+            "stale-authority" | "missing-guard" => ErrorCode::Estale,
+            "unsupported-anchor" => ErrorCode::Enotsup,
+            "bad-guard" => ErrorCode::Eio,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            owned.code, expected_code,
+            "{case}: reference decoder precedence"
+        );
+        assert_eq!(
+            (
+                streamed.code,
+                &streamed.syscall,
+                &streamed.path,
+                &streamed.dest,
+                streamed.to_string()
+            ),
+            (
+                owned.code,
+                &owned.syscall,
+                &owned.path,
+                &owned.dest,
+                owned.to_string()
+            ),
+            "{case}: borrowed-row fallback must preserve the complete reference error",
+        );
+        assert_eq!(
+            before, after,
+            "{case}: read failures must preserve all raw rows"
+        );
+        assert_eq!(
+            rows, 1,
+            "{case}: one joined result row, including the absent guard"
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.starts_with("SELECT "))
+                .count(),
+            1,
+            "{case}"
+        );
+        assert!(
+            queries
+                .iter()
+                .any(|sql| sql.contains("LEFT JOIN mount_rs_tidb_compact_guards")),
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
 async fn actual_compact_same_inode_one_winner_and_unrelated_preserved() {
     let f = fixture(true).await;
     let a = create(&f, "a").await;
@@ -318,6 +630,551 @@ async fn actual_compact_enrollment_rejects_nonfresh_namespace_without_mutation()
 #[path = "support/compact_proxy.rs"]
 mod compact_proxy;
 use std::sync::atomic::Ordering;
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_transitions_target_two_guards() {
+    for siblings in [128, 1000] {
+        let f = fixture(true).await;
+        let base = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        let mut ns = base.namespace().unwrap();
+        let file = add_file(&mut ns, "selected-source");
+        for n in 0..siblings {
+            add_file(&mut ns, &format!("sibling-{n}"));
+        }
+        let setup = CompactStructuralDelta::capture(&base, &ns, StructuralScope::Full).unwrap();
+        f.store.publish_compact_structure(&setup).await.unwrap();
+        let expected = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        assert_eq!(expected.guards.len(), siblings + 2);
+
+        let proxy = compact_proxy::Proxy::new(&f.url).await;
+        let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.compact_root_file_capability(),
+            CompactRootFileCapability::Supported
+        );
+        // Warm the owned connection and prepared statement outside the trace.
+        reader
+            .load_compact_root_file(f.backing, expected.anchor.root, file)
+            .await
+            .unwrap();
+        proxy.begin();
+        let captured = reader
+            .load_compact_root_file(f.backing, expected.anchor.root, file)
+            .await
+            .unwrap();
+        let (queries, _) = proxy.end();
+
+        assert_eq!(captured.anchor(), &expected.anchor);
+        assert_eq!(
+            captured.root(),
+            Some(&expected.guards[&expected.anchor.root])
+        );
+        assert_eq!(captured.file(), Some(&expected.guards[&file]));
+        let selects: Vec<_> = queries
+            .iter()
+            .filter(|sql| sql.starts_with("SELECT "))
+            .collect();
+        assert_eq!(selects.len(), 1, "{siblings} siblings: one coherent SELECT");
+        assert!(selects[0].contains("mount_rs_tidb_metadata AS m"));
+        assert!(selects[0].contains(" AS r ON r.volume_key=m.volume_key"));
+        assert!(selects[0].contains(" AS f ON f.volume_key=m.volume_key"));
+        assert!(!selects[0].contains("FOR UPDATE"));
+        assert!(!selects[0].starts_with("SELECT inode,incarnation,epoch,revision,node"));
+        let (_, _, audited) = expected.clone().into_validated_namespace().unwrap();
+        let verified = audited
+            .verify_root_file(
+                captured,
+                file,
+                &expected.guards[&file].node,
+                expected.guards[&file].identity,
+            )
+            .unwrap();
+        let root_stats = &expected.guards[&expected.anchor.root].node.stats;
+        let file_stats = &expected.guards[&file].node.stats;
+        let rename = CompactRootFileTransition::capture(
+            verified,
+            CompactRootFileIntent::RenameAbsent {
+                from: "selected-source".into(),
+                to: "renamed-source".into(),
+            },
+            CompactRootFileTimes {
+                parent_mtime_ms: root_stats.mtime_ms + 2,
+                parent_ctime_ms: root_stats.ctime_ms + 2,
+                file_ctime_ms: file_stats.ctime_ms + 1,
+            },
+        )
+        .unwrap();
+        proxy.begin();
+        reader
+            .publish_compact_structure(rename.delta())
+            .await
+            .unwrap();
+        let (rename_queries, rename_rows) = proxy.end();
+        assert_root_file_publication_queries(&rename_queries, rename_rows);
+        let renamed = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        let NodeData::Directory { entries } = &renamed.guards[&renamed.anchor.root].node.data
+        else {
+            panic!("root directory required");
+        };
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "renamed-source" && entry.inode == file)
+        );
+        assert!(!entries.iter().any(|entry| entry.name == "selected-source"));
+        assert_eq!(renamed.guards[&file].node.stats.nlink, 1);
+
+        let (_, _, audited) = renamed.clone().into_validated_namespace().unwrap();
+        let read = reader
+            .load_compact_root_file(f.backing, renamed.anchor.root, file)
+            .await
+            .unwrap();
+        let verified = audited
+            .verify_root_file(
+                read,
+                file,
+                &renamed.guards[&file].node,
+                renamed.guards[&file].identity,
+            )
+            .unwrap();
+        let root_stats = &renamed.guards[&renamed.anchor.root].node.stats;
+        let file_stats = &renamed.guards[&file].node.stats;
+        let unlink = CompactRootFileTransition::capture(
+            verified,
+            CompactRootFileIntent::UnlinkLastLink {
+                name: "renamed-source".into(),
+            },
+            CompactRootFileTimes {
+                parent_mtime_ms: root_stats.mtime_ms + 1,
+                parent_ctime_ms: root_stats.ctime_ms + 1,
+                file_ctime_ms: file_stats.ctime_ms + 1,
+            },
+        )
+        .unwrap();
+        proxy.begin();
+        reader
+            .publish_compact_structure(unlink.delta())
+            .await
+            .unwrap();
+        let (unlink_queries, unlink_rows) = proxy.end();
+        assert_root_file_publication_queries(&unlink_queries, unlink_rows);
+        let unlinked = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        let NodeData::Directory { entries } = &unlinked.guards[&unlinked.anchor.root].node.data
+        else {
+            panic!("root directory required");
+        };
+        assert!(!entries.iter().any(|entry| entry.inode == file));
+        assert_eq!(unlinked.guards[&file].node.stats.nlink, 0);
+        assert!(unlinked.anchor.members.contains(&file));
+        assert_eq!(unlinked.guards.len(), siblings + 2);
+        reader.close().await.unwrap();
+        proxy.shutdown().await;
+        f.store.close().await.unwrap();
+        eprintln!(
+            "compact root-file transitions: siblings={siblings}; one joined capture; each publication two locked guards, two guard updates and one anchor update; source tombstone retained"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_capture_uses_one_view() {
+    let f = fixture(true).await;
+    let file = create(&f, "source").await;
+    let before = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let transition = root_file_rename_transition(&f, &f.store, file, "source", "moved").await;
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    reader
+        .load_compact_root_file(f.backing, before.anchor.root, file)
+        .await
+        .unwrap();
+    proxy.begin();
+    proxy.trace.pause_guards.store(true, Ordering::SeqCst);
+    let backing = f.backing;
+    let root = before.anchor.root;
+    let reading = tokio::spawn(async move {
+        let result = reader.load_compact_root_file(backing, root, file).await;
+        reader.close().await.unwrap();
+        result
+    });
+    proxy.reached().await;
+    // The joined SELECT is paused before it reaches TiDB. Commit both affected
+    // structural bodies, then an independent selected source revision.
+    f.store
+        .publish_compact_structure(transition.delta())
+        .await
+        .unwrap();
+    let old = f.store.load_compact_inode(f.backing, file).await.unwrap();
+    let mut node = old.guard.node;
+    node.stats.mtime_ms += 1;
+    f.store
+        .publish_compact_inode(f.backing, file, old.generation, old.guard.identity, node)
+        .await
+        .unwrap();
+    let expected = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    proxy.trace.resume.notify_one();
+    let captured = reading.await.unwrap().unwrap();
+    let (queries, joined_rows) = proxy.end();
+    assert_eq!(joined_rows, 1, "one physical row contains two guard bodies");
+    assert_eq!(
+        captured.into_parts(),
+        (
+            expected.anchor.clone(),
+            Some(expected.guards[&root].clone()),
+            Some(expected.guards[&file].clone()),
+        )
+    );
+    assert_ne!(expected.anchor, before.anchor);
+    assert_ne!(expected.guards[&root], before.guards[&root]);
+    assert_ne!(expected.guards[&file], before.guards[&file]);
+    let selects: Vec<_> = queries
+        .iter()
+        .filter(|sql| sql.starts_with("SELECT "))
+        .collect();
+    assert_eq!(selects.len(), 1);
+    assert!(selects[0].contains(" AS r ON r.volume_key=m.volume_key"));
+    assert!(selects[0].contains(" AS f ON f.volume_key=m.volume_key"));
+    assert!(!selects[0].contains("FOR UPDATE"));
+    proxy.shutdown().await;
+    f.store.close().await.unwrap();
+}
+
+fn assert_root_file_publication_queries(queries: &[String], returned_guard_rows: usize) {
+    assert_eq!(returned_guard_rows, 2, "exactly two locked guard rows");
+    let guard_reads: Vec<_> = queries
+        .iter()
+        .filter(|sql| {
+            sql.starts_with(
+                "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards",
+            )
+        })
+        .collect();
+    assert_eq!(guard_reads.len(), 1);
+    assert!(guard_reads[0].contains("inode IN (?,?) ORDER BY inode FOR UPDATE"));
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("UPDATE mount_rs_tidb_compact_guards"))
+            .count(),
+        2,
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("UPDATE mount_rs_tidb_metadata SET revision="))
+            .count(),
+        1,
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.eq_ignore_ascii_case("COMMIT"))
+            .count(),
+        1
+    );
+}
+
+async fn root_file_rename_transition(
+    f: &Fixture,
+    reader: &TidbMetadataStore,
+    file: u64,
+    from: &str,
+    to: &str,
+) -> CompactRootFileTransition {
+    let snapshot = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let (_, _, audited) = snapshot.clone().into_validated_namespace().unwrap();
+    let read = reader
+        .load_compact_root_file(f.backing, snapshot.anchor.root, file)
+        .await
+        .unwrap();
+    let verified = audited
+        .verify_root_file(
+            read,
+            file,
+            &snapshot.guards[&file].node,
+            snapshot.guards[&file].identity,
+        )
+        .unwrap();
+    let root = &snapshot.guards[&snapshot.anchor.root].node.stats;
+    let file_stats = &snapshot.guards[&file].node.stats;
+    CompactRootFileTransition::capture(
+        verified,
+        CompactRootFileIntent::RenameAbsent {
+            from: from.into(),
+            to: to.into(),
+        },
+        CompactRootFileTimes {
+            parent_mtime_ms: root.mtime_ms.checked_add(2).unwrap(),
+            parent_ctime_ms: root.ctime_ms.checked_add(2).unwrap(),
+            file_ctime_ms: file_stats.ctime_ms.checked_add(1).unwrap(),
+        },
+    )
+    .unwrap()
+}
+
+async fn root_file_unlink_transition(
+    f: &Fixture,
+    reader: &TidbMetadataStore,
+    file: u64,
+    name: &str,
+) -> CompactRootFileTransition {
+    let snapshot = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let (_, _, audited) = snapshot.clone().into_validated_namespace().unwrap();
+    let read = reader
+        .load_compact_root_file(f.backing, snapshot.anchor.root, file)
+        .await
+        .unwrap();
+    let verified = audited
+        .verify_root_file(
+            read,
+            file,
+            &snapshot.guards[&file].node,
+            snapshot.guards[&file].identity,
+        )
+        .unwrap();
+    let root = &snapshot.guards[&snapshot.anchor.root].node.stats;
+    let file_stats = &snapshot.guards[&file].node.stats;
+    CompactRootFileTransition::capture(
+        verified,
+        CompactRootFileIntent::UnlinkLastLink { name: name.into() },
+        CompactRootFileTimes {
+            parent_mtime_ms: root.mtime_ms.checked_add(1).unwrap(),
+            parent_ctime_ms: root.ctime_ms.checked_add(1).unwrap(),
+            file_ctime_ms: file_stats.ctime_ms.checked_add(1).unwrap(),
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_wait_rechecks_source_and_authority() {
+    let f = fixture(true).await;
+    let file = create(&f, "source").await;
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    let transition = root_file_rename_transition(&f, &writer, file, "source", "moved").await;
+    let pool = Pool::from_url(&f.url).unwrap();
+    let mut conn = pool.get_conn().await.unwrap();
+    conn.query_drop("SET SESSION tidb_txn_mode='pessimistic'")
+        .await
+        .unwrap();
+    let mut tx = conn
+        .start_transaction(mysql_async::TxOpts::default())
+        .await
+        .unwrap();
+    let (revision, body): (i64, String) = tx
+        .exec_first(
+            "SELECT revision,node FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode=? FOR UPDATE",
+            (&f.key, file),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut node: mount_rs_core::storage::NodeMetadata = serde_json::from_str(&body).unwrap();
+    node.stats.mtime_ms += 1;
+    tx.exec_drop(
+        "UPDATE mount_rs_tidb_compact_guards SET revision=?,node=? WHERE volume_key=? AND inode=?",
+        (
+            revision + 1,
+            serde_json::to_string(&node).unwrap(),
+            &f.key,
+            file,
+        ),
+    )
+    .await
+    .unwrap();
+    proxy.begin();
+    proxy.trace.pause_guards.store(true, Ordering::SeqCst);
+    let publishing = tokio::spawn(async move {
+        let result = writer.publish_compact_structure(transition.delta()).await;
+        writer.close().await.unwrap();
+        result
+    });
+    proxy.reached().await;
+    proxy.trace.resume.notify_one();
+    tx.commit().await.unwrap();
+    let result = publishing.await.unwrap();
+    assert!(result.unwrap_err().is(ErrorCode::Eagain));
+    let (queries, _) = proxy.end();
+    assert!(!queries.iter().any(|sql| sql.starts_with("UPDATE ")
+        || sql.starts_with("INSERT ")
+        || sql.starts_with("DELETE ")));
+    let after_source = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    assert_eq!(after_source.guards[&file].node, node);
+    assert_eq!(
+        after_source.guards[&file].identity.revision,
+        revision as u64 + 1
+    );
+    assert_eq!(after_source.anchor.members.len(), 2);
+
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    let transition = root_file_rename_transition(&f, &writer, file, "source", "moved").await;
+    create(&f, "independent").await;
+    let before = raw(&f).await;
+    proxy.begin();
+    assert!(
+        writer
+            .publish_compact_structure(transition.delta())
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Eagain)
+    );
+    let (queries, _) = proxy.end();
+    assert!(!queries.iter().any(|sql| sql.starts_with("UPDATE ")
+        || sql.starts_with("INSERT ")
+        || sql.starts_with("DELETE ")));
+    assert_eq!(raw(&f).await, before);
+    writer.close().await.unwrap();
+    proxy.shutdown().await;
+    drop(conn);
+    pool.disconnect().await.unwrap();
+    f.store.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_commit_ack_unknown_not_replayed() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let f = fixture(true).await;
+    let file = create(&f, "source").await;
+    for rename in [true, false] {
+        let before = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        let proxy = compact_proxy::Proxy::new(&f.url).await;
+        let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+            .await
+            .unwrap();
+        let transition = if rename {
+            root_file_rename_transition(&f, &writer, file, "source", "moved").await
+        } else {
+            root_file_unlink_transition(&f, &writer, file, "moved").await
+        };
+        proxy.begin();
+        proxy.trace.drop_commit_ack.store(true, Ordering::SeqCst);
+        let result = timeout(
+            Duration::from_secs(10),
+            writer.publish_compact_structure(transition.delta()),
+        )
+        .await
+        .expect("controlled root-file publication completed");
+        let (queries, rows) = proxy.end();
+        let commits = proxy.trace.commits.load(Ordering::SeqCst);
+        let dropped = proxy.trace.dropped_acks.load(Ordering::SeqCst);
+        let fresh = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        timeout(Duration::from_secs(10), writer.close())
+            .await
+            .expect("writer disconnect completed")
+            .unwrap();
+        timeout(Duration::from_secs(10), proxy.shutdown())
+            .await
+            .expect("proxy relay settled");
+        let error = result.unwrap_err();
+        assert!(error.is(ErrorCode::Eio));
+        assert!(!error.is(ErrorCode::Eagain));
+        assert!(error.to_string().contains("commit outcome is unknown"));
+        assert_eq!(commits, 1);
+        assert_eq!(dropped, 1);
+        assert_root_file_publication_queries(&queries, rows);
+        assert_eq!(fresh.anchor.generation, before.anchor.generation + 1);
+        assert_eq!(fresh.guards[&file].identity.epoch, fresh.anchor.generation);
+        let NodeData::Directory { entries } = &fresh.guards[&fresh.anchor.root].node.data else {
+            panic!("root directory required");
+        };
+        if rename {
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.name == "moved" && entry.inode == file)
+            );
+            assert!(!entries.iter().any(|entry| entry.name == "source"));
+            assert_eq!(fresh.guards[&file].node.stats.nlink, 1);
+        } else {
+            assert!(!entries.iter().any(|entry| entry.inode == file));
+            assert_eq!(fresh.guards[&file].node.stats.nlink, 0);
+            assert!(fresh.anchor.members.contains(&file));
+        }
+    }
+    f.store.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_packet_rejects_before_mutation() {
+    use mount_rs_core::storage::{BlockExtent, BlockId};
+
+    let f = fixture(true).await;
+    let file = create(&f, "source").await;
+    let old = f.store.load_compact_inode(f.backing, file).await.unwrap();
+    let mut node = old.guard.node.clone();
+    node.stats.size = 1024;
+    node.stats.blocks = 2;
+    // The locked input row must fit the client's receive packet. Make the
+    // serialized body close enough to that limit for the provider's outgoing
+    // statement budget to reject it before any DML, for either transition.
+    for offset in 0..1024 {
+        let NodeData::File(layout) = &mut node.data else {
+            panic!("source file required")
+        };
+        layout.extents.push(BlockExtent {
+            file_offset: offset,
+            block: BlockId(format!("b{}", "1".repeat(64))),
+            block_offset: 0,
+            length: 1,
+        });
+        if serde_json::to_vec(&node).unwrap().len() >= 64900 {
+            break;
+        }
+    }
+    let input_bytes = serde_json::to_vec(&node).unwrap().len();
+    assert!((64900..=65100).contains(&input_bytes));
+    assert!(
+        input_bytes + 128 < 65536,
+        "complete guard row fits receive packet"
+    );
+    f.store
+        .publish_compact_inode(f.backing, file, old.generation, old.guard.identity, node)
+        .await
+        .unwrap();
+    let rename = root_file_rename_transition(&f, &f.store, file, "source", "moved").await;
+    let unlink = root_file_unlink_transition(&f, &f.store, file, "source").await;
+    let before = raw(&f).await;
+    let mut url = url::Url::parse(&f.url).unwrap();
+    url.query_pairs_mut()
+        .append_pair("max_allowed_packet", "65536");
+    let proxy = compact_proxy::Proxy::new(url.as_str()).await;
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    for transition in [&rename, &unlink] {
+        proxy.begin();
+        let error = writer
+            .publish_compact_structure(transition.delta())
+            .await
+            .unwrap_err();
+        let (queries, rows) = proxy.end();
+        assert!(error.is(ErrorCode::Efbig));
+        assert_eq!(rows, 2);
+        assert!(!queries.iter().any(|sql| sql.starts_with("UPDATE ")
+            || sql.starts_with("INSERT ")
+            || sql.starts_with("DELETE ")));
+        assert_eq!(raw(&f).await, before);
+    }
+    writer.close().await.unwrap();
+    proxy.shutdown().await;
+    f.store.close().await.unwrap();
+}
 
 #[tokio::test]
 #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
@@ -481,6 +1338,167 @@ async fn actual_compact_lost_commit_ack_is_unknown_and_not_replayed() {
     writer.close().await.unwrap();
     fresh.close().await.unwrap();
     f.store.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
+async fn actual_compact_file_create_lost_commit_ack_is_unknown_and_not_replayed() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const BOUND: Duration = Duration::from_secs(10);
+    let f = fixture(true).await;
+    let before = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let mut ns = before.namespace().unwrap();
+    let new = add_file(&mut ns, "lost-create-ack");
+    ns.nodes.get_mut(&new).unwrap().stats.mtime_ms = 9;
+    let delta = CompactStructuralDelta::capture(&before, &ns, StructuralScope::FileCreate).unwrap();
+
+    // Assemble the committed state independently of the shared delta evaluator.
+    // A generation-only oracle would miss a partial parent/new-file mutation.
+    let mut anchor = before.anchor.clone();
+    anchor.generation += 1;
+    anchor.next_inode += 1;
+    anchor.members.push(new);
+    let expected = CompactSnapshot {
+        guards: std::collections::BTreeMap::from([
+            (
+                anchor.root,
+                CompactGuard {
+                    identity: PhysicalInodeIdentity {
+                        incarnation: before.guards[&anchor.root].identity.incarnation,
+                        epoch: anchor.generation,
+                        revision: 0,
+                    },
+                    node: ns.nodes[&anchor.root].clone(),
+                },
+            ),
+            (
+                new,
+                CompactGuard {
+                    identity: PhysicalInodeIdentity {
+                        incarnation: anchor.generation,
+                        epoch: anchor.generation,
+                        revision: 0,
+                    },
+                    node: ns.nodes[&new].clone(),
+                },
+            ),
+        ]),
+        anchor,
+    };
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    proxy.begin();
+    // The existing relay discards only an actual successful server COMMIT OK.
+    proxy.trace.drop_commit_ack.store(true, Ordering::SeqCst);
+    let publication = timeout(BOUND, writer.publish_compact_structure(&delta)).await;
+    let (queries, rows) = proxy.end();
+    let commits = proxy.trace.commits.load(Ordering::SeqCst);
+    let dropped_acks = proxy.trace.dropped_acks.load(Ordering::SeqCst);
+
+    // Bypass the faulting connection for the full anchor/body/identity oracle.
+    let fresh = timeout(BOUND, TidbMetadataStore::connect_with_key(&f.url, &f.key)).await;
+    let loaded = match fresh.as_ref() {
+        Ok(Ok(store)) => Some(timeout(BOUND, store.load_compact_snapshot(f.backing)).await),
+        _ => None,
+    };
+    // Attempt all disconnects and drain the actual relay before assertions.
+    let writer_closed = timeout(BOUND, writer.close()).await;
+    let fresh_closed = match fresh.as_ref() {
+        Ok(Ok(store)) => Some(timeout(BOUND, store.close()).await),
+        _ => None,
+    };
+    let fixture_closed = timeout(BOUND, f.store.close()).await;
+    let proxy_closed = timeout(BOUND, proxy.shutdown()).await;
+
+    writer_closed.expect("writer disconnect completed").unwrap();
+    fixture_closed
+        .expect("fixture disconnect completed")
+        .unwrap();
+    proxy_closed.expect("proxy listener and relays settled");
+    fresh.expect("fresh store connect completed").unwrap();
+    fresh_closed
+        .expect("fresh store available for close")
+        .expect("fresh store disconnect completed")
+        .unwrap();
+
+    let error = publication
+        .expect("controlled file-create publication completed")
+        .unwrap_err();
+    assert!(error.is(ErrorCode::Eio));
+    assert!(!error.is(ErrorCode::Eagain));
+    assert!(
+        error
+            .to_string()
+            .contains("publish compact structure commit outcome is unknown")
+    );
+    assert_eq!(commits, 1);
+    assert_eq!(dropped_acks, 1);
+    assert_eq!(rows, 1);
+    // A replay can fail at its next read without another mutation or COMMIT.
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("START TRANSACTION"))
+            .count(),
+        1
+    );
+    let joined = |sql: &String| {
+        sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
+            && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
+    };
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| {
+                joined(sql)
+                    || sql.starts_with("SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation")
+            })
+            .count(),
+        1,
+        "one anchor-bearing read must precede the one publication"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| {
+                joined(sql)
+                    || sql.starts_with("SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards")
+            })
+            .count(),
+        1,
+        "one parent-bearing read must precede the one publication"
+    );
+    for (prefix, count) in [
+        ("INSERT INTO mount_rs_tidb_compact_guards", 1),
+        ("UPDATE mount_rs_tidb_compact_guards", 1),
+        ("DELETE FROM mount_rs_tidb_compact_guards", 0),
+        ("UPDATE mount_rs_tidb_metadata", 1),
+    ] {
+        assert_eq!(
+            queries.iter().filter(|sql| sql.starts_with(prefix)).count(),
+            count,
+            "{prefix}"
+        );
+    }
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.eq_ignore_ascii_case("COMMIT"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        loaded
+            .expect("fresh store available for full snapshot")
+            .expect("fresh full snapshot completed")
+            .unwrap(),
+        expected,
+        "lost acknowledgment must leave exactly one complete file create committed"
+    );
 }
 
 #[tokio::test]
@@ -1138,4 +2156,264 @@ async fn actual_compact_captured_delta_preserves_new_unrelated_body_and_full_con
     assert_eq!(after.guards[&a], selected.guard);
     assert_eq!(after.anchor.generation, base.anchor.generation + 1);
     f.store.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB, MOUNT_RS_TIDB_URL and MOUNT_RS_PROFILE_IO=1; run serial"]
+async fn actual_compact_selected_load_uses_one_autocommit_joined_query() {
+    use mount_rs_core::diagnostics::storage;
+    assert!(
+        storage::enabled(),
+        "run this actual control with MOUNT_RS_PROFILE_IO=1"
+    );
+    let f = fixture(true).await;
+    let inode = create(&f, "joined-read").await;
+    let expected = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    // Warm the owned pool/session and prepared statement outside measurement.
+    reader.load_compact_inode(f.backing, inode).await.unwrap();
+    proxy.begin();
+    let before = storage::snapshot();
+    let loaded = reader.load_compact_inode(f.backing, inode).await.unwrap();
+    let delta = storage::snapshot().delta(&before).unwrap();
+    let (queries, rows) = proxy.end();
+    // Expected semantic RED must still explicitly settle owned provider resources.
+    reader.close().await.unwrap();
+    f.store.close().await.unwrap();
+
+    assert_eq!(loaded.generation, expected.anchor.generation);
+    assert_eq!(loaded.guard, expected.guards[&inode]);
+    assert_eq!(rows, 1, "one complete selected guard row must be observed");
+    let selects: Vec<_> = queries
+        .iter()
+        .filter(|sql| sql.starts_with("SELECT "))
+        .collect();
+    assert_eq!(
+        selects.len(),
+        1,
+        "one actual SQL SELECT must supply anchor and selected guard"
+    );
+    assert!(selects[0].contains("mount_rs_tidb_metadata"));
+    assert!(selects[0].contains("LEFT JOIN mount_rs_tidb_compact_guards"));
+    assert!(
+        !selects[0].contains("FOR UPDATE"),
+        "selected read remains nonlocking"
+    );
+    assert!(
+        queries.iter().all(|sql| {
+            !sql.starts_with("SET ")
+                && !sql.starts_with("START TRANSACTION")
+                && !sql.eq_ignore_ascii_case("BEGIN")
+                && !sql.eq_ignore_ascii_case("COMMIT")
+                && !sql.eq_ignore_ascii_case("ROLLBACK")
+        }),
+        "selected read must send no transaction or session control SQL: {queries:?}"
+    );
+    for (name, calls) in [
+        ("tidb.pool.checkout", 1),
+        ("tidb.tx.begin.compact_read", 0),
+        ("tidb.tx.rollback", 0),
+        ("tidb.sql.inode_read", 1),
+        ("tidb.sql.metadata_read", 0),
+        ("tidb.tx.commit", 0),
+    ] {
+        let row = delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap();
+        assert_eq!(row.calls, calls, "{name}");
+        assert_eq!(row.success, calls, "{name}");
+        assert_eq!(row.error, 0, "{name}");
+        assert_eq!(row.cancelled, 0, "{name}");
+    }
+    assert_eq!(delta.in_flight, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancellation() {
+    use mount_rs_tidb::{TidbPoolContext, TidbStorageOptions};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    const BOUND: Duration = Duration::from_secs(10);
+    let f = fixture(true).await;
+    let inode = create(&f, "session-reuse").await;
+    let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+
+    // Trace starts before the first connection. A cap of one and exactly one
+    // verified session callback pair distinguish warm reuse from reconnects.
+    proxy.begin();
+    let context = TidbPoolContext::new(&proxy.url, 1).unwrap();
+    let reader = context
+        .metadata(TidbStorageOptions::new(&f.key))
+        .await
+        .unwrap();
+    let warm_first = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let warm_second = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let (warm_queries, _) = proxy.end();
+
+    // The independent writer advances the physical identity. Rejecting an
+    // update with the previous identity drops an already-started, tracked
+    // transaction; the cap-one checkout must wait for recycler rollback.
+    let mut updated_node = original.guard.node.clone();
+    updated_node.stats.mtime_ms += 1;
+    let updated = f
+        .store
+        .publish_compact_inode(
+            f.backing,
+            inode,
+            original.generation,
+            original.guard.identity,
+            updated_node,
+        )
+        .await
+        .unwrap();
+
+    // Capture the future independent structural publication before creating
+    // any deliberately interrupted work. It changes both authority generation
+    // and the selected guard's contents, so stale snapshots cannot pass.
+    let base = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let mut fresh_namespace = base.namespace().unwrap();
+    fresh_namespace
+        .nodes
+        .get_mut(&inode)
+        .unwrap()
+        .stats
+        .mtime_ms += 13;
+    add_file(&mut fresh_namespace, "after-cancel");
+    let fresh_delta =
+        CompactStructuralDelta::capture(&base, &fresh_namespace, StructuralScope::Full).unwrap();
+
+    proxy.begin();
+    let rejected = timeout(
+        BOUND,
+        reader.publish_compact_inode(
+            f.backing,
+            inode,
+            updated.generation,
+            original.guard.identity,
+            original.guard.node.clone(),
+        ),
+    )
+    .await;
+    let after_drop = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let (drop_queries, _) = proxy.end();
+
+    proxy.begin();
+    proxy.trace.pause_guards.store(true, Ordering::SeqCst);
+    let interrupted_reader = reader.clone();
+    let backing = f.backing;
+    let reading =
+        tokio::spawn(async move { interrupted_reader.load_compact_inode(backing, inode).await });
+    // Existing pause_guards holds the prepared EXECUTE before forwarding it
+    // to TiDB. Awaiting the abort and then resuming settles this exact boundary.
+    let reached = timeout(BOUND, proxy.trace.reached.notified()).await;
+    reading.abort();
+    let canceled = reading.await;
+    proxy.trace.resume.notify_one();
+
+    let published = timeout(BOUND, f.store.publish_compact_structure(&fresh_delta)).await;
+    let after_cancel = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let after_cancel_again = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let (cancel_queries, _) = proxy.end();
+
+    // Attempt every shutdown before semantic assertions. Store close releases
+    // its lifecycle; the shared context owns disconnect. Proxy shutdown drains
+    // relay tasks and drops their socket halves before its listener completes.
+    let reader_closed = timeout(BOUND, reader.close()).await;
+    let context_closed = timeout(BOUND, context.close()).await;
+    let fixture_closed = timeout(BOUND, f.store.close()).await;
+    let proxy_closed = timeout(BOUND, proxy.shutdown()).await;
+
+    reader_closed.expect("reader close completed").unwrap();
+    context_closed
+        .expect("shared context disconnect completed")
+        .unwrap();
+    fixture_closed
+        .expect("independent fixture disconnect completed")
+        .unwrap();
+    proxy_closed.expect("proxy listener and relays settled");
+
+    let joined = |sql: &String| {
+        sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
+            && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
+    };
+    let session_sets = |queries: &[String]| {
+        queries
+            .iter()
+            .filter(|sql| sql.as_str() == "SET SESSION autocommit=1")
+            .count()
+    };
+    let session_checks = |queries: &[String]| {
+        queries
+            .iter()
+            .filter(|sql| sql.as_str() == "SELECT @@SESSION.autocommit")
+            .count()
+    };
+    assert_eq!(session_sets(&warm_queries), 1);
+    assert_eq!(session_checks(&warm_queries), 1);
+    assert_eq!(warm_queries.iter().filter(|sql| joined(sql)).count(), 2);
+    for loaded in [warm_first, warm_second] {
+        let loaded = loaded.expect("warm cap-one checkout completed").unwrap();
+        assert_eq!(loaded.generation, original.generation);
+        assert_eq!(loaded.guard, original.guard);
+    }
+
+    assert!(
+        rejected
+            .expect("stale selected update completed")
+            .unwrap_err()
+            .is(ErrorCode::Eagain)
+    );
+    let after_drop = after_drop
+        .expect("checkout after tracked transaction drop completed")
+        .unwrap();
+    assert_eq!(after_drop.generation, updated.generation);
+    assert_eq!(after_drop.guard, updated.guard);
+    let rollback = drop_queries
+        .iter()
+        .position(|sql| sql.eq_ignore_ascii_case("ROLLBACK"))
+        .expect("dropped tracked transaction was rolled back");
+    let selected = drop_queries
+        .iter()
+        .position(joined)
+        .expect("selected read followed tracked transaction cleanup");
+    assert!(rollback < selected);
+    assert_eq!(
+        session_sets(&drop_queries),
+        0,
+        "cleanup reused the configured session"
+    );
+    assert_eq!(session_checks(&drop_queries), 0);
+
+    reached.expect("selected EXECUTE reached controlled proxy pause");
+    assert!(canceled.unwrap_err().is_cancelled());
+    let publication = published
+        .expect("fresh independent structural publication completed")
+        .unwrap();
+    assert!(publication.anchor.generation > updated.generation);
+    let expected_guard = &publication.upserts[&inode];
+    assert_eq!(expected_guard.node, fresh_namespace.nodes[&inode]);
+    assert_ne!(expected_guard, &updated.guard);
+    for loaded in [after_cancel, after_cancel_again] {
+        let loaded = loaded
+            .expect("selected read recovered without cap-one starvation")
+            .unwrap();
+        assert_eq!(loaded.generation, publication.anchor.generation);
+        assert_eq!(&loaded.guard, expected_guard);
+    }
+    assert_eq!(cancel_queries.iter().filter(|sql| joined(sql)).count(), 3);
+    // Safe reuse or one newly verified replacement is permitted after abort.
+    // These counts do not claim a server connection ID or blanket discard.
+    assert_eq!(
+        session_sets(&cancel_queries),
+        session_checks(&cancel_queries)
+    );
+    assert!(session_sets(&cancel_queries) <= 1);
 }

@@ -247,6 +247,14 @@ impl Snapshot {
         Self::capture_network(network)
     }
 
+    /// Client/network and OS I/O observations at workload boundaries only.
+    /// The periodic sampler continues to use the ordinary disk-disabled path.
+    pub fn capture_io_boundary(clients: &[super::Client]) -> Result<Self, &'static str> {
+        let mut snapshot = Self::capture(clients)?;
+        snapshot.os_io = device_io::Snapshot::capture_from_env();
+        Ok(snapshot)
+    }
+
     /// Boundary-only network capture; never used by the100ms process sampler.
     pub fn capture_connections(connections: &[quinn::Connection]) -> Result<Self, &'static str> {
         Self::capture_network(connections.iter().map(Network::capture).collect())
@@ -551,9 +559,9 @@ mod continuous_sampler_contracts {
     use super::{ProcessSample, ProcessSampler, ProcessSummary};
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn summary_retains_transient_resident_and_sqlite_peaks_in_constant_space() {
@@ -626,10 +634,28 @@ mod continuous_sampler_contracts {
 
     #[test]
     fn transient_sqlite_allocation_is_observed_before_free() {
+        const OWNED_BYTES: u64 = 8 * 1024 * 1024;
+
+        struct SqliteAllocation {
+            pointer: std::ptr::NonNull<std::ffi::c_void>,
+            phase: Arc<AtomicBool>,
+        }
+        impl Drop for SqliteAllocation {
+            fn drop(&mut self) {
+                self.phase.store(false, Ordering::Release);
+                // This guard owns the pointer returned by sqlite3_malloc64.
+                unsafe { rusqlite::ffi::sqlite3_free(self.pointer.as_ptr()) };
+            }
+        }
+
+        let allocated_phase = Arc::new(AtomicBool::new(false));
+        let sampled_phase = allocated_phase.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
         let sampler = ProcessSampler::start_with(Duration::from_millis(2), move || {
+            // Read the phase first, so an accepted heap sample follows malloc.
+            let allocated = sampled_phase.load(Ordering::Acquire);
             let (heap, _) = super::sqlite_heap()?;
-            let _ = sender.send(heap);
+            let _ = sender.send((allocated, heap));
             Ok(ProcessSample {
                 resident_bytes: super::resident_bytes(),
                 sqlite_heap_bytes: heap,
@@ -637,20 +663,29 @@ mod continuous_sampler_contracts {
             })
         })
         .unwrap();
-        let baseline = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
-        let allocation = unsafe { rusqlite::ffi::sqlite3_malloc64(8 * 1024 * 1024) };
-        assert!(!allocation.is_null());
+        let allocation = SqliteAllocation {
+            pointer: std::ptr::NonNull::new(unsafe {
+                rusqlite::ffi::sqlite3_malloc64(OWNED_BYTES)
+            })
+            .expect("owned SQLite allocation must succeed"),
+            phase: allocated_phase.clone(),
+        };
+        allocated_phase.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
         let observed = loop {
-            let heap = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
-            if heap >= baseline + 8 * 1024 * 1024 {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("owned SQLite allocation must be sampled within two seconds");
+            let (allocated, heap) = receiver
+                .recv_timeout(remaining)
+                .expect("owned SQLite allocation must be sampled within two seconds");
+            // Other tests can free the shared baseline while this pointer stays
+            // live. Its own size is the stable absolute minimum for this phase.
+            if allocated && heap >= OWNED_BYTES {
                 break heap;
             }
         };
-        unsafe {
-            rusqlite::ffi::sqlite3_free(allocation);
-        }
-        let (final_heap, _) = super::sqlite_heap().unwrap();
-        assert!(final_heap < observed);
+        drop(allocation);
         let summary = sampler.finish().unwrap();
         assert!(summary.sqlite_heap_peak_bytes >= observed);
     }

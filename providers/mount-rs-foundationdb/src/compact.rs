@@ -395,6 +395,9 @@ impl Plan {
 }
 
 #[derive(Clone)]
+// Retain structural witnesses by value so submitting a command does not add
+// a heap allocation solely to accommodate the larger sealed transition.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Command {
     Inspect,
     Prepare(ConcurrentBackingId, u64),
@@ -617,6 +620,12 @@ async fn execute(trx: &Transaction, inner: &Inner, command: Command) -> TxnResul
             Ok(Output::Inode(LoadedCompactInode { generation, guard }))
         }
         Command::Structure(delta) => {
+            if matches!(
+                delta.scope(),
+                StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink
+            ) {
+                return Err(TxnError::Fs(FsError::new(ErrorCode::Enotsup)));
+            }
             let (manifest, anchor) = view.anchor(delta.base_anchor().backing).await?;
             let current = match delta.scope() {
                 StructuralScope::Full => view.guards().await?,
@@ -626,6 +635,9 @@ async fn execute(trx: &Transaction, inner: &Inner, command: Command) -> TxnResul
                         map.insert(inode, view.guard(inode).await?);
                     }
                     map
+                }
+                StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink => {
+                    return Err(TxnError::Fs(FsError::new(ErrorCode::Enotsup)));
                 }
             };
             let publication = delta

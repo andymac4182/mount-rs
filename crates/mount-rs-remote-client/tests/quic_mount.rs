@@ -22,6 +22,8 @@ use ring::{
 use serde_json::json;
 use std::{collections::BTreeMap, sync::Arc};
 
+mod quic_mount_reply_loss;
+
 struct Keys(Jwk);
 #[async_trait::async_trait]
 impl OidcKeySource for Keys {
@@ -61,6 +63,29 @@ async fn signed_oidc_multiple_drives_persistence_and_revocation() {
 #[tokio::test]
 async fn websocket_signed_oidc_multiple_drives_persistence_and_revocation() {
     signed_oidc_roundtrip(1).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS=1, private TMPDIR and an owned process gate"]
+async fn websocket_sqlite_commit_survives_lost_wire_reply_without_replay() {
+    quic_mount_reply_loss::run(quic_mount_reply_loss::Selection::WebSocket)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS=1, private TMPDIR and an owned process gate"]
+async fn automatic_fallback_sqlite_commit_survives_lost_wire_reply_without_replay() {
+    quic_mount_reply_loss::run(quic_mount_reply_loss::Selection::Auto)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires MOUNT_RS_REMOTE_SQLITE_REPLY_LOSS=1, private TMPDIR and an owned process gate"]
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+async fn automatic_fallback_compact_sqlite_commit_survives_lost_wire_reply_without_replay() {
+    quic_mount_reply_loss::run_compact_auto().await.unwrap();
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 #[derive(Serialize, Deserialize)]
@@ -33,6 +33,8 @@ pub struct PrivateConfig {
     pub binary_digest: String,
     pub output: PathBuf,
     pub parent_pid: u32,
+    pub expected_backings: Vec<String>,
+    pub expected_backings_sha256: String,
 }
 struct Keys(Jwk);
 #[async_trait::async_trait]
@@ -52,8 +54,12 @@ pub struct Ready {
     pub binary_digest: String,
     pub backend_prefix: String,
     pub mode: String,
-    pub replicas: usize,
-    pub receipts: Vec<Value>,
+    pub schema: String,
+    pub planned_drives: usize,
+    pub registered_drives: usize,
+    pub max_active_drives: usize,
+    pub expected_backings_sha256: String,
+    pub runtime_activation: Value,
     pub resources: Value,
     pub core_profile: Value,
     pub phase_metrics: Value,
@@ -84,6 +90,11 @@ pub struct Fleet {
 impl Fleet {
     pub fn expect_initialized_backings(&mut self, values: Vec<String>) {
         self.initial_backings = Some(values);
+    }
+    pub(super) fn initialized_backings(&self) -> Result<&[String], String> {
+        self.initial_backings
+            .as_deref()
+            .ok_or_else(|| "initializer backing baseline absent".into())
     }
     pub fn new() -> Self {
         Self {
@@ -185,23 +196,19 @@ impl Fleet {
             if complete == SERVERS {
                 let mut endpoints = std::collections::BTreeSet::new();
                 let mut pids = std::collections::BTreeSet::new();
-                let backings = validate_backing_receipts(self.children[0].ready.as_ref().unwrap())?;
+                let backings = expected_backings(private)?;
                 for child in &self.children {
                     let r = child.ready.as_ref().unwrap();
                     if !endpoints.insert(r.address)
                         || !pids.insert(r.pid)
-                        || validate_backing_receipts(r)? != backings
+                        || r.expected_backings_sha256 != private.expected_backings_sha256
                     {
                         return Err("worker endpoint/PID/backing consistency mismatch".into());
                     }
                     let sample = super::read_json(&child.root.join("resources.json"))?;
                     super::resources::validate_sample(&sample, child.child.id(), super::utc_ms())?;
                 }
-                if self
-                    .initial_backings
-                    .as_ref()
-                    .is_some_and(|initial| initial != &backings)
-                {
+                if self.initial_backings.as_ref() != Some(&backings) {
                     return Err("backing identity changed across replica generations".into());
                 }
                 self.initial_backings = Some(backings);
@@ -281,6 +288,36 @@ impl Fleet {
         self.project_resources_with(progress, |progress, owner, root| {
             progress.resource(owner, || read_resource_file(&root.join("resources.json")))
         });
+        self.project_checkpoints_with(progress, |progress, owner, root| {
+            progress.checkpoint(owner, || {
+                super::checkpoints::read_latest(&root.join("checkpoint-latest.json"))
+            });
+        });
+    }
+    fn project_checkpoints_with(
+        &self,
+        progress: &mut super::progress::Progress,
+        mut project: impl FnMut(&mut super::progress::Progress, super::progress::ResourceOwner, &Path),
+    ) {
+        for child in &self.children {
+            if self.resource_expected[child.server] && !child.reaped {
+                project(progress, self.checkpoint_owner(child), &child.root);
+            }
+        }
+    }
+    fn checkpoint_owner(&self, child: &OwnedChild) -> super::progress::ResourceOwner {
+        let mut owner = self.resource_owner(child);
+        if owner.generation_context.is_none() {
+            // Fleet::ready retains validated receipts independently of the
+            // throttled startup emission that owns legacy resource context.
+            owner.generation_context = child.ready.as_ref().and_then(|ready| {
+                (ready.pid == child.child.id()
+                    && ready.server == child.server
+                    && Some(ready.generation) == self.resource_generation)
+                    .then_some(ready.generation)
+            });
+        }
+        owner
     }
     fn resource_owner(&self, child: &OwnedChild) -> super::progress::ResourceOwner {
         let context = self.resource_generation_seen[child.server]
@@ -512,6 +549,97 @@ fn read_resource_file(path: &Path) -> Result<Option<Value>, String> {
         .map_err(|_| "resource receipt invalid".into())
 }
 #[test]
+fn checkpoint_projection_uses_matching_ready_before_startup_emission() {
+    let root = tempfile::tempdir().unwrap();
+    let child = Command::new("/bin/sh")
+        .args(["-c", "read ignored || true"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let mut fleet = Fleet::new();
+    fleet.children.push(OwnedChild {
+        child,
+        server: 0,
+        ready: None,
+        exited: None,
+        reaped: false,
+        signal: None,
+        forced: false,
+        root: root.path().to_owned(),
+    });
+    let mut progress = super::progress::Progress::disabled();
+    let mut records = Vec::new();
+    let mut capture = |label, fleet: &Fleet| {
+        fleet.project_checkpoints_with(&mut progress, |_, owner, path| {
+            records.push((
+                label,
+                owner.pid,
+                owner.worker,
+                owner.generation_context,
+                path == root.path(),
+            ));
+        });
+    };
+    capture("unconfigured", &fleet);
+    fleet.resource_expected[0] = true;
+    fleet.resource_generation = Some(0);
+    // Model a fast Ready receipt already retained by Fleet::ready while the
+    // independent startup progress throttle has not emitted any generation.
+    fleet.startup_next = Some(Instant::now() + Duration::from_secs(5));
+    capture("missing_ready", &fleet);
+    let mut ready = example_ready();
+    ready.pid = pid;
+    ready.resources = super::resources::example_sample(pid);
+    fleet.children[0].ready = Some(ready.clone());
+    capture("ready_g0", &fleet);
+    let legacy_g0 = fleet.resource_owner(&fleet.children[0]).generation_context;
+    fleet.resource_generation = Some(1);
+    capture("old_ready_after_reopen", &fleet);
+    ready.generation = 1;
+    ready.runtime_activation = super::metrics::example_runtime(1, 10);
+    fleet.children[0].ready = Some(ready.clone());
+    capture("ready_g1", &fleet);
+    let legacy_g1 = fleet.resource_owner(&fleet.children[0]).generation_context;
+    fleet.children[0].ready.as_mut().unwrap().pid = pid.wrapping_add(1);
+    capture("foreign_pid", &fleet);
+    fleet.children[0].ready = Some(ready.clone());
+    fleet.children[0].ready.as_mut().unwrap().server = 1;
+    capture("foreign_server", &fleet);
+    fleet.children[0].ready = Some(ready);
+    fleet.resource_generation = None;
+    capture("no_requested_generation", &fleet);
+    fleet.resource_generation = Some(1);
+    fleet.resource_generation_seen[0] = Some(1);
+    fleet.children[0].ready = None;
+    capture("startup_context", &fleet);
+    let startup_accounting = (fleet.startup_seen[0], fleet.resource_generation_seen[0]);
+    // Always settle the actual owned child before the expected RED assertion.
+    fleet.children[0].child.stdin.take();
+    let status = fleet.children[0].child.wait().unwrap();
+    fleet.children[0].record_status(status);
+    capture("reaped", &fleet);
+    assert!(fleet.children[0].reaped);
+    assert_eq!(legacy_g0, None);
+    assert_eq!(legacy_g1, None);
+    assert_eq!(startup_accounting, (None, Some(1)));
+    assert_eq!(
+        records,
+        vec![
+            ("missing_ready", pid, Some(0), None, true),
+            ("ready_g0", pid, Some(0), Some(0), true),
+            ("old_ready_after_reopen", pid, Some(0), None, true),
+            ("ready_g1", pid, Some(0), Some(1), true),
+            ("foreign_pid", pid, Some(0), None, true),
+            ("foreign_server", pid, Some(0), None, true),
+            ("no_requested_generation", pid, Some(0), None, true),
+            ("startup_context", pid, Some(0), Some(1), true),
+        ]
+    );
+}
+#[test]
 fn resource_progress_owned_expectation_and_generation_context_do_not_reset_sampler() {
     let root = tempfile::tempdir().unwrap();
     let child = Command::new("/bin/sh")
@@ -540,6 +668,7 @@ fn resource_progress_owned_expectation_and_generation_context_do_not_reset_sampl
             drives: 10,
             files: 2,
             seconds: 1,
+            population_seconds: super::config::PHASE_SECONDS,
             provider: "sqlite".into(),
         },
     );
@@ -626,6 +755,7 @@ async fn resource_progress_cleanup_captures_owned_terminal_once_and_preserves_li
                     drives: 10,
                     files: 2,
                     seconds: 1,
+                    population_seconds: super::config::PHASE_SECONDS,
                     provider: "sqlite".into(),
                 },
             );
@@ -704,6 +834,7 @@ async fn resource_progress_cleanup_captures_owned_terminal_once_and_preserves_li
             drives: 10,
             files: 2,
             seconds: 1,
+            population_seconds: super::config::PHASE_SECONDS,
             provider: "sqlite".into(),
         },
     );
@@ -828,13 +959,25 @@ fn validate_ready(
         || r.binary_digest != p.binary_digest
         || r.backend_prefix != p.backend.prefix
         || r.mode != "MRC5"
-        || r.replicas != p.config.drives
-        || r.receipts.len() != p.config.drives
+        || r.schema != "mount-rs.production-ready.v2"
+        || r.planned_drives != p.config.drives
+        || r.registered_drives != p.config.drives
+        || r.max_active_drives != p.config.drives
+        || r.expected_backings_sha256 != p.expected_backings_sha256
         || !r.address.ip().is_loopback()
     {
         return Err("worker readiness identity mismatch".into());
     }
-    validate_backing_receipts(r)?;
+    let expected = expected_backings(p)?;
+    super::metrics::validate_runtime_snapshot(
+        &r.runtime_activation,
+        generation,
+        p.config.drives,
+        &expected,
+    )?;
+    if !cold_runtime(&r.runtime_activation, p.config.drives) {
+        return Err("worker readiness was not an actual cold registration".into());
+    }
     // Readiness is historical; Fleet also checks the current on-disk sample.
     let observed = r.resources["observed_unix_ms"]
         .as_u64()
@@ -842,38 +985,57 @@ fn validate_ready(
     super::resources::validate_sample(&r.resources, pid, observed)?;
     Ok(())
 }
-async fn close_replicas(
-    server: &mut Option<RemoteServer>,
-    filesystems: &mut Vec<mount_rs_sdk::Filesystem>,
-    listener_closes: &mut CloseTasks,
-) -> Result<(), String> {
-    let mut failure = false;
-    if let Some(s) = server.take() {
-        listener_closes.tasks.push(tokio::spawn(async move {
-            s.close().await;
-        }));
+fn runtime_keeper() -> Arc<super::lazy_runtime::TargetRuntimeKeeper> {
+    static KEEPER: OnceLock<Arc<super::lazy_runtime::TargetRuntimeKeeper>> = OnceLock::new();
+    KEEPER
+        .get_or_init(|| Arc::new(super::lazy_runtime::TargetRuntimeKeeper::default()))
+        .clone()
+}
+fn cold_runtime(value: &Value, drives: usize) -> bool {
+    value["pool"]["registered"].as_u64() == Some(drives as u64)
+        && [
+            "resident",
+            "opening",
+            "ready",
+            "closing",
+            "quarantined",
+            "pinned",
+            "open_success",
+            "open_error",
+            "eviction_success",
+            "eviction_error",
+            "waits",
+            "capacity_rejections",
+        ]
+        .into_iter()
+        .all(|field| value["pool"][field].as_u64() == Some(0))
+        && value["observations"].as_array().is_some_and(|rows| {
+            rows.len() == drives
+                && rows.iter().all(|row| {
+                    row["constructed"].as_u64() == Some(0) && row["observed_backing"].is_null()
+                })
+        })
+}
+fn expected_backings(p: &PrivateConfig) -> Result<Vec<String>, String> {
+    if p.expected_backings.len() != p.config.drives
+        || super::digest(
+            &serde_json::to_vec(&p.expected_backings)
+                .map_err(|_| "backing manifest encoding failed")?,
+        ) != p.expected_backings_sha256
+    {
+        return Err("initializer backing manifest binding mismatch".into());
     }
-    failure |= listener_closes
-        .drain(Duration::from_secs(30))
-        .await
-        .is_err();
-    let closed = tokio::time::timeout(Duration::from_secs(30), async {
-        for fs in filesystems.iter() {
-            if fs.shutdown().await.is_err() {
-                failure = true;
+    p.expected_backings
+        .iter()
+        .map(|value| {
+            let id = mount_rs_core::storage::ConcurrentBackingId::from_hex(value)
+                .map_err(|_| "initializer backing manifest invalid")?;
+            if id.to_hex() != *value || value == "00000000000000000000000000000000" {
+                return Err("initializer backing manifest noncanonical".into());
             }
-        }
-    })
-    .await;
-    if closed.is_err() {
-        failure = true;
-    }
-    if failure {
-        Err("worker replica drain unproven".into())
-    } else {
-        filesystems.clear();
-        Ok(())
-    }
+            Ok(id.to_hex())
+        })
+        .collect()
 }
 pub async fn worker() -> Result<(), String> {
     let index: usize = std::env::var("MOUNT_RS_TARGET_WORKER")
@@ -883,7 +1045,7 @@ pub async fn worker() -> Result<(), String> {
     if index >= SERVERS {
         return Err("worker index outside owned fleet".into());
     }
-    let mut startup = Startup::new(
+    let mut startup = Startup::new_lazy(
         mount_rs_core::diagnostics::profile::enabled(),
         StartupIdentity::worker(index, 0),
     );
@@ -938,6 +1100,10 @@ async fn worker_observed(
             &mut |snapshot| publish_startup_progress(&root, 0, snapshot),
         )
         .await?;
+    // Reserve process-lifetime authority before context or provider construction.
+    let scope = runtime_keeper()
+        .reserve()
+        .map_err(|_| "worker runtime owner occupied")?;
     let context = startup
         .observe(
             StartupStage::Configuration,
@@ -945,10 +1111,12 @@ async fn worker_observed(
             &mut |snapshot| publish_startup_progress(&root, 0, snapshot),
         )
         .await?;
-    let mut filesystems = Vec::new();
-    let mut server = None;
+    scope
+        .install_context(context.clone())
+        .map_err(|_| "worker context retention failed")?;
+    let mut current_generation = None;
+    let mut prepared = false;
     let mut server_diagnostics = None;
-    let mut listener_closes = CloseTasks::default();
     let mut generation = 0;
     let mut opens = 0;
     let mut commands = super::command::Commands::default();
@@ -974,8 +1142,14 @@ async fn worker_observed(
         }, &mut |snapshot| publish_startup_progress(&root, 0, snapshot)).await?;
         let phase_metrics = phase_metrics.as_mut().ok_or("worker metric owner unavailable")?;
         loop {
+            if mount_rs_core::diagnostics::profile::enabled() {
+                resources.install_checkpoints(super::checkpoints::Identity {
+                    pid: std::process::id(), controller_pid: p.parent_pid, worker: index, generation,
+                    source_digest: p.source_digest.clone(), binary_digest: p.binary_digest.clone(),
+                })?;
+            }
             if generation != 0 {
-                *startup = Startup::new(mount_rs_core::diagnostics::profile::enabled(), StartupIdentity::worker(index, generation));
+                *startup = Startup::new_lazy(mount_rs_core::diagnostics::profile::enabled(), StartupIdentity::worker(index, generation));
             }
             let mut startup_sink = |snapshot: &StartupSnapshot| publish_startup_progress(&root, generation, snapshot);
             startup.publish(&mut startup_sink);
@@ -988,7 +1162,8 @@ async fn worker_observed(
             let snapshot = startup.observe(StartupStage::CatalogLoad, async {
                 catalog.load_shared_current().await.map_err(|_| "worker catalog read failed")
             }, &mut startup_sink).await?;
-            startup.plan((p.config.drives / 2) as u64, p.config.drives as u64);
+            startup.plan_lazy((p.config.drives / 2) as u64, p.config.drives as u64, p.config.drives as u64)
+                .map_err(|_| "worker lazy startup plan invalid")?;
             startup.observe(StartupStage::CatalogValidate, async {
             if super::digest(
                 &serde_json::to_vec(snapshot.as_ref())
@@ -1003,34 +1178,44 @@ async fn worker_observed(
             }
             Ok::<_, String>(())
             }, &mut startup_sink).await?;
+            if !prepared {
+                let ids = expected_backings(&p)?;
+                let options = p.backend.prepared_options(p.config.drives)?;
+                let plans = options.into_iter().enumerate().map(|(drive, options)| {
+                    Ok::<_, String>(super::lazy_runtime::PreparedDrive {
+                        options,
+                        expected_backing: mount_rs_core::storage::ConcurrentBackingId::from_hex(&ids[drive])
+                            .map_err(|_| "worker expected backing invalid")?,
+                    })
+                }).collect::<Result<Vec<_>, _>>()?;
+                scope.install_prepared(plans).map_err(|_| "worker immutable runtime planning failed")?;
+                prepared = true;
+            }
+            let runtime = scope.new_generation(generation).map_err(|_| "worker generation admission refused")?;
+            current_generation = Some(runtime.clone());
             let mut dispatcher = DriveDispatcher::new(catalog.clone());
-            let mut receipts = Vec::new();
             for drive in 0..p.config.drives {
                 resources.check()?;
-                let fs = startup.observe(StartupStage::DriveOpen, p.backend.open(drive, &context), &mut startup_sink).await?;
-                let driver = fs.driver();
-                filesystems.push(fs);
-                opens += 1;
-                receipts.push(startup.observe(StartupStage::BackingReceipt, p.backend.receipt(drive, &context), &mut startup_sink).await?);
+                let registration = startup.observe(StartupStage::DriveConfig, async {
+                    runtime.register(drive).map_err(|_| "worker lazy runtime registration failed")
+                }, &mut startup_sink).await?;
+                startup.construction_plan();
                 startup.observe(StartupStage::DriveRegister, async { dispatcher
-                    .register_definition(
+                    .register_lazy_definition(
                         &format!("partition-{}", drive / 2),
                         &format!("sandbox-{drive}"),
                         snapshot.partitions[&format!("partition-{}", drive / 2)].drives
-                            [&format!("sandbox-{drive}")]
-                            .driver
-                            .clone(),
-                        driver,
-                    )
-                    .map_err(|_| "worker registration failed") }, &mut startup_sink).await?;
+                            [&format!("sandbox-{drive}")].driver.clone(),
+                        registration,
+                    ).map_err(|_| "worker registration failed")
+                }, &mut startup_sink).await?;
                 startup.registered();
             }
             let auth = Arc::new(CatalogAuthenticator::with_key_source(
                 catalog,
                 Arc::new(Keys(p.jwk.clone())),
             ));
-            server = Some(
-                startup.observe(StartupStage::ListenerBind, RemoteServer::bind_with_diagnostics(
+            let server = startup.observe(StartupStage::ListenerBind, RemoteServer::bind_with_diagnostics(
                     "127.0.0.1:0".parse().unwrap(),
                     vec![rustls::pki_types::CertificateDer::from(p.cert.clone())],
                     rustls::pki_types::PrivatePkcs8KeyDer::from(p.key.clone()).into(),
@@ -1041,32 +1226,37 @@ async fn worker_observed(
                     },
                     RemoteTransferLimits::default(),
                     mount_rs_core::diagnostics::profile::enabled(),
-                ), &mut startup_sink).await.map_err(|_| "worker TLS listener bind failed")?,
-            );
-            server_diagnostics=server.as_ref().unwrap().diagnostics();
+                ), &mut startup_sink).await.map_err(|_| "worker TLS listener bind failed")?;
+            let address = server.local_addr();
+            server_diagnostics=server.diagnostics();
+            runtime.install_server(server).map_err(|_| "worker listener retention failed")?;
             startup.finish_startup(true);
             startup.publish(&mut startup_sink);
-            let startup_metrics = phase_metrics.capture(
+            let startup_metrics = phase_metrics.capture_with_runtime(
                 super::metrics::identity(&p, std::process::id(), Some(index), generation, last_metric_sequence, "worker_startup", "ready"),
-                server_diagnostics.as_ref(), Value::Null,
+                server_diagnostics.as_ref(), || runtime.runtime_activation_snapshot(),
             )?;
-            let startup_path = metrics_root.join(format!("startup-g{generation}.json"));
+            let startup_path = metrics_root.join(format!("startup-g{generation}.json.gz"));
             super::metrics::publish_immutable(&startup_path, &startup_metrics)?;
             let ready = Ready {
                 pid: std::process::id(),
                 server: index,
                 generation,
-                address: server.as_ref().unwrap().local_addr(),
+                address,
                 catalog_digest: p.catalog_digest.clone(),
                 source_digest: p.source_digest.clone(),
                 binary_digest: p.binary_digest.clone(),
                 backend_prefix: p.backend.prefix.clone(),
                 mode: "MRC5".into(),
-                replicas: filesystems.len(),
-                receipts,
+                schema: "mount-rs.production-ready.v2".into(),
+                planned_drives: p.config.drives,
+                registered_drives: runtime.pool_snapshot().registered,
+                max_active_drives: p.config.drives,
+                expected_backings_sha256: p.expected_backings_sha256.clone(),
+                runtime_activation: startup_metrics["runtime_activation"].clone(),
                 resources: resources.snapshot(),
                 startup_diagnostics: startup.snapshot().map(|value| serde_json::to_value(value).unwrap()),
-                phase_metrics: json!({"file":format!("metrics/startup-g{generation}.json"),"sha256":super::file_digest(&startup_path)?,"metrics_complete":startup_metrics["metrics_complete"]}),
+                phase_metrics: json!({"file":format!("metrics/startup-g{generation}.json.gz"),"sha256":super::file_digest(&startup_path)?,"metrics_complete":startup_metrics["metrics_complete"]}),
                 core_profile: json!({
                         "enabled":mount_rs_core::diagnostics::profile::enabled(),
                         "scope":"worker service SDK startup and replica refresh cumulative counters",
@@ -1096,21 +1286,23 @@ async fn worker_observed(
                         requested["boundary"].as_str().ok_or("metric command boundary missing")?);
                     super::metrics::validate_receipt(requested, &expected)?;
                     if metric_sequence.accept(requested)? {
-                        let captured = phase_metrics.capture(expected, server_diagnostics.as_ref(), Value::Null)?;
-                        let path = metrics_root.join(format!("g{generation}-s{sequence}.json"));
+                        let captured = phase_metrics.capture_with_runtime(expected, server_diagnostics.as_ref(), || runtime.runtime_activation_snapshot())?;
+                        let path = metrics_root.join(format!("g{generation}-s{sequence}.json.gz"));
                         super::metrics::publish_immutable(&path, &captured)?;
-                        super::write_json(&root.join("metrics-ack.json"), &json!({"identity":requested,"file":format!("metrics/g{generation}-s{sequence}.json"),"sha256":super::file_digest(&path)?}))?;
+                        super::write_json(&root.join("metrics-ack.json"), &json!({"identity":requested,"file":format!("metrics/g{generation}-s{sequence}.json.gz"),"sha256":super::file_digest(&path)?}))?;
                         last_metric_sequence = sequence;
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            close_replicas(&mut server, &mut filesystems, &mut listener_closes).await?;
-            let closed_metrics=phase_metrics.capture(
+            runtime.close().await.map_err(|_| "worker replica drain unproven")?;
+            opens += runtime.pool_snapshot().open_success;
+            current_generation = None;
+            let closed_metrics=phase_metrics.capture_with_runtime(
                 super::metrics::identity(&p,std::process::id(),Some(index),generation,last_metric_sequence+1,"replica_close","after"),
-                server_diagnostics.as_ref(),Value::Null,
+                server_diagnostics.as_ref(),|| runtime.runtime_activation_snapshot(),
             )?;
-            super::metrics::publish_immutable(&metrics_root.join(format!("closed-g{generation}.json")),&closed_metrics)?;
+            super::metrics::publish_immutable(&metrics_root.join(format!("closed-g{generation}.json.gz")),&closed_metrics)?;
             generation += 1;
         }
     })
@@ -1123,14 +1315,24 @@ async fn worker_observed(
         let _ = startup.write_banks(&mut std::io::stderr().lock());
     }
     let cleanup = startup.begin(StartupStage::Cleanup);
-    let close = close_replicas(&mut server, &mut filesystems, &mut listener_closes).await;
-    let context_close = tokio::time::timeout(Duration::from_secs(30), context.close()).await;
+    let close = match &current_generation {
+        Some(runtime) => runtime
+            .close()
+            .await
+            .map_err(|_| "worker replica drain unproven".to_string()),
+        None => Ok(()),
+    };
+    if let Some(runtime) = &current_generation {
+        opens += runtime.pool_snapshot().open_success;
+    }
+    // Scope owns the context and refuses this transition unless every generation ACKed.
+    let context_close = tokio::time::timeout(Duration::from_secs(30), scope.close_context()).await;
     let observer_close = commands.cleanup().await;
     let terminal_metrics = phase_metrics
         .as_mut()
         .ok_or_else(|| "worker metric setup incomplete".to_string())
         .and_then(|metrics| {
-            metrics.capture(
+            metrics.capture_with_runtime(
                 super::metrics::identity(
                     &p,
                     std::process::id(),
@@ -1141,11 +1343,16 @@ async fn worker_observed(
                     "terminal",
                 ),
                 server_diagnostics.as_ref(),
-                Value::Null,
+                || {
+                    current_generation
+                        .as_ref()
+                        .ok_or_else(|| mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio))?
+                        .runtime_activation_snapshot()
+                },
             )
         })
         .and_then(|value| {
-            super::metrics::publish_immutable(&metrics_root.join("terminal.json"), &value)?;
+            super::metrics::publish_immutable(&metrics_root.join("terminal.json.gz"), &value)?;
             Ok(value)
         });
     let sampler_close = resources.finish().await;
@@ -1171,7 +1378,7 @@ async fn worker_observed(
                 "replica_close_error":close.err(),
                 "context_closed":matches!(context_close,
                     Ok(Ok(()))),
-                "phase_metrics":{"file":"metrics/terminal.json","capture_error":terminal_metrics.as_ref().err(),"metrics_complete":terminal_metrics.as_ref().ok().map(|m| &m["metrics_complete"])},
+                "phase_metrics":{"file":"metrics/terminal.json.gz","capture_error":terminal_metrics.as_ref().err(),"metrics_complete":terminal_metrics.as_ref().ok().map(|m| &m["metrics_complete"])},
                 "startup_diagnostics":startup.snapshot(),
                 "replica_opens":opens,"sampler_shutdown_error":sampler_close.err(),"observer_close_error":observer_close.err(),"observer_processes":commands.receipts(),
                 "resources":resources.snapshot(),
@@ -1238,6 +1445,17 @@ fn owned_startup(
     }
     Ok(snapshot)
 }
+fn lazy_plan_complete(snapshot: &StartupSnapshot, drives: usize) -> bool {
+    snapshot.accounting_complete
+        && snapshot.terminal_outcome == mount_rs_service::startup::Outcome::Ready
+        && snapshot.planned_drives == Some(drives as u64)
+        && snapshot.registered_drives == drives as u64
+        && snapshot.construction_mode == Some(mount_rs_service::startup::ConstructionMode::Lazy)
+        && snapshot.max_active_drives == Some(drives as u64)
+        && snapshot.construction_plans == Some(drives as u64)
+        && snapshot.open_started == 0
+        && snapshot.open_success == 0
+}
 fn ready_startup_complete(ready: &Ready, drives: usize) -> bool {
     let Some(value) = &ready.startup_diagnostics else {
         return false;
@@ -1245,12 +1463,8 @@ fn ready_startup_complete(ready: &Ready, drives: usize) -> bool {
     let Ok(bytes) = serde_json::to_vec(value) else {
         return false;
     };
-    owned_startup(&bytes, ready.pid, ready.server, ready.generation, drives).is_ok_and(|snapshot| {
-        snapshot.accounting_complete
-            && snapshot.terminal_outcome == mount_rs_service::startup::Outcome::Ready
-            && snapshot.planned_drives == Some(drives as u64)
-            && snapshot.registered_drives == drives as u64
-    })
+    owned_startup(&bytes, ready.pid, ready.server, ready.generation, drives)
+        .is_ok_and(|snapshot| lazy_plan_complete(&snapshot, drives))
 }
 fn publish_startup_progress(
     root: &Path,
@@ -1285,8 +1499,14 @@ fn example_ready() -> Ready {
         binary_digest: "binary".into(),
         backend_prefix: "owned".into(),
         mode: "MRC5".into(),
-        replicas: 10,
-        receipts: (0..10).map(|drive| json!({"drive":drive,"mode":"MRC5","backing":format!("{:032x}",drive+1),"provider_backing_verified":true})).collect(),
+        schema: "mount-rs.production-ready.v2".into(),
+        planned_drives: 10,
+        registered_drives: 10,
+        max_active_drives: 10,
+        expected_backings_sha256: super::digest(
+            &serde_json::to_vec(&example_expected_backings()).unwrap(),
+        ),
+        runtime_activation: super::metrics::example_runtime(0, 10),
         resources: super::resources::example_sample(123),
         core_profile: Value::Null,
         phase_metrics: Value::Null,
@@ -1322,10 +1542,12 @@ fn wrong_readiness_identities_are_rejected() {
             drives: 10,
             files: 2,
             seconds: 1,
+            population_seconds: super::config::PHASE_SECONDS,
             provider: "sqlite".into(),
         },
         backend: Backend {
             provider: "sqlite".into(),
+            block_provider: "metadata".into(),
             root: PathBuf::new(),
             prefix: "owned".into(),
         },
@@ -1342,6 +1564,10 @@ fn wrong_readiness_identities_are_rejected() {
         binary_digest: "binary".into(),
         output: PathBuf::new(),
         parent_pid: 1,
+        expected_backings: example_expected_backings(),
+        expected_backings_sha256: super::digest(
+            &serde_json::to_vec(&example_expected_backings()).unwrap(),
+        ),
     };
     validate_ready(&ready, 123, 0, 0, &p).unwrap();
     assert!(validate_ready(&ready, 124, 0, 0, &p).is_err());
@@ -1395,9 +1621,7 @@ async fn cleanup_forces_and_reaps_owned_noncooperating_child_within_budget() {
 }
 #[test]
 fn prereview_red_malformed_backing_receipts() {
-    let mut ready = example_ready();
-    ready.receipts[0] = Value::Null;
-    assert!(validate_backing_receipts(&ready).is_err());
+    assert!(validate_backing_receipt(&Value::Null, 0).is_err());
 }
 pub(super) fn validate_backing_receipt(r: &Value, drive: usize) -> Result<String, String> {
     if r["drive"].as_u64() != Some(drive as u64)
@@ -1414,16 +1638,9 @@ pub(super) fn validate_backing_receipt(r: &Value, drive: usize) -> Result<String
     }
     Ok(backing.to_hex())
 }
-fn validate_backing_receipts(ready: &Ready) -> Result<Vec<String>, String> {
-    if ready.receipts.len() != ready.replicas {
-        return Err("backing receipt count mismatch".into());
-    }
-    ready
-        .receipts
-        .iter()
-        .enumerate()
-        .map(|(drive, r)| validate_backing_receipt(r, drive))
-        .collect()
+#[cfg(test)]
+fn example_expected_backings() -> Vec<String> {
+    (0..10).map(|drive| format!("{:032x}", drive + 1)).collect()
 }
 #[derive(Default)]
 struct CloseTasks {
@@ -1486,10 +1703,11 @@ async fn listener_timeout_retains_only_pending_handle_until_completion() {
 
 #[test]
 fn startup_progress_identity_bounds_and_incomplete_readiness_are_separate() {
-    let startup = Startup::new(true, StartupIdentity::worker(0, 2));
-    startup.plan(5, 10);
+    let startup = Startup::new_lazy(true, StartupIdentity::worker(0, 2));
+    startup.plan_lazy(5, 10, 10).unwrap();
     for _ in 0..10 {
-        startup.begin(StartupStage::DriveOpen).finish(true);
+        startup.construction_plan();
+        startup.begin(StartupStage::DriveRegister).finish(true);
         startup.registered();
     }
     startup.publish(&mut |_| Err(std::io::Error::other("observer unavailable")));
@@ -1515,7 +1733,10 @@ fn startup_progress_identity_bounds_and_incomplete_readiness_are_separate() {
     ready.startup_diagnostics = Some(serde_json::to_value(&snapshot).unwrap());
     assert!(!ready_startup_complete(&ready, 10));
     // Ready's product identity/content validation remains independent of the observer.
-    assert_eq!(ready.replicas, snapshot.open_success as usize);
+    assert_eq!(
+        ready.planned_drives as u64,
+        snapshot.planned_drives.unwrap()
+    );
     ready.startup_diagnostics = None;
     assert!(!ready_startup_complete(&ready, 10));
     let root = tempfile::tempdir().unwrap();
@@ -1545,21 +1766,20 @@ fn terminal_startup_complete(terminal: &Value, ready: &Ready) -> bool {
         ready.pid,
         ready.server,
         ready.generation,
-        ready.replicas,
+        ready.planned_drives,
     )
     .is_ok_and(|snapshot| {
-        snapshot.accounting_complete
-            && snapshot.terminal_outcome == mount_rs_service::startup::Outcome::Ready
+        lazy_plan_complete(&snapshot, ready.planned_drives)
             && snapshot.cleanup_outcome == Some(mount_rs_service::startup::CleanupOutcome::Success)
-            && snapshot.planned_drives == Some(ready.replicas as u64)
     })
 }
 #[test]
 fn terminal_startup_publication_failure_cannot_reuse_ready_completeness() {
-    let startup = Startup::new(true, StartupIdentity::worker(0, 0));
-    startup.plan(5, 10);
+    let startup = Startup::new_lazy(true, StartupIdentity::worker(0, 0));
+    startup.plan_lazy(5, 10, 10).unwrap();
     for _ in 0..10 {
-        startup.begin(StartupStage::DriveOpen).finish(true);
+        startup.construction_plan();
+        startup.begin(StartupStage::DriveRegister).finish(true);
         startup.registered();
     }
     startup.finish_startup(true);
@@ -1580,5 +1800,53 @@ fn terminal_startup_publication_failure_cannot_reuse_ready_completeness() {
     assert_eq!(
         terminal["clean"], true,
         "product cleanup remains successful"
+    );
+}
+
+#[test]
+fn lazy_target_terminal_requires_the_same_cold_plan_as_ready() {
+    let mut ready = example_ready();
+    ready.pid = std::process::id();
+    let lazy = Startup::new_lazy(true, StartupIdentity::worker(0, 0));
+    lazy.plan_lazy(5, 10, 10).unwrap();
+    for _ in 0..10 {
+        lazy.construction_plan();
+        lazy.registered();
+    }
+    lazy.finish_startup(true);
+    lazy.begin(StartupStage::Cleanup).finish(true);
+    lazy.finish_cleanup(true);
+    let complete =
+        json!({"pid":ready.pid,"server":ready.server,"startup_diagnostics":lazy.snapshot()});
+    assert!(terminal_startup_complete(&complete, &ready));
+    let mut reduced = complete.clone();
+    reduced["startup_diagnostics"]["max_active_drives"] = json!(1);
+    let bytes = serde_json::to_vec(&reduced["startup_diagnostics"]).unwrap();
+    assert!(
+        owned_startup(&bytes, ready.pid, 0, 0, 10).is_ok(),
+        "negative must be structurally valid"
+    );
+    assert!(
+        !terminal_startup_complete(&reduced, &ready),
+        "terminal must not shrink default capacity"
+    );
+    let eager = Startup::new(true, StartupIdentity::worker(0, 0));
+    eager.plan(5, 10);
+    for _ in 0..10 {
+        eager.begin(StartupStage::DriveOpen).finish(true);
+        eager.registered();
+    }
+    eager.finish_startup(true);
+    eager.begin(StartupStage::Cleanup).finish(true);
+    eager.finish_cleanup(true);
+    let old = json!({"pid":ready.pid,"server":ready.server,"startup_diagnostics":eager.snapshot()});
+    let bytes = serde_json::to_vec(&old["startup_diagnostics"]).unwrap();
+    assert!(
+        owned_startup(&bytes, ready.pid, 0, 0, 10).is_ok(),
+        "legacy eager negative must parse"
+    );
+    assert!(
+        !terminal_startup_complete(&old, &ready),
+        "terminal must carry the same cold lazy plan"
     );
 }

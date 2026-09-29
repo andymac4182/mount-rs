@@ -158,6 +158,18 @@ impl MetadataStore for MetadataProbe {
         assert_eq!(revision, 41);
         Ok(None)
     }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedCompactInode> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(backing.as_bytes(), [0x7a; 16]);
+        assert_eq!(inode, 7);
+        Err(FsError::new(ErrorCode::Eio)
+            .with_syscall("default compact load probe")
+            .with_message("custom provider retained its fresh owned fallback"))
+    }
     async fn delegation_state(&self) -> Result<Option<DelegationState>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(None)
@@ -209,6 +221,191 @@ fn erased_metadata(probe: Arc<dyn MetadataStore>) -> ErasedMetadataStore {
         ErasedMetadataStore::new(probe)
     }
 }
+
+struct CompactReadProbe {
+    read_calls: AtomicU64,
+    old_load_calls: AtomicU64,
+}
+
+fn compact_read_probe_node() -> NodeMetadata {
+    use mount_rs_core::chunking::ChunkerConfig;
+    use mount_rs_core::storage::{FileLayout, NodeData};
+    use mount_rs_core::types::{S_IFREG, Stats};
+
+    NodeMetadata {
+        stats: Stats {
+            dev: 0,
+            ino: 7,
+            mode: S_IFREG | 0o600,
+            nlink: 1,
+            uid: 3,
+            gid: 4,
+            rdev: 0,
+            size: 0,
+            blksize: 4096,
+            blocks: 0,
+            atime_ms: 1,
+            mtime_ms: 2,
+            ctime_ms: 3,
+            birthtime_ms: 4,
+        },
+        data: NodeData::File(FileLayout {
+            chunker: ChunkerConfig {
+                algorithm: "fixed-size".into(),
+                version: 1,
+                parameters: BTreeMap::from([("chunk_size".into(), 4096)]),
+            },
+            extents: vec![],
+        }),
+    }
+}
+
+#[async_trait]
+impl MetadataStore for CompactReadProbe {
+    fn durable(&self) -> bool {
+        false
+    }
+
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: mount_rs_core::storage::compact::CompactInodeExpectation<'_>,
+    ) -> Result<mount_rs_core::storage::compact::CompactInodeRead> {
+        use mount_rs_core::storage::compact::check_compact_inode_unchanged;
+
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(backing.as_bytes(), [0x7a; 16]);
+        assert_eq!(inode, 7);
+        let checked = check_compact_inode_unchanged(
+            br#"{"layout":"mount-rs-compact-inodes","version":1,"anchor":{"backing":[122,122,122,122,122,122,122,122,122,122,122,122,122,122,122,122],"generation":37,"root":1,"next_inode":8,"default_uid":3,"default_gid":4,"umask":23,"default_chunker":{"algorithm":"fixed-size","version":1,"parameters":{"chunk_size":4096}},"members":[1,7]}}"#,
+            backing,
+            37,
+            inode,
+            PhysicalInodeIdentity {
+                incarnation: 2,
+                epoch: 11,
+                revision: 13,
+            },
+            br#"{"stats":{"dev":0,"ino":7,"mode":33152,"nlink":1,"uid":3,"gid":4,"rdev":0,"size":0,"blksize":4096,"blocks":0,"atime_ms":1,"mtime_ms":2,"ctime_ms":3,"birthtime_ms":4},"data":{"File":{"chunker":{"algorithm":"fixed-size","version":1,"parameters":{"chunk_size":4096}},"extents":[]}}}"#,
+            expected,
+        )
+        .expect("the wrapper must preserve the exact borrowed expectation");
+        assert_eq!(checked.generation(), 37);
+        assert_eq!(checked.inode(), inode);
+        Err(FsError::new(ErrorCode::Eacces)
+            .with_syscall("selected compact read probe")
+            .with_message("provider certified the exact forwarded expectation"))
+    }
+
+    async fn load_compact_inode(
+        &self,
+        _: ConcurrentBackingId,
+        _: InodeId,
+    ) -> Result<LoadedCompactInode> {
+        self.old_load_calls.fetch_add(1, Ordering::Relaxed);
+        Err(FsError::new(ErrorCode::Eio)
+            .with_syscall("unexpected old compact load")
+            .with_message("SDK bypassed the provider's selected read override"))
+    }
+
+    async fn load(&self) -> Result<LoadedMetadata> {
+        unreachable!()
+    }
+    async fn acquire_writer(&self, _: &str, _: Duration) -> Result<WriterLease> {
+        unreachable!()
+    }
+    async fn renew_writer(&self, _: &WriterLease, _: Duration) -> Result<WriterLease> {
+        unreachable!()
+    }
+    async fn release_writer(&self, _: &WriterLease) -> Result<()> {
+        unreachable!()
+    }
+    async fn publish(&self, _: u64, _: &WriterLease, _: Namespace) -> Result<u64> {
+        unreachable!()
+    }
+    async fn flush(&self) -> Result<()> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn erased_selected_compact_read_forwards_exact_expectation_and_provider_error() {
+    use mount_rs_core::storage::compact::CompactInodeExpectation;
+
+    let backing = ConcurrentBackingId::from_bytes([0x7a; 16]).unwrap();
+    let identity = PhysicalInodeIdentity {
+        incarnation: 2,
+        epoch: 11,
+        revision: 13,
+    };
+    let node = compact_read_probe_node();
+
+    // A custom provider that does not implement the new method still performs
+    // exactly one fresh owned load through the trait's default implementation.
+    let fallback = MetadataProbe {
+        calls: AtomicU64::new(0),
+        ready: AtomicBool::new(true),
+    };
+    let fallback_error = fallback
+        .read_compact_inode(
+            backing,
+            7,
+            CompactInodeExpectation::selected(37, identity, &node),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(fallback_error.code, ErrorCode::Eio);
+    assert_eq!(
+        fallback_error.syscall.as_deref(),
+        Some("default compact load probe")
+    );
+
+    let probe = Arc::new(CompactReadProbe {
+        read_calls: AtomicU64::new(0),
+        old_load_calls: AtomicU64::new(0),
+    });
+    let direct_error = probe
+        .read_compact_inode(
+            backing,
+            7,
+            CompactInodeExpectation::selected(37, identity, &node),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(direct_error.code, ErrorCode::Eacces);
+    assert_eq!(probe.read_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(probe.old_load_calls.load(Ordering::Relaxed), 0);
+
+    let erased = erased_metadata(probe.clone());
+    let forwarded_error = erased
+        .read_compact_inode(
+            backing,
+            7,
+            CompactInodeExpectation::selected(37, identity, &node),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (
+            probe.read_calls.load(Ordering::Relaxed),
+            probe.old_load_calls.load(Ordering::Relaxed)
+        ),
+        (2, 0),
+        "the actual erased wrapper must delegate the new read once, without the old load"
+    );
+    assert_eq!(forwarded_error.code, ErrorCode::Eacces);
+    assert_eq!(
+        forwarded_error.syscall.as_deref(),
+        Some("selected compact read probe")
+    );
+    assert_eq!(
+        forwarded_error.to_string(),
+        "provider certified the exact forwarded expectation"
+    );
+}
+
 fn allocation_controls(enabled: bool) {
     assert_eq!(storage::enabled(), enabled);
     let inner = Arc::new(BlockProbe::new());

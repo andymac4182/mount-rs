@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use md5::{Digest, Md5};
+use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::InodeId;
@@ -162,6 +163,7 @@ impl Database {
         connection_string: &str,
         schema: &str,
         options: PgliteStorageOptions,
+        observer: Option<&dyn ConstructionObserver>,
     ) -> Result<Self> {
         if options.volume_key.is_empty() {
             return Err(
@@ -181,6 +183,9 @@ impl Database {
             volume_key: options.volume_key,
             durable: options.durable,
         };
+        if let Some(observer) = observer {
+            observer.retain(Arc::new(database.clone()));
+        }
         database
             .client
             .lock()
@@ -276,6 +281,13 @@ impl Database {
     }
 }
 
+#[async_trait]
+impl ConstructionResource for Database {
+    async fn close(&self) -> Result<()> {
+        Database::close(self).await
+    }
+}
+
 /// Fenced single-writer metadata persisted in an external PGlite database.
 /// Namespace JSON contains attributes and block references only; file bytes
 /// are stored by [`PgliteBlockStore`].
@@ -366,7 +378,17 @@ impl PgliteMetadataStore {
         connection_string: &str,
         options: PgliteStorageOptions,
     ) -> Result<Self> {
-        let database = Database::connect(connection_string, METADATA_SCHEMA, options).await?;
+        Self::connect_with_options_and_observer(connection_string, options, None).await
+    }
+
+    /// Retain the actual database owner before fallible schema initialization.
+    pub async fn connect_with_options_and_observer(
+        connection_string: &str,
+        options: PgliteStorageOptions,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<Self> {
+        let database =
+            Database::connect(connection_string, METADATA_SCHEMA, options, observer).await?;
         {
             let client = database.lock_client().await?;
             compact::initialize(client.as_ref().ok_or_else(connection_closed)?).await?;
@@ -407,8 +429,17 @@ impl PgliteBlockStore {
         connection_string: &str,
         options: PgliteStorageOptions,
     ) -> Result<Self> {
+        Self::connect_with_options_and_observer(connection_string, options, None).await
+    }
+
+    /// Retain the actual database owner before fallible schema initialization.
+    pub async fn connect_with_options_and_observer(
+        connection_string: &str,
+        options: PgliteStorageOptions,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<Self> {
         Ok(Self(
-            Database::connect(connection_string, BLOCK_SCHEMA, options).await?,
+            Database::connect(connection_string, BLOCK_SCHEMA, options, observer).await?,
         ))
     }
 
@@ -5541,3 +5572,7 @@ mod inode_wire_tests;
 #[cfg(test)]
 #[path = "compact_tests.rs"]
 mod compact_tests;
+
+#[cfg(test)]
+#[path = "construction_tests.rs"]
+mod construction_tests;

@@ -1,0 +1,781 @@
+{
+  "schema": "mount-rs.private-matched-native-scalar-comparison.v1",
+  "status": "accepted_sequential_bounded_controls",
+  "capacity_claim": false,
+  "provenance": {
+    "addon_sha256": "bc5be09416aad0d2efd0615bc21d1b5a117fb45b169f69d0d15243c32935fb79",
+    "common_source_manifest_sha256": "f47256c906e69e9510de3de39c0ee28992cb2b549f81e4fa8dcae0effe384e3d",
+    "matched_runner_sha256": "8571370adab15e30b014ef5dc391c29d7a331dec25cf9857cda4392024768344",
+    "lane_router_sha256": "8cc1deff5a9975bffaaa83db124492374009b8655a84c7cd871714d288d40cb4"
+  },
+  "cells": [
+    {
+      "drives": 1,
+      "workers": 8,
+      "logical_operations": 64,
+      "writes": 32,
+      "full_reads": 32,
+      "verified_reads": 32,
+      "distinct_changed_contents": 32,
+      "changed_content_bytes": 4098,
+      "write_payload_bytes": 4096,
+      "chunk_size_bytes": 65536,
+      "distinct_initial_setup_objects": 1,
+      "native_timed_elapsed_ms": 457.8329580000004,
+      "logical_operations_per_second": 139.788975174653,
+      "write_median_ms": 65.1207710000001,
+      "read_median_ms": 48.6518544999999,
+      "enclosing_native_window_ms": 748.6902499999999,
+      "rustfs_client_instances": 1,
+      "independent_tidb_pools_source_derived": 1,
+      "native_storage_declared_rows": 116,
+      "native_profile_rows": 136,
+      "provenance": {
+        "parent_sha256": "d69ae998303a9c6802c7294442d9584e194a1f837fe8847a9381b148b8bb2b23",
+        "result_sha256": "f1f1980dd7207cb97f8e1a8d07421cc0b7e0e31e2911b7dbe17d052c61996486",
+        "root_acceptance_sha256": "1315f57220ed8b8294213434582b5d19da2e9b2396ba32766d1563d56bc628ac",
+        "source_inputs": 745,
+        "runner_sha256": "3212d3a74ae7db631454117454e653e89788d5f900281b4df7eab549c3c15eb6",
+        "helper_sha256": "867edf165c4ff6d6f58a25cd9a2ef5d557d7ad19c81299d6b1c137763a102f31",
+        "config_sha256": "7c43a6f84ca662faf2224ee5d9a5658c7645e2260326b95d1f3d424f8b4cfbb3",
+        "ready_sha256": "50f2c006d5a947d9523b1a6b89dc280005b27e1faa530a217d8283535a555fd0"
+      },
+      "gates": [
+        {
+          "name": "filesystem.gate_wait.read",
+          "calls": 64,
+          "elapsed_ns": 1382060418
+        },
+        {
+          "name": "filesystem.gate_wait.metadata",
+          "calls": 8,
+          "elapsed_ns": 4126
+        },
+        {
+          "name": "filesystem.gate_wait.write_prepare",
+          "calls": 48,
+          "elapsed_ns": 527225625
+        },
+        {
+          "name": "filesystem.gate_wait.write_commit",
+          "calls": 32,
+          "elapsed_ns": 731565080
+        },
+        {
+          "name": "filesystem.gate_wait.write_fallback",
+          "calls": 0,
+          "elapsed_ns": 0
+        },
+        {
+          "name": "filesystem.gate_wait.whole_file_replay",
+          "calls": 0,
+          "elapsed_ns": 0
+        },
+        {
+          "name": "filesystem.gate_wait.mutation_batch",
+          "calls": 8,
+          "elapsed_ns": 3709
+        },
+        {
+          "name": "filesystem.gate_wait.maintenance",
+          "calls": 8,
+          "elapsed_ns": 7915
+        }
+      ],
+      "storage": [
+        {
+          "name": "metadata.load",
+          "calls": 144,
+          "elapsed_ns": 357921333,
+          "success": 144,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "metadata.snapshot",
+          "calls": 8,
+          "elapsed_ns": 24362336,
+          "success": 8,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "metadata.publish",
+          "calls": 40,
+          "elapsed_ns": 237652745,
+          "success": 40,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "blocks.put",
+          "calls": 40,
+          "elapsed_ns": 500078875,
+          "success": 40,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 163920
+        },
+        {
+          "name": "blocks.get",
+          "calls": 64,
+          "elapsed_ns": 387250,
+          "success": 64,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 262272
+        },
+        {
+          "name": "blocks.flush",
+          "calls": 40,
+          "elapsed_ns": 4458,
+          "success": 40,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "blocks.verify_backing",
+          "calls": 72,
+          "elapsed_ns": 81265375,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "tidb.pool.checkout",
+          "calls": 192,
+          "elapsed_ns": 180917,
+          "success": 192,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "tidb.tx.begin.compact_read",
+          "calls": 152,
+          "elapsed_ns": 135211246,
+          "success": 152,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "tidb.tx.rollback",
+          "calls": 152,
+          "elapsed_ns": 56706330,
+          "success": 152,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "object_store.backing_marker.probe.get",
+          "calls": 72,
+          "elapsed_ns": 45228581,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "object_store.backing_marker.probe.body_read",
+          "calls": 72,
+          "elapsed_ns": 262953,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 1440
+        },
+        {
+          "name": "object_store.backing_marker.data.get",
+          "calls": 72,
+          "elapsed_ns": 34852453,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "object_store.backing_marker.data.body_read",
+          "calls": 72,
+          "elapsed_ns": 130001,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 1440
+        },
+        {
+          "name": "object_store.backing_marker.retry_backoff",
+          "calls": 0,
+          "elapsed_ns": 0,
+          "success": 0,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        }
+      ],
+      "rustfs_adapter": {
+        "ordinary_gets": 64,
+        "ordinary_get_cache_hits": 64,
+        "puts": 40,
+        "conditional_conflicts": 7,
+        "retry_exhausted": 0,
+        "errors": 0,
+        "raw_requests": [
+          {
+            "name": "body_read.block_read",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "body_read.conflict_verify",
+            "calls": 7,
+            "success": 7,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 16710,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 28686
+          },
+          {
+            "name": "body_read.migration",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "delete.direct",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "delete.reconcile",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "get.block_read",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "get.conflict_verify",
+            "calls": 7,
+            "success": 7,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 5749916,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "get.migration",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "head.direct_delete",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "put_opts.block_create",
+            "calls": 40,
+            "success": 33,
+            "error": 7,
+            "cancelled": 0,
+            "elapsed_ns": 493349416,
+            "attempted_bytes": 163920,
+            "confirmed_bytes": 135234,
+            "returned_bytes": 0
+          }
+        ],
+        "http_attempts": "unavailable",
+        "internal_successful_retries": "unavailable"
+      },
+      "node_process": {
+        "cpu_work_user_us": 44816,
+        "cpu_work_system_us": 49614,
+        "cpu_observer_user_us": 2015,
+        "cpu_observer_system_us": 42,
+        "native_allocation_count": "unavailable",
+        "js_allocation_count": "unavailable"
+      },
+      "backend_container_resources": {
+        "members": 8,
+        "overall_complete": false,
+        "metrics": {
+          "cpu_usage_ns": {
+            "complete": true,
+            "total": 755442000,
+            "missing_member_count": 0
+          },
+          "block_bytes": {
+            "complete": true,
+            "total": 1056768,
+            "missing_member_count": 0
+          },
+          "block_operations": {
+            "complete": false,
+            "total": null,
+            "missing_member_count": 8
+          },
+          "network_rx_bytes": {
+            "complete": true,
+            "total": 1764541,
+            "missing_member_count": 0
+          },
+          "network_tx_bytes": {
+            "complete": true,
+            "total": 1964191,
+            "missing_member_count": 0
+          }
+        }
+      },
+      "caller_durability_assertions": {
+        "metadata": true,
+        "blocks": true
+      },
+      "crash_qualified": false,
+      "capacity_claim": false
+    },
+    {
+      "drives": 8,
+      "workers": 8,
+      "logical_operations": 64,
+      "writes": 32,
+      "full_reads": 32,
+      "verified_reads": 32,
+      "distinct_changed_contents": 32,
+      "changed_content_bytes": 4098,
+      "write_payload_bytes": 4096,
+      "chunk_size_bytes": 65536,
+      "distinct_initial_setup_objects": 8,
+      "native_timed_elapsed_ms": 194.55812499999956,
+      "logical_operations_per_second": 328.95053856013544,
+      "write_median_ms": 40.23589600000014,
+      "read_median_ms": 7.768750000000182,
+      "enclosing_native_window_ms": 539.8112499999997,
+      "rustfs_client_instances": 8,
+      "independent_tidb_pools_source_derived": 8,
+      "native_storage_declared_rows": 116,
+      "native_profile_rows": 136,
+      "provenance": {
+        "parent_sha256": "5d461fa6842b1e1b7201d10b00d8e9a18d4d57b4394a281e4b2372c0946de0b4",
+        "result_sha256": "ee3b608ab0a09ca21762137e06bcb8aa46a13afcd3eb09c358d823cde165dacd",
+        "root_acceptance_sha256": "3aeeac44c506ffaeccf74d846860b343f2b93f5870af30348a77a8db6e350d00",
+        "source_inputs": 745,
+        "runner_sha256": "3212d3a74ae7db631454117454e653e89788d5f900281b4df7eab549c3c15eb6",
+        "helper_sha256": "867edf165c4ff6d6f58a25cd9a2ef5d557d7ad19c81299d6b1c137763a102f31",
+        "config_sha256": "7c43a6f84ca662faf2224ee5d9a5658c7645e2260326b95d1f3d424f8b4cfbb3",
+        "ready_sha256": "50f2c006d5a947d9523b1a6b89dc280005b27e1faa530a217d8283535a555fd0"
+      },
+      "gates": [
+        {
+          "name": "filesystem.gate_wait.read",
+          "calls": 64,
+          "elapsed_ns": 7168
+        },
+        {
+          "name": "filesystem.gate_wait.metadata",
+          "calls": 8,
+          "elapsed_ns": 4583
+        },
+        {
+          "name": "filesystem.gate_wait.write_prepare",
+          "calls": 48,
+          "elapsed_ns": 10332
+        },
+        {
+          "name": "filesystem.gate_wait.write_commit",
+          "calls": 32,
+          "elapsed_ns": 8626
+        },
+        {
+          "name": "filesystem.gate_wait.write_fallback",
+          "calls": 0,
+          "elapsed_ns": 0
+        },
+        {
+          "name": "filesystem.gate_wait.whole_file_replay",
+          "calls": 0,
+          "elapsed_ns": 0
+        },
+        {
+          "name": "filesystem.gate_wait.mutation_batch",
+          "calls": 8,
+          "elapsed_ns": 4916
+        },
+        {
+          "name": "filesystem.gate_wait.maintenance",
+          "calls": 8,
+          "elapsed_ns": 668
+        }
+      ],
+      "storage": [
+        {
+          "name": "metadata.load",
+          "calls": 144,
+          "elapsed_ns": 488757204,
+          "success": 144,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "metadata.snapshot",
+          "calls": 8,
+          "elapsed_ns": 28638334,
+          "success": 8,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "metadata.publish",
+          "calls": 40,
+          "elapsed_ns": 343017296,
+          "success": 40,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "blocks.put",
+          "calls": 40,
+          "elapsed_ns": 887255039,
+          "success": 40,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 163920
+        },
+        {
+          "name": "blocks.get",
+          "calls": 64,
+          "elapsed_ns": 323792,
+          "success": 64,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 262272
+        },
+        {
+          "name": "blocks.flush",
+          "calls": 40,
+          "elapsed_ns": 4873,
+          "success": 40,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "blocks.verify_backing",
+          "calls": 72,
+          "elapsed_ns": 132027582,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "tidb.pool.checkout",
+          "calls": 192,
+          "elapsed_ns": 200748,
+          "success": 192,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "tidb.tx.begin.compact_read",
+          "calls": 152,
+          "elapsed_ns": 189508911,
+          "success": 152,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "tidb.tx.rollback",
+          "calls": 152,
+          "elapsed_ns": 72311626,
+          "success": 152,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "object_store.backing_marker.probe.get",
+          "calls": 72,
+          "elapsed_ns": 87456042,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "object_store.backing_marker.probe.body_read",
+          "calls": 72,
+          "elapsed_ns": 283333,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 1440
+        },
+        {
+          "name": "object_store.backing_marker.data.get",
+          "calls": 72,
+          "elapsed_ns": 43239498,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        },
+        {
+          "name": "object_store.backing_marker.data.body_read",
+          "calls": 72,
+          "elapsed_ns": 130253,
+          "success": 72,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 1440
+        },
+        {
+          "name": "object_store.backing_marker.retry_backoff",
+          "calls": 0,
+          "elapsed_ns": 0,
+          "success": 0,
+          "error": 0,
+          "cancelled": 0,
+          "bytes": 0
+        }
+      ],
+      "rustfs_adapter": {
+        "ordinary_gets": 64,
+        "ordinary_get_cache_hits": 64,
+        "puts": 40,
+        "conditional_conflicts": 0,
+        "retry_exhausted": 0,
+        "errors": 0,
+        "raw_requests": [
+          {
+            "name": "body_read.block_read",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "body_read.conflict_verify",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "body_read.migration",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "delete.direct",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "delete.reconcile",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "get.block_read",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "get.conflict_verify",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "get.migration",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "head.direct_delete",
+            "calls": 0,
+            "success": 0,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 0,
+            "attempted_bytes": 0,
+            "confirmed_bytes": 0,
+            "returned_bytes": 0
+          },
+          {
+            "name": "put_opts.block_create",
+            "calls": 40,
+            "success": 40,
+            "error": 0,
+            "cancelled": 0,
+            "elapsed_ns": 886358459,
+            "attempted_bytes": 163920,
+            "confirmed_bytes": 163920,
+            "returned_bytes": 0
+          }
+        ],
+        "http_attempts": "unavailable",
+        "internal_successful_retries": "unavailable"
+      },
+      "node_process": {
+        "cpu_work_user_us": 40944,
+        "cpu_work_system_us": 43601,
+        "cpu_observer_user_us": 3679,
+        "cpu_observer_system_us": 106,
+        "native_allocation_count": "unavailable",
+        "js_allocation_count": "unavailable"
+      },
+      "backend_container_resources": {
+        "members": 8,
+        "overall_complete": false,
+        "metrics": {
+          "cpu_usage_ns": {
+            "complete": true,
+            "total": 816762000,
+            "missing_member_count": 0
+          },
+          "block_bytes": {
+            "complete": true,
+            "total": 1110016,
+            "missing_member_count": 0
+          },
+          "block_operations": {
+            "complete": false,
+            "total": null,
+            "missing_member_count": 8
+          },
+          "network_rx_bytes": {
+            "complete": true,
+            "total": 1551918,
+            "missing_member_count": 0
+          },
+          "network_tx_bytes": {
+            "complete": true,
+            "total": 1673331,
+            "missing_member_count": 0
+          }
+        }
+      },
+      "caller_durability_assertions": {
+        "metadata": true,
+        "blocks": true
+      },
+      "crash_qualified": false,
+      "capacity_claim": false
+    }
+  ],
+  "scopes": {
+    "rates": "aggregate logical partial-overwrite/full-read operations across eight concurrent lanes; not per-Drive rates or physical IOPS",
+    "comparison": "single short sequential controls; Drive count changes independent pools, filesystem gates, prefixes and setup-object count; no capacity scaling or mutex-only attribution",
+    "timed_window": "summary excludes setup/open/close/unlink and read verification; native counters enclose lane setup/open/close, so no pure timed per-operation counter cost",
+    "counters": "selected inclusive async wall spans overlap; fixed API invocations are not wire packets or HTTP attempts",
+    "cache": "64 ordinary adapter gets and 64 adapter cache hits in each enclosing native window; excludes marker and conflict-verification requests",
+    "raw_requests": "registered RustFS block-store adapter methods; marker/preflight/internal client requests excluded; HTTP attempts and internal successful retries unavailable",
+    "backend_resources": "enclosing eight-container accounting; no idle subtraction, pure timed-work attribution or physical-device attribution",
+    "network": "container interfaces may count the same virtual/client/server traffic multiple times; not physical-link bytes",
+    "block_operations": "unavailable for all eight members; total null, not zero or physical IOPS",
+    "durability": "caller persistent-backend assertions and flush/reopen checks; no crash, power-loss or production qualification"
+  }
+}

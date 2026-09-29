@@ -77,6 +77,13 @@ use mount_rs_core::Loopback;
 use mount_rs_remote_protocol::{OperationName, binary::IoRequest};
 #[path = "support/saturation_backend.rs"]
 mod backend;
+#[cfg(unix)]
+#[allow(dead_code)]
+#[path = "support/production_target/command.rs"]
+mod command;
+#[allow(dead_code)]
+#[path = "support/remote_blocks.rs"]
+mod remote_blocks;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -220,6 +227,33 @@ fn source_binary_receipt() -> Result<Value, String> {
         &std::fs::read(BACKEND_SOURCE_PATH).map_err(|_| "backend source read failed")?,
     );
     require_matching_runner_source(&compiled_source_sha256, &current_source_sha256)?;
+    let mut supplemental_source_sha256 = serde_json::Map::new();
+    for (name, compiled) in [
+        (
+            "support/remote_blocks.rs",
+            include_bytes!("support/remote_blocks.rs").as_slice(),
+        ),
+        (
+            "support/production_target/command.rs",
+            include_bytes!("support/production_target/command.rs").as_slice(),
+        ),
+    ] {
+        let actual = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join(name),
+        )
+        .map_err(|_| "supplemental runner source read failed")?;
+        if actual != compiled {
+            return Err("supplemental runner source changed since executable compilation".into());
+        }
+        let digest: String = ring::digest::digest(&ring::digest::SHA256, compiled)
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        supplemental_source_sha256.insert(name.into(), json!(digest));
+    }
     let executable = std::env::current_exe().map_err(|_| "executable path unavailable")?;
     let mut input = std::fs::File::open(&executable).map_err(|_| "executable read failed")?;
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
@@ -268,6 +302,7 @@ fn source_binary_receipt() -> Result<Value, String> {
         "compiled_revision_env":option_env!("MOUNT_RS_SATURATION_SOURCE_REVISION"),
         "compiled_runner_source_sha256":compiled_source_sha256,
         "current_runner_source_sha256":current_source_sha256,
+        "supplemental_source_sha256":supplemental_source_sha256,
         "features":{"resource_profiling":cfg!(feature="resource-profiling"),"allocation_profiling":cfg!(feature="allocation-profiling"),"foundationdb":cfg!(feature="saturation-foundationdb")},
     }))
 }
@@ -321,6 +356,291 @@ fn rejected_mode_receipt_or_owned_count_writes_failed_artifact() {
                 json!(count_error)
             );
         }
+    }
+}
+
+// Both banks use the existing drained-stage boundaries. Snapshots are relaxed,
+// sequential observations, not an atomic cut of all background/server activity.
+struct StageDiagnostics {
+    core: mount_rs_core::diagnostics::profile::Snapshot,
+    storage: Option<mount_rs_core::diagnostics::storage::Snapshot>,
+}
+impl StageDiagnostics {
+    fn capture(storage_enabled: bool) -> Self {
+        Self {
+            core: mount_rs_core::diagnostics::profile::snapshot(),
+            storage: storage_enabled.then(mount_rs_core::diagnostics::storage::snapshot),
+        }
+    }
+
+    fn finish_into(self, report: &mut Value) -> Result<(), String> {
+        let core_after = mount_rs_core::diagnostics::profile::snapshot();
+        report["io_profile"] = serde_json::to_value(core_after.delta(&self.core)?)
+            .map_err(|_| "profile encode failed")?;
+        let observed = match self.storage {
+            Some(before) => {
+                let after = mount_rs_core::diagnostics::storage::snapshot();
+                // Fail on changed identity/shape or a reset; never fabricate a
+                // zero delta or repeat a snapshot to hide a pending operation.
+                let delta = after.delta(&before)?;
+                let pending = [&before, &after].iter().any(|snapshot| {
+                    snapshot.in_flight != 0 || snapshot.entries.iter().any(|row| row.in_flight != 0)
+                });
+                let consistent = [&before, &after].iter().all(|snapshot| {
+                    snapshot.entries.iter().all(|row| {
+                        row.success
+                            .checked_add(row.error)
+                            .and_then(|n| n.checked_add(row.cancelled))
+                            == Some(row.calls)
+                            && row
+                                .latency_log2_us
+                                .iter()
+                                .try_fold(0u64, |n, count| n.checked_add(*count))
+                                == Some(row.calls)
+                    })
+                });
+                json!({
+                    "enabled":true,
+                    "complete":!pending && consistent,
+                    "status":if pending {"nonquiescent"} else if consistent {"complete"} else {"inconsistent"},
+                    "before":before,"after":after,"delta":delta,
+                })
+            }
+            None => {
+                json!({"enabled":false,"complete":false,"status":"disabled","before":null,"after":null,"delta":null})
+            }
+        };
+        let enabled = observed["enabled"] == true;
+        report["storage_profile"] = json!({
+            "schema":"mount-rs.remote-stage-storage.v1",
+            "operations":mount_rs_core::diagnostics::storage::operation_names(),
+            "measurement":{
+                "calls":"completed_instrumented_method_or_stage_invocations; success_error_cancelled_are_distinct",
+                "bytes":"known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload",
+                "known_byte_families":{"direct_sdk_blocks":"successful_put_input_and_get_or_migration_payload_bytes; SDK_metadata_bytes_unavailable","tidb_sql":"known_successful_returned_query_bytes; not_base_datastore_IOPS","production_remote_client":"unavailable","peer_blob_cache":"not_configured"},
+                "returned_rows":"known_successful_returned_SQL_rows; zero_observations_means_unavailable",
+                "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+                "latency_histogram":"32_log2_microsecond_buckets; bucket0_below1us; bucket_n_[2^(n-1),2^n)_us; final_bucket_includes_higher_latencies",
+                "in_flight":"before_and_after_are_endpoint_gauges; delta_retains_after_gauge_without_subtraction",
+                "forwarding_boxes":"unavailable; this_fixture_does_not_call_NAPI_forwarding_sites"
+            },
+            "coverage":{
+                "direct_sdk_storage":{"configured":true,"available":enabled,"status":if enabled {"observed"}else{"disabled"}},
+                "production_remote_client":{"available":false,"status":"unavailable","reason":"direct test wire bypasses production remote client"},
+                "peer_blob_cache":{"available":false,"status":"not_configured","reason":"peer blob cache not configured"},
+                "service_stage_observer":{"available":false,"status":"unavailable","reason":"fixture binds without service diagnostics observer"},
+                "oidc_authentication":{"available":false,"status":"unavailable","reason":"synthetic fixture authenticator bypasses OIDC signature validation"}
+            },
+            "scope":"one process hosts all client and server coordinators; one shared Partition; one file per active client; shared or separate Drives as selected by the artifact; direct SDK method boundaries overlap core/provider wall; no independent server process, production topology or physical IOPS qualification",
+            "boundary_scope":"stage workers drained; complete means consistent observed zero instrumented global and per-row boundary gauges only; relaxed sequential snapshots are not an atomic cut or proof of all server/provider/background quiescence"
+        });
+        let Value::Object(observed) = observed else {
+            unreachable!()
+        };
+        report["storage_profile"]
+            .as_object_mut()
+            .unwrap()
+            .extend(observed);
+        Ok(())
+    }
+}
+
+#[test]
+#[ignore = "isolated enabled storage export behavioral gate"]
+fn storage_stage_artifact_preserves_public_spans_and_disabled_coverage() {
+    use mount_rs_core::diagnostics::{profile, storage};
+    assert!(
+        storage::enabled(),
+        "explicit MOUNT_RS_PROFILE_IO=1 required"
+    );
+    assert!(profile::enabled());
+    let actual_before = storage::snapshot();
+    assert_eq!(actual_before.in_flight, 0);
+    let boundary = StageDiagnostics::capture(true);
+    let mut put = storage::Span::new(storage::Operation::SdkBlocksPut);
+    put.finish_success(4096);
+    let mut failed = storage::Span::new(storage::Operation::SdkMetadataFlush);
+    failed.finish_error();
+    drop(storage::Span::new(storage::Operation::SdkBlocksGet));
+    let mut rows = storage::Span::new(storage::Operation::TidbSqlBlockRead);
+    rows.finish_success_with_rows(17, 0);
+    drop(profile::Span::new(profile::Event::BlockPut).units(4096));
+
+    let actual = storage::snapshot().delta(&actual_before).unwrap();
+    let real_row = |name: &str| actual.entries.iter().find(|row| row.name == name).unwrap();
+    assert_eq!(real_row("sdk.blocks.put").success, 1);
+    assert_eq!(real_row("sdk.blocks.put").bytes, 4096);
+    assert_eq!(real_row("sdk.metadata.flush").error, 1);
+    assert_eq!(real_row("sdk.blocks.get").cancelled, 1);
+    assert_eq!(real_row("tidb.sql.block_read").returned_rows, 0);
+    assert_eq!(real_row("tidb.sql.block_read").returned_row_observations, 1);
+    assert_eq!(actual.in_flight, 0);
+
+    let mut completed = json!({"case":"completed"});
+    boundary.finish_into(&mut completed).unwrap();
+    let pending_boundary = StageDiagnostics::capture(true);
+    let pending = storage::Span::new(storage::Operation::SdkMetadataLoad);
+    let pending_actual = storage::snapshot();
+    assert_eq!(pending_actual.in_flight, 1);
+    assert_eq!(
+        pending_actual
+            .entries
+            .iter()
+            .find(|row| row.name == "sdk.metadata.load")
+            .unwrap()
+            .in_flight,
+        1
+    );
+    let mut nonquiescent = json!({"case":"nonquiescent"});
+    pending_boundary.finish_into(&mut nonquiescent).unwrap();
+    drop(pending);
+    assert_eq!(storage::snapshot().in_flight, 0);
+
+    let disabled_boundary = StageDiagnostics::capture(false);
+    let mut disabled = json!({"case":"disabled"});
+    disabled_boundary.finish_into(&mut disabled).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("stage.json");
+    let artifact = json!({"stages":[completed,nonquiescent,disabled]});
+    write_saturation_artifact(&artifact, Some(&path), "storage-stage").unwrap();
+    let observed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let retained: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("stage-storage-stage.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(observed, retained);
+    let core_put = observed["stages"][0]["io_profile"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "provider.blocks.put_bytes")
+        .unwrap();
+    assert_eq!(core_put["calls"], 1);
+    assert_eq!(core_put["units"], 4096);
+    println!(
+        "MOUNT_RS_STORAGE_STAGE_EXPORT behavior_oracles=complete public_success_error_cancel_verified=true known_zero_rows_verified=true pending_gauge_verified=true core_profile_preserved=true retained_artifact_equal=true"
+    );
+
+    let complete = &observed["stages"][0]["storage_profile"];
+    assert!(
+        complete.is_object(),
+        "measured stage artifact omitted storage bank after public span and encoding oracles"
+    );
+    assert_eq!(complete["enabled"], true);
+    assert_eq!(complete["complete"], true);
+    assert_eq!(complete["status"], "complete");
+    let names: Vec<_> = storage::operation_names()
+        .iter()
+        .copied()
+        .map(Value::from)
+        .collect();
+    assert_eq!(complete["operations"], json!(names));
+    assert_eq!(
+        complete["measurement"]["bytes"],
+        "known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload"
+    );
+    assert_eq!(
+        complete["measurement"]["returned_rows"],
+        "known_successful_returned_SQL_rows; zero_observations_means_unavailable"
+    );
+    assert_eq!(
+        complete["measurement"]["duration"],
+        "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap"
+    );
+    let entries = complete["delta"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), names.len());
+    let row = |name: &str| entries.iter().find(|row| row["name"] == name).unwrap();
+    for (name, success, error, cancelled, bytes, returned_observations) in [
+        ("sdk.blocks.put", 1, 0, 0, 4096, 0),
+        ("sdk.metadata.flush", 0, 1, 0, 0, 0),
+        ("sdk.blocks.get", 0, 0, 1, 0, 0),
+        ("tidb.sql.block_read", 1, 0, 0, 17, 1),
+    ] {
+        assert_eq!(row(name)["calls"], 1);
+        assert_eq!(row(name)["success"], success);
+        assert_eq!(row(name)["error"], error);
+        assert_eq!(row(name)["cancelled"], cancelled);
+        assert_eq!(row(name)["bytes"], bytes);
+        assert_eq!(row(name)["returned_rows"], 0);
+        assert_eq!(
+            row(name)["returned_row_observations"],
+            returned_observations
+        );
+        assert_eq!(row(name)["in_flight"], 0);
+        assert_eq!(
+            row(name)["latency_log2_us"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_u64().unwrap())
+                .sum::<u64>(),
+            1
+        );
+    }
+    assert_eq!(complete["before"]["in_flight"], 0);
+    assert_eq!(complete["after"]["in_flight"], 0);
+    assert_eq!(
+        complete["coverage"]["production_remote_client"]["available"],
+        false
+    );
+    assert_eq!(
+        complete["coverage"]["production_remote_client"]["status"],
+        "unavailable"
+    );
+    assert_eq!(
+        complete["coverage"]["production_remote_client"]["reason"],
+        "direct test wire bypasses production remote client"
+    );
+    assert_eq!(complete["coverage"]["peer_blob_cache"]["available"], false);
+    assert_eq!(
+        complete["coverage"]["peer_blob_cache"]["status"],
+        "not_configured"
+    );
+    assert_eq!(
+        complete["coverage"]["peer_blob_cache"]["reason"],
+        "peer blob cache not configured"
+    );
+    assert_eq!(
+        complete["coverage"]["service_stage_observer"]["available"],
+        false
+    );
+    assert_eq!(
+        complete["coverage"]["service_stage_observer"]["reason"],
+        "fixture binds without service diagnostics observer"
+    );
+    assert_eq!(
+        complete["coverage"]["oidc_authentication"]["available"],
+        false
+    );
+    assert_eq!(
+        complete["coverage"]["oidc_authentication"]["reason"],
+        "synthetic fixture authenticator bypasses OIDC signature validation"
+    );
+
+    let pending = &observed["stages"][1]["storage_profile"];
+    assert_eq!(pending["complete"], false);
+    assert_eq!(pending["status"], "nonquiescent");
+    assert_eq!(pending["before"]["in_flight"], 0);
+    assert_eq!(pending["after"]["in_flight"], 1);
+    assert_eq!(pending["delta"]["in_flight"], 1);
+    assert_eq!(
+        pending["after"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "sdk.metadata.load")
+            .unwrap()["in_flight"],
+        1
+    );
+    let disabled = &observed["stages"][2]["storage_profile"];
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(disabled["complete"], false);
+    assert_eq!(disabled["status"], "disabled");
+    for field in ["before", "after", "delta"] {
+        assert!(
+            disabled[field].is_null(),
+            "disabled storage cannot export observations"
+        );
     }
 }
 #[test]
@@ -444,6 +764,166 @@ fn env_num(name: &str, default: usize, min: usize, max: usize) -> usize {
     );
     n
 }
+// File population and verification still use every block. Only timed lane
+// positions are limited, so inode size can vary with a fixed blob working set.
+fn selected_hot_blocks(
+    value: Result<String, std::env::VarError>,
+    file_blocks: usize,
+    depths: &[usize],
+) -> Result<usize, String> {
+    let hot = match value {
+        Err(std::env::VarError::NotPresent) => file_blocks,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("hot block selector must be Unicode decimal".into());
+        }
+        Ok(value) => {
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("hot block selector must be unsigned decimal".into());
+            }
+            value
+                .parse::<usize>()
+                .map_err(|_| "hot block selector overflow")?
+        }
+    };
+    let max_depth = depths.iter().copied().max().ok_or("no lane depths")?;
+    if max_depth == 0 || depths.contains(&0) || hot < max_depth || hot > file_blocks {
+        return Err("hot blocks must cover all lanes and fit the full file".into());
+    }
+    Ok(hot)
+}
+
+fn lane_positions(blocks: usize, lane: usize, depth: usize) -> Vec<usize> {
+    assert!(depth > 0 && lane < depth && blocks >= depth);
+    (lane..blocks).step_by(depth).collect()
+}
+
+fn validate_hot_ledger(
+    ledger: &[(usize, usize, usize, u64)],
+    expected: &[Vec<(usize, u64)>],
+    hot_blocks: usize,
+    depth: usize,
+) -> Result<(), String> {
+    for &(client, lane, block, _) in ledger {
+        if depth == 0
+            || client >= expected.len()
+            || lane >= depth
+            || block >= hot_blocks
+            || block >= expected[client].len()
+            || block % depth != lane
+        {
+            return Err("write ledger escaped its client/lane/hot block range".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_cold_suffix(expected: &[Vec<(usize, u64)>], hot_blocks: usize) -> Result<(), String> {
+    for blocks in expected {
+        if hot_blocks > blocks.len()
+            || blocks
+                .iter()
+                .enumerate()
+                .skip(hot_blocks)
+                .any(|(block, value)| *value != (0, block as u64 + 1))
+        {
+            return Err("cold suffix no longer matches the initial full file".into());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn hot_block_selection_is_strict_and_preserves_default_file_range() {
+    for blocks in [32, 128, 256, 1024] {
+        assert_eq!(
+            selected_hot_blocks(Err(std::env::VarError::NotPresent), blocks, &[1, 2, 8]).unwrap(),
+            blocks
+        );
+        assert_eq!(
+            selected_hot_blocks(Ok("32".into()), blocks, &[1, 8]).unwrap(),
+            32
+        );
+    }
+    for invalid in [
+        "",
+        "0",
+        "-1",
+        "+32",
+        " 32",
+        "32 ",
+        "3.2",
+        "３２",
+        "257",
+        "999999999999999999999999999999",
+    ] {
+        assert!(selected_hot_blocks(Ok(invalid.into()), 256, &[1]).is_err());
+    }
+    assert!(selected_hot_blocks(Ok("3".into()), 256, &[1, 4]).is_err());
+    assert!(selected_hot_blocks(Ok("32".into()), 256, &[]).is_err());
+    assert!(selected_hot_blocks(Ok("32".into()), 256, &[0, 1]).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        assert!(
+            selected_hot_blocks(
+                Err(std::env::VarError::NotUnicode(
+                    std::ffi::OsString::from_vec(vec![0xff])
+                )),
+                256,
+                &[1],
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn hot_lane_positions_cover_disjoint_nonempty_ranges_without_touching_cold_blocks() {
+    for hot in [1, 3, 5, 32, 128, 256] {
+        for depth in 1..=hot.min(8) {
+            let mut observed = BTreeSet::new();
+            for lane in 0..depth {
+                let positions = lane_positions(hot, lane, depth);
+                assert!(!positions.is_empty());
+                assert_eq!(positions, (lane..hot).step_by(depth).collect::<Vec<_>>());
+                for block in positions {
+                    assert!(block < hot && block % depth == lane && observed.insert(block));
+                }
+            }
+            assert_eq!(observed, (0..hot).collect());
+        }
+    }
+}
+
+#[test]
+fn hot_ledger_rejects_out_of_bounds_or_wrong_lane_before_expected_updates() {
+    let expected = vec![vec![(0, 1); 256]];
+    assert!(validate_hot_ledger(&[(0, 0, 0, 99), (0, 1, 31, 100)], &expected, 32, 2).is_ok());
+    for invalid in [
+        (1, 0, 0, 1),
+        (0, 2, 0, 1),
+        (0, 0, 32, 1),
+        (0, 0, 31, 1),
+        (0, 0, 256, 1),
+    ] {
+        assert!(validate_hot_ledger(&[invalid], &expected, 32, 2).is_err());
+    }
+    assert!(validate_hot_ledger(&[(0, 0, 0, 1)], &expected, 32, 0).is_err());
+}
+
+#[test]
+fn hot_ledger_preserves_seeded_cold_suffix_and_refuses_a_changed_tail() {
+    let mut expected = vec![
+        (0..256)
+            .map(|block| (0, block as u64 + 1))
+            .collect::<Vec<_>>(),
+    ];
+    expected[0][31] = (0, 999);
+    assert!(validate_cold_suffix(&expected, 32).is_ok());
+    expected[0][255] = (0, 999);
+    assert!(validate_cold_suffix(&expected, 32).is_err());
+}
+
 #[allow(clippy::too_many_arguments)] // Explicit worker inputs are test-only and immutable.
 async fn lane(
     connection: quinn::Connection,
@@ -463,7 +943,7 @@ async fn lane(
     let mut result = LaneResult::default();
     let mut seq = 0u64;
     let mut rng = (client as u64 + 1) * 7919 + (lane as u64 + 1) * 104729;
-    let positions: Vec<usize> = (lane..blocks).step_by(depth).collect();
+    let positions = lane_positions(blocks, lane, depth);
     let mut expected_bytes = vec![0; BYTES];
     let mut read_buffer = vec![0; BYTES];
     let mut request = IoRequest {
@@ -557,8 +1037,8 @@ async fn stage(
     expected: &[Vec<(usize, u64)>],
 ) -> (Value, Vec<(usize, usize, usize, u64)>, Vec<String>) {
     #[cfg(all(feature = "resource-profiling", unix))]
-    let resources_before =
-        resource_profile::Snapshot::capture(clients).expect("process resource profile unavailable");
+    let resources_before = resource_profile::Snapshot::capture_io_boundary(clients)
+        .expect("process resource profile unavailable");
     let start_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -620,11 +1100,12 @@ async fn stage(
     let elapsed = start.elapsed().as_secs_f64();
     let iops = (read.count + write.count) as f64 / elapsed;
     #[cfg(all(feature = "resource-profiling", unix))]
-    let resources = resource_profile::Snapshot::capture(clients)
+    let resources = resource_profile::Snapshot::capture_io_boundary(clients)
         .expect("process resource profile unavailable")
         .delta(&resources_before)
         .expect("process resource counters invalid");
-    let report = json!({"mode":format!("{mode:?}"),"codec":codec.label(),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":clients.len(),"active_clients":active_clients,"servers":server_count,"per_client_depth":depth,"total_queue_depth":active_clients*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
+    let mut report = json!({"mode":format!("{mode:?}"),"codec":codec.label(),"nominal_seconds":seconds,"start_unix_ms":start_unix_ms,"finish_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),"clients":clients.len(),"active_clients":active_clients,"servers":server_count,"per_client_depth":depth,"total_queue_depth":active_clients*depth,"elapsed_seconds_including_drain":elapsed,"read":read.json(),"write":write.json(),"read_iops":read.count as f64/elapsed,"write_iops":write.count as f64/elapsed,"total_iops":iops,"payload_mib_per_second":iops*BYTES as f64/1048576.0,"reference_target_iops":100000,"target_attainment":iops/100000.0,"failures":errors.len(),"cache":"cache-warm randomized dataset; no cold-cache claim"});
+    report["runtime"] = runtime_worker_receipt();
     #[cfg(all(feature = "resource-profiling", unix))]
     let report = {
         let mut report = report;
@@ -633,13 +1114,270 @@ async fn stage(
     };
     (report, ledger, errors)
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+const RUNTIME_WORKER_SELECTOR: &str = "MOUNT_RS_REMOTE_SATURATION_RUNTIME_WORKERS";
+
+fn selected_runtime_workers(value: Option<&str>) -> Result<usize, &'static str> {
+    match value {
+        None | Some("16") => Ok(16),
+        Some("32") => Ok(32),
+        Some("64") => Ok(64),
+        Some(_) => Err("runtime worker selector requires exactly 16, 32 or 64"),
+    }
+}
+
+const JOURNAL_SELECTOR: &str = "MOUNT_RS_REMOTE_SATURATION_SQLITE_JOURNAL";
+
+// Experimental fixture selection only. Validate before opening any provider.
+fn selected_sqlite_journal<'a>(
+    value: Option<&'a str>,
+    provider: &str,
+    separate: bool,
+    provision: bool,
+    preseed: bool,
+    profiled: bool,
+) -> Result<Option<&'a str>, &'static str> {
+    let Some(mode) = value else { return Ok(None) };
+    if !matches!(mode, "DELETE" | "WAL") {
+        return Err("SQLite journal selector requires DELETE or WAL");
+    }
+    if provider != "sqlite" || !separate || !provision || preseed || !profiled {
+        return Err(
+            "SQLite journal selection requires profiled, provisioned, separate owned SQLite drives without preseed",
+        );
+    }
+    Ok(Some(mode))
+}
+
+fn validate_journal_connections(
+    snapshot: &Value,
+    mode: &str,
+    count: usize,
+    expected: Option<&BTreeSet<u64>>,
+) -> Result<BTreeSet<u64>, String> {
+    let rows = snapshot["connections"]
+        .as_array()
+        .ok_or("SQLite connections unavailable")?;
+    if snapshot.get("error").is_some() || count == 0 || rows.len() != count {
+        return Err("SQLite journal connection count mismatch".into());
+    }
+    let mut ids = BTreeSet::new();
+    for row in rows {
+        let id = row["connection_id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or("SQLite connection identity unavailable")?;
+        if !ids.insert(id) || row.get("error").is_some() || row["counter_overflow"] != false {
+            return Err("SQLite connection diagnostic incomplete".into());
+        }
+        let config = &row["configuration"];
+        if config["journal_mode"] != mode.to_ascii_lowercase()
+            || config["synchronous"] != 2
+            || config["locking_mode"] != "normal"
+            || config["is_autocommit"] != true
+            || config["busy_timeout_ms"] != 5000
+            || config["fullfsync"] != 0
+            || config["checkpoint_fullfsync"] != 0
+            || config["wal_autocheckpoint_pages"] != 1000
+            || config["cache_size"] != -2000
+            || row["page_size"] != 4096
+        {
+            return Err("SQLite journal connection configuration mismatch".into());
+        }
+    }
+    if expected.is_some_and(|expected| *expected != ids) {
+        return Err("SQLite journal connection identities changed".into());
+    }
+    Ok(ids)
+}
+
+fn complete_terminal_os_io(resources: &Value) -> bool {
+    let io = &resources["os_io"];
+    io["enabled_start"] == true
+        && io["enabled_end"] == true
+        && io["process_disk"]["complete"] == true
+        && (io["host_block_device"]["status"] == "unselected"
+            || io["host_block_device"]["complete"] == true)
+}
+
+fn owned_sqlite_file_receipts(backends: &[backend::Backend]) -> Result<Vec<Value>, String> {
+    backends
+        .iter()
+        .enumerate()
+        .map(|(index, backend)| {
+            Ok(json!({"drive_index":index,"files":backend.owned_sqlite_file_bytes()?}))
+        })
+        .collect()
+}
+
+#[test]
+fn terminal_io_rejects_unavailable_banks_despite_successful_outer_snapshot() {
+    let valid = json!({"os_io":{"enabled_start":true,"enabled_end":true,
+        "process_disk":{"complete":true},"host_block_device":{"complete":true}}});
+    assert!(complete_terminal_os_io(&valid));
+    assert!(!complete_terminal_os_io(&Value::Null));
+    for bank in ["process_disk", "host_block_device"] {
+        let mut incomplete = valid.clone();
+        incomplete["os_io"][bank]["complete"] = json!(false);
+        assert!(!complete_terminal_os_io(&incomplete));
+    }
+    let mut unselected = valid;
+    unselected["os_io"]["host_block_device"] = json!({"complete":false,"status":"unselected"});
+    assert!(complete_terminal_os_io(&unselected));
+    unselected["os_io"]["enabled_end"] = json!(false);
+    assert!(!complete_terminal_os_io(&unselected));
+}
+
+#[test]
+fn sqlite_journal_selector_requires_owned_profiled_fixture() {
+    assert_eq!(
+        selected_sqlite_journal(None, "tidb", false, false, true, false),
+        Ok(None)
+    );
+    for mode in ["DELETE", "WAL"] {
+        assert_eq!(
+            selected_sqlite_journal(Some(mode), "sqlite", true, true, false, true),
+            Ok(Some(mode))
+        );
+    }
+    for mode in ["", "wal", "delete", " WAL", "WAL;", "NORMAL"] {
+        assert!(selected_sqlite_journal(Some(mode), "sqlite", true, true, false, true).is_err());
+    }
+    for (provider, separate, provision, preseed, profiled) in [
+        ("tidb", true, true, false, true),
+        ("sqlite", false, true, false, true),
+        ("sqlite", true, false, false, true),
+        ("sqlite", true, true, true, true),
+        ("sqlite", true, true, false, false),
+    ] {
+        assert!(
+            selected_sqlite_journal(
+                Some("WAL"),
+                provider,
+                separate,
+                provision,
+                preseed,
+                profiled
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn sqlite_journal_receipt_rejects_missing_changed_or_weaker_connections() {
+    let row = json!({"connection_id":1,"counter_overflow":false,"page_size":4096,
+        "configuration":{"journal_mode":"wal","synchronous":2,"locking_mode":"normal",
+            "is_autocommit":true,"busy_timeout_ms":5000,"fullfsync":0,
+            "checkpoint_fullfsync":0,"wal_autocheckpoint_pages":1000,"cache_size":-2000}});
+    let sample = json!({"connections":[row]});
+    let ids = validate_journal_connections(&sample, "WAL", 1, None).unwrap();
+    assert!(validate_journal_connections(&sample, "WAL", 1, Some(&ids)).is_ok());
+    assert!(validate_journal_connections(&sample, "DELETE", 1, None).is_err());
+    assert!(validate_journal_connections(&sample, "WAL", 2, None).is_err());
+    assert!(validate_journal_connections(&sample, "WAL", 1, Some(&BTreeSet::from([2]))).is_err());
+    for (path, value) in [
+        ("synchronous", json!(1)),
+        ("wal_autocheckpoint_pages", json!(0)),
+        ("is_autocommit", json!(false)),
+        ("busy_timeout_ms", json!(100)),
+    ] {
+        let mut invalid = sample.clone();
+        invalid["connections"][0]["configuration"][path] = value;
+        assert!(validate_journal_connections(&invalid, "WAL", 1, None).is_err());
+    }
+    for (path, value) in [
+        ("connection_id", json!(0)),
+        ("counter_overflow", json!(true)),
+        ("error", json!("unavailable")),
+        ("page_size", json!(8192)),
+    ] {
+        let mut invalid = sample.clone();
+        invalid["connections"][0][path] = value;
+        assert!(validate_journal_connections(&invalid, "WAL", 1, None).is_err());
+    }
+    let duplicate = json!({"connections":[sample["connections"][0],sample["connections"][0]]});
+    assert!(validate_journal_connections(&duplicate, "WAL", 2, None).is_err());
+}
+
+fn saturation_runtime(value: Option<&str>) -> Result<tokio::runtime::Runtime, &'static str> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(selected_runtime_workers(value)?)
+        .enable_all()
+        .build()
+        .map_err(|_| "saturation runtime construction failed")
+}
+
+fn runtime_worker_receipt() -> Value {
+    json!({
+        "scheduler":"tokio_multi_thread",
+        "worker_threads":tokio::runtime::Handle::current().metrics().num_workers(),
+        "selector_env":RUNTIME_WORKER_SELECTOR,
+        "selector_value":std::env::var(RUNTIME_WORKER_SELECTOR).ok(),
+        "scope":"observed Tokio scheduler worker pool size; not busy or physical thread count; per-client I/O depth and workload unchanged"
+    })
+}
+
+#[test]
+fn runtime_worker_selector_is_strict_and_defaults_to_16() {
+    assert_eq!(selected_runtime_workers(None), Ok(16));
+    for (value, expected) in [("16", 16), ("32", 32), ("64", 64)] {
+        assert_eq!(selected_runtime_workers(Some(value)), Ok(expected));
+    }
+    for invalid in [
+        "", "0", "1", "8", "17", "31", "65", "128", "016", "+32", "32 ", " 32", "32,64", "invalid",
+    ] {
+        assert!(
+            selected_runtime_workers(Some(invalid)).is_err(),
+            "{invalid:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "explicit serial runtime worker-pool observation control"]
+fn runtime_worker_selector_reaches_observed_tokio_pool() {
+    let caller_thread = std::thread::current().id();
+    for selector in [None, Some("16"), Some("32"), Some("64")] {
+        let expected = selected_runtime_workers(selector).unwrap();
+        let runtime = saturation_runtime(selector).unwrap();
+        let (receipt, task_thread) = runtime.block_on(async {
+            tokio::spawn(async { (runtime_worker_receipt(), std::thread::current().id()) })
+                .await
+                .unwrap()
+        });
+        assert_ne!(
+            task_thread, caller_thread,
+            "probe must execute on a runtime worker"
+        );
+        let encoded = serde_json::to_vec(&receipt).unwrap();
+        let observed: Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(observed["worker_threads"], expected);
+        assert_eq!(observed["scheduler"], "tokio_multi_thread");
+        assert_eq!(observed["selector_env"], RUNTIME_WORKER_SELECTOR);
+        println!(
+            "MOUNT_RS_RUNTIME_WORKERS expected={expected} observed={} worker_task_verified=true",
+            observed["worker_threads"]
+        );
+        // Each complete runtime is dropped before the next is constructed.
+        drop(runtime);
+    }
+}
+
+#[test]
 #[ignore = "requires disposable provider; 100 QUIC clients / 10 independent coordinators"]
-async fn actual_tidb_100_clients_10_servers_saturation() {
-    tokio::time::timeout(Duration::from_secs(1800), packet())
-        .await
-        .expect("overall saturation deadline exceeded")
-        .expect("saturation failed");
+fn actual_tidb_100_clients_10_servers_saturation() {
+    let selected = match std::env::var(RUNTIME_WORKER_SELECTOR) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => panic!("runtime worker selector must be Unicode"),
+    };
+    let runtime = saturation_runtime(selected.as_deref()).expect("invalid saturation runtime");
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(1800), packet())
+            .await
+            .expect("overall saturation deadline exceeded")
+            .expect("saturation failed");
+    });
 }
 async fn stage_observer(
     phase: &str,
@@ -733,6 +1471,11 @@ async fn packet() -> Result<(), String> {
     let warmup = env_num("MOUNT_RS_REMOTE_TIDB_SATURATION_WARMUP_SECONDS", 1, 1, 10);
     let blocks = env_num("MOUNT_RS_REMOTE_TIDB_SATURATION_BLOCKS", 64, 32, 1024);
     assert!(blocks >= *depths.iter().max().unwrap());
+    let hot_blocks = selected_hot_blocks(
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_HOT_BLOCKS"),
+        blocks,
+        &depths,
+    )?;
     let timeout = Duration::from_secs(env_num(
         "MOUNT_RS_REMOTE_TIDB_SATURATION_REQUEST_TIMEOUT_SECONDS",
         30,
@@ -747,10 +1490,28 @@ async fn packet() -> Result<(), String> {
             .unwrap()
             .as_nanos()
     );
-    let backend = backend::Backend::from_environment(&key).await?;
     let preseed = std::env::var("MOUNT_RS_REMOTE_SATURATION_PRESEED").as_deref() == Ok("1");
     let separate =
         std::env::var("MOUNT_RS_REMOTE_SATURATION_SEPARATE_DRIVES").as_deref() == Ok("1");
+    let provision = separate
+        && std::env::var("MOUNT_RS_REMOTE_SATURATION_PROVISION_DRIVES").as_deref() == Ok("1");
+    let requested_journal = match std::env::var(JOURNAL_SELECTOR) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("SQLite journal selector must be Unicode".into());
+        }
+    };
+    let journal = selected_sqlite_journal(
+        requested_journal.as_deref(),
+        &std::env::var("MOUNT_RS_REMOTE_SATURATION_PROVIDER").unwrap_or_else(|_| "tidb".into()),
+        separate,
+        provision,
+        preseed,
+        cfg!(all(feature = "resource-profiling", unix))
+            && mount_rs_core::diagnostics::profile::enabled(),
+    )?;
+    let backend = backend::Backend::from_environment(&key).await?;
     let tidb_pool_max_connections =
         env_num("MOUNT_RS_REMOTE_SATURATION_TIDB_POOL_MAX", 16, 1, 1024);
     let storage_contexts: Vec<_> = (0..server_count)
@@ -777,8 +1538,10 @@ async fn packet() -> Result<(), String> {
     let mut setup_seconds = None;
     let mut driver_setup_seconds = None;
     let mut provisioning_seconds = None;
-    let provision = separate
-        && std::env::var("MOUNT_RS_REMOTE_SATURATION_PROVISION_DRIVES").as_deref() == Ok("1");
+    let mut journal_receipts = vec![];
+    let mut journal_connection_ids = None;
+    let journal_connection_count = 2 * client_count * server_count;
+    let mut journal_setup_seconds = None;
     let driver_setup_started = Instant::now();
     let topology = &backend.topology;
     let mut expected: Vec<Vec<(usize, u64)>> =
@@ -789,8 +1552,16 @@ async fn packet() -> Result<(), String> {
             for b in drive_backends.iter() {
                 let fs = b.open(0).await?;
                 fs.shutdown().await.map_err(|_| "drive provisioning shutdown failed")?;
+                drop(fs);
             }
             provisioning_seconds = Some(started.elapsed().as_secs_f64());
+        }
+        if let Some(mode) = journal {
+            let started = Instant::now();
+            for (index, b) in drive_backends.iter().enumerate() {
+                journal_receipts.push(json!({"drive_index":index,"configuration":b.configure_owned_sqlite_journal(mode)?}));
+            }
+            journal_setup_seconds = Some(started.elapsed().as_secs_f64());
         }
         if separate {
             let mut starts = tokio::task::JoinSet::new();
@@ -833,6 +1604,10 @@ async fn packet() -> Result<(), String> {
             }
         }
 
+        if let Some(mode) = journal {
+            journal_connection_ids = Some(validate_journal_connections(
+                &mount_rs_sqlite::sqlite_io_diagnostics(false), mode, journal_connection_count, None)?);
+        }
         driver_setup_seconds = Some(driver_setup_started.elapsed().as_secs_f64());
         let mut setup_tasks = tokio::task::JoinSet::new();
         let setup_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(setup_concurrency));
@@ -921,16 +1696,22 @@ async fn packet() -> Result<(), String> {
                     phase += 1;
                     let stage_id = format!("{key}-{phase}");
                     if measured { stage_observer("begin", *mode, depth, &stage_id, 0, 0, active_clients).await?; }
-                    let profile_before = mount_rs_core::diagnostics::profile::snapshot();
+                    let stage_diagnostics = StageDiagnostics::capture(measured && mount_rs_core::diagnostics::storage::enabled());
+                    let files_before = if measured && journal.is_some() {
+                        Some(owned_sqlite_file_receipts(&drive_backends)?)
+                    } else { None };
                     let sqlite_before = if measured && backend.name == "sqlite" && mount_rs_core::diagnostics::profile::enabled() {
                         Some(mount_rs_sqlite::sqlite_io_diagnostics(true))
                     } else { None };
+                    if let (Some(mode), Some(before)) = (journal, sqlite_before.as_ref()) {
+                        validate_journal_connections(before, mode, journal_connection_count, journal_connection_ids.as_ref())?;
+                    }
                     let (mut report, ledger, errors) = stage(
                         &clients,
                         server_count,
                         active_clients,
                         depth,
-                        blocks,
+                        hot_blocks,
                         *mode,
                         codec,
                         duration,
@@ -939,19 +1720,30 @@ async fn packet() -> Result<(), String> {
                         &expected,
                     )
                     .await;
+                    report["file_blocks"] = json!(blocks);
+                    report["hot_blocks"] = json!(hot_blocks);
+                    report["hot_working_set_bytes"] = json!(active_clients * hot_blocks * BYTES);
                     if measured {
-                        let profile_after = mount_rs_core::diagnostics::profile::snapshot();
-                        report["io_profile"] = serde_json::to_value(profile_after.delta(&profile_before)?).map_err(|_| "profile encode failed")?;
+                        stage_diagnostics.finish_into(&mut report)?;
+                        if let Some(before) = files_before {
+                            report["sqlite_owned_files_begin"] = json!(before);
+                            report["sqlite_owned_files_end"] = json!(owned_sqlite_file_receipts(&drive_backends)?);
+                        }
                         if let Some(before) = sqlite_before {
                             report["sqlite_io_begin"] = before;
                             report["sqlite_io_end"] = mount_rs_sqlite::sqlite_io_diagnostics(false);
+                            if let Some(mode) = journal {
+                                validate_journal_connections(&report["sqlite_io_end"], mode, journal_connection_count, journal_connection_ids.as_ref())?;
+                            }
                         }
                         stage_observer("end", *mode, depth, &stage_id,
                             report["read"]["completed"].as_u64().unwrap_or(0) + report["write"]["completed"].as_u64().unwrap_or(0), errors.len(), active_clients).await?;
                     }
+                    validate_hot_ledger(&ledger, &expected, hot_blocks, depth)?;
                     for (c, l, b, s) in ledger {
                         expected[c][b] = (l, s);
                     }
+                    validate_cold_suffix(&expected[..active_clients], hot_blocks)?;
                     if !errors.is_empty() {
                         let samples:Vec<&String>=errors.iter().take(8).collect();
                         failed_phase=Some(json!({"report":report,"measured":measured,"failure_count":errors.len(),"timeout_failures":errors.iter().filter(|e|e.contains("request timeout")).count(),"error_samples":samples}));
@@ -981,6 +1773,14 @@ async fn packet() -> Result<(), String> {
     })
     .await
     .unwrap_or_else(|_| Err("setup/work deadline exceeded".into()));
+    // This separate interval includes final provider drops and possible last-close
+    // checkpoints, but no fresh verification connections or payload operations.
+    #[cfg(all(feature = "resource-profiling", unix))]
+    let terminal_files_before = journal.map(|_| owned_sqlite_file_receipts(&drive_backends));
+    #[cfg(all(feature = "resource-profiling", unix))]
+    let terminal_before =
+        journal.map(|_| resource_profile::Snapshot::capture_process_io_boundary());
+    let terminal_started = Instant::now();
     // Always shut down all created resources after work failure. No write is retried.
     for e in endpoints {
         e.close(0u32.into(), b"shutdown");
@@ -1018,6 +1818,39 @@ async fn packet() -> Result<(), String> {
     .await
     .unwrap_or_else(|_| Err("shutdown deadline exceeded".into()));
     drop(dirs);
+    #[cfg(all(feature = "resource-profiling", unix))]
+    let terminal_receipt = if let Some(before) = terminal_before {
+        let elapsed_seconds = terminal_started.elapsed().as_secs_f64();
+        let observed = before.and_then(|before| {
+            resource_profile::Snapshot::capture_process_io_boundary()?.delta(&before)
+        });
+        let remaining = mount_rs_sqlite::sqlite_io_diagnostics(false);
+        let files_before = terminal_files_before.expect("journal terminal file receipt selected");
+        let files_after = owned_sqlite_file_receipts(&drive_backends);
+        let incomplete = !observed.as_ref().is_ok_and(complete_terminal_os_io)
+            || remaining["connections"]
+                .as_array()
+                .is_none_or(|rows| !rows.is_empty())
+            || files_before.is_err()
+            || files_after.is_err();
+        json!({"elapsed_seconds":elapsed_seconds,"resources":observed.as_ref().ok(),
+            "resource_error":observed.as_ref().err(),"remaining_provider_connections":remaining,
+            "files_before":files_before.as_ref().ok(),"files_after":files_after.as_ref().ok(),
+            "files_before_error":files_before.as_ref().err(),"files_after_error":files_after.as_ref().err(),
+            "incomplete":incomplete,"scope":"server close and filesystem shutdown/drop; before fresh verification; includes process background and observer work; not checkpoint-only I/O"})
+    } else {
+        Value::Null
+    };
+    #[cfg(not(all(feature = "resource-profiling", unix)))]
+    let terminal_receipt = {
+        let _ = terminal_started;
+        Value::Null
+    };
+    let cleanup = if terminal_receipt["incomplete"] == true {
+        Err("SQLite terminal resource or connection-close receipt incomplete".into())
+    } else {
+        cleanup
+    };
     let verification_run = work.is_ok() && cleanup.is_ok();
     let verification = if verification_run {
         if separate {
@@ -1055,6 +1888,20 @@ async fn packet() -> Result<(), String> {
     let snapshot_verification =
         std::env::var("MOUNT_RS_REMOTE_SATURATION_SNAPSHOT_VERIFY").as_deref() == Ok("1");
     let mut artifact = json!({"separate_drives":separate,"drive_count":if separate {client_count} else {1},"driver_replicas":if separate {client_count*server_count} else {server_count},"verification_method":if separate && snapshot_verification {"all stored and fresh driver files"} else if separate {"all fresh driver files"} else if snapshot_verification {"all stored files plus fresh driver sample"} else {"all fresh driver files"},"fresh_driver_sample_limit":if separate {active_clients} else if snapshot_verification {64} else {active_clients},"schema":"mount-rs-provider-saturation-v2","inode_updates":backend.inode_mode.inode_updates(),"compact_inode_updates":backend.inode_mode.compact_inode_updates(),"provider":backend.name,"provider_identity":backend.identity,"provider_version":backend.version,"volume_key":key,"clients":client_count,"active_clients":active_clients,"servers":server_count,"offline_empty_file_preseed":preseed,"setup_concurrency":setup_concurrency,"setup_seconds":setup_seconds,"driver_setup_seconds":driver_setup_seconds,"parallel_server_startup":separate,"drives_provisioned_before_startup":provision,"provisioning_seconds":provisioning_seconds,"dataset_bytes":active_clients*blocks*BYTES,"namespace_bytes":namespace_bytes,"topology":topology,"debug_assertions":cfg!(debug_assertions),"build_profile":if cfg!(debug_assertions){"debug"}else{"release"},"warmup_seconds":warmup,"nominal_stage_seconds":seconds,"configured_modes":modes.iter().map(|m|format!("{m:?}")).collect::<Vec<_>>(),"audit_logging":"enabled; request audit cost included","latency_histogram":"power-of-two microsecond upper bounds","stages":reports,"failed_phase":failed_phase,"verification_status":verification_status,"verified_files":if verification_status=="passed"{active_clients}else{0},"work_error":work.as_ref().err(),"cleanup_error":cleanup.as_ref().err(),"verification_error":verification.as_ref().err()});
+    artifact["metadata_provider"] = json!(backend.name);
+    artifact["block_provider"] = json!(backend.block_provider());
+    artifact["block_provider_selection"] = json!({"selector":"MOUNT_RS_REMOTE_SATURATION_BLOCK_PROVIDER",
+        "requested":if backend.block_provider() == "rustfs" { "rustfs" } else { "metadata" }});
+    artifact["rustfs_preflight"] = json!(backend.rustfs_preflight());
+    artifact["runtime"] = runtime_worker_receipt();
+    artifact["file_blocks"] = json!(blocks);
+    artifact["hot_blocks"] = json!(hot_blocks);
+    artifact["hot_working_set_bytes"] = json!(active_clients * hot_blocks * BYTES);
+    artifact["cold_suffix_blocks_per_file"] = json!(blocks - hot_blocks);
+    artifact["sqlite_journal_experiment"] = json!({"requested":journal,"setup_seconds":journal_setup_seconds,
+        "owned_drive_receipts":journal_receipts,"provider_connection_ids":journal_connection_ids,
+        "provider_connection_count":journal.map(|_| journal_connection_count),"terminal_cleanup":terminal_receipt,
+        "production_default_changed":false});
     artifact["requested_inode_mode"] = json!(backend.inode_mode.label());
     artifact["inode_mode_selector_env"] = json!({
         "MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES":std::env::var("MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES").ok(),
@@ -1343,6 +2190,79 @@ async fn snapshot_oracle_rejects_incorrect_byte_ledger() {
         .await
         .unwrap_err();
     assert!(error.contains("stored file mismatch"));
+}
+
+#[tokio::test]
+#[ignore = "explicit owned SQLite compact cold-tail oracle"]
+async fn hot_working_set_oracles_reject_corrupted_cold_tail() {
+    assert_eq!(
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_PROVIDER").as_deref(),
+        Ok("sqlite")
+    );
+    assert_eq!(
+        std::env::var("MOUNT_RS_REMOTE_SATURATION_COMPACT_INODE_UPDATES").as_deref(),
+        Ok("1")
+    );
+    let key = format!(
+        "hot-tail-oracle-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let backend = backend::Backend::from_environment(&key).await.unwrap();
+    let mut expected = (0..64)
+        .map(|block| (0, block as u64 + 1))
+        .collect::<Vec<_>>();
+    for (block, value) in expected.iter_mut().enumerate().take(32) {
+        *value = (0, 900_000 + block as u64);
+    }
+    validate_cold_suffix(&[expected.clone()], 32).unwrap();
+    let mut bytes = expected
+        .iter()
+        .flat_map(|(lane, seq)| payload(0, *lane, *seq))
+        .collect::<Vec<_>>();
+    let fs = backend.open(0).await.unwrap();
+    let view = Loopback::from_arc(fs.driver());
+    view.write_file("/saturation-0", &bytes).await.unwrap();
+    fs.shutdown().await.unwrap();
+    drop(view);
+    drop(fs);
+    backend
+        .verify_stored_files(&[expected.clone()])
+        .await
+        .unwrap();
+    verify_one_separate_drive_with_shutdown(&backend, 1, 0, &expected, |fs| async move {
+        fs.shutdown()
+            .await
+            .map_err(|_| "cold-tail positive shutdown failed".to_owned())
+    })
+    .await
+    .unwrap();
+
+    // Alter a real cold block while keeping the full expected file unchanged.
+    bytes[63 * BYTES + 17] ^= 0x40;
+    let fs = backend.open(2).await.unwrap();
+    let view = Loopback::from_arc(fs.driver());
+    view.write_file("/saturation-0", &bytes).await.unwrap();
+    fs.shutdown().await.unwrap();
+    drop(view);
+    drop(fs);
+    let stored = backend
+        .verify_stored_files(&[expected.clone()])
+        .await
+        .unwrap_err();
+    assert!(stored.contains("stored file mismatch"), "{stored}");
+    let fresh =
+        verify_one_separate_drive_with_shutdown(&backend, 3, 0, &expected, |fs| async move {
+            fs.shutdown()
+                .await
+                .map_err(|_| "cold-tail negative shutdown failed".to_owned())
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(fresh, "separate drive content mismatch");
 }
 
 #[test]

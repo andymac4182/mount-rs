@@ -1,0 +1,259 @@
+{
+  "base_commit": "056d81a18edd473b5309eef67cf4729b32caac87",
+  "baseline_red": {
+    "failure_class": "exact_test_failed",
+    "lifecycle_settled": true,
+    "logs": {
+      "stderr": {
+        "bytes": 747,
+        "sha256": "078996578c473149d220d1166d5e703ab7ea9996ffe53c442d3129bb09efb714"
+      },
+      "stdout": {
+        "bytes": 633,
+        "sha256": "e86417a9ff355847efcf4ca493263b28de05ac22fbbda1ed7fa6cc86acec0632"
+      }
+    },
+    "observations": [
+      {
+        "cache_owners_released": true,
+        "complete_binary": true,
+        "immediate_addr_in_use": true,
+        "immediate_bound": false,
+        "kind": "bare_quinn",
+        "no_connections": true,
+        "prepared_bound": false
+      },
+      {
+        "cache_owners_released": true,
+        "complete_binary": true,
+        "immediate_addr_in_use": true,
+        "immediate_bound": false,
+        "kind": "peer_transport",
+        "no_connections": true,
+        "prepared_bound": false
+      }
+    ],
+    "only_sticky_unknown": [
+      "exact_named_case_not_observed_passed"
+    ],
+    "oracle": "Both independent asynchronous-release controls and their complete binary datagrams and cleanup finished before the intended one-shot fixture assertion failed.",
+    "receipt_sha256": "0da06cc31f8e37db12183bd618b71166142820815222df4f8d1d7aaf4e6256b1",
+    "returncode": 101,
+    "source_count": 504,
+    "source_manifest_sha256": "77720ad2399cff64dc0b1906e0f44abdefd03a6b2069bf5c5db556f943b4061d",
+    "source_unchanged": true
+  },
+  "change": "The stopped-peer test fixture binds the actual UDP address until success or one fixed three-second deadline, retaining the first successful socket as the stopped-peer owner.",
+  "final_udp_observations": [
+    {
+      "cache_owners_released": true,
+      "complete_binary": true,
+      "immediate_addr_in_use": true,
+      "immediate_bound": false,
+      "kind": "bare_quinn",
+      "no_connections": true,
+      "prepared_bound": true
+    },
+    {
+      "cache_owners_released": true,
+      "complete_binary": true,
+      "immediate_addr_in_use": true,
+      "immediate_bound": false,
+      "kind": "peer_transport",
+      "no_connections": true,
+      "prepared_bound": true
+    }
+  ],
+  "gates": [
+    {
+      "elapsed_seconds": 9.266225041996222,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "peerport",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 350,
+          "sha256": "4af687666699d25312ea6f2a132e0f075b500f0a15d8f6e5f58c2778f1341001"
+        },
+        "stdout": {
+          "bytes": 643,
+          "sha256": "62f3b70120e8f3edc3308ab3035802645e7b0c9b0ff0a5daf59c9906e4d69927"
+        }
+      },
+      "receipt_sha256": "1c15ecb91f6ff2fd1100f37ed70c7b535b6e74e710f1d96be432d2811bbcd30d",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "stopped_peer_udp_rebind_waits_for_real_driver_release",
+      "source_count": 504,
+      "source_manifest_sha256": "a37fd9b4ed96c42bb1775029483f5a7ceff34960159e968e42e29c3a8d2e7953",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.589234416023828,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "peerreconnect",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 404,
+          "sha256": "4e2b1ec71d0e0b517fb3ea18c8ea302f6e7b465547b7517997c3f990e6add654"
+        },
+        "stdout": {
+          "bytes": 15094,
+          "sha256": "7001af31a231cf8d6199676b2efb563552f7b5149c95b4345bf2ad11cc0f08ee"
+        }
+      },
+      "receipt_sha256": "da46dd12348c06e623480523c3d3971a41ec06e51dd0b42a59596aaaa0076bb9",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "peer_read_reconnect_bypasses_pending_replica_handshake",
+      "source_count": 504,
+      "source_manifest_sha256": "a37fd9b4ed96c42bb1775029483f5a7ceff34960159e968e42e29c3a8d2e7953",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 5.80612145800842,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "peermetrics",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 210,
+          "sha256": "a113aa0a6c14eb9f2babc3e35ac8cb19c8477b3296458c7c0b77c537fa92cf11"
+        },
+        "stdout": {
+          "bytes": 15737,
+          "sha256": "da464c0e5478e2af07eb6ba39fa945eba774f4bdc71c558655fdf7bf0a8c4891"
+        }
+      },
+      "receipt_sha256": "54f708b9bc2b9a593fc6fd5e36671fdce227a039e49c6664f1d7605c01ece8de",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "peer::tests::peer_connection_stage_metrics_preserve_bytes_and_cancellation",
+      "source_count": 504,
+      "source_manifest_sha256": "a37fd9b4ed96c42bb1775029483f5a7ceff34960159e968e42e29c3a8d2e7953",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 9.246509124990553,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "cachetests",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 634,
+          "sha256": "3b20a0d70bf2de24d6790d94b36fc21781f1e002844904f83d6bd34c4df9af2d"
+        },
+        "stdout": {
+          "bytes": 5430,
+          "sha256": "5a7ec4817c69943fee0fb0ecc3824732c6ac2f85a45735a136b712150668035e"
+        }
+      },
+      "receipt_sha256": "ad71725d1be7780d5e2a75a7cff663914f04b87860914e4484af12023fb85798",
+      "returncode": 0,
+      "rust_test_executions": 46,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "a37fd9b4ed96c42bb1775029483f5a7ceff34960159e968e42e29c3a8d2e7953",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.1533987500006333,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "faultclippy",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 204,
+          "sha256": "c7b41e5e8d7a85a1162e9840b0b805949e8b2e6c1340f9c4ae5447577e5b7460"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "receipt_sha256": "43c470ce30975cf3f080bee9f4e94530662cce7f3b1d91106412237521447d1a",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "a37fd9b4ed96c42bb1775029483f5a7ceff34960159e968e42e29c3a8d2e7953",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.8122327919700183,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "fmt",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "receipt_sha256": "ea14b3d69d1eb0f3f7c8f457424d8872b7896536bbbfc8023487b3f8b261b50d",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "a37fd9b4ed96c42bb1775029483f5a7ceff34960159e968e42e29c3a8d2e7953",
+      "source_unchanged": true
+    }
+  ],
+  "limits": [
+    "The bare Quinn and transport controls establish asynchronous socket/address reuse; they do not isolate detached accept-task ownership.",
+    "No attribution of an earlier hosted CI failure.",
+    "No new throughput, CPU, allocation, physical IOPS or production-capacity measurements.",
+    "Immediate bind success remains an allowed platform outcome; the test requires actual bounded prepared binding and complete datagrams.",
+    "Actions raw logs and artifacts were not accessed."
+  ],
+  "qualification": {
+    "bank_index_sha256": "0bd638810b1bfaf3df067710ffcc043f4543ab77d8160ce056b73ce90b20001e",
+    "format_passed": true,
+    "hosted_ci": "Exact new source requires separate hosted qualification.",
+    "modeled_controls_receipt_sha256": "b335292470137840fbd09662746bdcb67f27924e65b12010b72b63f4077703f9",
+    "modeled_parent_controls": 64,
+    "owned_gate_count": 6,
+    "preliminary_bank_index_sha256": "b6527209ef09ada97ea2303470067e24164bb63ac7d1f647014d0a2bed381fce",
+    "preliminary_scope": "Passed before two comment precision changes; excluded from final execution counts.",
+    "rust_test_executions": 49,
+    "source_count": 504,
+    "source_pins_unchanged_across_all_owned_gates": true,
+    "strict_cache_remote_clippy_passed": true
+  },
+  "real_held_port_control": {
+    "fixed_deadline": true,
+    "socket_released": true,
+    "timed_out": true
+  },
+  "runtime_contract": {
+    "directory_lifetime": "Keep the fixture directory until observed cache-owner release. Failure or cancellation before then leaves it for the owned parent after reap, group absence and EOF.",
+    "other_errors": "returned immediately",
+    "outer_integration_deadline_seconds": 15,
+    "owned_parent_deadline_seconds": 180,
+    "production_change": false,
+    "public_shutdown_contract": "No synchronous UDP disposal or joined Quinn driver guarantee is introduced.",
+    "request_deadline_seconds": 0.4,
+    "retained_socket": "Return and retain the successful bound socket; no close/rebind gap.",
+    "retry_kind": "AddrInUse only",
+    "total_bind_deadline_seconds": 3,
+    "yield_milliseconds": 1
+  },
+  "schema": "mount-rs.stopped-peer-udp-release.v1",
+  "source_inputs": {
+    ".github/workflows/remote-drives.yml": "d4fd0426253206020139ab2bd1be8f7ce1714fbefc81578e7e99f0854bc8c2dc",
+    "crates/mount-rs-blob-cache/tests/distributed_failure.rs": "2cd5ef7098d497f29a5e078e37afc2e17eb218ac640476da0110c28bb0f1cad0",
+    "scripts/test-remote-failures-controls.py": "f03068527de2b485e5f8cf7f171db51468cf288b66bed40085041a5cd1a2d790",
+    "scripts/test-remote-failures.py": "6de94fa4715ea148bca2790696b8516fd0f9e188bfa721029cf68c5d2dc3ba9c"
+  }
+}

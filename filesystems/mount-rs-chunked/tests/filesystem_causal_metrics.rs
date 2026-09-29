@@ -480,9 +480,11 @@ fn coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies() {
     let after = profile::snapshot();
     assert_eq!(blocks.counts.calls.load(Ordering::SeqCst), 2);
     assert_eq!(blocks.counts.bytes.load(Ordering::SeqCst), 9);
-    assert_eq!(metadata.attempts.load(Ordering::SeqCst) - attempts, 3);
-    assert_eq!(metadata.commits.load(Ordering::SeqCst) - commits, 2);
+    assert_eq!(metadata.attempts.load(Ordering::SeqCst) - attempts, 2);
+    assert_eq!(metadata.commits.load(Ordering::SeqCst) - commits, 1);
     assert_eq!(metadata.conflicts.load(Ordering::SeqCst), 1);
+    // One confirmed provider CAS loss retries the same two prepared creates
+    // against a fresh candidate; both then commit in one publication.
     assert_eq!(
         delta(
             &before,
@@ -503,12 +505,16 @@ fn coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies() {
         (1, 2)
     );
     assert_eq!(
+        delta(&before, &after, "filesystem.mutation.attempt.success"),
+        (1, 2)
+    );
+    assert_eq!(
         delta(
             &before,
             &after,
             "filesystem.mutation.attempt.no_publication"
         ),
-        (1, 2)
+        (0, 0)
     );
     assert_eq!(
         delta(&before, &after, "filesystem.mutation.enqueue_requests").1,
@@ -525,11 +531,11 @@ fn coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies() {
     assert!(delta(&before, &after, "filesystem.mutation.coalescing_yields").1 >= 1);
     assert_eq!(
         delta(&before, &after, "filesystem.mutation.request.committed").1,
-        0
+        2
     );
     assert_eq!(
         delta(&before, &after, "filesystem.mutation.request.conflict").1,
-        2
+        0
     );
     assert_eq!(
         delta(&before, &after, "filesystem.mutation.request.reply_sent").1,
@@ -537,7 +543,7 @@ fn coalesced_conflicting_batch_separates_candidate_replay_from_sent_replies() {
     );
     assert_eq!(
         delta(&before, &after, "filesystem.gate_hold.whole_file_replay").0,
-        2
+        0
     );
 }
 
@@ -1009,8 +1015,12 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
                 .unwrap()
                 .is_some(),
         );
+        let before_create = profile::snapshot();
         fs.write_file("/data", b"abcdefgh").await.unwrap();
+        let after_create = profile::snapshot();
+        let before_open = profile::snapshot();
         let handle = fs.open("/data", "r+", 0).await.unwrap();
+        let after_open = profile::snapshot();
 
         let before_write = profile::snapshot();
         assert_eq!(handle.write(b"XY", Some(2)).await.unwrap(), 2);
@@ -1129,6 +1139,10 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
             ),
             (0, 0)
         );
+        let before_eof = profile::snapshot();
+        assert_eq!(handle.read(&mut bytes, Some(8)).await.unwrap(), 0);
+        let after_eof = profile::snapshot();
+        assert_eq!(&bytes, b"abXYefgh");
         handle.close().await.unwrap();
         drop(handle);
         fs.shutdown().await.unwrap();
@@ -1153,5 +1167,111 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
         reader.close().await.unwrap();
         drop(reader);
         reopened.shutdown().await.unwrap();
+
+        // These rows measure node work caused by the real persisted create.
+        // The baseline excludes filesystem initialization and the snapshots
+        // exclude the later selected write and reopen readback.
+        for name in [
+            "filesystem.snapshot_nodes",
+            "compact.namespace.materialize_nodes",
+            "filesystem.mutation.candidate_clone_nodes",
+            "compact.structure.delta_capture_nodes",
+            "compact.structure.expected_guard_nodes",
+        ] {
+            let (calls, nodes) = delta(&before_create, &after_create, name);
+            assert!(calls > 0, "{name} must record a create call");
+            assert!(nodes > 0, "{name} must record touched nodes");
+        }
+
+        // Classify the actual refresh calls only after complete bytes have
+        // survived fresh SQLite connections. EOF still performs both handle
+        // freshness checks even though it performs no immutable block read.
+        let refresh_names = [
+            "filesystem.refresh.replace_probe",
+            "filesystem.refresh.create_capture",
+            "filesystem.refresh.batch_capture",
+            "filesystem.refresh.path_structure",
+            "filesystem.refresh.read_before",
+            "filesystem.refresh.read_after",
+        ];
+        // Guarded missing-path preparation resolves its parent through
+        // inode_path_view, so this uncontended create has one path refresh.
+        for (phase, before, after, expected_calls) in [
+            ("create", &before_create, &after_create, [1, 1, 1, 1, 0, 0]),
+            ("open", &before_open, &after_open, [0, 0, 0, 1, 0, 0]),
+            ("write", &before_write, &after_write, [0, 0, 0, 0, 0, 0]),
+            ("stat", &before_stat, &after_stat, [0, 0, 0, 1, 0, 0]),
+            ("read", &before_read, &after_read, [0, 0, 0, 0, 1, 1]),
+            ("eof", &before_eof, &after_eof, [0, 0, 0, 0, 1, 1]),
+        ] {
+            let observed = refresh_names.map(|name| delta(before, after, name));
+            println!(
+                "MOUNT_RS_FS_REFRESH phase={phase} calls={:?} units={:?}",
+                observed.map(|row| row.0),
+                observed.map(|row| row.1),
+            );
+            for ((name, actual), calls) in
+                refresh_names.into_iter().zip(observed).zip(expected_calls)
+            {
+                assert_eq!(
+                    actual,
+                    (calls, 0),
+                    "{phase} must classify only its actual {name} calls",
+                );
+            }
+        }
+        for (before, after) in [(&before_open, &after_open), (&before_stat, &after_stat)] {
+            assert_eq!(
+                delta(before, after, "filesystem.inode_path_guard"),
+                (1, 0),
+                "the fresh root witness is reused; only the file needs a traversal guard",
+            );
+        }
+        for (before, after) in [(&before_read, &after_read), (&before_eof, &after_eof)] {
+            assert_eq!(
+                delta(before, after, "filesystem.inode_path_guard"),
+                (0, 0),
+                "handle reads refresh their selected inode without resolving a path",
+            );
+        }
+        // Reusing the root traversal witness must not turn either selected
+        // read into a cached provider hit. Open/stat check root and file;
+        // handle reads, including EOF, check the file before and after I/O.
+        for (phase, before, after) in [
+            ("open", &before_open, &after_open),
+            ("stat", &before_stat, &after_stat),
+            ("read", &before_read, &after_read),
+            ("eof", &before_eof, &after_eof),
+        ] {
+            assert_eq!(
+                delta(before, after, "sqlite.compact.guard_selected_rows"),
+                (2, 2),
+                "{phase} must still read two fresh selected provider rows",
+            );
+            for name in [
+                "sqlite.compact.authority_query",
+                "sqlite.compact.authority_path",
+            ] {
+                assert_eq!(
+                    delta(before, after, name),
+                    (2, 0),
+                    "{phase} must validate authority for both selected reads",
+                );
+            }
+            for name in [
+                "sqlite.compact.anchor_query_bytes",
+                "sqlite.compact.anchor_decode_bytes",
+                "sqlite.compact.guard_selected_decode_bytes",
+            ] {
+                let (calls, bytes) = delta(before, after, name);
+                assert_eq!(calls, 2, "{phase} must check both fresh {name} bodies");
+                assert!(bytes > 0, "{phase} must account for fresh {name} bytes");
+            }
+            assert_eq!(
+                delta(before, after, "sqlite.compact.guard_full_rows"),
+                (0, 0),
+                "{phase} must preserve selected reads without a full guard scan",
+            );
+        }
     });
 }

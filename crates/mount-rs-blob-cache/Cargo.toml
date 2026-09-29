@@ -16,7 +16,11 @@ quinn = { version = "=0.11.12", default-features = false, features = ["runtime-t
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 [dev-dependencies]
+quinn-proto = { version = "=0.11.18", default-features = false, features = ["rustls-ring"] }
 mount-rs-sdk = { path = "../mount-rs-sdk" }
+mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
+rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
+serde_json = "1"
 tempfile = "3"
 rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread"] }

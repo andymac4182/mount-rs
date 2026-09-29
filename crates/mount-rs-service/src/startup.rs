@@ -1,11 +1,14 @@
 //! Bounded, opt-in observations before a service listener exists.
 //! Durations are inclusive wall time; a record is not an atomic or drained cut.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 use std::{
     future::Future,
     io::{self, Write},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::time::{Duration, Instant};
 
@@ -109,12 +112,19 @@ impl StageRow {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Schema {
     #[serde(rename = "mount-rs.startup.v1")]
     V1,
+    #[serde(rename = "mount-rs.startup.v2")]
+    V2,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstructionMode {
+    Lazy,
+}
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub schema: Schema,
@@ -142,6 +152,45 @@ pub struct Snapshot {
     pub accounting_complete: bool,
     pub banks_captured: bool,
     pub stages: [StageRow; STAGE_COUNT],
+    #[serde(default)]
+    pub construction_mode: Option<ConstructionMode>,
+    #[serde(default)]
+    pub max_active_drives: Option<u64>,
+    #[serde(default)]
+    pub construction_plans: Option<u64>,
+}
+impl Serialize for Snapshot {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let lazy = self.schema == Schema::V2;
+        let mut value = serializer.serialize_struct("Snapshot", if lazy { 24 } else { 21 })?;
+        value.serialize_field("schema", &self.schema)?;
+        value.serialize_field("pid", &self.pid)?;
+        value.serialize_field("worker", &self.worker)?;
+        value.serialize_field("generation", &self.generation)?;
+        value.serialize_field("observed_unix_ms", &self.observed_unix_ms)?;
+        value.serialize_field("current_stage", &self.current_stage)?;
+        value.serialize_field("terminal_outcome", &self.terminal_outcome)?;
+        value.serialize_field("cleanup_outcome", &self.cleanup_outcome)?;
+        value.serialize_field("configured_partitions", &self.configured_partitions)?;
+        value.serialize_field("planned_drives", &self.planned_drives)?;
+        value.serialize_field("open_started", &self.open_started)?;
+        value.serialize_field("open_success", &self.open_success)?;
+        value.serialize_field("open_error", &self.open_error)?;
+        value.serialize_field("open_cancelled", &self.open_cancelled)?;
+        value.serialize_field("open_in_flight", &self.open_in_flight)?;
+        value.serialize_field("registered_drives", &self.registered_drives)?;
+        value.serialize_field("elapsed_ns", &self.elapsed_ns)?;
+        value.serialize_field("current_stage_elapsed_ns", &self.current_stage_elapsed_ns)?;
+        value.serialize_field("accounting_complete", &self.accounting_complete)?;
+        value.serialize_field("banks_captured", &self.banks_captured)?;
+        value.serialize_field("stages", &self.stages)?;
+        if lazy {
+            value.serialize_field("construction_mode", &self.construction_mode)?;
+            value.serialize_field("max_active_drives", &self.max_active_drives)?;
+            value.serialize_field("construction_plans", &self.construction_plans)?;
+        }
+        value.end()
+    }
 }
 fn required_nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
@@ -155,6 +204,22 @@ impl Snapshot {
             return Err(invalid());
         }
         let value: Self = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+        let projection: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+        let fields = projection.as_object().ok_or_else(invalid)?;
+        let lazy = value.schema == Schema::V2;
+        let expected_fields = if lazy { 24 } else { 21 };
+        if fields.len() != expected_fields
+            || (lazy
+                && ![
+                    "construction_mode",
+                    "max_active_drives",
+                    "construction_plans",
+                ]
+                .iter()
+                .all(|field| fields.contains_key(*field)))
+        {
+            return Err(invalid());
+        }
         if value.pid == 0
             || value.worker.is_some_and(|worker| worker >= 10)
             || value.observed_unix_ms == 0
@@ -189,14 +254,40 @@ impl Snapshot {
             open.error,
             open.cancelled,
             open.in_flight,
-        ) || value.registered_drives > value.open_success
-        {
+        ) {
             return Err(invalid());
         }
-        if value.accounting_complete
+        if lazy {
+            let plans = value.construction_plans.ok_or_else(invalid)?;
+            if value.construction_mode != Some(ConstructionMode::Lazy)
+                || value.max_active_drives == Some(0)
+                || value.max_active_drives.is_some() != value.planned_drives.is_some()
+                || value.configured_partitions.is_some() != value.planned_drives.is_some()
+                || value.registered_drives > plans
+                || plans > value.planned_drives.unwrap_or(0)
+                || (
+                    open.started,
+                    open.success,
+                    open.error,
+                    open.cancelled,
+                    open.in_flight,
+                ) != (0, 0, 0, 0, 0)
+            {
+                return Err(invalid());
+            }
+        } else if value.registered_drives > value.open_success {
+            return Err(invalid());
+        }
+        if (lazy || value.accounting_complete)
             && value.terminal_outcome == Outcome::Ready
             && (!value.planned_drives.is_some_and(|planned| {
-                planned == value.open_success && planned == value.registered_drives
+                planned == value.registered_drives
+                    && if lazy {
+                        Some(planned) == value.construction_plans
+                            && value.max_active_drives.is_some_and(|limit| limit > 0)
+                    } else {
+                        planned == value.open_success
+                    }
             }) || value.open_error != 0
                 || value.open_cancelled != 0
                 || value.open_in_flight != 0)
@@ -208,6 +299,7 @@ impl Snapshot {
 }
 struct State {
     identity: Identity,
+    schema: Schema,
     started: Instant,
     stage_started: Instant,
     stage_elapsed: Option<u64>,
@@ -218,6 +310,8 @@ struct State {
     cleanup: Option<CleanupOutcome>,
     partitions: Option<u64>,
     planned: Option<u64>,
+    max_active_drives: Option<u64>,
+    construction_plans: u64,
     registered: u64,
     complete: bool,
     rows: [StageRow; STAGE_COUNT],
@@ -240,10 +334,11 @@ fn add(value: &mut u64, amount: u64, complete: &mut bool) {
     }
 }
 impl State {
-    fn new(identity: Identity) -> Self {
+    fn new(identity: Identity, schema: Schema) -> Self {
         let now = clock_now();
         Self {
             identity,
+            schema,
             started: now,
             stage_started: now,
             stage_elapsed: Some(0),
@@ -254,6 +349,8 @@ impl State {
             cleanup: None,
             partitions: None,
             planned: None,
+            max_active_drives: None,
+            construction_plans: 0,
             registered: 0,
             complete: identity.worker.is_none_or(|i| i < 10),
             rows: STAGES.map(StageRow::new),
@@ -268,7 +365,7 @@ impl State {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |time| time.as_millis().min(u128::from(u64::MAX)) as u64);
         Snapshot {
-            schema: Schema::V1,
+            schema: self.schema,
             pid: self.identity.pid,
             worker: self.identity.worker,
             generation: self.identity.generation,
@@ -293,12 +390,17 @@ impl State {
             accounting_complete: self.complete,
             banks_captured: false,
             stages: self.rows,
+            construction_mode: (self.schema == Schema::V2).then_some(ConstructionMode::Lazy),
+            max_active_drives: self.max_active_drives,
+            construction_plans: (self.schema == Schema::V2).then_some(self.construction_plans),
         }
     }
 }
 /// A disabled recorder holds no heap storage and never reads a clock or creates a timer.
 /// The fixed state exists only for an explicitly enabled caller.
 pub struct Startup {
+    schema: Schema,
+    lazy_plan_set: AtomicBool,
     state: Option<Mutex<State>>,
 }
 #[must_use]
@@ -354,8 +456,17 @@ impl Drop for Attempt<'_> {
 }
 impl Startup {
     pub fn new(enabled: bool, identity: Identity) -> Self {
+        Self::with_schema(enabled, identity, Schema::V1)
+    }
+    /// Additive lazy-startup observations; this does not activate a runtime pool.
+    pub fn new_lazy(enabled: bool, identity: Identity) -> Self {
+        Self::with_schema(enabled, identity, Schema::V2)
+    }
+    fn with_schema(enabled: bool, identity: Identity, schema: Schema) -> Self {
         Self {
-            state: enabled.then(|| Mutex::new(State::new(identity))),
+            schema,
+            lazy_plan_set: AtomicBool::new(false),
+            state: enabled.then(|| Mutex::new(State::new(identity, schema))),
         }
     }
     pub fn enabled(&self) -> bool {
@@ -375,11 +486,52 @@ impl Startup {
     }
     pub fn plan(&self, partitions: u64, drives: u64) {
         self.with_state(|state| {
+            if state.schema != Schema::V1 {
+                state.complete = false;
+                return;
+            }
             if state.planned.is_some() {
                 state.complete = false;
             }
             state.partitions = Some(partitions);
             state.planned = Some(drives);
+        });
+    }
+    /// Set immutable lazy-plan totals once. Validation also runs when observation is disabled.
+    pub fn plan_lazy(
+        &self,
+        partitions: u64,
+        drives: u64,
+        max_active_drives: u64,
+    ) -> io::Result<()> {
+        if self.schema != Schema::V2 || max_active_drives == 0 {
+            return Err(io::Error::other("lazy startup plan invalid"));
+        }
+        if self
+            .lazy_plan_set
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(io::Error::other("lazy startup plan already configured"));
+        }
+        self.with_state(|state| {
+            state.partitions = Some(partitions);
+            state.planned = Some(drives);
+            state.max_active_drives = Some(max_active_drives);
+        });
+        Ok(())
+    }
+    /// Count one successfully completed immutable construction plan, without opening its provider.
+    pub fn construction_plan(&self) {
+        self.with_state(|state| {
+            if state.schema != Schema::V2 || state.planned.is_none() {
+                state.complete = false;
+                return;
+            }
+            add(&mut state.construction_plans, 1, &mut state.complete);
+            if state.construction_plans > state.planned.unwrap_or(0) {
+                state.complete = false;
+            }
         });
     }
     pub fn begin(&self, stage: Stage) -> Attempt<'_> {
@@ -403,7 +555,12 @@ impl Startup {
     pub fn registered(&self) {
         self.with_state(|state| {
             add(&mut state.registered, 1, &mut state.complete);
-            if state.registered > state.rows[Stage::DriveOpen as usize].success {
+            let completed = if state.schema == Schema::V2 {
+                state.construction_plans
+            } else {
+                state.rows[Stage::DriveOpen as usize].success
+            };
+            if state.registered > completed {
                 state.complete = false;
             }
         });
@@ -415,10 +572,17 @@ impl Startup {
             }
             state.startup_elapsed = Some(ns(clock_now().duration_since(state.started)));
             let row = state.rows[Stage::DriveOpen as usize];
-            let ready = state
-                .planned
-                .is_some_and(|planned| row.success == planned && state.registered == planned)
-                && row.error == 0
+            let ready = state.planned.is_some_and(|planned| {
+                state.registered == planned
+                    && if state.schema == Schema::V2 {
+                        state.construction_plans == planned
+                            && state.max_active_drives.is_some_and(|limit| limit > 0)
+                            && row.started == 0
+                            && row.success == 0
+                    } else {
+                        row.success == planned
+                    }
+            }) && row.error == 0
                 && row.cancelled == 0
                 && row.in_flight == 0;
             state.outcome = if success && ready {
@@ -606,6 +770,170 @@ thread_local! { static CLOCK_READS: std::cell::Cell<u64> = const { std::cell::Ce
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lazy_producer_registers_completed_plans_without_opening_providers() {
+        let startup = Startup::new_lazy(true, Identity::cli());
+        let initial = serde_json::to_value(startup.snapshot().unwrap()).unwrap();
+        assert_eq!(initial["schema"], "mount-rs.startup.v2");
+        assert_eq!(initial["max_active_drives"], serde_json::Value::Null);
+        assert_eq!(initial["construction_plans"], 0);
+        startup.plan_lazy(2, 3, 2_048).unwrap();
+        for _ in 0..3 {
+            startup.begin(Stage::DriveConfig).finish(true);
+            startup.construction_plan();
+            startup.begin(Stage::DriveRegister).finish(true);
+            startup.registered();
+        }
+        startup.finish_startup(true);
+        let snapshot = startup.snapshot().unwrap();
+        assert_eq!(snapshot.terminal_outcome, Outcome::Ready);
+        assert!(snapshot.accounting_complete);
+        assert_eq!((snapshot.open_started, snapshot.registered_drives), (0, 3));
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(value["max_active_drives"], 2_048);
+        assert_eq!(value["construction_plans"], 3);
+        Snapshot::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+    #[test]
+    fn lazy_plan_rejects_zero_duplicate_and_eager_schema_without_overwrite() {
+        let startup = Startup::new_lazy(true, Identity::cli());
+        assert!(startup.plan_lazy(2, 3, 0).is_err());
+        startup.plan_lazy(2, 3, 1).unwrap();
+        assert!(startup.plan_lazy(7, 8, 9).is_err());
+        let value = serde_json::to_value(startup.snapshot().unwrap()).unwrap();
+        assert_eq!(value["configured_partitions"], 2);
+        assert_eq!(value["planned_drives"], 3);
+        assert_eq!(value["max_active_drives"], 1);
+        let eager = Startup::new(true, Identity::cli());
+        assert!(eager.plan_lazy(2, 3, 1).is_err());
+        assert_eq!(eager.snapshot().unwrap().planned_drives, None);
+    }
+    #[test]
+    fn disabled_lazy_producer_validates_plan_without_clocks_or_publication() {
+        CLOCK_READS.set(0);
+        let startup = Startup::new_lazy(false, Identity::cli());
+        assert!(startup.plan_lazy(2, 3, 0).is_err());
+        startup.plan_lazy(2, 3, 1).unwrap();
+        assert!(startup.plan_lazy(2, 3, 1).is_err());
+        startup.construction_plan();
+        startup.registered();
+        startup.finish_startup(true);
+        startup.publish(&mut |_| panic!("disabled producer published"));
+        assert!(startup.snapshot().is_none());
+        assert_eq!(CLOCK_READS.get(), 0);
+    }
+    fn lazy_ready_projection() -> serde_json::Value {
+        let startup = Startup::new(true, Identity::cli());
+        let mut value = serde_json::to_value(startup.snapshot().unwrap()).unwrap();
+        value["schema"] = serde_json::json!("mount-rs.startup.v2");
+        value["construction_mode"] = serde_json::json!("lazy");
+        value["max_active_drives"] = serde_json::json!(2_048);
+        value["construction_plans"] = serde_json::json!(3);
+        value["configured_partitions"] = serde_json::json!(2);
+        value["planned_drives"] = serde_json::json!(3);
+        value["registered_drives"] = serde_json::json!(3);
+        value["current_stage"] = serde_json::json!("ready");
+        value["terminal_outcome"] = serde_json::json!("ready");
+        value["stages"][Stage::DriveConfig as usize]["started"] = serde_json::json!(3);
+        value["stages"][Stage::DriveConfig as usize]["success"] = serde_json::json!(3);
+        value["stages"][Stage::DriveRegister as usize]["started"] = serde_json::json!(3);
+        value["stages"][Stage::DriveRegister as usize]["success"] = serde_json::json!(3);
+        value
+    }
+    #[test]
+    fn lazy_v2_ready_accepts_registered_plans_without_startup_opens() {
+        let value = lazy_ready_projection();
+        let snapshot = Snapshot::parse(&serde_json::to_vec(&value).unwrap())
+            .expect("registered lazy plans must be ready without opening providers");
+        assert_eq!(snapshot.registered_drives, 3);
+        assert_eq!((snapshot.open_started, snapshot.open_success), (0, 0));
+        assert_eq!(serde_json::to_value(snapshot).unwrap(), value);
+    }
+    #[test]
+    fn lazy_v2_projection_is_closed_and_rejects_false_readiness() {
+        let original = lazy_ready_projection();
+        Snapshot::parse(&serde_json::to_vec(&original).unwrap()).unwrap();
+        for key in [
+            "construction_mode",
+            "max_active_drives",
+            "construction_plans",
+        ] {
+            let mut value = original.clone();
+            value.as_object_mut().unwrap().remove(key);
+            assert!(
+                Snapshot::parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "missing {key}"
+            );
+        }
+        for (key, replacement) in [
+            ("construction_mode", serde_json::json!("eager")),
+            ("max_active_drives", serde_json::json!(0)),
+            ("max_active_drives", serde_json::Value::Null),
+            ("construction_plans", serde_json::json!(2)),
+            ("registered_drives", serde_json::json!(2)),
+            ("planned_drives", serde_json::Value::Null),
+        ] {
+            let mut value = original.clone();
+            value[key] = replacement;
+            assert!(
+                Snapshot::parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "invalid {key}"
+            );
+        }
+        let mut opened = original.clone();
+        opened["open_started"] = serde_json::json!(1);
+        opened["open_success"] = serde_json::json!(1);
+        opened["stages"][Stage::DriveOpen as usize]["started"] = serde_json::json!(1);
+        opened["stages"][Stage::DriveOpen as usize]["success"] = serde_json::json!(1);
+        assert!(Snapshot::parse(&serde_json::to_vec(&opened).unwrap()).is_err());
+        let mut incomplete = original.clone();
+        incomplete["accounting_complete"] = serde_json::json!(false);
+        Snapshot::parse(&serde_json::to_vec(&incomplete).unwrap()).unwrap();
+        incomplete["registered_drives"] = serde_json::json!(2);
+        assert!(Snapshot::parse(&serde_json::to_vec(&incomplete).unwrap()).is_err());
+        let mut private = original;
+        private["private_path"] = serde_json::json!("arbitrary private value");
+        assert!(Snapshot::parse(&serde_json::to_vec(&private).unwrap()).is_err());
+    }
+    #[test]
+    fn lazy_v2_running_requires_explicit_nullable_capacity() {
+        let mut value = lazy_ready_projection();
+        value["current_stage"] = serde_json::json!("configuration");
+        value["terminal_outcome"] = serde_json::json!("running");
+        value["max_active_drives"] = serde_json::Value::Null;
+        value["construction_plans"] = serde_json::json!(0);
+        value["configured_partitions"] = serde_json::Value::Null;
+        value["planned_drives"] = serde_json::Value::Null;
+        value["registered_drives"] = serde_json::json!(0);
+        for stage in [Stage::DriveConfig, Stage::DriveRegister] {
+            value["stages"][stage as usize]["started"] = serde_json::json!(0);
+            value["stages"][stage as usize]["success"] = serde_json::json!(0);
+        }
+        let parsed = Snapshot::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        value.as_object_mut().unwrap().remove("max_active_drives");
+        assert!(Snapshot::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    #[test]
+    fn eager_v1_projection_keeps_its_original_closed_shape() {
+        let startup = Startup::new(true, Identity::cli());
+        let original = serde_json::to_value(startup.snapshot().unwrap()).unwrap();
+        let parsed = Snapshot::parse(&serde_json::to_vec(&original).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), original);
+        assert_eq!(original.as_object().unwrap().len(), 21);
+        for key in [
+            "construction_mode",
+            "max_active_drives",
+            "construction_plans",
+        ] {
+            let mut value = original.clone();
+            value[key] = serde_json::Value::Null;
+            assert!(
+                Snapshot::parse(&serde_json::to_vec(&value).unwrap()).is_err(),
+                "v1 accepted {key}"
+            );
+        }
+    }
     #[test]
     fn nullable_projection_fields_are_required_and_incomplete_counts_are_preserved() {
         let startup = Startup::new(true, Identity::cli());

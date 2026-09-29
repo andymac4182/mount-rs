@@ -1,0 +1,202 @@
+{
+  "TiDB_wait_counter_evidence_available": false,
+  "aggregation": "No summed rates, sources, devices or disk/partition stacks. Every rate uses its own source monotonic interval. No per-Drive or per-logical-operation rate asserted.",
+  "all_guest_execs_settled": true,
+  "capture_status": "observed_partial",
+  "control": "remote10-v7-20260928",
+  "counter_reset_count": 0,
+  "coverage_complete": false,
+  "device_series_changes": 0,
+  "evidence_sha256": {
+    "begin_receipt": "f9918c6d99f5b06741c75c15c4cc627ed3954f6d1d59e1ba3b0e94fe6277c8df",
+    "begin_snapshot": "4c18500588e9341a0c54f6710fd68e39ed347f104dd79c4945a42fe433d9a171",
+    "end_snapshot": "44f00465d39e3ee33b1359dbc38895b28d085e08247a682d18a4143725052a2c",
+    "failed_end_receipt": "96ba7b3888292f28a4457183d0c51778028aa44f0b618972e6d3ed62ff619d4c",
+    "retry_end_receipt": "882f0f37ea7b90fb4b8d016abda578f8b0696b016c4432b1502ea255f658e23b"
+  },
+  "guest_exec_count": 4,
+  "guest_exec_exit_codes": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "logical_denominator_available": false,
+  "logical_failure_count": null,
+  "logical_operation_count": null,
+  "network_scope": "Container eth0 bytes and packets; includes replication, application, observer and background traffic; not physical network-device accounting.",
+  "physical_NVMe_IOPS_available": false,
+  "process_io_scope": "Separate Linux process I/O accounting and read/write syscall counters; not logical drive operations or physical device IOPS.",
+  "rustfs_scope": "Actual /data filesystem is virtiofs; object data path is host-forwarded, not guest-device block accounting. Its exposed guest block counters do not quantify RustFS backing-object data traffic.",
+  "schema": "mount-rs.private-backing-io-scalar-whitelist.v1",
+  "snapshot_begin_to_end_seconds": 478.418783,
+  "sources": [
+    {
+      "cgroup_standard_fields_complete": true,
+      "container_eth0_counter_deltas": {
+        "rx_bytes": 62523504,
+        "rx_packets": 52911,
+        "tx_bytes": 7185547,
+        "tx_packets": 53449
+      },
+      "data_filesystem_supports_cgroup_writeback": true,
+      "data_filesystem_type": "ext4",
+      "data_mount_linux_major_minor": "254:1",
+      "data_path_attribution_complete": false,
+      "observed_linux_cgroup_devices": [
+        {
+          "linux_major_minor": "254:0",
+          "observed_discard_bytes": 0,
+          "observed_discard_io_count": 0,
+          "observed_read_bytes": 4096,
+          "observed_read_bytes_per_second": 8.56152432301269,
+          "observed_read_io_count": 1,
+          "observed_read_io_count_per_second": 0.00209021589917302,
+          "observed_write_bytes": 82231296,
+          "observed_write_bytes_per_second": 171881.16230880277,
+          "observed_write_io_count": 9188,
+          "observed_write_io_count_per_second": 19.20490368160171
+        }
+      ],
+      "process_io_counter_deltas": {
+        "cancelled_write_bytes": 0,
+        "rchar": 35567825,
+        "read_bytes": 4096,
+        "syscr": 344435,
+        "syscw": 19353,
+        "wchar": 62860885,
+        "write_bytes": 82202624
+      },
+      "source_begin_monotonic_ns": 462412481820916,
+      "source_end_monotonic_ns": 462890901299208,
+      "source_role": "tikv1",
+      "source_sample_interval_seconds": 478.419478292
+    },
+    {
+      "cgroup_standard_fields_complete": true,
+      "container_eth0_counter_deltas": {
+        "rx_bytes": 62590184,
+        "rx_packets": 51987,
+        "tx_bytes": 5901841,
+        "tx_packets": 52640
+      },
+      "data_filesystem_supports_cgroup_writeback": true,
+      "data_filesystem_type": "ext4",
+      "data_mount_linux_major_minor": "254:1",
+      "data_path_attribution_complete": false,
+      "observed_linux_cgroup_devices": [
+        {
+          "linux_major_minor": "254:0",
+          "observed_discard_bytes": 0,
+          "observed_discard_io_count": 0,
+          "observed_read_bytes": 0,
+          "observed_read_bytes_per_second": 0.0,
+          "observed_read_io_count": 0,
+          "observed_read_io_count_per_second": 0.0,
+          "observed_write_bytes": 82059264,
+          "observed_write_bytes_per_second": 171521.42454339765,
+          "observed_write_io_count": 9110,
+          "observed_write_io_count_per_second": 19.041849773236482
+        }
+      ],
+      "process_io_counter_deltas": {
+        "cancelled_write_bytes": 0,
+        "rchar": 35602696,
+        "read_bytes": 0,
+        "syscr": 345225,
+        "syscw": 20077,
+        "wchar": 62667838,
+        "write_bytes": 82034688
+      },
+      "source_begin_monotonic_ns": 462412501402750,
+      "source_end_monotonic_ns": 462890921309875,
+      "source_role": "tikv2",
+      "source_sample_interval_seconds": 478.419907125
+    },
+    {
+      "cgroup_standard_fields_complete": true,
+      "container_eth0_counter_deltas": {
+        "rx_bytes": 74777456,
+        "rx_packets": 177641,
+        "tx_bytes": 310475086,
+        "tx_packets": 159663
+      },
+      "data_filesystem_supports_cgroup_writeback": true,
+      "data_filesystem_type": "ext4",
+      "data_mount_linux_major_minor": "254:1",
+      "data_path_attribution_complete": false,
+      "observed_linux_cgroup_devices": [
+        {
+          "linux_major_minor": "254:0",
+          "observed_discard_bytes": 0,
+          "observed_discard_io_count": 0,
+          "observed_read_bytes": 0,
+          "observed_read_bytes_per_second": 0.0,
+          "observed_read_io_count": 0,
+          "observed_read_io_count_per_second": 0.0,
+          "observed_write_bytes": 93302784,
+          "observed_write_bytes_per_second": 195021.72056722912,
+          "observed_write_io_count": 14385,
+          "observed_write_io_count_per_second": 30.0675642257319
+        }
+      ],
+      "process_io_counter_deltas": {
+        "cancelled_write_bytes": 0,
+        "rchar": 36675898,
+        "read_bytes": 0,
+        "syscr": 432507,
+        "syscw": 109747,
+        "wchar": 63811018,
+        "write_bytes": 93270016
+      },
+      "source_begin_monotonic_ns": 462412518613916,
+      "source_end_monotonic_ns": 462890941139000,
+      "source_role": "tikv3",
+      "source_sample_interval_seconds": 478.422525084
+    },
+    {
+      "cgroup_standard_fields_complete": true,
+      "container_eth0_counter_deltas": {
+        "rx_bytes": 27446110,
+        "rx_packets": 39836,
+        "tx_bytes": 23463327,
+        "tx_packets": 34173
+      },
+      "data_filesystem_supports_cgroup_writeback": false,
+      "data_filesystem_type": "virtiofs",
+      "data_mount_linux_major_minor": "0:46",
+      "data_path_attribution_complete": false,
+      "observed_linux_cgroup_devices": [
+        {
+          "linux_major_minor": "254:0",
+          "observed_discard_bytes": 0,
+          "observed_discard_io_count": 0,
+          "observed_read_bytes": 0,
+          "observed_read_bytes_per_second": 0.0,
+          "observed_read_io_count": 0,
+          "observed_read_io_count_per_second": 0.0,
+          "observed_write_bytes": 8192,
+          "observed_write_bytes_per_second": 17.122884111042527,
+          "observed_write_io_count": 2,
+          "observed_write_io_count_per_second": 0.004180391628672492
+        }
+      ],
+      "process_io_counter_deltas": {
+        "cancelled_write_bytes": 0,
+        "rchar": 207135072,
+        "read_bytes": 0,
+        "syscr": 89178,
+        "syscw": 178048,
+        "wchar": 53530570,
+        "write_bytes": 31173875
+      },
+      "source_begin_monotonic_ns": 462412536721583,
+      "source_end_monotonic_ns": 462890960797041,
+      "source_role": "rustfs",
+      "source_sample_interval_seconds": 478.424075458
+    }
+  ],
+  "verification": "file-only hash-bound receipt/snapshot reads and scalar delta/rate arithmetic; no imports of observer, runtime, network or source edits",
+  "whole_window_scope": "accepted control startup/work/oracles/cleanup, observer overhead, delayed end retry, additional idle/background and backing-server background work; not exclusive active-stage timing",
+  "zero_scope": "Zero deltas refer only to explicitly exposed unchanged counters, not absent accounting or physical disk inactivity."
+}

@@ -12,7 +12,8 @@ use mount_rs_core::diagnostics::profile::{Event, Span, add};
 use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::InodeId;
 use mount_rs_core::storage::compact::{
-    CompactInodeCapability, CompactPublication, CompactSnapshot, CompactStructuralDelta,
+    CompactInodeCapability, CompactInodeExpectation, CompactInodeRead, CompactPublication,
+    CompactRootFileCapability, CompactRootFileRead, CompactSnapshot, CompactStructuralDelta,
     LoadedCompactInode, PhysicalInodeIdentity,
 };
 use mount_rs_core::storage::{
@@ -54,6 +55,42 @@ impl ErasedMetadataStore {
 
 #[async_trait]
 impl MetadataStore for ErasedMetadataStore {
+    fn compact_root_file_capability(&self) -> CompactRootFileCapability {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataCompactRootFileCapability);
+        let result = self.inner.compact_root_file_capability();
+        storage_span.finish_success(0);
+        result
+    }
+
+    async fn load_compact_root_file(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: InodeId,
+        candidate_file: InodeId,
+    ) -> Result<CompactRootFileRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactRootFile);
+        let _profile = Span::new(Event::InodeLoad).units(2);
+        #[cfg(feature = "observability")]
+        let result = self
+            .telemetry
+            .observe_fs(
+                "provider.metadata",
+                "compact.root_file",
+                None,
+                self.inner
+                    .load_compact_root_file(backing, expected_root, candidate_file),
+            )
+            .await;
+        #[cfg(not(feature = "observability"))]
+        let result = self
+            .inner
+            .load_compact_root_file(backing, expected_root, candidate_file)
+            .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
     fn compact_inode_capability(&self) -> CompactInodeCapability {
         let mut storage_span =
             StorageSpan::new(StorageOperation::SdkMetadataCompactInodeCapability);
@@ -160,6 +197,37 @@ impl MetadataStore for ErasedMetadataStore {
                 .await;
             #[cfg(not(feature = "observability"))]
             let result = self.inner.load_compact_inode(backing, inode).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: CompactInodeExpectation<'_>,
+    ) -> Result<CompactInodeRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactInode);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.load",
+                    None,
+                    self.inner.read_compact_inode(backing, inode, expected),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .read_compact_inode(backing, inode, expected)
+                .await;
             result
         }
         .await;
@@ -1391,6 +1459,17 @@ mod tests {
         assert_eq!(snapshot, compact_probe_snapshot(backing));
         let loaded = erased.load_compact_inode(backing, 1).await.unwrap();
         assert_eq!(loaded, compact_probe_loaded(backing));
+        assert_eq!(
+            erased.compact_root_file_capability(),
+            CompactRootFileCapability::Supported
+        );
+        let pair = erased.load_compact_root_file(backing, 1, 2).await.unwrap();
+        assert_eq!(pair.anchor(), &snapshot.anchor);
+        assert_eq!(pair.root(), Some(&loaded.guard));
+        assert!(
+            pair.file().is_none(),
+            "a missing candidate must remain explicit"
+        );
         let published = erased
             .publish_compact_inode(
                 backing,
@@ -1418,12 +1497,13 @@ mod tests {
                 "prepare",
                 "snapshot",
                 "load",
+                "root_file",
                 "publish_inode",
                 "publish_structure"
             ]
         );
         #[cfg(feature = "observability")]
-        assert_eq!(telemetry.snapshot().operations, 6);
+        assert_eq!(telemetry.snapshot().operations, 7);
         if mount_rs_core::diagnostics::profile::enabled() {
             let profile = mount_rs_core::diagnostics::profile::snapshot()
                 .delta(&profile_before)
@@ -1442,7 +1522,8 @@ mod tests {
                         .find(|entry| entry.name == name)
                         .unwrap()
                         .calls,
-                    if name == "provider.metadata.load_if_changed" {
+                    if name == "provider.metadata.load_if_changed" || name == "provider.inode.load"
+                    {
                         2
                     } else {
                         1
@@ -1476,6 +1557,18 @@ mod tests {
         assert_eq!(
             incapable.compact_inode_capability(),
             CompactInodeCapability::Unsupported
+        );
+        assert_eq!(
+            incapable.compact_root_file_capability(),
+            CompactRootFileCapability::Unsupported
+        );
+        assert_eq!(
+            incapable
+                .load_compact_root_file(backing, 1, 2)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
         );
         assert_eq!(
             incapable.compact_inode_mode_state().await.unwrap_err().code,
@@ -1525,6 +1618,26 @@ mod tests {
 
     #[async_trait]
     impl MetadataStore for IdentityProbeMetadataStore {
+        fn compact_root_file_capability(&self) -> CompactRootFileCapability {
+            CompactRootFileCapability::Supported
+        }
+        async fn load_compact_root_file(
+            &self,
+            backing: ConcurrentBackingId,
+            root: InodeId,
+            file: InodeId,
+        ) -> Result<CompactRootFileRead> {
+            assert_eq!((backing, root, file), (self.0, 1, 2));
+            self.1.lock().unwrap().push("root_file");
+            let snapshot = compact_probe_snapshot(self.0);
+            CompactRootFileRead::from_guards(
+                snapshot.anchor,
+                root,
+                file,
+                Some(compact_probe_loaded(self.0).guard),
+                None,
+            )
+        }
         fn compact_inode_capability(
             &self,
         ) -> mount_rs_core::storage::compact::CompactInodeCapability {

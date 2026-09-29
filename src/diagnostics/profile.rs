@@ -136,6 +136,28 @@ events! {
     FilesystemMutationCreateGuardRevisionMismatch => "filesystem.mutation.create_guard.revision_mismatch",
     FilesystemMutationCreateGuardAllocationMismatch => "filesystem.mutation.create_guard.allocation_mismatch",
     FilesystemMutationCreateGuardPathPresent => "filesystem.mutation.create_guard.path_present",
+    CompactNamespaceMaterializeNodes => "compact.namespace.materialize_nodes",
+    MutationCandidateCloneNodes => "filesystem.mutation.candidate_clone_nodes",
+    CompactStructuralDeltaCaptureNodes => "compact.structure.delta_capture_nodes",
+    CompactStructuralExpectedGuardNodes => "compact.structure.expected_guard_nodes",
+    SqliteCompactAuthorityQuery => "sqlite.compact.authority_query",
+    SqliteCompactAuthorityPath => "sqlite.compact.authority_path",
+    SqliteCompactAnchorQueryBytes => "sqlite.compact.anchor_query_bytes",
+    SqliteCompactAnchorDecodeBytes => "sqlite.compact.anchor_decode_bytes",
+    SqliteCompactGuardSelectedRows => "sqlite.compact.guard_selected_rows",
+    SqliteCompactGuardFullRows => "sqlite.compact.guard_full_rows",
+    SqliteCompactGuardSelectedDecodeBytes => "sqlite.compact.guard_selected_decode_bytes",
+    SqliteCompactGuardFullDecodeBytes => "sqlite.compact.guard_full_decode_bytes",
+    SqliteCompactReadLockWait => "sqlite.compact.read_lock_wait",
+    SqliteCompactReadBegin => "sqlite.compact.read_begin",
+    FilesystemRefreshReplaceProbe => "filesystem.refresh.replace_probe",
+    FilesystemRefreshCreateCapture => "filesystem.refresh.create_capture",
+    FilesystemRefreshBatchCapture => "filesystem.refresh.batch_capture",
+    FilesystemRefreshPathStructure => "filesystem.refresh.path_structure",
+    FilesystemRefreshReadBefore => "filesystem.refresh.read_before",
+    FilesystemRefreshReadAfter => "filesystem.refresh.read_after",
+    BlobCacheRamHitBytes => "blob_cache.ram.hit_bytes",
+    BlobCacheDiskHitBytes => "blob_cache.disk.hit_bytes",
 }
 
 #[derive(Default)]
@@ -698,12 +720,95 @@ mod tests {
                 Event::FilesystemMutationCreateGuardPathPresent,
                 "filesystem.mutation.create_guard.path_present",
             ),
+            (
+                Event::CompactNamespaceMaterializeNodes,
+                "compact.namespace.materialize_nodes",
+            ),
+            (
+                Event::MutationCandidateCloneNodes,
+                "filesystem.mutation.candidate_clone_nodes",
+            ),
+            (
+                Event::CompactStructuralDeltaCaptureNodes,
+                "compact.structure.delta_capture_nodes",
+            ),
+            (
+                Event::CompactStructuralExpectedGuardNodes,
+                "compact.structure.expected_guard_nodes",
+            ),
+            (
+                Event::SqliteCompactAuthorityQuery,
+                "sqlite.compact.authority_query",
+            ),
+            (
+                Event::SqliteCompactAuthorityPath,
+                "sqlite.compact.authority_path",
+            ),
+            (
+                Event::SqliteCompactAnchorQueryBytes,
+                "sqlite.compact.anchor_query_bytes",
+            ),
+            (
+                Event::SqliteCompactAnchorDecodeBytes,
+                "sqlite.compact.anchor_decode_bytes",
+            ),
+            (
+                Event::SqliteCompactGuardSelectedRows,
+                "sqlite.compact.guard_selected_rows",
+            ),
+            (
+                Event::SqliteCompactGuardFullRows,
+                "sqlite.compact.guard_full_rows",
+            ),
+            (
+                Event::SqliteCompactGuardSelectedDecodeBytes,
+                "sqlite.compact.guard_selected_decode_bytes",
+            ),
+            (
+                Event::SqliteCompactGuardFullDecodeBytes,
+                "sqlite.compact.guard_full_decode_bytes",
+            ),
+            (
+                Event::SqliteCompactReadLockWait,
+                "sqlite.compact.read_lock_wait",
+            ),
+            (Event::SqliteCompactReadBegin, "sqlite.compact.read_begin"),
+            (
+                Event::FilesystemRefreshReplaceProbe,
+                "filesystem.refresh.replace_probe",
+            ),
+            (
+                Event::FilesystemRefreshCreateCapture,
+                "filesystem.refresh.create_capture",
+            ),
+            (
+                Event::FilesystemRefreshBatchCapture,
+                "filesystem.refresh.batch_capture",
+            ),
+            (
+                Event::FilesystemRefreshPathStructure,
+                "filesystem.refresh.path_structure",
+            ),
+            (
+                Event::FilesystemRefreshReadBefore,
+                "filesystem.refresh.read_before",
+            ),
+            (
+                Event::FilesystemRefreshReadAfter,
+                "filesystem.refresh.read_after",
+            ),
         ];
-        assert_eq!(NAMES.len(), 114);
+        assert_eq!(NAMES.len(), 136);
         for (offset, (event, name)) in expected.into_iter().enumerate() {
             assert_eq!(event as usize, 47 + offset);
             assert_eq!(NAMES[47 + offset], name);
         }
+        assert_eq!(Event::BlobCacheRamHitBytes as usize, 134);
+        assert_eq!(Event::BlobCacheDiskHitBytes as usize, 135);
+        assert_eq!(
+            &NAMES[134..136],
+            &["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes",]
+        );
     }
 
     #[test]

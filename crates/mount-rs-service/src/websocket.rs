@@ -1,8 +1,12 @@
 //! TLS WebSocket listener using the authoritative Drive dispatcher.
 //! One MRB2 header message precedes bounded binary body chunks. No pipelining.
+pub use crate::server::{WebSocketDiagnostics, WebSocketSnapshot};
 use crate::{
     dispatch::{DriveDispatcher, SessionHandles, SessionIdentity},
-    server::{Authenticator, RemoteServerOptions},
+    server::{
+        Authenticator, DiagnosticOperation, Outcome, RemoteServerOptions, ServerDiagnostics, Span,
+        auth_scope,
+    },
     transfer::{Admission, Budgets, RemoteTransferLimits, ResponseBuffer, ResponseReservation},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -36,6 +40,7 @@ pub struct WebSocketServer {
     address: SocketAddr,
     shutdown: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    diagnostics: Option<WebSocketDiagnostics>,
 }
 impl WebSocketServer {
     pub async fn bind(
@@ -84,8 +89,40 @@ impl WebSocketServer {
         options: RemoteServerOptions,
         limits: RemoteTransferLimits,
     ) -> Result<Self, Error> {
+        Self::bind_with_diagnostics(
+            address,
+            certs,
+            key,
+            dispatcher,
+            authenticator,
+            options,
+            limits,
+            false,
+        )
+        .await
+    }
+    /// Explicit application observer in an io-profiling build. Ordinary binds
+    /// remain disabled even when PROFILE_IO is set. TRACE_SERVICE additionally
+    /// enables the existing bounded, fixed-label slow records.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind_with_diagnostics(
+        address: SocketAddr,
+        certs: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+        dispatcher: Arc<DriveDispatcher>,
+        authenticator: Arc<dyn Authenticator>,
+        options: RemoteServerOptions,
+        limits: RemoteTransferLimits,
+        diagnostics_enabled: bool,
+    ) -> Result<Self, Error> {
         options.validate()?;
         limits.validate()?;
+        let diagnostics = (diagnostics_enabled && cfg!(feature = "io-profiling")).then(|| {
+            WebSocketDiagnostics::new(
+                std::env::var_os("MOUNT_RS_TRACE_SERVICE").is_some_and(|value| value == "1"),
+            )
+        });
+        let task_diagnostics = diagnostics.clone();
         let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
@@ -107,27 +144,39 @@ impl WebSocketServer {
                     Some(_) = sessions.join_next(), if !sessions.is_empty() => {},
                     incoming = listener.accept() => {
                         let Ok((tcp, _)) = incoming else {break;};
-                        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {drop(tcp); continue;};
+                        let observer = task_diagnostics.as_ref().map(WebSocketDiagnostics::application_observer);
+                        let mut admission = Span::new(observer, DiagnosticOperation::ConnectionAdmission);
+                        let permit = Arc::clone(&connections).try_acquire_owned();
+                        admission.finish(Outcome::result(&permit));
+                        let Ok(permit) = permit else {drop(tcp); continue;};
                         let _ = tcp.set_nodelay(true);
                         let acceptor = acceptor.clone();
                         let dispatcher = Arc::clone(&dispatcher);
                         let authenticator = Arc::clone(&authenticator);
                         let budgets = Arc::clone(&budgets);
                         let mut stopping = stopping.clone();
+                        let diagnostics = task_diagnostics.clone();
                         sessions.spawn(async move {
                             let _permit = permit;
+                            let observer = diagnostics.as_ref().map(WebSocketDiagnostics::application_observer);
+                            let mut application_handshake = Span::new(observer, DiagnosticOperation::Handshake);
                             let handshake = async {
-                                let tls = acceptor.accept(tcp).await?;
+                                let tls = observed(observer, DiagnosticOperation::TlsHandshake, acceptor.accept(tcp)).await?;
                                 let config = WebSocketConfig::default().read_buffer_size(4096).write_buffer_size(0)
                                     .max_write_buffer_size(CHUNK_BYTES * 2).max_message_size(Some(CHUNK_BYTES)).max_frame_size(Some(CHUNK_BYTES));
-                                Ok::<_, Error>(tokio_tungstenite::accept_hdr_async_with_config(tls, upgrade, Some(config)).await?)
+                                Ok::<_, Error>(observed(observer, DiagnosticOperation::WebSocketUpgrade,
+                                    tokio_tungstenite::accept_hdr_async_with_config(tls, upgrade, Some(config))).await?)
                             };
                             let socket = tokio::select! {
                                 biased;
                                 _ = stopping.changed() => return,
-                                result = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake) => match result {Ok(Ok(socket)) => socket, _ => return},
+                                result = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake) => match result {
+                                    Ok(Ok(socket)) => socket,
+                                    Ok(Err(_)) => { application_handshake.finish(Outcome::Error); return; },
+                                    Err(_) => { application_handshake.finish(Outcome::Timeout); return; },
+                                },
                             };
-                            serve(socket, dispatcher, authenticator, budgets, stopping).await;
+                            serve(socket, dispatcher, authenticator, budgets, stopping, observer, application_handshake).await;
                         });
                     }
                 }
@@ -139,16 +188,69 @@ impl WebSocketServer {
             address,
             shutdown,
             task,
+            diagnostics,
         })
     }
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.address
     }
+    #[must_use]
+    pub fn diagnostics(&self) -> Option<WebSocketDiagnostics> {
+        self.diagnostics.clone()
+    }
     pub async fn close(self) {
         self.shutdown.send_replace(true);
         let _ = self.task.await;
     }
+}
+
+async fn observed<T, E>(
+    observer: Option<&ServerDiagnostics>,
+    operation: DiagnosticOperation,
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let mut span = Span::new(observer, operation);
+    let result = future.await;
+    span.finish(Outcome::result(&result));
+    result
+}
+
+pub(crate) struct Failure {
+    error: Error,
+    outcome: Outcome,
+}
+
+/// Hello retains its existing auth deadline; renewal is timed by dispatch.
+pub(crate) async fn authenticate(
+    authenticator: &dyn Authenticator,
+    bearer: &str,
+    partition: &str,
+    observer: Option<&ServerDiagnostics>,
+    deadline: Option<Duration>,
+) -> Result<SessionIdentity, Failure> {
+    let mut span = Span::new(observer, DiagnosticOperation::Authentication);
+    let future = auth_scope(observer, authenticator.authenticate(bearer, partition));
+    let result = if let Some(deadline) = deadline {
+        match tokio::time::timeout(deadline, future).await {
+            Ok(result) => result,
+            Err(error) => {
+                span.finish(Outcome::Timeout);
+                return Err(Failure {
+                    error: error.into(),
+                    outcome: Outcome::Timeout,
+                });
+            }
+        }
+    } else {
+        future.await
+    };
+    let outcome = Outcome::result(&result);
+    span.finish(outcome);
+    result.map_err(|_| Failure {
+        error: "authentication failed".into(),
+        outcome,
+    })
 }
 #[allow(clippy::result_large_err)]
 fn upgrade(request: &Request, mut response: Response) -> Result<Response, ErrorResponse> {
@@ -177,43 +279,87 @@ async fn receive(socket: &mut Socket) -> Result<tokio_tungstenite::tungstenite::
         }
     }
 }
-async fn incoming(socket: &mut Socket, budgets: &Budgets) -> Result<(Incoming, Admission), Error> {
-    let bytes = receive(socket).await?;
-    let header = Header::decode(
-        bytes
-            .as_ref()
-            .try_into()
-            .map_err(|_| "invalid header message")?,
-    )?;
-    let admission = budgets.ingress(header)?;
-    let _wire_permit = budgets.websocket_wire(header)?;
-    // Charge before even the library allocates its first body message. The
-    // fixed <=32KiB pre-header window is bounded separately by connections.
-    let length = header.control_len + header.payload_len;
-    let mut bytes = Vec::with_capacity(length);
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        while bytes.len() < length {
-            let chunk = receive(socket).await?;
-            if chunk.is_empty() || chunk.len() > length - bytes.len() {
-                return Err::<(), Error>("invalid body chunk".into());
+async fn incoming(
+    socket: &mut Socket,
+    budgets: &Budgets,
+    observer: Option<&ServerDiagnostics>,
+    record_request: bool,
+) -> Result<(Incoming, Admission, Span), Failure> {
+    // Waiting for the next header is idle socket traffic, not an application
+    // request. Start both spans only once its first binary message arrives.
+    let bytes = receive(socket).await.map_err(|error| Failure {
+        error,
+        outcome: Outcome::Error,
+    })?;
+    let mut request = Span::new(
+        if record_request { observer } else { None },
+        DiagnosticOperation::Request,
+    );
+    let mut reading = Span::new(observer, DiagnosticOperation::IncomingRead);
+    let mut outcome = Outcome::Error;
+    let result = async {
+        let header = Header::decode(
+            bytes
+                .as_ref()
+                .try_into()
+                .map_err(|_| "invalid header message")?,
+        )?;
+        let mut ingress = Span::new(observer, DiagnosticOperation::IngressAdmission);
+        let admitted = budgets
+            .ingress(header)
+            .and_then(|admission| budgets.websocket_wire(header).map(|wire| (admission, wire)));
+        ingress.finish(Outcome::result(&admitted));
+        let (admission, _wire_permit) = admitted?;
+        // Charge before even the library allocates its first body message. The
+        // fixed <=32KiB pre-header window is bounded separately by connections.
+        let length = header.control_len + header.payload_len;
+        let mut bytes = Vec::with_capacity(length);
+        let body = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            while bytes.len() < length {
+                let chunk = receive(socket).await?;
+                if chunk.is_empty() || chunk.len() > length - bytes.len() {
+                    return Err::<(), Error>("invalid body chunk".into());
+                }
+                bytes.extend_from_slice(&chunk);
             }
-            bytes.extend_from_slice(&chunk);
+            if !receive(socket).await?.is_empty() {
+                return Err("invalid envelope terminator".into());
+            }
+            Ok(())
+        })
+        .await;
+        match body {
+            Ok(result) => result?,
+            Err(error) => {
+                outcome = Outcome::Timeout;
+                return Err(error.into());
+            }
         }
-        if !receive(socket).await?.is_empty() {
-            return Err("invalid envelope terminator".into());
+        let mut cursor = bytes.as_slice();
+        let incoming = binary::read_body(&mut cursor, header).await?;
+        if !cursor.is_empty() {
+            return Err("trailing body bytes".into());
         }
-        Ok(())
-    })
-    .await??;
-    let mut cursor = bytes.as_slice();
-    let incoming = binary::read_body(&mut cursor, header).await?;
-    if !cursor.is_empty() {
-        return Err("trailing body bytes".into());
+        outcome = Outcome::Success;
+        Ok::<_, Error>((incoming, admission))
     }
-    Ok((incoming, admission))
+    .await;
+    reading.finish(outcome);
+    match result {
+        Ok((incoming, admission)) => Ok((incoming, admission, request)),
+        Err(error) => {
+            request.finish(outcome);
+            Err(Failure { error, outcome })
+        }
+    }
 }
-async fn send(socket: &mut Socket, bytes: &[u8]) -> Result<(), Error> {
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+async fn send(
+    socket: &mut Socket,
+    bytes: &[u8],
+    observer: Option<&ServerDiagnostics>,
+) -> Result<(), Failure> {
+    let mut submit = Span::new(observer, DiagnosticOperation::ResponseSubmit);
+    let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         socket
             .send(WsMessage::Binary(
                 bytes[..binary::HEADER_BYTES].to_vec().into(),
@@ -227,7 +373,19 @@ async fn send(socket: &mut Socket, bytes: &[u8]) -> Result<(), Error> {
         socket.send(WsMessage::Binary(Vec::new().into())).await?;
         Ok::<(), Error>(())
     })
-    .await?
+    .await;
+    let outcome = match &result {
+        Ok(result) => Outcome::result(result),
+        Err(_) => Outcome::Timeout,
+    };
+    submit.finish(outcome);
+    match result {
+        Ok(result) => result.map_err(|error| Failure { error, outcome }),
+        Err(error) => Err(Failure {
+            error: error.into(),
+            outcome,
+        }),
+    }
 }
 async fn serve(
     mut socket: Socket,
@@ -235,17 +393,25 @@ async fn serve(
     authenticator: Arc<dyn Authenticator>,
     budgets: Arc<Budgets>,
     mut stopping: watch::Receiver<bool>,
+    observer: Option<&ServerDiagnostics>,
+    mut handshake: Span,
 ) {
     let handles = SessionHandles::default();
     // Cancellation drops in-flight RPCs (including uncertain committed writes),
     // then cleanup always executes outside that cancelled future.
-    tokio::select! {
+    let result = tokio::select! {
         biased;
-        _ = stopping.changed() => {},
-        _ = session(&mut socket, &dispatcher, &*authenticator, &budgets, &handles) => {},
-    }
+        _ = stopping.changed() => None,
+        result = session(&mut socket, &dispatcher, &*authenticator, &budgets, &handles, observer, &mut handshake) => Some(result),
+    };
+    handshake.finish(match result {
+        Some(result) => Outcome::result(&result),
+        None => Outcome::Cancelled,
+    });
     drop(socket);
+    let mut cleanup = Span::new(observer, DiagnosticOperation::SessionCleanup);
     handles.close_all().await;
+    cleanup.finish(Outcome::Success);
 }
 async fn session(
     socket: &mut Socket,
@@ -253,9 +419,25 @@ async fn session(
     authenticator: &dyn Authenticator,
     budgets: &Budgets,
     handles: &SessionHandles,
+    observer: Option<&ServerDiagnostics>,
+    handshake: &mut Span,
 ) -> Result<(), Error> {
-    let (hello, admission) =
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming(socket, budgets)).await??;
+    let (hello, admission, _request) = match tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        incoming(socket, budgets, observer, false),
+    )
+    .await
+    {
+        Ok(Ok(received)) => received,
+        Ok(Err(failure)) => {
+            handshake.finish(failure.outcome);
+            return Err(failure.error);
+        }
+        Err(error) => {
+            handshake.finish(Outcome::Timeout);
+            return Err(error.into());
+        }
+    };
     let Incoming::Control(Message::ClientHello {
         version,
         partition_id,
@@ -267,12 +449,21 @@ async fn session(
     if version != PROTOCOL_VERSION {
         return Err("unsupported protocol".into());
     }
-    let mut identity = tokio::time::timeout(
-        OPERATION_TIMEOUT,
-        authenticator.authenticate(&bearer, &partition_id),
+    let mut identity = match authenticate(
+        authenticator,
+        &bearer,
+        &partition_id,
+        observer,
+        Some(OPERATION_TIMEOUT),
     )
-    .await?
-    .map_err(|_| "authentication failed")?;
+    .await
+    {
+        Ok(identity) => identity,
+        Err(failure) => {
+            handshake.finish(failure.outcome);
+            return Err(failure.error);
+        }
+    };
     if identity.partition_id != partition_id {
         return Err("partition mismatch".into());
     }
@@ -281,40 +472,79 @@ async fn session(
         session_id: crate::server::session_id(),
     };
     let reservation = ResponseReservation::message(&hello);
-    let permit = budgets.egress(reservation.control, reservation.charge)?;
+    let mut egress = Span::new(observer, DiagnosticOperation::EgressAdmission);
+    let permit = budgets.egress(reservation.control, reservation.charge);
+    egress.finish(Outcome::result(&permit));
+    let permit = permit?;
     let mut output = ResponseBuffer::new(reservation.wire_limit);
-    binary::write_control(&mut output, &hello).await?;
-    send(socket, &output.bytes).await?;
+    observed(
+        observer,
+        DiagnosticOperation::ResponseEncode,
+        binary::write_control(&mut output, &hello),
+    )
+    .await?;
+    if let Err(failure) = send(socket, &output.bytes, observer).await {
+        handshake.finish(failure.outcome);
+        return Err(failure.error);
+    }
     drop((permit, admission));
+    handshake.finish(Outcome::Success);
     loop {
-        let (request, mut admission) = incoming(socket, budgets).await?;
-        if handles.is_closed().await {
-            return Err("session invalidated".into());
+        let (request, mut admission, mut request_span) = incoming(socket, budgets, observer, true)
+            .await
+            .map_err(|failure| failure.error)?;
+        let mut outcome = Outcome::Error;
+        let result = async {
+            if handles.is_closed().await {
+                return Err("session invalidated".into());
+            }
+            if matches!(request, Incoming::Control(Message::Request { .. })) {
+                let mut ingress = Span::new(observer, DiagnosticOperation::IngressAdmission);
+                let admitted = budgets.request_operation(&mut admission);
+                ingress.finish(Outcome::result(&admitted));
+                admitted?;
+            }
+            let reservation = match &request {
+                Incoming::Control(message) => ResponseReservation::message(message),
+                Incoming::Read { length, .. } => ResponseReservation::io(*length),
+                Incoming::Write { .. } => ResponseReservation::io(0),
+            };
+            let mut egress = Span::new(observer, DiagnosticOperation::EgressAdmission);
+            let permit = budgets.egress(reservation.control, reservation.charge);
+            egress.finish(Outcome::result(&permit));
+            let permit = permit?;
+            let mut output = ResponseBuffer::new(reservation.wire_limit);
+            let dispatched = match tokio::time::timeout(
+                OPERATION_TIMEOUT,
+                dispatch(
+                    request,
+                    &mut identity,
+                    dispatcher,
+                    authenticator,
+                    handles,
+                    &mut output,
+                    observer,
+                ),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(error) => {
+                    outcome = Outcome::Timeout;
+                    return Err(error.into());
+                }
+            };
+            if let Err(failure) = send(socket, &output.bytes, observer).await {
+                outcome = failure.outcome;
+                return Err(failure.error);
+            }
+            drop((permit, admission));
+            outcome = dispatched;
+            Ok::<(), Error>(())
         }
-        if matches!(request, Incoming::Control(Message::Request { .. })) {
-            budgets.request_operation(&mut admission)?;
-        }
-        let reservation = match &request {
-            Incoming::Control(message) => ResponseReservation::message(message),
-            Incoming::Read { length, .. } => ResponseReservation::io(*length),
-            Incoming::Write { .. } => ResponseReservation::io(0),
-        };
-        let permit = budgets.egress(reservation.control, reservation.charge)?;
-        let mut output = ResponseBuffer::new(reservation.wire_limit);
-        tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            dispatch(
-                request,
-                &mut identity,
-                dispatcher,
-                authenticator,
-                handles,
-                &mut output,
-            ),
-        )
-        .await??;
-        send(socket, &output.bytes).await?;
-        drop((permit, admission));
+        .await;
+        request_span.finish(outcome);
+        result?;
     }
 }
 async fn dispatch(
@@ -324,23 +554,39 @@ async fn dispatch(
     authenticator: &dyn Authenticator,
     handles: &SessionHandles,
     output: &mut ResponseBuffer,
-) -> Result<(), Error> {
-    match request {
+    observer: Option<&ServerDiagnostics>,
+) -> Result<Outcome, Error> {
+    let outcome = match request {
         Incoming::Control(Message::Request {
             request_id,
             drive_id,
             operation,
         }) if request_id != 0 => {
-            let result = dispatcher
-                .dispatch_request(identity, &drive_id, &operation, handles, request_id)
-                .await;
-            binary::write_control(output, &Message::Response { request_id, result }).await?;
+            let result = observed(
+                observer,
+                DiagnosticOperation::DispatchControl,
+                dispatcher.dispatch_request(identity, &drive_id, &operation, handles, request_id),
+            )
+            .await;
+            let outcome = Outcome::result(&result);
+            observed(
+                observer,
+                DiagnosticOperation::ResponseEncode,
+                binary::write_control(output, &Message::Response { request_id, result }),
+            )
+            .await?;
+            outcome
         }
         Incoming::Control(Message::Renew { bearer }) => {
-            let next = authenticator
-                .authenticate(&bearer, &identity.partition_id)
-                .await
-                .map_err(|_| "authentication failed")?;
+            let next = authenticate(
+                authenticator,
+                &bearer,
+                &identity.partition_id,
+                observer,
+                None,
+            )
+            .await
+            .map_err(|failure| failure.error)?;
             if next.partition_id != identity.partition_id
                 || next.policy_id != identity.policy_id
                 || next.issuer != identity.issuer
@@ -353,36 +599,61 @@ async fn dispatch(
                 return Err("session invalidated".into());
             }
             *identity = next;
-            binary::write_control(
-                output,
-                &Message::ServerHello {
-                    version: PROTOCOL_VERSION,
-                    session_id: "renewed".into(),
-                },
+            observed(
+                observer,
+                DiagnosticOperation::ResponseEncode,
+                binary::write_control(
+                    output,
+                    &Message::ServerHello {
+                        version: PROTOCOL_VERSION,
+                        session_id: "renewed".into(),
+                    },
+                ),
             )
             .await?;
+            Outcome::Success
         }
         Incoming::Read {
             request_id,
             request,
             length,
         } => {
-            let result = dispatcher
-                .dispatch_io(identity, &request, handles, request_id, length, None)
-                .await;
-            binary::write_result(output, request_id, result).await?;
+            let result = observed(
+                observer,
+                DiagnosticOperation::DispatchRead,
+                dispatcher.dispatch_io(identity, &request, handles, request_id, length, None),
+            )
+            .await;
+            let outcome = Outcome::result(&result);
+            observed(
+                observer,
+                DiagnosticOperation::ResponseEncode,
+                binary::write_result(output, request_id, result),
+            )
+            .await?;
+            outcome
         }
         Incoming::Write {
             request_id,
             request,
             data,
         } => {
-            let result = dispatcher
-                .dispatch_io(identity, &request, handles, request_id, 0, Some(&data))
-                .await;
-            binary::write_result(output, request_id, result).await?;
+            let result = observed(
+                observer,
+                DiagnosticOperation::DispatchWrite,
+                dispatcher.dispatch_io(identity, &request, handles, request_id, 0, Some(&data)),
+            )
+            .await;
+            let outcome = Outcome::result(&result);
+            observed(
+                observer,
+                DiagnosticOperation::ResponseEncode,
+                binary::write_result(output, request_id, result),
+            )
+            .await?;
+            outcome
         }
         _ => return Err("invalid request".into()),
-    }
-    Ok(())
+    };
+    Ok(outcome)
 }

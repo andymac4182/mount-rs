@@ -1,0 +1,803 @@
+{
+  "base_commit": "ab0f22ee4081100a14e615660536cae78c7023eb",
+  "comparison": {
+    "after": {
+      "full_bytes_size_eof_distinct_inode_and_fresh_reopen_oracles": true,
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 232,
+          "sha256": "f062f3fe0dba43f7c1389b0f59d96574c321ceb9316edce841449ced6474fc24"
+        },
+        "stdout": {
+          "bytes": 2848,
+          "sha256": "04324ec4e760469787760bf65b42b46ec640a0dc47106275017766aa98b5702b"
+        }
+      },
+      "receipt_sha256": "d05c68bb9c49966bfed96d9cea1aa2f5a93cde7da15cd12d30b1d76f10f6ff95",
+      "returncode": 0,
+      "rows": [
+        {
+          "calls": 3,
+          "elapsed_ns": 306208,
+          "name": "sqlite.compact.guard_selected_rows",
+          "phase": "preparation",
+          "units": 3
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "sqlite.compact.guard_full_rows",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 3,
+          "elapsed_ns": 270792,
+          "name": "sqlite.compact.guard_selected_decode_bytes",
+          "phase": "preparation",
+          "units": 13878
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "sqlite.compact.guard_full_decode_bytes",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "filesystem.snapshot_nodes",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 559458,
+          "name": "filesystem.refresh.create_capture",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "filesystem.refresh.batch_capture",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 3,
+          "elapsed_ns": 50583,
+          "name": "sqlite.compact.authority_query",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 3,
+          "elapsed_ns": 12500,
+          "name": "sqlite.compact.anchor_query_bytes",
+          "phase": "preparation",
+          "units": 2154
+        },
+        {
+          "calls": 3,
+          "elapsed_ns": 3209,
+          "name": "sqlite.compact.read_begin",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "sqlite.compact.guard_selected_rows",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 3233708,
+          "name": "sqlite.compact.guard_full_rows",
+          "phase": "publication",
+          "units": 258
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "sqlite.compact.guard_selected_decode_bytes",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 258,
+          "elapsed_ns": 2932783,
+          "name": "sqlite.compact.guard_full_decode_bytes",
+          "phase": "publication",
+          "units": 186704
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 408167,
+          "name": "filesystem.snapshot_nodes",
+          "phase": "publication",
+          "units": 129
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "filesystem.refresh.create_capture",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 2803500,
+          "name": "filesystem.refresh.batch_capture",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 29708,
+          "name": "sqlite.compact.authority_query",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 8999,
+          "name": "sqlite.compact.anchor_query_bytes",
+          "phase": "publication",
+          "units": 1436
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 1458,
+          "name": "sqlite.compact.read_begin",
+          "phase": "publication",
+          "units": 0
+        }
+      ],
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    "after_totals": {
+      "authority_query_calls": 5,
+      "guard_bodies_returned": 261,
+      "guard_decode_bytes": 200582,
+      "read_begin_calls": 4
+    },
+    "baseline_failure": "All byte/reopen oracles passed before the intended zero-preparation-Full-scan assertion failed. Compile, fixture initialization and verifier failures are not semantic RED evidence.",
+    "before": {
+      "full_bytes_size_eof_distinct_inode_and_fresh_reopen_oracles": true,
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 1428,
+          "sha256": "df9ceda5e8579b54e61549a9357da94b89c0842c099d1613df1bd0f490f336d0"
+        },
+        "stdout": {
+          "bytes": 2976,
+          "sha256": "936e316cf5d9f9944f2d82f923cfebbddbff95f635ca5f9578d969ec275aadc8"
+        }
+      },
+      "receipt_sha256": "a12a730801c02c90ca37cc180b9e2b30a07ab19bde6ca5bd91ca80ad56766df5",
+      "returncode": 101,
+      "rows": [
+        {
+          "calls": 1,
+          "elapsed_ns": 97458,
+          "name": "sqlite.compact.guard_selected_rows",
+          "phase": "preparation",
+          "units": 1
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 1627750,
+          "name": "sqlite.compact.guard_full_rows",
+          "phase": "preparation",
+          "units": 129
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 86334,
+          "name": "sqlite.compact.guard_selected_decode_bytes",
+          "phase": "preparation",
+          "units": 4626
+        },
+        {
+          "calls": 129,
+          "elapsed_ns": 1481626,
+          "name": "sqlite.compact.guard_full_decode_bytes",
+          "phase": "preparation",
+          "units": 93352
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 344459,
+          "name": "filesystem.snapshot_nodes",
+          "phase": "preparation",
+          "units": 129
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 2775333,
+          "name": "filesystem.refresh.create_capture",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "filesystem.refresh.batch_capture",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 27459,
+          "name": "sqlite.compact.authority_query",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 7666,
+          "name": "sqlite.compact.anchor_query_bytes",
+          "phase": "preparation",
+          "units": 1436
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 2126,
+          "name": "sqlite.compact.read_begin",
+          "phase": "preparation",
+          "units": 0
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "sqlite.compact.guard_selected_rows",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 3319501,
+          "name": "sqlite.compact.guard_full_rows",
+          "phase": "publication",
+          "units": 258
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "sqlite.compact.guard_selected_decode_bytes",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 258,
+          "elapsed_ns": 3016082,
+          "name": "sqlite.compact.guard_full_decode_bytes",
+          "phase": "publication",
+          "units": 186704
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 334333,
+          "name": "filesystem.snapshot_nodes",
+          "phase": "publication",
+          "units": 129
+        },
+        {
+          "calls": 0,
+          "elapsed_ns": 0,
+          "name": "filesystem.refresh.create_capture",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 2876958,
+          "name": "filesystem.refresh.batch_capture",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 27459,
+          "name": "sqlite.compact.authority_query",
+          "phase": "publication",
+          "units": 0
+        },
+        {
+          "calls": 2,
+          "elapsed_ns": 8958,
+          "name": "sqlite.compact.anchor_query_bytes",
+          "phase": "publication",
+          "units": 1436
+        },
+        {
+          "calls": 1,
+          "elapsed_ns": 1459,
+          "name": "sqlite.compact.read_begin",
+          "phase": "publication",
+          "units": 0
+        }
+      ],
+      "source_manifest_sha256": "6c4b2f46678c3dbbbf25af96ec3dc9794c495bd23c6e47f4208903ca7e9759ca",
+      "source_unchanged": true
+    },
+    "before_totals": {
+      "authority_query_calls": 4,
+      "guard_bodies_returned": 388,
+      "guard_decode_bytes": 284682,
+      "read_begin_calls": 3
+    },
+    "timing_limit": "Inclusive stage wall time from one controlled before and one final after run; not exclusive CPU time, a latency distribution, a throughput improvement or physical IOPS. Nested spans must not be added as exclusive time."
+  },
+  "environment": "macOS local SQLite; one before and one final after controlled observation; no remote transport in the comparison",
+  "fixture": {
+    "chunk_bytes": 16,
+    "oracles": [
+      "complete deterministic bytes for all 129 files",
+      "exact sizes and EOF",
+      "129 distinct inode identities",
+      "shutdown/drop and fresh metadata/block store reopen",
+      "same complete bytes and inode identities after reopen"
+    ],
+    "pause_boundary": "first immutable block PUT, after guarded preparation and before publication",
+    "sampling_end": "successful write returns, before byte and reopen oracles",
+    "siblings": 128,
+    "verified_files": 129
+  },
+  "gates": [
+    {
+      "elapsed_seconds": 3.792234207969159,
+      "exact_named_case_observed_passed": true,
+      "fixture_root_removed": true,
+      "kind": "createprep",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 232,
+          "overflow": false,
+          "sha256": "f062f3fe0dba43f7c1389b0f59d96574c321ceb9316edce841449ced6474fc24"
+        },
+        "stdout": {
+          "bytes": 2848,
+          "overflow": false,
+          "sha256": "04324ec4e760469787760bf65b42b46ec640a0dc47106275017766aa98b5702b"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "d05c68bb9c49966bfed96d9cea1aa2f5a93cde7da15cd12d30b1d76f10f6ff95",
+      "returncode": 0,
+      "rust_tests_passed": 1,
+      "selected_suite": null,
+      "selected_test": "missing_compact_create_preparation_avoids_full_scan_with_128_siblings",
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.8513454159838147,
+      "exact_named_case_observed_passed": null,
+      "fixture_root_removed": true,
+      "kind": "createpath",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 232,
+          "overflow": false,
+          "sha256": "f062f3fe0dba43f7c1389b0f59d96574c321ceb9316edce841449ced6474fc24"
+        },
+        "stdout": {
+          "bytes": 3073,
+          "overflow": false,
+          "sha256": "5fd218dbb7cd1f676ff049af32e2bfaf34756b733a16a9fc7843def1d2952f88"
+        }
+      },
+      "named_suite_observed_passed": true,
+      "parent_exit": 0,
+      "receipt_sha256": "433aeb869c1a984197aa1c3d46b365cf560349e02c8a9a2da2c34032c86e717b",
+      "returncode": 0,
+      "rust_tests_passed": 5,
+      "selected_suite": [
+        "missing_compact_create_preparation_avoids_full_scan_with_128_siblings",
+        "peer_allocation_rebases_prepared_create",
+        "retargeted_symlink_rebases_into_current_parent",
+        "occupied_current_path_keeps_guard_conflict_and_replay",
+        "removed_current_parent_is_rejected"
+      ],
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 4.787533333001193,
+      "exact_named_case_observed_passed": true,
+      "fixture_root_removed": true,
+      "kind": "createguard",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 361,
+          "overflow": false,
+          "sha256": "9edd5c33b0985b7ed98c6667d17349d5aed49cb3b4177fb12dbaa95b5a81900b"
+        },
+        "stdout": {
+          "bytes": 176,
+          "overflow": false,
+          "sha256": "1c4134bb81f957640e51d3625fd2144bbc9ed0b7a1adf77318d7ca6742e7b17e"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "b19dda2c2950e62dc8e122a40517b6fcf13c1ebab14b70deea9b558b3fa6e5f8",
+      "returncode": 0,
+      "rust_tests_passed": 1,
+      "selected_suite": null,
+      "selected_test": "unchanged_compact_refresh_preserves_prepared_create",
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 10.204666292003822,
+      "exact_named_case_observed_passed": null,
+      "fixture_root_removed": true,
+      "kind": "createunit",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 597,
+          "overflow": false,
+          "sha256": "788300d3929e643b7911237beef822dc4f946598833caf4657a79b9048925976"
+        },
+        "stdout": {
+          "bytes": 738,
+          "overflow": false,
+          "sha256": "0eb27331f64420112a7cb0038752e34e1549b79c1ed7bdcae55904ac9cbddc87"
+        }
+      },
+      "named_suite_observed_passed": true,
+      "parent_exit": 0,
+      "receipt_sha256": "41307bf370e9f085ccc5c749083fdfa94c5129a77d3742478a79bcb9cb56636a",
+      "returncode": 0,
+      "rust_tests_passed": 4,
+      "selected_suite": [
+        "compact_preparation_tests::missing_preparation_waits_for_full_publication_and_releases_gate_before_blocks",
+        "compact_preparation_tests::canceled_missing_preparation_retains_no_pending_full_capture",
+        "compact_preparation_tests::occupied_preparation_uses_full_current_selected_body",
+        "compact_preparation_tests::damaged_traversed_or_unrelated_guard_refuses_create_without_publication"
+      ],
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 11.241391375020612,
+      "exact_named_case_observed_passed": null,
+      "fixture_root_removed": true,
+      "kind": "chunkedtests",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 1642,
+          "overflow": false,
+          "sha256": "96e7f450730a2ca5caa0c79d4c029e805db989919848a6a0ccbbdf275263753e"
+        },
+        "stdout": {
+          "bytes": 28562,
+          "overflow": false,
+          "sha256": "521dc75aae88aef3385c06ec2d065beff478df070cb14db637d702dc4a553386"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "61d17a35e7a6e53916284196758a86c9921251190f927d9776f82bcd12312f9c",
+      "returncode": 0,
+      "rust_tests_passed": 276,
+      "selected_suite": null,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 16.018362915958278,
+      "exact_named_case_observed_passed": null,
+      "fixture_root_removed": true,
+      "kind": "chunkedclippy",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 1293,
+          "overflow": false,
+          "sha256": "a198a5bb1b5f6b4650c9ea84d7d32f93029d5d7c9451f353a905b76f0bc3068d"
+        },
+        "stdout": {
+          "bytes": 0,
+          "overflow": false,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "b31fb01a76d8eba92dc72b9959f5dac9604e3ec71d27e09ccdee44ecb5b30b8d",
+      "returncode": 0,
+      "rust_tests_passed": 0,
+      "selected_suite": null,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 32.35347187501611,
+      "exact_named_case_observed_passed": null,
+      "fixture_root_removed": true,
+      "kind": "remotetests",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 12949,
+          "overflow": false,
+          "sha256": "557f9c18d594db716e6e38f76f53108c75c8d34c2d422ab38648447d1b82585a"
+        },
+        "stdout": {
+          "bytes": 3403,
+          "overflow": false,
+          "sha256": "692cea2d81764c5a5196a701dbffa444cfc023ff85509d88902cd26de81d577c"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "b40355eec87a651e77f1c6a9a419f79d169b7cbe7a26e9f3fe4a4157bee5f09b",
+      "returncode": 0,
+      "rust_tests_passed": 37,
+      "selected_suite": null,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 2.649474250036292,
+      "exact_named_case_observed_passed": true,
+      "fixture_root_removed": true,
+      "kind": "wsloss",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 1695,
+          "overflow": false,
+          "sha256": "3542f88cdb43f26c819be6aa6dc468854083347e977935bd0628b96ed128ee86"
+        },
+        "stdout": {
+          "bytes": 188,
+          "overflow": false,
+          "sha256": "9092fb165e381989f730d9f99fa1dffd7e6f3024dad7105ef0461db1d6b82b0e"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "ea55b691638ce9f3d1762b2655f09a3ac9c48e00eceb02704de1f0ff56aa9992",
+      "returncode": 0,
+      "rust_tests_passed": 1,
+      "selected_suite": null,
+      "selected_test": "websocket_sqlite_commit_survives_lost_wire_reply_without_replay",
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 21.34642462496413,
+      "exact_named_case_observed_passed": true,
+      "fixture_root_removed": true,
+      "kind": "clicompact",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 729,
+          "overflow": false,
+          "sha256": "cca76a857f79af88f2a0830acc1bb75527e1d7586ba4f7e75bfb915eaeb0953e"
+        },
+        "stdout": {
+          "bytes": 69210,
+          "overflow": false,
+          "sha256": "38187b7a7fb5ec1260cd230d3b101497e82af0b06535ba47798fb8a3aa68b1de"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "8d3b053be1fed67170522ced1397439b24c523054fe4d15ed4454f4db3d5a89d",
+      "returncode": 0,
+      "rust_tests_passed": 1,
+      "selected_suite": null,
+      "selected_test": "configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen",
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 7.060916125017684,
+      "exact_named_case_observed_passed": true,
+      "fixture_root_removed": true,
+      "kind": "storagealloc",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 472,
+          "overflow": false,
+          "sha256": "ef64be1c71cf744aa22833364dc9caed3e354fa2d6f4792e10d5afac9fa97fca"
+        },
+        "stdout": {
+          "bytes": 276,
+          "overflow": false,
+          "sha256": "0d1a9f29977db0ffab5e0811a1fded040cbcc626f780e33d3a2a284d4b34ab9e"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "a71c549a2a191731ad8f2b57bb8f3026849f13b09f787b9a9071e88d189c2d3b",
+      "returncode": 0,
+      "rust_tests_passed": 1,
+      "selected_suite": null,
+      "selected_test": "warmed_core_spans_record_without_added_allocations",
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.197613625030499,
+      "exact_named_case_observed_passed": true,
+      "fixture_root_removed": true,
+      "kind": "corealloc",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 353,
+          "overflow": false,
+          "sha256": "e1d012651ada166b95d66780bf2da9e552ad014932323213c040aa66b0f45717"
+        },
+        "stdout": {
+          "bytes": 283,
+          "overflow": false,
+          "sha256": "48b20343558f59aa4105151ee9d4778d0ed68f7b57fa4b9355ea03f21e99acc6"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "06da38f36662456e148ef2802ef339d5ab5bc775d716b5a7aa085aa532397bf7",
+      "returncode": 0,
+      "rust_tests_passed": 1,
+      "selected_suite": null,
+      "selected_test": "warmed_causal_profile_rows_record_without_added_allocations",
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.860566582996398,
+      "exact_named_case_observed_passed": null,
+      "fixture_root_removed": true,
+      "kind": "fmt",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "overflow": false,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "overflow": false,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "named_suite_observed_passed": null,
+      "parent_exit": 0,
+      "receipt_sha256": "00c3beb1d1595dcdbefd323e278ec55c892f1c67cdecb1c207cd8274202348ea",
+      "returncode": 0,
+      "rust_tests_passed": 0,
+      "selected_suite": null,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "0d18647167483b673f93f0afc6e0b82ed394379b2500c385d4d4b725b2d9cada",
+      "source_unchanged": true
+    }
+  ],
+  "qualification": {
+    "all_504_inputs_unchanged_during_every_owned_gate": true,
+    "allocation_scope": "Warmed recorders pass 13 selected storage rows of 91 and 89 selected core rows of 136 with zero added allocations. Whole metadata/cache operations are not qualified allocation-free.",
+    "bank_index_sha256": "bce8746dee5282d696f56d902b0100ce5f315efb425717f9b190b6ee67857805",
+    "controls_logs": {
+      "controls.stderr": {
+        "bytes": 154,
+        "sha256": "129aff8733bdbf273d83bc9564146166a0ad341996ae89f3ebc36761d642d0cf"
+      },
+      "controls.stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "controls_receipt_sha256": "b692695606d9b398450fa032c42e22a8fa1663b06ff0d1f47b96791f8c596dcf",
+    "format_passed": true,
+    "hosted_ci": "Separate pending gate at publication; no hosted CI pass is inferred from these local results.",
+    "limits": [
+      "No measured reduction in total SQL statement calls",
+      "No datastore daemon or physical device IOPS qualification",
+      "No end-to-end QUIC throughput qualification for this optimization",
+      "No compression/chunk format redesign evidence",
+      "No full 10-server, 10000-client, 10000-drive, 5000-partition, 1000-files-per-drive qualification"
+    ],
+    "local_gate_count": 13,
+    "modeled_parent_controls": 55,
+    "owned_rust_gates": 12,
+    "rust_test_executions": 328,
+    "strict_chunked_sqlite_clippy_passed": true
+  },
+  "retained_unqualified_attempts": [
+    {
+      "classification": "New occupied-race test fixture failed to enroll compact metadata before a legacy-refusing wrapper opened it; fixture initialization failure, not a production semantic regression.",
+      "receipt_sha256": "2b91c31008386b23efd17f2ee0137c2ab467a24f20ed14dd9727971010e56028",
+      "returncode": 101,
+      "sticky_unknown": [],
+      "superseded_by_final_bank": true
+    },
+    {
+      "classification": "All five Rust cases passed, but the parent rejected split nocapture stdout; verifier rejection, not a Rust test failure. Final bank uses exact unique names and passed summary for these fixed suites.",
+      "receipt_sha256": "e5fb7b3ce5fcbe09ce940f24a8051812cd162e89cafa68a2010a376e207938f0",
+      "returncode": 0,
+      "sticky_unknown": [
+        "named_suite_not_observed_passed"
+      ],
+      "superseded_by_final_bank": true
+    }
+  ],
+  "safety_controls": {
+    "current_path_rebase": [
+      "peer allocation",
+      "symlink retarget",
+      "path occupied after capture with conflict and replay",
+      "parent removed with ENOENT and no commit"
+    ],
+    "damage": {
+      "traversed_guard": {
+        "acknowledged": false,
+        "fresh_open_refused": true,
+        "immutable_put_calls": 0,
+        "poisoned": true,
+        "raw_metadata_unchanged": true
+      },
+      "unrelated_guard": {
+        "acknowledged": false,
+        "fresh_open_refused": true,
+        "observed_immutable_put_calls": 2,
+        "poisoned": true,
+        "raw_metadata_unchanged": true
+      }
+    },
+    "occupied_path": "Uses a Full current file body after a stale namespace Arc and a newer peer selected update; no replay needed.",
+    "private_unit_suite_cases": 4,
+    "public_ignored_suite_cases": 5,
+    "tradeoff": "Unrelated guard corruption can be detected at unchanged Full batch capture after immutable blocks are prepared. Unreferenced blocks may remain; compact SQLite concurrent mode does not promise automatic reconciliation/reclamation. Traversed damage refuses before PUT.",
+    "unchanged_publication": "Full batch snapshot/rebase and all structural guards remain mandatory before acknowledgment."
+  },
+  "schema": "mount-rs.compact-missing-create-preparation.v1",
+  "source_inputs": {
+    ".github/workflows/remote-drives.yml": "6fa8f3f3db51a6698ee79538312738ede0e7026919fc3dfa6f30b76c94108918",
+    "Cargo.lock": "bd756a43dd751e6e24ec53c981ff616f6d0c5914ec0463a441569b3a1f447c34",
+    "filesystems/mount-rs-chunked/Cargo.toml": "bedca15f32777c2c4cad89077e303c5b4acd001a4604d52b042f38aee35ce3b8",
+    "filesystems/mount-rs-chunked/src/lib.rs": "616bce93fc0c1caac4570858fab8d58673b97d04fe635f831b18069c7189e325",
+    "filesystems/mount-rs-chunked/tests/compact_snapshot_revision.rs": "770d2e1c5f64a3452ea291de3800b08e8d6d3fce38ee41ba067527ba975f1fc3",
+    "filesystems/mount-rs-chunked/tests/current_path_create_rebase.rs": "11d6b27bf030e5bc3909da2cfc07c3df003352f8bcd212892f598192033fa7e2",
+    "scripts/test-remote-failures-controls.py": "122bd5377974bfea9bb324e0213cb229fe7aeda5821d59ccbf54ec94318e73d6",
+    "scripts/test-remote-failures.py": "ecf2e3b9bb63b68082360c55ae971628da512af3fe7eb8d386a2db977d07bd30"
+  }
+}

@@ -1,16 +1,21 @@
 //! Fixture-only independent-process controller. No production runtime policy changes.
 mod backend;
+mod checkpoints;
 mod command;
 mod config;
 #[allow(dead_code)]
 #[path = "../production_fixture.rs"]
 mod fixture;
+mod lazy_runtime;
 #[allow(dead_code)]
 mod metrics;
 mod oracle;
 mod preflight;
 mod process;
 mod progress;
+#[allow(dead_code)]
+#[path = "../remote_blocks.rs"]
+mod remote_blocks;
 #[allow(dead_code)]
 #[path = "../resource_profile.rs"]
 mod resource_profile;
@@ -29,8 +34,10 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use workload::Lane;
+use workload::{CrossnodeCoverage, Lane};
 type Client = Lane;
+#[cfg(test)]
+pub use checkpoints::retained_checkpoint;
 use fixture::{FileProfile, SignedTokens, target_catalog};
 pub use process::worker;
 pub fn utc_ms() -> u64 {
@@ -55,6 +62,9 @@ pub fn file_digest(path: &Path) -> Result<String, String> {
     result
 }
 pub fn read_json(path: &Path) -> Result<Value, String> {
+    if path.extension().is_some_and(|extension| extension == "gz") {
+        return metrics::read_compressed(path);
+    }
     serde_json::from_slice(&std::fs::read(path).map_err(|_| "receipt unavailable")?)
         .map_err(|_| "receipt invalid".into())
 }
@@ -92,7 +102,55 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
         ("config.rs", include_bytes!("config.rs").as_slice()),
         ("state.rs", include_bytes!("state.rs").as_slice()),
         ("resources.rs", include_bytes!("resources.rs").as_slice()),
+        (
+            "checkpoints.rs",
+            include_bytes!("checkpoints.rs").as_slice(),
+        ),
         ("backend.rs", include_bytes!("backend.rs").as_slice()),
+        (
+            "lazy_runtime.rs",
+            include_bytes!("lazy_runtime.rs").as_slice(),
+        ),
+        (
+            "../../../src/filesystem_runtime.rs",
+            include_bytes!("../../../src/filesystem_runtime.rs").as_slice(),
+        ),
+        (
+            "../../../src/runtime_pool.rs",
+            include_bytes!("../../../src/runtime_pool.rs").as_slice(),
+        ),
+        (
+            "../../../src/runtime_diagnostics.rs",
+            include_bytes!("../../../src/runtime_diagnostics.rs").as_slice(),
+        ),
+        (
+            "../../../src/dispatch.rs",
+            include_bytes!("../../../src/dispatch.rs").as_slice(),
+        ),
+        (
+            "../../../../mount-rs-sdk/src/filesystem.rs",
+            include_bytes!("../../../../mount-rs-sdk/src/filesystem.rs").as_slice(),
+        ),
+        (
+            "../../../../mount-rs-sdk/src/providers.rs",
+            include_bytes!("../../../../mount-rs-sdk/src/providers.rs").as_slice(),
+        ),
+        (
+            "../../../../mount-rs-sdk/src/construction.rs",
+            include_bytes!("../../../../mount-rs-sdk/src/construction.rs").as_slice(),
+        ),
+        (
+            "../../../../mount-rs-sdk/src/options.rs",
+            include_bytes!("../../../../mount-rs-sdk/src/options.rs").as_slice(),
+        ),
+        (
+            "../../../../../src/construction.rs",
+            include_bytes!("../../../../../src/construction.rs").as_slice(),
+        ),
+        (
+            "../remote_blocks.rs",
+            include_bytes!("../remote_blocks.rs").as_slice(),
+        ),
         ("process.rs", include_bytes!("process.rs").as_slice()),
         ("workload.rs", include_bytes!("workload.rs").as_slice()),
         ("oracle.rs", include_bytes!("oracle.rs").as_slice()),
@@ -193,6 +251,7 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
             "binary_sha256":file_digest(&std::env::current_exe().map_err(|_|"binary path unavailable")?)?,
             "resource_profiling":cfg!(feature="resource-profiling"),
             "allocation_profiling":cfg!(feature="allocation-profiling"),
+            "sdk_runtime":cfg!(feature="sdk-runtime"),
             "debug_assertions":cfg!(debug_assertions),
             "scope":"current checkout native fixture; dirty source disclosed; not clean committed CI"}
     ))
@@ -204,6 +263,7 @@ struct Journal {
     enclosing_deadline: Instant,
     phase_deadline: Instant,
     progress: progress::Progress,
+    oracle_progress: Option<oracle::ProgressView>,
 }
 fn project_resource_progress(
     fleet: &mut Fleet,
@@ -231,6 +291,10 @@ fn project_resource_progress(
 impl Journal {
     fn flush(&mut self) -> Result<(), String> {
         let span = metrics::observer().begin("journal_publication");
+        if let Some(oracle) = &self.oracle_progress {
+            self.value["fresh_oracle_progress"] =
+                progress::public_oracle_snapshot(&oracle.snapshot());
+        }
         self.value["lanes"] = serde_json::to_value(
             self.counts
                 .iter()
@@ -245,13 +309,29 @@ impl Journal {
         result
     }
     fn phase(&mut self, name: &str) -> Result<(), String> {
-        if Instant::now() >= self.phase_deadline {
+        self.phase_at(name, Instant::now(), utc_ms())
+    }
+    fn phase_at(&mut self, name: &str, now: Instant, now_unix_ms: u64) -> Result<(), String> {
+        self.phase_with_budget_at(name, PHASE_SECONDS, now, now_unix_ms)
+    }
+    fn phase_with_budget(&mut self, name: &str, seconds: u64) -> Result<(), String> {
+        self.phase_with_budget_at(name, seconds, Instant::now(), utc_ms())
+    }
+    fn phase_with_budget_at(
+        &mut self,
+        name: &str,
+        seconds: u64,
+        now: Instant,
+        now_unix_ms: u64,
+    ) -> Result<(), String> {
+        if now >= self.phase_deadline {
             return Err("previous phase exhausted its inherited deadline".into());
         }
+        // A phase allowance never renews the enclosing work deadline.
         self.phase_deadline = self
             .enclosing_deadline
-            .min(Instant::now() + Duration::from_secs(PHASE_SECONDS));
-        let now = utc_ms();
+            .min(now + Duration::from_secs(seconds));
+        let now = now_unix_ms;
         let previous = self.value["phase"].clone();
         let began = self.value["phase_started_unix_ms"]
             .as_u64()
@@ -298,6 +378,26 @@ async fn supervised<T>(
                 }
     }
 }
+trait OracleBoundary {
+    fn accounting(&self) -> &metrics::Accounting;
+    fn settled(&self) -> bool;
+}
+impl OracleBoundary for oracle::Pool {
+    fn accounting(&self) -> &metrics::Accounting {
+        &self.accounting
+    }
+    fn settled(&self) -> bool {
+        oracle::Pool::settled(self)
+    }
+}
+impl OracleBoundary for oracle::Owner {
+    fn accounting(&self) -> &metrics::Accounting {
+        &self.accounting
+    }
+    fn settled(&self) -> bool {
+        oracle::Owner::settled(self)
+    }
+}
 async fn metric_boundary(
     collector: &mut metrics::Collector,
     fleet: &mut Fleet,
@@ -305,8 +405,12 @@ async fn metric_boundary(
     resources: &resources::Resources,
     journal: &mut Journal,
     boundary: (&str, &str),
-    oracle: &oracle::Owner,
+    oracle: &impl OracleBoundary,
 ) -> Result<Duration, String> {
+    if !oracle.settled() {
+        collector.complete = false;
+        return Err("metric boundary has unsettled fresh oracle slots".into());
+    }
     if journal.counts.iter().any(|counts| {
         let counts = counts.lock().unwrap();
         counts.pending.is_some() || counts.uncertain != 0
@@ -323,7 +427,7 @@ async fn metric_boundary(
             private,
             resources,
             boundary,
-            oracle.accounting.snapshot(),
+            oracle.accounting().snapshot(),
             deadline,
         ),
     )
@@ -336,6 +440,10 @@ async fn metric_boundary(
     journal.value["phase_metrics"] = collector.summary();
     journal.flush()?;
     project_resource_progress(fleet, resources, &mut journal.progress, true);
+    if !journal.progress.complete() || !oracle.settled() {
+        collector.complete = false;
+        return Err("metric boundary publication or fresh oracle settlement incomplete".into());
+    }
     if Instant::now() >= deadline {
         collector.complete = false;
         return Err("metric publication exceeded inherited phase deadline".into());
@@ -349,15 +457,239 @@ async fn connect(
     drive: usize,
     server: usize,
 ) -> Result<quinn::Connection, String> {
+    let address = fleet.children[server]
+        .ready
+        .as_ref()
+        .ok_or("worker readiness missing")?
+        .address;
+    connect_address(endpoint, address, tokens, drive).await
+}
+fn checked_oracle_pass(
+    snapshot: &Value,
+    pass: &str,
+    expected: &[&state::Expected],
+    verified: &oracle::Verified,
+) -> Result<Value, String> {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut drives = std::collections::BTreeSet::new();
+    for ledger in expected {
+        if !drives.insert(ledger.drive as u64) {
+            return Err("fresh oracle expected Drive repeated".into());
+        }
+        files = files
+            .checked_add(ledger.files.len() as u64)
+            .ok_or("fresh oracle file total overflow")?;
+        for file in ledger.files.values() {
+            if !file.length.is_multiple_of(4096) {
+                return Err("fresh oracle expected length is not block aligned".into());
+            }
+            bytes = bytes
+                .checked_add(file.length as u64)
+                .ok_or("fresh oracle byte total overflow")?;
+        }
+    }
+    let public = progress::public_oracle_snapshot(snapshot);
+    let completed = snapshot["completed_drive_ids"]
+        .as_array()
+        .ok_or("fresh oracle completion roster missing")?;
+    let completed: Vec<_> = completed
+        .iter()
+        .map(|drive| {
+            drive
+                .as_u64()
+                .ok_or("fresh oracle completion identity invalid")
+        })
+        .collect::<Result<_, _>>()?;
+    if !matches!(pass, "initial" | "final")
+        || public["pass"] != pass
+        || public["slot_limit"] != oracle::FRESH_ORACLE_SLOTS
+        || public["expected_drives"] != expected.len()
+        || public["complete"] != true
+        || public["settled"] != true
+        || public["expected_files"] != files
+        || public["expected_bytes"] != bytes
+        || verified.files != files
+        || verified.bytes != bytes
+        || completed != drives.into_iter().collect::<Vec<_>>()
+    {
+        return Err("fresh oracle complete corpus proof mismatch".into());
+    }
+    Ok(public)
+}
+fn record_oracle_pass(
+    journal: &mut Journal,
+    pool: &oracle::Pool,
+    pass: &str,
+    expected: &[&state::Expected],
+    verified: &oracle::Verified,
+) -> Result<(), String> {
+    if !pool.settled() || Instant::now() >= journal.phase_deadline {
+        return Err("fresh oracle receipt settlement or inherited deadline incomplete".into());
+    }
+    let snapshot = pool.progress().snapshot();
+    let mut summary = checked_oracle_pass(&snapshot, pass, expected, verified)?;
+    let passes = journal.value["fresh_oracle_passes"]
+        .as_array()
+        .ok_or("fresh oracle pass receipts missing")?;
+    if passes.len() != usize::from(pass == "final") {
+        return Err("fresh oracle pass receipt order invalid".into());
+    }
+    let directory = journal.output.join("oracle-receipts");
+    std::fs::create_dir_all(&directory)
+        .map_err(|_| "fresh oracle private receipt directory unavailable")?;
+    let path = directory.join(format!("{pass}.json"));
+    if path.exists() {
+        return Err("fresh oracle refuses existing pass receipt".into());
+    }
+    write_json(&path, &snapshot)?;
+    let sha256 = file_digest(&path)?;
+    if Instant::now() >= journal.phase_deadline {
+        return Err("fresh oracle receipt exceeded inherited deadline".into());
+    }
+    summary["after_boundary_complete"] = json!(true);
+    summary["receipt"] = json!({"file":format!("oracle-receipts/{pass}.json"),"sha256":sha256});
+    journal.value["fresh_oracle_passes"]
+        .as_array_mut()
+        .unwrap()
+        .push(summary);
+    Ok(())
+}
+fn oracle_passes_complete(journal: &Value) -> bool {
+    let Some(passes) = journal["fresh_oracle_passes"].as_array() else {
+        return false;
+    };
+    if passes.len() != 2 || journal["verified_passes"] != 2 {
+        return false;
+    }
+    for (pass, label) in passes.iter().zip(["initial", "final"]) {
+        let public = progress::public_oracle_snapshot(pass);
+        if public["pass"] != label
+            || public["complete"] != true
+            || public["settled"] != true
+            || public["slot_limit"] != oracle::FRESH_ORACLE_SLOTS
+            || public["expected_drives"] != journal["configuration"]["drives"]
+            || pass["after_boundary_complete"] != true
+        {
+            return false;
+        }
+    }
+    passes[1]["completed_files"] == journal["verified_files"]
+        && passes[1]["completed_bytes"] == journal["verified_bytes"]
+}
+
+#[cfg(test)]
+mod oracle_receipt_tests {
+    use super::*;
+
+    fn corpus() -> (state::Expected, state::Expected, Value) {
+        let mut first = state::Expected::empty(4, 2);
+        first.create("payload".into(), 0);
+        first.write("payload", 0, 0);
+        first.create("empty".into(), 1);
+        let mut second = state::Expected::empty(9, 1);
+        second.create("other".into(), 0);
+        second.write("other", 0, 0);
+        let snapshot = json!({"pass":"initial","slot_limit":8,
+            "expected_drives":2,"started_drives":2,"completed_drives":2,"live_slots":0,
+            "expected_files":3,"completed_files":3,"checked_files":3,
+            "expected_bytes":8192,"completed_bytes":8192,"compared_bytes":8192,
+            "complete":true,"settled":true,"completed_drive_ids":[4,9]});
+        (first, second, snapshot)
+    }
+
+    #[test]
+    fn oracle_receipt_requires_exact_unique_corpus_beyond_matching_counts() {
+        let (first, second, snapshot) = corpus();
+        let expected = [&first, &second];
+        let verified = oracle::Verified {
+            files: 3,
+            bytes: 8192,
+        };
+        let public = checked_oracle_pass(&snapshot, "initial", &expected, &verified).unwrap();
+        assert_eq!(public.as_object().unwrap().len(), 14);
+        assert!(public.get("completed_drive_ids").is_none());
+        for roster in [
+            json!([4, 4]),
+            json!([4, 8]),
+            json!([9, 4]),
+            json!([4]),
+            json!([4, "9"]),
+        ] {
+            let mut wrong = snapshot.clone();
+            wrong["completed_drive_ids"] = roster;
+            assert!(checked_oracle_pass(&wrong, "initial", &expected, &verified).is_err());
+        }
+        assert!(checked_oracle_pass(&snapshot, "initial", &[&first, &first], &verified).is_err());
+        let wrong = oracle::Verified {
+            files: 3,
+            bytes: 4096,
+        };
+        assert!(checked_oracle_pass(&snapshot, "initial", &expected, &wrong).is_err());
+    }
+
+    #[test]
+    fn oracle_receipt_rejects_partial_wrong_pass_slots_and_unaligned_tail() {
+        let (mut first, second, snapshot) = corpus();
+        let verified = oracle::Verified {
+            files: 3,
+            bytes: 8192,
+        };
+        for (field, value) in [
+            ("complete", json!(false)),
+            ("settled", json!(false)),
+            ("live_slots", json!(1)),
+            ("slot_limit", json!(1)),
+            ("pass", json!("final")),
+            ("completed_files", json!(2)),
+            ("compared_bytes", json!(4096)),
+        ] {
+            let mut wrong = snapshot.clone();
+            wrong[field] = value;
+            assert!(
+                checked_oracle_pass(&wrong, "initial", &[&first, &second], &verified).is_err(),
+                "{field}"
+            );
+        }
+        first.truncate("payload", 4097);
+        assert!(checked_oracle_pass(&snapshot, "initial", &[&first, &second], &verified).is_err());
+    }
+
+    #[test]
+    fn oracle_receipt_terminal_requires_both_after_boundaries_and_final_totals() {
+        let (_, _, mut initial) = corpus();
+        initial["after_boundary_complete"] = json!(true);
+        let mut final_pass = initial.clone();
+        final_pass["pass"] = json!("final");
+        // Final acknowledged append changes the proof; population totals cannot substitute.
+        for field in ["expected_bytes", "completed_bytes", "compared_bytes"] {
+            final_pass[field] = json!(12288);
+        }
+        let journal = json!({"configuration":{"drives":2},"verified_passes":2,
+            "verified_files":3,"verified_bytes":12288,"fresh_oracle_passes":[initial,final_pass]});
+        assert!(oracle_passes_complete(&journal));
+        let mut wrong = journal.clone();
+        wrong["fresh_oracle_passes"][0]["after_boundary_complete"] = json!(false);
+        assert!(!oracle_passes_complete(&wrong));
+        let mut wrong = journal.clone();
+        wrong["verified_bytes"] = json!(8192);
+        assert!(!oracle_passes_complete(&wrong));
+        let mut wrong = journal.clone();
+        wrong["fresh_oracle_passes"][1]["pass"] = json!("initial");
+        assert!(!oracle_passes_complete(&wrong));
+    }
+}
+async fn connect_address(
+    endpoint: &quinn::Endpoint,
+    address: std::net::SocketAddr,
+    tokens: &SignedTokens,
+    drive: usize,
+) -> Result<quinn::Connection, String> {
     tokio::time::timeout(
         Duration::from_secs(REQUEST_SECONDS),
         wire::connect_token(
             endpoint,
-            fleet.children[server]
-                .ready
-                .as_ref()
-                .ok_or("worker readiness missing")?
-                .address,
+            address,
             &format!("partition-{}", drive / 2),
             &tokens.token(drive, 3000),
         ),
@@ -391,6 +723,7 @@ pub async fn controller() -> Result<(), String> {
                 "scope":"local loopback, signed local ES256 fixture authentication; not external issuer or cross-host capacity",
                 "budgets":{
                     "phase_seconds":PHASE_SECONDS,
+                    "population_seconds":null,
                     "work_seconds":WORK_SECONDS,
                     "request_seconds":REQUEST_SECONDS,
                     "setup_seconds":600,
@@ -407,6 +740,7 @@ pub async fn controller() -> Result<(), String> {
         enclosing_deadline: setup_deadline,
         phase_deadline: setup_deadline,
         progress: progress::Progress::disabled(),
+        oracle_progress: None,
     };
     journal.flush()?;
     let mut fleet = Fleet::new();
@@ -414,7 +748,9 @@ pub async fn controller() -> Result<(), String> {
     let mut lanes = Vec::new();
     let mut private_path = None;
     let mut resources = None;
-    let mut oracle_owner = oracle::Owner::default();
+    let mut oracle_owner = oracle::Pool::new(oracle::FRESH_ORACLE_SLOTS)?;
+    journal.oracle_progress = Some(oracle_owner.progress());
+    journal.value["fresh_oracle_passes"] = json!([]);
     let mut initializer_owner = oracle::Owner::default();
     let mut initialization_receipts = Vec::new();
     let mut initialization_start = None;
@@ -425,6 +761,15 @@ pub async fn controller() -> Result<(), String> {
         let setup = async {
             phase_metrics=Some(metrics::Collector::new()?);
             let config = Config::environment()?;
+            journal.value["budgets"]["population_seconds"] = json!(config.population_seconds);
+            let block_provider = remote_blocks::selector_from_environment("MOUNT_RS_TARGET_BLOCK_PROVIDER")?
+                .unwrap_or_else(|| "metadata".into());
+            // Validate roles and all explicit settings before identity/open/provisioning.
+            let selected_blocks = remote_blocks::resolve_blocks(&config.provider, "target-preflight/blocks",
+                Some(&block_provider), |name| std::env::var(name).ok())?;
+            journal.value["metadata_provider"] = json!(config.provider);
+            journal.value["block_provider"] = json!(if selected_blocks.is_some() { "rustfs" } else { config.provider.as_str() });
+            journal.value["block_provider_selection"] = json!({"selector":"MOUNT_RS_TARGET_BLOCK_PROVIDER","requested":block_provider});
             journal.progress = progress::Progress::new(mount_rs_core::diagnostics::profile::enabled(), &config);
             journal.progress.start();
             journal.value["full_target"] = json!(config.full_target);
@@ -462,6 +807,11 @@ pub async fn controller() -> Result<(), String> {
                         "scope":"owned local SQLite diagnostic; no TiDB capacity claim"}
                 );
             }
+            if let Some(blocks) = &selected_blocks {
+                let receipt = remote_blocks::preflight(&mut commands, blocks).await?;
+                write_json(&output.join("rustfs-preflight.json"), &receipt)?;
+                journal.value["rustfs_preflight"] = receipt;
+            }
             let directory = output.join("private");
             std::fs::create_dir(&directory).map_err(|_| "private fixture directory unavailable")?;
             use std::os::unix::fs::PermissionsExt;
@@ -469,6 +819,7 @@ pub async fn controller() -> Result<(), String> {
                 .map_err(|_| "private directory permissions failed")?;
             let backend = backend::Backend {
                 provider: config.provider.clone(),
+                block_provider,
                 root: directory.clone(),
                 prefix: format!("production-target-{}-{}", std::process::id(), utc_ms()),
             };
@@ -493,13 +844,13 @@ pub async fn controller() -> Result<(), String> {
             journal.value["initialization"]["cleanup_confirmed"] = json!(true);
             journal.value["initialization"]["complete"] = json!(true);
             journal.value["initialization"]["elapsed_seconds"] = json!(initialization_start.take().unwrap().elapsed().as_secs_f64());
-            fleet.expect_initialized_backings(
-                initialization_receipts
-                    .iter()
-                    .enumerate()
-                    .map(|(drive, r)| process::validate_backing_receipt(r, drive))
-                    .collect::<Result<_, _>>()?,
-            );
+            let expected_backings = initialization_receipts.iter().enumerate()
+                .map(|(drive, receipt)| process::validate_backing_receipt(receipt, drive))
+                .collect::<Result<Vec<_>, _>>()?;
+            let expected_backings_sha256 = digest(&serde_json::to_vec(&expected_backings)
+                .map_err(|_| "initializer manifest encoding failed")?);
+            fleet.expect_initialized_backings(expected_backings.clone());
+            journal.value["initialization"]["expected_backings_sha256"] = json!(expected_backings_sha256);
             journal.flush()?;
             let catalog_path = directory.join("catalog.sqlite");
             let catalog = mount_rs_service::catalog::SqliteCatalog::open(&catalog_path)
@@ -533,6 +884,8 @@ pub async fn controller() -> Result<(), String> {
                     .into(),
                 output: output.clone(),
                 parent_pid: std::process::id(),
+                expected_backings,
+                expected_backings_sha256,
             };
             let path = directory.join("worker-config.json");
             write_json(&path, &serde_json::to_value(&private).unwrap())?;
@@ -608,9 +961,9 @@ pub async fn controller() -> Result<(), String> {
                 Ok::<_, String>(())
             }).await.map_err(|_| "signed connections inherited phase deadline")??;
             journal.value["connected_clients"] = json!(lanes.len());
-            journal.phase("online_namespace")?;
+            journal.phase_with_budget("online_namespace", config.population_seconds)?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_namespace","before"),&oracle_owner).await?;
-            supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
+            supervised(&mut fleet, resource, &mut journal, config.population_seconds, async {
                 futures_util::future::try_join_all(
                     lanes.iter_mut().map(|l| l.populate(config.files, false)),
                 )
@@ -620,9 +973,9 @@ pub async fn controller() -> Result<(), String> {
             .await?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_namespace","after"),&oracle_owner).await?;
             journal.value["namespace_files"] = json!(lanes.iter().map(|l|l.expected.files.len()as u64).sum::<u64>());
-            journal.phase("online_payload")?;
+            journal.phase_with_budget("online_payload", config.population_seconds)?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("online_payload","before"),&oracle_owner).await?;
-            supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
+            supervised(&mut fleet, resource, &mut journal, config.population_seconds, async {
                 futures_util::future::try_join_all(
                     lanes.iter_mut().map(|l| l.populate(config.files, true)),
                 )
@@ -634,14 +987,15 @@ pub async fn controller() -> Result<(), String> {
             journal.value["population_bytes"] = json!(lanes.iter().flat_map(|l|l.expected.files.values()).map(|f|f.length as u64).sum::<u64>());
             journal.phase("initial_fresh_oracle")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("initial_fresh_oracle","before"),&oracle_owner).await?;
-            supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
-                for lane in &lanes {
-                    oracle::verify(&mut oracle_owner, &backend, &lane.expected).await?;
-                }
-                Ok(())
-            })
-            .await?;
+            let expected: Vec<_> = lanes.iter().map(|lane| &lane.expected).collect();
+            let oracle_deadline = journal.phase_deadline;
+            let verification = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS,
+                oracle_owner.verify_pass(oracle::Pass::Initial, &backend, &expected, oracle_deadline)).await;
+            // Publish even an immediate failure before switching to cleanup context.
+            journal.flush()?;
+            let verified = verification?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("initial_fresh_oracle","after"),&oracle_owner).await?;
+            record_oracle_pass(&mut journal, &oracle_owner, "initial", &expected, &verified)?;
             journal.value["verified_passes"] = json!(1);
             // End old connections and all replicas before reopening each worker.
             journal.phase("refresh_replicas")?;
@@ -669,27 +1023,32 @@ pub async fn controller() -> Result<(), String> {
             }).await.map_err(|_| "replica reconnect inherited phase deadline")??;
             journal.phase("routes_and_scope")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("routes_and_scope","before"),&oracle_owner).await?;
-            let (routes, sibling, partition) = tokio::time::timeout_at(journal.phase_deadline.into(), async {
+            let (route_probes, sibling, partition) = tokio::time::timeout_at(journal.phase_deadline.into(), async {
             let mut routes = 0;
             let mut sibling = 0;
             let mut partition = 0;
             for (server, endpoint) in endpoints.iter().enumerate() {
                 for drive in 0..config.drives {
                     let connection = connect(endpoint, &fleet, &tokens, drive, server).await?;
-                    tokio::time::timeout(
+                    // A fresh session has no handle0. Its typed EBADF follows
+                    // current catalog authorization, definition and route checks,
+                    // without acquiring a filesystem runtime. Backing access is
+                    // proved by assigned warmup and the post-profile Stat batches.
+                    let response = tokio::time::timeout(
                         Duration::from_secs(REQUEST_SECONDS),
-                        wire::success(
+                        wire::request(
                             &connection,
                             1,
                             &format!("sandbox-{drive}"),
-                            mount_rs_remote_protocol::OperationName::Stat,
-                            json!({
-                                    "path":"/mixed-0"}
-                            ),
+                            mount_rs_remote_protocol::OperationName::HandleClose,
+                            json!({"handle":0}),
                         ),
                     )
                     .await
                     .map_err(|_| "route request deadline")??;
+                    if response != Err("EBADF".into()) {
+                        return Err("nonactivating route binding proof missing".into());
+                    }
                     routes += 1;
                     connection.close(0u32.into(), b"route complete");
                 }
@@ -733,12 +1092,30 @@ pub async fn controller() -> Result<(), String> {
             }
                 Ok::<_, String>((routes, sibling, partition))
             }).await.map_err(|_| "routes inherited phase deadline")??;
-            journal.value["routes"] = json!(routes);
+            journal.value["nonactivating_routes"] = json!(route_probes);
+            journal.value["nonactivating_route_scope"] = json!("fresh authenticated handle0 EBADF after current catalog and Drive binding checks; no backing or runtime health proof");
             journal.value["scope_denials"] = json!({
                     "sibling":sibling,
                     "partition":partition}
             );
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("routes_and_scope","after"),&oracle_owner).await?;
+            journal.phase("assigned_warmup")?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("assigned_warmup","before"),&oracle_owner).await?;
+            let mut warmed = 0;
+            let warmup = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
+                for lane in &mut lanes {
+                    lane.request(
+                        mount_rs_remote_protocol::OperationName::Stat,
+                        json!({"path":"/mixed-0"}),
+                    ).await?;
+                    warmed += 1;
+                }
+                Ok(())
+            }).await;
+            journal.value["assigned_warmup"] = json!({"acknowledged_stats":warmed,"expected_stats":config.drives,"complete":warmup.is_ok(),"scope":"actual I/O for each sandbox on its assigned server; caches may warm before timed modes"});
+            journal.flush()?;
+            warmup?;
+            metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("assigned_warmup","after"),&oracle_owner).await?;
             for mostly_idle in [true, false] {
                 for pattern in PATTERNS {
                     let mode = if mostly_idle {
@@ -851,24 +1228,99 @@ pub async fn controller() -> Result<(), String> {
                     journal.flush()?;
                 }
             }
+            // Keep the complete actual cross-server storage proof after the
+            // balanced timed modes. Every rotation starts only after the old
+            // generation's acknowledged drain; no batch receives a fresh phase.
+            journal.phase("crossnode_routes")?;
+            journal.value["crossnode_route_batches"] = json!([]);
+            let mut payload_coverage = CrossnodeCoverage::new(config.drives)?;
+            journal.value["crossnode_payload"] = json!({"verified_reads":0,"verified_bytes":0,"completed_pairs":0,"expected_pairs":payload_coverage.expected_pairs(),"complete":false,"scope":"one existing acknowledged 4096-byte block per Drive/server pair over rotated QUIC sessions; no payload writes; outside timed modes"});
+            let mut routes = 0;
+            for rotation in 1..=SERVERS {
+                let generation = rotation as u64 + 1;
+                let offset = rotation % SERVERS;
+                for lane in &lanes {
+                    lane.connection.close(0u32.into(), b"post-profile rotation");
+                }
+                fleet.command("reopen", generation)?;
+                tokio::time::timeout_at(journal.phase_deadline.into(), fleet.ready(&private, generation, &mut journal.progress, resource))
+                    .await.map_err(|_| "crossnode refresh inherited phase deadline")??;
+                let ready_sequence = phase_metrics.as_ref().unwrap().sequence + 1;
+                metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("crossnode_routes","after_ready"),&oracle_owner).await?;
+                // Retain the just-validated addresses separately so the owned
+                // supervisor can keep checking the mutable Fleet while I/O runs.
+                let addresses = fleet.children.iter().map(|child| {
+                    child.ready.as_ref().map(|ready| ready.address).ok_or("worker readiness missing")
+                }).collect::<Result<Vec<_>, _>>()?;
+                if addresses.len() != SERVERS {
+                    return Err("crossnode worker geometry missing".into());
+                }
+                let mut batch_routes = 0;
+                let mut batch_reads = 0;
+                let mut batch_bytes = 0;
+                let batch = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
+                    for (drive, lane) in lanes.iter_mut().enumerate() {
+                        let server = (drive + offset) % SERVERS;
+                        lane.connection = connect_address(&endpoints[server], addresses[server], &tokens, drive).await?;
+                        lane.request(
+                            mount_rs_remote_protocol::OperationName::Stat,
+                            json!({"path":"/mixed-0"}),
+                        ).await?;
+                        batch_routes += 1;
+                        let bytes = lane.crossnode_sentinel().await?;
+                        payload_coverage.record(drive, server)?;
+                        batch_reads += 1;
+                        batch_bytes += bytes;
+                        lane.connection.close(0u32.into(), b"post-profile payload verified");
+                    }
+                    Ok(())
+                }).await;
+                routes += batch_routes;
+                journal.value["routes"] = json!(routes);
+                let completed_pairs = payload_coverage.completed_pairs();
+                journal.value["crossnode_payload"]["verified_reads"] = json!(completed_pairs);
+                journal.value["crossnode_payload"]["verified_bytes"] = json!(completed_pairs * 4096);
+                journal.value["crossnode_payload"]["completed_pairs"] = json!(completed_pairs);
+                journal.value["crossnode_route_batches"].as_array_mut().unwrap().push(json!({"generation":generation,"offset":offset,"acknowledged_stats":batch_routes,"expected_stats":config.drives,"verified_reads":batch_reads,"verified_bytes":batch_bytes,"expected_reads":config.drives,"expected_bytes":config.drives*4096,"ready_sequence":ready_sequence,"rpc_complete":batch.is_ok(),"validation_complete":false}));
+                journal.flush()?;
+                batch?;
+                if batch_routes != config.drives || batch_reads != config.drives || batch_bytes != config.drives * 4096 {
+                    return Err("crossnode payload batch incomplete".into());
+                }
+                let batch_sequence = phase_metrics.as_ref().unwrap().sequence + 1;
+                metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("crossnode_routes","after_batch"),&oracle_owner).await?;
+                let receipt = journal.value["crossnode_route_batches"].as_array_mut().unwrap().last_mut().unwrap();
+                receipt["batch_sequence"] = json!(batch_sequence);
+                receipt["validation_complete"] = json!(true);
+                journal.flush()?;
+            }
+            if routes != config.drives * SERVERS {
+                return Err("complete crossnode route coverage missing".into());
+            }
+            payload_coverage.verify_complete()?;
+            journal.value["crossnode_payload"]["complete"] = json!(true);
+            journal.flush()?;
+            // The last rotation has offset0. Retain fresh original-assignment
+            // sessions for the existing final durability and revocation checks.
+            tokio::time::timeout_at(journal.phase_deadline.into(), async {
+                for (drive, lane) in lanes.iter_mut().enumerate() {
+                    lane.connection = connect(&endpoints[drive % SERVERS], &fleet, &tokens, drive, drive % SERVERS).await?;
+                }
+                Ok::<_, String>(())
+            }).await.map_err(|_| "post-profile reconnect inherited phase deadline")??;
             journal.phase("final_fresh_oracle")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("final_fresh_oracle","before"),&oracle_owner).await?;
-            let mut verified_files = 0;
-            let mut verified_bytes = 0;
-            supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
-                for lane in &lanes {
-                    let (files, bytes) =
-                        oracle::verify(&mut oracle_owner, &backend, &lane.expected).await?;
-                    verified_files += files;
-                    verified_bytes += bytes;
-                }
-                Ok(())
-            })
-            .await?;
+            let expected: Vec<_> = lanes.iter().map(|lane| &lane.expected).collect();
+            let oracle_deadline = journal.phase_deadline;
+            let verification = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS,
+                oracle_owner.verify_pass(oracle::Pass::Final, &backend, &expected, oracle_deadline)).await;
+            journal.flush()?;
+            let verified = verification?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("final_fresh_oracle","after"),&oracle_owner).await?;
+            record_oracle_pass(&mut journal, &oracle_owner, "final", &expected, &verified)?;
             journal.value["verified_passes"] = json!(2);
-            journal.value["verified_files"] = json!(verified_files);
-            journal.value["verified_bytes"] = json!(verified_bytes);
+            journal.value["verified_files"] = json!(verified.files);
+            journal.value["verified_bytes"] = json!(verified.bytes);
             journal.phase("revocation")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("revocation","before"),&oracle_owner).await?;
             tokio::time::timeout_at(journal.phase_deadline.into(), async {
@@ -940,7 +1392,7 @@ pub async fn controller() -> Result<(), String> {
         cleanup.push(json!({"error":error}));
     }
     journal.value["observer_processes"] = commands.receipts();
-    if let Err(error) = oracle_owner.close().await {
+    if let Err(error) = oracle_owner.close_once().await {
         cleanup.push(json!({
                 "error":error}
         ));
@@ -1040,6 +1492,7 @@ pub async fn controller() -> Result<(), String> {
     journal.value["cleanup_errors"] = json!(cleanup);
     journal.value["error"] = json!(result.as_ref().err());
     if let Some(collector) = &mut phase_metrics {
+        collector.complete &= oracle_owner.settled();
         if let Err(error) = collector.terminal_workers(&fleet, audit_deadline) {
             collector.complete = false;
             journal.value["worker_metrics_terminal_error"] = json!(error);
@@ -1082,10 +1535,15 @@ pub async fn controller() -> Result<(), String> {
             .as_ref()
             .is_some_and(metrics::Collector::qualified)
             && oracle_owner.accounting.complete()
+            && oracle_owner.settled()
             && initializer_owner.accounting.complete()
     );
     journal.value["cleanup_errors"] = json!(cleanup);
-    let workload_success = result.is_ok() && cleanup.is_empty();
+    let oracle_complete = oracle_owner.settled() && oracle_passes_complete(&journal.value);
+    journal.value["fresh_oracle_settled"] = json!(oracle_owner.settled());
+    journal.value["fresh_oracle_complete"] = json!(oracle_complete);
+    journal.value["workload_complete"] = json!(result.is_ok() && oracle_complete);
+    let workload_success = result.is_ok() && cleanup.is_empty() && oracle_complete;
     let metrics_required = mount_rs_core::diagnostics::profile::enabled();
     let success =
         workload_success && (!metrics_required || journal.value["metrics_complete"] == true);
@@ -1160,4 +1618,119 @@ fn audit_missing_or_expired_is_unknown_not_zero() {
         observe_audit(&path, Instant::now() + Duration::from_secs(1))["remote_access_events"],
         1
     );
+}
+
+#[cfg(test)]
+mod population_budget_tests {
+    use super::*;
+
+    fn journal_at(now: Instant, remaining: u64) -> (tempfile::TempDir, Journal) {
+        let directory = tempfile::tempdir().unwrap();
+        let enclosing_deadline = now + Duration::from_secs(remaining);
+        let journal = Journal {
+            value: json!({
+                "phase":"signed_connections","created_unix_ms":1000,
+                "phase_started_unix_ms":2000
+            }),
+            output: directory.path().to_owned(),
+            counts: vec![],
+            enclosing_deadline,
+            phase_deadline: enclosing_deadline,
+            progress: progress::Progress::disabled(),
+            oracle_progress: None,
+        };
+        (directory, journal)
+    }
+
+    fn assert_published_phase(directory: &tempfile::TempDir, journal: &Journal, name: &str) {
+        let published = read_json(&directory.path().join("terminal.json")).unwrap();
+        assert_eq!(published, journal.value);
+        assert_eq!(published["phase"], name);
+        assert_eq!(published["phase_started_unix_ms"], 5000);
+        assert_eq!(
+            published["phase_history"],
+            json!([
+                {"phase":"signed_connections","elapsed_ms":3000,"ended_unix_ms":5000}
+            ])
+        );
+    }
+
+    #[test]
+    fn production_population_budget_extends_actual_journal_beyond_ordinary_600() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, WORK_SECONDS);
+        let enclosing = journal.enclosing_deadline;
+        journal
+            .phase_with_budget_at("online_payload", 900, now, 5000)
+            .unwrap();
+        assert_published_phase(&directory, &journal, "online_payload");
+        assert_eq!(journal.enclosing_deadline, enclosing);
+        assert_eq!(
+            journal.phase_deadline,
+            now + Duration::from_secs(900),
+            "population allowance must change the actual inherited deadline"
+        );
+    }
+
+    #[test]
+    fn production_population_budget_shrinks_actual_journal_to_60() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, WORK_SECONDS);
+        journal
+            .phase_with_budget_at("online_namespace", 60, now, 5000)
+            .unwrap();
+        assert_published_phase(&directory, &journal, "online_namespace");
+        assert_eq!(
+            journal.phase_deadline,
+            now + Duration::from_secs(60),
+            "population allowance must also enforce a smaller configured cap"
+        );
+    }
+
+    #[test]
+    fn production_population_budget_clips_actual_journal_to_120_remaining() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, 120);
+        let enclosing = journal.enclosing_deadline;
+        journal
+            .phase_with_budget_at("online_payload", 900, now, 5000)
+            .unwrap();
+        assert_published_phase(&directory, &journal, "online_payload");
+        assert_eq!(journal.phase_deadline, enclosing);
+        assert_eq!(journal.enclosing_deadline, enclosing);
+    }
+
+    #[test]
+    fn production_population_budget_preserves_ordinary_phase_600() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, WORK_SECONDS);
+        journal.phase_at("initial_fresh_oracle", now, 5000).unwrap();
+        assert_published_phase(&directory, &journal, "initial_fresh_oracle");
+        assert_eq!(
+            journal.phase_deadline,
+            now + Duration::from_secs(PHASE_SECONDS)
+        );
+    }
+
+    #[test]
+    fn production_population_budget_refuses_expired_predecessor_without_mutating_history() {
+        let now = Instant::now();
+        let (directory, mut journal) = journal_at(now, WORK_SECONDS);
+        journal.phase_deadline = now;
+        journal.flush().unwrap();
+        let previous_value = journal.value.clone();
+        let previous_receipt = std::fs::read(directory.path().join("terminal.json")).unwrap();
+        let enclosing = journal.enclosing_deadline;
+        let error = journal
+            .phase_with_budget_at("online_payload", 900, now, 5000)
+            .unwrap_err();
+        assert_eq!(error, "previous phase exhausted its inherited deadline");
+        assert_eq!(journal.phase_deadline, now);
+        assert_eq!(journal.enclosing_deadline, enclosing);
+        assert_eq!(journal.value, previous_value);
+        assert_eq!(
+            std::fs::read(directory.path().join("terminal.json")).unwrap(),
+            previous_receipt
+        );
+    }
 }

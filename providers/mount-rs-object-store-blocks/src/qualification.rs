@@ -11,7 +11,9 @@ use object_store::path::Path as ObjectPath;
 use object_store::{PutMode, PutOptions, PutPayload, PutResult};
 use tokio::sync::Barrier;
 
-use crate::{ObjectStoreBlockStore, validate_prefix, verify_configured_backing_id};
+use crate::{
+    ObjectStoreBlockStore, RawBlockCacheBudget, validate_prefix, verify_configured_backing_id,
+};
 
 /// An isolated marker owned by a single qualification attempt. External
 /// callers cannot direct its cleanup at a production block authority.
@@ -45,8 +47,19 @@ pub async fn prove_two_configured_clients(
     prefix: &PrivateQualificationPrefix,
 ) -> Result<()> {
     let marker = prefix.marker_path();
-    let first_blocks = ObjectStoreBlockStore::new(first_data.clone(), prefix.0.as_ref(), true)?;
-    let second_blocks = ObjectStoreBlockStore::new(second_data.clone(), prefix.0.as_ref(), true)?;
+    let raw_cache_budget = RawBlockCacheBudget::new(0, 0);
+    let first_blocks = ObjectStoreBlockStore::new_with_cache_budget(
+        first_data.clone(),
+        prefix.0.as_ref(),
+        true,
+        raw_cache_budget.clone(),
+    )?;
+    let second_blocks = ObjectStoreBlockStore::new_with_cache_budget(
+        second_data.clone(),
+        prefix.0.as_ref(),
+        true,
+        raw_cache_budget,
+    )?;
     let attempted_create = AtomicBool::new(false);
     let creates_in_flight = AtomicUsize::new(0);
     let creates_overlapped = AtomicBool::new(false);

@@ -62,7 +62,9 @@ use mount_rs_pglite_fs::connect_pglite_with_store;
 use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_r2_fs::open_r2;
 use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
-use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+use mount_rs_sqlite::{
+    SqliteBlockStore, SqliteJournalMode, SqliteMetadataStore, SqliteStorageOptions,
+};
 use mount_rs_sqlite_fs::open_sqlite;
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 use napi::bindgen_prelude::{Buffer, Either, Env, PromiseRaw, Reference};
@@ -262,6 +264,71 @@ fn storage_operation_families() -> Value {
                 "foundationdb.read.get","foundationdb.read.get_key","foundationdb.read.get_range_page"],
             "calls":"native_client_read_method_invocations; range_page_calls_not_key_value_count",
             "bytes":"known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only",
+            "returned_rows":"unavailable","duration":duration},
+        "blob_cache":{"operations":[
+                "blob_cache.miss.admission_wait","blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup","blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait","blob_cache.peer.connection_establish"],
+            "calls":"cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination",
+            "bytes":"known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero",
+            "returned_rows":"unavailable","duration":duration},
+        "client_quic":{"operations":["client.quic.open_bi"],
+            "calls":"stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "client_quic_request_send":{"operations":["client.quic.request_send"],
+            "calls":"request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_write_and_fin_submission_nanoseconds; not_acknowledgment_or_exclusive_cpu_time"},
+        "client_quic_response_receive":{"operations":["client.quic.response_receive"],
+            "calls":"response_receive_stage_invocations; includes_success_error_and_cancellation; not_server_operations",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_decode_and_eof_validation_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "blob_cache_peer_request_byte_admission_wait":{"operations":["blob_cache.peer.request_byte_admission_wait"],
+            "calls":"request_byte_permit_acquisition_invocations; includes_success_error_and_cancellation",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_request_byte_permit_await_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_open_bi":{"operations":["blob_cache.peer.open_bi"],
+            "calls":"stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_open_bi_await_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_request_send":{"operations":["blob_cache.peer.request_send"],
+            "calls":"request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments",
+            "bytes":"known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments",
+            "returned_rows":"unavailable",
+            "duration":"inclusive_write_and_fin_submission_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_response_receive":{"operations":["blob_cache.peer.response_receive"],
+            "calls":"response_receive_stage_invocations; includes_success_error_and_cancellation; not_backing_reads",
+            "bytes":"known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes",
+            "returned_rows":"unavailable",
+            "duration":"inclusive_response_read_and_validation_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_get":{"operations":["blob_cache.peer.get"],
+            "calls":"logical_peer_get_and_get_shared_invocations; includes_hits_misses_errors_and_cancellation",
+            "bytes":"known_successful_logical_get_payload_bytes; misses_zero","returned_rows":"unavailable",
+            "duration":"inclusive_get_method_nanoseconds; includes_request_and_existing_return_conversion; overlaps_transport_stages"},
+        "blob_cache_peer_get_miss":{"operations":["blob_cache.peer.get_miss"],
+            "calls":"successful_get_miss_classifications; not_peer_requests",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"classification_marker_nanoseconds; excludes_get_request_duration"},
+        "client_websocket":{"operations":["client.websocket.tcp_connect",
+            "client.websocket.tls_handshake","client.websocket.upgrade",
+            "client.websocket.socket_lock_wait","client.websocket.request_encode",
+            "client.websocket.request_send","client.websocket.response_receive",
+            "client.websocket.response_decode"],
+            "calls":"client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time"},
+        "client_quic_connection_setup":{"operations":["client.quic.connection_setup"],
+            "calls":"quic_transport_setup_attempts; excludes_credentials_hello_and_websocket_fallback",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_tls_config_endpoint_connect_and_alpn_validation_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "blob_cache_discovery":{"operations":["blob_cache.discovery.locate"],
+            "calls":"discovery_locate_invocations; empty_and_fallback_peer_lists_are_success; not_peer_gets_or_directory_health",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_locate_await_nanoseconds; excludes_peer_filtering_queries_and_hedging"},
+        "object_store_backing_marker":{"operations":matching(&["object_store.backing_marker."]),
+            "calls":"object_store_marker_get_body_create_and_backoff_invocations; includes_success_error_and_cancellation; not_http_attempts_or_application_iops",
+            "bytes":"known_successful_materialized_body_bytes_before_identity_validation_and_accepted_create_input_bytes; get_backoff_error_and_cancellation_bytes_unavailable",
             "returned_rows":"unavailable","duration":duration}
     })
 }
@@ -331,6 +398,16 @@ const LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS: &[&str] = &[
     "sdk.blocks.reconcile",
 ];
 
+// Independently audited actual marker producer sites, separate from registry declarations.
+const OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS: &[&str] = &[
+    "object_store.backing_marker.probe.get",
+    "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get",
+    "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create",
+    "object_store.backing_marker.retry_backoff",
+];
+
 fn storage_instrumented_operation_names() -> Vec<&'static str> {
     // Keep the core order while consuming audited producer coverage explicitly.
     storage::operation_names()
@@ -342,6 +419,7 @@ fn storage_instrumented_operation_names() -> Vec<&'static str> {
                     .operations
                     .contains(name)
                 || foundationdb_instrumented_operations().contains(name)
+                || OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS.contains(name)
         })
         .collect()
 }
@@ -464,7 +542,7 @@ pub fn storage_diagnostics() -> String {
         "physical_device_iops":"unavailable",
         "measurement":{
             "storage_calls":"fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops",
-            "storage_bytes":"known_successful_payload_bytes_only; zero_does_not_establish_no_payload",
+            "storage_bytes":"known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload",
             "storage_rows":"known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows",
             "storage_operations":storage::operation_names(),
             "storage_families":storage_operation_families(),
@@ -1847,6 +1925,9 @@ pub struct JsMountFailure {
 /// backend never falls back to an in-memory store.
 #[napi(object)]
 pub struct JsChunkedStoreOptions {
+    /// SQLite only: preserve (default) or wal, retaining FULL synchronization.
+    #[napi(ts_type = "'preserve' | 'wal'")]
+    pub journal_mode: Option<String>,
     /// Supported values are memory, sqlite, pglite, tidb, foundationdb, r2,
     /// and rustfs (object stores are blocks only). FoundationDB requires the native feature and an
     /// explicit persisted-single-authority, shared-provider, or revision-cas authority.
@@ -3130,6 +3211,33 @@ fn optional_u32(name: &str, value: Option<f64>, default: u32) -> Result<u32, Err
         .unwrap_or(Ok(default))
 }
 
+fn sqlite_storage_options(
+    options: &JsChunkedStoreOptions,
+    role: &str,
+) -> Result<SqliteStorageOptions, Error> {
+    if options.kind != "sqlite" {
+        reject_set(&options.journal_mode, &format!("{role}.journalMode"))?;
+        return Ok(SqliteStorageOptions::default());
+    }
+    let journal_mode = match options.journal_mode.as_deref() {
+        None | Some("preserve") => SqliteJournalMode::Preserve,
+        Some("wal") => SqliteJournalMode::Wal,
+        _ => {
+            return Err(config_error(format!(
+                "{role}.journalMode must be 'preserve' or 'wal'"
+            )));
+        }
+    };
+    if journal_mode == SqliteJournalMode::Wal
+        && !options.uri.as_deref().is_some_and(sqlite_durable_uri)
+    {
+        return Err(config_error(format!(
+            "{role}.uri: SQLite WAL requires a local file path; empty, :memory: and file: paths are unsupported"
+        )));
+    }
+    Ok(SqliteStorageOptions { journal_mode })
+}
+
 async fn build_metadata_store(
     options: &JsChunkedStoreOptions,
     _block_options: &JsChunkedStoreOptions,
@@ -3159,7 +3267,13 @@ async fn build_metadata_store(
             reject_set(&options.access_key_id, "metadata.accessKeyId")?;
             reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
             Ok((
-                Arc::new(SqliteMetadataStore::open(uri).map_err(to_js_error)?),
+                Arc::new(
+                    SqliteMetadataStore::open_with_options(
+                        uri,
+                        sqlite_storage_options(options, "metadata")?,
+                    )
+                    .map_err(to_js_error)?,
+                ),
                 None,
             ))
         }
@@ -3271,7 +3385,13 @@ async fn build_block_store(
             reject_set(&options.access_key_id, "blocks.accessKeyId")?;
             reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
             Ok((
-                Arc::new(SqliteBlockStore::open(uri).map_err(to_js_error)?),
+                Arc::new(
+                    SqliteBlockStore::open_with_options(
+                        uri,
+                        sqlite_storage_options(options, "blocks")?,
+                    )
+                    .map_err(to_js_error)?,
+                ),
                 None,
             ))
         }
@@ -5049,6 +5169,9 @@ pub async fn inspect_split_namespace_presence(
 
 #[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
+    // Validate both journal selections before opening either provider.
+    sqlite_storage_options(&options.metadata, "metadata")?;
+    sqlite_storage_options(&options.blocks, "blocks")?;
     let (ownership_mode, _) =
         chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
     let compact_inode_updates = options.compact_inode_updates.unwrap_or(false);
@@ -5399,6 +5522,7 @@ mod tests {
         inode: bool,
     ) -> JsChunkedOptions {
         let store = |name: &str| JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "sqlite".into(),
             uri: Some(path.join(name).to_string_lossy().into_owned()),
             key: None,
@@ -5930,6 +6054,72 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn sqlite_journal_options_reject_invalid_selections_before_first_open() {
+        let path = std::env::temp_dir().join(format!(
+            "mount-rs-napi-wal-rejection-{}",
+            std::process::id()
+        ));
+        assert!(!path.exists());
+        for role in ["metadata", "blocks"] {
+            for value in ["delete", "WAL", ""] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.journal_mode = Some(value.into());
+                assert_eq!(
+                    block_on(create_chunked_driver(options))
+                        .err()
+                        .unwrap()
+                        .reason,
+                    config_error(format!("{role}.journalMode must be 'preserve' or 'wal'")).reason
+                );
+                assert!(!path.exists());
+            }
+            for kind in ["memory", "pglite", "tidb", "foundationdb", "r2", "rustfs"] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.kind = kind.into();
+                store.journal_mode = Some("preserve".into());
+                assert_eq!(
+                    block_on(create_chunked_driver(options))
+                        .err()
+                        .unwrap()
+                        .reason,
+                    config_error(format!("{role}.journalMode is not valid for this backend"))
+                        .reason
+                );
+                assert!(!path.exists());
+            }
+            for uri in ["", ":memory:", "file:database.db"] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.uri = Some(uri.into());
+                store.journal_mode = Some("wal".into());
+                assert!(block_on(create_chunked_driver(options)).is_err());
+                assert!(!path.exists());
+            }
+        }
+        let mut options = compact_layout_sqlite_options(&path, true, true);
+        options.metadata.journal_mode = Some("preserve".into());
+        assert_eq!(
+            sqlite_storage_options(&options.metadata, "metadata").unwrap(),
+            SqliteStorageOptions::default()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn create_chunked_driver_forwards_compact_runtime_through_dynamic_stores() {
         block_on(async {
             let path = std::env::temp_dir().join(format!(
@@ -5942,6 +6132,7 @@ mod tests {
             ));
             std::fs::create_dir(&path).unwrap();
             let store = |name: &str| JsChunkedStoreOptions {
+                journal_mode: Some("wal".into()),
                 kind: "sqlite".into(),
                 uri: Some(path.join(name).to_string_lossy().into_owned()),
                 key: None,
@@ -5991,6 +6182,13 @@ mod tests {
             drop(driver);
             second.shutdown().await.unwrap();
             drop(second);
+            for name in ["metadata.db", "blocks.db"] {
+                let bytes = std::fs::read(path.join(name)).unwrap();
+                assert_eq!(&bytes[..16], b"SQLite format 3\0");
+                // SQLite's persistent header read/write versions are both 2
+                // for WAL. This observes the actual files after clean close.
+                assert_eq!(&bytes[18..20], &[2, 2], "{name} must persist WAL");
+            }
             std::fs::remove_dir_all(path).unwrap();
         });
     }
@@ -6219,6 +6417,7 @@ mod tests {
     fn foundationdb_policy_requires_exact_kind_uri_and_prefix_pair() {
         use FoundationDbBlockAuthorityPolicy::{ExternalBlockStore, SameKeyspace};
         let config = |kind: &str, uri: &str, key: &str| JsChunkedStoreOptions {
+            journal_mode: None,
             kind: kind.into(),
             uri: Some(uri.into()),
             key: Some(key.into()),
@@ -6570,6 +6769,7 @@ mod tests {
     #[test]
     fn r2_block_durability_preserves_explicit_override() {
         let mut options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "r2".to_owned(),
             uri: None,
             key: Some("mount-rs/test".to_owned()),
@@ -6595,6 +6795,7 @@ mod tests {
     #[test]
     fn rustfs_block_durability_is_only_asserted_when_configured() {
         let mut options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "rustfs".to_owned(),
             uri: None,
             key: Some("mount-rs/test".to_owned()),
@@ -6666,6 +6867,7 @@ mod tests {
     fn live_r2_raw_diagnostics_require_exact_fields() {
         assert!(storage::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
         let options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "r2".to_owned(),
             uri: None,
             key: Some("private-test-prefix".to_owned()),
@@ -6883,6 +7085,7 @@ mod tests {
     fn disabled_r2_local_diagnostics_do_not_register_instances() {
         assert!(!storage::enabled(), "run with MOUNT_RS_PROFILE_IO unset");
         let options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "r2".to_owned(),
             uri: None,
             key: Some("private-disabled-prefix".to_owned()),
@@ -6920,6 +7123,7 @@ mod tests {
 
     fn inert_diagnostic_store_options(kind: &str, prefix: &str) -> JsChunkedStoreOptions {
         JsChunkedStoreOptions {
+            journal_mode: None,
             kind: kind.to_owned(),
             uri: None,
             key: Some(prefix.to_owned()),
@@ -7270,13 +7474,13 @@ mod tests {
         let families = snapshot["measurement"]["storage_families"]
             .as_object()
             .unwrap();
-        assert_eq!(families.len(), 10);
+        assert_eq!(families.len(), 24);
         let declared = families
             .values()
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 85);
+        assert_eq!(declared.len(), 116);
         assert_eq!(
             declared
                 .into_iter()
@@ -7306,9 +7510,24 @@ mod tests {
             "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
         );
         let names = storage::operation_names();
-        assert_eq!(names.len(), 85);
+        assert_eq!(names.len(), 116);
         assert_eq!(
-            &names[78..],
+            &names[110..116],
+            OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS
+        );
+        assert_eq!(
+            families["object_store_backing_marker"]["operations"],
+            json!(OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS)
+        );
+        assert_eq!(
+            families["object_store_backing_marker"]["returned_rows"],
+            "unavailable"
+        );
+        for (index, name) in names[110..116].iter().enumerate() {
+            assert_eq!(snapshot["storage"]["entries"][110 + index]["name"], *name);
+        }
+        assert_eq!(
+            &names[78..85],
             &[
                 "foundationdb.transaction.create",
                 "foundationdb.transaction.closure_attempt",
@@ -7318,6 +7537,119 @@ mod tests {
                 "foundationdb.transaction.commit",
                 "foundationdb.transaction.on_error",
             ]
+        );
+        assert_eq!(
+            &names[85..91],
+            &[
+                "blob_cache.miss.admission_wait",
+                "blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup",
+                "blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait",
+                "blob_cache.peer.connection_establish",
+            ]
+        );
+        assert_eq!(families["blob_cache"]["operations"], json!(&names[85..91]));
+        assert_eq!(families["blob_cache"]["returned_rows"], "unavailable");
+        assert_eq!(
+            families["blob_cache"]["bytes"],
+            "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero"
+        );
+        assert_eq!(&names[91..92], &["client.quic.open_bi"]);
+        assert_eq!(families["client_quic"]["operations"], json!(&names[91..92]));
+        assert_eq!(families["client_quic"]["bytes"], "unavailable");
+        assert_eq!(families["client_quic"]["returned_rows"], "unavailable");
+        assert!(!storage_instrumented_operation_names().contains(&"client.quic.open_bi"));
+        assert_eq!(
+            &names[92..100],
+            &[
+                "client.quic.request_send",
+                "client.quic.response_receive",
+                "blob_cache.peer.request_byte_admission_wait",
+                "blob_cache.peer.open_bi",
+                "blob_cache.peer.request_send",
+                "blob_cache.peer.response_receive",
+                "blob_cache.peer.get",
+                "blob_cache.peer.get_miss",
+            ]
+        );
+        assert_eq!(
+            &names[100..108],
+            &[
+                "client.websocket.tcp_connect",
+                "client.websocket.tls_handshake",
+                "client.websocket.upgrade",
+                "client.websocket.socket_lock_wait",
+                "client.websocket.request_encode",
+                "client.websocket.request_send",
+                "client.websocket.response_receive",
+                "client.websocket.response_decode",
+            ]
+        );
+        assert_eq!(
+            families["client_websocket"]["operations"],
+            json!(&names[100..108])
+        );
+        assert_eq!(
+            families["client_websocket"]["calls"],
+            "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments"
+        );
+        assert_eq!(families["client_websocket"]["bytes"], "unavailable");
+        assert_eq!(families["client_websocket"]["returned_rows"], "unavailable");
+        assert_eq!(
+            families["client_websocket"]["duration"],
+            "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time"
+        );
+        assert!(
+            storage_instrumented_operation_names()
+                .iter()
+                .all(|name| !name.starts_with("client."))
+        );
+        for (index, family) in [
+            "client_quic_request_send",
+            "client_quic_response_receive",
+            "blob_cache_peer_request_byte_admission_wait",
+            "blob_cache_peer_open_bi",
+            "blob_cache_peer_request_send",
+            "blob_cache_peer_response_receive",
+            "blob_cache_peer_get",
+            "blob_cache_peer_get_miss",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(families[*family]["operations"], json!([names[92 + index]]));
+            assert_eq!(families[*family]["returned_rows"], "unavailable");
+            assert!(!storage_instrumented_operation_names().contains(&names[92 + index]));
+        }
+        assert_eq!(
+            families["blob_cache_peer_request_send"]["bytes"],
+            "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments"
+        );
+        assert_eq!(
+            families["blob_cache_peer_response_receive"]["bytes"],
+            "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes"
+        );
+        assert_eq!(
+            families["blob_cache_peer_get"]["bytes"],
+            "known_successful_logical_get_payload_bytes; misses_zero"
+        );
+        assert_eq!(
+            families["blob_cache_peer_get_miss"]["duration"],
+            "classification_marker_nanoseconds; excludes_get_request_duration"
+        );
+        for family in [
+            "client_quic_request_send",
+            "client_quic_response_receive",
+            "blob_cache_peer_request_byte_admission_wait",
+            "blob_cache_peer_open_bi",
+            "blob_cache_peer_get_miss",
+        ] {
+            assert_eq!(families[family]["bytes"], "unavailable");
+        }
+        assert_eq!(
+            snapshot["measurement"]["storage_bytes"],
+            "known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload"
         );
         assert_eq!(LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS.len(), 60);
         assert_eq!(&names[..60], LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS);
@@ -7351,8 +7683,29 @@ mod tests {
                 "exact static site count {field}"
             );
         }
-        assert_eq!(snapshot["storage"]["entries"].as_array().unwrap().len(), 85);
-        for (index, name) in names[78..].iter().enumerate() {
+        assert_eq!(
+            snapshot["storage"]["entries"].as_array().unwrap().len(),
+            116
+        );
+        for (index, name) in names[91..110].iter().enumerate() {
+            let transport_row = &snapshot["storage"]["entries"][91 + index];
+            assert_eq!(transport_row["name"], *name);
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "bytes",
+                "elapsed_ns",
+                "in_flight",
+                "returned_rows",
+                "returned_row_observations",
+            ] {
+                assert_eq!(transport_row[field], "0");
+            }
+            assert_eq!(transport_row["latency_log2_us"], json!(vec!["0"; 32]));
+        }
+        for (index, name) in names[78..85].iter().enumerate() {
             let row = &snapshot["storage"]["entries"][78 + index];
             assert_eq!(row["name"], *name);
             assert_eq!(row["returned_rows"], "0");
@@ -7387,6 +7740,15 @@ mod tests {
         assert!(snapshot["storage"]["entries"][0]["calls"].is_string());
         assert!(snapshot["storage"]["forwarding_boxes"]["calls"].is_string());
         assert!(snapshot["storage"]["forwarding_boxes"]["requested_object_bytes"].is_string());
+        let profile = snapshot["profile"]["entries"].as_array().unwrap();
+        assert_eq!(profile.len(), 136);
+        assert_eq!(profile[134]["name"], "blob_cache.ram.hit_bytes");
+        assert_eq!(profile[135]["name"], "blob_cache.disk.hit_bytes");
+        for row in &profile[134..] {
+            for field in ["calls", "elapsed_ns", "units"] {
+                assert!(row[field].is_string(), "exact cache hit counter {field}");
+            }
+        }
         assert_eq!(
             snapshot["measurement"]["latency_histogram"]["intervals"]
                 .as_array()
@@ -7419,6 +7781,10 @@ mod tests {
         let instrumented = snapshot["measurement"]["storage_instrumented_operations"]
             .as_array()
             .unwrap();
+        assert_eq!(OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS.len(), 6);
+        for name in OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS {
+            assert!(instrumented.contains(&json!(name)));
+        }
         assert_eq!(
             coverage["schema"],
             "mount-rs-foundationdb-client-diagnostic-coverage-v1"
@@ -7428,7 +7794,19 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            85
+            116
+        );
+        assert!(
+            instrumented
+                .iter()
+                .all(|name| !name.as_str().unwrap().starts_with("blob_cache.")),
+            "cache bank declarations do not establish addon source coverage"
+        );
+        assert!(
+            instrumented
+                .iter()
+                .all(|name| !name.as_str().unwrap().starts_with("client.")),
+            "client transport declarations do not establish addon source coverage"
         );
         #[cfg(all(
             feature = "foundationdb",
@@ -7455,7 +7833,7 @@ mod tests {
             for name in source.operations {
                 assert!(instrumented.contains(&json!(name)));
             }
-            assert_eq!(instrumented.len(), 85);
+            assert_eq!(instrumented.len(), 91);
         }
         #[cfg(not(all(
             feature = "foundationdb",
@@ -7476,7 +7854,7 @@ mod tests {
                     "operations":[]
                 })
             );
-            assert_eq!(instrumented.len(), 78);
+            assert_eq!(instrumented.len(), 84);
             assert!(
                 instrumented
                     .iter()

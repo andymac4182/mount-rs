@@ -157,6 +157,49 @@ impl Lane {
             Err("read incomplete or unknown".into())
         }
     }
+    /// Verify existing acknowledged bytes through this freshly routed session.
+    /// The expected ledger stays unchanged; no payload is created or repaired.
+    pub async fn crossnode_sentinel(&mut self) -> Result<usize, String> {
+        const NAME: &str = "mixed-0";
+        if self
+            .expected
+            .files
+            .get(NAME)
+            .is_none_or(|file| file.length < 4096)
+        {
+            return Err("crossnode sentinel expected payload missing".into());
+        }
+        let value = self
+            .request(
+                OperationName::Open,
+                json!({"path":"/mixed-0","flags":"r","mode":0}),
+            )
+            .await?;
+        let Some(handle) = value.as_u64() else {
+            self.connection
+                .close(1u32.into(), b"invalid sentinel handle; never replayed");
+            return Err("invalid acknowledged sentinel handle".into());
+        };
+        let uncertain_before = self.counts.lock().unwrap().uncertain;
+        let read = self.read(handle, NAME, 0).await;
+        let known = {
+            let counts = self.counts.lock().unwrap();
+            counts.pending.is_none() && counts.uncertain == uncertain_before
+        };
+        // An acknowledged byte mismatch still owns a usable handle. Close it
+        // before returning that failure. Unknown reads are never replayed;
+        // connection disposal and the inherited supervisor own their teardown.
+        if !known || self.connection.close_reason().is_some() {
+            self.connection
+                .close(1u32.into(), b"sentinel read unknown; never replayed");
+            read?;
+            return Err("crossnode sentinel connection closed".into());
+        }
+        let close = self.close(handle).await;
+        read?;
+        close?;
+        Ok(4096)
+    }
     pub async fn populate(&mut self, files: usize, payload: bool) -> Result<(), String> {
         for file in 0..files {
             let name = format!("mixed-{file}");
@@ -233,6 +276,62 @@ impl Lane {
         self.close(handle).await
     }
 }
+
+/// Exact post-profile Drive/server coverage. Each bit follows a successful
+/// every-byte sentinel and its acknowledged handle close.
+pub(super) struct CrossnodeCoverage {
+    servers_by_drive: Vec<u16>,
+}
+impl CrossnodeCoverage {
+    pub(super) fn new(drives: usize) -> Result<Self, String> {
+        if drives == 0 || drives > 10_000 {
+            return Err("crossnode payload geometry invalid".into());
+        }
+        Ok(Self {
+            servers_by_drive: vec![0; drives],
+        })
+    }
+    pub(super) fn record(&mut self, drive: usize, server: usize) -> Result<(), String> {
+        if server >= super::SERVERS {
+            return Err("crossnode payload server outside geometry".into());
+        }
+        let mask = self
+            .servers_by_drive
+            .get_mut(drive)
+            .ok_or("crossnode payload Drive outside geometry")?;
+        let bit = 1u16 << server;
+        if *mask & bit != 0 {
+            return Err("duplicate crossnode payload pair".into());
+        }
+        *mask |= bit;
+        Ok(())
+    }
+    pub(super) fn completed_pairs(&self) -> usize {
+        self.servers_by_drive
+            .iter()
+            .map(|mask| mask.count_ones() as usize)
+            .sum()
+    }
+    pub(super) fn expected_pairs(&self) -> usize {
+        self.servers_by_drive.len() * super::SERVERS
+    }
+    pub(super) fn verify_complete(&self) -> Result<(), String> {
+        let all_servers = (1u16 << super::SERVERS) - 1;
+        if self
+            .servers_by_drive
+            .iter()
+            .any(|mask| *mask != all_servers)
+        {
+            return Err("complete crossnode payload coverage missing".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "crossnode_tests.rs"]
+mod crossnode_tests;
+
 pub fn endpoint(cert: &[u8]) -> Result<quinn::Endpoint, String> {
     let mut roots = rustls::RootCertStore::empty();
     roots

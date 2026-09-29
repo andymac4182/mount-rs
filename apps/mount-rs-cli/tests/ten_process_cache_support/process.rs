@@ -1,5 +1,9 @@
 //! Owned process controller. File limits are cooperative observations, not emission limits.
-use super::{config::sha256, contracts::*};
+use super::{
+    config::sha256,
+    contracts::*,
+    progress_trace::{self, Label},
+};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{
@@ -121,6 +125,135 @@ fn resource_write<T: Serialize>(root: &Path, name: &str, value: &T) -> Result<()
     fs::rename(temporary, root.join(name)).map_err(|e| e.to_string())
 }
 const FIRST_RSS_CAP: usize = 2048;
+const FIRST_FRAME_VALIDATION_CAP: usize = 2048;
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FrameValidationSite {
+    BeforeRssAcquisition,
+    FinalRecompose,
+}
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+struct FrameRunScalars {
+    controller_pid: u32,
+    worker_pid: u32,
+    group: u32,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+struct FrameValidationPredicates {
+    schema: bool,
+    run: bool,
+    sequence: bool,
+    frame_error: bool,
+    time_order: bool,
+    future: bool,
+    stale: bool,
+    wire_cap: bool,
+    other_contract: bool,
+}
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+struct FirstFrameValidationFailure {
+    schema: &'static str,
+    site: FrameValidationSite,
+    expected_schema: u32,
+    expected_run: FrameRunScalars,
+    accepted_sequence: u64,
+    freshness_ns: u64,
+    frame_schema: u32,
+    frame_run: FrameRunScalars,
+    frame_sequence: u64,
+    frame_started_ns: u64,
+    frame_finished_ns: u64,
+    validation_now_ns: u64,
+    age_ns: Option<u64>,
+    failed: FrameValidationPredicates,
+}
+#[derive(Default)]
+struct OuterSampleEvidence {
+    first_rss_failure: Option<FirstRssFailure>,
+    first_frame_validation_failure: Option<FirstFrameValidationFailure>,
+    #[cfg(test)]
+    validation_clock: Option<Box<dyn FnMut() -> Result<u64>>>,
+}
+impl OuterSampleEvidence {
+    fn validation_now(&mut self) -> Result<u64> {
+        #[cfg(test)]
+        if let Some(clock) = &mut self.validation_clock {
+            return clock();
+        }
+        monotonic_ns()
+    }
+
+    fn retain_frame_validation_failure(
+        &mut self,
+        frame: &ResourceFrame,
+        run: &ResourceRun,
+        sequence: u64,
+        now: u64,
+        site: FrameValidationSite,
+    ) {
+        if self.first_frame_validation_failure.is_some()
+            || frame.validate(run, sequence, now).is_ok()
+        {
+            return;
+        }
+        let age_ns = now.checked_sub(frame.started_ns);
+        let mut failed = FrameValidationPredicates {
+            schema: frame.schema != 1,
+            run: &frame.run != run
+                || frame.run.controller_pid == 0
+                || frame.run.worker_pid == 0
+                || frame.run.controller_pid == frame.run.worker_pid
+                || frame.run.group != frame.run.worker_pid
+                || !Path::new(&frame.run.root).is_absolute(),
+            sequence: frame.sequence == 0 || frame.sequence < sequence,
+            frame_error: frame.error.is_some(),
+            time_order: frame.started_ns > frame.finished_ns,
+            future: frame.finished_ns > now,
+            stale: age_ns.is_some_and(|age| age > RESOURCE_FRESH_NS),
+            wire_cap: serde_json::to_vec(frame)
+                .is_ok_and(|bytes| bytes.len() as u64 > RESOURCE_CAP),
+            other_contract: false,
+        };
+        failed.other_contract = !(failed.schema
+            || failed.run
+            || failed.sequence
+            || failed.frame_error
+            || failed.time_order
+            || failed.future
+            || failed.stale
+            || failed.wire_cap);
+        let record = FirstFrameValidationFailure {
+            schema: "mount-rs.cache-frame-validation-failure.v1",
+            site,
+            expected_schema: 1,
+            expected_run: FrameRunScalars {
+                controller_pid: run.controller_pid,
+                worker_pid: run.worker_pid,
+                group: run.group,
+            },
+            accepted_sequence: sequence,
+            freshness_ns: RESOURCE_FRESH_NS,
+            frame_schema: frame.schema,
+            frame_run: FrameRunScalars {
+                controller_pid: frame.run.controller_pid,
+                worker_pid: frame.run.worker_pid,
+                group: frame.run.group,
+            },
+            frame_sequence: frame.sequence,
+            frame_started_ns: frame.started_ns,
+            frame_finished_ns: frame.finished_ns,
+            validation_now_ns: now,
+            age_ns,
+            failed,
+        };
+        // Only this closed scalar DTO crosses into the receipt, never frame strings/paths.
+        if serde_json::to_vec_pretty(&record)
+            .is_ok_and(|bytes| bytes.len() <= FIRST_FRAME_VALIDATION_CAP)
+        {
+            self.first_frame_validation_failure = Some(record);
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RssCategory {
@@ -650,6 +783,7 @@ pub struct OwnedProcess {
     pub receipt: ProcessReceipt,
     stdout: PathBuf,
     stderr: PathBuf,
+    object_store_projection: Option<serde_json::Value>,
     pub quic: Option<SocketAddr>,
     peer: Option<SocketAddr>,
     pub cache: Option<PathBuf>,
@@ -723,6 +857,7 @@ impl OwnedProcess {
             receipt,
             stdout,
             stderr,
+            object_store_projection: None,
             quic: None,
             peer,
             cache,
@@ -966,7 +1101,18 @@ impl OwnedProcess {
             self.receipt.pid,
         )?;
         let banks = if self.receipt.role == "server" {
-            Some(parse_banks(&stderr)?)
+            let banks = parse_banks(&stderr)?;
+            self.object_store_projection = Some(super::object_store_projection::project_cli(
+                &super::object_store_projection::CliBinding {
+                    node: &self.receipt.node,
+                    generation: self.receipt.generation,
+                    pid: self.receipt.pid,
+                    path: &self.stderr.to_string_lossy(),
+                    owner_complete: true,
+                },
+                stderr.as_bytes(),
+            ));
+            Some(banks)
         } else {
             None
         };
@@ -995,6 +1141,7 @@ pub struct Fleet {
     pub processes: Vec<OwnedProcess>,
     pub retired: Vec<ProcessReceipt>,
     pub banks: Vec<serde_json::Value>,
+    pub object_store_observations: Vec<serde_json::Value>,
     next_generation: u64,
     resources: ResourceMonitor,
 }
@@ -1011,6 +1158,7 @@ impl Fleet {
             processes: Vec::new(),
             retired: Vec::new(),
             banks: Vec::new(),
+            object_store_observations: Vec::new(),
             next_generation: 1,
             resources: ResourceMonitor {
                 run,
@@ -1356,12 +1504,24 @@ impl Fleet {
         self.check_at(RssSite::ActiveChild)
     }
     fn check_at(&mut self, site: RssSite) -> Result<()> {
-        self.refresh_resources(false, false)?;
-        all_log_bytes(&self.root)?;
-        if free_disk(&self.root)? < FREE_DISK_FLOOR {
+        let _check = progress_trace::span(Label::FleetCheck);
+        {
+            let _sample = progress_trace::span(Label::FleetResourceSample);
+            self.refresh_resources(false, false)?;
+        }
+        {
+            let _logs = progress_trace::span(Label::FleetLogRead);
+            all_log_bytes(&self.root)?;
+        }
+        let available = {
+            let _disk = progress_trace::span(Label::FleetDiskStat);
+            free_disk(&self.root)?
+        };
+        if available < FREE_DISK_FLOOR {
             return Err("free disk below 64 GiB floor".into());
         }
         for index in 0..self.processes.len() {
+            let _child = progress_trace::span(Label::FleetChildSample);
             self.sample_process(index, site, false)?;
         }
         Ok(())
@@ -1398,6 +1558,16 @@ impl Fleet {
             self.banks.push(json!({"node":process.receipt.node,"generation":process.receipt.generation,
                 "pid":process.receipt.pid,"scope":"cumulative generation shutdown logical counters",
                 "launch":process.receipt.launch,"maintenance_quiescence":"unavailable","rows":rows}));
+        }
+        if process.receipt.role == "server" {
+            let projection = if evidence.is_ok() {
+                process.object_store_projection.take().unwrap_or_else(
+                    || json!({"status":"unavailable","reason":"disabled_or_missing"}),
+                )
+            } else {
+                json!({"status":"unavailable","reason":"owner_not_qualified"})
+            };
+            self.object_store_observations.push(projection);
         }
         // Retain ownership/proof failures too; no callback error can discard a receipt.
         self.retired.push(process.receipt.clone());
@@ -1833,14 +2003,14 @@ fn outer_sample(
     root: &Path,
     run: &ResourceRun,
     sequence: u64,
-    first: &mut Option<FirstRssFailure>,
+    evidence: &mut OuterSampleEvidence,
     child: &Child,
 ) -> Result<Option<OuterResourceSample>> {
     outer_sample_with(
         root,
         run,
         sequence,
-        first,
+        evidence,
         child,
         &mut measured,
         &mut exited_without_reap,
@@ -1850,20 +2020,30 @@ fn outer_sample_with(
     root: &Path,
     run: &ResourceRun,
     sequence: u64,
-    first: &mut Option<FirstRssFailure>,
+    evidence: &mut OuterSampleEvidence,
     child: &Child,
     measure: &mut impl FnMut(RssIdentity, bool) -> RssReadResult<RssAcquisition>,
     poll: &mut impl FnMut(&Child) -> Result<bool>,
 ) -> Result<Option<OuterResourceSample>> {
     let frame: ResourceFrame = resource_read(&root.join("resource.json"))?;
-    frame.validate(run, sequence, monotonic_ns()?)?;
+    let validation_now = evidence.validation_now()?;
+    if let Err(error) = frame.validate(run, sequence, validation_now) {
+        evidence.retain_frame_validation_failure(
+            &frame,
+            run,
+            sequence,
+            validation_now,
+            FrameValidationSite::BeforeRssAcquisition,
+        );
+        return Err(error);
+    }
     // Replace producer supervisor samples; only child observations/subtotal cross the IPC seam.
     let controller = outer_acquire(
         run,
         frame.sequence,
         supervisor_identity("controller", run.controller_pid),
         RssSite::OuterController,
-        first,
+        &mut evidence.first_rss_failure,
         measure,
     )?;
     // A later worker exit must not discard an already-fatal controller observation.
@@ -1871,13 +2051,33 @@ fn outer_sample_with(
         std::slice::from_ref(&controller.identity),
         std::slice::from_ref(&controller),
     )?;
-    let worker = match outer_worker_acquire(run, frame.sequence, child, first, measure, poll)? {
+    let worker = match outer_worker_acquire(
+        run,
+        frame.sequence,
+        child,
+        &mut evidence.first_rss_failure,
+        measure,
+        poll,
+    )? {
         OuterWorkerAcquisition::Observed(value) => value,
         OuterWorkerAcquisition::Exited => return Ok(None),
     };
     let supervisors = [controller, worker];
+    let validation_now = evidence.validation_now()?;
     let (totals, observations) =
-        frame.recompose_observed(run, sequence, monotonic_ns()?, supervisors)?;
+        match frame.recompose_observed(run, sequence, validation_now, supervisors) {
+            Ok(value) => value,
+            Err(error) => {
+                evidence.retain_frame_validation_failure(
+                    &frame,
+                    run,
+                    sequence,
+                    validation_now,
+                    FrameValidationSite::FinalRecompose,
+                );
+                return Err(error);
+            }
+        };
     let limit_error = rss_caps(&totals, &observations).err();
     Ok(Some(OuterResourceSample {
         frame,
@@ -1888,6 +2088,20 @@ fn outer_sample_with(
 }
 
 pub fn supervise() {
+    supervise_selected(
+        "native_worker",
+        "SQLite public CLI debug local OIDC fixture",
+    );
+}
+
+pub fn supervise_tidb_rustfs_cold() {
+    supervise_selected(
+        "native_tidb_rustfs_cold_worker",
+        "TiDB/RustFS public CLI debug local OIDC cold retirement fixture",
+    );
+}
+
+fn supervise_selected(worker_entry: &'static str, scope: &'static str) {
     assert_eq!(
         std::env::var("MOUNT_RS_TEN_PROCESS_RUN").as_deref(),
         Ok("1"),
@@ -1934,7 +2148,7 @@ pub fn supervise() {
         .expect("CLI binary attestation");
     assert!(Instant::now() < deadline, "expired supervisor start budget");
     let child = Command::new(&executable)
-        .args(["--ignored", "--exact", "native_worker", "--nocapture"])
+        .args(["--ignored", "--exact", worker_entry, "--nocapture"])
         .env("MOUNT_RS_TEN_PROCESS_ROOT", &root)
         .env("MOUNT_RS_TEN_PROCESS_SETUP_NS", setup_ns.to_string())
         .env("MOUNT_RS_TEN_PROCESS_OUTER_NS", outer_ns.to_string())
@@ -1968,6 +2182,7 @@ pub fn supervise() {
         "supervisor_pid":std::process::id(),"worker_reaped":false,"forced":false,
         "failure":"controller did not reach a terminal receipt; retained ownership only",
         "first_rss_failure":null,"first_rss_failure_retention":"not_attempted",
+        "first_frame_validation_failure":null,
         "private_credential_cleanup":"pending; private key/token files must not be exported",
         "test_binary_sha256":binary_hash,"cli_binary_sha256":cli_hash});
     fs::write(
@@ -1985,7 +2200,7 @@ pub fn supervise() {
     let mut last_sequence = 0;
     let mut initial_observed = false;
     let mut last_resource = None;
-    let mut first_rss_failure = None;
+    let mut outer_evidence = OuterSampleEvidence::default();
     let mut first_rss_failure_retention = RssRetention::NotAttempted;
     let status = loop {
         if Instant::now() >= deadline {
@@ -2040,16 +2255,18 @@ pub fn supervise() {
             }
         }
         if initial_observed {
-            let had_rss_failure = first_rss_failure.is_some();
+            let had_rss_failure = outer_evidence.first_rss_failure.is_some();
+            let had_frame_failure = outer_evidence.first_frame_validation_failure.is_some();
             let sampled = outer_sample(
                 &root,
                 &run,
                 last_sequence,
-                &mut first_rss_failure,
+                &mut outer_evidence,
                 &worker.child,
             );
-            if !had_rss_failure && first_rss_failure.is_some() {
-                initial["first_rss_failure"] = serde_json::to_value(first_rss_failure).unwrap();
+            if !had_rss_failure && outer_evidence.first_rss_failure.is_some() {
+                initial["first_rss_failure"] =
+                    serde_json::to_value(outer_evidence.first_rss_failure).unwrap();
                 initial["first_rss_failure_retention"] =
                     serde_json::to_value(RssRetention::Written).unwrap();
                 first_rss_failure_retention = if fs::write(
@@ -2062,6 +2279,14 @@ pub fn supervise() {
                 } else {
                     RssRetention::WriteFailed
                 };
+            }
+            if !had_frame_failure && outer_evidence.first_frame_validation_failure.is_some() {
+                initial["first_frame_validation_failure"] =
+                    serde_json::to_value(outer_evidence.first_frame_validation_failure).unwrap();
+                let _ = fs::write(
+                    root.join("controller.json"),
+                    serde_json::to_vec_pretty(&initial).unwrap(),
+                );
             }
             match sampled {
                 // Confirmed WNOWAIT exit returns to the existing closure/group/reap branch.
@@ -2147,7 +2372,7 @@ pub fn supervise() {
     let sentinel_owned = sentinel.local_addr().ok() == Some(sentinel_address)
         && UdpSocket::bind(sentinel_address).is_err();
     let capture = output(&out_path, true).and_then(|_| output(&err_path, true));
-    let controller = json!({"schema":1,"scope":"SQLite public CLI debug local OIDC fixture",
+    let controller = json!({"schema":1,"scope":scope,"worker_entry":worker_entry,
         "worker_pid":group,"process_group":group,"supervisor_pid":std::process::id(),
         "test_binary_sha256":binary_hash,"cli_binary_sha256":cli_hash,
         "debug_assertions":cfg!(debug_assertions),"local_oidc_fixture":cfg!(feature="local-oidc-fixture"),
@@ -2157,7 +2382,8 @@ pub fn supervise() {
         "owned_aggregate_max_observed_bytes":max_total,"resource_sample_count":sample_count,
         "resource_initial_observed":initial_observed,"resource_last_sequence":last_sequence,
         "resource_last":last_resource,"resource_clock":"CLOCK_MONOTONIC",
-        "first_rss_failure":first_rss_failure,"first_rss_failure_retention":first_rss_failure_retention,
+        "first_rss_failure":outer_evidence.first_rss_failure,"first_rss_failure_retention":first_rss_failure_retention,
+        "first_frame_validation_failure":outer_evidence.first_frame_validation_failure,
         "resource_fresh_ns":RESOURCE_FRESH_NS,"resource_sampling":"cooperative sequential/skewed; not a hard bound",
         "owned_aggregate_rss_cap_bytes":RSS_CAP,"cooperative_poll_ms":POLL_MS,"failure":failure});
     fs::write(
@@ -2263,6 +2489,7 @@ mod tests {
                 receipt,
                 stdout,
                 stderr,
+                object_store_projection: None,
                 quic: None,
                 peer: None,
                 cache: None,
@@ -2451,6 +2678,7 @@ mod tests {
             processes: vec![process],
             retired: Vec::new(),
             banks: Vec::new(),
+            object_store_observations: Vec::new(),
             next_generation: 2,
             resources: ResourceMonitor {
                 run: previous.run.clone(),
@@ -2910,6 +3138,379 @@ mod tests {
         }
     }
 
+    fn frame_validation_owned_frame(run: &ResourceRun, now: u64, sequence: u64) -> ResourceFrame {
+        let mut frame = resource_frame(now);
+        frame.run = run.clone();
+        frame.sequence = sequence;
+        frame.expected = vec![
+            supervisor_identity("controller", run.controller_pid),
+            supervisor_identity("worker", run.worker_pid),
+        ];
+        for (observation, identity) in frame.observations.iter_mut().zip(&frame.expected) {
+            observation.identity = identity.clone();
+        }
+        frame
+    }
+
+    fn frame_validation_acquisition(identity: RssIdentity, now: u64) -> RssAcquisition {
+        RssAcquisition {
+            observation: RssObservation {
+                identity,
+                started_ns: now,
+                finished_ns: now,
+                bytes: Some(4096),
+                missing: None,
+            },
+            category: None,
+        }
+    }
+
+    fn frame_validation_evidence(clock: &Rc<Cell<u64>>) -> OuterSampleEvidence {
+        let clock = Rc::clone(clock);
+        OuterSampleEvidence {
+            validation_clock: Some(Box::new(move || Ok(clock.get()))),
+            ..OuterSampleEvidence::default()
+        }
+    }
+
+    fn frame_validation_close_child(
+        process: &mut OwnedProcess,
+        input: &mut Option<std::process::ChildStdin>,
+    ) {
+        release_inert_child(input, process.child.id()).unwrap();
+        process.poll_exit().unwrap();
+        cleanup_inert_child(process);
+        assert!(process.receipt.reaped && process.receipt.success && process.terminal);
+    }
+
+    #[test]
+    fn frame_validation_same_fresh_sequence_then_stale_is_retained_before_rss() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let started = 1_000_000_000;
+        let frame = frame_validation_owned_frame(&run, started, 7);
+        resource_write(directory.path(), "resource.json", &frame).unwrap();
+        let clock = Rc::new(Cell::new(started + RESOURCE_FRESH_NS));
+        let mut evidence = frame_validation_evidence(&clock);
+        let reads = Cell::new(0);
+        let mut measure = |identity, _| {
+            reads.set(reads.get() + 1);
+            Ok(frame_validation_acquisition(identity, clock.get()))
+        };
+        let mut poll = |_: &Child| panic!("a valid observation must not perform a retirement poll");
+        let first = outer_sample_with(
+            directory.path(),
+            &run,
+            7,
+            &mut evidence,
+            &process.child,
+            &mut measure,
+            &mut poll,
+        );
+        let repeated = outer_sample_with(
+            directory.path(),
+            &run,
+            7,
+            &mut evidence,
+            &process.child,
+            &mut measure,
+            &mut poll,
+        );
+        let fresh_reads = reads.get();
+        clock.set(started + RESOURCE_FRESH_NS + 1);
+        let rejected = outer_sample_with(
+            directory.path(),
+            &run,
+            7,
+            &mut evidence,
+            &process.child,
+            &mut measure,
+            &mut poll,
+        );
+        frame_validation_close_child(&mut process, &mut input);
+        assert!(matches!(first, Ok(Some(_))) && matches!(repeated, Ok(Some(_))));
+        assert_eq!(fresh_reads, 4);
+        assert_eq!(
+            reads.get(),
+            fresh_reads,
+            "stale rejection must precede all RSS queries"
+        );
+        assert_eq!(
+            rejected.err().as_deref(),
+            Some("RSS frame missing, stale, foreign, regressed or incomplete")
+        );
+        assert!(evidence.first_rss_failure.is_none());
+        let record = evidence
+            .first_frame_validation_failure
+            .expect("failed frame validation must retain its exact first evidence");
+        assert_eq!(record.site, FrameValidationSite::BeforeRssAcquisition);
+        assert_eq!(record.accepted_sequence, 7);
+        assert_eq!(record.frame_sequence, 7);
+        assert_eq!(
+            (record.frame_started_ns, record.frame_finished_ns),
+            (started, started)
+        );
+        assert_eq!(record.validation_now_ns, clock.get());
+        assert_eq!(record.age_ns, Some(RESOURCE_FRESH_NS + 1));
+        assert_eq!(
+            record.expected_run,
+            FrameRunScalars {
+                controller_pid: run.controller_pid,
+                worker_pid: run.worker_pid,
+                group: run.group
+            }
+        );
+        assert_eq!(record.frame_run, record.expected_run);
+        assert_eq!(
+            record.failed,
+            FrameValidationPredicates {
+                stale: true,
+                ..FrameValidationPredicates::default()
+            }
+        );
+    }
+
+    #[test]
+    fn frame_validation_final_recompose_retains_loaded_frame_and_first_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let started = 2_000_000_000;
+        let frame = frame_validation_owned_frame(&run, started, 9);
+        resource_write(directory.path(), "resource.json", &frame).unwrap();
+        let clock = Rc::new(Cell::new(started));
+        let mut evidence = frame_validation_evidence(&clock);
+        let reads = Cell::new(0);
+        let later_now = started + RESOURCE_FRESH_NS + 1;
+        let mut replacement = frame_validation_owned_frame(&run, later_now, 10);
+        let result = outer_sample_with(
+            directory.path(),
+            &run,
+            8,
+            &mut evidence,
+            &process.child,
+            &mut |identity, _| {
+                reads.set(reads.get() + 1);
+                if identity.role == "controller" {
+                    resource_write(directory.path(), "resource.json", &replacement)?;
+                    clock.set(later_now);
+                }
+                Ok(frame_validation_acquisition(identity, started))
+            },
+            &mut |_| panic!("observed supervisors must not perform retirement polls"),
+        );
+        let first = evidence.first_frame_validation_failure;
+        replacement.schema = 2;
+        replacement.error = Some("PRIVATE_LATER_FRAME_ERROR".into());
+        resource_write(directory.path(), "resource.json", &replacement).unwrap();
+        let later = outer_sample_with(
+            directory.path(),
+            &run,
+            8,
+            &mut evidence,
+            &process.child,
+            &mut |_, _| panic!("the later invalid frame must fail before RSS queries"),
+            &mut |_| panic!("the later invalid frame must fail before retirement polls"),
+        );
+        frame_validation_close_child(&mut process, &mut input);
+        assert_eq!(reads.get(), 2);
+        assert_eq!(
+            result.err().as_deref(),
+            Some("RSS frame missing, stale, foreign, regressed or incomplete")
+        );
+        assert!(later.is_err());
+        assert!(evidence.first_rss_failure.is_none());
+        assert_eq!(evidence.first_frame_validation_failure, first);
+        let record = first.expect(
+            "final recomposition must retain the loaded failed frame, not reread its replacement",
+        );
+        assert_eq!(record.site, FrameValidationSite::FinalRecompose);
+        assert_eq!(record.accepted_sequence, 8);
+        assert_eq!(record.frame_sequence, 9);
+        assert_eq!(
+            (record.frame_started_ns, record.frame_finished_ns),
+            (started, started)
+        );
+        assert_eq!(record.validation_now_ns, later_now);
+        assert_eq!(record.age_ns, Some(RESOURCE_FRESH_NS + 1));
+        assert_eq!(
+            record.failed,
+            FrameValidationPredicates {
+                stale: true,
+                ..FrameValidationPredicates::default()
+            }
+        );
+    }
+
+    #[test]
+    fn frame_validation_max_scalars_are_bounded_without_private_strings() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let mut frame = frame_validation_owned_frame(&run, u64::MAX, u64::MAX);
+        frame.schema = u32::MAX;
+        frame.run.controller_pid = u32::MAX;
+        frame.run.worker_pid = u32::MAX;
+        frame.run.group = u32::MAX;
+        frame.run.root = "PRIVATE_FRAME_ROOT".into();
+        frame.error = Some("PRIVATE_FRAME_ERROR".into());
+        resource_write(directory.path(), "resource.json", &frame).unwrap();
+        let clock = Rc::new(Cell::new(1));
+        let mut evidence = frame_validation_evidence(&clock);
+        let result = outer_sample_with(
+            directory.path(),
+            &run,
+            u64::MAX,
+            &mut evidence,
+            &process.child,
+            &mut |_, _| panic!("invalid frame must not query RSS"),
+            &mut |_| panic!("invalid frame must not poll the worker"),
+        );
+        frame_validation_close_child(&mut process, &mut input);
+        assert_eq!(
+            result.err().as_deref(),
+            Some("RSS frame missing, stale, foreign, regressed or incomplete")
+        );
+        assert!(evidence.first_rss_failure.is_none());
+        let record = evidence
+            .first_frame_validation_failure
+            .expect("parsed failed frames require bounded numeric evidence");
+        assert_eq!(record.frame_schema, u32::MAX);
+        assert_eq!(record.frame_sequence, u64::MAX);
+        assert_eq!(record.accepted_sequence, u64::MAX);
+        assert_eq!(record.frame_started_ns, u64::MAX);
+        assert_eq!(record.frame_finished_ns, u64::MAX);
+        assert_eq!(record.age_ns, None, "future timestamps have no checked age");
+        assert_eq!(
+            record.failed,
+            FrameValidationPredicates {
+                schema: true,
+                run: true,
+                frame_error: true,
+                future: true,
+                ..FrameValidationPredicates::default()
+            }
+        );
+        let bytes = serde_json::to_vec(&record).unwrap();
+        assert!(bytes.len() <= FIRST_FRAME_VALIDATION_CAP);
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(!text.contains("PRIVATE_FRAME_ROOT") && !text.contains("PRIVATE_FRAME_ERROR"));
+        assert!(!text.contains(&run.root));
+    }
+
+    #[test]
+    fn frame_validation_malformed_json_has_no_numeric_evidence_or_rss_queries() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        fs::write(directory.path().join("resource.json"), b"{").unwrap();
+        let mut evidence = OuterSampleEvidence {
+            validation_clock: Some(Box::new(|| {
+                panic!("unparsed JSON has no validation timestamp")
+            })),
+            ..OuterSampleEvidence::default()
+        };
+        let result = outer_sample_with(
+            directory.path(),
+            &run,
+            0,
+            &mut evidence,
+            &process.child,
+            &mut |_, _| panic!("unparsed JSON must not query RSS"),
+            &mut |_| panic!("unparsed JSON must not poll the worker"),
+        );
+        frame_validation_close_child(&mut process, &mut input);
+        assert_eq!(
+            result.err(),
+            Some(
+                serde_json::from_slice::<ResourceFrame>(b"{")
+                    .unwrap_err()
+                    .to_string()
+            )
+        );
+        assert!(evidence.first_frame_validation_failure.is_none());
+        assert!(evidence.first_rss_failure.is_none());
+    }
+
+    #[test]
+    fn frame_validation_other_contract_failure_has_categorical_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let now = 4_000_000_000;
+        let mut frame = frame_validation_owned_frame(&run, now, 3);
+        frame.expected.pop();
+        frame.observations.pop();
+        frame.total_bytes = Some(4096);
+        resource_write(directory.path(), "resource.json", &frame).unwrap();
+        let clock = Rc::new(Cell::new(now));
+        let mut evidence = frame_validation_evidence(&clock);
+        let result = outer_sample_with(
+            directory.path(),
+            &run,
+            2,
+            &mut evidence,
+            &process.child,
+            &mut |_, _| panic!("an invalid publication contract must fail before RSS acquisition"),
+            &mut |_| panic!("an invalid publication contract must not poll the worker"),
+        );
+        frame_validation_close_child(&mut process, &mut input);
+        assert_eq!(
+            result.err().as_deref(),
+            Some("RSS frame lacks exact supervisor identity")
+        );
+        assert!(evidence.first_rss_failure.is_none());
+        let record = evidence
+            .first_frame_validation_failure
+            .expect("contract-only frame failures require static categorical evidence");
+        assert_eq!(
+            record.failed,
+            FrameValidationPredicates {
+                other_contract: true,
+                ..FrameValidationPredicates::default()
+            }
+        );
+        assert_eq!(record.frame_sequence, 3);
+        assert_eq!(record.accepted_sequence, 2);
+        assert_eq!(record.age_ns, Some(0));
+    }
+
+    #[test]
+    fn frame_validation_final_rss_error_does_not_fabricate_frame_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process(directory.path());
+        let run = outer_worker_run(directory.path(), &process.child);
+        let now = 3_000_000_000;
+        let frame = frame_validation_owned_frame(&run, now, 1);
+        resource_write(directory.path(), "resource.json", &frame).unwrap();
+        let clock = Rc::new(Cell::new(now));
+        let mut evidence = frame_validation_evidence(&clock);
+        let result = outer_sample_with(
+            directory.path(),
+            &run,
+            0,
+            &mut evidence,
+            &process.child,
+            &mut |identity, _| {
+                let is_worker = identity.role == "worker";
+                let mut value = frame_validation_acquisition(identity, now);
+                if is_worker {
+                    value.observation.finished_ns = now + 1;
+                }
+                Ok(value)
+            },
+            &mut |_| panic!("observed supervisors must not perform retirement polls"),
+        );
+        frame_validation_close_child(&mut process, &mut input);
+        assert_eq!(
+            result.err().as_deref(),
+            Some("outer RSS sample missing, stale or future")
+        );
+        assert!(evidence.first_frame_validation_failure.is_none());
+        assert!(evidence.first_rss_failure.is_none());
+    }
+
     #[test]
     fn rss_outer_worker_retirement_rejects_earlier_controller_sample_failures() {
         for unavailable in [false, true] {
@@ -2926,7 +3527,7 @@ mod tests {
                 observation.identity = identity.clone();
             }
             resource_write(directory.path(), "resource.json", &frame).unwrap();
-            let mut first = None;
+            let mut first = OuterSampleEvidence::default();
             let mut worker_reads = 0;
             let mut polls = 0;
             let result = outer_sample_with(
@@ -2957,7 +3558,7 @@ mod tests {
             cleanup_inert_child(&mut process);
             assert!(result.is_err());
             assert_eq!((worker_reads, polls), (0, 0));
-            let record = first.unwrap();
+            let record = first.first_rss_failure.unwrap();
             assert_eq!(record.site, RssSite::OuterController);
             assert_eq!(
                 record.category,
@@ -3382,7 +3983,7 @@ mod tests {
             b"PRIVATE_MALFORMED_FRAME",
         )
         .unwrap();
-        let mut first = None;
+        let mut first = OuterSampleEvidence::default();
         assert!(
             outer_sample(
                 directory.path(),
@@ -3393,7 +3994,8 @@ mod tests {
             )
             .is_err()
         );
-        assert!(first.is_none());
+        assert!(first.first_rss_failure.is_none());
+        assert!(first.first_frame_validation_failure.is_none());
     }
     #[test]
     fn rss_first_failure_max_wire_scalars_fit_two_kibibytes() {

@@ -3,6 +3,7 @@ use futures_util::{
     FutureExt,
     stream::{self, BoxStream},
 };
+use mount_rs_core::diagnostics::storage as storage_metrics;
 use object_store::memory::InMemory;
 use object_store::{
     GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
@@ -15,7 +16,7 @@ use tokio::sync::Semaphore;
 /// Ok get, never by turning a body fault into a get fault.
 #[derive(Debug)]
 struct ApiStore {
-    inner: InMemory,
+    inner: Arc<InMemory>,
     puts: AtomicUsize,
     gets: AtomicUsize,
     bodies: Arc<AtomicUsize>,
@@ -28,12 +29,17 @@ struct ApiStore {
     put_fault: AtomicUsize,
     get_fault: AtomicBool,
     body_fault: AtomicBool,
+    temporary_get_fault: AtomicBool,
+    temporary_body_fault: AtomicBool,
     delete_not_found: AtomicBool,
 }
 impl ApiStore {
     fn new() -> Arc<Self> {
+        Self::with_inner(Arc::new(InMemory::new()))
+    }
+    fn with_inner(inner: Arc<InMemory>) -> Arc<Self> {
         Arc::new(Self {
-            inner: InMemory::new(),
+            inner,
             puts: AtomicUsize::new(0),
             gets: AtomicUsize::new(0),
             bodies: Arc::new(AtomicUsize::new(0)),
@@ -46,6 +52,8 @@ impl ApiStore {
             put_fault: AtomicUsize::new(0),
             get_fault: AtomicBool::new(false),
             body_fault: AtomicBool::new(false),
+            temporary_get_fault: AtomicBool::new(false),
+            temporary_body_fault: AtomicBool::new(false),
             delete_not_found: AtomicBool::new(false),
         })
     }
@@ -65,6 +73,14 @@ fn fault() -> object_store::Error {
     object_store::Error::Generic {
         store: "ApiStore",
         source: Box::new(std::io::Error::other("private-test-fault")),
+    }
+}
+fn temporary_fault() -> object_store::Error {
+    object_store::Error::Generic {
+        store: "ApiStore",
+        source: Box::new(std::io::Error::other(
+            "connection reset: private-test-fault",
+        )),
     }
 }
 impl std::fmt::Display for ApiStore {
@@ -109,6 +125,9 @@ impl ObjectStore for ApiStore {
         if self.get_fault.swap(false, Ordering::SeqCst) {
             return Err(fault());
         }
+        if self.temporary_get_fault.swap(false, Ordering::SeqCst) {
+            return Err(temporary_fault());
+        }
         let result = self.inner.get_opts(p, o).await?;
         let meta = result.meta.clone();
         let range = result.range.clone();
@@ -117,6 +136,7 @@ impl ObjectStore for ApiStore {
         let gate = self.body_gate.clone();
         let hold = self.hold_body.load(Ordering::SeqCst);
         let fail = self.body_fault.swap(false, Ordering::SeqCst);
+        let temporary_fail = self.temporary_body_fault.swap(false, Ordering::SeqCst);
         let payload = GetResultPayload::Stream(
             stream::once(async move {
                 bodies.fetch_add(1, Ordering::SeqCst);
@@ -125,6 +145,8 @@ impl ObjectStore for ApiStore {
                 }
                 if fail {
                     Err(fault())
+                } else if temporary_fail {
+                    Err(temporary_fault())
                 } else {
                     result.bytes().await
                 }
@@ -545,6 +567,562 @@ async fn backing_marker_calls_are_explicitly_outside_raw_bank() {
             .all(|row| row.calls == 0)
     );
 }
+
+const MARKER_METRIC_NAMES: [&str; 6] = [
+    "object_store.backing_marker.probe.get",
+    "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get",
+    "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create",
+    "object_store.backing_marker.retry_backoff",
+];
+type MarkerCounts = (u64, u64, u64, u64, u64); // calls, success, error, cancelled, bytes
+const NO_MARKER_CALLS: MarkerCounts = (0, 0, 0, 0, 0);
+
+fn isolated_marker_metrics(test: &str, expected_enabled: bool) -> bool {
+    const CHILD: &str = "MOUNT_RS_MARKER_METRICS_TEST_CHILD";
+    match std::env::var(CHILD) {
+        Ok(child) => {
+            assert_eq!(child, test, "the exact requested child must run");
+            assert_eq!(storage_metrics::enabled(), expected_enabled);
+            println!("MARKER_METRICS_CHILD_RUNNING test={test} enabled={expected_enabled}");
+            true
+        }
+        Err(std::env::VarError::NotPresent) => {
+            let filter = format!("raw_metrics_tests::{test}");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &filter, "--nocapture", "--test-threads=1"])
+                .env(CHILD, test)
+                .env(
+                    "MOUNT_RS_PROFILE_IO",
+                    if expected_enabled { "1" } else { "0" },
+                )
+                .env_remove("MOUNT_RS_TRACE_STORAGE")
+                .output()
+                .expect("run the owned marker metrics child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stdout.contains("running 1 test"),
+                "{filter}\n{stdout}\n{stderr}"
+            );
+            assert!(
+                stdout.contains(&format!(
+                    "MARKER_METRICS_CHILD_RUNNING test={test} enabled={expected_enabled}"
+                )),
+                "the named child did not execute: {filter}\n{stdout}\n{stderr}"
+            );
+            assert!(output.status.success(), "{filter}\n{stdout}\n{stderr}");
+            assert!(
+                stdout.contains("test result: ok. 1 passed"),
+                "missing terminal child result: {filter}\n{stdout}\n{stderr}"
+            );
+            false
+        }
+        Err(error) => panic!("invalid marker metrics child selection: {error}"),
+    }
+}
+
+fn marker_bytes(id: ConcurrentBackingId) -> Vec<u8> {
+    let mut bytes = Vec::from(&b"MRC2"[..]);
+    bytes.extend_from_slice(&id.as_bytes());
+    bytes
+}
+
+async fn marker_clients(
+    probe_bytes: Option<&[u8]>,
+    data_bytes: Option<&[u8]>,
+    enabled: bool,
+) -> (Arc<ApiStore>, Arc<ApiStore>, ObjectStoreBlockStore) {
+    let probe = ApiStore::new();
+    let data = ApiStore::new();
+    let blocks = if enabled {
+        adapter(data.clone(), true)
+    } else {
+        ObjectStoreBlockStore::new(data.clone(), "private", false).unwrap()
+    };
+    // Fixture seeding bypasses the independent oracle, so its request/body
+    // counts describe only actual marker methods invoked by the test.
+    for (store, bytes) in [(&probe, probe_bytes), (&data, data_bytes)] {
+        if let Some(bytes) = bytes {
+            store
+                .inner
+                .put(&blocks.backing_id_path(), PutPayload::from(bytes.to_vec()))
+                .await
+                .unwrap();
+        }
+    }
+    (probe, data, blocks)
+}
+
+fn marker_metric<'a>(
+    snapshot: &'a storage_metrics::Snapshot,
+    name: &str,
+) -> &'a storage_metrics::Entry {
+    snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.name == name)
+        .unwrap_or_else(|| panic!("the fixed backing-marker metric must be exported: {name}"))
+}
+
+fn assert_marker_metrics(snapshot: &storage_metrics::Snapshot, expected: [MarkerCounts; 6]) {
+    assert_eq!(snapshot.in_flight, 0);
+    for (name, expected) in MARKER_METRIC_NAMES.into_iter().zip(expected) {
+        let row = marker_metric(snapshot, name);
+        assert_eq!(
+            (row.calls, row.success, row.error, row.cancelled, row.bytes),
+            expected,
+            "{name}"
+        );
+        assert_eq!(row.in_flight, 0, "{name}");
+        assert_eq!(row.calls, row.success + row.error + row.cancelled, "{name}");
+        assert_eq!(row.calls, row.latency_log2_us.iter().sum::<u64>(), "{name}");
+    }
+}
+
+fn assert_marker_oracle(
+    snapshot: &storage_metrics::Snapshot,
+    probe: &ApiStore,
+    data: &ApiStore,
+    blocks: &ObjectStoreBlockStore,
+) {
+    for (store, get, body) in [
+        (probe, MARKER_METRIC_NAMES[0], MARKER_METRIC_NAMES[1]),
+        (data, MARKER_METRIC_NAMES[2], MARKER_METRIC_NAMES[3]),
+    ] {
+        assert_eq!(
+            marker_metric(snapshot, get).calls,
+            store.gets.load(Ordering::SeqCst) as u64
+        );
+        assert_eq!(
+            marker_metric(snapshot, body).calls,
+            store.bodies.load(Ordering::SeqCst) as u64
+        );
+        assert_eq!(store.heads.load(Ordering::SeqCst), 0);
+        assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
+    }
+    assert_eq!(
+        marker_metric(snapshot, MARKER_METRIC_NAMES[4]).calls,
+        probe.puts.load(Ordering::SeqCst) as u64
+    );
+    assert_eq!(data.puts.load(Ordering::SeqCst), 0);
+    assert_marker_payload_unobserved(blocks);
+}
+
+fn assert_marker_payload_unobserved(blocks: &ObjectStoreBlockStore) {
+    let stats = blocks.stats();
+    assert_eq!(
+        (
+            stats.puts,
+            stats.gets,
+            stats.bytes_written,
+            stats.bytes_read
+        ),
+        (0, 0, 0, 0)
+    );
+    if let Some(raw) = stats.raw_api {
+        quiescent(&raw);
+        assert!(raw.entries.iter().all(|row| row.calls == 0));
+        assert_eq!(
+            (raw.claims.leader_claims, raw.claims.follower_claims),
+            (0, 0)
+        );
+    }
+    if let Some(local) = stats.local_work {
+        local_quiescent(&local);
+        assert!(local.entries.iter().all(|row| row.calls == 0));
+    }
+}
+
+#[tokio::test]
+async fn backing_marker_verification_observes_both_clients_without_payload_counts() {
+    if !isolated_marker_metrics(
+        "backing_marker_verification_observes_both_clients_without_payload_counts",
+        true,
+    ) {
+        return;
+    }
+    let id = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+    let bytes = marker_bytes(id);
+    let (probe, data, blocks) = marker_clients(Some(&bytes), Some(&bytes), true).await;
+    let before = storage_metrics::snapshot();
+    verify_configured_backing_id(probe.as_ref(), &blocks, id)
+        .await
+        .unwrap();
+    let delta = storage_metrics::snapshot().delta(&before).unwrap();
+    assert_marker_metrics(
+        &delta,
+        [
+            (1, 1, 0, 0, 0),
+            (1, 1, 0, 0, 20),
+            (1, 1, 0, 0, 0),
+            (1, 1, 0, 0, 20),
+            NO_MARKER_CALLS,
+            NO_MARKER_CALLS,
+        ],
+    );
+    assert_marker_oracle(&delta, &probe, &data, &blocks);
+}
+
+#[tokio::test]
+async fn backing_marker_authority_failures_preserve_estale_and_transport_outcomes() {
+    if !isolated_marker_metrics(
+        "backing_marker_authority_failures_preserve_estale_and_transport_outcomes",
+        true,
+    ) {
+        return;
+    }
+    let id = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+    let other = ConcurrentBackingId::from_bytes([8; 16]).unwrap();
+    let bytes = marker_bytes(id);
+    let changed = marker_bytes(other);
+    let complete = [
+        (1, 1, 0, 0, 0),
+        (1, 1, 0, 0, 20),
+        (1, 1, 0, 0, 0),
+        (1, 1, 0, 0, 20),
+        NO_MARKER_CALLS,
+        NO_MARKER_CALLS,
+    ];
+    for (name, first, second, expected_id, expected) in [
+        (
+            "expected mismatch",
+            Some(bytes.as_slice()),
+            Some(bytes.as_slice()),
+            other,
+            complete,
+        ),
+        (
+            "client mismatch",
+            Some(bytes.as_slice()),
+            Some(changed.as_slice()),
+            id,
+            complete,
+        ),
+        (
+            "absent",
+            None,
+            None,
+            id,
+            [
+                (1, 0, 1, 0, 0),
+                NO_MARKER_CALLS,
+                (1, 0, 1, 0, 0),
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+            ],
+        ),
+        (
+            "malformed probe",
+            Some(&b"bad!"[..]),
+            Some(bytes.as_slice()),
+            id,
+            [
+                (1, 1, 0, 0, 0),
+                (1, 1, 0, 0, 4),
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+            ],
+        ),
+        (
+            "malformed data",
+            Some(bytes.as_slice()),
+            Some(&b"bad!"[..]),
+            id,
+            [
+                (1, 1, 0, 0, 0),
+                (1, 1, 0, 0, 20),
+                (1, 1, 0, 0, 0),
+                (1, 1, 0, 0, 4),
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+            ],
+        ),
+    ] {
+        let (probe, data, blocks) = marker_clients(first, second, true).await;
+        let before = storage_metrics::snapshot();
+        let error = verify_configured_backing_id(probe.as_ref(), &blocks, expected_id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Estale, "{name}");
+        assert_eq!(
+            probe.puts.load(Ordering::SeqCst),
+            0,
+            "verification is read-only: {name}"
+        );
+        let delta = storage_metrics::snapshot().delta(&before).unwrap();
+        assert_marker_metrics(&delta, expected);
+        assert_marker_oracle(&delta, &probe, &data, &blocks);
+    }
+}
+
+#[tokio::test]
+async fn backing_marker_claim_observes_create_and_fresh_dual_client_reads() {
+    if !isolated_marker_metrics(
+        "backing_marker_claim_observes_create_and_fresh_dual_client_reads",
+        true,
+    ) {
+        return;
+    }
+    let inner = Arc::new(InMemory::new());
+    let probe = ApiStore::with_inner(inner.clone());
+    let data = ApiStore::with_inner(inner);
+    let blocks = adapter(data.clone(), true);
+    let candidate = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+    let before = storage_metrics::snapshot();
+    let actual = prepare_configured_backing_id_with_candidate(probe.as_ref(), &blocks, candidate)
+        .await
+        .unwrap();
+    assert_eq!(actual, candidate);
+    let delta = storage_metrics::snapshot().delta(&before).unwrap();
+    assert_marker_metrics(
+        &delta,
+        [
+            (2, 1, 1, 0, 0),
+            (1, 1, 0, 0, 20),
+            (2, 1, 1, 0, 0),
+            (1, 1, 0, 0, 20),
+            (1, 1, 0, 0, 20),
+            NO_MARKER_CALLS,
+        ],
+    );
+    assert_marker_oracle(&delta, &probe, &data, &blocks);
+}
+
+#[tokio::test]
+async fn backing_marker_temporary_get_and_body_failures_observe_retry_backoff() {
+    if !isolated_marker_metrics(
+        "backing_marker_temporary_get_and_body_failures_observe_retry_backoff",
+        true,
+    ) {
+        return;
+    }
+    let id = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+    let bytes = marker_bytes(id);
+    for body_fault in [false, true] {
+        let (probe, data, blocks) = marker_clients(Some(&bytes), Some(&bytes), true).await;
+        probe
+            .temporary_get_fault
+            .store(!body_fault, Ordering::SeqCst);
+        probe
+            .temporary_body_fault
+            .store(body_fault, Ordering::SeqCst);
+        let before = storage_metrics::snapshot();
+        let mut verify = Box::pin(verify_configured_backing_id(probe.as_ref(), &blocks, id));
+        assert!(verify.as_mut().now_or_never().is_none());
+        // A real one-shot failure reached the existing positive backoff. No
+        // detached task, manual sleeping, or private retry helper is involved.
+        assert_eq!(probe.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.bodies.load(Ordering::SeqCst), usize::from(body_fault));
+        assert_eq!(data.gets.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            marker_metric(&storage_metrics::snapshot(), MARKER_METRIC_NAMES[5]).in_flight,
+            1
+        );
+        tokio::time::timeout(Duration::from_secs(1), verify)
+            .await
+            .unwrap()
+            .unwrap();
+        let delta = storage_metrics::snapshot().delta(&before).unwrap();
+        assert_marker_metrics(
+            &delta,
+            [
+                if body_fault {
+                    (2, 2, 0, 0, 0)
+                } else {
+                    (2, 1, 1, 0, 0)
+                },
+                if body_fault {
+                    (2, 1, 1, 0, 20)
+                } else {
+                    (1, 1, 0, 0, 20)
+                },
+                (1, 1, 0, 0, 0),
+                (1, 1, 0, 0, 20),
+                NO_MARKER_CALLS,
+                (1, 1, 0, 0, 0),
+            ],
+        );
+        assert!(marker_metric(&delta, MARKER_METRIC_NAMES[5]).elapsed_ns > 0);
+        assert_marker_oracle(&delta, &probe, &data, &blocks);
+    }
+}
+
+#[tokio::test]
+async fn backing_marker_permanent_get_and_body_failures_preserve_first_error() {
+    if !isolated_marker_metrics(
+        "backing_marker_permanent_get_and_body_failures_preserve_first_error",
+        true,
+    ) {
+        return;
+    }
+    let id = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+    let bytes = marker_bytes(id);
+    for body_fault in [false, true] {
+        let (probe, data, blocks) = marker_clients(Some(&bytes), Some(&bytes), true).await;
+        probe.get_fault.store(!body_fault, Ordering::SeqCst);
+        probe.body_fault.store(body_fault, Ordering::SeqCst);
+        let before = storage_metrics::snapshot();
+        let error = verify_configured_backing_id(probe.as_ref(), &blocks, id)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eio);
+        assert_eq!(
+            error.to_string(),
+            "object-store backing identity read failed (Server)"
+        );
+        let delta = storage_metrics::snapshot().delta(&before).unwrap();
+        assert_marker_metrics(
+            &delta,
+            [
+                if body_fault {
+                    (1, 1, 0, 0, 0)
+                } else {
+                    (1, 0, 1, 0, 0)
+                },
+                if body_fault {
+                    (1, 0, 1, 0, 0)
+                } else {
+                    NO_MARKER_CALLS
+                },
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+                NO_MARKER_CALLS,
+            ],
+        );
+        assert_marker_oracle(&delta, &probe, &data, &blocks);
+    }
+}
+
+#[tokio::test]
+async fn backing_marker_held_body_cancellation_and_unpolled_futures_are_distinct() {
+    if !isolated_marker_metrics(
+        "backing_marker_held_body_cancellation_and_unpolled_futures_are_distinct",
+        true,
+    ) {
+        return;
+    }
+    let id = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+    let bytes = marker_bytes(id);
+    let (probe, data, blocks) = marker_clients(Some(&bytes), Some(&bytes), true).await;
+    let before = storage_metrics::snapshot();
+    drop(verify_configured_backing_id(probe.as_ref(), &blocks, id));
+    drop(prepare_configured_backing_id_with_candidate(
+        probe.as_ref(),
+        &blocks,
+        id,
+    ));
+    assert_eq!(probe.gets.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.puts.load(Ordering::SeqCst), 0);
+    assert!(
+        storage_metrics::snapshot()
+            .delta(&before)
+            .unwrap()
+            .entries
+            .iter()
+            .all(|row| row.calls == 0 && row.in_flight == 0)
+    );
+    probe.hold_body.store(true, Ordering::SeqCst);
+    let mut verify = Box::pin(verify_configured_backing_id(probe.as_ref(), &blocks, id));
+    assert!(verify.as_mut().now_or_never().is_none());
+    assert_eq!(probe.gets.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.bodies.load(Ordering::SeqCst), 1);
+    assert_eq!(data.gets.load(Ordering::SeqCst), 0);
+    let held = storage_metrics::snapshot();
+    assert_eq!(marker_metric(&held, MARKER_METRIC_NAMES[0]).success, 1);
+    let body = marker_metric(&held, MARKER_METRIC_NAMES[1]);
+    assert_eq!((body.calls, body.in_flight), (0, 1));
+    assert_eq!(held.in_flight, 1);
+    drop(verify);
+    let delta = storage_metrics::snapshot().delta(&before).unwrap();
+    assert_marker_metrics(
+        &delta,
+        [
+            (1, 1, 0, 0, 0),
+            (1, 0, 0, 1, 0),
+            NO_MARKER_CALLS,
+            NO_MARKER_CALLS,
+            NO_MARKER_CALLS,
+            NO_MARKER_CALLS,
+        ],
+    );
+    assert_marker_oracle(&delta, &probe, &data, &blocks);
+}
+
+#[tokio::test]
+async fn backing_marker_metrics_exclude_configured_prefix_preflight() {
+    if !isolated_marker_metrics(
+        "backing_marker_metrics_exclude_configured_prefix_preflight",
+        true,
+    ) {
+        return;
+    }
+    let store = ApiStore::new();
+    let blocks = adapter(store.clone(), true);
+    let before = storage_metrics::snapshot();
+    probe_configured_concurrent_prefix(store.as_ref(), "private")
+        .await
+        .unwrap();
+    assert_eq!(store.puts.load(Ordering::SeqCst), 1);
+    assert_eq!(store.gets.load(Ordering::SeqCst), 2);
+    assert_eq!(store.bodies.load(Ordering::SeqCst), 1);
+    assert_marker_metrics(
+        &storage_metrics::snapshot().delta(&before).unwrap(),
+        [NO_MARKER_CALLS; 6],
+    );
+    assert_marker_payload_unobserved(&blocks);
+}
+
+#[tokio::test]
+async fn backing_marker_disabled_profile_preserves_authority_and_zero_observations() {
+    if !isolated_marker_metrics(
+        "backing_marker_disabled_profile_preserves_authority_and_zero_observations",
+        false,
+    ) {
+        return;
+    }
+    let id = ConcurrentBackingId::from_bytes([7; 16]).unwrap();
+    let other = ConcurrentBackingId::from_bytes([8; 16]).unwrap();
+    let bytes = marker_bytes(id);
+    for (first, second, expected, succeeds) in [
+        (Some(bytes.as_slice()), Some(bytes.as_slice()), id, true),
+        (Some(bytes.as_slice()), Some(bytes.as_slice()), other, false),
+        (None, None, id, false),
+        (Some(&b"bad!"[..]), Some(bytes.as_slice()), id, false),
+    ] {
+        let (probe, data, blocks) = marker_clients(first, second, false).await;
+        let before = storage_metrics::snapshot();
+        let result = verify_configured_backing_id(probe.as_ref(), &blocks, expected).await;
+        if succeeds {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().code, ErrorCode::Estale);
+        }
+        assert_eq!(probe.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            data.gets.load(Ordering::SeqCst),
+            usize::from(first != Some(&b"bad!"[..]))
+        );
+        assert_eq!(probe.puts.load(Ordering::SeqCst), 0);
+        let delta = storage_metrics::snapshot().delta(&before).unwrap();
+        assert_marker_metrics(&delta, [NO_MARKER_CALLS; 6]);
+        for row in &delta.entries {
+            assert_eq!(
+                (row.calls, row.bytes, row.elapsed_ns, row.in_flight),
+                (0, 0, 0, 0)
+            );
+        }
+        assert!(blocks.stats().raw_api.is_none());
+        assert!(blocks.stats().local_work.is_none());
+        assert_marker_payload_unobserved(&blocks);
+    }
+}
+
 #[tokio::test]
 async fn disabled_injection_keeps_behavior_and_raw_unavailable() {
     let store = ApiStore::new();

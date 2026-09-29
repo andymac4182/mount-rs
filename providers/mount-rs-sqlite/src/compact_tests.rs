@@ -101,6 +101,193 @@ fn raw(f: &Fixture) -> (u64, String, RawGuards, String) {
     let authority: MetadataPublicationRow = conn.query_row("SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).unwrap();
     (generation, anchor, rows, format!("{authority:?}"))
 }
+
+#[test]
+fn compact_selected_read_preserves_anchor_error_before_guard_query_failure() {
+    fn authority_anchor_and_guard_table(f: &Fixture) -> (String, String, bool) {
+        let connection = f.store.0.lock().unwrap();
+        let authority: MetadataPublicationRow = connection.query_row(
+            "SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+        ).unwrap();
+        let anchor: String = connection
+            .query_row(
+                "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let guard_table: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mount_rs_compact_guards')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (format!("{authority:?}"), anchor, guard_table)
+    }
+    let identity = |error: &FsError| {
+        (
+            error.code,
+            error.syscall.clone(),
+            error.path.clone(),
+            error.dest.clone(),
+            error.to_string(),
+        )
+    };
+
+    let f = fixture(true);
+    let inode = create(&f, "dual-corruption-selected");
+    let original = run(f.store.load_compact_inode(f.backing, inode)).unwrap();
+    let expectation = CompactInodeExpectation::selected(
+        original.generation,
+        original.guard.identity,
+        &original.guard.node,
+    );
+    let healthy = run(f.store.read_compact_inode(f.backing, inode, expectation)).unwrap();
+    match healthy {
+        CompactInodeRead::Unchanged(checked) => {
+            assert_eq!(checked.generation(), original.generation);
+            assert_eq!(checked.inode(), inode);
+            assert_eq!(checked.identity(), original.guard.identity);
+        }
+        CompactInodeRead::Loaded(loaded) => assert_eq!(loaded, original),
+    }
+    let before = authority_anchor_and_guard_table(&f);
+    assert!(
+        before.2,
+        "the healthy real provider must have its guard table"
+    );
+    let mut unsupported: serde_json::Value = serde_json::from_str(&before.1).unwrap();
+    unsupported["anchor"]["default_chunker"]["algorithm"] =
+        serde_json::json!("unsupported-dual-corruption-chunker");
+    let unsupported = serde_json::to_string(&unsupported).unwrap();
+    {
+        let connection = f.store.0.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE mount_rs_metadata SET namespace=?1 WHERE id=1",
+                [&unsupported],
+            )
+            .unwrap();
+        connection
+            .execute("DROP TABLE mount_rs_compact_guards", [])
+            .unwrap();
+    }
+    let damaged = authority_anchor_and_guard_table(&f);
+    assert_eq!(
+        damaged.0, before.0,
+        "both corruptions retain valid authority"
+    );
+    assert_eq!(damaged.1, unsupported);
+    assert!(
+        !damaged.2,
+        "the guard query must fail independently of decoding"
+    );
+
+    // The real old read validates the anchor before querying any guards. The
+    // new read must retain that precedence, including errors preparing SQL.
+    let old_error = run(f.store.load_compact_inode(f.backing, inode)).unwrap_err();
+    let new_error = run(f.store.read_compact_inode(f.backing, inode, expectation)).unwrap_err();
+    assert_eq!(authority_anchor_and_guard_table(&f), damaged);
+    assert_eq!(old_error.code, ErrorCode::Enotsup);
+    assert_eq!(
+        old_error.to_string(),
+        "unsupported chunker algorithm/version"
+    );
+    assert_eq!(
+        identity(&new_error),
+        identity(&old_error),
+        "the new selected read must report the same anchor error before its missing-table SQL error"
+    );
+}
+
+fn check_selected_anchor_column_error(sql: &str) {
+    fn retained_row(f: &Fixture) -> (MetadataPublicationRow, String, Option<Vec<u8>>, bool) {
+        let connection = f.store.0.lock().unwrap();
+        let authority = connection.query_row(
+            "SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+        ).unwrap();
+        let (kind, bytes) = connection
+            .query_row(
+                "SELECT typeof(namespace),CAST(namespace AS BLOB) FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let guards = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mount_rs_compact_guards')",
+            [], |row| row.get(0),
+        ).unwrap();
+        (authority, kind, bytes, guards)
+    }
+    let identity = |error: &FsError| {
+        (
+            error.code,
+            error.syscall.clone(),
+            error.path.clone(),
+            error.dest.clone(),
+            error.to_string(),
+        )
+    };
+    for missing_guards in [false, true] {
+        let f = fixture(true);
+        let inode = create(&f, "anchor-column-error");
+        let original = run(f.store.load_compact_inode(f.backing, inode)).unwrap();
+        let expected = CompactInodeExpectation::selected(
+            original.generation,
+            original.guard.identity,
+            &original.guard.node,
+        );
+        let before = retained_row(&f);
+        {
+            let connection = f.store.0.lock().unwrap();
+            connection.execute(sql, []).unwrap();
+            if missing_guards {
+                connection
+                    .execute("DROP TABLE mount_rs_compact_guards", [])
+                    .unwrap();
+            }
+        }
+        let damaged = retained_row(&f);
+        assert_eq!(damaged.0, before.0, "authority remains valid");
+        assert_eq!(damaged.3, !missing_guards);
+        let reference = run(f.store.load_compact_inode(f.backing, inode)).unwrap_err();
+        let selected = run(f.store.read_compact_inode(f.backing, inode, expected)).unwrap_err();
+        assert_eq!(reference.code, ErrorCode::Eio);
+        assert_eq!(
+            retained_row(&f),
+            damaged,
+            "both reads preserve the damaged row"
+        );
+        assert_eq!(
+            identity(&selected),
+            identity(&reference),
+            "same SQL column error, missing guards={missing_guards}"
+        );
+    }
+}
+
+#[test]
+fn compact_selected_anchor_column_null_preserves_reference_error() {
+    check_selected_anchor_column_error("UPDATE mount_rs_metadata SET namespace=NULL WHERE id=1");
+}
+
+#[test]
+fn compact_selected_anchor_column_blob_preserves_reference_error() {
+    check_selected_anchor_column_error("UPDATE mount_rs_metadata SET namespace=X'7b7d' WHERE id=1");
+}
+
+#[test]
+fn compact_selected_anchor_column_invalid_utf8_preserves_reference_error() {
+    check_selected_anchor_column_error(
+        "UPDATE mount_rs_metadata SET namespace=CAST(X'80ff00' AS TEXT) WHERE id=1",
+    );
+}
+
 #[test]
 fn compact_mode_discovery_is_read_only_and_rejects_damaged_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -1423,4 +1610,205 @@ fn compact_enrollment_peer_transition_refuses_invalid_authority_without_mutation
         assert_eq!(raw(&f), before, "{damage}");
         println!("ENROLLMENT_REFUSAL {damage} terminal=1 raw_unchanged=1");
     }
+}
+
+#[test]
+#[ignore = "requires MOUNT_RS_PROFILE_IO=1 and serial profile stage ownership"]
+fn compact_profile_stages_account_for_selected_full_and_failed_decode() {
+    // Profiling is selected before this test process starts. Never mutate the
+    // process environment after the provider/global recorder has initialized.
+    assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("MOUNT_RS_TRACE_STORAGE").as_deref(), Ok("0"));
+    assert!(profile::enabled());
+
+    const ROWS: [&str; 10] = [
+        "sqlite.compact.authority_query",
+        "sqlite.compact.authority_path",
+        "sqlite.compact.anchor_query_bytes",
+        "sqlite.compact.anchor_decode_bytes",
+        "sqlite.compact.guard_selected_rows",
+        "sqlite.compact.guard_full_rows",
+        "sqlite.compact.guard_selected_decode_bytes",
+        "sqlite.compact.guard_full_decode_bytes",
+        "sqlite.compact.read_lock_wait",
+        "sqlite.compact.read_begin",
+    ];
+    fn metric(delta: &profile::Snapshot, name: &str) -> (u64, u64) {
+        delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| (entry.calls, entry.units))
+            .unwrap_or((0, 0))
+    }
+    fn assert_stage(
+        delta: &profile::Snapshot,
+        stage: &str,
+        anchor_bytes: u64,
+        selected: (u64, u64),
+        full: (u64, u64),
+    ) {
+        for name in [
+            "sqlite.compact.authority_query",
+            "sqlite.compact.authority_path",
+            "sqlite.compact.read_lock_wait",
+            "sqlite.compact.read_begin",
+        ] {
+            assert_eq!(metric(delta, name), (1, 0), "{stage}: {name}");
+        }
+        for name in [
+            "sqlite.compact.anchor_query_bytes",
+            "sqlite.compact.anchor_decode_bytes",
+        ] {
+            assert_eq!(metric(delta, name), (1, anchor_bytes), "{stage}: {name}");
+        }
+        assert_eq!(
+            metric(delta, "sqlite.compact.guard_selected_rows"),
+            (u64::from(selected.0 != 0), selected.0),
+            "{stage}: selected cursor rows"
+        );
+        assert_eq!(
+            metric(delta, "sqlite.compact.guard_full_rows"),
+            (u64::from(full.0 != 0), full.0),
+            "{stage}: full cursor rows"
+        );
+        assert_eq!(
+            metric(delta, "sqlite.compact.guard_selected_decode_bytes"),
+            selected,
+            "{stage}: attempted selected body decodes"
+        );
+        assert_eq!(
+            metric(delta, "sqlite.compact.guard_full_decode_bytes"),
+            full,
+            "{stage}: attempted full body decodes"
+        );
+    }
+    fn report_stage(delta: &profile::Snapshot, stage: &str) {
+        let rows: Vec<_> = ROWS
+            .iter()
+            .map(|name| {
+                let (calls, units) = metric(delta, name);
+                let elapsed_ns = delta
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == *name)
+                    .map(|entry| entry.elapsed_ns)
+                    .unwrap_or(0);
+                serde_json::json!({"name":name,"calls":calls,"units":units,"elapsed_ns":elapsed_ns})
+            })
+            .collect();
+        // Emit only fixed labels and numeric counters, after the data oracle.
+        println!(
+            "COMPACT_PROFILE_STAGE {}",
+            serde_json::json!({"stage":stage,"rows":rows})
+        );
+    }
+
+    let f = fixture(true);
+    let selected_inode = create(&f, "first");
+    create(&f, "second");
+    let original = raw(&f);
+    let selected_body = &original
+        .2
+        .iter()
+        .find(|row| row.0 == selected_inode.to_string())
+        .unwrap()
+        .4;
+    let anchor_bytes = original.1.len() as u64;
+    let selected_bytes = selected_body.len() as u64;
+    let full_rows = original.2.len() as u64;
+    let full_bytes = original.2.iter().map(|row| row.4.len() as u64).sum();
+    assert_eq!(full_rows, 3);
+
+    let before = profile::snapshot();
+    let loaded = run(f.store.load_compact_inode(f.backing, selected_inode)).unwrap();
+    let selected_delta = profile::snapshot().delta(&before).unwrap();
+    let expected: NodeMetadata = serde_json::from_str(selected_body).unwrap();
+    assert_eq!(loaded.guard.node, expected);
+    assert_eq!(loaded.generation, original.0);
+    assert_eq!(raw(&f), original, "selected read must not mutate SQLite");
+    assert_stage(
+        &selected_delta,
+        "selected",
+        anchor_bytes,
+        (1, selected_bytes),
+        (0, 0),
+    );
+    report_stage(&selected_delta, "selected");
+
+    let before = profile::snapshot();
+    let snapshot = run(f.store.load_compact_snapshot(f.backing)).unwrap();
+    let full_delta = profile::snapshot().delta(&before).unwrap();
+    assert_eq!(snapshot.guards.len() as u64, full_rows);
+    assert_eq!(snapshot.anchor.generation, original.0);
+    for (inode, incarnation, epoch, revision, body) in &original.2 {
+        let guard = &snapshot.guards[&inode.parse::<u64>().unwrap()];
+        assert_eq!(
+            guard.identity,
+            PhysicalInodeIdentity {
+                incarnation: *incarnation,
+                epoch: *epoch,
+                revision: *revision,
+            }
+        );
+        assert_eq!(
+            guard.node,
+            serde_json::from_str::<NodeMetadata>(body).unwrap()
+        );
+    }
+    assert_eq!(raw(&f), original, "full read must not mutate SQLite");
+    assert_stage(
+        &full_delta,
+        "full",
+        anchor_bytes,
+        (0, 0),
+        (full_rows, full_bytes),
+    );
+    report_stage(&full_delta, "full");
+
+    f.store
+        .0
+        .lock()
+        .unwrap()
+        .execute("UPDATE mount_rs_metadata SET namespace='{}' WHERE id=1", [])
+        .unwrap();
+    let damaged_anchor = raw(&f);
+    let before = profile::snapshot();
+    assert!(run(f.store.load_compact_inode(f.backing, selected_inode)).is_err());
+    let anchor_failure_delta = profile::snapshot().delta(&before).unwrap();
+    assert_eq!(raw(&f), damaged_anchor, "bad anchor must not be repaired");
+    assert_stage(&anchor_failure_delta, "invalid_anchor", 2, (0, 0), (0, 0));
+    report_stage(&anchor_failure_delta, "invalid_anchor");
+
+    f.store
+        .0
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE mount_rs_metadata SET namespace=?1 WHERE id=1",
+            [&original.1],
+        )
+        .unwrap();
+    f.store
+        .0
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE mount_rs_compact_guards SET node='{}' WHERE inode=?1",
+            [selected_inode.to_string()],
+        )
+        .unwrap();
+    let damaged_guard = raw(&f);
+    let before = profile::snapshot();
+    assert!(run(f.store.load_compact_inode(f.backing, selected_inode)).is_err());
+    let guard_failure_delta = profile::snapshot().delta(&before).unwrap();
+    assert_eq!(raw(&f), damaged_guard, "bad guard must not be repaired");
+    assert_stage(
+        &guard_failure_delta,
+        "invalid_selected_body",
+        anchor_bytes,
+        (1, 2),
+        (0, 0),
+    );
+    report_stage(&guard_failure_delta, "invalid_selected_body");
 }

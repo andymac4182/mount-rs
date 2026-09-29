@@ -2,6 +2,7 @@ import {
   STORAGE_BYTE_SEMANTICS, STORAGE_CALL_SEMANTICS, STORAGE_ROW_SEMANTICS,
   RUSTFS_API_MEASUREMENT, RUSTFS_LOCAL_MEASUREMENT,
   validateRawPhaseDiagnostics, validateLocalPhaseDiagnostics,
+  PROCESS_RESOURCE_MEASUREMENT,
 } from "./diagnostics.mjs"
 
 const SCHEMA = "mount-rs.owned-layout-phase-metrics.v1"
@@ -134,6 +135,28 @@ const CORE_NAMES = new Set([
   "filesystem.mutation.create_guard.revision_mismatch",
   "filesystem.mutation.create_guard.allocation_mismatch",
   "filesystem.mutation.create_guard.path_present",
+  "compact.namespace.materialize_nodes",
+  "filesystem.mutation.candidate_clone_nodes",
+  "compact.structure.delta_capture_nodes",
+  "compact.structure.expected_guard_nodes",
+  "sqlite.compact.authority_query",
+  "sqlite.compact.authority_path",
+  "sqlite.compact.anchor_query_bytes",
+  "sqlite.compact.anchor_decode_bytes",
+  "sqlite.compact.guard_selected_rows",
+  "sqlite.compact.guard_full_rows",
+  "sqlite.compact.guard_selected_decode_bytes",
+  "sqlite.compact.guard_full_decode_bytes",
+  "sqlite.compact.read_lock_wait",
+  "sqlite.compact.read_begin",
+  "filesystem.refresh.replace_probe",
+  "filesystem.refresh.create_capture",
+  "filesystem.refresh.batch_capture",
+  "filesystem.refresh.path_structure",
+  "filesystem.refresh.read_before",
+  "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ])
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
 const fields = (source, names) => Object.fromEntries(names.map((name) => [name, source[name]]))
@@ -191,9 +214,34 @@ function local(instance, measurement) {
 }
 function processMetrics(source) {
   try {
-    return { status: "observed", cpu_work: counters(source.cpu_work, ["user_us", "system_us"]), cpu_observer: counters(source.cpu_observer, ["user_us", "system_us"]), resources_work: counters(source.resources_work, ["voluntary_context_switches", "involuntary_context_switches"]), memory_end_bytes: counters(source.memory_end_bytes, ["rss", "heapTotal", "heapUsed", "external", "arrayBuffers"]),
+    const resourceFields = ["minor_page_faults", "major_page_faults", "filesystem_input_operations", "filesystem_output_operations"]
+    const memoryFields = ["rss", "heapTotal", "heapUsed", "external", "arrayBuffers"]
+    const optionalCounter = (value) => { try { return counter(value) } catch { return "unavailable" } }
+    const optionalCounters = (value, names) => Object.fromEntries(names.map((name) => [name, optionalCounter(value?.[name])]))
+    const metadata = source.resource_measurement
+    const recognized = object(metadata) && Object.keys(metadata).length === Object.keys(PROCESS_RESOURCE_MEASUREMENT).length &&
+      Object.entries(PROCESS_RESOURCE_MEASUREMENT).every(([key, value]) => metadata[key] === value)
+    const work = optionalCounters(recognized ? source.resources_work : null, resourceFields)
+    const observer = optionalCounters(recognized ? source.resources_observer : null, resourceFields)
+    const memoryStart = optionalCounters(recognized ? source.memory_start_bytes : null, memoryFields)
+    const memoryEnd = optionalCounters(source.memory_end_bytes, memoryFields)
+    const memoryDelta = Object.fromEntries(memoryFields.map((field) => {
+      const value = recognized ? source.memory_delta_bytes?.[field] : null
+      if (typeof value !== "string" || value.length > 21 || !/^(?:0|-?[1-9]\d*)$/u.test(value)) return [field, "unavailable"]
+      const number = BigInt(value)
+      if (number < -U64 || number > U64 || memoryStart[field] === "unavailable" || memoryEnd[field] === "unavailable" ||
+          number !== BigInt(memoryEnd[field]) - BigInt(memoryStart[field])) return [field, "unavailable"]
+      return [field, value]
+    }))
+    const peak = recognized && source.lifetime_peak_rss_bytes?.scope === PROCESS_RESOURCE_MEASUREMENT.peak_rss ? source.lifetime_peak_rss_bytes : null
+    const peakStart = optionalCounter(peak?.start), peakEnd = optionalCounter(peak?.end)
+    const lifetimePeak = { start: peakStart, end: peakStart !== "unavailable" && peakEnd !== "unavailable" && BigInt(peakEnd) >= BigInt(peakStart) ? peakEnd : "unavailable", scope: PROCESS_RESOURCE_MEASUREMENT.peak_rss }
+    return { status: "observed", cpu_work: counters(source.cpu_work, ["user_us", "system_us"]), cpu_observer: counters(source.cpu_observer, ["user_us", "system_us"]),
+      resources_work: { ...counters(source.resources_work, ["voluntary_context_switches", "involuntary_context_switches"]), ...work },
+      resources_observer: observer, memory_start_bytes: memoryStart, memory_end_bytes: memoryEnd, memory_delta_bytes: memoryDelta,
+      lifetime_peak_rss_bytes: lifetimePeak, resource_measurement: recognized ? { ...PROCESS_RESOURCE_MEASUREMENT } : "unavailable",
       native_allocation_count: "unavailable", js_allocation_count: "unavailable",
-      scope: "process_work_and_snapshot_cpu; includes_background_work; memory_is_endpoint_not_delta_or_peak" }
+      scope: "process_work_and_snapshot_cpu; includes_background_work; memory_endpoint_deltas_not_allocations; RSS_peak_process_lifetime; block_accounting_not_device_iops" }
   } catch { return { ...unavailable(), native_allocation_count: "unavailable", js_allocation_count: "unavailable" } }
 }
 function forwarding(native) {

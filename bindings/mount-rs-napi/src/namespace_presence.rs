@@ -27,7 +27,9 @@ fn parse_input(
     metadata: JsChunkedStoreOptions,
     blocks: JsChunkedStoreOptions,
 ) -> napi::Result<PresenceInput> {
-    if metadata.kind != "tidb"
+    if metadata.journal_mode.is_some()
+        || blocks.journal_mode.is_some()
+        || metadata.kind != "tidb"
         || blocks.kind != "rustfs"
         || metadata.lease_authority.is_some()
         || metadata.authority_prefix.is_some()
@@ -221,6 +223,7 @@ mod tests {
 
     fn stores() -> (JsChunkedStoreOptions, JsChunkedStoreOptions) {
         let metadata = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "tidb".into(),
             uri: Some("mysql://private-user:private-password@127.0.0.1:14000/storage".into()),
             key: Some("storage-benchmark/owned-a1/tidb-rustfs/metadata".into()),
@@ -234,6 +237,7 @@ mod tests {
             secret_access_key: None,
         };
         let blocks = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "rustfs".into(),
             uri: None,
             key: Some("storage-benchmark/owned-a1/tidb-rustfs/blocks".into()),

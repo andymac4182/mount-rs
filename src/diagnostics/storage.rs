@@ -104,8 +104,41 @@ pub enum Operation {
     FoundationDbReadGetRangePage,
     FoundationDbTransactionCommit,
     FoundationDbTransactionOnError,
+    BlobCacheMissAdmissionWait,
+    BlobCacheMissSingleflightWait,
+    BlobCacheRamLookup,
+    BlobCacheDiskLookup,
+    BlobCachePeerConnectionLockWait,
+    BlobCachePeerConnectionEstablish,
+    RemoteClientQuicOpenBi,
+    RemoteClientQuicRequestSend,
+    RemoteClientQuicResponseReceive,
+    BlobCachePeerRequestByteAdmissionWait,
+    BlobCachePeerOpenBi,
+    BlobCachePeerRequestSend,
+    BlobCachePeerResponseReceive,
+    BlobCachePeerGet,
+    BlobCachePeerGetMiss,
+    RemoteClientWebSocketTcpConnect,
+    RemoteClientWebSocketTlsHandshake,
+    RemoteClientWebSocketUpgrade,
+    RemoteClientWebSocketSocketLockWait,
+    RemoteClientWebSocketRequestEncode,
+    RemoteClientWebSocketRequestSend,
+    RemoteClientWebSocketResponseReceive,
+    RemoteClientWebSocketResponseDecode,
+    RemoteClientQuicConnectionSetup,
+    BlobCacheDiscoveryLocate,
+    ObjectStoreBackingMarkerProbeGet,
+    ObjectStoreBackingMarkerProbeBodyRead,
+    ObjectStoreBackingMarkerDataGet,
+    ObjectStoreBackingMarkerDataBodyRead,
+    ObjectStoreBackingMarkerProbeCreate,
+    ObjectStoreBackingMarkerRetryBackoff,
+    SdkMetadataCompactRootFileCapability,
+    SdkMetadataLoadCompactRootFile,
 }
-const NAMES: [&str; 85] = [
+const NAMES: [&str; 118] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -191,6 +224,39 @@ const NAMES: [&str; 85] = [
     "foundationdb.read.get_range_page",
     "foundationdb.transaction.commit",
     "foundationdb.transaction.on_error",
+    "blob_cache.miss.admission_wait",
+    "blob_cache.miss.singleflight_wait",
+    "blob_cache.ram.lookup",
+    "blob_cache.disk.lookup",
+    "blob_cache.peer.connection_lock_wait",
+    "blob_cache.peer.connection_establish",
+    "client.quic.open_bi",
+    "client.quic.request_send",
+    "client.quic.response_receive",
+    "blob_cache.peer.request_byte_admission_wait",
+    "blob_cache.peer.open_bi",
+    "blob_cache.peer.request_send",
+    "blob_cache.peer.response_receive",
+    "blob_cache.peer.get",
+    "blob_cache.peer.get_miss",
+    "client.websocket.tcp_connect",
+    "client.websocket.tls_handshake",
+    "client.websocket.upgrade",
+    "client.websocket.socket_lock_wait",
+    "client.websocket.request_encode",
+    "client.websocket.request_send",
+    "client.websocket.response_receive",
+    "client.websocket.response_decode",
+    "client.quic.connection_setup",
+    "blob_cache.discovery.locate",
+    "object_store.backing_marker.probe.get",
+    "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get",
+    "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create",
+    "object_store.backing_marker.retry_backoff",
+    "sdk.metadata.compact_root_file_capability",
+    "sdk.metadata.load_compact_root_file",
 ];
 
 /// Fixed serialized row order. Appended families have separate invocation semantics.
@@ -603,19 +669,47 @@ mod tests {
     #[test]
     fn slow_log_is_bounded_and_contains_only_fixed_fields() {
         let mut output = Vec::new();
-        for _ in 0..32 {
-            let _ = write_slow_record(
-                &mut output,
-                Operation::BlockPut,
-                Outcome::Error,
-                999_000_000,
-            );
+        let operations = [
+            Operation::BlockPut,
+            Operation::RemoteClientWebSocketTcpConnect,
+            Operation::RemoteClientWebSocketTlsHandshake,
+            Operation::RemoteClientWebSocketUpgrade,
+            Operation::RemoteClientWebSocketSocketLockWait,
+            Operation::RemoteClientWebSocketRequestEncode,
+            Operation::RemoteClientWebSocketRequestSend,
+            Operation::RemoteClientWebSocketResponseReceive,
+            Operation::RemoteClientWebSocketResponseDecode,
+            Operation::RemoteClientQuicConnectionSetup,
+            Operation::BlobCacheDiscoveryLocate,
+        ];
+        let names = [
+            "blocks.put",
+            "client.websocket.tcp_connect",
+            "client.websocket.tls_handshake",
+            "client.websocket.upgrade",
+            "client.websocket.socket_lock_wait",
+            "client.websocket.request_encode",
+            "client.websocket.request_send",
+            "client.websocket.response_receive",
+            "client.websocket.response_decode",
+            "client.quic.connection_setup",
+            "blob_cache.discovery.locate",
+        ];
+        for operation in operations.into_iter().cycle().take(32) {
+            let _ = write_slow_record(&mut output, operation, Outcome::Error, 999_000_000);
         }
         let log = String::from_utf8(output).unwrap();
         assert_eq!(log.lines().count(), MAX_SLOW_RECORDS as usize);
-        assert!(
-            log.lines()
-                .all(|line| line.contains("operation=blocks.put outcome=error"))
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            names
+                .into_iter()
+                .cycle()
+                .take(MAX_SLOW_RECORDS as usize)
+                .map(|name| format!(
+                    "MOUNT_RS_STORAGE_SLOW operation={name} outcome=error elapsed_us=999000"
+                ))
+                .collect::<Vec<_>>()
         );
     }
     #[test]
@@ -656,7 +750,7 @@ mod tests {
     #[test]
     fn fixed_names_match_appended_sdk_tidb_and_foundationdb_rows() {
         let names = operation_names();
-        assert_eq!(names.len(), 85);
+        assert_eq!(names.len(), 118);
         assert_eq!(
             names[Operation::SdkMetadataLoadIfChanged as usize],
             "sdk.metadata.load_if_changed"
@@ -672,7 +766,7 @@ mod tests {
         assert_eq!(Operation::FoundationDbTransactionCreate as usize, 78);
         assert_eq!(Operation::FoundationDbTransactionOnError as usize, 84);
         assert_eq!(
-            &names[78..],
+            &names[78..85],
             &[
                 "foundationdb.transaction.create",
                 "foundationdb.transaction.closure_attempt",
@@ -681,6 +775,121 @@ mod tests {
                 "foundationdb.read.get_range_page",
                 "foundationdb.transaction.commit",
                 "foundationdb.transaction.on_error",
+            ]
+        );
+        for (offset, operation) in [
+            Operation::BlobCacheMissAdmissionWait,
+            Operation::BlobCacheMissSingleflightWait,
+            Operation::BlobCacheRamLookup,
+            Operation::BlobCacheDiskLookup,
+            Operation::BlobCachePeerConnectionLockWait,
+            Operation::BlobCachePeerConnectionEstablish,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(operation as usize, 85 + offset);
+        }
+        assert_eq!(
+            &names[85..91],
+            &[
+                "blob_cache.miss.admission_wait",
+                "blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup",
+                "blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait",
+                "blob_cache.peer.connection_establish",
+            ]
+        );
+        assert_eq!(Operation::RemoteClientQuicOpenBi as usize, 91);
+        assert_eq!(names[91], "client.quic.open_bi");
+        for (offset, operation) in [
+            Operation::RemoteClientQuicRequestSend,
+            Operation::RemoteClientQuicResponseReceive,
+            Operation::BlobCachePeerRequestByteAdmissionWait,
+            Operation::BlobCachePeerOpenBi,
+            Operation::BlobCachePeerRequestSend,
+            Operation::BlobCachePeerResponseReceive,
+            Operation::BlobCachePeerGet,
+            Operation::BlobCachePeerGetMiss,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(operation as usize, 92 + offset);
+        }
+        assert_eq!(
+            &names[92..100],
+            &[
+                "client.quic.request_send",
+                "client.quic.response_receive",
+                "blob_cache.peer.request_byte_admission_wait",
+                "blob_cache.peer.open_bi",
+                "blob_cache.peer.request_send",
+                "blob_cache.peer.response_receive",
+                "blob_cache.peer.get",
+                "blob_cache.peer.get_miss",
+            ]
+        );
+        for (offset, operation) in [
+            Operation::RemoteClientWebSocketTcpConnect,
+            Operation::RemoteClientWebSocketTlsHandshake,
+            Operation::RemoteClientWebSocketUpgrade,
+            Operation::RemoteClientWebSocketSocketLockWait,
+            Operation::RemoteClientWebSocketRequestEncode,
+            Operation::RemoteClientWebSocketRequestSend,
+            Operation::RemoteClientWebSocketResponseReceive,
+            Operation::RemoteClientWebSocketResponseDecode,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(operation as usize, 100 + offset);
+        }
+        assert_eq!(
+            &names[100..108],
+            &[
+                "client.websocket.tcp_connect",
+                "client.websocket.tls_handshake",
+                "client.websocket.upgrade",
+                "client.websocket.socket_lock_wait",
+                "client.websocket.request_encode",
+                "client.websocket.request_send",
+                "client.websocket.response_receive",
+                "client.websocket.response_decode",
+            ]
+        );
+        assert_eq!(Operation::RemoteClientQuicConnectionSetup as usize, 108);
+        assert_eq!(Operation::BlobCacheDiscoveryLocate as usize, 109);
+        assert_eq!(
+            &names[108..110],
+            &[
+                "client.quic.connection_setup",
+                "blob_cache.discovery.locate"
+            ]
+        );
+        for (offset, operation) in [
+            Operation::ObjectStoreBackingMarkerProbeGet,
+            Operation::ObjectStoreBackingMarkerProbeBodyRead,
+            Operation::ObjectStoreBackingMarkerDataGet,
+            Operation::ObjectStoreBackingMarkerDataBodyRead,
+            Operation::ObjectStoreBackingMarkerProbeCreate,
+            Operation::ObjectStoreBackingMarkerRetryBackoff,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(operation as usize, 110 + offset);
+        }
+        assert_eq!(
+            &names[110..116],
+            &[
+                "object_store.backing_marker.probe.get",
+                "object_store.backing_marker.probe.body_read",
+                "object_store.backing_marker.data.get",
+                "object_store.backing_marker.data.body_read",
+                "object_store.backing_marker.probe.create",
+                "object_store.backing_marker.retry_backoff",
             ]
         );
         assert_eq!(

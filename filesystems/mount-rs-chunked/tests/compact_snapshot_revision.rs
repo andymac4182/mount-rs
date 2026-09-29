@@ -143,6 +143,14 @@ fn unchanged_compact_refresh_preserves_prepared_create() {
         "an unchanged snapshot must not force whole-file replay",
     );
     assert_eq!(committed, 1, "the prepared request must commit directly");
+    assert_eq!(
+        guard_delta(&before, &after, "filesystem.snapshot_nodes"),
+        (1, 1)
+    );
+    assert_eq!(
+        guard_delta(&before, &after, "sqlite.compact.guard_full_rows"),
+        (2, 2)
+    );
     assert_eq!(replies, 1, "the committed request must deliver its reply");
     assert_eq!(
         guard_delta(
@@ -189,7 +197,7 @@ fn unchanged_compact_refresh_preserves_prepared_create() {
 #[cfg(unix)]
 #[test]
 #[ignore = "requires MOUNT_RS_PROFILE_IO=1 and MOUNT_RS_TRACE_STORAGE=0"]
-fn peer_selected_inode_update_invalidates_prepared_create() {
+fn unrelated_peer_compact_update_rebases_prepared_create() {
     use async_trait::async_trait;
     use mount_rs_core::storage::{
         BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, MetadataStore,
@@ -323,7 +331,6 @@ fn peer_selected_inode_update_invalidates_prepared_create() {
                 .backing;
 
             blocks.pause.store(true, Ordering::SeqCst);
-            let before = profile::snapshot();
             let create = async {
                 creator
                     .write_file("/created", b"complete acknowledged bytes")
@@ -348,29 +355,12 @@ fn peer_selected_inode_update_invalidates_prepared_create() {
                     new.guards[&seed_inode].node, old.guards[&seed_inode].node,
                     "the persisted peer update must change the captured body",
                 );
+                let before = profile::snapshot();
                 blocks.resume.notify_one();
+                before
             };
-            futures_lite::future::zip(create, change).await;
+            let (_, before) = futures_lite::future::zip(create, change).await;
             let after = profile::snapshot();
-            let observed = |name| calls(&after, name) - calls(&before, name);
-            assert_eq!(observed("filesystem.mutation.request.conflict"), 1);
-            assert_eq!(observed("filesystem.gate_hold.whole_file_replay"), 1);
-            assert_eq!(observed("filesystem.gate_wait.whole_file_replay"), 1);
-            assert_eq!(observed("filesystem.mutation.request.committed"), 0);
-            assert_eq!(observed("filesystem.mutation.request.reply_sent"), 1);
-            assert_eq!(observed("filesystem.mutation.attempt_requests"), 1);
-            assert_eq!(observed("filesystem.mutation.attempt.no_publication"), 1);
-            for name in [
-                "filesystem.mutation.attempt.success",
-                "filesystem.mutation.attempt.conflict",
-                "filesystem.mutation.attempt.error",
-                "filesystem.mutation.attempt.cancelled",
-                "filesystem.mutation.request.error",
-                "filesystem.mutation.request.cancelled",
-                "filesystem.mutation.request.receiver_closed",
-            ] {
-                assert_eq!(observed(name), 0, "unexpected terminal outcome {name}");
-            }
 
             assert_file_bytes(&creator, "/seed", b"PEER0000").await;
             assert_file_bytes(&creator, "/created", b"complete acknowledged bytes").await;
@@ -395,6 +385,22 @@ fn peer_selected_inode_update_invalidates_prepared_create() {
             assert_file_bytes(&reopened, "/seed", b"PEER0000").await;
             assert_file_bytes(&reopened, "/created", b"complete acknowledged bytes").await;
             reopened.shutdown().await.unwrap();
+            let observed = |name| calls(&after, name) - calls(&before, name);
+            assert_eq!(observed("filesystem.mutation.request.conflict"), 0);
+            assert_eq!(observed("filesystem.gate_hold.whole_file_replay"), 0);
+            assert_eq!(observed("filesystem.gate_wait.whole_file_replay"), 0);
+            assert_eq!(observed("filesystem.mutation.request.committed"), 1);
+            assert_eq!(observed("filesystem.mutation.request.reply_sent"), 1);
+            assert_eq!(observed("filesystem.mutation.attempt_requests"), 1);
+            assert_eq!(observed("filesystem.mutation.attempt.no_publication"), 0);
+            assert_eq!(observed("filesystem.mutation.attempt.success"), 1);
+            for name in [
+                "filesystem.mutation.attempt.conflict",
+                "filesystem.mutation.attempt.error",
+                "filesystem.mutation.request.error",
+            ] {
+                assert_eq!(observed(name), 0, "unexpected outcome {name}");
+            }
             assert_eq!(
                 guard_delta(
                     &before,
@@ -405,11 +411,11 @@ fn peer_selected_inode_update_invalidates_prepared_create() {
             );
             assert_eq!(
                 guard_delta(&before, &after, "filesystem.mutation.create_guard.passed"),
-                (0, 0)
+                (1, 1)
             );
             assert_eq!(
                 guard_delta(&before, &after, "filesystem.mutation.create_guard.conflict"),
-                (1, 1)
+                (0, 0)
             );
             assert_eq!(
                 guard_delta(
@@ -417,7 +423,7 @@ fn peer_selected_inode_update_invalidates_prepared_create() {
                     &after,
                     "filesystem.mutation.create_guard.revision_mismatch"
                 ),
-                (1, 1)
+                (0, 0)
             );
             assert_eq!(
                 guard_delta(

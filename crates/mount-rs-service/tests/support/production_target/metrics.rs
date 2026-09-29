@@ -108,6 +108,10 @@ fn phase_delta(before: &Value, after: &Value) -> Result<Value, String> {
         value["storage"] =
             delta_entries(&before["storage"]["entries"], &after["storage"]["entries"])?;
     }
+    if before["runtime_activation"].is_object() || after["runtime_activation"].is_object() {
+        value["runtime_activation"] =
+            runtime_delta(&before["runtime_activation"], &after["runtime_activation"])?;
+    }
     let mut process = Map::new();
     for field in [
         "cpu_user_us",
@@ -282,25 +286,62 @@ pub fn publish_immutable(path: &Path, value: &Value) -> Result<(), String> {
     result.map(|_| ())
 }
 fn publish_immutable_inner(path: &Path, value: &Value) -> Result<u64, String> {
-    let bytes = serde_json::to_vec(value).map_err(|_| "metric encoding failed")?;
     let pending = path.with_extension(format!("pending-{}", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&pending)
         .map_err(|_| "metric pending file already exists or unavailable")?;
-    let result: Result<(), String> = (|| {
-        file.write_all(&bytes).map_err(|_| "metric write failed")?;
+    let result: Result<u64, String> = (|| {
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        serde_json::to_writer(&mut encoder, value).map_err(|_| "metric encoding failed")?;
+        let mut file = encoder
+            .finish()
+            .map_err(|_| "metric compression finish failed")?;
         file.flush().map_err(|_| "metric flush failed")?;
+        let bytes = file.metadata().map_err(|_| "metric metadata failed")?.len();
+        if bytes > ENCODED_METRIC_LIMIT {
+            return Err("encoded metric limit exceeded".into());
+        }
+        drop(file);
         std::fs::hard_link(&pending, path)
             .map_err(|_| "immutable metric receipt exists or publication failed")?;
-        Ok(())
+        Ok(bytes)
     })();
-    drop(file);
     let removed = std::fs::remove_file(&pending);
-    let result =
-        result.and_then(|()| removed.map_err(|_| "metric pending cleanup failed".to_string()));
-    result.map(|()| bytes.len() as u64)
+    result.and_then(|bytes| {
+        removed
+            .map_err(|_| "metric pending cleanup failed".to_string())
+            .map(|()| bytes)
+    })
+}
+pub(crate) const ENCODED_METRIC_LIMIT: u64 = 16 * 1024 * 1024;
+pub(crate) const DECODED_METRIC_LIMIT: u64 = 64 * 1024 * 1024;
+pub(crate) fn read_compressed(path: &Path) -> Result<Value, String> {
+    use std::io::{BufRead, BufReader, Read};
+    let file = std::fs::File::open(path).map_err(|_| "metric receipt unavailable")?;
+    if file.metadata().map_err(|_| "metric metadata failed")?.len() > ENCODED_METRIC_LIMIT {
+        return Err("encoded metric limit exceeded".into());
+    }
+    let mut decoder = flate2::bufread::GzDecoder::new(BufReader::new(file));
+    let mut bytes = Vec::new();
+    decoder
+        .by_ref()
+        .take(DECODED_METRIC_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "compressed metric invalid")?;
+    if bytes.len() as u64 > DECODED_METRIC_LIMIT {
+        return Err("decoded metric limit exceeded".into());
+    }
+    if !decoder
+        .into_inner()
+        .fill_buf()
+        .map_err(|_| "metric trailing input unavailable")?
+        .is_empty()
+    {
+        return Err("compressed metric trailing input".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "metric receipt invalid".into())
 }
 const CATEGORIES: [&str; 21] = [
     "context_open",
@@ -453,6 +494,499 @@ pub fn identity(
 ) -> Value {
     json!({"pid":pid,"role":if server.is_some(){"worker"}else{"controller"},"server":server,"controller_pid":private.parent_pid,"generation":generation,"sequence":sequence,"phase":phase,"boundary":boundary,"source_digest":private.source_digest,"binary_digest":private.binary_digest,"catalog_digest":private.catalog_digest,"backend_prefix":private.backend.prefix})
 }
+// Runtime evidence is local observer state, distinct from close acknowledgments.
+const RUNTIME_POOL_FIELDS: [&str; 13] = [
+    "registered",
+    "resident",
+    "opening",
+    "ready",
+    "closing",
+    "quarantined",
+    "pinned",
+    "open_success",
+    "open_error",
+    "eviction_success",
+    "eviction_error",
+    "waits",
+    "capacity_rejections",
+];
+const RUNTIME_ROWS: [&str; 8] = [
+    "runtime.acquire",
+    "runtime.activation_wait",
+    "runtime.open",
+    "runtime.eviction_shutdown",
+    "runtime.terminal_drain",
+    "runtime.handle_close",
+    "runtime.state_mutex_wait",
+    "runtime.state_mutex_hold",
+];
+fn closed_keys(value: &Value, keys: &[&str]) -> Result<(), String> {
+    let object = value.as_object().ok_or("runtime evidence object missing")?;
+    if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+        return Err("runtime evidence fields changed".into());
+    }
+    Ok(())
+}
+fn runtime_integer(value: &Value) -> Result<u64, String> {
+    value
+        .as_u64()
+        .ok_or_else(|| "runtime evidence integer invalid".into())
+}
+fn runtime_hex(value: &Value) -> Result<&str, String> {
+    let value = value.as_str().ok_or("runtime backing ID missing")?;
+    let parsed = mount_rs_core::storage::ConcurrentBackingId::from_hex(value)
+        .map_err(|_| "runtime backing ID invalid")?;
+    if parsed.to_hex() != value || value == "00000000000000000000000000000000" {
+        return Err("runtime backing ID noncanonical".into());
+    }
+    Ok(value)
+}
+/// Validate exact shape and identity. False means valid incomplete observation;
+/// it never authorizes shutdown, eviction, context close, or a new generation.
+pub(super) fn validate_runtime_snapshot(
+    value: &Value,
+    generation: u64,
+    drives: usize,
+    expected: &[String],
+) -> Result<bool, String> {
+    closed_keys(
+        value,
+        &[
+            "schema",
+            "generation",
+            "capacity",
+            "available",
+            "complete",
+            "pool",
+            "diagnostics",
+            "observations",
+        ],
+    )?;
+    if drives == 0
+        || drives > 10_000
+        || expected.len() != drives
+        || value["schema"] != "mount-rs.target-runtime.v1"
+        || runtime_integer(&value["generation"])? != generation
+        || runtime_integer(&value["capacity"])? != drives as u64
+    {
+        return Err("runtime evidence identity mismatch".into());
+    }
+    let available = value["available"]
+        .as_bool()
+        .ok_or("runtime availability invalid")?;
+    let declared_complete = value["complete"]
+        .as_bool()
+        .ok_or("runtime completeness invalid")?;
+    let pool = &value["pool"];
+    closed_keys(pool, &RUNTIME_POOL_FIELDS)?;
+    for field in RUNTIME_POOL_FIELDS {
+        runtime_integer(&pool[field])?;
+    }
+    let rows = value["observations"]
+        .as_array()
+        .ok_or("runtime observations missing")?;
+    if rows.len() != drives {
+        return Err("runtime observation geometry mismatch".into());
+    }
+    let mut constructed = 0_u64;
+    let mut coherent = true;
+    for (drive, (row, expected)) in rows.iter().zip(expected).enumerate() {
+        closed_keys(
+            row,
+            &[
+                "drive",
+                "expected_backing",
+                "observed_backing",
+                "constructed",
+            ],
+        )?;
+        if runtime_integer(&row["drive"])? != drive as u64
+            || runtime_hex(&row["expected_backing"])? != expected.as_str()
+            || runtime_hex(&json!(expected))? != expected.as_str()
+        {
+            return Err("runtime observation backing mismatch".into());
+        }
+        let count = runtime_integer(&row["constructed"])?;
+        if count == 0 {
+            if !row["observed_backing"].is_null() {
+                return Err("cold runtime claims backing observation".into());
+            }
+        } else if runtime_hex(&row["observed_backing"])? != expected.as_str() {
+            return Err("actual runtime backing mismatch".into());
+        }
+        coherent &= count <= 1;
+        constructed = constructed
+            .checked_add(count)
+            .ok_or("runtime construction count overflow")?;
+    }
+    coherent &= pool["registered"] == drives as u64
+        && runtime_integer(&pool["resident"])? <= drives as u64
+        && pool["open_success"] == constructed
+        && [
+            "opening",
+            "closing",
+            "quarantined",
+            "pinned",
+            "open_error",
+            "eviction_error",
+            "eviction_success",
+        ]
+        .iter()
+        .all(|field| pool[*field] == 0);
+    if available {
+        let diagnostics = &value["diagnostics"];
+        closed_keys(
+            diagnostics,
+            &[
+                "scope",
+                "sampling_scope",
+                "histogram_scope",
+                "deferred_scope",
+                "inclusive_spans_overlap",
+                "concurrent_activity",
+                "counter_saturated",
+                "slow_record_attempts",
+                "entries",
+            ],
+        )?;
+        for (field, expected) in [
+            ("scope", "process_local_preconstructed_runtime_observer"),
+            (
+                "sampling_scope",
+                "serial_atomic_loads_not_transactional_or_drain_proof",
+            ),
+            (
+                "histogram_scope",
+                "inclusive_wall_time_log2_microseconds_32_buckets",
+            ),
+            (
+                "deferred_scope",
+                "deferred_spans_enter_only_on_post_unlock_publication",
+            ),
+        ] {
+            if diagnostics[field] != expected {
+                return Err("runtime diagnostic scope mismatch".into());
+            }
+        }
+        if diagnostics["inclusive_spans_overlap"] != true {
+            return Err("runtime diagnostic overlap missing".into());
+        }
+        let concurrent = diagnostics["concurrent_activity"]
+            .as_bool()
+            .ok_or("runtime concurrency missing")?;
+        let saturated = diagnostics["counter_saturated"]
+            .as_bool()
+            .ok_or("runtime saturation missing")?;
+        runtime_integer(&diagnostics["slow_record_attempts"])?;
+        coherent &= !concurrent && !saturated;
+        let entries = diagnostics["entries"]
+            .as_array()
+            .ok_or("runtime diagnostic rows missing")?;
+        if entries.len() != RUNTIME_ROWS.len() {
+            return Err("runtime diagnostic inventory changed".into());
+        }
+        for (row, name) in entries.iter().zip(RUNTIME_ROWS) {
+            closed_keys(
+                row,
+                &[
+                    "name",
+                    "calls",
+                    "success",
+                    "error",
+                    "cancelled",
+                    "in_flight",
+                    "elapsed_ns",
+                    "max_elapsed_ns",
+                    "latency_log2_us",
+                ],
+            )?;
+            if row["name"] != name {
+                return Err("runtime diagnostic row changed".into());
+            }
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "in_flight",
+                "elapsed_ns",
+                "max_elapsed_ns",
+            ] {
+                runtime_integer(&row[field])?;
+            }
+            let histogram = row["latency_log2_us"]
+                .as_array()
+                .ok_or("runtime histogram missing")?;
+            if histogram.len() != 32 {
+                return Err("runtime histogram shape changed".into());
+            }
+            let mut histogram_sum = Some(0_u64);
+            for bucket in histogram {
+                let count = runtime_integer(bucket)?;
+                histogram_sum = histogram_sum.and_then(|sum| sum.checked_add(count));
+            }
+            let outcomes = runtime_integer(&row["success"])?
+                .checked_add(runtime_integer(&row["error"])?)
+                .and_then(|sum| sum.checked_add(row["cancelled"].as_u64().unwrap()));
+            coherent &= outcomes
+                .and_then(|sum| sum.checked_add(row["in_flight"].as_u64().unwrap()))
+                == row["calls"].as_u64()
+                && outcomes == histogram_sum
+                && row["in_flight"] == 0
+                && runtime_integer(&row["max_elapsed_ns"])? <= runtime_integer(&row["elapsed_ns"])?;
+        }
+    } else if !value["diagnostics"].is_null() {
+        return Err("unavailable runtime claims diagnostics".into());
+    }
+    let calculated_complete = available && coherent;
+    if declared_complete && !calculated_complete {
+        return Err("runtime completeness contradicts actual observation".into());
+    }
+    Ok(declared_complete && calculated_complete)
+}
+fn runtime_expected(value: &Value) -> Result<Vec<String>, String> {
+    value["observations"]
+        .as_array()
+        .ok_or("runtime observations missing")?
+        .iter()
+        .map(|row| runtime_hex(&row["expected_backing"]).map(str::to_owned))
+        .collect()
+}
+fn runtime_delta(before: &Value, after: &Value) -> Result<Value, String> {
+    if before["schema"] != after["schema"]
+        || before["generation"] != after["generation"]
+        || before["capacity"] != after["capacity"]
+        || runtime_expected(before)? != runtime_expected(after)?
+    {
+        return Err("runtime delta identity changed".into());
+    }
+    let mut pool = Map::new();
+    for field in RUNTIME_POOL_FIELDS {
+        let value = if [
+            "registered",
+            "resident",
+            "opening",
+            "ready",
+            "closing",
+            "quarantined",
+            "pinned",
+        ]
+        .contains(&field)
+        {
+            json!({"before":before["pool"][field],"after":after["pool"][field],"scope":"gauge; not subtracted"})
+        } else {
+            subtract(&before["pool"][field], &after["pool"][field])?
+        };
+        pool.insert(field.into(), value);
+    }
+    let diagnostics = match (before["available"].as_bool(), after["available"].as_bool()) {
+        (Some(true), Some(true)) => {
+            json!({"entries":delta_entries(&before["diagnostics"]["entries"], &after["diagnostics"]["entries"])?})
+        }
+        (Some(false), Some(false)) => Value::Null,
+        _ => return Err("runtime diagnostic coverage changed".into()),
+    };
+    let a = before["observations"]
+        .as_array()
+        .ok_or("runtime observations missing")?;
+    let b = after["observations"]
+        .as_array()
+        .ok_or("runtime observations missing")?;
+    if a.len() != b.len() {
+        return Err("runtime observations changed".into());
+    }
+    let observations = a.iter().zip(b).map(|(a,b)| {
+        if a["drive"] != b["drive"] || a["expected_backing"] != b["expected_backing"]
+            || (!a["observed_backing"].is_null() && a["observed_backing"] != b["observed_backing"]) {
+            return Err("runtime observation identity changed".into());
+        }
+        Ok(json!({"drive":b["drive"],"constructed":subtract(&a["constructed"],&b["constructed"])?,"observed_backing":{"before":a["observed_backing"],"after":b["observed_backing"],"scope":"captured-at-construction identity; not fresh inspection"}}))
+    }).collect::<Result<Vec<_>,String>>()?;
+    Ok(
+        json!({"pool":pool,"diagnostics":diagnostics,"observations":observations,"scope":"same owned generation; inclusive local counters and endpoint gauges; not a drain proof"}),
+    )
+}
+fn validate_worker_runtime(value: &Value, expected: &[String]) -> Result<bool, String> {
+    validate_runtime_snapshot(
+        &value["runtime_activation"],
+        runtime_integer(&value["identity"]["generation"])?,
+        expected.len(),
+        expected,
+    )
+}
+fn runtime_assignment(generation: u64, drive: usize) -> Result<usize, String> {
+    let offset = match generation {
+        0 | 1 => 0,
+        generation if generation <= super::SERVERS as u64 + 1 => {
+            ((generation - 1) % super::SERVERS as u64) as usize
+        }
+        _ => return Err("runtime assignment generation outside fixture proof".into()),
+    };
+    Ok((drive % super::SERVERS + offset) % super::SERVERS)
+}
+fn runtime_boundary(
+    value: &Value,
+    expected: &[String],
+    phase: &str,
+    boundary: &str,
+    server: usize,
+) -> Result<(), String> {
+    if !validate_worker_runtime(value, expected)? {
+        return Err("runtime boundary observation incomplete".into());
+    }
+    let generation = runtime_integer(&value["identity"]["generation"])?;
+    if server >= super::SERVERS {
+        return Err("runtime boundary server outside fixture proof".into());
+    }
+    // g0 populates assigned Drives; g1 measures those assignments. Generations
+    // g2..=g11 separately prove every cross-server pair after timed traffic.
+    runtime_assignment(generation, 0)?;
+    let cold = matches!(
+        (generation, phase, boundary),
+        (_, "worker_startup", "ready")
+            | (_, "worker_setup", "after_ready")
+            | (_, "refresh_replicas", "after_ready")
+            | (0, "online_namespace", "before")
+            | (1, "routes_and_scope", "before" | "after")
+            | (1, "assigned_warmup", "before")
+    ) || (generation >= 2 && phase == "crossnode_routes" && boundary == "after_ready");
+    let mut wanted = 0_u64;
+    let observations = value["runtime_activation"]["observations"]
+        .as_array()
+        .ok_or("runtime observations missing")?;
+    for (drive, observation) in observations.iter().enumerate() {
+        let selected = !cold && runtime_assignment(generation, drive)? == server;
+        wanted += u64::from(selected);
+        if observation["constructed"] != u64::from(selected) {
+            return Err("runtime boundary selected Drive mismatch".into());
+        }
+    }
+    let pool = &value["runtime_activation"]["pool"];
+    if pool["open_success"] != wanted || pool["resident"] != wanted || pool["ready"] != wanted {
+        return Err("runtime boundary activation geometry mismatch".into());
+    }
+    Ok(())
+}
+fn runtime_closed_boundary(
+    value: &Value,
+    expected: &[String],
+    server: usize,
+) -> Result<bool, String> {
+    let complete = validate_worker_runtime(value, expected)?;
+    let generation = runtime_integer(&value["identity"]["generation"])?;
+    let observations = value["runtime_activation"]["observations"]
+        .as_array()
+        .ok_or("runtime observations missing")?;
+    if server >= super::SERVERS {
+        return Err("closed runtime server outside fixture proof".into());
+    }
+    runtime_assignment(generation, 0)?;
+    let mut wanted = 0_u64;
+    for (drive, observation) in observations.iter().enumerate() {
+        let selected = runtime_assignment(generation, drive)? == server;
+        wanted += u64::from(selected);
+        if observation["constructed"] != u64::from(selected) {
+            return Err("closed runtime selected Drive mismatch".into());
+        }
+    }
+    Ok(complete
+        && value["runtime_activation"]["pool"]["open_success"] == wanted
+        && [
+            "resident",
+            "opening",
+            "ready",
+            "closing",
+            "quarantined",
+            "pinned",
+        ]
+        .iter()
+        .all(|field| value["runtime_activation"]["pool"][*field] == 0))
+}
+#[cfg(test)]
+pub(super) fn example_runtime(generation: u64, drives: usize) -> Value {
+    let mut pool = Map::new();
+    for field in RUNTIME_POOL_FIELDS {
+        pool.insert(
+            field.into(),
+            json!(if field == "registered" {
+                drives as u64
+            } else {
+                0
+            }),
+        );
+    }
+    json!({"schema":"mount-rs.target-runtime.v1","generation":generation,"capacity":drives,"available":false,"complete":false,"pool":pool,"diagnostics":null,"observations":(0..drives).map(|drive|json!({"drive":drive,"expected_backing":format!("{:032x}",drive+1),"observed_backing":null,"constructed":0})).collect::<Vec<_>>()})
+}
+
+type ObjectStoreSnapshot = mount_rs_core::diagnostics::object_store::Snapshot;
+struct ObjectStoreCapture<'a> {
+    enabled: bool,
+    snapshot: &'a mut dyn FnMut() -> Option<ObjectStoreSnapshot>,
+}
+const OBJECT_STORE_SCOPE: &str = "process cumulative RustFS service dispatch/body and generic adapter cache observations; bounded records from one fixed snapshot; not exact wire requests, physical IOPS, transactional cut or provider/socket drain acknowledgment";
+fn object_store_identity(
+    identity: &Value,
+    started: u64,
+) -> Result<mount_rs_service::object_store_diagnostics::Capture, String> {
+    use mount_rs_service::object_store_diagnostics::{Capture, CaptureContext};
+    Ok(Capture {
+        pid: identity["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .ok_or("object-store boundary PID missing or invalid")?,
+        sequence: identity["sequence"]
+            .as_u64()
+            .ok_or("object-store boundary sequence missing or invalid")?,
+        observed_unix_ms: started,
+        // This context covers every owned fixture process boundary. Outer role
+        // remains authoritative, including real controller SDK/provider setup.
+        context: CaptureContext::WorkerBoundary,
+        generation: Some(
+            identity["generation"]
+                .as_u64()
+                .ok_or("object-store boundary generation missing or invalid")?,
+        ),
+    })
+}
+fn object_store_records(
+    enabled: bool,
+    identity: &Value,
+    started: u64,
+    snapshot: impl FnOnce() -> Option<ObjectStoreSnapshot>,
+) -> Result<Value, String> {
+    use mount_rs_service::object_store_diagnostics as codec;
+    let absent = |status, reason| json!({"enabled":enabled,"available":false,"complete":false,"status":status,"reason":reason,"records":[],"scope":OBJECT_STORE_SCOPE});
+    if !enabled {
+        // No callback, capture validation, encoded frame or synthetic zero bank.
+        return Ok(absent("disabled", "object-store profiling disabled"));
+    }
+    let Some(sample) = codec::capture(true, object_store_identity(identity, started)?, snapshot)
+        .map_err(|_| "object-store boundary capture invalid")?
+    else {
+        return Ok(absent("unavailable", "object-store observer unavailable"));
+    };
+    let mut bytes = Vec::new();
+    sample
+        .write(&mut bytes)
+        .map_err(|_| "object-store bounded record encoding failed")?;
+    let text = String::from_utf8(bytes).map_err(|_| "object-store record encoding invalid")?;
+    let records: Vec<_> = text.split_inclusive('\n').map(str::to_owned).collect();
+    if records.len() != codec::FRAME_COUNT
+        || records.iter().any(|record| {
+            record.len() > codec::RECORD_LIMIT
+                || !record.as_bytes().starts_with(codec::PREFIX)
+                || !record.ends_with('\n')
+        })
+    {
+        return Err("object-store bounded record set invalid".into());
+    }
+    // Export allocations are inside the existing local capture envelope and
+    // outside allocation-free fixed-bank update claims. No second capture.
+    Ok(
+        json!({"enabled":true,"available":true,"complete":false,"status":"observed","records":records,"scope":OBJECT_STORE_SCOPE}),
+    )
+}
+
 pub struct Local {
     baseline: Option<super::resource_profile::Snapshot>,
     previous_process: Option<super::resource_profile::Snapshot>,
@@ -483,7 +1017,23 @@ impl Local {
         oracle: Value,
     ) -> Result<Value, String> {
         let span = observer().begin("metric_capture");
-        let result = self.capture_inner(identity, service, oracle);
+        let result = self.capture_inner(identity, service, oracle, None, None);
+        span.finish(result.is_ok(), 0);
+        result
+    }
+    pub fn capture_with_runtime<F>(
+        &mut self,
+        identity: Value,
+        service: Option<&mount_rs_service::server::ServerDiagnostics>,
+        mut runtime: F,
+    ) -> Result<Value, String>
+    where
+        F: FnMut() -> mount_rs_core::Result<Value>,
+    {
+        let span = observer().begin("metric_capture");
+        let mut capture =
+            || runtime().map_err(|_| "runtime metric capture unavailable".to_string());
+        let result = self.capture_inner(identity, service, Value::Null, Some(&mut capture), None);
         span.finish(result.is_ok(), 0);
         result
     }
@@ -492,9 +1042,28 @@ impl Local {
         identity: Value,
         service: Option<&mount_rs_service::server::ServerDiagnostics>,
         oracle: Value,
+        runtime: Option<&mut dyn FnMut() -> Result<Value, String>>,
+        object_store: Option<ObjectStoreCapture<'_>>,
     ) -> Result<Value, String> {
         let start = Instant::now();
         let started = super::utc_ms();
+        // One snapshot and its seven bounded records belong to this same
+        // boundary/allowance. The private override supports isolated controls;
+        // existing public paths always use the actual process bank.
+        let object_store = match object_store {
+            Some(capture) => {
+                object_store_records(capture.enabled, &identity, started, capture.snapshot)?
+            }
+            None => {
+                let observer = mount_rs_core::diagnostics::object_store::Observer::enabled();
+                object_store_records(observer.is_enabled(), &identity, started, || {
+                    observer.snapshot()
+                })?
+            }
+        };
+        // Include the bounded runtime snapshot in the existing capture allowance
+        // and observer category; no added sampler or deadline is created.
+        let runtime = runtime.map(|capture| capture()).transpose()?;
         let enabled = mount_rs_core::diagnostics::profile::enabled();
         let service_before =
             service.map(|observer| serde_json::to_value(observer.snapshot()).unwrap());
@@ -560,16 +1129,35 @@ impl Local {
         });
         let storage_quiescent = storage.as_ref().is_some_and(|s| s["in_flight"] == 0);
         let quiescent = application_quiescent && storage_quiescent;
+        let runtime_complete = if worker {
+            match runtime.as_ref() {
+                Some(value) => validate_runtime_snapshot(
+                    value,
+                    identity["generation"]
+                        .as_u64()
+                        .ok_or("runtime generation missing")?,
+                    value["capacity"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or("runtime capacity missing")?,
+                    &runtime_expected(value)?,
+                )?,
+                None => false,
+            }
+        } else {
+            true
+        };
         let accounting_complete =
             observer().complete() && (oracle.is_null() || oracle["_status"]["complete"] == true);
         let elapsed = start.elapsed();
         let mut value = json!({"schema":"mount-rs-phase-metrics-v1","identity":identity,"enabled":enabled,
             "capture_started_unix_ms":started,"capture_ended_unix_ms":super::utc_ms(),"capture_elapsed_ns":elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,"process_observation_elapsed_seconds":self.started.elapsed().as_secs_f64(),
-            "capture_complete":!enabled || elapsed<=Duration::from_secs(30),"metrics_complete":enabled && quiescent && accounting_complete && elapsed<=Duration::from_secs(30),"accounting_complete":accounting_complete,
+            "capture_complete":!enabled || elapsed<=Duration::from_secs(30),"metrics_complete":enabled && quiescent && accounting_complete && runtime_complete && elapsed<=Duration::from_secs(30),"accounting_complete":accounting_complete,
             "quiescence":{"controller_work_drained":true,"service_observed":service.is_some(),"application_quiescent":application_quiescent,"instrumented_storage_in_flight_zero":storage_quiescent,"scope":"owned controller work drained; only instrumented service/storage activity observed; no global atomic cut or proof of all provider/background work"},
-            "core":core,"storage":storage,"process_since_baseline":process,"process_since_previous_boundary":process_interval,"server_quic":service,"server_quic_before_local_capture":service_envelope,"oracle":oracle,
-            "coverage":{"core":family_state(enabled,true,true,quiescent),"storage":family_state(enabled,true,true,quiescent),"process":family_state(enabled,true,true,true),
+            "object_store_observation":object_store,"core":core,"storage":storage,"process_since_baseline":process,"process_since_previous_boundary":process_interval,"server_quic":service,"server_quic_before_local_capture":service_envelope,"oracle":oracle,"runtime_activation":runtime,
+            "coverage":{"object_store_observation":json!({"enabled":object_store["enabled"],"configured":true,"available":object_store["available"],"complete":false,"status":if object_store["available"]==true{"partial"}else if object_store["enabled"]==true{"unavailable"}else{"disabled"},"scope":OBJECT_STORE_SCOPE}),"core":family_state(enabled,true,true,quiescent),"storage":family_state(enabled,true,true,quiescent),"process":family_state(enabled,true,true,true),
                 "server_quic":family_state(enabled,worker,service.is_some(),quiescent),
+                "runtime_activation":family_state(enabled,worker,runtime.as_ref().is_some_and(|value| value["available"]==true),runtime_complete),
                 "catalog_pager_core":{"status":if enabled{"partial"}else{"disabled"},"available":enabled,"scope":"catalog pager hit/miss/write/unavailable core rows retained; not all SQLite connections"},
                 "sqlite_cache_sql":{"enabled":enabled,"configured":true,"complete":false,"status":"unavailable","available":false,"reason":"live registry requires connection locks/PRAGMA; no independent blocking observer owner in this collector"},
                 "blob_cache":{"enabled":enabled,"configured":false,"complete":false,"status":"not_configured","available":false},
@@ -620,6 +1208,7 @@ impl Collector {
         fleet: &super::process::Fleet,
         deadline: Instant,
     ) -> Result<(), String> {
+        let runtime_expected = fleet.initialized_backings()?;
         let base = self
             .local
             .previous
@@ -650,19 +1239,25 @@ impl Collector {
             id["sequence"] = json!(self.sequence + 1);
             id["phase"] = json!("worker_cleanup");
             id["boundary"] = json!("terminal");
-            let path = child.root.join("metrics/terminal.json");
+            let path = child.root.join("metrics/terminal.json.gz");
             match super::read_json(&path) {
                 Ok(value) => {
                     let valid = validate_receipt(&value["identity"], &id);
-                    let complete =
-                        valid.is_ok() && value["capture_complete"] == true && child.reaped;
+                    let runtime_complete =
+                        runtime_closed_boundary(&value, runtime_expected, child.server)?;
+                    let runtime_closed = runtime_complete;
+                    let complete = valid.is_ok()
+                        && value["capture_complete"] == true
+                        && runtime_complete
+                        && runtime_closed
+                        && child.reaped;
                     let terminal = super::read_json(&child.root.join("terminal.json"))?;
                     let accounting_complete =
                         terminal["observer_accounting"]["_status"]["complete"] == true;
                     self.complete &= complete && accounting_complete;
                     identities.push(value["identity"].clone());
                     expected.push(id);
-                    rows.push(json!({"server":child.server,"pid":child.child.id(),"file":format!("worker-{}/metrics/terminal.json",child.server),"sha256":super::file_digest(&path)?,"complete":complete,"metrics_complete":value["metrics_complete"]==true && accounting_complete,"observer_accounting_complete":accounting_complete,"identity_error":valid.err()}));
+                    rows.push(json!({"server":child.server,"pid":child.child.id(),"file":format!("worker-{}/metrics/terminal.json.gz",child.server),"sha256":super::file_digest(&path)?,"complete":complete,"metrics_complete":value["metrics_complete"]==true && accounting_complete,"observer_accounting_complete":accounting_complete,"identity_error":valid.err()}));
                 }
                 Err(error) => {
                     self.complete = false;
@@ -708,12 +1303,12 @@ impl Collector {
         id["phase"] = json!("controller_cleanup");
         id["boundary"] = json!("terminal");
         let value = self.local.capture(id, None, oracle)?;
-        let path = output.join("metrics/terminal.json");
+        let path = output.join("metrics/terminal.json.gz");
         publish_immutable(&path, &value)?;
         let complete = Instant::now() <= deadline && value["capture_complete"] == true;
         let metrics_complete = complete && value["metrics_complete"] == true;
         self.complete &= metrics_complete;
-        self.records.push(json!({"phase":"controller_cleanup","boundary":"terminal","complete":complete,"controller":{"file":"metrics/terminal.json","sha256":super::file_digest(&path)?},"metrics_complete":metrics_complete,"scope":"after cleanup; worker terminal observations retained separately; existing audit observation deadline"}));
+        self.records.push(json!({"phase":"controller_cleanup","boundary":"terminal","complete":complete,"controller":{"file":"metrics/terminal.json.gz","sha256":super::file_digest(&path)?},"metrics_complete":metrics_complete,"scope":"after cleanup; worker terminal observations retained separately; existing audit observation deadline"}));
         if Instant::now() > deadline {
             self.complete = false;
             if let Some(record) = self.records.last_mut() {
@@ -735,7 +1330,7 @@ impl Collector {
                 .all(|r| r["complete"] == true && r["metrics_complete"] == true)
     }
     pub fn summary(&self) -> Value {
-        json!({"enabled":mount_rs_core::diagnostics::profile::enabled(),"metrics_complete":self.qualified(),"boundaries":self.records,"observer":observer().snapshot(),"coverage":"fixed process-local boundaries; metrics_complete covers required core/storage/process/service observations only; no complete physical/HTTP/cache coverage claim","coverage_complete":false,"required_families":["core","storage","process","service_quiescence","server_quic"],"known_unavailable_families":["sqlite_live_cache_sql","direct_sdk_raw_object_store","http_attempts","physical_iops"]})
+        json!({"enabled":mount_rs_core::diagnostics::profile::enabled(),"metrics_complete":self.qualified(),"boundaries":self.records,"observer":observer().snapshot(),"coverage":"fixed process-local boundaries; metrics_complete covers required core/storage/process/service/runtime observations only; no complete physical/HTTP/cache coverage claim","coverage_complete":false,"required_families":["core","storage","process","service_quiescence","server_quic","runtime_activation"],"known_unavailable_families":["sqlite_live_cache_sql","direct_sdk_raw_object_store","http_attempts","physical_iops"]})
     }
     pub async fn boundary(
         &mut self,
@@ -791,7 +1386,7 @@ impl Collector {
                 let startup_path = child
                     .root
                     .join("metrics")
-                    .join(format!("startup-g{generation}.json"));
+                    .join(format!("startup-g{generation}.json.gz"));
                 let startup = super::read_json(&startup_path)?;
                 let expected_startup = identity(
                     private,
@@ -805,18 +1400,29 @@ impl Collector {
                 validate_receipt(&startup["identity"], &expected_startup)?;
                 let hash = super::file_digest(&startup_path)?;
                 if ready.phase_metrics["sha256"] != hash
-                    || ready.phase_metrics["file"] != format!("metrics/startup-g{generation}.json")
+                    || ready.phase_metrics["file"]
+                        != format!("metrics/startup-g{generation}.json.gz")
                 {
                     return Err("startup metric readiness reference mismatch".into());
                 }
+                if ready.runtime_activation != startup["runtime_activation"] {
+                    return Err("cold readiness runtime reference mismatch".into());
+                }
+                runtime_boundary(
+                    &startup,
+                    &private.expected_backings,
+                    "worker_startup",
+                    "ready",
+                    child.server,
+                )?;
                 self.complete &= startup["metrics_complete"] == true;
-                readiness_metrics.push(json!({"server":child.server,"generation":generation,"file":format!("worker-{}/metrics/startup-g{generation}.json",child.server),"sha256":hash,"metrics_complete":startup["metrics_complete"]}));
+                readiness_metrics.push(json!({"server":child.server,"generation":generation,"file":format!("worker-{}/metrics/startup-g{generation}.json.gz",child.server),"sha256":hash,"metrics_complete":startup["metrics_complete"]}));
                 if generation > 0 {
                     let old = generation - 1;
                     let closed_path = child
                         .root
                         .join("metrics")
-                        .join(format!("closed-g{old}.json"));
+                        .join(format!("closed-g{old}.json.gz"));
                     let closed = super::read_json(&closed_path)?;
                     let expected_closed = identity(
                         private,
@@ -828,8 +1434,12 @@ impl Collector {
                         "after",
                     );
                     validate_receipt(&closed["identity"], &expected_closed)?;
+                    if !runtime_closed_boundary(&closed, &private.expected_backings, child.server)?
+                    {
+                        return Err("closed generation runtime observation incomplete".into());
+                    }
                     self.complete &= closed["metrics_complete"] == true;
-                    readiness_metrics.push(json!({"server":child.server,"generation":old,"file":format!("worker-{}/metrics/closed-g{old}.json",child.server),"sha256":super::file_digest(&closed_path)?,"metrics_complete":closed["metrics_complete"]}));
+                    readiness_metrics.push(json!({"server":child.server,"generation":old,"file":format!("worker-{}/metrics/closed-g{old}.json.gz",child.server),"sha256":super::file_digest(&closed_path)?,"metrics_complete":closed["metrics_complete"]}));
                 }
             }
             let existing =
@@ -859,18 +1469,19 @@ impl Collector {
                 // Read all known receipts before checking child loss, retaining the other nine.
                 for (slot,child) in receipts.iter_mut().zip(&fleet.children) {
                     if slot.is_some(){continue;}
-                    let path=child.root.join("metrics").join(format!("g{generation}-s{sequence}.json"));
+                    let path=child.root.join("metrics").join(format!("g{generation}-s{sequence}.json.gz"));
                     if path.exists(){
                         let ack=super::read_json(&child.root.join("metrics-ack.json")).unwrap_or(Value::Null);
                         if ack["identity"]["sequence"].as_u64().is_none_or(|s|s<sequence){continue;}
                         validate_receipt(&ack["identity"],&expected[child.server])?;
                         let mut receipt=super::read_json(&path)?;validate_receipt(&receipt["identity"],&expected[child.server])?;
                         let hash=super::file_digest(&path)?;
-                        if ack["file"]!=format!("metrics/g{generation}-s{sequence}.json") || ack["sha256"]!=hash {return Err("metric acknowledgment artifact mismatch".into());}
+                        if ack["file"]!=format!("metrics/g{generation}-s{sequence}.json.gz") || ack["sha256"]!=hash {return Err("metric acknowledgment artifact mismatch".into());}
+                        runtime_boundary(&receipt,&private.expected_backings,phase,boundary,child.server)?;
                         receipt["_artifact_sha256"]=json!(hash);*slot=Some(receipt);
                     }
                 }
-                self.records[index]["workers"]=json!(receipts.iter().enumerate().filter_map(|(server,r)|r.as_ref().map(|r|json!({"server":server,"pid":r["identity"]["pid"],"file":format!("worker-{server}/metrics/g{generation}-s{sequence}.json"),"metrics_complete":r["metrics_complete"],"sha256":r["_artifact_sha256"]}))).collect::<Vec<_>>());
+                self.records[index]["workers"]=json!(receipts.iter().enumerate().filter_map(|(server,r)|r.as_ref().map(|r|json!({"server":server,"pid":r["identity"]["pid"],"file":format!("worker-{server}/metrics/g{generation}-s{sequence}.json.gz"),"metrics_complete":r["metrics_complete"],"sha256":r["_artifact_sha256"]}))).collect::<Vec<_>>());
                 fleet.check()?;
                 if Instant::now()>=deadline{return Err("shared metric barrier deadline".into());}
                 if receipts.iter().all(Option::is_some){break;}
@@ -879,10 +1490,10 @@ impl Collector {
             let identities:Vec<_>=receipts.iter().map(|r|r.as_ref().unwrap()["identity"].clone()).collect();validate_fleet(&identities,&expected)?;
             let id=identity(private,std::process::id(),None,generation,sequence,phase,boundary);
             let receipt=self.local.capture(id,None,oracle)?;
-            let path=root.join(format!("g{generation}-s{sequence}.json"));publish_immutable(&path,&receipt)?;
+            let path=root.join(format!("g{generation}-s{sequence}.json.gz"));publish_immutable(&path,&receipt)?;
             let metrics_complete=receipts.iter().all(|r|r.as_ref().unwrap()["metrics_complete"]==true) && receipt["metrics_complete"]==true;
             self.complete &= metrics_complete;
-            self.records[index]["controller"]=json!({"file":format!("metrics/g{generation}-s{sequence}.json"),"sha256":super::file_digest(&path)?,"metrics_complete":receipt["metrics_complete"]});
+            self.records[index]["controller"]=json!({"file":format!("metrics/g{generation}-s{sequence}.json.gz"),"sha256":super::file_digest(&path)?,"metrics_complete":receipt["metrics_complete"]});
             self.records[index]["metrics_complete"]=json!(metrics_complete);
             if Instant::now()>deadline{return Err("metric capture/publication exceeded shared deadline".into());}
             Ok::<_,String>(())
@@ -904,6 +1515,292 @@ mod tests {
             "sequence":4,"phase":"online_payload","boundary":"after","source_digest":"source",
             "binary_digest":"binary","catalog_digest":"catalog","backend_prefix":"fixture"})
     }
+    fn runtime_fixture(generation: u64, drives: usize, active: usize) -> Value {
+        let mut value = example_runtime(generation, drives);
+        value["available"] = json!(true);
+        value["complete"] = json!(true);
+        value["pool"]["resident"] = json!(active);
+        value["pool"]["ready"] = json!(active);
+        value["pool"]["open_success"] = json!(active);
+        for row in value["observations"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .take(active)
+        {
+            row["observed_backing"] = row["expected_backing"].clone();
+            row["constructed"] = json!(1);
+        }
+        value["diagnostics"] = json!({
+            "scope":"process_local_preconstructed_runtime_observer",
+            "sampling_scope":"serial_atomic_loads_not_transactional_or_drain_proof",
+            "histogram_scope":"inclusive_wall_time_log2_microseconds_32_buckets",
+            "deferred_scope":"deferred_spans_enter_only_on_post_unlock_publication",
+            "inclusive_spans_overlap":true,"concurrent_activity":false,"counter_saturated":false,
+            "slow_record_attempts":0,
+            "entries":RUNTIME_ROWS.map(|name|json!({"name":name,"calls":0,"success":0,"error":0,"cancelled":0,"in_flight":0,"elapsed_ns":0,"max_elapsed_ns":0,"latency_log2_us":vec![0u64;32]})),
+        });
+        value
+    }
+    #[test]
+    fn runtime_capture_epoch_encloses_snapshot_callback() {
+        // The zero-delay control and real delayed callback both use the public
+        // collector path, without opening a provider or adding a clock seam.
+        for delay in [Duration::ZERO, Duration::from_millis(25)] {
+            let mut local = Local::new().unwrap();
+            let mut snapshot = Some(runtime_fixture(1, 10, 0));
+            let mut callback_boundary = None;
+            let before = super::super::utc_ms();
+            let value = local
+                .capture_with_runtime(identity(), None, || {
+                    let began = super::super::utc_ms();
+                    let elapsed = Instant::now();
+                    std::thread::sleep(delay);
+                    let elapsed = elapsed.elapsed();
+                    let ended = super::super::utc_ms();
+                    callback_boundary = Some((began, ended, elapsed));
+                    Ok(snapshot
+                        .take()
+                        .expect("runtime snapshot captured exactly once"))
+                })
+                .unwrap();
+            let after = super::super::utc_ms();
+            let (callback_start, callback_end, callback_elapsed) =
+                callback_boundary.expect("actual callback must run");
+            assert!(snapshot.is_none(), "callback must consume its snapshot");
+            if !delay.is_zero() {
+                assert!(
+                    callback_end > callback_start,
+                    "delayed control must cross an epoch millisecond boundary"
+                );
+            }
+            let recorded_start = value["capture_started_unix_ms"].as_u64().unwrap();
+            let recorded_end = value["capture_ended_unix_ms"].as_u64().unwrap();
+            let recorded_elapsed = value["capture_elapsed_ns"].as_u64().unwrap();
+            assert!(recorded_start >= before && recorded_end <= after);
+            assert!(
+                recorded_start <= callback_start,
+                "capture epoch starts after runtime observation: delay={delay:?}"
+            );
+            assert!(recorded_end >= callback_end);
+            assert!(
+                recorded_end.saturating_sub(recorded_start)
+                    >= callback_end.saturating_sub(callback_start),
+                "capture epoch envelope omits callback time"
+            );
+            assert!(
+                u128::from(recorded_elapsed) >= callback_elapsed.as_nanos(),
+                "capture monotonic elapsed omits callback time"
+            );
+        }
+    }
+    #[test]
+    fn lazy_target_runtime_shape_preserves_cold_and_actual_backing_distinction() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let cold = runtime_fixture(0, 10, 0);
+        assert_eq!(validate_runtime_snapshot(&cold, 0, 10, &expected), Ok(true));
+        let opened = runtime_fixture(0, 10, 1);
+        assert_eq!(
+            validate_runtime_snapshot(&opened, 0, 10, &expected),
+            Ok(true)
+        );
+        let unavailable = example_runtime(0, 10);
+        assert_eq!(
+            validate_runtime_snapshot(&unavailable, 0, 10, &expected),
+            Ok(false)
+        );
+        let mut invented = cold.clone();
+        invented["observations"][0]["observed_backing"] = json!(expected[0]);
+        assert!(validate_runtime_snapshot(&invented, 0, 10, &expected).is_err());
+        for field in ["generation", "capacity"] {
+            let mut bad = cold.clone();
+            bad[field] = json!(999);
+            assert!(validate_runtime_snapshot(&bad, 0, 10, &expected).is_err());
+        }
+        let mut foreign = opened.clone();
+        foreign["observations"][0]["observed_backing"] = json!(expected[1]);
+        assert!(validate_runtime_snapshot(&foreign, 0, 10, &expected).is_err());
+        let mut unknown = cold.clone();
+        unknown["private_url"] = json!("not permitted");
+        assert!(validate_runtime_snapshot(&unknown, 0, 10, &expected).is_err());
+    }
+    #[test]
+    fn lazy_target_runtime_incomplete_frames_cannot_qualify_or_invent_zero() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let complete = runtime_fixture(0, 10, 0);
+        for field in ["opening", "quarantined", "pinned", "open_error"] {
+            let mut value = complete.clone();
+            value["pool"][field] = json!(1);
+            assert!(
+                validate_runtime_snapshot(&value, 0, 10, &expected).is_err(),
+                "declared complete {field}"
+            );
+            value["complete"] = json!(false);
+            assert_eq!(
+                validate_runtime_snapshot(&value, 0, 10, &expected),
+                Ok(false)
+            );
+        }
+        let mut row = complete.clone();
+        row["diagnostics"]["entries"][0]["calls"] = json!(1);
+        assert!(validate_runtime_snapshot(&row, 0, 10, &expected).is_err());
+        row["complete"] = json!(false);
+        assert_eq!(validate_runtime_snapshot(&row, 0, 10, &expected), Ok(false));
+        let mut malformed = complete.clone();
+        malformed["pool"]["resident"] = Value::Null;
+        assert!(validate_runtime_snapshot(&malformed, 0, 10, &expected).is_err());
+        let mut unavailable = example_runtime(0, 10);
+        unavailable["complete"] = json!(true);
+        assert!(validate_runtime_snapshot(&unavailable, 0, 10, &expected).is_err());
+    }
+    #[test]
+    fn lazy_target_runtime_delta_keeps_gauges_and_rejects_cross_generation() {
+        let cold = runtime_fixture(0, 10, 0);
+        let opened = runtime_fixture(0, 10, 1);
+        let delta = runtime_delta(&cold, &opened).unwrap();
+        assert_eq!(delta["pool"]["resident"]["before"], 0);
+        assert_eq!(delta["pool"]["resident"]["after"], 1);
+        assert_eq!(delta["pool"]["open_success"], 1);
+        assert_eq!(delta["observations"][0]["constructed"], 1);
+        assert!(runtime_delta(&opened, &cold).is_err());
+        let mut next = opened;
+        next["generation"] = json!(1);
+        assert!(runtime_delta(&cold, &next).is_err());
+    }
+    #[test]
+    fn lazy_target_timed_modes_accept_only_balanced_assigned_runtime_owners() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let runtime = runtime_fixture(1, 10, 1);
+        let frame = json!({"identity":{"generation":1},"runtime_activation":runtime});
+        for mode in ["mostly_idle", "all_active"] {
+            for pattern in super::super::config::PATTERNS {
+                for boundary in ["before_active", "after_active", "after_idle"] {
+                    runtime_boundary(&frame, &expected, &format!("{mode}/{pattern}"), boundary, 0)
+                        .expect("balanced assigned runtime owners must qualify both timed modes");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_target_timed_modes_reject_unassigned_crossnode_runtime_replication() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let runtime = runtime_fixture(1, 10, 10);
+        let frame = json!({"identity":{"generation":1},"runtime_activation":runtime});
+        for mode in ["mostly_idle", "all_active"] {
+            assert!(
+                runtime_boundary(
+                    &frame,
+                    &expected,
+                    &format!("{mode}/sequential_read"),
+                    "before_active",
+                    0
+                )
+                .is_err(),
+                "unassigned replicas must not qualify the balanced production traffic profile"
+            );
+        }
+    }
+
+    #[test]
+    fn lazy_target_nonactivating_route_checks_require_zero_opened_owners() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let cold =
+            json!({"identity":{"generation":1},"runtime_activation":runtime_fixture(1,10,0)});
+        runtime_boundary(&cold, &expected, "routes_and_scope", "after", 0)
+            .expect("registration/auth route coverage must leave providers dormant");
+        let opened =
+            json!({"identity":{"generation":1},"runtime_activation":runtime_fixture(1,10,1)});
+        assert!(runtime_boundary(&opened, &expected, "routes_and_scope", "after", 0).is_err());
+    }
+
+    #[test]
+    fn lazy_target_postprofile_rotation_requires_only_its_exact_assigned_owners() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        // g2 is the first post-profile batch, offset1: Drive9 belongs to server0.
+        let mut rotated = runtime_fixture(2, 10, 1);
+        rotated["observations"][0]["constructed"] = json!(0);
+        rotated["observations"][0]["observed_backing"] = Value::Null;
+        rotated["observations"][9]["constructed"] = json!(1);
+        rotated["observations"][9]["observed_backing"] = json!(expected[9]);
+        let frame = |runtime: Value| json!({"identity":{"generation":runtime["generation"]},"runtime_activation":runtime});
+        let cold = frame(runtime_fixture(2, 10, 0));
+        runtime_boundary(&cold, &expected, "crossnode_routes", "after_ready", 0)
+            .expect("acknowledged next generation must be cold before its rotated I/O batch");
+        runtime_boundary(
+            &frame(rotated.clone()),
+            &expected,
+            "crossnode_routes",
+            "after_batch",
+            0,
+        )
+        .expect("only the exact rotated assignment may qualify this actual crossnode batch");
+        let wrong = frame(runtime_fixture(2, 10, 1));
+        assert!(runtime_boundary(&wrong, &expected, "crossnode_routes", "after_batch", 0).is_err());
+        let mut closed = rotated;
+        closed["pool"]["resident"] = json!(0);
+        closed["pool"]["ready"] = json!(0);
+        assert_eq!(
+            runtime_closed_boundary(&frame(closed.clone()), &expected, 0),
+            Ok(true)
+        );
+        closed["pool"]["resident"] = json!(1);
+        assert_ne!(
+            runtime_closed_boundary(&frame(closed), &expected, 0),
+            Ok(true),
+            "next batch must not reuse an unproven previous generation close"
+        );
+    }
+
+    #[test]
+    fn lazy_target_closed_measured_generation_rejects_unassigned_replication() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let mut runtime = runtime_fixture(1, 10, 10);
+        runtime["pool"]["resident"] = json!(0);
+        runtime["pool"]["ready"] = json!(0);
+        let frame = json!({"identity":{"generation":1},"runtime_activation":runtime});
+        assert_ne!(
+            runtime_closed_boundary(&frame, &expected, 0),
+            Ok(true),
+            "a successfully closed replicated profile is still the wrong production traffic geometry"
+        );
+    }
+
+    #[test]
+    fn lazy_target_runtime_boundary_requires_actual_primary_and_all_route_activations() {
+        let expected: Vec<_> = (1..=10).map(|id| format!("{id:032x}")).collect();
+        let frame = |runtime: Value| json!({"identity":{"generation":runtime["generation"]},"runtime_activation":runtime});
+        let cold = frame(runtime_fixture(0, 10, 0));
+        runtime_boundary(&cold, &expected, "worker_startup", "ready", 0).unwrap();
+        assert!(runtime_boundary(&cold, &expected, "online_namespace", "after", 0).is_err());
+        let primary = frame(runtime_fixture(0, 10, 1));
+        runtime_boundary(&primary, &expected, "online_namespace", "after", 0).unwrap();
+        let mut wrong_primary = primary.clone();
+        wrong_primary["runtime_activation"]["observations"][0]["constructed"] = json!(0);
+        wrong_primary["runtime_activation"]["observations"][0]["observed_backing"] = Value::Null;
+        wrong_primary["runtime_activation"]["observations"][1]["constructed"] = json!(1);
+        wrong_primary["runtime_activation"]["observations"][1]["observed_backing"] =
+            json!(expected[1]);
+        assert!(
+            runtime_boundary(&wrong_primary, &expected, "online_namespace", "after", 0).is_err()
+        );
+        let generation1cold = frame(runtime_fixture(1, 10, 0));
+        runtime_boundary(
+            &generation1cold,
+            &expected,
+            "refresh_replicas",
+            "after_ready",
+            0,
+        )
+        .unwrap();
+        // Route/auth coverage no longer constructs every replica before timing.
+        runtime_boundary(&generation1cold, &expected, "routes_and_scope", "after", 0).unwrap();
+        let assigned = frame(runtime_fixture(1, 10, 1));
+        runtime_boundary(&assigned, &expected, "assigned_warmup", "after", 0).unwrap();
+        let all = frame(runtime_fixture(1, 10, 10));
+        assert!(runtime_boundary(&all, &expected, "assigned_warmup", "after", 0).is_err());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn inherited_boundary_budget_never_restarts_expired_or_short_phase() {
         for remaining in [Duration::ZERO, Duration::from_secs(1)] {
@@ -1152,11 +2049,405 @@ mod tests {
     #[test]
     fn phase_receipt_publication_never_overwrites_prior_evidence() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("g1-s4.json");
+        let path = directory.path().join("g1-s4.json.gz");
         let first = json!({"identity":identity(),"complete":false,"reason":"nonquiescent"});
         publish_immutable(&path, &first).expect("first immutable receipt must publish");
         let bytes = std::fs::read(&path).unwrap();
         assert!(publish_immutable(&path, &json!({"complete":true})).is_err());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    #[test]
+    fn large_metric_frame_is_compressed_readable_and_immutable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("g1-s4.json.gz");
+        let counters: Vec<Value> = (0..256)
+            .map(|index| {
+                json!({
+                    "name": format!("operation_{index}"),
+                    "calls": index + 1,
+                    "success": index + 1,
+                    "error": 0,
+                    "latency_log2_us": vec![0u64; 32],
+                })
+            })
+            .collect();
+        let frame = json!({
+            "identity": identity(),
+            "core": {"entries": counters},
+            "runtime_activation": runtime_fixture(1, 100, 1),
+            "oracle": {"complete": true, "verified_passes": 1},
+        });
+        let plain_len = serde_json::to_vec(&frame).unwrap().len();
+
+        publish_immutable(&path, &frame).expect("metric frame must publish");
+        let encoded = std::fs::read(&path).unwrap();
+        assert!(
+            encoded.starts_with(&[0x1f, 0x8b, 0x08]),
+            "a .json.gz metric frame must be gzip encoded"
+        );
+        assert!(
+            encoded.len() * 4 <= plain_len,
+            "repetitive counter frames must occupy at most one quarter of their JSON size"
+        );
+        let decoded = super::super::read_json(&path).expect("metric reader must decode gzip");
+        assert_eq!(decoded["identity"], frame["identity"]);
+        assert_eq!(decoded["core"]["entries"], frame["core"]["entries"]);
+        assert_eq!(decoded, frame);
+
+        assert!(publish_immutable(&path, &json!({"identity":identity()})).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), encoded);
+    }
+    fn gzip_test_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+    #[test]
+    fn metric_reader_accepts_one_complete_gzip_member_and_ordinary_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let value = json!({"identity":identity(),"core":{"entries":[{"calls":7}]}});
+        let json_bytes = serde_json::to_vec(&value).unwrap();
+        let compressed = directory.path().join("one.json.gz");
+        std::fs::write(&compressed, gzip_test_bytes(&json_bytes)).unwrap();
+        assert_eq!(super::super::read_json(&compressed).unwrap(), value);
+
+        let ordinary = directory.path().join("ordinary.json");
+        std::fs::write(&ordinary, &json_bytes).unwrap();
+        assert_eq!(super::super::read_json(&ordinary).unwrap(), value);
+    }
+    #[test]
+    fn metric_reader_rejects_malformed_or_extra_gzip_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let valid = gzip_test_bytes(br#"{"identity":{"sequence":4},"complete":true}"#);
+        let mut checksum_corrupt = valid.clone();
+        let crc_index = checksum_corrupt.len() - 8;
+        checksum_corrupt[crc_index] ^= 1;
+        let mut trailing_bytes = valid.clone();
+        trailing_bytes.extend_from_slice(b"trailing bytes");
+        let mut concatenated_members = valid.clone();
+        concatenated_members.extend_from_slice(&gzip_test_bytes(br#"{"second":true}"#));
+        for (name, bytes) in [
+            ("plain-json", br#"{"complete":true}"#.to_vec()),
+            ("invalid-header", vec![0x1f, 0x8b, 0x08]),
+            ("truncated", valid[..valid.len() - 2].to_vec()),
+            ("checksum-corrupt", checksum_corrupt),
+            ("trailing-bytes", trailing_bytes),
+            ("concatenated-members", concatenated_members),
+        ] {
+            let path = directory.path().join(format!("{name}.json.gz"));
+            std::fs::write(&path, bytes).unwrap();
+            assert!(
+                super::super::read_json(&path).is_err(),
+                "{name} must not qualify as one complete gzip metric frame"
+            );
+        }
+    }
+    #[test]
+    fn metric_reader_rejects_decoded_size_bomb_without_building_plain_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.json.gz");
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(b"\"").unwrap();
+        let chunk = [b'a'; 64 * 1024];
+        let mut remaining = DECODED_METRIC_LIMIT as usize;
+        while remaining != 0 {
+            let count = remaining.min(chunk.len());
+            encoder.write_all(&chunk[..count]).unwrap();
+            remaining -= count;
+        }
+        encoder.write_all(b"\"").unwrap();
+        let encoded = encoder.finish().unwrap();
+        assert!(
+            encoded.len() < ENCODED_METRIC_LIMIT as usize,
+            "small encoded frame must exercise the decoded limit"
+        );
+        std::fs::write(&path, encoded).unwrap();
+        assert!(super::super::read_json(&path).is_err());
+    }
+    fn object_store_sample(value: &Value) -> mount_rs_service::object_store_diagnostics::Sample {
+        let codec_records = value["records"].as_array().expect("bounded record array");
+        let mut bytes = Vec::new();
+        for record in codec_records {
+            let record = record.as_str().expect("record is a complete string");
+            assert!(record.len() <= mount_rs_service::object_store_diagnostics::RECORD_LIMIT);
+            assert!(
+                record
+                    .as_bytes()
+                    .starts_with(mount_rs_service::object_store_diagnostics::PREFIX)
+            );
+            assert!(record.ends_with('\n'));
+            bytes.extend_from_slice(record.as_bytes());
+        }
+        assert_eq!(
+            codec_records.len(),
+            mount_rs_service::object_store_diagnostics::FRAME_COUNT
+        );
+        mount_rs_service::object_store_diagnostics::decode(&bytes)
+            .expect("one coherent fixed sample")
+    }
+
+    #[test]
+    fn object_store_actual_local_capture_encloses_once_and_binds_worker_and_controller() {
+        use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+        use mount_rs_service::object_store_diagnostics::CaptureContext;
+        // Explicit enabled applies solely to this isolated object-store seam;
+        // no environment write or cached global-profile reset is required.
+        for role in ["worker", "controller"] {
+            for delay in [Duration::ZERO, Duration::from_millis(25)] {
+                let bank = Observer::isolated();
+                let client = bank.client(ClientRole::StandaloneData);
+                let mut body = client.attempt(HttpMethod::Get, Some(4096)).headers(200);
+                body.data(4096);
+                body.eof();
+                let mut local = Local::new().unwrap();
+                let mut outer_identity = identity();
+                outer_identity["role"] = json!(role);
+                let mut calls = 0;
+                let mut callback_elapsed = None;
+                let mut captured = None;
+                let mut callback = || {
+                    calls += 1;
+                    let elapsed = Instant::now();
+                    std::thread::sleep(delay);
+                    let snapshot = bank.snapshot().expect("isolated bank is enabled");
+                    captured = Some(snapshot);
+                    callback_elapsed = Some(elapsed.elapsed());
+                    Some(snapshot)
+                };
+                let value = local
+                    .capture_inner(
+                        outer_identity.clone(),
+                        None,
+                        Value::Null,
+                        None,
+                        Some(ObjectStoreCapture {
+                            enabled: true,
+                            snapshot: &mut callback,
+                        }),
+                    )
+                    .unwrap();
+                assert_eq!(calls, 1, "actual Local boundary must invoke one snapshot");
+                let callback_elapsed = callback_elapsed.unwrap();
+                let start = value["capture_started_unix_ms"].as_u64().unwrap();
+                // The epoch clock can step; binding is exact below, while the
+                // monotonic elapsed proves the callback is inside the envelope.
+                assert!(
+                    u128::from(value["capture_elapsed_ns"].as_u64().unwrap())
+                        >= callback_elapsed.as_nanos()
+                );
+                assert_eq!(value["identity"], outer_identity);
+                assert_eq!(value["object_store_observation"]["status"], "observed");
+                let sample = object_store_sample(&value["object_store_observation"]);
+                assert_eq!(
+                    sample.capture(),
+                    &object_store_identity(&outer_identity, start).unwrap()
+                );
+                assert_eq!(sample.capture().context, CaptureContext::WorkerBoundary);
+                assert_eq!(sample.snapshot(), captured.as_ref().unwrap());
+                assert_eq!(
+                    value["coverage"]["object_store_observation"]["status"],
+                    "partial"
+                );
+                assert_eq!(
+                    value["coverage"]["object_store_observation"]["complete"],
+                    false
+                );
+                assert_eq!(value["coverage"]["http_attempts"]["available"], false);
+                assert_eq!(value["coverage"]["physical_iops"]["available"], false);
+                assert_eq!(value["schema"], "mount-rs-phase-metrics-v1");
+            }
+        }
+    }
+
+    #[test]
+    fn object_store_disabled_skips_callback_and_unavailable_does_not_export_zero() {
+        let calls = std::cell::Cell::new(0);
+        let disabled = object_store_records(false, &Value::Null, 0, || {
+            calls.set(calls.get() + 1);
+            panic!("disabled export must skip its actual snapshot callback");
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+        assert_eq!(disabled["status"], "disabled");
+        assert_eq!(disabled["available"], false);
+        assert_eq!(disabled["records"], json!([]));
+        let unavailable = object_store_records(true, &identity(), 123, || {
+            calls.set(calls.get() + 1);
+            None
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1, "enabled unavailable bank is observed once");
+        assert_eq!(unavailable["status"], "unavailable");
+        assert_eq!(unavailable["available"], false);
+        assert_eq!(unavailable["complete"], false);
+        assert_eq!(unavailable["records"], json!([]));
+        assert!(unavailable.get("snapshot").is_none());
+    }
+
+    #[test]
+    fn object_store_boundary_identity_checks_pid_and_preserves_zero_sequence_generation() {
+        use mount_rs_core::diagnostics::object_store::Observer;
+        for (field, replacement) in [
+            ("pid", json!(u64::from(u32::MAX) + 1)),
+            ("pid", json!(0)),
+            ("sequence", json!(-1)),
+            ("generation", json!("1")),
+        ] {
+            let mut invalid = identity();
+            invalid[field] = replacement;
+            let calls = std::cell::Cell::new(0);
+            let result = object_store_records(true, &invalid, 123, || {
+                calls.set(calls.get() + 1);
+                None
+            });
+            assert!(
+                result.is_err(),
+                "invalid {field} must fail before the callback"
+            );
+            assert_eq!(calls.get(), 0);
+        }
+        let bank = Observer::isolated();
+        let mut startup = identity();
+        startup["sequence"] = json!(0);
+        startup["generation"] = json!(0);
+        let value = object_store_records(true, &startup, 0, || bank.snapshot()).unwrap();
+        let sample = object_store_sample(&value);
+        assert_eq!(sample.capture().sequence, 0);
+        assert_eq!(sample.capture().generation, Some(0));
+        assert_eq!(sample.capture().observed_unix_ms, 0);
+    }
+
+    #[test]
+    fn object_store_records_own_exact_u64_snapshot_and_reject_cross_boundary_merge() {
+        use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+        use mount_rs_service::object_store_diagnostics as codec;
+        let bank = Observer::isolated();
+        let client = bank.client(ClientRole::StandaloneData);
+        let mut body = client.attempt(HttpMethod::Get, Some(u64::MAX)).headers(200);
+        body.data(u64::MAX);
+        body.eof();
+        let calls = std::cell::Cell::new(0);
+        let expected = bank.snapshot().unwrap();
+        let outer_identity = identity();
+        let value = object_store_records(true, &outer_identity, 456, || {
+            calls.set(calls.get() + 1);
+            bank.snapshot()
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        let sample = object_store_sample(&value);
+        assert_eq!(sample.snapshot(), &expected);
+        let row = &sample.snapshot().clients[ClientRole::StandaloneData.index()].http
+            [HttpMethod::Get.index()];
+        assert_eq!(row.offered_bytes, u64::MAX);
+        assert_eq!(row.body_bytes, u64::MAX);
+        client.attempt(HttpMethod::Get, None).transport_error();
+        assert_ne!(bank.snapshot().unwrap(), expected);
+        assert_eq!(
+            object_store_sample(&value).snapshot(),
+            &expected,
+            "receipt owns a copied value, never recaptures its live bank"
+        );
+        for (field, replacement) in [
+            ("pid", json!(124)),
+            ("generation", json!(2)),
+            ("sequence", json!(5)),
+        ] {
+            let mut changed = outer_identity.clone();
+            changed[field] = replacement;
+            assert_ne!(
+                sample.capture(),
+                &object_store_identity(&changed, 456).unwrap()
+            );
+        }
+        assert_ne!(
+            sample.capture(),
+            &object_store_identity(&outer_identity, 457).unwrap()
+        );
+        let mut records: Vec<String> = value["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row.as_str().unwrap().to_owned())
+            .collect();
+        let mut frame: Value = serde_json::from_str(&records[0][codec::PREFIX.len()..]).unwrap();
+        frame["capture"]["sequence"] = json!(5);
+        records[0] = format!(
+            "{}{}\n",
+            std::str::from_utf8(codec::PREFIX).unwrap(),
+            serde_json::to_string(&frame).unwrap()
+        );
+        assert!(
+            codec::decode(records.concat().as_bytes()).is_err(),
+            "one changed frame cannot silently merge another boundary"
+        );
+    }
+
+    #[test]
+    fn object_store_additive_receipt_does_not_enter_existing_phase_deltas() {
+        let mut before = json!({"identity":identity(),"core":{"entries":[]},"object_store_observation":{"available":true,"records":["older cumulative bank"]}});
+        before["identity"]["sequence"] = json!(3);
+        let mut after = before.clone();
+        after["identity"]["sequence"] = json!(4);
+        after["object_store_observation"] =
+            json!({"available":false,"records":[],"status":"unavailable"});
+        let delta = phase_delta(&before, &after).unwrap();
+        assert!(delta.get("object_store_observation").is_none());
+        let mut legacy_before = before.clone();
+        let mut legacy_after = after.clone();
+        legacy_before
+            .as_object_mut()
+            .unwrap()
+            .remove("object_store_observation");
+        legacy_after
+            .as_object_mut()
+            .unwrap()
+            .remove("object_store_observation");
+        assert_eq!(delta, phase_delta(&legacy_before, &legacy_after).unwrap());
+    }
+    #[test]
+    fn object_store_public_local_capture_uses_actual_process_bank_or_disabled_status() {
+        use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+        let bank = Observer::enabled();
+        let client = bank.client(ClientRole::StandaloneProbe);
+        // This is real bank work, not HTTP/network activity. Fresh-process
+        // MOUNT_RS_PROFILE_IO=1 enables the positive public-path control.
+        if bank.is_enabled() {
+            let body = client.attempt(HttpMethod::Head, None).headers(200);
+            drop(body);
+        }
+        let mut outer_identity = identity();
+        outer_identity["role"] = json!("controller");
+        outer_identity["pid"] = json!(std::process::id());
+        let value = Local::new()
+            .unwrap()
+            .capture(outer_identity.clone(), None, Value::Null)
+            .unwrap();
+        let observation = &value["object_store_observation"];
+        assert_eq!(observation["enabled"], bank.is_enabled());
+        if bank.is_enabled() {
+            assert_eq!(observation["status"], "observed");
+            let sample = object_store_sample(observation);
+            assert_eq!(
+                sample.capture(),
+                &object_store_identity(
+                    &outer_identity,
+                    value["capture_started_unix_ms"].as_u64().unwrap()
+                )
+                .unwrap()
+            );
+            let row = &sample.snapshot().clients[ClientRole::StandaloneProbe.index()].http
+                [HttpMethod::Head.index()];
+            assert!(row.attempts_started >= 1);
+            assert!(row.body_dropped >= 1);
+            assert_eq!(
+                value["coverage"]["object_store_observation"]["status"],
+                "partial"
+            );
+        } else {
+            assert_eq!(observation["status"], "disabled");
+            assert_eq!(observation["available"], false);
+            assert_eq!(observation["records"], json!([]));
+        }
     }
 }

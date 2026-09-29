@@ -423,8 +423,30 @@ pub fn validate_node_kind(node: &NodeMetadata) -> Result<()> {
 fn validate_file_layout(layout: &FileLayout, file_size: u64) -> Result<()> {
     // An empty list represents an empty or entirely sparse/zero-filled file.
     // Every stored extent, however, must be a nonempty bounded range.
-    from_config(&layout.chunker)?;
+    validate_chunker_config(&layout.chunker)?;
     validate_file_extents(&layout.extents, file_size)
+}
+
+// Validation must not construct a boxed Chunker just to inspect a persisted
+// layout. Keep these rules aligned with chunking::from_config.
+fn validate_chunker_config(config: &ChunkerConfig) -> Result<usize> {
+    if config.algorithm != "fixed-size" || config.version != 1 {
+        return Err(
+            FsError::new(ErrorCode::Enotsup).with_message("unsupported chunker algorithm/version")
+        );
+    }
+    if config.parameters.len() != 1 {
+        return Err(FsError::new(ErrorCode::Einval).with_message("invalid fixed-size parameters"));
+    }
+    let size = config
+        .parameters
+        .get("chunk_size")
+        .and_then(|size| usize::try_from(*size).ok())
+        .ok_or_else(|| FsError::new(ErrorCode::Einval).with_message("invalid chunk_size"))?;
+    if size == 0 {
+        return Err(FsError::new(ErrorCode::Einval).with_message("chunk size must be positive"));
+    }
+    Ok(size)
 }
 
 fn validate_file_extents(extents: &[BlockExtent], file_size: u64) -> Result<()> {
@@ -991,6 +1013,22 @@ pub trait MetadataStore: Send + Sync {
     fn compact_inode_capability(&self) -> compact::CompactInodeCapability {
         compact::CompactInodeCapability::Unsupported
     }
+    /// Support for fixed coherent root/file captures and both sealed structural
+    /// transitions. Resolve before choosing a targeted publication strategy.
+    fn compact_root_file_capability(&self) -> compact::CompactRootFileCapability {
+        compact::CompactRootFileCapability::Unsupported
+    }
+    /// Read authority, the complete anchor and two optional complete guards in
+    /// one coherent view. Missing guards are retained for generation recovery;
+    /// malformed guard groups remain errors. No hidden Full scan is permitted.
+    async fn load_compact_root_file(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_root: InodeId,
+        _candidate_file: InodeId,
+    ) -> Result<compact::CompactRootFileRead> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
     /// Inspect exact persisted MRC5 authority without enrollment or repair.
     /// `None` denotes a coherently recognized noncompact mode, not a fresh volume.
     async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
@@ -1020,6 +1058,19 @@ pub trait MetadataStore: Send + Sync {
         _inode: InodeId,
     ) -> Result<compact::LoadedCompactInode> {
         Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read current anchor and guard at one provider view and either certify
+    /// exact equality to the borrowed body or return the ordinary owned result.
+    /// The default preserves the fresh read contract for other providers.
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        _expected: compact::CompactInodeExpectation<'_>,
+    ) -> Result<compact::CompactInodeRead> {
+        self.load_compact_inode(backing, inode)
+            .await
+            .map(compact::CompactInodeRead::Loaded)
     }
     /// Atomically validate anchor generation and physical identity, then update
     /// only the selected guard. Immutable blocks must be durable before this call.

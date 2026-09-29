@@ -1,0 +1,460 @@
+{
+  "allocation_controls": [
+    {
+      "added_holder_io_allocations": 0,
+      "direct_io_allocations": 256,
+      "held_io_allocations": 256,
+      "observer_enabled": false,
+      "warm_lease_allocations": 0
+    },
+    {
+      "added_holder_io_allocations": 0,
+      "direct_io_allocations": 256,
+      "held_io_allocations": 256,
+      "observer_enabled": true,
+      "warm_lease_allocations": 0
+    }
+  ],
+  "allocation_scope": "Controlled current-thread warmed leases and borrowed handles, trace off; excludes cold construction, actual provider/RPC/metadata work, snapshots, close setup, other threads and RSS.",
+  "base_commit": "07838429d8332345add4da841e532b6a90393f23",
+  "ci_budget": {
+    "checked_failed_head": "07838429d8332345add4da841e532b6a90393f23",
+    "failed_job_id": 108730379227,
+    "failed_step": 12,
+    "new_commit_ci": "pending",
+    "new_group_minutes": 3,
+    "old_group_minutes": 1,
+    "per_case_seconds": 10,
+    "remote_failure_cause": "unconfirmed; job/step metadata only; no raw CI logs/artifacts fetched",
+    "run_id": 36358327909
+  },
+  "cli_binary_postgate": {
+    "binding": "postgate observation; not a prelaunch executable pin",
+    "bytes": 107810984,
+    "sha256": "9f0a295371601b456ac3c5b84a4d2b950438799c666b251308b0f14d0a9f23fb"
+  },
+  "cli_scope": "Actual signed configured QUIC/WebSocket control: eager three Drives/two Partitions, full payload/EOF/backing, denials, clean restart; not lazy/full production target.",
+  "execution_identity": "Frozen worktree source hashes, not HEAD alone; publication commit is joined after commit.",
+  "fixed_parent": {
+    "basename": "owned-atomic-health-final.py",
+    "bytes": 67344,
+    "sha256": "620c097be6fceef9fa57028e719fcc7821cefe5b08467e37e548fe27f2ed4edf"
+  },
+  "frozen_sources": {
+    ".github/workflows/ci.yml": "5895b2715028497e9bd3d2aa7105ee3ca9b5db46a95151fcb96903cdafe664c5",
+    "crates/mount-rs-sdk/src/filesystem.rs": "cdaf8ecdfb5c39d9859df496468337b73a088ae923d2515d5b6654e4a64fbb0e",
+    "docs/benchmarks/runtime-lifecycle-metrics-20260928.md": "5ce5fc6541ea72bbce37e2083a071dd4f9f1da4b73a503bd2c72e88fbd02a89a",
+    "docs/superpowers/plans/2026-09-28-bounded-drive-runtimes.md": "84690f44401ea81d06517af9569d9addaf8013403066010150be22fb529fed7b",
+    "docs/superpowers/specs/2026-09-28-bounded-drive-runtimes-design.md": "5ae6a1a9c5a64bf7134e5416421c0762d4ca25110336998ce1e32b9a4d4902c4",
+    "filesystems/mount-rs-chunked/src/lib.rs": "031d62e88ba2726de24c471f9bc2d46693a1a61783418680ac55aa72159b07f7",
+    "filesystems/mount-rs-chunked/src/runtime_health_tests.rs": "89446d08776779c54f2ed0700253de674e4a87a53cbcde6207da0a5ccf28fc29"
+  },
+  "gates": [
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-chunked",
+        "-p",
+        "mount-rs-sdk",
+        "-p",
+        "mount-rs-service",
+        "--all-targets",
+        "--",
+        "--test-threads=1"
+      ],
+      "elapsed_seconds": 85.60771779197967,
+      "execution_head": "07838429d8332345add4da841e532b6a90393f23",
+      "kind": "atomicsurfaces",
+      "logs": {
+        "stderr": {
+          "bytes": 114799,
+          "sha256": "a32496d0a9f678748e3c20356003fbfa4f5b2798e090a6b578f273118f9067bc"
+        },
+        "stdout": {
+          "bytes": 53570,
+          "sha256": "c4d69d0dd638939ed5737b1af9144f8adfc16e6bedeb2a5bfb0277fc000ac693"
+        }
+      },
+      "node_passed_executions": 0,
+      "profile_io_env": "0",
+      "receipt_directory": "mount-rs-owned-fault-atomicsurfaces-pa1g3chw",
+      "receipt_sha256": "f52e6ac82b15b3f2c4e858d6fe2b703f7d47f97fb8851243c673064f3971c265",
+      "returncode": 0,
+      "rust_ignored_occurrences": 48,
+      "rust_passed_executions": 486,
+      "rust_target_summaries": 38,
+      "source_before_after_current_join": true,
+      "source_count": 523,
+      "source_manifest_sha256": "92a8d32733d1ba91922fd224b28160d13dad9c2b28beb9c5e270c9f6b9f721ab",
+      "terminal_ownership_settled": true,
+      "trace_storage_env": "0"
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-chunked",
+        "-p",
+        "mount-rs-sdk",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "mount-rs-service/io-profiling",
+        "--all-targets",
+        "--",
+        "--test-threads=1"
+      ],
+      "elapsed_seconds": 65.4267727919505,
+      "execution_head": "07838429d8332345add4da841e532b6a90393f23",
+      "kind": "atomicprofiled",
+      "logs": {
+        "stderr": {
+          "bytes": 113626,
+          "sha256": "3cac90a6c6fac3b0ce670a8a370702eba51acc7727b5385aad96021c7d532f0a"
+        },
+        "stdout": {
+          "bytes": 56539,
+          "sha256": "ce05a5ba236b33fd9e1461d885b2cf31bc345aeaa28546f57df5f4036957305b"
+        }
+      },
+      "node_passed_executions": 0,
+      "profile_io_env": "0",
+      "receipt_directory": "mount-rs-owned-fault-atomicprofiled-9s7o13b5",
+      "receipt_sha256": "dc6085fd6f751f0a84fd252866d61164c31775f75062d5f3285226d37b8cec4f",
+      "returncode": 0,
+      "rust_ignored_occurrences": 48,
+      "rust_passed_executions": 518,
+      "rust_target_summaries": 38,
+      "source_before_after_current_join": true,
+      "source_count": 523,
+      "source_manifest_sha256": "92a8d32733d1ba91922fd224b28160d13dad9c2b28beb9c5e270c9f6b9f721ab",
+      "terminal_ownership_settled": true,
+      "trace_storage_env": "0"
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-chunked",
+        "-p",
+        "mount-rs-sdk",
+        "-p",
+        "mount-rs-service",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_seconds": 19.58775245799916,
+      "execution_head": "07838429d8332345add4da841e532b6a90393f23",
+      "kind": "atomicclippy",
+      "logs": {
+        "stderr": {
+          "bytes": 2602,
+          "sha256": "90d09313dd0c742f5a85f4ebfdd841dc2fc64f0a5a329b915862ff7a53b5b800"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "node_passed_executions": 0,
+      "profile_io_env": "0",
+      "receipt_directory": "mount-rs-owned-fault-atomicclippy-khpwu8um",
+      "receipt_sha256": "6bb404ea0ab419cfeefb859b81d69565908b65fd6d21aa96e477e0d6765f3dc9",
+      "returncode": 0,
+      "rust_ignored_occurrences": 0,
+      "rust_passed_executions": 0,
+      "rust_target_summaries": 0,
+      "source_before_after_current_join": true,
+      "source_count": 523,
+      "source_manifest_sha256": "92a8d32733d1ba91922fd224b28160d13dad9c2b28beb9c5e270c9f6b9f721ab",
+      "terminal_ownership_settled": true,
+      "trace_storage_env": "0"
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-chunked",
+        "-p",
+        "mount-rs-sdk",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "mount-rs-service/allocation-profiling",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_seconds": 6.803168874990661,
+      "execution_head": "07838429d8332345add4da841e532b6a90393f23",
+      "kind": "atomicprofiledclippy",
+      "logs": {
+        "stderr": {
+          "bytes": 198,
+          "sha256": "aa094e4d1451a54272fdc2a3d495064d0dba8ba217e9d9fa66cf37a3dc40f262"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "node_passed_executions": 0,
+      "profile_io_env": "0",
+      "receipt_directory": "mount-rs-owned-fault-atomicprofiledclippy-xu4f5bkj",
+      "receipt_sha256": "12b5d59d1d94ebf14f26b081a8195d3e4189df665e1dee6295a70d523239f230",
+      "returncode": 0,
+      "rust_ignored_occurrences": 0,
+      "rust_passed_executions": 0,
+      "rust_target_summaries": 0,
+      "source_before_after_current_join": true,
+      "source_count": 523,
+      "source_manifest_sha256": "92a8d32733d1ba91922fd224b28160d13dad9c2b28beb9c5e270c9f6b9f721ab",
+      "terminal_ownership_settled": true,
+      "trace_storage_env": "0"
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "allocation-profiling",
+        "--test",
+        "runtime_pool_allocations",
+        "--",
+        "--ignored",
+        "--exact",
+        "warmed_runtime_leases_allocate_nothing_and_handle_holder_adds_no_io_boxes",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "elapsed_seconds": 5.850831417017616,
+      "execution_head": "07838429d8332345add4da841e532b6a90393f23",
+      "kind": "runtimealloc",
+      "logs": {
+        "stderr": {
+          "bytes": 610,
+          "sha256": "a094b1130e8bf2bfa2656be77c442593774952d1e23e38d69fd4bf47510e95b8"
+        },
+        "stdout": {
+          "bytes": 1200,
+          "sha256": "800a7a7c690392d93edd103cdd80f252b52b336c7e5b9c7b114dde02cfa3de1a"
+        }
+      },
+      "node_passed_executions": 0,
+      "profile_io_env": "0",
+      "receipt_directory": "mount-rs-owned-fault-runtimealloc-_f7g6e1j",
+      "receipt_sha256": "7cafbb186e55df9f410900a7c8a01f3f83eb10a3f9a26779daeafe830b7d26c3",
+      "returncode": 0,
+      "rust_ignored_occurrences": 0,
+      "rust_passed_executions": 1,
+      "rust_target_summaries": 1,
+      "source_before_after_current_join": true,
+      "source_count": 523,
+      "source_manifest_sha256": "92a8d32733d1ba91922fd224b28160d13dad9c2b28beb9c5e270c9f6b9f721ab",
+      "terminal_ownership_settled": true,
+      "trace_storage_env": "0"
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "-p",
+        "mount-rs-cli",
+        "--features",
+        "local-oidc-fixture,io-profiling",
+        "--test",
+        "configured_remote_compact",
+        "--locked",
+        "--offline",
+        "--",
+        "--exact",
+        "configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "elapsed_seconds": 8.280320915975608,
+      "execution_head": "07838429d8332345add4da841e532b6a90393f23",
+      "kind": "clicompact",
+      "logs": {
+        "stderr": {
+          "bytes": 471,
+          "sha256": "3d07b7195d70bfc0b0e45bf6421a0c802ca1013c57e0b3e93ffbe2d0fc2fd933"
+        },
+        "stdout": {
+          "bytes": 133554,
+          "sha256": "772c53d85f35f455fa873363cfbec0f2610b17da546f34d5b541c453adde1a49"
+        }
+      },
+      "node_passed_executions": 0,
+      "profile_io_env": "1",
+      "receipt_directory": "mount-rs-owned-fault-clicompact-a_dqvlk0",
+      "receipt_sha256": "c4a8074e0c745ec21bd76f900edc1d055257734d1d3ac37f59c2a8820121d291",
+      "returncode": 0,
+      "rust_ignored_occurrences": 0,
+      "rust_passed_executions": 1,
+      "rust_target_summaries": 1,
+      "source_before_after_current_join": true,
+      "source_count": 523,
+      "source_manifest_sha256": "92a8d32733d1ba91922fd224b28160d13dad9c2b28beb9c5e270c9f6b9f721ab",
+      "terminal_ownership_settled": true,
+      "trace_storage_env": "0"
+    },
+    {
+      "command": [
+        "fnm",
+        "exec",
+        "--using",
+        "v24.18.0",
+        "node",
+        "--test",
+        "--test-reporter=tap",
+        "--test-timeout=10000",
+        "benchmarks/storage/owned-layout-arm.test.mjs",
+        "benchmarks/storage/owned-layout-outcome.test.mjs",
+        "benchmarks/storage/owned-layout-comparison.test.mjs",
+        "benchmarks/storage/owned-layout-metrics.test.mjs",
+        "benchmarks/storage/process-resource-metrics.test.mjs",
+        "benchmarks/storage/owned-layout-entry.test.mjs",
+        "scripts/verify-owned-layout-comparison.test.mjs"
+      ],
+      "elapsed_seconds": 15.096133125014603,
+      "execution_head": "07838429d8332345add4da841e532b6a90393f23",
+      "kind": "layoutcontrols",
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 134119,
+          "sha256": "010437ba7854e231b9910bbab2b2863d259470ea42a24dd37baa947981c70511"
+        }
+      },
+      "node_passed_executions": 592,
+      "profile_io_env": null,
+      "receipt_directory": "mount-rs-owned-fault-layoutcontrols-lwctae8z",
+      "receipt_sha256": "8672a8711398cba7679f9eb9757320d7403493d40425e54ec12967db04331686",
+      "returncode": 0,
+      "rust_ignored_occurrences": 0,
+      "rust_passed_executions": 0,
+      "rust_target_summaries": 0,
+      "source_before_after_current_join": true,
+      "source_count": 717,
+      "source_manifest_sha256": "60545ac27dbd4a61f5ef27665312776806f2054ca9ea99b5b169d908b3d09070",
+      "terminal_ownership_settled": true,
+      "trace_storage_env": null
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "elapsed_seconds": 4.9368518750416115,
+      "execution_head": "07838429d8332345add4da841e532b6a90393f23",
+      "kind": "fmt",
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "node_passed_executions": 0,
+      "profile_io_env": "0",
+      "receipt_directory": "mount-rs-owned-fault-fmt-2r90kmru",
+      "receipt_sha256": "1f181cadde9c5258c734571c08e2e17bf5644fe9adec1c36f32674b2a05d8c22",
+      "returncode": 0,
+      "rust_ignored_occurrences": 0,
+      "rust_passed_executions": 0,
+      "rust_target_summaries": 0,
+      "source_before_after_current_join": true,
+      "source_count": 523,
+      "source_manifest_sha256": "92a8d32733d1ba91922fd224b28160d13dad9c2b28beb9c5e270c9f6b9f721ab",
+      "terminal_ownership_settled": true,
+      "trace_storage_env": "0"
+    }
+  ],
+  "health_scope": "Nonblocking sticky observation; all three detailed failure writers, healthy contention, inactive guards, first stored error, clones, shutdown, observed poison.",
+  "independent_evidence_review": {
+    "audited_candidate_sha256": "3ca29062f3906e4a834797c035c73617a4d3d6ec6afc2a010051d0946956520e",
+    "post_review_change": "Only this review field was changed from pending after the independent audit.",
+    "scope": "Eight receipts; sixteen logs; before/after/current source joins; counts, historical RED bytes and ordering, allocation modes, scope limits.",
+    "status": "passed"
+  },
+  "independent_source_review": {
+    "scope": "four production/test/workflow source pins; no actionable findings",
+    "status": "passed"
+  },
+  "limits": [
+    "Passing test executions include repeated and modeled controller cases; ignored cases are not qualified.",
+    "No production constructor resource-journal qualification.",
+    "Runtime pool timing bank still needs CLI/process lazy wiring.",
+    "No new actual TiDB/PGlite/FoundationDB integration, physical SSD IOPS, formal proof, crash qualification or full 10,000-client capacity claim.",
+    "Source pins cover the selected repository inputs and private fixed parent; they do not pin every compiler, registry or environment dependency."
+  ],
+  "passed_node_harness_executions": 592,
+  "passed_rust_executions_including_repeats": 1006,
+  "schema": "mount-rs.runtime-health-qualification.v1",
+  "semantic_red": {
+    "cause": "failed() waited for the actual held state mutex",
+    "compiled_and_executed": true,
+    "executed_failed": 1,
+    "executed_passed": 0,
+    "ownership_settled": true,
+    "receipt_directory": "mount-rs-owned-fault-atomichealthred-a9x1lnyx",
+    "receipt_sha256": "0550a2dd37c7ab3772acee2b7942a473684389e0c2f07a5524c352ab406af9fa",
+    "retained_chunked_source": {
+      "basename": "chunked-lib-semantic-red.rs",
+      "bytes": 444611,
+      "matches_gate_source_pin": true,
+      "retention": "Base commit source plus the test-only module include, verified against frozen gate pin.",
+      "sha256": "a7434a1009006ff59f22b1a49e0d820e78d08904ce1f88a1246cc595814823fc"
+    },
+    "retained_test_source": {
+      "basename": "runtime-health-tests-semantic-red.rs",
+      "bytes": 8015,
+      "matches_gate_source_pin": true,
+      "retention": "Exact original byte reconstruction, verified against frozen gate pin before retention.",
+      "sha256": "d0387a2e602a1a6161a56eb85d384e418b27310248b86e5bb54bc3e72c05c8f3"
+    },
+    "selected_case": "runtime_health_tests::healthy_failed_observation_does_not_wait_for_state_mutex",
+    "workers_joined_before_assertion": "source ordering and executed timeout failure; not a separate process counter"
+  },
+  "source_manifest": {
+    "count": 523,
+    "private_fixed_parent_sources": 1,
+    "repo_sources": 522,
+    "sha256": "92a8d32733d1ba91922fd224b28160d13dad9c2b28beb9c5e270c9f6b9f721ab"
+  },
+  "source_union": {
+    "count": 717,
+    "encoding": "UTF-8 json.dumps(sort_keys=True,separators=(comma,colon)) plus one newline",
+    "sha256": "9729d0cdb2d3f8179b7a71a2ee97728624b34580ec55603da91e955880b62099"
+  }
+}

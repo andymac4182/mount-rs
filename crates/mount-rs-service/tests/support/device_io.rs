@@ -1335,6 +1335,25 @@ fn own_process_os_io_boundary_retains_native_identity_and_observer_cost() {
         ordinary.os_io.delta(&ordinary.os_io)["process_disk"]["status"],
         "disabled"
     );
+    // Saturation workloads use Client slices rather than raw connections.
+    // Exercise that boundary with no clients; OS observations still belong to
+    // this process and ordinary sampling still leaves disk accounting disabled.
+    let clients_boundary = super::Snapshot::capture_io_boundary(&[]).unwrap();
+    let clients_delta = clients_boundary.delta(&after).unwrap();
+    assert_eq!(
+        clients_delta["os_io"]["process_disk"]["status"],
+        "available"
+    );
+    assert_eq!(clients_delta["os_io"]["process_disk"]["complete"], true);
+    assert_eq!(
+        clients_delta["os_io"]["host_block_device"]["status"],
+        "unselected"
+    );
+    let ordinary_clients = super::Snapshot::capture(&[]).unwrap();
+    assert_eq!(
+        ordinary_clients.os_io.delta(&ordinary_clients.os_io)["process_disk"]["status"],
+        "disabled"
+    );
     println!(
         "OS_IO_NATIVE_JSON={}",
         serde_json::json!({"raw_before":before.os_io,"raw_after":after.os_io,"phase":io})

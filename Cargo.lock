@@ -1724,9 +1724,13 @@ dependencies = [
  "md-5 0.10.6",
  "mount-rs-core",
  "mount-rs-sdk",
+ "mount-rs-sqlite",
  "quinn",
+ "quinn-proto",
  "rcgen",
+ "rusqlite",
  "rustls",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -1743,6 +1747,7 @@ dependencies = [
  "mount-rs-core",
  "mount-rs-memory",
  "mount-rs-sqlite",
+ "rusqlite",
  "serde_json",
  "tokio",
 ]
@@ -1764,9 +1769,11 @@ dependencies = [
  "mount-rs-observability",
  "mount-rs-remote-client",
  "mount-rs-remote-protocol",
+ "mount-rs-rustfs",
  "mount-rs-sdk",
  "mount-rs-service",
  "mount-rs-sqlite",
+ "mount-rs-tidb",
  "rcgen",
  "ring",
  "rusqlite",
@@ -2065,6 +2072,7 @@ dependencies = [
  "mount-rs-remote-protocol",
  "mount-rs-sdk",
  "mount-rs-service",
+ "mount-rs-sqlite",
  "quinn",
  "rcgen",
  "ring",
@@ -2093,9 +2101,13 @@ name = "mount-rs-rustfs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "futures",
+ "http-body",
  "mount-rs-core",
  "mount-rs-object-store-blocks",
  "object_store 0.12.5",
+ "serde_json",
  "tokio",
 ]
 
@@ -2146,6 +2158,7 @@ dependencies = [
  "mount-rs-sqlite-fs",
  "mount-rs-tidb",
  "mysql_async",
+ "rusqlite",
  "tokio",
 ]
 
@@ -2156,12 +2169,14 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "futures-util",
  "libc",
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-memfs",
  "mount-rs-remote-protocol",
+ "mount-rs-rustfs",
  "mount-rs-sdk",
  "mount-rs-sqlite",
  "mount-rs-tidb",
@@ -2969,8 +2984,6 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "aws-lc-rs",
  "bytes",

@@ -26,7 +26,8 @@ PATTERNS = (
 TARGET_PHASES = frozenset((
     "preflight", "empty_drive_initialization", "worker_setup", "injected_timeout",
     "signed_connections", "online_namespace", "online_payload", "initial_fresh_oracle",
-    "refresh_replicas", "routes_and_scope", "final_fresh_oracle", "revocation", "terminal",
+    "refresh_replicas", "routes_and_scope", "assigned_warmup", "crossnode_routes",
+    "final_fresh_oracle", "revocation", "terminal",
 )) | frozenset(f"{mode}/{pattern}" for mode in ("mostly_idle", "all_active") for pattern in PATTERNS)
 STARTUP_FIELDS = frozenset((
     "schema", "pid", "worker", "generation", "observed_unix_ms", "current_stage",
@@ -34,6 +35,9 @@ STARTUP_FIELDS = frozenset((
     "open_started", "open_success", "open_error", "open_cancelled", "open_in_flight",
     "registered_drives", "elapsed_ns", "current_stage_elapsed_ns", "accounting_complete",
     "banks_captured", "stages",
+))
+LAZY_STARTUP_FIELDS = STARTUP_FIELDS | frozenset((
+    "construction_mode", "max_active_drives", "construction_plans",
 ))
 STAGE_FIELDS = frozenset((
     "stage", "started", "success", "error", "cancelled", "in_flight", "elapsed_ns", "max_ns",
@@ -43,6 +47,15 @@ TARGET_FIELDS = frozenset((
     "partitions", "files_per_drive", "phase_seconds", "phase", "source_revision", "source_verified",
     "host_free_bytes", "initialized_drives", "connected_clients", "outcome", "accounting_complete",
 ))
+ORACLE_FIELDS = frozenset((
+    "pass", "slot_limit", "expected_drives", "started_drives", "completed_drives", "live_slots",
+    "expected_files", "completed_files", "expected_bytes", "completed_bytes", "checked_files",
+    "compared_bytes", "complete", "settled",
+))
+ORACLE_COUNTERS = (
+    "started_drives", "completed_drives", "completed_files", "completed_bytes", "checked_files",
+    "compared_bytes",
+)
 IDENTITY_FIELDS = (
     "mode", "provider", "servers", "clients", "drives", "partitions", "files_per_drive", "phase_seconds",
 )
@@ -109,8 +122,15 @@ def reject_constant(unused):
 
 
 def validate_startup(record):
-    exact_fields(record, STARTUP_FIELDS)
-    require(record["schema"] == "mount-rs.startup.v1")
+    require(type(record) is dict)
+    enumeration(record.get("schema"), ("mount-rs.startup.v1", "mount-rs.startup.v2"))
+    lazy = record["schema"] == "mount-rs.startup.v2"
+    exact_fields(record, LAZY_STARTUP_FIELDS if lazy else STARTUP_FIELDS)
+    if lazy:
+        require(record["construction_mode"] == "lazy")
+        if record["max_active_drives"] is not None:
+            unsigned(record["max_active_drives"], minimum=1)
+        unsigned(record["construction_plans"])
     unsigned(record["pid"], (1 << 32) - 1, 1)
     if record["worker"] is not None:
         unsigned(record["worker"], 9)
@@ -141,20 +161,60 @@ def validate_startup(record):
     open_row = rows[STAGES.index("drive_open")]
     require(all(record["open_" + field] == open_row[field] for field in
                 ("started", "success", "error", "cancelled", "in_flight")), "invalid_accounting")
-    require(record["registered_drives"] <= record["open_success"], "invalid_accounting")
+    if lazy:
+        require((record["max_active_drives"] is not None) == (record["planned_drives"] is not None)
+                == (record["configured_partitions"] is not None), "invalid_accounting")
+        require(record["registered_drives"] <= record["construction_plans"]
+                <= (record["planned_drives"] or 0), "invalid_accounting")
+        require(all(record["open_" + field] == 0 for field in
+                    ("started", "success", "error", "cancelled", "in_flight")), "invalid_accounting")
+    else:
+        require(record["registered_drives"] <= record["open_success"], "invalid_accounting")
     if record["accounting_complete"]:
         require(record["open_started"] == sum(record[field] for field in
                 ("open_success", "open_error", "open_cancelled", "open_in_flight")), "invalid_accounting")
-    if record["terminal_outcome"] == "ready" and record["accounting_complete"]:
-        require(record["planned_drives"] is not None
-                and record["registered_drives"] == record["open_success"] == record["open_started"]
-                == record["planned_drives"]
-                and record["open_error"] == record["open_cancelled"] == record["open_in_flight"] == 0,
-                "invalid_accounting")
+    if record["terminal_outcome"] == "ready" and (lazy or record["accounting_complete"]):
+        if lazy:
+            require(record["planned_drives"] is not None
+                    and record["max_active_drives"] is not None
+                    and record["registered_drives"] == record["construction_plans"]
+                    == record["planned_drives"], "invalid_accounting")
+        else:
+            require(record["planned_drives"] is not None
+                    and record["registered_drives"] == record["open_success"] == record["open_started"]
+                    == record["planned_drives"]
+                    and record["open_error"] == record["open_cancelled"] == record["open_in_flight"] == 0,
+                    "invalid_accounting")
+
+
+def validate_oracle(record, drives):
+    exact_fields(record, ORACLE_FIELDS)
+    enumeration(record["pass"], ("initial", "final"))
+    unsigned(record["slot_limit"], 16, 1)
+    for field in ORACLE_FIELDS - {"pass", "slot_limit", "complete", "settled"}:
+        unsigned(record[field])
+    boolean(record["complete"])
+    boolean(record["settled"])
+    require(record["expected_drives"] == drives
+            and record["completed_drives"] <= record["started_drives"] <= drives
+            and record["live_slots"] <= min(record["slot_limit"],
+                                             record["started_drives"] - record["completed_drives"]),
+            "invalid_oracle_accounting")
+    require(record["completed_files"] <= record["checked_files"] <= record["expected_files"]
+            and record["completed_bytes"] <= record["compared_bytes"] <= record["expected_bytes"],
+            "invalid_oracle_accounting")
+    require(not record["settled"] or record["live_slots"] == 0, "invalid_oracle_accounting")
+    if record["complete"]:
+        require(record["settled"]
+                and record["completed_drives"] == record["started_drives"] == drives
+                and record["completed_files"] == record["checked_files"] == record["expected_files"]
+                and record["completed_bytes"] == record["compared_bytes"] == record["expected_bytes"],
+                "invalid_oracle_accounting")
 
 
 def validate_target(record):
-    exact_fields(record, TARGET_FIELDS)
+    require(type(record) is dict)
+    exact_fields(record, TARGET_FIELDS | {"oracle"} if "oracle" in record else TARGET_FIELDS)
     require(record["schema"] == "mount-rs.target-progress.v1")
     enumeration(record["event"], ("controller_start", "source_verified", "capacity", "phase", "progress", "terminal"))
     unsigned(record["pid"], (1 << 32) - 1, 1)
@@ -177,6 +237,8 @@ def validate_target(record):
     if record["mode"] == "full":
         require(record["drives"] == 10000 and record["files_per_drive"] == 1000 and record["phase_seconds"] == 30)
     require(record["initialized_drives"] <= record["drives"] and record["connected_clients"] <= record["clients"])
+    if "oracle" in record:
+        validate_oracle(record["oracle"], record["drives"])
     if record["event"] == "controller_start":
         require(record["phase"] == "preflight" and not record["source_verified"]
                 and record["outcome"] == "running")
@@ -281,6 +343,54 @@ class TargetIdentity:
         return self.pid is not None and self.verified and self.terminal
 
 
+class OracleIdentity:
+    """One controller and two closed scalar pass snapshots, without private ledgers."""
+
+    def __init__(self):
+        self.pid = None
+        self.previous = None
+        self.initial_complete = False
+        self.terminal = False
+
+    def accept(self, record):
+        oracle = record.get("oracle")
+        if oracle is None:
+            require(self.previous is None, "oracle_progress_missing")
+            self.terminal |= record["event"] == "terminal"
+            return
+        require(not self.terminal and (self.pid is None or record["pid"] == self.pid),
+                "oracle_identity_mismatch")
+        previous = self.previous
+        initial_complete = self.initial_complete
+        if previous is None:
+            require(oracle["pass"] == "initial"
+                    and (record["phase"] == "initial_fresh_oracle"
+                         or (record["phase"] == "terminal" and record["outcome"] != "success")),
+                    "oracle_pass_invalid")
+        else:
+            require(oracle["slot_limit"] == previous["slot_limit"]
+                    and oracle["expected_drives"] == previous["expected_drives"],
+                    "oracle_identity_mismatch")
+            if oracle["pass"] != previous["pass"]:
+                require(previous["pass"] == "initial" and oracle["pass"] == "final"
+                        and record["phase"] == "final_fresh_oracle"
+                        and previous["complete"] and previous["settled"], "oracle_pass_invalid")
+                initial_complete = True
+            else:
+                require(all(oracle[field] == previous[field] for field in
+                            ("expected_files", "expected_bytes")), "oracle_identity_mismatch")
+                require(all(oracle[field] >= previous[field] for field in ORACLE_COUNTERS)
+                        and (not previous["complete"] or oracle["complete"]),
+                        "oracle_counter_regressed")
+        if record["event"] == "terminal" and record["outcome"] == "success":
+            require(initial_complete and oracle["pass"] == "final"
+                    and oracle["complete"] and oracle["settled"], "oracle_terminal_incomplete")
+        self.pid = record["pid"]
+        self.previous = oracle
+        self.initial_complete = initial_complete
+        self.terminal = record["event"] == "terminal"
+
+
 class ResourceIdentity:
     """Bounded in-stream associations; source artifacts still need a separate digest join."""
 
@@ -293,6 +403,7 @@ class ResourceIdentity:
         self.workers = {}
         self.startups = {}
         self.previous = {}
+        self.oracle = OracleIdentity()
 
     def target(self, record):
         if record["event"] == "controller_start":
@@ -300,6 +411,8 @@ class ResourceIdentity:
             self.controller_pid = record["pid"]
         if self.controller_pid is not None:
             require(record["pid"] == self.controller_pid, "resource_identity_mismatch")
+        self.oracle.accept(record)
+        if self.controller_pid is not None:
             self.phase = record["phase"]
             if record["event"] == "source_verified":
                 require(self.revision is None, "resource_identity_mismatch")

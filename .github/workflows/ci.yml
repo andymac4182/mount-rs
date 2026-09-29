@@ -162,7 +162,7 @@ jobs:
           napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
           mkdir -p "$napi_stage"
           pnpm --dir bindings/mount-rs-napi exec napi build \
-            --platform --release --no-js --output-dir "$napi_stage"
+            --platform --release --no-js --output-dir "$napi_stage" -- --locked
           native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
           test -n "$native_path"
           test "$(printf '%s\n' "$native_path" | wc -l | tr -d ' ')" = 1
@@ -227,7 +227,7 @@ jobs:
           napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
           mkdir -p "$napi_stage"
           pnpm --dir bindings/mount-rs-napi exec napi build \
-            --platform --release --no-js --output-dir "$napi_stage"
+            --platform --release --no-js --output-dir "$napi_stage" -- --locked
           native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
           test -n "$native_path"
           test "$(printf '%s\n' "$native_path" | wc -l | tr -d ' ')" = 1
@@ -810,6 +810,20 @@ jobs:
           kani-version: '0.68.0'
           args: '-p mount-rs-core --harness single_extent_validation'
 
+  kani-current-create-rebase:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Prove bounded current fresh create rebase helper
+        uses: model-checking/kani-github-action@69d357bade1eb7b32bc3fc3d5c3d173c5bfa5237 # v1
+        with:
+          kani-version: '0.68.0'
+          args: '-p mount-rs-chunked --harness current_fresh_create_rebinds_only_eligible_preparation'
+
   http-observability:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -886,6 +900,32 @@ jobs:
             ./scripts/cargo-shared test -p mount-rs-chunked --test filesystem_causal_metrics \
             --locked --offline -- --ignored --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/filesystem-causal-metrics.log"
+      - name: Verify compact SQLite stage metrics
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-sqlite --lib --locked --offline \
+            -- --ignored --exact storage::compact_tests::compact_profile_stages_account_for_selected_full_and_failed_decode \
+            --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sqlite-compact-stage-metrics.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/sqlite-compact-stage-metrics.log"
+      - name: Verify own-process OS I/O boundary metrics
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset MOUNT_RS_PROFILE_BLOCK_DEVICE MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-service --features resource-profiling \
+            --test quic_tidb_saturation --locked --offline \
+            -- --ignored --exact resource_profile::device_io::own_process_os_io_boundary_retains_native_identity_and_observer_cost \
+            --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/process-os-io-boundary.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/process-os-io-boundary.log"
       - name: Verify warmed causal profile allocations
         timeout-minutes: 5
         shell: bash
@@ -905,6 +945,16 @@ jobs:
             ./scripts/cargo-shared test -p mount-rs-chunked --test compact_snapshot_revision \
             --locked --offline -- --ignored --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/compact-snapshot-revision.log"
+      - name: Verify current-path fresh create rebase controls
+        if: runner.os != 'Windows'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --test current_path_create_rebase \
+            --locked --offline -- --ignored --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/current-path-create-rebase.log"
       - name: Verify fresh create guard predicate accounting
         if: runner.os != 'Windows'
         timeout-minutes: 5
@@ -949,8 +999,11 @@ jobs:
           path: |
             ${{ runner.temp }}/storage-diagnostic-allocations.log
             ${{ runner.temp }}/filesystem-causal-metrics.log
+            ${{ runner.temp }}/sqlite-compact-stage-metrics.log
+            ${{ runner.temp }}/process-os-io-boundary.log
             ${{ runner.temp }}/filesystem-causal-profile-allocations.log
             ${{ runner.temp }}/compact-snapshot-revision.log
+            ${{ runner.temp }}/current-path-create-rebase.log
             ${{ runner.temp }}/filesystem-create-guard-metrics.log
             ${{ runner.temp }}/filesystem-causal-helpers.log
             ${{ runner.temp }}/filesystem-causal-profile-slow.log
@@ -991,7 +1044,7 @@ jobs:
         run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
       - name: Verify owned layout comparison and bottleneck metrics controls
         timeout-minutes: 1
-        run: node --test --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs
+        run: node --test --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11
@@ -1067,10 +1120,13 @@ jobs:
         timeout-minutes: 1
         run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
       - name: Verify owned layout comparison and bottleneck metrics controls
-        timeout-minutes: 1
+        # Seven files include bounded child-process and filesystem controls.
+        # Keep the per-case deadline below and allow slower matrix hosts time
+        # to complete the full group.
+        timeout-minutes: 3
         run: |
           set -o pipefail
-          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
+          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
       - name: Verify receipt producers and readonly handoff CLI
         timeout-minutes: 1
         run: |

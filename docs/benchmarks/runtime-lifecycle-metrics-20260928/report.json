@@ -1,0 +1,349 @@
+{
+  "allocation_scope": {
+    "delegation_and_returned_bytes_checked": true,
+    "direct_io_allocations_each_mode": 256,
+    "excluded": [
+      "cold_construction",
+      "provider_rpc_metadata",
+      "snapshots",
+      "close_task_setup",
+      "other_threads",
+      "rss"
+    ],
+    "held_io_allocations_each_mode": 256,
+    "observer_modes": [
+      "default_disabled",
+      "explicit_preconstructed_enabled_trace_disabled"
+    ],
+    "read_write_pairs_each": 128,
+    "thread": "controlled_current_thread",
+    "warm_acquire_clone_drop_iterations_each": 1024,
+    "warm_lease_allocations_each_mode": 0
+  },
+  "compile_only_attempts_excluded": [
+    {
+      "receipt_name": "mount-rs-owned-fault-runtimediagred-9_dt5rze",
+      "sha256": "d7b98ada096855d758b2b39c23d03074a311bef07c72732f08c5054e9307b9db"
+    }
+  ],
+  "critical_source_sha256": {
+    "crates/mount-rs-sdk/src/filesystem.rs": "1bfccc1badd6bccec287dbbda916ae263eb87427c4fdfeb8ec9895610955c9ce",
+    "crates/mount-rs-service/src/dispatch.rs": "a54181016c6cf040420cd629b33e7face50433d9c14c821e158dee17aa17b1b4",
+    "crates/mount-rs-service/src/lib.rs": "38849713897c9ce5ecf7db4b9be71a51c6ace957326622a3664c9c3554672d46",
+    "crates/mount-rs-service/src/runtime_diagnostics.rs": "38f081379c030c8f806c0db2dc45e8f576a26060566156b1147db0c4a3845ee9",
+    "crates/mount-rs-service/src/runtime_pool.rs": "9223c44f5b66c60004cfaf2d59d80a07bf4cf1adb09f4ba867f3bfd7f95ba252",
+    "crates/mount-rs-service/tests/runtime_pool_allocations.rs": "9bc33897c4770ad915ef7ae5523d20be85811ed6aa03ac130f4189f469b76833",
+    "crates/mount-rs-service/tests/runtime_pool_diagnostics.rs": "303523f877996956921d570c99ceb7f1916422c288575b05a2b76f568a4f558f",
+    "docs/benchmarks/runtime-lifecycle-metrics-20260928.md": "12226024638e9c2f5a43de01b5f3c562a67d9e85dba0322ad895f3d4e75f48a9",
+    "filesystems/mount-rs-chunked/src/lib.rs": "a89c2e3539f7210368363d77db0bab9be5aa955cabe4fa78478c8d901955b373"
+  },
+  "final_gates": [
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--all-targets",
+        "--",
+        "--test-threads=1"
+      ],
+      "elapsed_seconds": 37.574479250004515,
+      "ignored_occurrences": 17,
+      "kind": "runtimetests",
+      "logs": {
+        "stderr": {
+          "bytes": 110194,
+          "sha256": "c5c0eb7c29afdfd19d036577c08d426664ad4828c0c5fde6ea910889c4556d2e"
+        },
+        "stdout": {
+          "bytes": 29595,
+          "sha256": "1379e2053f6d97f4afdcc35537724d3b786bee8276456ebee590801f3224a0fa"
+        }
+      },
+      "owned_terminal_containment": true,
+      "passed_case_executions": 275,
+      "receipt_name": "mount-rs-owned-fault-runtimetests-o1wjy_dm",
+      "receipt_sha256": "24ba47291b86bb9dd056fa3c281fe5f83ad6474bb14bb335d90ffb8c05687fe2",
+      "result_blocks": 23,
+      "source_unchanged": true
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "io-profiling",
+        "--all-targets",
+        "--",
+        "--test-threads=1"
+      ],
+      "elapsed_seconds": 56.21816124999896,
+      "ignored_occurrences": 17,
+      "kind": "runtimeprofiled",
+      "logs": {
+        "stderr": {
+          "bytes": 111386,
+          "sha256": "82f2009a92aa6f4595adc7011506d9f8f5bb8a748bfb1b5a2f5e8d6c1ea22ca5"
+        },
+        "stdout": {
+          "bytes": 32564,
+          "sha256": "a91b59433839c255ae4b2608ef28230cb3255f40771a70cc5340ec56d3258a91"
+        }
+      },
+      "owned_terminal_containment": true,
+      "passed_case_executions": 307,
+      "receipt_name": "mount-rs-owned-fault-runtimeprofiled-dwxjfl66",
+      "receipt_sha256": "52a19240b3d08c1fb20eec909552e6d7394a0f4c24c8f545d0d644fdb65ed8c0",
+      "result_blocks": 23,
+      "source_unchanged": true
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "allocation-profiling",
+        "--test",
+        "runtime_pool_allocations",
+        "--",
+        "--ignored",
+        "--exact",
+        "warmed_runtime_leases_allocate_nothing_and_handle_holder_adds_no_io_boxes",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "elapsed_seconds": 4.531576666980982,
+      "ignored_occurrences": 0,
+      "kind": "runtimealloc",
+      "logs": {
+        "stderr": {
+          "bytes": 361,
+          "sha256": "b7963b224a576f06ce4dd2069d1f9c6396f2b02503a550ec5e9fc4b3bbc1efc2"
+        },
+        "stdout": {
+          "bytes": 1200,
+          "sha256": "800a7a7c690392d93edd103cdd80f252b52b336c7e5b9c7b114dde02cfa3de1a"
+        }
+      },
+      "owned_terminal_containment": true,
+      "passed_case_executions": 1,
+      "receipt_name": "mount-rs-owned-fault-runtimealloc-f4yk1gny",
+      "receipt_sha256": "8db82f6b4fe2c212f8acc48dfefafb7a60956929b073a0b81af5b3be38db03c7",
+      "result_blocks": 1,
+      "source_unchanged": true
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_seconds": 6.418411916005425,
+      "ignored_occurrences": 0,
+      "kind": "runtimedefaultclippy",
+      "logs": {
+        "stderr": {
+          "bytes": 72,
+          "sha256": "00e76b91bef667c719f0e7f7ff68c7e3387e6f2cfa29845cc7dbe11a4ff4aae4"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "owned_terminal_containment": true,
+      "passed_case_executions": 0,
+      "receipt_name": "mount-rs-owned-fault-runtimedefaultclippy-mreuqpip",
+      "receipt_sha256": "02fbdd5c33b575856f1750b95b2e99c77ca7d1e08f5460bc51da7b89d778b22c",
+      "result_blocks": 0,
+      "source_unchanged": true
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--offline",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "allocation-profiling,io-profiling",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_seconds": 3.8432780830189586,
+      "ignored_occurrences": 0,
+      "kind": "runtimeclippy",
+      "logs": {
+        "stderr": {
+          "bytes": 72,
+          "sha256": "4e857e8ebea43159b6f1acbd4b11448ae36294d66a6d373b8d0b78f089a3bf01"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "owned_terminal_containment": true,
+      "passed_case_executions": 0,
+      "receipt_name": "mount-rs-owned-fault-runtimeclippy-kej6vn6n",
+      "receipt_sha256": "0b76459d45d5e601610d88e6b979b7945f9bcbc918237363589db7498ac620ee",
+      "result_blocks": 0,
+      "source_unchanged": true
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "elapsed_seconds": 4.278354000009131,
+      "ignored_occurrences": 0,
+      "kind": "fmt",
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "owned_terminal_containment": true,
+      "passed_case_executions": 0,
+      "receipt_name": "mount-rs-owned-fault-fmt-fg97hr3r",
+      "receipt_sha256": "141b00c7f9e6a6d6eee0337db431c16d691ac57d6dfd291440a577207ee21754",
+      "result_blocks": 0,
+      "source_unchanged": true
+    },
+    {
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "-p",
+        "mount-rs-cli",
+        "--features",
+        "local-oidc-fixture,io-profiling",
+        "--test",
+        "configured_remote_compact",
+        "--locked",
+        "--offline",
+        "--",
+        "--exact",
+        "configured_binary_selects_mrc5_for_signed_quic_and_websocket_reopen",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "elapsed_seconds": 26.68510341597721,
+      "ignored_occurrences": 0,
+      "kind": "clicompact",
+      "logs": {
+        "stderr": {
+          "bytes": 2068,
+          "sha256": "48d73061013b0b78d87e4851e2429445a1fe16d0b0ede436a6d27a9a5623eda9"
+        },
+        "stdout": {
+          "bytes": 133569,
+          "sha256": "3d3623c74acd82d64a0d62665f9a36863108034c1c5c13cafd622412a5f924d6"
+        }
+      },
+      "owned_terminal_containment": true,
+      "passed_case_executions": 1,
+      "receipt_name": "mount-rs-owned-fault-clicompact-hhr7nuhc",
+      "receipt_sha256": "328d72c360d30c3968952d5079ea538612e22c16716bcec0db14614fc1b68a99",
+      "result_blocks": 1,
+      "source_unchanged": true
+    }
+  ],
+  "head_before_commit": "477a5d81c825201887504a35e375ecf8b2eaf7e7",
+  "limits": [
+    "runtime_observer_not_yet_wired_into_cli_or_real_process_fixture",
+    "current_sdk_health_getter_takes_state_mutex_needs_atomic_observation_for_concrete_pool_adapter",
+    "concrete_sdk_partial_open_cleanup_not_qualified_for_all_providers",
+    "native_resource_and_full_target_gates_incomplete",
+    "no_physical_device_iops_or_whole_filesystem_zero_allocation_claim",
+    "no_goal_completion_or_merge_claim"
+  ],
+  "passed_case_executions_including_repeats": 584,
+  "post_gate_cli_binary_observation": {
+    "bytes": 107810984,
+    "features": [
+      "local-oidc-fixture",
+      "io-profiling"
+    ],
+    "scope": "post_gate_file_observation_not_a_prelaunch_binary_pin",
+    "sha256": "e8b6d6d821483a86495d71ffa6cb28bd467d359a50c0e041942734f8190924a1"
+  },
+  "private_qualification_sha256": "52be94d227df7de537ef4494b33cf278586a2ea0bc5fe5b8e55c367af7608aec",
+  "profiled_observer_unit_cases": 9,
+  "profiling_behavioral_cases": [
+    "canceled_callers_leave_owned_open_and_terminal_drain_observed_until_completion",
+    "drop_owned_close_and_canceled_eviction_have_independent_active_and_success_rows",
+    "failed_and_panicking_owners_record_errors_without_replay_or_losing_actual_handles",
+    "default_pool_is_unobserved_and_hot_mutex_timings_publish_after_unlock",
+    "eviction_completion_metrics_publish_before_admission_ticket_wakes"
+  ],
+  "runtime_labels": [
+    "runtime.acquire",
+    "runtime.activation_wait",
+    "runtime.open",
+    "runtime.eviction_shutdown",
+    "runtime.terminal_drain",
+    "runtime.handle_close",
+    "runtime.state_mutex_wait",
+    "runtime.state_mutex_hold"
+  ],
+  "schema": "mount-rs.runtime-observer-qualification.v1",
+  "scope": "bounded_runtime_core_and_opt_in_observer_with_eager_signed_cli_integration",
+  "semantic_reds": [
+    {
+      "meaning": "active_owned_open_gauge_zero_instead_of_one",
+      "receipt_name": "mount-rs-owned-fault-runtimediagred-thspq2hk",
+      "sha256": "0c294e430b5ec646e4e9846c4e5b7ad8268a8fd8596a7fcedfe8baad78a8adb7"
+    },
+    {
+      "meaning": "admission_waker_observed_unsettled_eviction_row",
+      "receipt_name": "mount-rs-owned-fault-runtimeorderred-stad285m",
+      "sha256": "1af5e00c19f008f45e630f95eb2c3bb175a65cef5d3552c20af870551b875725"
+    }
+  ],
+  "slow_logging": {
+    "attempt_budget_per_observer": 16,
+    "fields": [
+      "static_stage",
+      "static_outcome",
+      "elapsed_ns"
+    ],
+    "fixed_buffer_bytes": 160,
+    "threshold_ms": 100,
+    "trace_default": false,
+    "writer_acquired_after_budget_reservation": true
+  },
+  "source_manifest_count": 522,
+  "source_manifest_sha256": "4982ce3f4b183551594b632205c0b55ba67f8528754dce65e8fa1085018dc04e",
+  "source_review": "independent source and receipt verification passed: 522 current pins, seven exact-source gates, fourteen joined raw logs, 584 passed case executions including repeats; remaining scope limits retained",
+  "source_selection": "tracked_rs_toml_lock_and_explicit_new_sources_docs_scripts_and_vendored_quinn"
+}

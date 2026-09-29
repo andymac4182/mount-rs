@@ -4,6 +4,7 @@ import {
   deltaNativeSnapshots, logPhaseSummary, NATIVE_DIAGNOSTICS_SCHEMA,
   STORAGE_BYTE_SEMANTICS, STORAGE_CALL_SEMANTICS, STORAGE_ROW_SEMANTICS,
   STORAGE_OPERATION_FAMILIES, TIDB_DIAGNOSTIC_COVERAGE,
+  SQLITE_VFS_MEASUREMENT, SQLITE_VFS_ENTRY_NAMES,
 } from "./diagnostics.mjs"
 
 // Independent pre-extension inventory: append-only compatibility is part of the contract.
@@ -97,21 +98,281 @@ const foundationdbNames = Object.freeze([
   "foundationdb.transaction.commit",
   "foundationdb.transaction.on_error",
 ])
-const operationNames = Object.freeze([...legacyNames, ...foundationdbNames])
-const duration = "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap"
-const foundationdbFamilies = {
-  foundationdb_transaction: {
-    operations: foundationdbNames.filter((name) => name.startsWith("foundationdb.transaction.")),
-    calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions",
-    bytes: "unavailable", returned_rows: "unavailable", duration,
-  },
-  foundationdb_read: {
-    operations: foundationdbNames.filter((name) => name.startsWith("foundationdb.read.")),
-    calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count",
-    bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only",
-    returned_rows: "unavailable", duration,
-  },
+const preCacheNames = Object.freeze([...legacyNames, ...foundationdbNames])
+const cacheNames = Object.freeze([
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+])
+const preClientNames = Object.freeze([...preCacheNames, ...cacheNames])
+const clientNames = Object.freeze(["client.quic.open_bi"])
+const preTransportNames = Object.freeze([...preClientNames, ...clientNames])
+const transportNames = Object.freeze([
+  "client.quic.request_send",
+  "client.quic.response_receive",
+  "blob_cache.peer.request_byte_admission_wait",
+  "blob_cache.peer.open_bi",
+  "blob_cache.peer.request_send",
+  "blob_cache.peer.response_receive",
+  "blob_cache.peer.get",
+  "blob_cache.peer.get_miss",
+])
+const websocketNames = Object.freeze([
+  "client.websocket.tcp_connect",
+  "client.websocket.tls_handshake",
+  "client.websocket.upgrade",
+  "client.websocket.socket_lock_wait",
+  "client.websocket.request_encode",
+  "client.websocket.request_send",
+  "client.websocket.response_receive",
+  "client.websocket.response_decode",
+])
+const setupDiscoveryNames = Object.freeze(["client.quic.connection_setup", "blob_cache.discovery.locate"])
+const historical108Names = Object.freeze([...preTransportNames, ...transportNames, ...websocketNames])
+const markerNames = Object.freeze([
+  "object_store.backing_marker.probe.get", "object_store.backing_marker.probe.body_read",
+  "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",
+  "object_store.backing_marker.probe.create", "object_store.backing_marker.retry_backoff",
+])
+const operationNames = Object.freeze([...historical108Names, ...setupDiscoveryNames, ...markerNames])
+// Literal historical 100-row inventory, independent of the current declaration.
+const historical100Names = Object.freeze([
+  "metadata.load",
+  "metadata.load_if_changed",
+  "metadata.snapshot",
+  "metadata.publish",
+  "metadata.flush",
+  "blocks.put",
+  "blocks.get",
+  "blocks.flush",
+  "blocks.verify_backing",
+  "blocks.prepare_backing",
+  "blocks.delete",
+  "blocks.reconcile",
+  "pglite.client_lock_wait",
+  "sdk.metadata.compact_inode_capability",
+  "sdk.metadata.compact_inode_mode_state",
+  "sdk.metadata.prepare_compact_inode_mode",
+  "sdk.metadata.load_compact_snapshot",
+  "sdk.metadata.load_compact_inode",
+  "sdk.metadata.publish_compact_inode",
+  "sdk.metadata.publish_compact_structure",
+  "sdk.metadata.inode_mode_state",
+  "sdk.metadata.prepare_inode_mode",
+  "sdk.metadata.load_inode_snapshot_if_changed",
+  "sdk.metadata.load_inode_snapshot",
+  "sdk.metadata.load_inode",
+  "sdk.metadata.load_inode_if_changed",
+  "sdk.metadata.publish_inode_if_version",
+  "sdk.metadata.publish_structure_if_versions",
+  "sdk.metadata.delegation_state",
+  "sdk.metadata.prepare_delegated_mode",
+  "sdk.metadata.checkout",
+  "sdk.metadata.publish_delegated",
+  "sdk.metadata.checkin",
+  "sdk.metadata.recover",
+  "sdk.metadata.durable",
+  "sdk.metadata.publish_includes_flush_barrier",
+  "sdk.metadata.load",
+  "sdk.metadata.load_if_changed",
+  "sdk.metadata.concurrent_mode_state",
+  "sdk.metadata.preflight_new_bound_mode",
+  "sdk.metadata.prepare_bound_concurrent_mode",
+  "sdk.metadata.acquire_writer",
+  "sdk.metadata.renew_writer",
+  "sdk.metadata.release_writer",
+  "sdk.metadata.publish",
+  "sdk.metadata.publish_bound_if_revision",
+  "sdk.metadata.migrate_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_trusted_unstamped_mrc1",
+  "sdk.metadata.migrate_trusted_unstamped_mrc1",
+  "sdk.metadata.flush",
+  "sdk.blocks.durable",
+  "sdk.blocks.prepare_concurrent_backing",
+  "sdk.blocks.verify_concurrent_backing",
+  "sdk.blocks.get_for_migration",
+  "sdk.blocks.put",
+  "sdk.blocks.get",
+  "sdk.blocks.flush",
+  "sdk.blocks.delete",
+  "sdk.blocks.reconcile",
+  "tidb.pool.checkout",
+  "tidb.session.configure",
+  "tidb.open.schema",
+  "tidb.open.metadata_row",
+  "tidb.tx.begin.metadata",
+  "tidb.tx.begin.inode",
+  "tidb.tx.begin.compact_read",
+  "tidb.tx.commit",
+  "tidb.tx.rollback",
+  "tidb.sql.session",
+  "tidb.sql.ddl",
+  "tidb.sql.metadata_read",
+  "tidb.sql.metadata_write",
+  "tidb.sql.inode_read",
+  "tidb.sql.inode_write",
+  "tidb.sql.block_read",
+  "tidb.sql.block_write",
+  "tidb.sql.flush_probe",
+  "foundationdb.transaction.create",
+  "foundationdb.transaction.closure_attempt",
+  "foundationdb.read.get",
+  "foundationdb.read.get_key",
+  "foundationdb.read.get_range_page",
+  "foundationdb.transaction.commit",
+  "foundationdb.transaction.on_error",
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
+  "client.quic.request_send",
+  "client.quic.response_receive",
+  "blob_cache.peer.request_byte_admission_wait",
+  "blob_cache.peer.open_bi",
+  "blob_cache.peer.request_send",
+  "blob_cache.peer.response_receive",
+  "blob_cache.peer.get",
+  "blob_cache.peer.get_miss",
+])
+// Literal v3 descriptor at 56b9; never substitute the current family metadata.
+const historical92ByteSemantics = "known_successful_payload_bytes_only; zero_does_not_establish_no_payload"
+const historical92Names = Object.freeze([
+  "metadata.load",
+  "metadata.load_if_changed",
+  "metadata.snapshot",
+  "metadata.publish",
+  "metadata.flush",
+  "blocks.put",
+  "blocks.get",
+  "blocks.flush",
+  "blocks.verify_backing",
+  "blocks.prepare_backing",
+  "blocks.delete",
+  "blocks.reconcile",
+  "pglite.client_lock_wait",
+  "sdk.metadata.compact_inode_capability",
+  "sdk.metadata.compact_inode_mode_state",
+  "sdk.metadata.prepare_compact_inode_mode",
+  "sdk.metadata.load_compact_snapshot",
+  "sdk.metadata.load_compact_inode",
+  "sdk.metadata.publish_compact_inode",
+  "sdk.metadata.publish_compact_structure",
+  "sdk.metadata.inode_mode_state",
+  "sdk.metadata.prepare_inode_mode",
+  "sdk.metadata.load_inode_snapshot_if_changed",
+  "sdk.metadata.load_inode_snapshot",
+  "sdk.metadata.load_inode",
+  "sdk.metadata.load_inode_if_changed",
+  "sdk.metadata.publish_inode_if_version",
+  "sdk.metadata.publish_structure_if_versions",
+  "sdk.metadata.delegation_state",
+  "sdk.metadata.prepare_delegated_mode",
+  "sdk.metadata.checkout",
+  "sdk.metadata.publish_delegated",
+  "sdk.metadata.checkin",
+  "sdk.metadata.recover",
+  "sdk.metadata.durable",
+  "sdk.metadata.publish_includes_flush_barrier",
+  "sdk.metadata.load",
+  "sdk.metadata.load_if_changed",
+  "sdk.metadata.concurrent_mode_state",
+  "sdk.metadata.preflight_new_bound_mode",
+  "sdk.metadata.prepare_bound_concurrent_mode",
+  "sdk.metadata.acquire_writer",
+  "sdk.metadata.renew_writer",
+  "sdk.metadata.release_writer",
+  "sdk.metadata.publish",
+  "sdk.metadata.publish_bound_if_revision",
+  "sdk.metadata.migrate_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_trusted_unstamped_mrc1",
+  "sdk.metadata.migrate_trusted_unstamped_mrc1",
+  "sdk.metadata.flush",
+  "sdk.blocks.durable",
+  "sdk.blocks.prepare_concurrent_backing",
+  "sdk.blocks.verify_concurrent_backing",
+  "sdk.blocks.get_for_migration",
+  "sdk.blocks.put",
+  "sdk.blocks.get",
+  "sdk.blocks.flush",
+  "sdk.blocks.delete",
+  "sdk.blocks.reconcile",
+  "tidb.pool.checkout",
+  "tidb.session.configure",
+  "tidb.open.schema",
+  "tidb.open.metadata_row",
+  "tidb.tx.begin.metadata",
+  "tidb.tx.begin.inode",
+  "tidb.tx.begin.compact_read",
+  "tidb.tx.commit",
+  "tidb.tx.rollback",
+  "tidb.sql.session",
+  "tidb.sql.ddl",
+  "tidb.sql.metadata_read",
+  "tidb.sql.metadata_write",
+  "tidb.sql.inode_read",
+  "tidb.sql.inode_write",
+  "tidb.sql.block_read",
+  "tidb.sql.block_write",
+  "tidb.sql.flush_probe",
+  "foundationdb.transaction.create",
+  "foundationdb.transaction.closure_attempt",
+  "foundationdb.read.get",
+  "foundationdb.read.get_key",
+  "foundationdb.read.get_range_page",
+  "foundationdb.transaction.commit",
+  "foundationdb.transaction.on_error",
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+  "client.quic.open_bi",
+])
+const historical92Families = {
+  napi_provider: { operations: historical92Names.filter((name) => name.startsWith("metadata.") || name.startsWith("blocks.")), calls: "napi_dynamic_provider_method_invocations", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  sdk_provider: { operations: historical92Names.filter((name) => name.startsWith("sdk.")), calls: "direct_sdk_provider_method_invocations_including_synchronous_methods", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  pglite_client_lock: { operations: ["pglite.client_lock_wait"], calls: "client_lock_acquisition_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_client_lock_await_nanoseconds" },
+  tidb_pool_checkout: { operations: ["tidb.pool.checkout"], calls: "pool_checkout_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_checkout_nanoseconds_including_lazy_connect_and_session_configuration; queue_only_wait_unavailable" },
+  tidb_session: { operations: ["tidb.session.configure"], calls: "session_configuration_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_open: { operations: historical92Names.filter((name) => name.startsWith("tidb.open.")), calls: "open_schema_and_metadata_initialization_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_transaction: { operations: historical92Names.filter((name) => name.startsWith("tidb.tx.")), calls: "transaction_lifecycle_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_sql: { operations: historical92Names.filter((name) => name.startsWith("tidb.sql.")), calls: "categorized_sql_adapter_invocations; not_internal_requests", bytes: "known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable", returned_rows: "known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  blob_cache: { operations: ["blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait", "blob_cache.ram.lookup", "blob_cache.disk.lookup", "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish"], calls: "cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination", bytes: "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
 }
+
+// Literal pre-WebSocket descriptor; current declarations cannot repair it.
+const historical100ByteSemantics = "known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload"
+const historical100Families = {
+  ...historical92Families,
+  client_quic_request_send: { operations: ["client.quic.request_send"], calls: "request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_write_and_fin_submission_nanoseconds; not_acknowledgment_or_exclusive_cpu_time" },
+  client_quic_response_receive: { operations: ["client.quic.response_receive"], calls: "response_receive_stage_invocations; includes_success_error_and_cancellation; not_server_operations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_decode_and_eof_validation_nanoseconds; not_exclusive_cpu_or_network_time" },
+  blob_cache_peer_request_byte_admission_wait: { operations: ["blob_cache.peer.request_byte_admission_wait"], calls: "request_byte_permit_acquisition_invocations; includes_success_error_and_cancellation", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_request_byte_permit_await_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_open_bi: { operations: ["blob_cache.peer.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_request_send: { operations: ["blob_cache.peer.request_send"], calls: "request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments", bytes: "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments", returned_rows: "unavailable", duration: "inclusive_write_and_fin_submission_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_response_receive: { operations: ["blob_cache.peer.response_receive"], calls: "response_receive_stage_invocations; includes_success_error_and_cancellation; not_backing_reads", bytes: "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes", returned_rows: "unavailable", duration: "inclusive_response_read_and_validation_nanoseconds; overlaps_get_duration" },
+  blob_cache_peer_get: { operations: ["blob_cache.peer.get"], calls: "logical_peer_get_and_get_shared_invocations; includes_hits_misses_errors_and_cancellation", bytes: "known_successful_logical_get_payload_bytes; misses_zero", returned_rows: "unavailable", duration: "inclusive_get_method_nanoseconds; includes_request_and_existing_return_conversion; overlaps_transport_stages" },
+  blob_cache_peer_get_miss: { operations: ["blob_cache.peer.get_miss"], calls: "successful_get_miss_classifications; not_peer_requests", bytes: "unavailable", returned_rows: "unavailable", duration: "classification_marker_nanoseconds; excludes_get_request_duration" },
+}
+
+// Literal 108-row descriptor preserves its original 21 families.
+const historical108Families = {
+  ...historical100Families,
+  client_websocket: { operations: [...websocketNames], calls: "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time" },
+}
+
+const duration = "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap"
 const foundationdbCoverage = {
   schema: "mount-rs-foundationdb-client-diagnostic-coverage-v1",
   status: "source_sites_instrumented",
@@ -145,16 +406,26 @@ const row = (name) => ({
   name, ...zeros(["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "in_flight", "elapsed_ns"]),
   latency_log2_us: Array(32).fill("0"),
 })
-function snapshot({ legacy = false, feature = true } = {}) {
-  const names = legacy ? legacyNames : operationNames
-  const families = Object.fromEntries(Object.entries(STORAGE_OPERATION_FAMILIES).filter(([name]) => !name.startsWith("foundationdb_")))
+function emptySqliteVfs() {
+  const zero = (fields) => Object.fromEntries(fields.map((field) => [field, "0"]))
+  const timing = () => ({ ...zero(["completed", "elapsed_ns", "max_elapsed_ns", "invalid_elapsed"]), overflow: false, histogram_log2_us: Array(32).fill("0") })
+  return { ...SQLITE_VFS_MEASUREMENT, overflow: false,
+    ...zero(["open_attempts", "open_errors", "files_opened", "close_calls", "close_errors", "in_flight", "live_files", "registered_vfs", "live_contexts"]),
+    entries: SQLITE_VFS_ENTRY_NAMES.map((name) => ({ name, ...timing(), ...zero(["errors", "requested_bytes", "confirmed_bytes", "short_reads"]) })),
+    checkpoint: { ...zero(["starts", "dones", "unmatched_starts", "unmatched_dones", "aborted_windows", "active_windows"]), paired: timing() } }
+}
+function snapshot({ legacy = false, preCache = false, preClient = false, preTransport = false, preWebSocket = false, preSetup = false, feature = true } = {}) {
+  const historical = legacy || preCache || preClient || preTransport
+  const names = legacy ? legacyNames : preCache ? preCacheNames : preClient ? preClientNames : preTransport ? historical92Names : preWebSocket ? historical100Names : preSetup ? historical108Names : operationNames
+  const families = historical ? Object.fromEntries(Object.entries(historical92Families)
+    .filter(([, family]) => family.operations.every((name) => names.includes(name)))) : preWebSocket ? historical100Families : preSetup ? historical108Families : STORAGE_OPERATION_FAMILIES
   return {
     schema_version: NATIVE_DIAGNOSTICS_SCHEMA, enabled: true, scope: "process",
     quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
     measurement: {
-      storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS,
-      storage_operations: [...names], storage_families: { ...structuredClone(families), ...(legacy ? {} : structuredClone(foundationdbFamilies)) },
-      storage_instrumented_operations: [...legacyNames, ...(!legacy && feature ? foundationdbNames : [])],
+      storage_calls: STORAGE_CALL_SEMANTICS, storage_bytes: historical ? historical92ByteSemantics : preWebSocket ? historical100ByteSemantics : STORAGE_BYTE_SEMANTICS, storage_rows: STORAGE_ROW_SEMANTICS,
+      storage_operations: [...names], storage_families: structuredClone(families),
+      storage_instrumented_operations: [...legacyNames, ...(!legacy && feature ? foundationdbNames : []), ...names.filter((name) => markerNames.includes(name))],
       tidb_coverage: structuredClone(TIDB_DIAGNOSTIC_COVERAGE),
       ...(legacy ? {} : { foundationdb_coverage: structuredClone(feature ? foundationdbCoverage : disabledCoverage) }),
       storage_duration: duration,
@@ -171,7 +442,11 @@ function snapshot({ legacy = false, feature = true } = {}) {
     backend_waits: { pglite_client_lock: "instrumented", tidb_pool: "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration" },
     http_attempts: "unavailable", physical_device_iops: "unavailable",
     storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: "0", requested_object_bytes: "0" }, entries: names.map(row) },
-    profile: { entries: [] }, sqlite: { connections: [] },
+    profile: { entries: [] }, sqlite: {
+      connections: [], sql_statements: "0", observer_elapsed_ns: "0",
+      observer_scope: "Instant wall time for sequential registry lock and per-connection observer collection; excludes final outer JSON serialization; not workload time",
+      vfs: emptySqliteVfs(),
+    },
     r2: { scope: "process_live_instances", instances: [], internal_successful_retries: "unavailable" },
   }
 }
@@ -204,10 +479,21 @@ function summary(native) {
   return JSON.parse(lines[0].replace(/^MOUNT_RS_STORAGE_PHASE /u, ""))
 }
 
-test("new 85-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
+test("new 116-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
   const value = snapshot()
-  assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.storage.entries.length, 116)
   assert.deepEqual(value.storage.entries.map((entry) => entry.name), operationNames)
+  assert.deepEqual(value.storage.entries.slice(78, 85).map((entry) => entry.name), foundationdbNames)
+  assert.deepEqual(value.storage.entries.slice(85, 91).map((entry) => entry.name), cacheNames)
+  assert.deepEqual(value.storage.entries.slice(91, 92).map((entry) => entry.name), clientNames)
+  assert.deepEqual(value.storage.entries.slice(92, 100).map((entry) => entry.name), transportNames)
+  assert.deepEqual(value.storage.entries.slice(100, 108).map((entry) => entry.name), websocketNames)
+  assert.deepEqual(value.storage.entries.slice(0, 100).map((entry) => entry.name), historical100Names)
+  assert.deepEqual(value.storage.entries.slice(0, 108).map((entry) => entry.name), historical108Names)
+  assert.deepEqual(value.storage.entries.slice(108, 110).map((entry) => entry.name), setupDiscoveryNames)
+  assert.deepEqual(value.storage.entries.slice(110, 116).map((entry) => entry.name), markerNames)
+  assert.deepEqual(value.measurement.storage_families.object_store_backing_marker.operations, markerNames)
+  assert.deepEqual(value.measurement.storage_instrumented_operations.slice(-6), markerNames)
   for (const entry of value.storage.entries) {
     assert.equal(BigInt(entry.calls), BigInt(entry.success) + BigInt(entry.error) + BigInt(entry.cancelled))
     assert.equal(entry.latency_log2_us.reduce((sum, count) => sum + BigInt(count), 0n), BigInt(entry.calls))
@@ -222,6 +508,64 @@ test("old 78-row observation remains incomplete without seven invented zero rows
   assert.equal(value.observations.after.storage.entries.length, 78)
   assert.equal(value.observations.after.storage.entries.values.some((entry) => foundationdbNames.includes(entry.name)), false)
   assert.equal(value.observations.after.measurement.foundationdb_coverage, "unavailable")
+})
+test("old 85-row observation remains incomplete without six invented cache rows", () => {
+  const before = snapshot({ preCache: true }), after = snapshot({ preCache: true })
+  Object.assign(find(after, foundationdbNames[2]), { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "1000", latency_log2_us: ["0", "1", ...Array(30).fill("0")] })
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.storage.entries.length, 85)
+  assert.equal(value.observations.after.storage.entries.values.length, 85)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => cacheNames.includes(entry.name)), false)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => clientNames.includes(entry.name)), false)
+  assert.equal(value.observations.after.storage.entries.values.find((entry) => entry.name === foundationdbNames[2]).bytes, "9007199254740993")
+})
+test("old 91-row observation remains incomplete without an invented client stream row", () => {
+  const value = deltaNativeSnapshots(snapshot({ preClient: true }), snapshot({ preClient: true }))
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.storage.entries.length, 91)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => clientNames.includes(entry.name)), false)
+})
+test("literal 56b9 92-row descriptor remains unavailable without invented transport rows", () => {
+  const before = snapshot({ preTransport: true }), after = snapshot({ preTransport: true })
+  assert.equal(after.measurement.storage_bytes, historical92ByteSemantics)
+  assert.deepEqual(after.measurement.storage_families, historical92Families)
+  assert.equal(Object.keys(after.measurement.storage_families).length, 12)
+  assert.deepEqual(after.measurement.storage_operations, historical92Names)
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.storage.entries.length, 92)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => transportNames.includes(entry.name)), false)
+  assert.equal(value.observations.after.measurement.storage_bytes, "unavailable")
+  assert.equal(value.observations.after.measurement.storage_families, "unavailable")
+})
+test("literal historical 100-row inventory stays incomplete without invented WebSocket stages", () => {
+  const before = snapshot({ preWebSocket: true }), after = snapshot({ preWebSocket: true })
+  const base = "9007199254740993"
+  Object.assign(find(after, "client.quic.request_send"), { calls: base, success: base, elapsed_ns: base, latency_log2_us: [base, ...Array(31).fill("0")] })
+  assert.deepEqual(after.measurement.storage_operations, historical100Names)
+  assert.deepEqual(after.measurement.storage_families, historical100Families)
+  assert.equal(after.measurement.storage_bytes, historical100ByteSemantics)
+  assert.equal(Object.keys(after.measurement.storage_families).length, 20)
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.storage.entries.length, 100)
+  assert.equal(value.observations.after.storage.entries.values.length, 100)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => websocketNames.includes(entry.name)), false)
+  assert.equal(value.observations.after.storage.entries.values.find((entry) => entry.name === "client.quic.request_send").calls, base)
+})
+test("current 116-row inventory refuses the historical payload-only byte descriptor", () => {
+  const before = snapshot(), after = snapshot()
+  before.measurement.storage_bytes = historical92ByteSemantics
+  after.measurement.storage_bytes = historical92ByteSemantics
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.measurement.storage_bytes, "unavailable")
 })
 test("seven FoundationDB terminal outcomes and histograms reconcile independently", () => {
   const before = snapshot(), after = snapshot()
@@ -256,11 +600,109 @@ test("successful empty get payload is a known zero without inventing SQL rows", 
   assert.match(value.measurement.storage_bytes, /zero_does_not_establish_no_payload/u)
   assert.equal(value.measurement.storage_families.foundationdb_read.returned_rows, "unavailable")
 })
-test("feature-off 85-row phase remains complete for other banks while FDB coverage is unavailable", () => {
+test("feature-off 116-row phase keeps FDB and cache source coverage unavailable", () => {
   const value = observed(snapshot({ feature: false }), snapshot({ feature: false }))
   assert.deepEqual(value.measurement.foundationdb_coverage, disabledCoverage)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
-  assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.measurement.storage_instrumented_operations.length, 84)
+  assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("blob_cache.")), false)
+  assert.equal(value.storage.entries.length, 116)
+  assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("client.")), false)
+})
+test("declared cache family stays unavailable in addon summaries with FDB enabled or disabled", () => {
+  for (const feature of [true, false]) {
+    const value = observed(snapshot({ feature }), snapshot({ feature }))
+    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 91 : 84)
+    assert.equal(value.measurement.storage_instrumented_operations.some((name) => cacheNames.includes(name)), false)
+    const family = summary(value).families.blob_cache
+    assert.equal(family.available, false)
+    assert.equal(family.instrumented, false)
+    assert.deepEqual(family.instrumented_operations, [])
+    for (const field of ["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"]) assert.equal(Object.hasOwn(family, field), false)
+  }
+})
+test("declared client stream family stays unavailable in addon summaries with FDB enabled or disabled", () => {
+  for (const feature of [true, false]) {
+    const value = observed(snapshot({ feature }), snapshot({ feature }))
+    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 91 : 84)
+    assert.equal(value.measurement.storage_instrumented_operations.includes("client.quic.open_bi"), false)
+    const family = summary(value).families.client_quic
+    assert.equal(family.available, false)
+    assert.equal(family.instrumented, false)
+    assert.deepEqual(family.instrumented_operations, [])
+    for (const field of ["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"]) assert.equal(Object.hasOwn(family, field), false)
+  }
+})
+test("eight transport families retain separate units without claiming addon source coverage", () => {
+  const expectedFamilies = {
+    client_quic_request_send: transportNames[0], client_quic_response_receive: transportNames[1],
+    blob_cache_peer_request_byte_admission_wait: transportNames[2], blob_cache_peer_open_bi: transportNames[3],
+    blob_cache_peer_request_send: transportNames[4], blob_cache_peer_response_receive: transportNames[5],
+    blob_cache_peer_get: transportNames[6], blob_cache_peer_get_miss: transportNames[7],
+  }
+  assert.equal(Object.keys(STORAGE_OPERATION_FAMILIES).length, 24)
+  const declared = Object.values(STORAGE_OPERATION_FAMILIES).flatMap((family) => family.operations)
+  assert.equal(declared.length, 116)
+  assert.equal(new Set(declared).size, 116)
+  assert.deepEqual(STORAGE_OPERATION_FAMILIES.blob_cache.operations, cacheNames)
+  assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_request_send.bytes, "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments")
+  assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_response_receive.bytes, "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes")
+  assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_get.bytes, "known_successful_logical_get_payload_bytes; misses_zero")
+  assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_get_miss.duration, "classification_marker_nanoseconds; excludes_get_request_duration")
+  for (const feature of [true, false]) {
+    const value = observed(snapshot({ feature }), snapshot({ feature }))
+    assert.equal(value.measurement.storage_instrumented_operations.length, feature ? 91 : 84)
+    const logged = summary(value)
+    for (const [family, operation] of Object.entries(expectedFamilies)) {
+      assert.deepEqual(value.measurement.storage_families[family].operations, [operation])
+      assert.equal(value.measurement.storage_families[family].returned_rows, "unavailable")
+      assert.equal(value.measurement.storage_instrumented_operations.includes(operation), false)
+      assert.equal(logged.families[family].available, false)
+      assert.equal(logged.families[family].instrumented, false)
+      assert.deepEqual(logged.families[family].instrumented_operations, [])
+      for (const field of ["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"]) assert.equal(Object.hasOwn(logged.families[family], field), false)
+    }
+  }
+})
+test("WebSocket stages declare exact units without claiming addon source coverage", () => {
+  assert.deepEqual(STORAGE_OPERATION_FAMILIES.client_websocket, {
+    operations: [...websocketNames],
+    calls: "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+    bytes: "unavailable", returned_rows: "unavailable",
+    duration: "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time",
+  })
+  for (const feature of [true, false]) {
+    const value = observed(snapshot({ feature }), snapshot({ feature }))
+    assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("client.")), false)
+    const family = summary(value).families.client_websocket
+    assert.equal(family.available, false)
+    assert.equal(family.instrumented, false)
+    assert.deepEqual(family.instrumented_operations, [])
+    for (const field of ["calls", "bytes", "error", "cancelled", "elapsed_ns", "returned_rows", "returned_row_observations"]) assert.equal(Object.hasOwn(family, field), false)
+  }
+})
+test("WebSocket stage deltas retain integers above JavaScript safe precision", () => {
+  const before = snapshot(), after = snapshot(), base = 9007199254740993n
+  for (const name of websocketNames) {
+    Object.assign(find(before, name), { calls: String(base), success: String(base), elapsed_ns: String(base), latency_log2_us: [String(base), ...Array(31).fill("0")] })
+    Object.assign(find(after, name), { calls: String(base + 1n), success: String(base + 1n), elapsed_ns: String(base + 9007199254740995n), latency_log2_us: [String(base + 1n), ...Array(31).fill("0")] })
+  }
+  const value = observed(before, after)
+  for (const name of websocketNames) {
+    assert.equal(find(value, name).calls, "1")
+    assert.equal(find(value, name).elapsed_ns, "9007199254740995")
+    assert.equal(find(value, name).bytes, "0")
+  }
+})
+for (const name of websocketNames) test(`missing ${name} is unavailable without a replacement zero row`, () => {
+  const before = snapshot(), after = snapshot()
+  after.storage.entries.splice(after.storage.entries.findIndex((entry) => entry.name === name), 1)
+  incomplete(before, after, /inventory|metadata|entries|operations|coverage/u)
+})
+test("misordered WebSocket stages cannot establish a complete phase", () => {
+  const before = snapshot(), after = snapshot()
+  ;[after.storage.entries[100], after.storage.entries[101]] = [after.storage.entries[101], after.storage.entries[100]]
+  incomplete(before, after, /inventory|metadata|order|name/u)
 })
 test("feature-off family summaries do not publish fixed zero rows as observed FDB attempts", () => {
   const logged = summary(observed(snapshot({ feature: false }), snapshot({ feature: false })))
@@ -296,7 +738,7 @@ test("a feature-on coverage claim cannot omit one audited FoundationDB operation
   const before = snapshot(), after = snapshot()
   for (const value of [before, after]) {
     value.measurement.foundationdb_coverage.operations.pop()
-    value.measurement.storage_instrumented_operations.pop()
+    value.measurement.storage_instrumented_operations = value.measurement.storage_instrumented_operations.filter((name) => name !== foundationdbNames.at(-1))
   }
   const value = incomplete(before, after, /metadata|coverage/u)
   assert.equal(value.observations.after.measurement.foundationdb_coverage, "unavailable")
@@ -307,4 +749,42 @@ test("arbitrary FoundationDB coverage data is rejected and never emitted as meta
   const value = incomplete(before, after, /metadata|coverage/u)
   assert.equal(value.observations.after.measurement.foundationdb_coverage, "unavailable")
   assert.equal(JSON.stringify(value).includes(sentinel), false)
+})
+
+for (const [family, name] of [["client_quic_connection_setup", "client.quic.connection_setup"], ["blob_cache_discovery", "blob_cache.discovery.locate"]]) test(`setup/discovery ${family} is declared but addon source coverage stays unavailable`, () => {
+  const before = snapshot(), after = snapshot()
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, true)
+  assert.deepEqual(STORAGE_OPERATION_FAMILIES[family].operations, [name])
+  assert.equal(STORAGE_OPERATION_FAMILIES[family].bytes, "unavailable")
+  assert.equal(STORAGE_OPERATION_FAMILIES[family].returned_rows, "unavailable")
+  assert.equal(value.measurement.storage_instrumented_operations.includes(name), false)
+  const observed = summary(value).families[family]
+  assert.equal(observed.available, false)
+  assert.equal(observed.instrumented, false)
+  assert.deepEqual(observed.instrumented_operations, [])
+})
+
+test("literal historical 108-row descriptor stays incomplete without invented setup or discovery", () => {
+  const before = snapshot({ preSetup: true }), after = snapshot({ preSetup: true })
+  assert.equal(Object.keys(after.measurement.storage_families).length, 21)
+  assert.deepEqual(after.measurement.storage_operations, historical108Names)
+  const value = deltaNativeSnapshots(before, after)
+  assert.equal(value.complete, false)
+  assert.equal(Object.hasOwn(value, "storage"), false)
+  assert.equal(value.observations.after.storage.entries.length, 108)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => setupDiscoveryNames.includes(entry.name)), false)
+})
+
+test("setup and discovery deltas retain exact large counters", () => {
+  const before = snapshot(), after = snapshot(), base = 9007199254740993n
+  for (const name of setupDiscoveryNames) {
+    Object.assign(find(before, name), { calls: String(base), success: String(base), elapsed_ns: String(base), latency_log2_us: [String(base), ...Array(31).fill("0")] })
+    Object.assign(find(after, name), { calls: String(base + 1n), success: String(base + 1n), elapsed_ns: String(base + 9007199254740995n), latency_log2_us: [String(base + 1n), ...Array(31).fill("0")] })
+  }
+  const value = observed(before, after)
+  for (const name of setupDiscoveryNames) {
+    assert.equal(find(value, name).calls, "1")
+    assert.equal(find(value, name).elapsed_ns, "9007199254740995")
+  }
 })

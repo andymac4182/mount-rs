@@ -10,6 +10,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use mount_rs_auto::{AutoMount, AutoMountError, AutoMountOptions, AutoTransport};
+use mount_rs_core::construction::ConstructionObserver;
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, Loopback, Result as FsResult};
 use mount_rs_http::{
@@ -33,6 +34,10 @@ use crate::parser::{
 };
 use crate::stale::{stale_command_line, unmount_stale};
 use crate::watch::{WatchOptions, watch_driver};
+
+#[cfg(test)]
+#[path = "runtime/construction_tests.rs"]
+mod construction_tests;
 
 #[derive(Debug, Clone)]
 pub struct CliError {
@@ -149,12 +154,327 @@ impl From<FsError> for CliError {
 
 #[derive(Clone)]
 pub(crate) struct DriverRuntime {
-    filesystem: Filesystem,
+    filesystem: Arc<Filesystem>,
+    driver: Arc<dyn FsDriver>,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
 }
 
+/// An owned construction choice that can be reopened without resolving CLI
+/// environment references, local paths, owner defaults or process identity.
+/// Preparation opens no providers. The observer-aware entrypoint lets the
+/// caller retain construction owners across errors after opening.
+///
+/// AWS S3 remains a specific exception: the provider calls `from_env` on each
+/// open, so its endpoint and credential-source choices are not frozen here.
+/// Workload credentials retain the provider's normal refresh behavior.
+#[derive(Clone)]
+pub(crate) struct DriverRuntimePlan {
+    driver: PreparedDriver,
+    #[cfg(feature = "observability")]
+    telemetry: Telemetry,
+}
+
+#[derive(Clone)]
+enum PreparedDriver {
+    Memory(MemoryOptions),
+    Host {
+        root: PathBuf,
+        options: HostOptions,
+    },
+    Sqlite {
+        database: PathBuf,
+        root_owner: SqliteRootOwner,
+    },
+    Split(Box<SplitOptions>),
+}
+
+// Preserve provider POSIX codes until the caller chooses the CLI or wire
+// boundary. CLI-only root/postconfiguration refusals have a fixed mapping;
+// display text is never parsed back into a wire error or diagnostic.
+enum PreparedOpenError {
+    Filesystem(FsError),
+    Postconfiguration(CliError),
+}
+
+impl From<FsError> for PreparedOpenError {
+    fn from(error: FsError) -> Self {
+        Self::Filesystem(error)
+    }
+}
+
+impl From<CliError> for PreparedOpenError {
+    fn from(error: CliError) -> Self {
+        Self::Postconfiguration(error)
+    }
+}
+
+impl PreparedOpenError {
+    fn into_cli(self) -> CliError {
+        match self {
+            Self::Filesystem(error) => CliError::from(error),
+            Self::Postconfiguration(error) => error,
+        }
+    }
+
+    fn into_filesystem(self) -> FsError {
+        match self {
+            Self::Filesystem(error) => error,
+            Self::Postconfiguration(error) => FsError::new(if error.exit_code() == 2 {
+                ErrorCode::Einval
+            } else {
+                ErrorCode::Eio
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SqliteRootOwner {
+    configured: Option<(u32, u32)>,
+    uid: u32,
+    gid: u32,
+    read_only: bool,
+}
+
+impl DriverRuntimePlan {
+    fn resolve_with(
+        options: &CliOptions,
+        uid: u32,
+        gid: u32,
+        cwd: &Path,
+        home: &Path,
+        mut resolve_env: impl FnMut(&EnvReference) -> Result<String, CliError>,
+    ) -> Result<Self, CliError> {
+        let driver =
+            match options.driver {
+                DriverChoice::Memory => PreparedDriver::Memory(MemoryOptions {
+                    uid,
+                    gid,
+                    ..MemoryOptions::default()
+                }),
+                DriverChoice::Host => PreparedDriver::Host {
+                    root: options
+                        .root
+                        .as_deref()
+                        .map(|path| resolved_path(path, cwd, home))
+                        .unwrap_or_else(|| cwd.to_owned()),
+                    options: HostOptions {
+                        read_only: options.read_only,
+                    },
+                },
+                DriverChoice::Sqlite => {
+                    let database = options.database.as_deref().ok_or_else(|| {
+                        CliError::usage("--driver sqlite requires --database <path>")
+                    })?;
+                    let configured = match (options.root_uid, options.root_gid) {
+                        (Some(uid), Some(gid)) => Some((uid, gid)),
+                        (None, None) => None,
+                        _ => {
+                            return Err(CliError::usage(
+                                "sqlite root ownership requires both uid and gid",
+                            ));
+                        }
+                    };
+                    PreparedDriver::Sqlite {
+                        database: resolved_path(database, cwd, home),
+                        root_owner: SqliteRootOwner {
+                            configured,
+                            uid,
+                            gid,
+                            read_only: options.read_only,
+                        },
+                    }
+                }
+                DriverChoice::SplitStore => PreparedDriver::Split(Box::new(
+                    split_options_resolved(options, uid, gid, cwd, home, &mut resolve_env)?,
+                )),
+            };
+        Ok(Self {
+            driver,
+            #[cfg(feature = "observability")]
+            telemetry: mount_rs_observability::global(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn split_plan_for_holder_tests(options: SplitOptions) -> Self {
+        Self {
+            driver: PreparedDriver::Split(Box::new(options)),
+            #[cfg(feature = "observability")]
+            telemetry: mount_rs_observability::global(),
+        }
+    }
+
+    /// Selected block policy is derived from this already prepared local plan.
+    pub(crate) fn cache_block_config(&self) -> Option<&mount_rs_sdk::StoreConfig> {
+        match &self.driver {
+            PreparedDriver::Split(options) => Some(&options.blocks),
+            _ => None,
+        }
+    }
+    /// Cold holders initially support literal TiDB metadata and RustFS blobs.
+    /// AWS remains eligible through existing verified active store admission.
+    pub(crate) fn cold_cache_options(&self) -> Option<&SplitOptions> {
+        match &self.driver {
+            PreparedDriver::Split(options)
+                if options.concurrent_writes
+                    && options.inode_updates
+                    && options.compact_inode_updates
+                    && !options.delegated
+                    && !options.writeback
+                    && options.checkout_path.is_none()
+                    && matches!(options.metadata, mount_rs_sdk::StoreConfig::Tidb { .. })
+                    && matches!(options.blocks, mount_rs_sdk::StoreConfig::RustFs { .. }) =>
+            {
+                Some(options)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) async fn open(&self) -> Result<DriverRuntime, CliError> {
+        self.open_with_storage_context(None, None).await
+    }
+
+    /// Open or reopen precisely this plan. Decorators and storage contexts are
+    /// application-owned inputs; they are borrowed only for this construction.
+    pub(crate) async fn open_with_storage_context(
+        &self,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: Option<&mount_rs_sdk::StorageContext>,
+    ) -> Result<DriverRuntime, CliError> {
+        self.open_impl(decorator, context, None)
+            .await
+            .map_err(PreparedOpenError::into_cli)
+    }
+
+    /// Open with the application's construction observer. The caller must own
+    /// its journal and attempt before polling this future. After an acknowledged
+    /// error it seals the attempt and awaits journal-owned cleanup; after success
+    /// it retains the returned runtime while handing off the attempt. Dropping
+    /// the future leaves the journal uncertain. This method creates no worker
+    /// or admission fence independent of cancellation.
+    ///
+    /// Split construction forwards this observer to the SDK for provider and
+    /// authority ownership. Snapshot SQLite can register its actual filesystem
+    /// only after its native constructor returns, before root postconfiguration
+    /// awaits. The SDK's SlateDB dependency also has a pre-return interval that
+    /// this journal does not cover.
+    #[allow(dead_code)] // Retained for observer-aware ordinary mount construction.
+    pub(crate) async fn open_with_construction_observer(
+        &self,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: Option<&mount_rs_sdk::StorageContext>,
+        observer: &dyn ConstructionObserver,
+    ) -> Result<DriverRuntime, CliError> {
+        self.open_impl(decorator, context, Some(observer))
+            .await
+            .map_err(PreparedOpenError::into_cli)
+    }
+
+    // Cold service construction reuses the exact prepared plan and selected
+    // driver, preserving typed provider errors rather than flattening CliError.
+    pub(crate) async fn construct_for_service(
+        &self,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: &mount_rs_sdk::StorageContext,
+        observer: &dyn ConstructionObserver,
+    ) -> FsResult<mount_rs_service::filesystem_runtime::ConstructedRuntime> {
+        let runtime = self
+            .open_impl(decorator, Some(context), Some(observer))
+            .await
+            .map_err(PreparedOpenError::into_filesystem)?;
+        Ok(
+            mount_rs_service::filesystem_runtime::ConstructedRuntime::new(
+                runtime.filesystem,
+                runtime.driver,
+            ),
+        )
+    }
+
+    async fn open_impl(
+        &self,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: Option<&mount_rs_sdk::StorageContext>,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<DriverRuntime, PreparedOpenError> {
+        let filesystem = match &self.driver {
+            PreparedDriver::Memory(options) => Filesystem::memory(*options),
+            PreparedDriver::Host { root, options } => Filesystem::host(root, *options),
+            PreparedDriver::Sqlite { database, .. } => Filesystem::sqlite(database).await?,
+            PreparedDriver::Split(split) => {
+                if let Some(observer) = observer {
+                    Filesystem::split_with_construction_observer(
+                        split.as_ref().clone(),
+                        context,
+                        decorator,
+                        observer,
+                    )
+                    .await?
+                } else {
+                    match (context, decorator) {
+                        (Some(context), Some(decorator)) => {
+                            Filesystem::split_with_context_and_block_decorator(
+                                split.as_ref().clone(),
+                                context,
+                                decorator,
+                            )
+                            .await?
+                        }
+                        (Some(context), None) => {
+                            Filesystem::split_with_context(split.as_ref().clone(), context).await?
+                        }
+                        (None, Some(decorator)) => {
+                            Filesystem::split_with_block_decorator(
+                                split.as_ref().clone(),
+                                decorator,
+                            )
+                            .await?
+                        }
+                        (None, None) => Filesystem::split(split.as_ref().clone()).await?,
+                    }
+                }
+            }
+        };
+        let filesystem = Arc::new(filesystem);
+        if let Some(observer) = observer {
+            // The journal takes the actual SDK owner synchronously, before
+            // telemetry wrapping or SQLite root stat/chown can await or fail.
+            observer.retain(filesystem.clone());
+        }
+        let driver = {
+            #[cfg(feature = "observability")]
+            {
+                filesystem.driver_with_telemetry(self.telemetry.clone())
+            }
+            #[cfg(not(feature = "observability"))]
+            {
+                filesystem.driver()
+            }
+        };
+        if let PreparedDriver::Sqlite { root_owner, .. } = &self.driver {
+            configure_sqlite_root_owner(&driver, *root_owner).await?;
+        }
+        Ok(DriverRuntime {
+            filesystem,
+            driver,
+            #[cfg(feature = "observability")]
+            telemetry: self.telemetry.clone(),
+        })
+    }
+}
+
 impl DriverRuntime {
+    pub(crate) fn prepare(
+        options: &CliOptions,
+        uid: u32,
+        gid: u32,
+    ) -> Result<DriverRuntimePlan, CliError> {
+        let (cwd, home) = resolution_directories(options)?;
+        DriverRuntimePlan::resolve_with(options, uid, gid, &cwd, &home, resolve_storage_env)
+    }
+
     pub(crate) async fn open(options: &CliOptions, uid: u32, gid: u32) -> Result<Self, CliError> {
         Self::open_with_block_decorator(options, uid, gid, None).await
     }
@@ -175,82 +495,30 @@ impl DriverRuntime {
         decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
         context: Option<&mount_rs_sdk::StorageContext>,
     ) -> Result<Self, CliError> {
-        #[cfg(feature = "observability")]
-        let telemetry = mount_rs_observability::global();
-        let filesystem = match options.driver {
-            DriverChoice::Memory => Filesystem::memory(MemoryOptions {
-                uid,
-                gid,
-                ..MemoryOptions::default()
-            }),
-            DriverChoice::Host => {
-                let root = options
-                    .root
-                    .as_deref()
-                    .map(expand_path)
-                    .unwrap_or(std::env::current_dir().map_err(io_error)?);
-                Filesystem::host(
-                    root,
-                    HostOptions {
-                        read_only: options.read_only,
-                    },
-                )
-            }
-            DriverChoice::Sqlite => {
-                let database = options
-                    .database
-                    .as_deref()
-                    .ok_or_else(|| CliError::usage("--driver sqlite requires --database <path>"))?;
-                Filesystem::sqlite(expand_path(database)).await?
-            }
-            DriverChoice::SplitStore => {
-                let split = split_options(options, uid, gid)?;
-                match (context, decorator) {
-                    (Some(context), Some(decorator)) => {
-                        Filesystem::split_with_context_and_block_decorator(
-                            split, context, decorator,
-                        )
-                        .await?
-                    }
-                    (Some(context), None) => Filesystem::split_with_context(split, context).await?,
-                    (None, Some(decorator)) => {
-                        Filesystem::split_with_block_decorator(split, decorator).await?
-                    }
-                    (None, None) => Filesystem::split(split).await?,
-                }
-            }
-        };
+        Self::prepare(options, uid, gid)?
+            .open_with_storage_context(decorator, context)
+            .await
+    }
 
-        if options.driver == DriverChoice::Sqlite {
-            let driver = {
-                #[cfg(feature = "observability")]
-                {
-                    filesystem.driver_with_telemetry(telemetry.clone())
-                }
-                #[cfg(not(feature = "observability"))]
-                {
-                    filesystem.driver()
-                }
-            };
-            configure_sqlite_root_owner(&driver, options, uid, gid).await?;
-        }
-        Ok(Self {
-            filesystem,
-            #[cfg(feature = "observability")]
-            telemetry,
-        })
+    /// Prepare options, then open with an application-owned construction
+    /// observer. The caller must begin and settle its journal attempt; this
+    /// convenience entrypoint does not own cleanup or cancellation.
+    #[allow(dead_code)] // Retained for observer-aware ordinary mount construction.
+    pub(crate) async fn open_with_construction_observer(
+        options: &CliOptions,
+        uid: u32,
+        gid: u32,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        context: Option<&mount_rs_sdk::StorageContext>,
+        observer: &dyn ConstructionObserver,
+    ) -> Result<Self, CliError> {
+        Self::prepare(options, uid, gid)?
+            .open_with_construction_observer(decorator, context, observer)
+            .await
     }
 
     pub(crate) fn driver(&self) -> Arc<dyn FsDriver> {
-        #[cfg(feature = "observability")]
-        {
-            self.filesystem
-                .driver_with_telemetry(self.telemetry.clone())
-        }
-        #[cfg(not(feature = "observability"))]
-        {
-            self.filesystem.driver()
-        }
+        Arc::clone(&self.driver)
     }
 
     pub(crate) async fn shutdown(&self) -> FsResult<()> {
@@ -268,13 +536,25 @@ impl DriverRuntime {
 }
 
 fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOptions, CliError> {
+    let (cwd, home) = resolution_directories(options)?;
+    split_options_resolved(options, uid, gid, &cwd, &home, &mut resolve_storage_env)
+}
+
+fn split_options_resolved(
+    options: &CliOptions,
+    uid: u32,
+    gid: u32,
+    cwd: &Path,
+    home: &Path,
+    resolve_env: &mut impl FnMut(&EnvReference) -> Result<String, CliError>,
+) -> Result<SplitOptions, CliError> {
     if let Some(storage) = &options.storage {
         if let Some(owner) = &storage.owner {
             validate_owner(owner)?;
         }
         return Ok(SplitOptions {
-            metadata: sdk_store_config(&storage.metadata)?,
-            blocks: sdk_store_config(&storage.blocks)?,
+            metadata: sdk_store_config(&storage.metadata, cwd, home, resolve_env)?,
+            blocks: sdk_store_config(&storage.blocks, cwd, home, resolve_env)?,
             chunk_size_bytes: storage.chunk_size_bytes,
             owner: storage.owner.clone().unwrap_or_else(unique_default_owner),
             lease_ttl: storage
@@ -297,10 +577,10 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
         (None, None) => (StoreConfig::Memory, StoreConfig::Memory),
         (Some(metadata), Some(blocks)) => (
             StoreConfig::Sqlite {
-                path: expand_path(metadata),
+                path: resolved_path(metadata, cwd, home),
             },
             StoreConfig::Sqlite {
-                path: expand_path(blocks),
+                path: resolved_path(blocks, cwd, home),
             },
         ),
         _ => {
@@ -327,16 +607,29 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
     })
 }
 
-fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError> {
+fn sdk_store_config(
+    provider: &StorageProvider,
+    cwd: &Path,
+    home: &Path,
+    resolve_env: &mut impl FnMut(&EnvReference) -> Result<String, CliError>,
+) -> Result<StoreConfig, CliError> {
     match provider {
         StorageProvider::Memory => Ok(StoreConfig::Memory),
-        StorageProvider::Sqlite { path } => Ok(StoreConfig::Sqlite { path: path.clone() }),
+        StorageProvider::Sqlite { path } => Ok(StoreConfig::Sqlite {
+            path: resolved_path(path, cwd, home),
+        }),
+        StorageProvider::SqliteWithOptions { path, options } => {
+            Ok(StoreConfig::SqliteWithOptions {
+                path: resolved_path(path, cwd, home),
+                options: *options,
+            })
+        }
         StorageProvider::Pglite {
             connection,
             volume_key,
             durable,
         } => Ok(StoreConfig::Pglite {
-            connection: resolve_storage_env(connection)?,
+            connection: resolve_env(connection)?,
             volume_key: volume_key.clone(),
             durable: *durable,
         }),
@@ -345,7 +638,7 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
             volume_key,
             durable,
         } => Ok(StoreConfig::Tidb {
-            connection: resolve_storage_env(connection)?,
+            connection: resolve_env(connection)?,
             volume_key: volume_key.clone(),
             durable: *durable,
         }),
@@ -355,7 +648,7 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
             durable,
             lease_authority,
         } => Ok(StoreConfig::FoundationDb {
-            cluster_file: cluster_file.clone(),
+            cluster_file: resolved_path(cluster_file, cwd, home),
             volume_key: volume_key.clone(),
             durable: *durable,
             lease_authority: lease_authority.clone(),
@@ -371,8 +664,8 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
             endpoint: endpoint.clone(),
             bucket: bucket.clone(),
             prefix: prefix.clone(),
-            access_key_id: resolve_storage_env(access_key_id)?,
-            secret_access_key: resolve_storage_env(secret_access_key)?,
+            access_key_id: resolve_env(access_key_id)?,
+            secret_access_key: resolve_env(secret_access_key)?,
             durable: *durable,
         }),
         StorageProvider::RustFs {
@@ -388,8 +681,8 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
             bucket: bucket.clone(),
             region: region.clone(),
             prefix: prefix.clone(),
-            access_key_id: resolve_storage_env(access_key_id)?,
-            secret_access_key: resolve_storage_env(secret_access_key)?,
+            access_key_id: resolve_env(access_key_id)?,
+            secret_access_key: resolve_env(secret_access_key)?,
             durable: *durable,
         }),
         StorageProvider::AwsS3 {
@@ -417,36 +710,25 @@ fn resolve_storage_env(reference: &EnvReference) -> Result<String, CliError> {
 /// database file is never chmod/chowned by the CLI.
 async fn configure_sqlite_root_owner(
     driver: &Arc<dyn FsDriver>,
-    options: &CliOptions,
-    uid: u32,
-    gid: u32,
-) -> Result<(), CliError> {
-    let configured = match (options.root_uid, options.root_gid) {
-        (Some(uid), Some(gid)) => Some((uid, gid)),
-        (None, None) => None,
-        _ => {
-            return Err(CliError::usage(
-                "sqlite root ownership requires both uid and gid",
-            ));
-        }
-    };
+    owner: SqliteRootOwner,
+) -> Result<(), PreparedOpenError> {
     let stats = driver.stat("/").await?;
-    let desired = configured.unwrap_or((uid, gid));
+    let desired = owner.configured.unwrap_or((owner.uid, owner.gid));
     if stats.uid == desired.0 && stats.gid == desired.1 {
         return Ok(());
     }
 
-    if options.read_only {
+    if owner.read_only {
         return Err(CliError::runtime(format!(
             "read-only SQLite mount would need virtual root ownership {}:{} -> {}:{}, refusing to mutate persisted metadata; use matching driver.uid and driver.gid or a writable explicit migration",
             stats.uid, stats.gid, desired.0, desired.1
-        )));
+        )).into());
     }
-    if configured.is_none() {
+    if owner.configured.is_none() {
         return Err(CliError::runtime(format!(
             "SQLite virtual root is owned by {}:{}, but this process requests {}:{}; set driver.uid and driver.gid for an explicit writable ownership migration",
-            stats.uid, stats.gid, uid, gid
-        )));
+            stats.uid, stats.gid, owner.uid, owner.gid
+        )).into());
     }
 
     driver.chown("/", desired.0, desired.1).await?;
@@ -688,7 +970,8 @@ async fn sdk_self_test_command(config_path: Option<&Path>, reopen: bool) -> Resu
     }
 
     let (uid, gid) = effective_identity();
-    let runtime = DriverRuntime::open(&options, uid, gid).await?;
+    let plan = DriverRuntime::prepare(&options, uid, gid)?;
+    let runtime = plan.open().await?;
     let path = format!(
         "/.mount-rs-rust-sdk-self-test-{}-{}.bin",
         std::process::id(),
@@ -738,7 +1021,7 @@ async fn sdk_self_test_command(config_path: Option<&Path>, reopen: bool) -> Resu
     shutdown.map_err(CliError::from)?;
 
     if reopen {
-        let reopened = DriverRuntime::open(&options, uid, gid).await?;
+        let reopened = plan.open().await?;
         let reopened_view = Loopback::from_arc(reopened.driver());
         let result = async {
             let actual = reopened_view.read_file(&path).await?;
@@ -1514,7 +1797,9 @@ fn validate_concurrent_sqlite_backing_paths(
         return Ok(());
     };
     for (role, provider) in [("metadata", &storage.metadata), ("blocks", &storage.blocks)] {
-        let StorageProvider::Sqlite { path } = provider else {
+        let (StorageProvider::Sqlite { path } | StorageProvider::SqliteWithOptions { path, .. }) =
+            provider
+        else {
             continue;
         };
         let backing = canonical_mountpoint_candidate(&expand_path(path))?;
@@ -1535,8 +1820,13 @@ fn validate_concurrent_sqlite_backing_paths(
 fn concurrent_sqlite_backing_requested(options: &CliOptions) -> bool {
     options.storage.as_ref().is_some_and(|storage| {
         storage.concurrent_writes
-            && (matches!(storage.metadata, StorageProvider::Sqlite { .. })
-                || matches!(storage.blocks, StorageProvider::Sqlite { .. }))
+            && (matches!(
+                storage.metadata,
+                StorageProvider::Sqlite { .. } | StorageProvider::SqliteWithOptions { .. }
+            ) || matches!(
+                storage.blocks,
+                StorageProvider::Sqlite { .. } | StorageProvider::SqliteWithOptions { .. }
+            ))
     })
 }
 
@@ -1662,6 +1952,70 @@ fn canonical_candidate_with_dangling_links(
     }
 }
 
+/// Freeze a local provider path against one captured directory and home.
+/// This is lexical resolution, not filesystem identity or symlink validation.
+fn resolved_path(path: &Path, cwd: &Path, home: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if text == "~" {
+        return if home.is_absolute() {
+            home.to_owned()
+        } else {
+            cwd.join(home)
+        };
+    }
+    if let Some(rest) = text.strip_prefix("~/") {
+        return if home.is_absolute() {
+            home.join(rest)
+        } else {
+            cwd.join(home).join(rest)
+        };
+    }
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn resolution_directories(options: &CliOptions) -> Result<(PathBuf, PathBuf), CliError> {
+    let home = home_directory();
+    let needs_directory = |path: &Path| {
+        !(path.is_absolute()
+            || (home.is_absolute()
+                && (path == Path::new("~") || path.to_string_lossy().starts_with("~/"))))
+    };
+    let provider_needs_directory = |provider: &StorageProvider| match provider {
+        StorageProvider::Sqlite { path } | StorageProvider::SqliteWithOptions { path, .. } => {
+            needs_directory(path)
+        }
+        StorageProvider::FoundationDb { cluster_file, .. } => needs_directory(cluster_file),
+        _ => false,
+    };
+    let required = match options.driver {
+        DriverChoice::Memory => false,
+        DriverChoice::Host => true,
+        DriverChoice::Sqlite => options.database.as_deref().is_some_and(needs_directory),
+        DriverChoice::SplitStore => options.storage.as_ref().map_or_else(
+            || {
+                options.database.as_deref().is_some_and(needs_directory)
+                    || options.blocks.as_deref().is_some_and(needs_directory)
+            },
+            |storage| {
+                provider_needs_directory(&storage.metadata)
+                    || provider_needs_directory(&storage.blocks)
+            },
+        ),
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) if required => return Err(io_error(error)),
+        // Purely volatile/remote plans and absolute local paths do not need
+        // a current directory. No relative path is resolved against this value.
+        Err(_) => PathBuf::new(),
+    };
+    Ok((cwd, home))
+}
+
 fn expand_path(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     if text == "~" {
@@ -1745,6 +2099,473 @@ mod tests {
     use crate::config::{SplitStorageConfig, StorageProvider};
     use crate::parser::parse_args;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn prepared_for_test(
+        options: &CliOptions,
+        uid: u32,
+        gid: u32,
+        cwd: &Path,
+        home: &Path,
+    ) -> DriverRuntimePlan {
+        DriverRuntimePlan::resolve_with(options, uid, gid, cwd, home, |reference| {
+            Err(CliError::runtime(format!(
+                "missing environment variable {}",
+                reference.name
+            )))
+        })
+        .unwrap()
+    }
+
+    fn prepared_split(plan: &DriverRuntimePlan) -> &SplitOptions {
+        match &plan.driver {
+            PreparedDriver::Split(split) => split,
+            _ => panic!("expected a prepared split driver"),
+        }
+    }
+
+    #[test]
+    fn prepared_runtime_freezes_explicit_environment_values_and_generated_owner() {
+        use std::cell::{Cell, RefCell};
+        use std::collections::HashMap;
+        let values = RefCell::new(HashMap::from([
+            ("PLAN_CONNECTION", "postgres://first.invalid/first"),
+            ("PLAN_ACCESS", "first-access"),
+            ("PLAN_SECRET", "first-secret"),
+        ]));
+        let reads = Cell::new(0);
+        let resolve = |reference: &EnvReference| {
+            reads.set(reads.get() + 1);
+            values
+                .borrow()
+                .get(reference.name.as_str())
+                .map(|value| (*value).to_owned())
+                .ok_or_else(|| {
+                    CliError::runtime(format!("missing environment variable {}", reference.name))
+                })
+        };
+        let mut options = CliOptions {
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Pglite {
+                    connection: EnvReference {
+                        name: "PLAN_CONNECTION".into(),
+                    },
+                    volume_key: "first-volume".into(),
+                    durable: true,
+                },
+                blocks: StorageProvider::RustFs {
+                    endpoint: "https://blocks.invalid".into(),
+                    bucket: "first-bucket".into(),
+                    region: "first-region".into(),
+                    prefix: "first-prefix".into(),
+                    access_key_id: EnvReference {
+                        name: "PLAN_ACCESS".into(),
+                    },
+                    secret_access_key: EnvReference {
+                        name: "PLAN_SECRET".into(),
+                    },
+                    durable: true,
+                },
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: Some(45_000),
+                concurrent_writes: true,
+                inode_updates: true,
+                compact_inode_updates: true,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
+                owner: None,
+            })),
+            ..CliOptions::default()
+        };
+        let cwd = std::env::temp_dir();
+        let plan =
+            DriverRuntimePlan::resolve_with(&options, 101, 202, &cwd, &cwd, resolve).unwrap();
+        assert_eq!(reads.get(), 3);
+        let original = prepared_split(&plan).clone();
+        assert!(!original.owner.is_empty());
+        assert_eq!(
+            (original.uid, original.gid, original.lease_ttl),
+            (101, 202, Duration::from_secs(45))
+        );
+        values
+            .borrow_mut()
+            .insert("PLAN_CONNECTION", "postgres://second.invalid/second");
+        values.borrow_mut().remove("PLAN_SECRET");
+        options.storage.as_mut().unwrap().owner = Some("replacement-owner".into());
+        options.storage.as_mut().unwrap().chunk_size_bytes = 8192;
+        let cloned = plan.clone();
+        assert_eq!(prepared_split(&cloned), &original);
+        assert_eq!(reads.get(), 3, "cloning must not resolve credentials again");
+        assert_eq!(
+            original.metadata,
+            StoreConfig::Pglite {
+                connection: "postgres://first.invalid/first".into(),
+                volume_key: "first-volume".into(),
+                durable: true,
+            }
+        );
+        assert_eq!(
+            original.blocks,
+            StoreConfig::RustFs {
+                endpoint: "https://blocks.invalid".into(),
+                bucket: "first-bucket".into(),
+                region: "first-region".into(),
+                prefix: "first-prefix".into(),
+                access_key_id: "first-access".into(),
+                secret_access_key: "first-secret".into(),
+                durable: true,
+            }
+        );
+        assert!(
+            DriverRuntimePlan::resolve_with(&options, 303, 404, &cwd, &cwd, resolve).is_err(),
+            "a new resolution must observe the removed environment reference"
+        );
+        assert_eq!(
+            prepared_split(&plan),
+            &original,
+            "a failed later resolution changed the prepared owner"
+        );
+    }
+
+    #[test]
+    fn prepared_runtime_preserves_all_cli_provider_mappings_and_local_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("cwd");
+        let home = root.path().join("home");
+        let sqlite_options = mount_rs_sdk::SqliteStorageOptions {
+            journal_mode: mount_rs_sdk::SqliteJournalMode::Wal,
+        };
+        let reference = || EnvReference {
+            name: "PLAN_VALUE".into(),
+        };
+        let authority = mount_rs_sdk::FoundationDbLeaseAuthority::SharedProvider {
+            authority_prefix: "authority".into(),
+        };
+        let cases = [
+            (StorageProvider::Memory, StoreConfig::Memory),
+            (
+                StorageProvider::Sqlite {
+                    path: "metadata.db".into(),
+                },
+                StoreConfig::Sqlite {
+                    path: cwd.join("metadata.db"),
+                },
+            ),
+            (
+                StorageProvider::SqliteWithOptions {
+                    path: "~/wal.db".into(),
+                    options: sqlite_options,
+                },
+                StoreConfig::SqliteWithOptions {
+                    path: home.join("wal.db"),
+                    options: sqlite_options,
+                },
+            ),
+            (
+                StorageProvider::Pglite {
+                    connection: reference(),
+                    volume_key: "pg".into(),
+                    durable: true,
+                },
+                StoreConfig::Pglite {
+                    connection: "resolved-value".into(),
+                    volume_key: "pg".into(),
+                    durable: true,
+                },
+            ),
+            (
+                StorageProvider::Tidb {
+                    connection: reference(),
+                    volume_key: "tidb".into(),
+                    durable: false,
+                },
+                StoreConfig::Tidb {
+                    connection: "resolved-value".into(),
+                    volume_key: "tidb".into(),
+                    durable: false,
+                },
+            ),
+            (
+                StorageProvider::FoundationDb {
+                    cluster_file: "fdb.cluster".into(),
+                    volume_key: "fdb".into(),
+                    durable: true,
+                    lease_authority: authority.clone(),
+                },
+                StoreConfig::FoundationDb {
+                    cluster_file: cwd.join("fdb.cluster"),
+                    volume_key: "fdb".into(),
+                    durable: true,
+                    lease_authority: authority,
+                },
+            ),
+            (
+                StorageProvider::R2 {
+                    endpoint: "https://r2.invalid".into(),
+                    bucket: "r2".into(),
+                    prefix: "r2-prefix".into(),
+                    access_key_id: reference(),
+                    secret_access_key: reference(),
+                    durable: true,
+                },
+                StoreConfig::R2 {
+                    endpoint: "https://r2.invalid".into(),
+                    bucket: "r2".into(),
+                    prefix: "r2-prefix".into(),
+                    access_key_id: "resolved-value".into(),
+                    secret_access_key: "resolved-value".into(),
+                    durable: true,
+                },
+            ),
+            (
+                StorageProvider::RustFs {
+                    endpoint: "https://rustfs.invalid".into(),
+                    bucket: "rustfs".into(),
+                    region: "region".into(),
+                    prefix: "rustfs-prefix".into(),
+                    access_key_id: reference(),
+                    secret_access_key: reference(),
+                    durable: false,
+                },
+                StoreConfig::RustFs {
+                    endpoint: "https://rustfs.invalid".into(),
+                    bucket: "rustfs".into(),
+                    region: "region".into(),
+                    prefix: "rustfs-prefix".into(),
+                    access_key_id: "resolved-value".into(),
+                    secret_access_key: "resolved-value".into(),
+                    durable: false,
+                },
+            ),
+            (
+                StorageProvider::AwsS3 {
+                    bucket: "aws".into(),
+                    region: "aws-region".into(),
+                    prefix: "aws-prefix".into(),
+                    durable: true,
+                },
+                StoreConfig::AwsS3 {
+                    bucket: "aws".into(),
+                    region: "aws-region".into(),
+                    prefix: "aws-prefix".into(),
+                    durable: true,
+                },
+            ),
+        ];
+        for (provider, expected) in cases {
+            let options = CliOptions {
+                driver: DriverChoice::SplitStore,
+                storage: Some(Box::new(SplitStorageConfig {
+                    metadata: provider,
+                    blocks: StorageProvider::Memory,
+                    chunk_size_bytes: 4096,
+                    lease_ttl_ms: None,
+                    concurrent_writes: false,
+                    inode_updates: false,
+                    compact_inode_updates: false,
+                    delegated: true,
+                    checkout_path: Some("/project".into()),
+                    writeback: false,
+                    owner: Some("mapping-owner".into()),
+                })),
+                ..CliOptions::default()
+            };
+            let plan = DriverRuntimePlan::resolve_with(&options, 100, 200, &cwd, &home, |_| {
+                Ok("resolved-value".into())
+            })
+            .unwrap();
+            let split = prepared_split(&plan);
+            assert_eq!(split.metadata, expected);
+            assert_eq!(split.blocks, StoreConfig::Memory);
+            assert_eq!(
+                split.checkout_path.as_deref(),
+                Some("/project"),
+                "virtual checkout paths must stay virtual"
+            );
+            assert_eq!(split.owner, "mapping-owner");
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_compact_sqlite_runtime_reopens_same_bytes_eof_backing_and_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cwd = root.path().join("original");
+        let mut home = root.path().join("home");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let mut options = CliOptions {
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Sqlite {
+                    path: "metadata.db".into(),
+                },
+                blocks: StorageProvider::Sqlite {
+                    path: "~/blocks.db".into(),
+                },
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: None,
+                concurrent_writes: true,
+                inode_updates: true,
+                compact_inode_updates: true,
+                delegated: false,
+                checkout_path: None,
+                writeback: false,
+                owner: None,
+            })),
+            ..CliOptions::default()
+        };
+        let plan = prepared_for_test(&options, 111, 222, &cwd, &home);
+        let owner = prepared_split(&plan).owner.clone();
+        cwd = root.path().join("replacement");
+        home = root.path().join("replacement-home");
+        options.storage.as_mut().unwrap().metadata = StorageProvider::Memory;
+        options.storage.as_mut().unwrap().owner = Some("replacement-owner".into());
+        let expected: Vec<u8> = (0..8193).map(|index| (index % 251) as u8).collect();
+        let first = plan.open().await.unwrap();
+        assert!(
+            Arc::ptr_eq(&first.driver(), &first.clone().driver()),
+            "driver observations must clone one cached Arc"
+        );
+        let identity = first
+            .filesystem
+            .concurrent_backing_id()
+            .expect("actual compact backing identity");
+        let first_driver = first.driver();
+        let root_stat = first_driver.stat("/").await.unwrap();
+        assert_eq!((root_stat.uid, root_stat.gid), (111, 222));
+        let view = Loopback::from_arc(first_driver);
+        view.write_file("/oracle", &expected).await.unwrap();
+        first.shutdown().await.unwrap();
+        drop(view);
+        drop(first);
+        for _ in 0..2 {
+            let reopened = plan.clone().open().await.unwrap();
+            assert_eq!(reopened.filesystem.concurrent_backing_id(), Some(identity));
+            assert_eq!(prepared_split(&plan).owner, owner);
+            let view = Loopback::from_arc(reopened.driver());
+            assert_eq!(view.read_file("/oracle").await.unwrap(), expected);
+            assert_eq!(
+                view.stat("/oracle").await.unwrap().size,
+                expected.len() as u64
+            );
+            let handle = view.open("/oracle", "r", 0).await.unwrap();
+            assert_eq!(
+                handle
+                    .read(&mut [0; 1], Some(expected.len() as u64))
+                    .await
+                    .unwrap(),
+                0
+            );
+            handle.close().await.unwrap();
+            reopened.shutdown().await.unwrap();
+        }
+        assert!(
+            !cwd.exists(),
+            "reopen created storage under changed resolution input"
+        );
+        assert!(!home.exists(), "reopen resolved HOME again");
+    }
+
+    #[tokio::test]
+    async fn prepared_sqlite_root_postconfiguration_is_owned_and_read_only_refusal_is_preserved() {
+        let root = tempfile::tempdir().unwrap();
+        let mut options = CliOptions {
+            driver: DriverChoice::Sqlite,
+            database: Some("filesystem.db".into()),
+            root_uid: Some(501),
+            root_gid: Some(20),
+            ..CliOptions::default()
+        };
+        let plan = prepared_for_test(&options, 1000, 1001, root.path(), root.path());
+        options.database = Some("replacement.db".into());
+        options.root_uid = Some(900);
+        options.root_gid = Some(901);
+        options.read_only = true;
+        let first = plan.open().await.unwrap();
+        let root_stat = first.driver().stat("/").await.unwrap();
+        assert_eq!((root_stat.uid, root_stat.gid), (501, 20));
+        first.shutdown().await.unwrap();
+        drop(first);
+        let reopened = plan.clone().open().await.unwrap();
+        let root_stat = reopened.driver().stat("/").await.unwrap();
+        assert_eq!((root_stat.uid, root_stat.gid), (501, 20));
+        reopened.shutdown().await.unwrap();
+        drop(reopened);
+        assert!(!root.path().join("replacement.db").exists());
+        options.database = Some("filesystem.db".into());
+        let mismatch = prepared_for_test(&options, 1000, 1001, root.path(), root.path());
+        let error = match mismatch.open().await {
+            Ok(_) => panic!("read-only ownership mismatch must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("refusing to mutate"));
+        let unchanged = plan.open().await.unwrap();
+        let root_stat = unchanged.driver().stat("/").await.unwrap();
+        assert_eq!((root_stat.uid, root_stat.gid), (501, 20));
+        unchanged.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_host_default_root_and_memory_identity_are_owned() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("sentinel"), b"host-oracle").unwrap();
+        let mut host_options = CliOptions {
+            driver: DriverChoice::Host,
+            read_only: true,
+            ..CliOptions::default()
+        };
+        let host_plan = prepared_for_test(&host_options, 101, 202, root.path(), root.path());
+        host_options.root = Some(root.path().join("replacement"));
+        host_options.read_only = false;
+        match &host_plan.driver {
+            PreparedDriver::Host {
+                root: prepared_root,
+                options,
+            } => {
+                assert_eq!(prepared_root, root.path());
+                assert!(options.read_only);
+            }
+            _ => panic!("expected host plan"),
+        }
+        let host = host_plan.open().await.unwrap();
+        assert_eq!(
+            Loopback::from_arc(host.driver())
+                .read_file("/sentinel")
+                .await
+                .unwrap(),
+            b"host-oracle"
+        );
+        assert!(Arc::ptr_eq(&host.driver(), &host.driver()));
+        host.shutdown().await.unwrap();
+        let memory_plan = DriverRuntime::prepare(&CliOptions::default(), 303, 404).unwrap();
+        let memory = memory_plan.open().await.unwrap();
+        let root_stat = memory.driver().stat("/").await.unwrap();
+        assert_eq!((root_stat.uid, root_stat.gid), (303, 404));
+        memory.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn prepared_sqlite_rejects_partial_root_identity_before_provider_open() {
+        let root = tempfile::tempdir().unwrap();
+        let options = CliOptions {
+            driver: DriverChoice::Sqlite,
+            database: Some("unopened.db".into()),
+            root_uid: Some(501),
+            root_gid: None,
+            ..CliOptions::default()
+        };
+        let error =
+            match DriverRuntimePlan::resolve_with(&options, 1, 2, root.path(), root.path(), |_| {
+                unreachable!("SQLite does not resolve credential references")
+            }) {
+                Ok(_) => panic!("partial configured root identity must fail during preparation"),
+                Err(error) => error,
+            };
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains("requires both uid and gid"));
+        assert!(!root.path().join("unopened.db").exists());
+    }
 
     struct RegistrationProbe {
         registered: Arc<AtomicBool>,
@@ -2376,6 +3197,56 @@ mod tests {
         assert_eq!(split.checkout_path.as_deref(), Some("/project"));
         assert!(split.concurrent_writes);
         assert!(!shared_view_requested(&options));
+    }
+
+    #[tokio::test]
+    async fn sqlite_journal_options_retain_native_backing_and_transport_guards() {
+        let directory = tempfile::tempdir().unwrap();
+        let view = directory.path().join("view");
+        let value = serde_json::json!({"version":1,"driver":{"kind":"splitstore","storage":{
+            "concurrent_writes":true,
+            "metadata":{"kind":"sqlite","path":"view/metadata.db","journal_mode":"wal"},
+            "blocks":{"kind":"sqlite","path":"blocks.db","journal_mode":"wal"}
+        }}});
+        let mut options = crate::config::parse_config_str(&value.to_string(), directory.path())
+            .unwrap()
+            .to_options();
+        options.mountpoint = Some(view);
+        options.transport = TransportChoice::Nfs;
+        assert!(concurrent_sqlite_backing_requested(&options));
+        assert!(
+            requested_mountpoints(&options)
+                .unwrap_err()
+                .to_string()
+                .contains("SQLite backing")
+        );
+        let split = split_options(&options, 0, 0).unwrap();
+        assert!(matches!(
+            split.metadata,
+            StoreConfig::SqliteWithOptions { .. }
+        ));
+        assert!(matches!(
+            split.blocks,
+            StoreConfig::SqliteWithOptions { .. }
+        ));
+        options.storage.as_mut().unwrap().metadata = StorageProvider::SqliteWithOptions {
+            path: directory.path().join("metadata.db"),
+            options: mount_rs_sdk::SqliteStorageOptions {
+                journal_mode: mount_rs_sdk::SqliteJournalMode::Wal,
+            },
+        };
+        for transport in [TransportChoice::Fuse, TransportChoice::P9] {
+            options.transport = transport;
+            assert!(
+                mount_command(options.clone())
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("shared mounts require NFS")
+            );
+        }
+        assert!(!directory.path().join("metadata.db").exists());
+        assert!(!directory.path().join("blocks.db").exists());
     }
 
     #[test]

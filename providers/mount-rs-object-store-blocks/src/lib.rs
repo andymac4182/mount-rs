@@ -12,6 +12,8 @@ pub use raw_metrics::{
     RAW_API_SCHEMA, RAW_API_SCOPE, RawApiClaims, RawApiEntry, RawApiSnapshot,
 };
 #[cfg(test)]
+mod object_store_cache_diagnostics_tests;
+#[cfg(test)]
 mod raw_metrics_tests;
 
 mod qualification;
@@ -22,11 +24,12 @@ pub use qualification::{
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use object_store::path::Path as ObjectPath;
@@ -39,6 +42,11 @@ const LEGACY_BLOCK_ID_HEX_CHARS: usize = 32;
 const CONTENT_BLOCK_ID_HEX_CHARS: usize = 64;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 4096;
+const RAW_CACHE_ENTRY_CHARGE: usize = 128;
+// Preserve the standalone payload/entry policy, including empty entries. This
+// charged allowance is not an allocator-footprint or process-RSS limit.
+const MAX_STANDALONE_CACHE_CHARGED_BYTES: usize =
+    MAX_CACHE_BYTES + MAX_CACHE_ENTRIES * (RAW_CACHE_ENTRY_CHARGE + 1);
 const CONCURRENT_PROBE_NAME: &str = "_mount-rs-concurrent-probe-v1";
 const CONCURRENT_PROBE_BYTES: &[u8] = b"mount-rs:object-store:concurrent-preflight:v1\n";
 const CONCURRENT_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -72,23 +80,25 @@ async fn prepare_configured_backing_id_with_candidate(
             {
                 MarkerVisibility::Winner(id) => return Ok(id),
                 MarkerVisibility::Partial => {
-                    tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+                    observe_backing_marker_backoff(backing_id_backoff(attempts, candidate)).await;
                     attempts = attempts.saturating_add(1);
                     continue;
                 }
                 MarkerVisibility::Missing if create_accepted => {
-                    tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+                    observe_backing_marker_backoff(backing_id_backoff(attempts, candidate)).await;
                     attempts = attempts.saturating_add(1);
                     continue;
                 }
                 MarkerVisibility::Missing => {}
             }
             if backoff_before_retry {
-                tokio::time::sleep(backing_id_backoff(attempts, candidate)).await;
+                observe_backing_marker_backoff(backing_id_backoff(attempts, candidate)).await;
             }
             let mut payload = Vec::with_capacity(20);
             payload.extend_from_slice(BACKING_ID_MAGIC);
             payload.extend_from_slice(&candidate.as_bytes());
+            let mut create_span =
+                StorageSpan::new(StorageOperation::ObjectStoreBackingMarkerProbeCreate);
             let create = probe
                 .put_opts(
                     &path,
@@ -99,6 +109,10 @@ async fn prepare_configured_backing_id_with_candidate(
                     },
                 )
                 .await;
+            match &create {
+                Ok(_) => create_span.finish_success(20),
+                Err(_) => create_span.finish_error(),
+            }
             match create {
                 Ok(_) => create_accepted = true,
                 Err(object_store::Error::AlreadyExists { .. })
@@ -140,14 +154,35 @@ enum MarkerVisibility {
     Winner(ConcurrentBackingId),
 }
 
+/// Closed context keeps generic configured-prefix preflight outside marker rows.
+#[derive(Clone, Copy)]
+enum BackingMarkerRole {
+    Probe,
+    Data,
+}
+impl BackingMarkerRole {
+    fn get_operation(self) -> StorageOperation {
+        match self {
+            Self::Probe => StorageOperation::ObjectStoreBackingMarkerProbeGet,
+            Self::Data => StorageOperation::ObjectStoreBackingMarkerDataGet,
+        }
+    }
+    fn body_operation(self) -> StorageOperation {
+        match self {
+            Self::Probe => StorageOperation::ObjectStoreBackingMarkerProbeBodyRead,
+            Self::Data => StorageOperation::ObjectStoreBackingMarkerDataBodyRead,
+        }
+    }
+}
+
 async fn read_backing_id_from_both(
     probe: &dyn ObjectStore,
     blocks: &dyn ObjectStore,
     path: &ObjectPath,
     retry_throttled: Option<ConcurrentBackingId>,
 ) -> Result<MarkerVisibility> {
-    let first = read_backing_id(probe, path, retry_throttled).await?;
-    let second = read_backing_id(blocks, path, retry_throttled).await?;
+    let first = read_backing_id(probe, path, retry_throttled, BackingMarkerRole::Probe).await?;
+    let second = read_backing_id(blocks, path, retry_throttled, BackingMarkerRole::Data).await?;
     match (first, second) {
         (Some(first), Some(second)) if first == second => Ok(MarkerVisibility::Winner(first)),
         (None, None) => Ok(MarkerVisibility::Missing),
@@ -160,6 +195,7 @@ async fn read_backing_id(
     store: &dyn ObjectStore,
     path: &ObjectPath,
     retry_throttled: Option<ConcurrentBackingId>,
+    role: BackingMarkerRole,
 ) -> Result<Option<ConcurrentBackingId>> {
     let mut attempts = 0_u32;
     let jitter = retry_throttled.map_or_else(
@@ -167,10 +203,10 @@ async fn read_backing_id(
         |candidate| u64::from(candidate.as_bytes()[0]) % 101,
     );
     let bytes = loop {
-        match read_direct_object_bytes_once(store, path).await {
+        match read_backing_marker_bytes_once(store, path, role).await {
             Ok(bytes) => break bytes,
             Err(error) if is_temporary_object_read_error(&error) => {
-                tokio::time::sleep(probe_backoff(attempts, jitter)).await;
+                observe_backing_marker_backoff(probe_backoff(attempts, jitter)).await;
                 attempts = attempts.saturating_add(1);
             }
             Err(error) => return Err(backing_id_object_error("read", &error)),
@@ -183,6 +219,48 @@ async fn read_backing_id(
     let id = ConcurrentBackingId::from_bytes(bytes[4..].try_into().expect("length checked"))
         .map_err(|_| stale_backing_id())?;
     Ok(Some(id))
+}
+
+async fn read_backing_marker_bytes_once(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    role: BackingMarkerRole,
+) -> object_store::Result<Option<Vec<u8>>> {
+    let mut get_span = StorageSpan::new(role.get_operation());
+    let result = match store.get(path).await {
+        Ok(result) => {
+            get_span.finish_success(0);
+            result
+        }
+        Err(error) => {
+            // NotFound is an actual failed GET, even when authority handling
+            // interprets it as a missing marker rather than a transport failure.
+            get_span.finish_error();
+            return match error {
+                object_store::Error::NotFound { .. } => Ok(None),
+                error => Err(error),
+            };
+        }
+    };
+    let mut body_span = StorageSpan::new(role.body_operation());
+    match result.bytes().await {
+        Ok(bytes) => {
+            // Count returned bytes before identity validation. Malformed marker
+            // content still has a successful GET and body materialization.
+            body_span.finish_success(bytes.len() as u64);
+            Ok(Some(bytes.to_vec()))
+        }
+        Err(error) => {
+            body_span.finish_error();
+            Err(error)
+        }
+    }
+}
+
+async fn observe_backing_marker_backoff(duration: Duration) {
+    let mut span = StorageSpan::new(StorageOperation::ObjectStoreBackingMarkerRetryBackoff);
+    tokio::time::sleep(duration).await;
+    span.finish_success(0);
 }
 
 async fn read_direct_object_bytes_once(
@@ -505,25 +583,358 @@ impl ObjectStoreBlockStoreStatsState {
     }
 }
 
+/// Shared capacity for retained raw block-cache entries and pending admission.
+///
+/// Entries charge `max(payload_len, 1) + 128` and one entry credit. Credits share
+/// capacity without sharing payloads, prefixes, credentials or backing stores.
+/// Caller-returned buffers and allocator overhead are outside this charged-byte
+/// contract; it does not limit physical RSS. Limits are immutable.
+/// Reservation attempts bypass on bank contention. Returning entry credit takes
+/// a short blocking bank lock without I/O or allocation; insertion is not wait-free.
+#[derive(Debug, Clone)]
+pub struct RawBlockCacheBudget {
+    inner: Arc<RawBlockCacheBudgetInner>,
+}
+
+#[derive(Debug)]
+struct RawBlockCacheBudgetInner {
+    max_charged_bytes: usize,
+    max_entries: usize,
+    state: Mutex<RawBlockCacheBudgetState>,
+    unavailable: AtomicBool,
+    rejected_reservations: AtomicU64,
+    contention_rejections: AtomicU64,
+    admission_skips: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct RawBlockCacheBudgetState {
+    charged_bytes: usize,
+    payload_bytes: usize,
+    entries: usize,
+    high_water_charged_bytes: usize,
+    high_water_entries: usize,
+}
+
+/// Joint credit observations take the reservation-bank lock. High-water marks
+/// include reservations held before a payload copy, not only indexed entries.
+/// The three rejection counters are independent atomic observations and need not
+/// describe exactly the same instant as the locked credit observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawBlockCacheBudgetSnapshot {
+    pub charged_bytes: usize,
+    pub payload_bytes: usize,
+    pub entries: usize,
+    pub high_water_charged_bytes: usize,
+    pub high_water_entries: usize,
+    pub rejected_reservations: u64,
+    pub contention_rejections: u64,
+    pub admission_skips: u64,
+}
+
+struct RawBlockCacheReservation {
+    budget: RawBlockCacheBudget,
+    charged_bytes: usize,
+    payload_bytes: usize,
+}
+
+enum RawBlockCacheReservationAttempt {
+    Reserved(RawBlockCacheReservation),
+    AtCapacity {
+        charged_deficit: usize,
+        entry_deficit: usize,
+    },
+    Busy,
+    Unavailable,
+}
+
+impl RawBlockCacheBudget {
+    /// Zero in either limit disables new admission. Empty payloads consume
+    /// positive byte and entry credits even when observation is disabled.
+    pub fn new(max_charged_bytes: usize, max_entries: usize) -> Self {
+        Self {
+            inner: Arc::new(RawBlockCacheBudgetInner {
+                max_charged_bytes,
+                max_entries,
+                state: Mutex::new(RawBlockCacheBudgetState::default()),
+                unavailable: AtomicBool::new(false),
+                rejected_reservations: AtomicU64::new(0),
+                contention_rejections: AtomicU64::new(0),
+                admission_skips: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    fn standalone() -> Self {
+        Self::new(MAX_STANDALONE_CACHE_CHARGED_BYTES, MAX_CACHE_ENTRIES)
+    }
+
+    pub fn max_charged_bytes(&self) -> usize {
+        self.inner.max_charged_bytes
+    }
+
+    pub fn max_entries(&self) -> usize {
+        self.inner.max_entries
+    }
+
+    /// Accounting faults are sticky. A poisoned bank cannot grant new credit.
+    pub fn is_unavailable(&self) -> bool {
+        self.inner.unavailable.load(Ordering::Acquire)
+    }
+
+    /// Rejection observations remain readable even when credit state is unknown.
+    pub fn rejected_reservations(&self) -> u64 {
+        self.inner.rejected_reservations.load(Ordering::Relaxed)
+    }
+
+    pub fn contention_rejections(&self) -> u64 {
+        self.inner.contention_rejections.load(Ordering::Relaxed)
+    }
+
+    pub fn admission_skips(&self) -> u64 {
+        self.inner.admission_skips.load(Ordering::Relaxed)
+    }
+
+    /// Return no invented occupancy when the bank is poisoned or unavailable.
+    /// This diagnostic operation takes a blocking bank lock; admission does not.
+    pub fn snapshot(&self) -> Option<RawBlockCacheBudgetSnapshot> {
+        if self.is_unavailable() {
+            return None;
+        }
+        let state = match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.mark_unavailable();
+                return None;
+            }
+        };
+        if self.is_unavailable() || !self.valid_state(&state) {
+            self.mark_unavailable();
+            return None;
+        }
+        Some(RawBlockCacheBudgetSnapshot {
+            charged_bytes: state.charged_bytes,
+            payload_bytes: state.payload_bytes,
+            entries: state.entries,
+            high_water_charged_bytes: state.high_water_charged_bytes,
+            high_water_entries: state.high_water_entries,
+            rejected_reservations: self.rejected_reservations(),
+            contention_rejections: self.contention_rejections(),
+            admission_skips: self.admission_skips(),
+        })
+    }
+
+    fn mark_unavailable(&self) {
+        self.inner.unavailable.store(true, Ordering::Release);
+    }
+
+    fn add_rejection_counter(&self, counter: &AtomicU64) {
+        if counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+                old.checked_add(1)
+            })
+            .is_err()
+        {
+            self.mark_unavailable();
+        }
+    }
+
+    fn skip_admission(&self) {
+        self.add_rejection_counter(&self.inner.admission_skips);
+    }
+
+    fn valid_state(&self, state: &RawBlockCacheBudgetState) -> bool {
+        state.charged_bytes <= self.max_charged_bytes()
+            && state.entries <= self.max_entries()
+            && state.high_water_charged_bytes >= state.charged_bytes
+            && state.high_water_charged_bytes <= self.max_charged_bytes()
+            && state.high_water_entries >= state.entries
+            && state.high_water_entries <= self.max_entries()
+            && Self::valid_occupancy(state.charged_bytes, state.payload_bytes, state.entries)
+    }
+
+    fn valid_occupancy(charged_bytes: usize, payload_bytes: usize, entries: usize) -> bool {
+        if entries == 0 {
+            return charged_bytes == 0 && payload_bytes == 0;
+        }
+        let charge = charged_bytes as u128;
+        charge >= entries as u128 * (RAW_CACHE_ENTRY_CHARGE + 1) as u128
+            && charge >= payload_bytes as u128 + entries as u128 * RAW_CACHE_ENTRY_CHARGE as u128
+    }
+
+    fn fits_entry(&self, payload_bytes: usize) -> bool {
+        !self.is_unavailable()
+            && self.max_entries() != 0
+            && mount_rs_core::storage::checked_buffer_reservation(
+                0,
+                payload_bytes,
+                RAW_CACHE_ENTRY_CHARGE,
+                self.max_charged_bytes(),
+            )
+            .is_some()
+    }
+
+    fn try_reserve(&self, payload_bytes: usize) -> RawBlockCacheReservationAttempt {
+        let charge = mount_rs_core::storage::checked_buffer_reservation(
+            0,
+            payload_bytes,
+            RAW_CACHE_ENTRY_CHARGE,
+            self.max_charged_bytes(),
+        );
+        let Some(charge) = charge.filter(|_| self.max_entries() != 0) else {
+            self.add_rejection_counter(&self.inner.rejected_reservations);
+            return RawBlockCacheReservationAttempt::AtCapacity {
+                charged_deficit: 1,
+                entry_deficit: 1,
+            };
+        };
+        if self.is_unavailable() {
+            self.add_rejection_counter(&self.inner.rejected_reservations);
+            return RawBlockCacheReservationAttempt::Unavailable;
+        }
+        let mut state = match self.inner.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.add_rejection_counter(&self.inner.rejected_reservations);
+                self.add_rejection_counter(&self.inner.contention_rejections);
+                return RawBlockCacheReservationAttempt::Busy;
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                self.mark_unavailable();
+                self.add_rejection_counter(&self.inner.rejected_reservations);
+                return RawBlockCacheReservationAttempt::Unavailable;
+            }
+        };
+        if self.is_unavailable() || !self.valid_state(&state) {
+            self.mark_unavailable();
+            self.add_rejection_counter(&self.inner.rejected_reservations);
+            return RawBlockCacheReservationAttempt::Unavailable;
+        }
+        let next_charge = state
+            .charged_bytes
+            .checked_add(charge)
+            .filter(|next| *next <= self.max_charged_bytes());
+        let next_entries = state
+            .entries
+            .checked_add(1)
+            .filter(|next| *next <= self.max_entries());
+        let (Some(next_charge), Some(next_entries)) = (next_charge, next_entries) else {
+            self.add_rejection_counter(&self.inner.rejected_reservations);
+            return RawBlockCacheReservationAttempt::AtCapacity {
+                charged_deficit: charge
+                    .saturating_sub(self.max_charged_bytes() - state.charged_bytes),
+                entry_deficit: usize::from(state.entries == self.max_entries()),
+            };
+        };
+        let Some(next_payload) = state.payload_bytes.checked_add(payload_bytes) else {
+            self.mark_unavailable();
+            self.add_rejection_counter(&self.inner.rejected_reservations);
+            return RawBlockCacheReservationAttempt::Unavailable;
+        };
+        state.charged_bytes = next_charge;
+        state.payload_bytes = next_payload;
+        state.entries = next_entries;
+        state.high_water_charged_bytes = state.high_water_charged_bytes.max(next_charge);
+        state.high_water_entries = state.high_water_entries.max(next_entries);
+        RawBlockCacheReservationAttempt::Reserved(RawBlockCacheReservation {
+            budget: self.clone(),
+            charged_bytes: charge,
+            payload_bytes,
+        })
+    }
+
+    fn release(&self, charged_bytes: usize, payload_bytes: usize) {
+        if self.is_unavailable() {
+            return;
+        }
+        let mut state = match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                self.mark_unavailable();
+                return;
+            }
+        };
+        if self.is_unavailable() || !self.valid_state(&state) {
+            self.mark_unavailable();
+            return;
+        }
+        let remaining_charge = state.charged_bytes.checked_sub(charged_bytes);
+        let remaining_payload = state.payload_bytes.checked_sub(payload_bytes);
+        let remaining_entries = state.entries.checked_sub(1);
+        let (Some(charge), Some(payload), Some(entries)) =
+            (remaining_charge, remaining_payload, remaining_entries)
+        else {
+            self.mark_unavailable();
+            return;
+        };
+        if !Self::valid_occupancy(charge, payload, entries) {
+            self.mark_unavailable();
+            return;
+        }
+        state.charged_bytes = charge;
+        state.payload_bytes = payload;
+        state.entries = entries;
+    }
+}
+
+impl Drop for RawBlockCacheReservation {
+    fn drop(&mut self) {
+        self.budget.release(self.charged_bytes, self.payload_bytes);
+    }
+}
+
+struct ObjectStoreBlockCacheEntry {
+    bytes: Vec<u8>,
+    // Fields drop in declaration order: free payload before returning credit.
+    _reservation: RawBlockCacheReservation,
+}
+
 #[derive(Default)]
 struct ObjectStoreBlockCacheState {
-    entries: HashMap<String, Vec<u8>>,
+    entries: HashMap<String, ObjectStoreBlockCacheEntry>,
     order: VecDeque<String>,
     bytes: usize,
 }
 
-#[derive(Default)]
 struct ObjectStoreBlockCache {
     state: Mutex<ObjectStoreBlockCacheState>,
+    budget: RawBlockCacheBudget,
+    // Declared last: publish final release after the actual cache state drops.
+    residency: mount_rs_core::diagnostics::object_store::CacheResidencyGuard,
+}
+
+impl Default for ObjectStoreBlockCache {
+    fn default() -> Self {
+        Self::new_with_observer(&mount_rs_core::diagnostics::object_store::Observer::enabled())
+    }
 }
 
 impl ObjectStoreBlockCache {
+    fn new_with_observer(observer: &mount_rs_core::diagnostics::object_store::Observer) -> Self {
+        Self::new_with_observer_and_budget(observer, RawBlockCacheBudget::standalone())
+    }
+
+    fn new_with_observer_and_budget(
+        observer: &mount_rs_core::diagnostics::object_store::Observer,
+        budget: RawBlockCacheBudget,
+    ) -> Self {
+        Self {
+            state: Mutex::new(ObjectStoreBlockCacheState::default()),
+            budget,
+            residency: observer.cache_residency(),
+        }
+    }
     fn lock(
         &self,
         local: Option<&LocalState>,
     ) -> std::sync::LockResult<std::sync::MutexGuard<'_, ObjectStoreBlockCacheState>> {
         let mut span = LocalSpan::new(local, Local::CacheLock, 0);
         let result = self.state.lock();
+        if result.is_err() {
+            // The poisoned guard still serializes this observation with state.
+            // Known totals exclude this owner until its final drop.
+            self.residency.mark_unknown();
+        }
         span.result(&result, 0);
         result
     }
@@ -534,8 +945,8 @@ impl ObjectStoreBlockCache {
     fn get_with_metrics(&self, id: &str, local: Option<&LocalState>) -> Option<Vec<u8>> {
         let mut state = self.lock(local).ok()?;
         let entry = state.entries.get(id)?;
-        let mut copy = LocalSpan::new(local, Local::ReturnCopy, entry.len() as u64);
-        let bytes = entry.clone();
+        let mut copy = LocalSpan::new(local, Local::ReturnCopy, entry.bytes.len() as u64);
+        let bytes = entry.bytes.clone();
         copy.success(bytes.len() as u64);
         if let Some(position) = state.order.iter().position(|entry| entry == id) {
             state.order.remove(position);
@@ -545,14 +956,75 @@ impl ObjectStoreBlockCache {
     }
 
     fn insert(&self, id: &str, bytes: &[u8], local: Option<&LocalState>) {
-        if bytes.len() > MAX_CACHE_BYTES {
+        if bytes.len() > MAX_CACHE_BYTES || !self.budget.fits_entry(bytes.len()) {
+            self.budget.skip_admission();
             return;
         }
         let Ok(mut state) = self.lock(local) else {
+            self.budget.skip_admission();
             return;
         };
+        if state
+            .entries
+            .get(id)
+            .is_some_and(|entry| entry.bytes.as_slice() == bytes)
+        {
+            if let Some(position) = state.order.iter().position(|entry| entry == id) {
+                state.order.remove(position);
+            }
+            state.order.push_back(id.to_owned());
+            return;
+        }
+        // Try before removing anything: initial contention bypasses without a
+        // copy or eviction. After capacity-driven eviction, a later busy bank
+        // bypasses the new copy while preserving the completed eviction. Never
+        // scan or lock another prefix's cache.
+        let reservation = loop {
+            match self.budget.try_reserve(bytes.len()) {
+                RawBlockCacheReservationAttempt::Reserved(reservation) => break reservation,
+                RawBlockCacheReservationAttempt::AtCapacity {
+                    charged_deficit,
+                    entry_deficit,
+                } => {
+                    let releasable = state.entries.values().try_fold(0_usize, |used, entry| {
+                        used.checked_add(entry._reservation.charged_bytes)
+                    });
+                    if releasable.is_none_or(|charge| charge < charged_deficit)
+                        || state.entries.len() < entry_deficit
+                        || state.entries.is_empty()
+                    {
+                        self.budget.skip_admission();
+                        self.residency.publish(state.entries.len(), state.bytes);
+                        return;
+                    }
+                    let evicted = if state.entries.contains_key(id) {
+                        id.to_owned()
+                    } else {
+                        let Some(evicted) = state.order.front().cloned() else {
+                            self.budget.mark_unavailable();
+                            self.budget.skip_admission();
+                            self.residency.publish(state.entries.len(), state.bytes);
+                            return;
+                        };
+                        evicted
+                    };
+                    if let Some(previous) = state.entries.remove(&evicted) {
+                        state.bytes -= previous.bytes.len();
+                    }
+                    if let Some(position) = state.order.iter().position(|entry| entry == &evicted) {
+                        state.order.remove(position);
+                    }
+                }
+                RawBlockCacheReservationAttempt::Busy
+                | RawBlockCacheReservationAttempt::Unavailable => {
+                    self.budget.skip_admission();
+                    self.residency.publish(state.entries.len(), state.bytes);
+                    return;
+                }
+            }
+        };
         if let Some(previous) = state.entries.remove(id) {
-            state.bytes = state.bytes.saturating_sub(previous.len());
+            state.bytes -= previous.bytes.len();
             if let Some(position) = state.order.iter().position(|entry| entry == id) {
                 state.order.remove(position);
             }
@@ -565,16 +1037,23 @@ impl ObjectStoreBlockCache {
                 break;
             };
             if let Some(previous) = state.entries.remove(&evicted) {
-                state.bytes = state.bytes.saturating_sub(previous.len());
+                state.bytes -= previous.bytes.len();
             }
         }
-        state.bytes = state.bytes.saturating_add(bytes.len());
         let key = id.to_owned();
         let mut copy = LocalSpan::new(local, Local::CacheCopy, bytes.len() as u64);
         let copied = bytes.to_vec();
         copy.success(copied.len() as u64);
-        state.entries.insert(key, copied);
+        state.bytes += copied.len();
+        state.entries.insert(
+            key,
+            ObjectStoreBlockCacheEntry {
+                bytes: copied,
+                _reservation: reservation,
+            },
+        );
         state.order.push_back(id.to_owned());
+        self.residency.publish(state.entries.len(), state.bytes);
     }
 
     fn remove(&self, id: &str, local: Option<&LocalState>) {
@@ -582,11 +1061,12 @@ impl ObjectStoreBlockCache {
             return;
         };
         if let Some(previous) = state.entries.remove(id) {
-            state.bytes = state.bytes.saturating_sub(previous.len());
+            state.bytes -= previous.bytes.len();
         }
         if let Some(position) = state.order.iter().position(|entry| entry == id) {
             state.order.remove(position);
         }
+        self.residency.publish(state.entries.len(), state.bytes);
     }
 }
 
@@ -902,6 +1382,16 @@ impl ObjectStoreBlockStore {
         prefix: impl Into<String>,
         durable: bool,
     ) -> Result<Self> {
+        Self::new_with_cache_budget(store, prefix, durable, RawBlockCacheBudget::standalone())
+    }
+
+    /// Construct a prefix-local cache with a shared capacity owner.
+    pub fn new_with_cache_budget(
+        store: Arc<dyn ObjectStore>,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
         Ok(Self {
             store,
             prefix: validate_prefix(&prefix.into())?,
@@ -911,7 +1401,10 @@ impl ObjectStoreBlockStore {
                     .then(|| Box::new(RawState::default())),
                 ..Default::default()
             }),
-            cache: Arc::new(ObjectStoreBlockCache::default()),
+            cache: Arc::new(ObjectStoreBlockCache::new_with_observer_and_budget(
+                &mount_rs_core::diagnostics::object_store::Observer::enabled(),
+                budget,
+            )),
             inflight_puts: Arc::new(Mutex::new(HashMap::new())),
         })
     }

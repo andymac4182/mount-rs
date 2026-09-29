@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_core::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant,
@@ -184,6 +185,10 @@ impl<T: Queryable + ?Sized> TimedSql for T {}
 #[path = "storage_metrics_tests.rs"]
 mod storage_metrics_tests;
 
+#[cfg(test)]
+#[path = "construction_tests.rs"]
+mod construction_tests;
+
 /// A conservative default below TiDB's default single-entry and packet
 /// limits. Deployments that raise the corresponding TiDB/TiKV limits may
 /// select a larger value explicitly.
@@ -222,7 +227,7 @@ pub const TIDB_DIAGNOSTIC_COVERAGE: TidbDiagnosticCoverage = TidbDiagnosticCover
     metadata_open_sites: 1,
     transaction_begin_sites: 3,
     transaction_commit_sites: 1,
-    transaction_rollback_sites: 5,
+    transaction_rollback_sites: 4,
     sql_statement_sites: 57,
     operations: &[
         "tidb.pool.checkout",
@@ -395,6 +400,7 @@ impl Database {
         options: TidbStorageOptions,
         schema: &str,
         ensure_metadata_row: bool,
+        observer: Option<&dyn ConstructionObserver>,
     ) -> Result<Self> {
         if url.trim().is_empty() {
             return Err(FsError::new(ErrorCode::Einval).with_message("TiDB URL must not be empty"));
@@ -422,6 +428,9 @@ impl Database {
             max_namespace_bytes: options.max_namespace_bytes,
             shared_context: None,
         };
+        if let Some(observer) = observer {
+            observer.retain(Arc::new(database.clone()));
+        }
 
         let mut connection = database
             .pool
@@ -463,6 +472,13 @@ impl Database {
             .disconnect()
             .await
             .map_err(|error| db_error("close TiDB connection pool", error))
+    }
+}
+
+#[async_trait]
+impl ConstructionResource for Database {
+    async fn close(&self) -> Result<()> {
+        Database::close(self).await
     }
 }
 
@@ -747,8 +763,17 @@ impl TidbMetadataStore {
     }
 
     pub async fn connect_with_options(url: &str, options: TidbStorageOptions) -> Result<Self> {
+        Self::connect_with_options_and_observer(url, options, None).await
+    }
+
+    /// Retain the private pool owner before connection and schema awaits.
+    pub async fn connect_with_options_and_observer(
+        url: &str,
+        options: TidbStorageOptions,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<Self> {
         Ok(Self(
-            Database::connect(url, options, METADATA_SCHEMA, true).await?,
+            Database::connect(url, options, METADATA_SCHEMA, true, observer).await?,
         ))
     }
 
@@ -775,8 +800,17 @@ impl TidbBlockStore {
     }
 
     pub async fn connect_with_options(url: &str, options: TidbStorageOptions) -> Result<Self> {
+        Self::connect_with_options_and_observer(url, options, None).await
+    }
+
+    /// Retain the private pool owner before connection and schema awaits.
+    pub async fn connect_with_options_and_observer(
+        url: &str,
+        options: TidbStorageOptions,
+        observer: Option<&dyn ConstructionObserver>,
+    ) -> Result<Self> {
         Ok(Self(
-            Database::connect(url, options, BLOCK_SCHEMA, false).await?,
+            Database::connect(url, options, BLOCK_SCHEMA, false, observer).await?,
         ))
     }
 
@@ -1639,6 +1673,20 @@ impl MetadataStore for TidbMetadataStore {
     fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
         mount_rs_core::storage::compact::CompactInodeCapability::V1
     }
+    fn compact_root_file_capability(
+        &self,
+    ) -> mount_rs_core::storage::compact::CompactRootFileCapability {
+        mount_rs_core::storage::compact::CompactRootFileCapability::Supported
+    }
+    async fn load_compact_root_file(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: InodeId,
+        candidate_file: InodeId,
+    ) -> Result<mount_rs_core::storage::compact::CompactRootFileRead> {
+        self.compact_root_file(backing, expected_root, candidate_file)
+            .await
+    }
     async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
         self.compact_inspect().await
     }
@@ -1661,6 +1709,14 @@ impl MetadataStore for TidbMetadataStore {
         inode: InodeId,
     ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
         self.compact_load(backing, inode).await
+    }
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: mount_rs_core::storage::compact::CompactInodeExpectation<'_>,
+    ) -> Result<mount_rs_core::storage::compact::CompactInodeRead> {
+        self.compact_read(backing, inode, expected).await
     }
     async fn publish_compact_inode(
         &self,

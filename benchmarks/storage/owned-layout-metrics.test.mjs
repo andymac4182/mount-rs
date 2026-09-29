@@ -68,9 +68,9 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
   Object.assign(entry, { calls: "1", success: "1", bytes: "9007199254740993", elapsed_ns: "9007199254740995", latency_log2_us: ["1", ...Array(31).fill("0")] })
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.equal(value.status, "observed")
-  assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.storage.entries.length, 116)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_COVERAGE)
-  assert.deepEqual(value.storage.instrumented_operations.slice(-7), FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations)
+  assert.deepEqual(value.storage.instrumented_operations.filter((name) => name.startsWith("foundationdb.")), FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations)
   const projected = value.storage.entries.find((row) => row.name === "foundationdb.read.get")
   assert.equal(projected.bytes, "9007199254740993"); assert.equal(projected.elapsed_ns, "9007199254740995")
   assert.equal(projected.returned_rows, "0"); assert.equal(projected.returned_row_observations, "0")
@@ -78,10 +78,29 @@ test("preserves audited FoundationDB source coverage and precise returned payloa
 })
 test("feature-off fixed FoundationDB rows retain explicit unavailable coverage", () => {
   const value = projectOwnedLayoutPhaseMetrics(model())
-  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.status, "observed"); assert.equal(value.storage.entries.length, 116)
   assert.deepEqual(value.storage.foundationdb_coverage, FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE)
   assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.match(value.storage.scope, /audited_instrumented_operations_separately_declared/u)
+})
+test("declared WebSocket rows retain exact large counters without entering addon source coverage", () => {
+  const source = model()
+  const names = STORAGE_OPERATION_NAMES.slice(100, 108)
+  assert.equal(names.length, 8)
+  for (const name of names) Object.assign(source.native.storage.entries.find((row) => row.name === name), {
+    calls: "9007199254740993", success: "9007199254740993", elapsed_ns: "9007199254740995",
+    latency_log2_us: ["9007199254740993", ...Array(31).fill("0")],
+  })
+  const value = projectOwnedLayoutPhaseMetrics(source)
+  assert.equal(value.status, "observed")
+  assert.equal(value.storage.entries.length, 116)
+  assert.equal(value.storage.instrumented_operations.some((name) => name.startsWith("client.")), false)
+  for (const name of names) {
+    const row = value.storage.entries.find((entry) => entry.name === name)
+    assert.equal(row.calls, "9007199254740993")
+    assert.equal(row.elapsed_ns, "9007199254740995")
+    assert.equal(row.bytes, "0")
+  }
 })
 test("retains digest, encoding, copy and wait evidence with original limits", () => {
   const source = model(); local(source)
@@ -151,9 +170,28 @@ const faults = [
   ["partial FoundationDB source audit", (p) => { p.native.measurement.foundationdb_coverage = structuredClone(FOUNDATIONDB_DIAGNOSTIC_COVERAGE); p.native.measurement.foundationdb_coverage.operations.pop(); return p }],
   ["private FoundationDB source metadata", (p) => { p.native.measurement.foundationdb_coverage.private_key = "PRIVATE_SECRET"; return p }],
   ["legacy78 row inventory", (p) => { p.native.storage.entries.length = 78; p.native.measurement.storage_operations.length = 78; delete p.native.measurement.foundationdb_coverage; return p }],
+  ["legacy85 row inventory", (p) => { p.native.storage.entries.length = 85; p.native.measurement.storage_operations.length = 85; delete p.native.measurement.storage_families.blob_cache; return p }],
+  ["legacy91 row inventory", (p) => { p.native.storage.entries.length = 91; p.native.measurement.storage_operations.length = 91; delete p.native.measurement.storage_families.client_quic; return p }],
+  ["legacy92 row inventory", (p) => { p.native.storage.entries.length = 92; p.native.measurement.storage_operations.length = 92; return p }],
+  ["legacy100 row inventory", (p) => { p.native.storage.entries.length = 100; p.native.measurement.storage_operations.length = 100; delete p.native.measurement.storage_families.client_websocket; return p }],
+  ["misordered WebSocket stages", (p) => { [p.native.storage.entries[100], p.native.storage.entries[101]] = [p.native.storage.entries[101], p.native.storage.entries[100]]; return p }],
+  ["former payload-only bytes descriptor", (p) => { p.native.measurement.storage_bytes = "known_successful_payload_bytes_only; zero_does_not_establish_no_payload"; return p }],
   ["cyclic input", (p) => { p.native.storage.circular = p; return p }],
   ["overcap evidence", (p) => { p.native.secret = "PRIVATE".repeat(1_300_000); return p }],
 ]
+for (const name of [
+  "client.quic.request_send", "client.quic.response_receive",
+  "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
+  "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
+  "blob_cache.peer.get", "blob_cache.peer.get_miss",
+  "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+  "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+  "client.websocket.request_encode", "client.websocket.request_send",
+  "client.websocket.response_receive", "client.websocket.response_decode",
+]) faults.push([`missing ${name} transport row`, (p) => {
+  p.native.storage.entries.splice(p.native.storage.entries.findIndex((row) => row.name === name), 1)
+  return p
+}])
 for (const [name, mutate] of faults) test(`${name} produces a closed unavailable receipt`, () => {
   const value = projectOwnedLayoutPhaseMetrics(mutate(model()))
   assert.equal(value.status, "unavailable"); assert.equal(value.reason, "PHASE_METRICS_UNAVAILABLE")
@@ -286,13 +324,35 @@ const causalProfileNames = [
   "filesystem.mutation.create_guard.revision_mismatch",
   "filesystem.mutation.create_guard.allocation_mismatch",
   "filesystem.mutation.create_guard.path_present",
+  "compact.namespace.materialize_nodes",
+  "filesystem.mutation.candidate_clone_nodes",
+  "compact.structure.delta_capture_nodes",
+  "compact.structure.expected_guard_nodes",
+  "sqlite.compact.authority_query",
+  "sqlite.compact.authority_path",
+  "sqlite.compact.anchor_query_bytes",
+  "sqlite.compact.anchor_decode_bytes",
+  "sqlite.compact.guard_selected_rows",
+  "sqlite.compact.guard_full_rows",
+  "sqlite.compact.guard_selected_decode_bytes",
+  "sqlite.compact.guard_full_decode_bytes",
+  "sqlite.compact.read_lock_wait",
+  "sqlite.compact.read_begin",
+  "filesystem.refresh.replace_probe",
+  "filesystem.refresh.create_capture",
+  "filesystem.refresh.batch_capture",
+  "filesystem.refresh.path_structure",
+  "filesystem.refresh.read_before",
+  "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ]
 
 test("causal core projection preserves fixed prefix, new zero rows and exact decimal strings", () => {
-  assert.equal(causalProfileNames.length, 114)
+  assert.equal(causalProfileNames.length, 136)
   assert.equal(causalProfileNames[46], "provider.inode_serialized_bytes")
   assert.equal(causalProfileNames[47], "filesystem.block_put.initial")
-  assert.deepEqual(causalProfileNames.slice(108), [
+  assert.deepEqual(causalProfileNames.slice(108, 114), [
     "filesystem.mutation.create_guard.evaluated",
     "filesystem.mutation.create_guard.passed",
     "filesystem.mutation.create_guard.conflict",
@@ -300,6 +360,31 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
     "filesystem.mutation.create_guard.allocation_mismatch",
     "filesystem.mutation.create_guard.path_present",
   ])
+  assert.deepEqual(causalProfileNames.slice(114, 118), [
+    "compact.namespace.materialize_nodes",
+    "filesystem.mutation.candidate_clone_nodes",
+    "compact.structure.delta_capture_nodes",
+    "compact.structure.expected_guard_nodes",
+  ])
+  assert.deepEqual(causalProfileNames.slice(118, 134), [
+    "sqlite.compact.authority_query",
+    "sqlite.compact.authority_path",
+    "sqlite.compact.anchor_query_bytes",
+    "sqlite.compact.anchor_decode_bytes",
+    "sqlite.compact.guard_selected_rows",
+    "sqlite.compact.guard_full_rows",
+    "sqlite.compact.guard_selected_decode_bytes",
+    "sqlite.compact.guard_full_decode_bytes",
+    "sqlite.compact.read_lock_wait",
+    "sqlite.compact.read_begin",
+    "filesystem.refresh.replace_probe",
+    "filesystem.refresh.create_capture",
+    "filesystem.refresh.batch_capture",
+    "filesystem.refresh.path_structure",
+    "filesystem.refresh.read_before",
+    "filesystem.refresh.read_after",
+  ])
+  assert.deepEqual(causalProfileNames.slice(134), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
   const source = model()
   source.native.measurement.profile = "existing_core_profile_counters"
   source.native.profile = { entries: causalProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })) }
@@ -307,7 +392,25 @@ test("causal core projection preserves fixed prefix, new zero rows and exact dec
   const value = projectOwnedLayoutPhaseMetrics(source)
   assert.deepEqual(value.core_profile.entries, source.native.profile.entries)
   assert.equal(value.core_profile.status, "observed")
-  assert.equal(value.storage.entries.length, 85)
+  assert.equal(value.storage.entries.length, 116)
+  source.native.profile.entries = source.native.profile.entries.slice(0, 134)
+  const previousCacheSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(previousCacheSnapshot.status, "observed")
+  assert.equal(previousCacheSnapshot.entries.length, 134)
+  assert.equal(previousCacheSnapshot.entries.some((row) => row.name.startsWith("blob_cache.")), false)
+  assert.match(previousCacheSnapshot.scope, /absent_events_unavailable/u)
+  source.native.profile.entries = source.native.profile.entries.slice(0, 118)
+  const previousCompactSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(previousCompactSnapshot.status, "observed")
+  assert.equal(previousCompactSnapshot.entries.length, 118)
+  assert.equal(previousCompactSnapshot.entries.some((row) => row.name === causalProfileNames[118]), false)
+  assert.match(previousCompactSnapshot.scope, /absent_events_unavailable/u)
+  source.native.profile.entries = source.native.profile.entries.slice(0, 114)
+  const previousSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(previousSnapshot.status, "observed")
+  assert.equal(previousSnapshot.entries.length, 114)
+  assert.equal(previousSnapshot.entries.some((row) => row.name === causalProfileNames[114]), false)
+  assert.match(previousSnapshot.scope, /absent_events_unavailable/u)
   source.native.profile.entries = source.native.profile.entries.slice(0, 108)
   const oldSnapshot = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(oldSnapshot.status, "observed")
@@ -348,6 +451,36 @@ test("partial projector retains six existing optional compact labels independent
   ]
   const complete = projectOwnedLayoutPhaseMetrics(source).core_profile
   assert.equal(complete.status, "observed")
-  assert.equal(complete.entries.length, 120)
+  assert.equal(complete.entries.length, 142)
   assert.deepEqual(complete.entries, source.native.profile.entries)
+})
+
+test("cache hit-byte events retain zero-byte hits and exact u64 payload units", () => {
+  const source = model()
+  source.native.measurement.profile = "existing_core_profile_counters"
+  source.native.profile = { entries: [
+    { name: "blob_cache.ram.hit_bytes", calls: "1", elapsed_ns: "0", units: "0" },
+    { name: "blob_cache.disk.hit_bytes", calls: "9007199254740993", elapsed_ns: "0", units: "18446744073709551615" },
+  ] }
+  const before = structuredClone(source)
+  const value = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(value.status, "observed")
+  assert.deepEqual(value.entries, source.native.profile.entries)
+  assert.deepEqual(source, before)
+})
+
+test("compact and refresh projection retains measured units and inclusive timing as exact strings", () => {
+  const source = model()
+  source.native.measurement.profile = "existing_core_profile_counters"
+  source.native.profile = { entries: causalProfileNames.slice(114).map((name, index) => ({
+    name, calls: String(index + 1), elapsed_ns: String(9007199254740993n + BigInt(index)),
+    units: String(18446744073709551615n - BigInt(index)),
+  })) }
+  const before = structuredClone(source)
+  const value = projectOwnedLayoutPhaseMetrics(source).core_profile
+  assert.equal(value.status, "observed")
+  assert.deepEqual(value.entries, source.native.profile.entries)
+  assert.deepEqual(source, before)
+  assert.equal(Object.isFrozen(value.entries[0]), true)
+  assert.match(value.scope, /units_depend_on_fixed_event/u)
 })

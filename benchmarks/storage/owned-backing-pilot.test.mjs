@@ -86,7 +86,7 @@ const { createBackingObserver } = await import("./backing-observer.mjs")
 const { createBackingEngineTransport } = await import("./backing-engine-transport.mjs")
 const pilot = await import("./owned-backing-pilot.mjs")
 const diagnostics = await import("./diagnostics.mjs")
-const { FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE, STORAGE_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES, STORAGE_INSTRUMENTED_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE } = diagnostics
+const { FOUNDATIONDB_DIAGNOSTIC_UNAVAILABLE, STORAGE_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES, STORAGE_INSTRUMENTED_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE, SQLITE_VFS_MEASUREMENT, SQLITE_VFS_ENTRY_NAMES } = diagnostics
 const capture = require(capturePath)
 
 test.after(() => {
@@ -645,12 +645,12 @@ test("native projection keeps fixed core counters and Node resources, rejecting 
   assert.equal(pilot.projectPilotRecord(fixture, { kind: "selected_native_file", native_sha256: "a".repeat(64) }).observation_status, "incomplete", "resource completion cannot repair malformed projected workload")
 })
 
-test("clean committed core row coverage excludes protected compact additions and unrelated labels", () => {
-  // Independent frozen committed profile contract, rather than the dirty
+test("current core row coverage excludes optional compatibility labels and unrelated labels", () => {
+  // Independent fixed profile contract, rather than the dirty
   // recorder or the projection's own label list.
   const committedNames = modelCommittedProfileNames
-  assert.equal(committedNames.length, 114)
-  assert.deepEqual(committedNames.slice(108), [
+  assert.equal(committedNames.length, 136)
+  assert.deepEqual(committedNames.slice(108, 114), [
     "filesystem.mutation.create_guard.evaluated",
     "filesystem.mutation.create_guard.passed",
     "filesystem.mutation.create_guard.conflict",
@@ -658,6 +658,31 @@ test("clean committed core row coverage excludes protected compact additions and
     "filesystem.mutation.create_guard.allocation_mismatch",
     "filesystem.mutation.create_guard.path_present",
   ])
+  assert.deepEqual(committedNames.slice(114, 118), [
+    "compact.namespace.materialize_nodes",
+    "filesystem.mutation.candidate_clone_nodes",
+    "compact.structure.delta_capture_nodes",
+    "compact.structure.expected_guard_nodes",
+  ])
+  assert.deepEqual(committedNames.slice(118, 134), [
+    "sqlite.compact.authority_query",
+    "sqlite.compact.authority_path",
+    "sqlite.compact.anchor_query_bytes",
+    "sqlite.compact.anchor_decode_bytes",
+    "sqlite.compact.guard_selected_rows",
+    "sqlite.compact.guard_full_rows",
+    "sqlite.compact.guard_selected_decode_bytes",
+    "sqlite.compact.guard_full_decode_bytes",
+    "sqlite.compact.read_lock_wait",
+    "sqlite.compact.read_begin",
+    "filesystem.refresh.replace_probe",
+    "filesystem.refresh.create_capture",
+    "filesystem.refresh.batch_capture",
+    "filesystem.refresh.path_structure",
+    "filesystem.refresh.read_before",
+    "filesystem.refresh.read_after",
+  ])
+  assert.deepEqual(committedNames.slice(134), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
   const fixture = resultFixture()
   fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: { complete: false,
     profile: { entries: [...committedNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })),
@@ -676,7 +701,7 @@ test("clean committed core row coverage excludes protected compact additions and
   fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = committedNames.slice(0, 108).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
   const oldSnapshot = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
   assert.equal(oldSnapshot.core_profile.status, "unavailable")
-  assert.equal(oldSnapshot.core_profile.entries.length, 114)
+  assert.equal(oldSnapshot.core_profile.entries.length, 136)
   assert.equal(oldSnapshot.core_profile.entries[108].calls, null)
   assert.equal(oldSnapshot.projected_component_complete, false)
   fixture.providers[0].storageDiagnostics.phases[0].native.r2 = { instances: Array.from({ length: 17 }, (_, index) => ({ id: String(index + 1) })) }
@@ -804,8 +829,38 @@ const modelCommittedProfileNames = [
   "filesystem.mutation.create_guard.revision_mismatch",
   "filesystem.mutation.create_guard.allocation_mismatch",
   "filesystem.mutation.create_guard.path_present",
+  "compact.namespace.materialize_nodes",
+  "filesystem.mutation.candidate_clone_nodes",
+  "compact.structure.delta_capture_nodes",
+  "compact.structure.expected_guard_nodes",
+  "sqlite.compact.authority_query",
+  "sqlite.compact.authority_path",
+  "sqlite.compact.anchor_query_bytes",
+  "sqlite.compact.anchor_decode_bytes",
+  "sqlite.compact.guard_selected_rows",
+  "sqlite.compact.guard_full_rows",
+  "sqlite.compact.guard_selected_decode_bytes",
+  "sqlite.compact.guard_full_decode_bytes",
+  "sqlite.compact.read_lock_wait",
+  "sqlite.compact.read_begin",
+  "filesystem.refresh.replace_probe",
+  "filesystem.refresh.create_capture",
+  "filesystem.refresh.batch_capture",
+  "filesystem.refresh.path_structure",
+  "filesystem.refresh.read_before",
+  "filesystem.refresh.read_after",
+  "blob_cache.ram.hit_bytes",
+  "blob_cache.disk.hit_bytes",
 ]
 
+function emptySqliteVfs() {
+  const zero = (fields) => Object.fromEntries(fields.map((field) => [field, "0"]))
+  const timing = () => ({ ...zero(["completed", "elapsed_ns", "max_elapsed_ns", "invalid_elapsed"]), overflow: false, histogram_log2_us: Array(32).fill("0") })
+  return { ...SQLITE_VFS_MEASUREMENT, overflow: false,
+    ...zero(["open_attempts", "open_errors", "files_opened", "close_calls", "close_errors", "in_flight", "live_files", "registered_vfs", "live_contexts"]),
+    entries: SQLITE_VFS_ENTRY_NAMES.map((name) => ({ name, ...timing(), ...zero(["errors", "requested_bytes", "confirmed_bytes", "short_reads"]) })),
+    checkpoint: { ...zero(["starts", "dones", "unmatched_starts", "unmatched_dones", "aborted_windows", "active_windows"]), paired: timing() } }
+}
 function modelNativeSnapshot(live) {
   const zero = (fields) => Object.fromEntries(fields.map((field) => [field, "0"]))
   const rawNames = ["put_opts.block_create", "get.block_read", "body_read.block_read", "get.conflict_verify", "body_read.conflict_verify", "get.migration", "body_read.migration", "head.direct_delete", "delete.direct", "delete.reconcile"]
@@ -827,7 +882,11 @@ function modelNativeSnapshot(live) {
     },
     backend_waits: { pglite_client_lock: "instrumented", tidb_pool: "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration" }, http_attempts: "unavailable", physical_device_iops: "unavailable",
     storage: { in_flight: "0", forwarding_boxes: { sites: "napi_dynamic_provider_forwarding_future", calls: "0", requested_object_bytes: "0" }, entries: STORAGE_OPERATION_NAMES.map((name) => ({ name, ...zero(["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "in_flight", "elapsed_ns"]), latency_log2_us: Array(32).fill("0") })) },
-    profile: { entries: modelCommittedProfileNames.map((name) => ({ name, ...zero(["calls", "elapsed_ns", "units"]) })) }, sqlite: { connections: [] }, r2: { scope: "process_live_instances", internal_successful_retries: "unavailable", instances: live ? [instance] : [] },
+    profile: { entries: modelCommittedProfileNames.map((name) => ({ name, ...zero(["calls", "elapsed_ns", "units"]) })) }, sqlite: {
+      connections: [], sql_statements: "0", observer_elapsed_ns: "0",
+      observer_scope: "Instant wall time for sequential registry lock and per-connection observer collection; excludes final outer JSON serialization; not workload time",
+      vfs: emptySqliteVfs(),
+    }, r2: { scope: "process_live_instances", internal_successful_retries: "unavailable", instances: live ? [instance] : [] },
   })
 }
 
@@ -994,13 +1053,300 @@ test("causal pilot requires new rows without manufacturing old-snapshot zeros", 
     profile: { entries: modelCommittedProfileNames.slice(0, 47).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" })) } } }] }
   const core = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
   assert.equal(core.status, "unavailable")
-  assert.equal(core.entries.length, 114)
+  assert.equal(core.entries.length, 136)
   assert.equal(core.entries[46].name, "provider.inode_serialized_bytes")
   assert.equal(core.entries[47].name, "filesystem.block_put.initial")
   assert.equal(core.entries[47].calls, null)
+  fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.slice(0, 114).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
+  const previousCore = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
+  assert.equal(previousCore.status, "unavailable")
+  assert.equal(previousCore.entries.length, 136)
+  assert.ok(previousCore.entries.slice(0, 114).every((row) => row.calls === "0"))
+  assert.ok(previousCore.entries.slice(114).every((row) => row.calls === null && row.elapsed_ns === null && row.units === null))
+  fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.slice(0, 118).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
+  const previousCompactCore = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
+  assert.equal(previousCompactCore.status, "unavailable")
+  assert.equal(previousCompactCore.entries.length, 136)
+  assert.ok(previousCompactCore.entries.slice(0, 118).every((row) => row.calls === "0"))
+  assert.ok(previousCompactCore.entries.slice(118).every((row) => row.calls === null && row.elapsed_ns === null && row.units === null))
+  fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.slice(0, 134).map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
+  const priorCachePhase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  const priorCacheCore = priorCachePhase.core_profile
+  assert.equal(priorCacheCore.status, "unavailable")
+  assert.equal(priorCachePhase.projected_component_complete, false)
+  assert.equal(priorCacheCore.entries.length, 136)
+  assert.ok(priorCacheCore.entries.slice(0, 134).every((row) => row.calls === "0"))
+  assert.deepEqual(priorCacheCore.entries.slice(134), [
+    { name: "blob_cache.ram.hit_bytes", calls: null, elapsed_ns: null, units: null },
+    { name: "blob_cache.disk.hit_bytes", calls: null, elapsed_ns: null, units: null },
+  ])
   fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries = modelCommittedProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
   fixture.providers[0].storageDiagnostics.phases[0].native.profile.entries[47].units = "9007199254740993"
   const complete = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
   assert.equal(complete.status, "observed")
   assert.equal(complete.entries[47].units, "9007199254740993")
+  assert.deepEqual(complete.entries.slice(134).map((row) => row.name), ["blob_cache.ram.hit_bytes", "blob_cache.disk.hit_bytes"])
+})
+
+// Literal historical inventories and v3 descriptor at 56b9; never substitute
+// current names or family metadata into these incomplete observations.
+const historical92ByteSemantics = "known_successful_payload_bytes_only; zero_does_not_establish_no_payload"
+const historical85Names = Object.freeze([
+  "metadata.load",
+  "metadata.load_if_changed",
+  "metadata.snapshot",
+  "metadata.publish",
+  "metadata.flush",
+  "blocks.put",
+  "blocks.get",
+  "blocks.flush",
+  "blocks.verify_backing",
+  "blocks.prepare_backing",
+  "blocks.delete",
+  "blocks.reconcile",
+  "pglite.client_lock_wait",
+  "sdk.metadata.compact_inode_capability",
+  "sdk.metadata.compact_inode_mode_state",
+  "sdk.metadata.prepare_compact_inode_mode",
+  "sdk.metadata.load_compact_snapshot",
+  "sdk.metadata.load_compact_inode",
+  "sdk.metadata.publish_compact_inode",
+  "sdk.metadata.publish_compact_structure",
+  "sdk.metadata.inode_mode_state",
+  "sdk.metadata.prepare_inode_mode",
+  "sdk.metadata.load_inode_snapshot_if_changed",
+  "sdk.metadata.load_inode_snapshot",
+  "sdk.metadata.load_inode",
+  "sdk.metadata.load_inode_if_changed",
+  "sdk.metadata.publish_inode_if_version",
+  "sdk.metadata.publish_structure_if_versions",
+  "sdk.metadata.delegation_state",
+  "sdk.metadata.prepare_delegated_mode",
+  "sdk.metadata.checkout",
+  "sdk.metadata.publish_delegated",
+  "sdk.metadata.checkin",
+  "sdk.metadata.recover",
+  "sdk.metadata.durable",
+  "sdk.metadata.publish_includes_flush_barrier",
+  "sdk.metadata.load",
+  "sdk.metadata.load_if_changed",
+  "sdk.metadata.concurrent_mode_state",
+  "sdk.metadata.preflight_new_bound_mode",
+  "sdk.metadata.prepare_bound_concurrent_mode",
+  "sdk.metadata.acquire_writer",
+  "sdk.metadata.renew_writer",
+  "sdk.metadata.release_writer",
+  "sdk.metadata.publish",
+  "sdk.metadata.publish_bound_if_revision",
+  "sdk.metadata.migrate_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_mrc1_to_bound_mode",
+  "sdk.metadata.preflight_trusted_unstamped_mrc1",
+  "sdk.metadata.migrate_trusted_unstamped_mrc1",
+  "sdk.metadata.flush",
+  "sdk.blocks.durable",
+  "sdk.blocks.prepare_concurrent_backing",
+  "sdk.blocks.verify_concurrent_backing",
+  "sdk.blocks.get_for_migration",
+  "sdk.blocks.put",
+  "sdk.blocks.get",
+  "sdk.blocks.flush",
+  "sdk.blocks.delete",
+  "sdk.blocks.reconcile",
+  "tidb.pool.checkout",
+  "tidb.session.configure",
+  "tidb.open.schema",
+  "tidb.open.metadata_row",
+  "tidb.tx.begin.metadata",
+  "tidb.tx.begin.inode",
+  "tidb.tx.begin.compact_read",
+  "tidb.tx.commit",
+  "tidb.tx.rollback",
+  "tidb.sql.session",
+  "tidb.sql.ddl",
+  "tidb.sql.metadata_read",
+  "tidb.sql.metadata_write",
+  "tidb.sql.inode_read",
+  "tidb.sql.inode_write",
+  "tidb.sql.block_read",
+  "tidb.sql.block_write",
+  "tidb.sql.flush_probe",
+  "foundationdb.transaction.create",
+  "foundationdb.transaction.closure_attempt",
+  "foundationdb.read.get",
+  "foundationdb.read.get_key",
+  "foundationdb.read.get_range_page",
+  "foundationdb.transaction.commit",
+  "foundationdb.transaction.on_error",
+])
+const historical91Names = Object.freeze([
+  ...historical85Names,
+  "blob_cache.miss.admission_wait",
+  "blob_cache.miss.singleflight_wait",
+  "blob_cache.ram.lookup",
+  "blob_cache.disk.lookup",
+  "blob_cache.peer.connection_lock_wait",
+  "blob_cache.peer.connection_establish",
+])
+const historical92Names = Object.freeze([
+  ...historical91Names,
+  "client.quic.open_bi",
+])
+const historical92Families = {
+  napi_provider: { operations: historical92Names.filter((name) => name.startsWith("metadata.") || name.startsWith("blocks.")), calls: "napi_dynamic_provider_method_invocations", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  sdk_provider: { operations: historical92Names.filter((name) => name.startsWith("sdk.")), calls: "direct_sdk_provider_method_invocations_including_synchronous_methods", bytes: "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  pglite_client_lock: { operations: ["pglite.client_lock_wait"], calls: "client_lock_acquisition_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_client_lock_await_nanoseconds" },
+  tidb_pool_checkout: { operations: ["tidb.pool.checkout"], calls: "pool_checkout_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_checkout_nanoseconds_including_lazy_connect_and_session_configuration; queue_only_wait_unavailable" },
+  tidb_session: { operations: ["tidb.session.configure"], calls: "session_configuration_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_open: { operations: historical92Names.filter((name) => name.startsWith("tidb.open.")), calls: "open_schema_and_metadata_initialization_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_transaction: { operations: historical92Names.filter((name) => name.startsWith("tidb.tx.")), calls: "transaction_lifecycle_invocations", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  tidb_sql: { operations: historical92Names.filter((name) => name.startsWith("tidb.sql.")), calls: "categorized_sql_adapter_invocations; not_internal_requests", bytes: "known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable", returned_rows: "known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_transaction: { operations: ["foundationdb.transaction.create", "foundationdb.transaction.closure_attempt", "foundationdb.transaction.commit", "foundationdb.transaction.on_error"], calls: "provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  foundationdb_read: { operations: ["foundationdb.read.get", "foundationdb.read.get_key", "foundationdb.read.get_range_page"], calls: "native_client_read_method_invocations; range_page_calls_not_key_value_count", bytes: "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  blob_cache: { operations: ["blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait", "blob_cache.ram.lookup", "blob_cache.disk.lookup", "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish"], calls: "cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination", bytes: "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
+  client_quic: { operations: ["client.quic.open_bi"], calls: "stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments", bytes: "unavailable", returned_rows: "unavailable", duration: "inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time" },
+}
+
+test("historical 85-row storage snapshot leaves thirty-one appended cache, client and marker stages unavailable", () => {
+  const fixture = resultFixture()
+  assert.equal(historical85Names.length, 85)
+  const oldStorage = historical85Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false, storage: { entries: oldStorage },
+  } }] }
+  const before = structuredClone(fixture)
+  const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  const projected = phase.storage
+  assert.equal(phase.status, "incomplete")
+  assert.equal(projected.length, 116)
+  assert.deepEqual(projected.slice(85, 100).map((row) => row.name), [
+    "blob_cache.miss.admission_wait", "blob_cache.miss.singleflight_wait",
+    "blob_cache.ram.lookup", "blob_cache.disk.lookup",
+    "blob_cache.peer.connection_lock_wait", "blob_cache.peer.connection_establish",
+    "client.quic.open_bi",
+    "client.quic.request_send",
+    "client.quic.response_receive",
+    "blob_cache.peer.request_byte_admission_wait",
+    "blob_cache.peer.open_bi",
+    "blob_cache.peer.request_send",
+    "blob_cache.peer.response_receive",
+    "blob_cache.peer.get",
+    "blob_cache.peer.get_miss",
+  ])
+  assert.deepEqual(projected.slice(100, 108).map((row) => row.name), [
+    "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+    "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+    "client.websocket.request_encode", "client.websocket.request_send",
+    "client.websocket.response_receive", "client.websocket.response_decode",
+  ])
+  assert.ok(projected.slice(0, 85).every((row) => row.calls === "0"))
+  for (const row of projected.slice(85)) {
+    for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
+    assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
+  }
+  assert.deepEqual(fixture, before)
+})
+
+test("historical 91-row storage snapshot leaves twenty-five client, peer and marker stages unavailable", () => {
+  const fixture = resultFixture()
+  assert.equal(historical91Names.length, 91)
+  const oldStorage = historical91Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false, storage: { entries: oldStorage },
+  } }] }
+  const before = structuredClone(fixture)
+  const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  const projected = phase.storage
+  assert.equal(phase.status, "incomplete")
+  assert.equal(projected.length, 116)
+  assert.ok(projected.slice(0, 91).every((row) => row.calls === "0"))
+  assert.equal(projected[91].name, "client.quic.open_bi")
+  for (const row of projected.slice(91)) {
+    for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
+    assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
+  }
+  assert.deepEqual(fixture, before)
+})
+
+test("literal historical 92-row v3 descriptor leaves all twenty-four appended transport and marker rows unavailable", () => {
+  const fixture = resultFixture()
+  assert.equal(historical92Names.length, 92)
+  const oldStorage = historical92Names.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" }))
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false,
+    measurement: { storage_bytes: historical92ByteSemantics, storage_operations: historical92Names, storage_families: structuredClone(historical92Families) },
+    storage: { entries: oldStorage },
+  } }] }
+  const before = structuredClone(fixture)
+  const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  assert.equal(phase.status, "incomplete")
+  assert.equal(phase.storage.length, 116)
+  assert.ok(phase.storage.slice(0, 92).every((row) => row.calls === "0"))
+  assert.deepEqual(phase.storage.slice(92, 100).map((row) => row.name), [
+    "client.quic.request_send", "client.quic.response_receive",
+    "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
+    "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
+    "blob_cache.peer.get", "blob_cache.peer.get_miss",
+  ])
+  assert.deepEqual(phase.storage.slice(100, 108).map((row) => row.name), [
+    "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+    "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+    "client.websocket.request_encode", "client.websocket.request_send",
+    "client.websocket.response_receive", "client.websocket.response_decode",
+  ])
+  for (const row of phase.storage.slice(92)) {
+    for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
+    assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
+  }
+  assert.deepEqual(fixture, before)
+})
+
+test("compact, refresh, and cache pilot projection retains measured units without numeric coercion", () => {
+  const fixture = resultFixture()
+  const entries = modelCommittedProfileNames.map((name) => ({ name, calls: "0", elapsed_ns: "0", units: "0" }))
+  for (const [index, row] of entries.slice(114).entries()) Object.assign(row, {
+    calls: String(index + 1), elapsed_ns: String(9007199254740993n + BigInt(index)),
+    units: String(18446744073709551615n - BigInt(index)),
+  })
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false, profile: { entries },
+  } }] }
+  const before = structuredClone(fixture)
+  const core = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1].core_profile
+  assert.equal(core.status, "observed")
+  assert.deepEqual(core.entries, entries)
+  assert.deepEqual(core.entries.slice(134).map((row) => row.units), [
+    String(18446744073709551615n - 20n), String(18446744073709551615n - 21n),
+  ])
+  assert.deepEqual(fixture, before)
+  assert.match(core.scope, /inclusive_elapsed_and_event_specific_units/u)
+})
+
+test("historical 108-row storage projection leaves setup, discovery and marker rows unavailable", () => {
+  const fixture = resultFixture()
+  const oldNames = [...historical92Names,
+    "client.quic.request_send", "client.quic.response_receive",
+    "blob_cache.peer.request_byte_admission_wait", "blob_cache.peer.open_bi",
+    "blob_cache.peer.request_send", "blob_cache.peer.response_receive",
+    "blob_cache.peer.get", "blob_cache.peer.get_miss",
+    "client.websocket.tcp_connect", "client.websocket.tls_handshake",
+    "client.websocket.upgrade", "client.websocket.socket_lock_wait",
+    "client.websocket.request_encode", "client.websocket.request_send",
+    "client.websocket.response_receive", "client.websocket.response_decode"]
+  assert.equal(oldNames.length, 108)
+  fixture.providers[0].storageDiagnostics = { phases: [{ name: "workload-4096bytes", native: {
+    complete: false, storage: { entries: oldNames.map((name) => ({ name, calls: "0", success: "0", error: "0", cancelled: "0" })) },
+  } }] }
+  const phase = pilot.projectPilotRecord(fixture, {}).native_phases.phases[1]
+  assert.equal(phase.status, "incomplete")
+  assert.equal(phase.storage.length, 116)
+  assert.deepEqual(phase.storage.slice(108, 110).map((row) => row.name), ["client.quic.connection_setup", "blob_cache.discovery.locate"])
+  assert.deepEqual(phase.storage.slice(110, 116).map((row) => row.name), [
+    "object_store.backing_marker.probe.get", "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create", "object_store.backing_marker.retry_backoff",
+  ])
+  for (const row of phase.storage.slice(108)) {
+    for (const field of ["calls", "success", "error", "cancelled", "bytes", "returned_rows", "returned_row_observations", "elapsed_ns", "in_flight_start", "in_flight_end"]) assert.equal(row[field], null)
+    assert.deepEqual(row.latency_log2_us, Array(32).fill(null))
+  }
 })
