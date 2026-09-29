@@ -1754,6 +1754,13 @@ impl MetadataStore for TidbMetadataStore {
     ) -> mount_rs_core::storage::compact::CompactPointReadCapability {
         mount_rs_core::storage::compact::CompactPointReadCapability::Supported
     }
+    fn compact_optimistic_create_capability(
+        &self,
+    ) -> mount_rs_core::storage::compact::CompactOptimisticCreateCapability {
+        // compact_publish_structure retains fresh complete member/root reads
+        // under the authority lock before its targeted create DML.
+        mount_rs_core::storage::compact::CompactOptimisticCreateCapability::Supported
+    }
     async fn read_compact_file(
         &self,
         backing: ConcurrentBackingId,

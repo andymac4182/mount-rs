@@ -712,6 +712,251 @@ fn audited_root_proposal_matches_full_reference_and_extends_graph_inductively() 
 }
 
 #[test]
+fn audited_root_capture_matches_loaded_and_verified_proposals_exactly() {
+    let base = fixture();
+    let (_, structure, parent) = retained_create_inputs(&base);
+    assert_eq!(structure.audited_root(), &base.guards[&1]);
+    let verified = structure.verify_loaded_root(&parent).unwrap();
+    let mut created = base.guards[&2].node.clone();
+    created.stats.ino = 4;
+    created.stats.mode = S_IFREG | 0o640;
+    let audited = CompactRootFileCreate::capture_audited(
+        &structure,
+        parent.guard.identity,
+        "new".into(),
+        created.clone(),
+        11,
+        17,
+    )
+    .unwrap();
+    let loaded = CompactRootFileCreate::capture(
+        &structure,
+        &parent,
+        parent.guard.identity,
+        "new".into(),
+        created.clone(),
+        11,
+        17,
+    )
+    .unwrap();
+    let checked = CompactRootFileCreate::capture_verified(
+        &structure,
+        &verified,
+        parent.guard.identity,
+        "new".into(),
+        created.clone(),
+        11,
+        17,
+    )
+    .unwrap();
+    for reference in [&loaded, &checked] {
+        let actual = audited.delta();
+        let expected = reference.delta();
+        assert_eq!(actual.base, expected.base);
+        assert_eq!(actual.next, expected.next);
+        assert_eq!(actual.expected, expected.expected);
+        assert_eq!(actual.changed, expected.changed);
+        assert_eq!(actual.created, expected.created);
+        assert_eq!(actual.removed, expected.removed);
+        assert_eq!(actual.entries, expected.entries);
+        assert_eq!(actual.parent_body, expected.parent_body);
+        assert_eq!(actual.captured_bodies, expected.captured_bodies);
+        assert_eq!(actual.next_root_children, expected.next_root_children);
+        assert_eq!(actual.next_root_file_bits, expected.next_root_file_bits);
+        assert_eq!(actual.scope, expected.scope);
+    }
+
+    let expected_anchor = CompactAnchor {
+        generation: 4,
+        next_inode: 5,
+        members: vec![1, 2, 3, 4],
+        ..base.anchor.clone()
+    };
+    let mut root = base.guards[&1].node.clone();
+    root.stats.mtime_ms = 11;
+    root.stats.ctime_ms = 17;
+    root.data = NodeData::Directory {
+        entries: vec![
+            DirectoryEntry {
+                name: "a".into(),
+                inode: 2,
+            },
+            DirectoryEntry {
+                name: "b".into(),
+                inode: 3,
+            },
+            DirectoryEntry {
+                name: "new".into(),
+                inode: 4,
+            },
+        ],
+    };
+    let expected_root = CompactGuard {
+        identity: PhysicalInodeIdentity {
+            incarnation: 1,
+            epoch: 4,
+            revision: 0,
+        },
+        node: root,
+    };
+    let expected_file = CompactGuard {
+        identity: PhysicalInodeIdentity {
+            incarnation: 4,
+            epoch: 4,
+            revision: 0,
+        },
+        node: created,
+    };
+    let expected_receipt = CompactPublication {
+        anchor: expected_anchor.clone(),
+        upserts: BTreeMap::from([(1, expected_root.clone()), (4, expected_file.clone())]),
+        removed: BTreeSet::new(),
+    };
+    let expected_snapshot = CompactSnapshot {
+        anchor: expected_anchor,
+        guards: BTreeMap::from([
+            (1, expected_root.clone()),
+            (2, base.guards[&2].clone()),
+            (3, base.guards[&3].clone()),
+            (4, expected_file),
+        ]),
+    };
+    expected_snapshot.namespace().unwrap();
+    let fresh_parent = BTreeMap::from([(1, parent.guard.clone())]);
+    for proposal in [&audited, &loaded, &checked] {
+        let receipt = proposal
+            .delta()
+            .validate_current(&base.anchor, &fresh_parent)
+            .unwrap();
+        assert_eq!(receipt, expected_receipt);
+        assert_eq!(proposal.delta().evaluate(&base).unwrap(), expected_snapshot);
+        let next = proposal.validate_publication(&receipt).unwrap();
+        assert_eq!(next.anchor(), &expected_snapshot.anchor);
+        assert_eq!(next.audited_root(), &expected_root);
+    }
+    assert_eq!(structure.audited_root(), &base.guards[&1]);
+
+    // A parent-only create does not certify unrelated selected file bodies as
+    // fresh. A legitimate concurrent selected write must still be preserved.
+    let selected = update(&base, 2, 917);
+    let committed = audited.delta().evaluate(&selected).unwrap();
+    assert_eq!(committed.guards[&2], selected.guards[&2]);
+    assert_eq!(committed.guards[&3], selected.guards[&3]);
+    assert_eq!(committed.guards[&1], expected_root);
+}
+
+#[test]
+fn audited_root_capture_requires_fresh_generation_and_parent_identity_at_publication() {
+    let base = fixture();
+    let (_, structure, parent) = retained_create_inputs(&base);
+    let mut created = base.guards[&2].node.clone();
+    created.stats.ino = base.anchor.next_inode;
+    let proposal = CompactRootFileCreate::capture_audited(
+        &structure,
+        parent.guard.identity,
+        "new".into(),
+        created,
+        1,
+        1,
+    )
+    .unwrap();
+    let fresh_parent = BTreeMap::from([(1, parent.guard.clone())]);
+    let mut newer = base.anchor.clone();
+    newer.generation = 4;
+    newer.validate().unwrap();
+    code(
+        proposal.delta().validate_current(&newer, &fresh_parent),
+        ErrorCode::Eagain,
+    );
+
+    let mut changed_parent = parent.guard.clone();
+    changed_parent.identity.revision = 5;
+    changed_parent.validate(1, &base.anchor).unwrap();
+    code(
+        proposal
+            .delta()
+            .validate_current(&base.anchor, &BTreeMap::from([(1, changed_parent)])),
+        ErrorCode::Eagain,
+    );
+    // An audited proposal remains a usable expectation for the unchanged
+    // state; neither refusal grants freshness or mutates the retained witness.
+    proposal
+        .delta()
+        .validate_current(&base.anchor, &fresh_parent)
+        .unwrap();
+    assert_eq!(structure.audited_root(), &base.guards[&1]);
+}
+
+#[test]
+fn audited_root_capture_refuses_same_identity_sibling_dentry_body_drift() {
+    let base = fixture();
+    let (_, structure, parent) = retained_create_inputs(&base);
+    let mut created = base.guards[&2].node.clone();
+    created.stats.ino = base.anchor.next_inode;
+    let proposal = CompactRootFileCreate::capture_audited(
+        &structure,
+        parent.guard.identity,
+        "new".into(),
+        created,
+        1,
+        1,
+    )
+    .unwrap();
+    for reorder in [false, true] {
+        let mut current = base.clone();
+        let NodeData::Directory { entries } = &mut current.guards.get_mut(&1).unwrap().node.data
+        else {
+            panic!()
+        };
+        if reorder {
+            entries.swap(0, 1);
+        } else {
+            entries[0].name = "renamed-sibling".into();
+        }
+        // Both states are otherwise valid graphs and keep the proposed name
+        // absent. The complete parent body fence must reject sibling drift.
+        current.namespace().unwrap();
+        let fresh_parent = current.guards.remove(&1).unwrap();
+        assert_eq!(fresh_parent.identity, parent.guard.identity);
+        code(
+            proposal
+                .delta()
+                .validate_current(&current.anchor, &BTreeMap::from([(1, fresh_parent)])),
+            ErrorCode::Einval,
+        );
+    }
+    assert_eq!(structure.audited_root(), &base.guards[&1]);
+}
+
+#[test]
+fn audited_root_capture_rejects_wrong_expected_parent_identity() {
+    let base = fixture();
+    let (_, structure, parent) = retained_create_inputs(&base);
+    for component in 0..3 {
+        let mut expected = parent.guard.identity;
+        match component {
+            0 => expected.incarnation += 1,
+            1 => expected.epoch += 1,
+            _ => expected.revision += 1,
+        }
+        let mut created = base.guards[&2].node.clone();
+        created.stats.ino = base.anchor.next_inode;
+        code(
+            CompactRootFileCreate::capture_audited(
+                &structure,
+                expected,
+                "new".into(),
+                created,
+                1,
+                1,
+            ),
+            ErrorCode::Eagain,
+        );
+    }
+    assert_eq!(structure.audited_root(), &base.guards[&1]);
+}
+
+#[test]
 fn audited_root_proposal_rejects_equal_identity_body_grafting_and_wrong_witnesses() {
     let base = fixture();
     let (_, structure, parent) = retained_create_inputs(&base);

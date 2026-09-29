@@ -13,9 +13,9 @@ use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as
 use mount_rs_core::storage::InodeId;
 use mount_rs_core::storage::compact::{
     CompactFileExpectation, CompactFileRead, CompactInodeCapability, CompactInodeExpectation,
-    CompactInodeRead, CompactPointReadCapability, CompactPublication, CompactRootEntryRead,
-    CompactRootFileCapability, CompactRootFileRead, CompactSnapshot, CompactStructuralDelta,
-    LoadedCompactInode, PhysicalInodeIdentity,
+    CompactInodeRead, CompactOptimisticCreateCapability, CompactPointReadCapability,
+    CompactPublication, CompactRootEntryRead, CompactRootFileCapability, CompactRootFileRead,
+    CompactSnapshot, CompactStructuralDelta, LoadedCompactInode, PhysicalInodeIdentity,
 };
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
@@ -56,6 +56,14 @@ impl ErasedMetadataStore {
 
 #[async_trait]
 impl MetadataStore for ErasedMetadataStore {
+    fn compact_optimistic_create_capability(&self) -> CompactOptimisticCreateCapability {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataCompactInodeCapability);
+        let result = self.inner.compact_optimistic_create_capability();
+        storage_span.finish_success(0);
+        result
+    }
+
     fn compact_point_read_capability(&self) -> CompactPointReadCapability {
         let mut storage_span =
             StorageSpan::new(StorageOperation::SdkMetadataCompactInodeCapability);
@@ -1406,6 +1414,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn erased_optimistic_create_capability_is_explicit_and_forwarded() {
+        let backing = ConcurrentBackingId::from_bytes([0xb2; 16]).unwrap();
+        let probe = Arc::new(IdentityProbeMetadataStore::new(backing));
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(probe.clone(), Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(probe.clone());
+        assert_eq!(
+            erased.compact_optimistic_create_capability(),
+            CompactOptimisticCreateCapability::Supported
+        );
+        assert_eq!(*probe.1.lock().unwrap(), ["optimistic_create_capability"]);
+        let incapable =
+            Arc::new(mount_rs_memory::MemoryMetadataStore::new()) as Arc<dyn MetadataStore>;
+        #[cfg(feature = "observability")]
+        let incapable = ErasedMetadataStore::new(incapable, Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let incapable = ErasedMetadataStore::new(incapable);
+        assert_eq!(
+            incapable.compact_optimistic_create_capability(),
+            CompactOptimisticCreateCapability::Unsupported
+        );
+    }
+
+    #[tokio::test]
     async fn erased_compact_point_reads_preserve_scope_expectation_and_delegate_errors() {
         use mount_rs_core::storage::compact::{CompactFileExpectation, CompactPointReadCapability};
         let backing = ConcurrentBackingId::from_bytes([0xb1; 16]).unwrap();
@@ -1750,6 +1783,11 @@ mod tests {
 
     #[async_trait]
     impl MetadataStore for IdentityProbeMetadataStore {
+        fn compact_optimistic_create_capability(&self) -> CompactOptimisticCreateCapability {
+            self.1.lock().unwrap().push("optimistic_create_capability");
+            CompactOptimisticCreateCapability::Supported
+        }
+
         fn compact_point_read_capability(
             &self,
         ) -> mount_rs_core::storage::compact::CompactPointReadCapability {

@@ -9,10 +9,10 @@ mod sqlite_runtime {
     use mount_rs_core::FsDriver;
     use mount_rs_core::storage::compact::{
         CompactAuthority, CompactDirectoryEntry, CompactDirectoryHeader, CompactFileExpectation,
-        CompactFileRead, CompactInodeCapability, CompactPointReadCapability, CompactPublication,
-        CompactRootEntryRead, CompactRootEntryRows, CompactRootFileCapability, CompactRootFileRead,
-        CompactSnapshot, CompactStructuralDelta, LoadedCompactInode, PhysicalInodeIdentity,
-        StructuralScope, check_compact_file_unchanged,
+        CompactFileRead, CompactInodeCapability, CompactOptimisticCreateCapability,
+        CompactPointReadCapability, CompactPublication, CompactRootEntryRead, CompactRootEntryRows,
+        CompactRootFileCapability, CompactRootFileRead, CompactSnapshot, CompactStructuralDelta,
+        LoadedCompactInode, PhysicalInodeIdentity, StructuralScope, check_compact_file_unchanged,
     };
     use mount_rs_core::storage::{
         BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, InodeMetadataSnapshot,
@@ -92,6 +92,9 @@ mod sqlite_runtime {
         corrupt_parent_body: Arc<AtomicBool>,
         corrupt_parent_identity: Arc<AtomicBool>,
         root_file_supported: Arc<AtomicBool>,
+        optimistic_create_supported: Arc<AtomicBool>,
+        reject_structure_once: Arc<AtomicBool>,
+        reject_structure_remaining: Arc<AtomicU64>,
         root_file_loads: Arc<AtomicU64>,
         corrupt_root_file_body: Arc<AtomicBool>,
         point_supported: Arc<AtomicBool>,
@@ -135,6 +138,9 @@ mod sqlite_runtime {
                 corrupt_parent_body: Arc::new(AtomicBool::new(false)),
                 corrupt_parent_identity: Arc::new(AtomicBool::new(false)),
                 root_file_supported: Arc::new(AtomicBool::new(false)),
+                optimistic_create_supported: Arc::new(AtomicBool::new(false)),
+                reject_structure_once: Arc::new(AtomicBool::new(false)),
+                reject_structure_remaining: Arc::new(AtomicU64::new(0)),
                 root_file_loads: Arc::new(AtomicU64::new(0)),
                 corrupt_root_file_body: Arc::new(AtomicBool::new(false)),
                 point_supported: Arc::new(AtomicBool::new(false)),
@@ -159,6 +165,14 @@ mod sqlite_runtime {
 
     #[async_trait]
     impl MetadataStore for RecordingMetadata {
+        fn compact_optimistic_create_capability(&self) -> CompactOptimisticCreateCapability {
+            if self.optimistic_create_supported.load(Ordering::SeqCst) {
+                CompactOptimisticCreateCapability::Supported
+            } else {
+                CompactOptimisticCreateCapability::Unsupported
+            }
+        }
+
         fn compact_point_read_capability(&self) -> CompactPointReadCapability {
             if self.point_supported.load(Ordering::SeqCst) {
                 CompactPointReadCapability::Supported
@@ -466,6 +480,16 @@ mod sqlite_runtime {
                 .lock()
                 .unwrap()
                 .push(delta.clone());
+            if self.reject_structure_once.swap(false, Ordering::SeqCst)
+                || self
+                    .reject_structure_remaining
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                        count.checked_sub(1)
+                    })
+                    .is_ok()
+            {
+                return Err(mount_rs_core::FsError::new(ErrorCode::Eagain));
+            }
             if self.hold_full_once.swap(false, Ordering::SeqCst) {
                 self.full_entered.notify_one();
                 self.full_resume.notified().await;
@@ -1987,6 +2011,403 @@ mod sqlite_runtime {
     }
 
     #[test]
+    fn optimistic_root_child_create_uses_locked_publication_without_parent_preflight() {
+        futures_lite::future::block_on(async {
+            let volume = Volume::new();
+            let setup = volume.open("optimistic-create-setup").await;
+            setup.write_file("/sibling", b"preserved").await.unwrap();
+            setup.shutdown().await.unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            recorder
+                .optimistic_create_supported
+                .store(true, Ordering::SeqCst);
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("optimistic-create", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            let snapshots = recorder.snapshot_loads.load(Ordering::SeqCst);
+            recorder.loaded_inodes.lock().unwrap().clear();
+            let handle = fs.open("/created", "wx+", 0o600).await.unwrap();
+            let preflight = recorder.loaded_inodes.lock().unwrap().clone();
+            let submitted = recorder.structural_submissions.lock().unwrap().clone();
+            let full_loads = recorder.snapshot_loads.load(Ordering::SeqCst) - snapshots;
+            handle.write(b"new", Some(0)).await.unwrap();
+            handle.close().await.unwrap();
+            fs.shutdown().await.unwrap();
+            let fresh = volume.open("optimistic-create-oracle").await;
+            for (path, expected) in [("/created", b"new".as_slice()), ("/sibling", b"preserved")] {
+                let reader = fresh.open(path, "r", 0).await.unwrap();
+                let mut bytes = [0; 16];
+                let count = reader.read(&mut bytes, Some(0)).await.unwrap();
+                assert_eq!(&bytes[..count], expected);
+                assert_eq!(
+                    reader.read(&mut bytes, Some(count as u64)).await.unwrap(),
+                    0
+                );
+                reader.close().await.unwrap();
+            }
+            fresh.shutdown().await.unwrap();
+            assert!(
+                preflight.is_empty(),
+                "redundant root preflight: {preflight:?}"
+            );
+            assert_eq!(full_loads, 0);
+            assert_eq!(submitted.len(), 1);
+            assert_eq!(submitted[0].scope(), StructuralScope::FileCreate);
+        });
+    }
+
+    #[test]
+    fn optimistic_create_conflict_keeps_same_generation_root_identity_refusal() {
+        futures_lite::future::block_on(async {
+            let volume = Volume::new();
+            volume
+                .open("optimistic-drift-setup")
+                .await
+                .shutdown()
+                .await
+                .unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            recorder
+                .optimistic_create_supported
+                .store(true, Ordering::SeqCst);
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("optimistic-drift", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            recorder.reject_structure_once.store(true, Ordering::SeqCst);
+            recorder
+                .corrupt_parent_identity
+                .store(true, Ordering::SeqCst);
+            assert_eq!(
+                fs.open("/created", "wx+", 0o600).await.err().unwrap().code,
+                ErrorCode::Estale
+            );
+            assert!(fs.failed());
+            let _ = fs.shutdown().await;
+            let fresh = volume.open("optimistic-drift-oracle").await;
+            assert_eq!(
+                fresh.stat("/created").await.unwrap_err().code,
+                ErrorCode::Enoent
+            );
+            fresh.shutdown().await.unwrap();
+            assert_eq!(recorder.structural_submissions.lock().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn optimistic_create_unknown_commit_never_replays() {
+        futures_lite::future::block_on(async {
+            let volume = Volume::new();
+            volume
+                .open("optimistic-unknown-setup")
+                .await
+                .shutdown()
+                .await
+                .unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            recorder
+                .optimistic_create_supported
+                .store(true, Ordering::SeqCst);
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("optimistic-unknown", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            recorder.loaded_inodes.lock().unwrap().clear();
+            recorder.lose_structure_ack.store(true, Ordering::SeqCst);
+            assert!(fs.open("/created", "wx+", 0o600).await.is_err());
+            assert!(fs.open("/replay", "wx+", 0o600).await.is_err());
+            assert!(fs.failed());
+            let _ = fs.shutdown().await;
+            let fresh = volume.open("optimistic-unknown-oracle").await;
+            assert_eq!(fresh.stat("/created").await.unwrap().size, 0);
+            assert_eq!(
+                fresh.stat("/replay").await.unwrap_err().code,
+                ErrorCode::Enoent
+            );
+            fresh.shutdown().await.unwrap();
+            assert!(recorder.loaded_inodes.lock().unwrap().is_empty());
+            assert_eq!(recorder.structural_submissions.lock().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn optimistic_create_resolves_peer_path_changes_without_overwriting() {
+        futures_lite::future::block_on(async {
+            for case in [0, 1, 2] {
+                let volume = Volume::new();
+                let setup = volume.open("optimistic-peer-setup").await;
+                setup.write_file("/sibling", b"preserved").await.unwrap();
+                if case == 0 {
+                    setup.write_file("/target", b"old").await.unwrap();
+                }
+                setup.shutdown().await.unwrap();
+                let recorder = RecordingMetadata::new(volume.metadata());
+                recorder
+                    .optimistic_create_supported
+                    .store(true, Ordering::SeqCst);
+                let fs = ChunkedFs::open(
+                    recorder.clone(),
+                    volume.blocks(),
+                    ChunkedOptions::fixed("optimistic-peer-origin", 16)
+                        .unwrap()
+                        .with_compact_inode_updates(true),
+                )
+                .await
+                .unwrap();
+                let peer = volume.open("optimistic-peer").await;
+                match case {
+                    0 => peer.unlink("/target").await.unwrap(),
+                    1 => peer.write_file("/target", b"peer").await.unwrap(),
+                    2 => peer.write_file("/other", b"peer").await.unwrap(),
+                    _ => unreachable!(),
+                }
+                recorder.loaded_inodes.lock().unwrap().clear();
+                let created = fs.open("/target", "wx+", 0o600).await;
+                let submissions = recorder.structural_submissions.lock().unwrap().clone();
+                let preflight = recorder.loaded_inodes.lock().unwrap().clone();
+                if case == 1 {
+                    assert_eq!(created.err().unwrap().code, ErrorCode::Eexist);
+                } else {
+                    let created = created.unwrap();
+                    created.write(b"new", Some(0)).await.unwrap();
+                    created.close().await.unwrap();
+                }
+                assert!(!fs.failed());
+                peer.shutdown().await.unwrap();
+                fs.shutdown().await.unwrap();
+                let fresh = volume.open("optimistic-peer-oracle").await;
+                for (path, expected) in [
+                    ("/sibling", b"preserved".as_slice()),
+                    (
+                        "/target",
+                        if case == 1 {
+                            b"peer".as_slice()
+                        } else {
+                            b"new".as_slice()
+                        },
+                    ),
+                ] {
+                    let reader = fresh.open(path, "r", 0).await.unwrap();
+                    let mut bytes = [0; 16];
+                    let count = reader.read(&mut bytes, Some(0)).await.unwrap();
+                    assert_eq!(&bytes[..count], expected);
+                    assert_eq!(
+                        reader.read(&mut bytes, Some(count as u64)).await.unwrap(),
+                        0
+                    );
+                    reader.close().await.unwrap();
+                }
+                if case == 2 {
+                    assert_eq!(fresh.stat("/other").await.unwrap().size, 4);
+                }
+                fresh.shutdown().await.unwrap();
+                assert!(
+                    !preflight.is_empty(),
+                    "peer change never refreshed case {case}"
+                );
+                assert_eq!(submissions.len(), if case == 2 { 2 } else { 1 });
+                assert!(
+                    submissions
+                        .iter()
+                        .all(|delta| delta.scope() == StructuralScope::FileCreate)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn optimistic_create_refreshes_repaired_cached_timestamp_overflow() {
+        futures_lite::future::block_on(async {
+            let volume = Volume::new();
+            let setup = volume.open("optimistic-time-setup").await;
+            setup.utimes("/", 0, i64::MAX).await.unwrap();
+            setup.shutdown().await.unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            recorder
+                .optimistic_create_supported
+                .store(true, Ordering::SeqCst);
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("optimistic-time", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            let peer = volume.open("optimistic-time-peer").await;
+            peer.utimes("/", 0, 123).await.unwrap();
+            recorder.loaded_inodes.lock().unwrap().clear();
+            let created = fs.open("/created", "wx+", 0o600).await.unwrap();
+            let submitted = recorder.structural_submissions.lock().unwrap().clone();
+            created.close().await.unwrap();
+            peer.shutdown().await.unwrap();
+            fs.shutdown().await.unwrap();
+            let fresh = volume.open("optimistic-time-oracle").await;
+            assert_eq!(fresh.stat("/created").await.unwrap().size, 0);
+            assert!(fresh.stat("/").await.unwrap().mtime_ms < i64::MAX);
+            fresh.shutdown().await.unwrap();
+            assert!(!recorder.loaded_inodes.lock().unwrap().is_empty());
+            assert_eq!(submitted.len(), 1);
+        });
+    }
+
+    #[test]
+    fn optimistic_create_preparation_error_keeps_fresh_corruption_precedence() {
+        futures_lite::future::block_on(async {
+            let volume = Volume::new();
+            let setup = volume.open("optimistic-error-setup").await;
+            setup.utimes("/", 0, i64::MAX).await.unwrap();
+            setup.shutdown().await.unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            recorder
+                .optimistic_create_supported
+                .store(true, Ordering::SeqCst);
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("optimistic-error", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            recorder.corrupt_parent_body.store(true, Ordering::SeqCst);
+            assert_eq!(
+                fs.open("/created", "wx+", 0o600).await.err().unwrap().code,
+                ErrorCode::Estale
+            );
+            assert!(fs.failed());
+            let _ = fs.shutdown().await;
+            let fresh = volume.open("optimistic-error-oracle").await;
+            assert_eq!(
+                fresh.stat("/created").await.unwrap_err().code,
+                ErrorCode::Enoent
+            );
+            fresh.shutdown().await.unwrap();
+            assert!(recorder.structural_submissions.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn optimistic_create_preparation_fallback_keeps_publication_retry_budget() {
+        futures_lite::future::block_on(async {
+            let volume = Volume::new();
+            let setup = volume.open("optimistic-budget-setup").await;
+            setup.utimes("/", 0, i64::MAX).await.unwrap();
+            setup.shutdown().await.unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            recorder
+                .optimistic_create_supported
+                .store(true, Ordering::SeqCst);
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("optimistic-budget", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            let peer = volume.open("optimistic-budget-peer").await;
+            peer.utimes("/", 0, 123).await.unwrap();
+            // The existing 128-attempt policy spends one attempt refreshing
+            // the peer generation. A preparation fallback must not spend a
+            // second attempt: 126 proven noncommits still leave one publish.
+            recorder
+                .reject_structure_remaining
+                .store(126, Ordering::SeqCst);
+            let created = fs.open("/created", "wx+", 0o600).await;
+            let submissions = recorder.structural_submissions.lock().unwrap().len();
+            if let Ok(created) = &created {
+                created.close().await.unwrap();
+            }
+            peer.shutdown().await.unwrap();
+            fs.shutdown().await.unwrap();
+            assert!(
+                created.is_ok(),
+                "fallback consumed a retry: {:?}",
+                created.as_ref().err()
+            );
+            assert_eq!(submissions, 127);
+            assert_eq!(
+                recorder.reject_structure_remaining.load(Ordering::SeqCst),
+                0
+            );
+            assert!(!fs.failed());
+            let fresh = volume.open("optimistic-budget-oracle").await;
+            assert_eq!(fresh.stat("/created").await.unwrap().size, 0);
+            assert!(fresh.stat("/").await.unwrap().mtime_ms < i64::MAX);
+            fresh.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn optimistic_capability_keeps_guarded_create_preflight_and_error_order() {
+        futures_lite::future::block_on(async {
+            use mount_rs_core::driver::{GuardedMutation, ObservedEntry, PathGuard, PathIdentity};
+            let volume = Volume::new();
+            let setup = volume.open("optimistic-guard-setup").await;
+            setup.write_file("/exists", b"preserved").await.unwrap();
+            setup.shutdown().await.unwrap();
+            let recorder = RecordingMetadata::new(volume.metadata());
+            recorder
+                .optimistic_create_supported
+                .store(true, Ordering::SeqCst);
+            let fs = ChunkedFs::open(
+                recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("optimistic-guard", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            let root = fs.stat("/").await.unwrap();
+            recorder.loaded_inodes.lock().unwrap().clear();
+            let result = fs
+                .guarded_mutation(GuardedMutation::Open {
+                    parent: PathGuard {
+                        path: "/".into(),
+                        identity: PathIdentity {
+                            dev: root.dev,
+                            ino: root.ino,
+                        },
+                    },
+                    name: "exists".into(),
+                    observed: ObservedEntry::Absent,
+                    flags: mount_rs_core::OpenFlags::parse("wx+", "/exists").unwrap(),
+                    mode: 0o600,
+                })
+                .await;
+            assert_eq!(result.err().unwrap().code, ErrorCode::Estale);
+            assert!(!recorder.loaded_inodes.lock().unwrap().is_empty());
+            assert!(recorder.structural_submissions.lock().unwrap().is_empty());
+            assert!(!fs.failed());
+            fs.shutdown().await.unwrap();
+            let fresh = volume.open("optimistic-guard-oracle").await;
+            assert_eq!(fresh.stat("/exists").await.unwrap().size, 9);
+            fresh.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
     fn root_file_unlink_preserves_other_runtime_open_handle() {
         futures_lite::future::block_on(async {
             let volume = Volume::new();
@@ -2716,7 +3137,9 @@ mod sqlite_runtime {
     #[test]
     fn targeted_create_unknown_commit_or_forged_receipt_poison_without_replay() {
         futures_lite::future::block_on(async {
-            for lost_ack in [false, true] {
+            for (optimistic, lost_ack) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
                 let volume = Volume::new();
                 volume
                     .open("targeted-fault-setup")
@@ -2725,6 +3148,9 @@ mod sqlite_runtime {
                     .await
                     .unwrap();
                 let recorder = RecordingMetadata::new(volume.metadata());
+                recorder
+                    .optimistic_create_supported
+                    .store(optimistic, Ordering::SeqCst);
                 let fs = ChunkedFs::open(
                     recorder.clone(),
                     volume.blocks(),
@@ -2753,6 +3179,9 @@ mod sqlite_runtime {
                 );
                 fresh.shutdown().await.unwrap();
                 assert_eq!(recorder.structural_submissions.lock().unwrap().len(), 1);
+                if optimistic {
+                    assert!(recorder.loaded_inodes.lock().unwrap().is_empty());
+                }
             }
         });
     }
@@ -2760,40 +3189,48 @@ mod sqlite_runtime {
     #[test]
     fn targeted_create_cancellation_during_publication_poison_without_replay() {
         futures_lite::future::block_on(async {
-            let volume = Volume::new();
-            volume
-                .open("targeted-cancel-setup")
-                .await
-                .shutdown()
+            for optimistic in [false, true] {
+                let volume = Volume::new();
+                volume
+                    .open("targeted-cancel-setup")
+                    .await
+                    .shutdown()
+                    .await
+                    .unwrap();
+                let recorder = RecordingMetadata::new(volume.metadata());
+                recorder
+                    .optimistic_create_supported
+                    .store(optimistic, Ordering::SeqCst);
+                let fs = ChunkedFs::open(
+                    recorder.clone(),
+                    volume.blocks(),
+                    ChunkedOptions::fixed("targeted-cancel", 16)
+                        .unwrap()
+                        .with_compact_inode_updates(true),
+                )
                 .await
                 .unwrap();
-            let recorder = RecordingMetadata::new(volume.metadata());
-            let fs = ChunkedFs::open(
-                recorder.clone(),
-                volume.blocks(),
-                ChunkedOptions::fixed("targeted-cancel", 16)
-                    .unwrap()
-                    .with_compact_inode_updates(true),
-            )
-            .await
-            .unwrap();
-            recorder.hold_full_once.store(true, Ordering::SeqCst);
-            let completed = futures_lite::future::or(
-                async {
-                    let _ = FsDriver::open(&fs, "/created", "wx+", 0o600).await;
-                    true
-                },
-                async {
-                    recorder.full_entered.notified().await;
-                    false
-                },
-            )
-            .await;
-            assert!(!completed);
-            assert!(fs.failed());
-            assert!(FsDriver::open(&fs, "/replay", "wx+", 0o600).await.is_err());
-            let _ = fs.shutdown().await;
-            assert_eq!(recorder.structural_submissions.lock().unwrap().len(), 1);
+                recorder.hold_full_once.store(true, Ordering::SeqCst);
+                let completed = futures_lite::future::or(
+                    async {
+                        let _ = FsDriver::open(&fs, "/created", "wx+", 0o600).await;
+                        true
+                    },
+                    async {
+                        recorder.full_entered.notified().await;
+                        false
+                    },
+                )
+                .await;
+                assert!(!completed);
+                assert!(fs.failed());
+                assert!(FsDriver::open(&fs, "/replay", "wx+", 0o600).await.is_err());
+                let _ = fs.shutdown().await;
+                assert_eq!(recorder.structural_submissions.lock().unwrap().len(), 1);
+                if optimistic {
+                    assert!(recorder.loaded_inodes.lock().unwrap().is_empty());
+                }
+            }
         });
     }
 

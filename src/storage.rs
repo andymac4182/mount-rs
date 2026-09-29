@@ -1018,6 +1018,12 @@ pub trait MetadataStore: Send + Sync {
     fn compact_point_read_capability(&self) -> compact::CompactPointReadCapability {
         compact::CompactPointReadCapability::Unsupported
     }
+    /// Opt-in root-child create proposals from an audited cache. The provider
+    /// must retain complete fresh structural validation under publication locks;
+    /// this capability never replaces it with selected points or cached rows.
+    fn compact_optimistic_create_capability(&self) -> compact::CompactOptimisticCreateCapability {
+        compact::CompactOptimisticCreateCapability::Unsupported
+    }
     /// Read fresh authority, selected membership and the complete file guard in
     /// one provider statement snapshot. Never substitute cached membership or
     /// split reads across statements; check generation before selected errors.

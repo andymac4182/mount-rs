@@ -39,6 +39,16 @@ pub enum CompactInodeCapability {
     V1,
 }
 
+/// Accept an audited, possibly stale create proposal without a separate root
+/// read. Publication must still validate the complete fresh membership and
+/// parent body under its transaction locks before any DML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompactOptimisticCreateCapability {
+    #[default]
+    Unsupported,
+    Supported,
+}
+
 /// Exact sorted membership and namespace defaults. IDs remain O(N) to read,
 /// copy and rewrite; changed directory entry arrays also retain their cost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -985,6 +995,11 @@ impl ValidatedCompactStructure {
         &self.anchor
     }
 
+    /// Retained complete-audit input, never a fresh provider read receipt.
+    pub fn audited_root(&self) -> &CompactGuard {
+        &self.root
+    }
+
     fn audited_root_children(
         namespace: &Namespace,
     ) -> (std::sync::Arc<[InodeId]>, std::sync::Arc<[u64]>) {
@@ -1254,6 +1269,29 @@ pub struct CompactRootFileCreate {
 }
 
 impl CompactRootFileCreate {
+    /// Construct a proposal from the opaque audited graph. This deliberately
+    /// grants no freshness: an opt-in provider must compare the complete fresh
+    /// anchor and parent with this proposal inside its publication transaction.
+    pub fn capture_audited(
+        structure: &ValidatedCompactStructure,
+        expected_parent: PhysicalInodeIdentity,
+        name: String,
+        created: NodeMetadata,
+        mtime_ms: i64,
+        ctime_ms: i64,
+    ) -> Result<Self> {
+        Self::capture_parent(
+            structure,
+            structure.anchor.generation,
+            &structure.root,
+            expected_parent,
+            name,
+            created,
+            mtime_ms,
+            ctime_ms,
+        )
+    }
+
     pub fn capture(
         structure: &ValidatedCompactStructure,
         parent: &LoadedCompactInode,

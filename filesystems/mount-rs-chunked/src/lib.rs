@@ -42,8 +42,9 @@ use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::compact::{
     CompactFileExpectation, CompactInodeCapability, CompactInodeExpectation, CompactInodeRead,
-    CompactPointReadCapability, CompactRootFileCreate, CompactSnapshot, CompactStructuralDelta,
-    PhysicalInodeIdentity, StructuralScope, ValidatedCompactStructure, VerifiedCompactRoot,
+    CompactOptimisticCreateCapability, CompactPointReadCapability, CompactRootFileCreate,
+    CompactSnapshot, CompactStructuralDelta, PhysicalInodeIdentity, StructuralScope,
+    ValidatedCompactStructure, VerifiedCompactRoot,
 };
 use mount_rs_core::storage::{
     BlockExtent, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
@@ -5999,67 +6000,115 @@ where
         guard: Option<(&PathGuard, &str, ObservedEntry)>,
         phase: GatePhasePermit<'_>,
     ) -> Result<(Arc<dyn FileHandle>, PathIdentity)> {
-        for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
-            let parent = {
-                let _refresh = phase.phase(GatePhase::Refresh);
-                self.load_current_compact_root().await?
-            };
-            let Some(parent) = parent else {
-                continue;
-            };
-            let (proposal, revision, inode) = {
+        self.check_inode_runtime()?;
+        let supports_optimistic = self.inner.metadata.compact_optimistic_create_capability()
+            == CompactOptimisticCreateCapability::Supported;
+        let mut force_preflight = false;
+        'cas: for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
+            self.check_inode_runtime()?;
+            // Cached absence can only construct a proposal. The publication
+            // transaction proves its freshness before DML. Occupied/guarded
+            // paths still need a fresh preflight before returning path errors.
+            let mut optimistic = supports_optimistic && !force_preflight && guard.is_none() && {
                 let state = self.lock_state()?;
-                let compact = state.compact.as_ref().ok_or_else(stale_inode_structure)?;
-                let namespace = state.namespace.as_ref();
-                let anchor = compact.structure.anchor();
-                // This runtime namespace was installed together with its
-                // opaque Full-audited witness. Selected file overlays cannot
-                // alter these structural fields or the audited root body.
-                if namespace.format_version != NAMESPACE_FORMAT_VERSION
-                    || namespace.root != anchor.root
-                    || namespace.next_inode != anchor.next_inode
-                    || namespace.default_uid != anchor.default_uid
-                    || namespace.default_gid != anchor.default_gid
-                    || namespace.umask != anchor.umask
-                    || namespace.default_chunker != anchor.default_chunker
-                    || namespace.nodes.len() != anchor.members.len()
-                    || namespace.nodes.contains_key(&anchor.next_inode)
-                {
-                    drop(state);
-                    return Err(self.fail_closed(stale_inode_structure()));
-                }
-                let entry = walk(namespace, &path, false, "open", 0)?;
-                validate_open_guard(namespace, &path, &entry, flags, guard)?;
-                if entry.node.is_some() {
-                    return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
-                }
-                if entry.parent != namespace.root {
-                    return Err(error_with_path(ErrorCode::Estale, "open", &entry.path));
-                }
-                let inode = namespace.next_inode;
-                let mode = S_IFREG | (mode & !namespace.umask & 0o7777);
-                let created = new_file_node(
-                    inode,
-                    mode,
-                    namespace.default_uid,
-                    namespace.default_gid,
-                    namespace.default_chunker.clone(),
-                );
-                let mut parent_stats = parent.guard().node.stats.clone();
-                touch_modified(&mut parent_stats, true)?;
-                let proposal = CompactRootFileCreate::capture_verified(
-                    &compact.structure,
-                    &parent,
-                    *compact
+                matches!(state.namespace.nodes.get(&state.namespace.root),
+                    Some(NodeMetadata { data: NodeData::Directory { entries }, .. })
+                    if !entries.iter().any(|entry| entry.name == path[1..]))
+            };
+            let (proposal, revision, inode) = loop {
+                let parent = if optimistic {
+                    None
+                } else {
+                    let _refresh = phase.phase(GatePhase::Refresh);
+                    let Some(parent) = self.load_current_compact_root().await? else {
+                        continue 'cas;
+                    };
+                    Some(parent)
+                };
+                let captured = (|| {
+                    let state = self.lock_state()?;
+                    let compact = state.compact.as_ref().ok_or_else(stale_inode_structure)?;
+                    let namespace = state.namespace.as_ref();
+                    let anchor = compact.structure.anchor();
+                    // This runtime namespace was installed together with its
+                    // opaque Full-audited witness. Selected file overlays cannot
+                    // alter these structural fields or the audited root body.
+                    if namespace.format_version != NAMESPACE_FORMAT_VERSION
+                        || namespace.root != anchor.root
+                        || namespace.next_inode != anchor.next_inode
+                        || namespace.default_uid != anchor.default_uid
+                        || namespace.default_gid != anchor.default_gid
+                        || namespace.umask != anchor.umask
+                        || namespace.default_chunker != anchor.default_chunker
+                        || namespace.nodes.len() != anchor.members.len()
+                        || namespace.nodes.contains_key(&anchor.next_inode)
+                        || namespace.nodes.get(&anchor.root)
+                            != Some(&compact.structure.audited_root().node)
+                    {
+                        drop(state);
+                        return Err(self.fail_closed(stale_inode_structure()));
+                    }
+                    let entry = walk(namespace, &path, false, "open", 0)?;
+                    validate_open_guard(namespace, &path, &entry, flags, guard)?;
+                    if entry.node.is_some() {
+                        return Err(error_with_path(ErrorCode::Eexist, "open", &entry.path));
+                    }
+                    if entry.parent != namespace.root {
+                        return Err(error_with_path(ErrorCode::Estale, "open", &entry.path));
+                    }
+                    let inode = namespace.next_inode;
+                    let mode = S_IFREG | (mode & !namespace.umask & 0o7777);
+                    let created = new_file_node(
+                        inode,
+                        mode,
+                        namespace.default_uid,
+                        namespace.default_gid,
+                        namespace.default_chunker.clone(),
+                    );
+                    let parent_guard = parent.as_ref().map_or_else(
+                        || compact.structure.audited_root(),
+                        VerifiedCompactRoot::guard,
+                    );
+                    let mut parent_stats = parent_guard.node.stats.clone();
+                    touch_modified(&mut parent_stats, true)?;
+                    let expected_parent = *compact
                         .physical
                         .get(&namespace.root)
-                        .ok_or_else(stale_inode_structure)?,
-                    entry.name,
-                    created,
-                    parent_stats.mtime_ms,
-                    parent_stats.ctime_ms,
-                )?;
-                (proposal, state.revision, inode)
+                        .ok_or_else(stale_inode_structure)?;
+                    let proposal = if let Some(parent) = &parent {
+                        CompactRootFileCreate::capture_verified(
+                            &compact.structure,
+                            parent,
+                            expected_parent,
+                            entry.name,
+                            created,
+                            parent_stats.mtime_ms,
+                            parent_stats.ctime_ms,
+                        )?
+                    } else {
+                        CompactRootFileCreate::capture_audited(
+                            &compact.structure,
+                            expected_parent,
+                            entry.name,
+                            created,
+                            parent_stats.mtime_ms,
+                            parent_stats.ctime_ms,
+                        )?
+                    };
+                    Ok((proposal, state.revision, inode))
+                })();
+                match captured {
+                    Ok(captured) => break captured,
+                    // A newer peer generation can repair cached timestamp overflow
+                    // or change pathname semantics. Recheck before returning any
+                    // error from optimistic capture; local poison is never retried.
+                    Err(_) if optimistic && !self.failed() => {
+                        force_preflight = true;
+                        optimistic = false;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             };
             let result = {
                 let _publication = phase.phase(GatePhase::Publication);
@@ -6068,6 +6117,12 @@ where
             match result {
                 Ok(()) => return self.open_inode_handle(inode, path, flags),
                 Err(error) if error.code == ErrorCode::Eagain => {
+                    if optimistic {
+                        // Do not let Full refresh adopt root identity drift at
+                        // an unchanged generation which fresh preflight rejects.
+                        let _refresh = phase.phase(GatePhase::Refresh);
+                        self.load_current_compact_root().await?;
+                    }
                     // Only a proven noncommit is replayable. Refresh a coherent
                     // Full view even when an unrelated selected write kept the
                     // structural generation unchanged.

@@ -676,3 +676,261 @@ async fn actual_indexed_oversized_dentry_is_rejected_before_any_table_dml() {
         "authority, guards, members and dentries remain byte-identical"
     );
 }
+
+fn audited_create_proposal(base: &CompactSnapshot, name: &str) -> CompactRootFileCreate {
+    let (_, _, audited) = base.clone().into_validated_namespace().unwrap();
+    let mut namespace = base.namespace().unwrap();
+    let inode = add_file(&mut namespace, name);
+    let created = namespace.nodes.remove(&inode).unwrap();
+    let root = &base.guards[&base.anchor.root];
+    CompactRootFileCreate::capture_audited(
+        &audited,
+        root.identity,
+        name.into(),
+        created,
+        root.node.stats.mtime_ms.checked_add(1).unwrap(),
+        root.node.stats.ctime_ms.checked_add(1).unwrap(),
+    )
+    .unwrap()
+}
+
+fn assert_no_structural_dml_or_commit(queries: &[String], complete_parent: bool) {
+    let one_position = |matches: fn(&str) -> bool, label: &str| {
+        let positions: Vec<_> = queries
+            .iter()
+            .enumerate()
+            .filter_map(|(position, sql)| matches(sql).then_some(position))
+            .collect();
+        assert_eq!(
+            positions.len(),
+            1,
+            "exactly one {label} must be captured: {queries:?}"
+        );
+        positions[0]
+    };
+    let started = one_position(
+        |sql| sql.starts_with("START TRANSACTION"),
+        "publication transaction",
+    );
+    let authority_lock = one_position(
+        |sql| {
+            sql.starts_with("SELECT owner, fence, expires,")
+                && sql.contains("FROM mount_rs_tidb_metadata")
+                && sql.contains("WHERE volume_key=?")
+                && sql.contains("FOR UPDATE")
+        },
+        "locked authority read",
+    );
+    let authority = one_position(
+        |sql| {
+            sql == "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?"
+        },
+        "fresh complete authority read",
+    );
+    let members = one_position(
+        |sql| {
+            sql == "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? ORDER BY inode"
+        },
+        "complete member read",
+    );
+    assert!(
+        started < authority_lock && authority_lock < authority && authority < members,
+        "the complete member proof must follow the authority lock and fresh authority read"
+    );
+    if complete_parent {
+        let parent = one_position(
+            |sql| {
+                sql == "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode=? ORDER BY inode FOR UPDATE"
+            },
+            "locked selected parent read",
+        );
+        let entries = one_position(
+            |sql| {
+                sql == "SELECT parent,ordinal,name_hash,name,inode FROM mount_rs_tidb_compact_dentries WHERE volume_key=? AND parent=? ORDER BY parent,ordinal FOR UPDATE"
+            },
+            "locked complete parent dentry read",
+        );
+        assert!(
+            members < parent && parent < entries,
+            "the fresh parent and complete dentry range must follow the complete member proof"
+        );
+    }
+    assert!(
+        !queries.iter().any(|sql| sql.starts_with("UPDATE ")
+            || sql.starts_with("INSERT ")
+            || sql.starts_with("DELETE ")
+            || sql.eq_ignore_ascii_case("COMMIT")),
+        "an audited proposal grants no freshness and must refuse before DML: {queries:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_indexed_optimistic_create_rejects_unrequested_dentry_tamper() {
+    use sha2::{Digest, Sha256};
+
+    let f = fixture(true).await;
+    create(&f, "unchanged-sibling").await;
+    let sibling = create(&f, "unrequested-sibling").await;
+    let base = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let proposal = audited_create_proposal(&base, "audited-create");
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    let capability = writer.compact_optimistic_create_capability();
+    let original = raw(&f).await;
+    let replacement = "changed-unrequested-sibling";
+    let replacement_hash = Sha256::digest(replacement.as_bytes()).to_vec();
+    let pool = Pool::from_url(&f.url).unwrap();
+    let mut connection = pool.get_conn().await.unwrap();
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_compact_dentries SET name_hash=?,name=? WHERE volume_key=? AND parent=? AND inode=?",
+            (
+                &replacement_hash,
+                replacement.as_bytes(),
+                &f.key,
+                base.anchor.root as i64,
+                sibling as i64,
+            ),
+        )
+        .await
+        .unwrap();
+    drop(connection);
+    pool.disconnect().await.unwrap();
+    let damaged = raw(&f).await;
+
+    proxy.begin();
+    let publication = writer.publish_compact_structure(proposal.delta()).await;
+    let (queries, _) = proxy.end();
+    // Settle every provider and relay before the fresh, independent raw observer.
+    let writer_closed = writer.close().await;
+    let fixture_closed = f.store.close().await;
+    proxy.shutdown().await;
+    let after = raw(&f).await;
+
+    writer_closed.unwrap();
+    fixture_closed.unwrap();
+    assert_eq!(capability, CompactOptimisticCreateCapability::Supported);
+    assert_eq!(
+        damaged.0, original.0,
+        "authority and generation are unchanged"
+    );
+    assert_eq!(
+        damaged.1, original.1,
+        "all guards and root header are unchanged"
+    );
+    assert_eq!(damaged.2, original.2);
+    assert_eq!(damaged.3, original.3);
+    let mut expected_entries = original.4.clone();
+    let changed = expected_entries
+        .iter_mut()
+        .find(|entry| entry.4 == sibling as i64)
+        .unwrap();
+    changed.2 = replacement_hash;
+    changed.3 = replacement.as_bytes().to_vec();
+    assert_eq!(
+        damaged.4, expected_entries,
+        "only one valid sibling name/hash pair changes; count, ordinal and child stay fixed"
+    );
+    assert!(
+        publication.unwrap_err().is(ErrorCode::Einval),
+        "the complete fresh parent must differ from the audited captured body"
+    );
+    assert_no_structural_dml_or_commit(&queries, true);
+    assert_eq!(
+        after, damaged,
+        "fresh observer retains every tampered row for the owned fixture cleanup"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_indexed_optimistic_create_rejects_equal_count_member_substitution() {
+    let f = fixture(true).await;
+    let gap = create(&f, "removed-gap").await;
+    let sibling = create(&f, "unrequested-member").await;
+    let before_removal = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let mut namespace = before_removal.namespace().unwrap();
+    namespace.nodes.remove(&gap).unwrap();
+    let NodeData::Directory { entries } =
+        &mut namespace.nodes.get_mut(&namespace.root).unwrap().data
+    else {
+        panic!("root directory required")
+    };
+    entries.retain(|entry| entry.inode != gap);
+    let removal =
+        CompactStructuralDelta::capture(&before_removal, &namespace, StructuralScope::Full)
+            .unwrap();
+    f.store.publish_compact_structure(&removal).await.unwrap();
+    let base = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    assert!(!base.anchor.members.contains(&gap));
+    assert!(gap < base.anchor.next_inode);
+    let proposal = audited_create_proposal(&base, "audited-create");
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    let capability = writer.compact_optimistic_create_capability();
+    let original = raw(&f).await;
+    let pool = Pool::from_url(&f.url).unwrap();
+    let mut connection = pool.get_conn().await.unwrap();
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_compact_members SET inode=? WHERE volume_key=? AND inode=?",
+            (gap as i64, &f.key, sibling as i64),
+        )
+        .await
+        .unwrap();
+    drop(connection);
+    pool.disconnect().await.unwrap();
+    let damaged = raw(&f).await;
+
+    proxy.begin();
+    let publication = writer.publish_compact_structure(proposal.delta()).await;
+    let (queries, _) = proxy.end();
+    let writer_closed = writer.close().await;
+    let fixture_closed = f.store.close().await;
+    proxy.shutdown().await;
+    let after = raw(&f).await;
+
+    writer_closed.unwrap();
+    fixture_closed.unwrap();
+    assert_eq!(capability, CompactOptimisticCreateCapability::Supported);
+    assert_eq!(
+        damaged.0, original.0,
+        "authority and member count are unchanged"
+    );
+    assert_eq!(
+        damaged.1, original.1,
+        "all guards and root header are unchanged"
+    );
+    assert_eq!(damaged.2, original.2);
+    assert_eq!(damaged.4, original.4, "all root dentries are unchanged");
+    let mut expected_members = original.3.clone();
+    *expected_members
+        .iter_mut()
+        .find(|member| **member == sibling as i64)
+        .unwrap() = gap as i64;
+    expected_members.sort_unstable();
+    assert_eq!(damaged.3, expected_members);
+    assert_eq!(damaged.3.len(), original.3.len());
+    // This is a valid, equal-count anchor substitution, not an invalid bound
+    // that could be detected by inspecting only the small authority envelope.
+    let mut substituted = base.anchor.clone();
+    substituted.members = damaged.3.iter().map(|member| *member as u64).collect();
+    substituted.validate().unwrap();
+    assert_ne!(substituted, base.anchor);
+    assert!(
+        publication.unwrap_err().is(ErrorCode::Eagain),
+        "the complete fresh member IDs must differ from the audited captured anchor"
+    );
+    // Member equality can reject before affected-body validation. Do not
+    // require later guard/dentry reads to prove this earlier noncommit.
+    assert_no_structural_dml_or_commit(&queries, false);
+    assert_eq!(
+        after, damaged,
+        "fresh observer retains every tampered row for the owned fixture cleanup"
+    );
+}
