@@ -466,7 +466,7 @@ async fn observed_compact_sqlite_refusal_retains_owners_until_cleanup_without_pu
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    let stored_metadata: (
+    type StoredMetadataRow = (
         i64,
         Option<String>,
         Option<String>,
@@ -474,7 +474,8 @@ async fn observed_compact_sqlite_refusal_retains_owners_until_cleanup_without_pu
         i64,
         Option<String>,
         Option<String>,
-    ) = metadata
+    );
+    let stored_metadata: StoredMetadataRow = metadata
         .query_row(
             "SELECT revision, namespace, owner, fence, expires, write_mode, backing_id
              FROM mount_rs_metadata WHERE id=1",

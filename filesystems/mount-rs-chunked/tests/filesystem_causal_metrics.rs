@@ -1223,8 +1223,8 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
         for (before, after) in [(&before_open, &after_open), (&before_stat, &after_stat)] {
             assert_eq!(
                 delta(before, after, "filesystem.inode_path_guard"),
-                (2, 0),
-                "the root and file each require a selected path guard",
+                (1, 0),
+                "the fresh root witness is reused; only the file needs a traversal guard",
             );
         }
         for (before, after) in [(&before_read, &after_read), (&before_eof, &after_eof)] {
@@ -1232,6 +1232,45 @@ fn sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen() {
                 delta(before, after, "filesystem.inode_path_guard"),
                 (0, 0),
                 "handle reads refresh their selected inode without resolving a path",
+            );
+        }
+        // Reusing the root traversal witness must not turn either selected
+        // read into a cached provider hit. Open/stat check root and file;
+        // handle reads, including EOF, check the file before and after I/O.
+        for (phase, before, after) in [
+            ("open", &before_open, &after_open),
+            ("stat", &before_stat, &after_stat),
+            ("read", &before_read, &after_read),
+            ("eof", &before_eof, &after_eof),
+        ] {
+            assert_eq!(
+                delta(before, after, "sqlite.compact.guard_selected_rows"),
+                (2, 2),
+                "{phase} must still read two fresh selected provider rows",
+            );
+            for name in [
+                "sqlite.compact.authority_query",
+                "sqlite.compact.authority_path",
+            ] {
+                assert_eq!(
+                    delta(before, after, name),
+                    (2, 0),
+                    "{phase} must validate authority for both selected reads",
+                );
+            }
+            for name in [
+                "sqlite.compact.anchor_query_bytes",
+                "sqlite.compact.anchor_decode_bytes",
+                "sqlite.compact.guard_selected_decode_bytes",
+            ] {
+                let (calls, bytes) = delta(before, after, name);
+                assert_eq!(calls, 2, "{phase} must check both fresh {name} bodies");
+                assert!(bytes > 0, "{phase} must account for fresh {name} bytes");
+            }
+            assert_eq!(
+                delta(before, after, "sqlite.compact.guard_full_rows"),
+                (0, 0),
+                "{phase} must preserve selected reads without a full guard scan",
             );
         }
     });
