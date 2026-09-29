@@ -69,7 +69,7 @@ export function validateSplitNamespacePresenceReceipt(source) {
   } catch { invalid() }
   closedObject(receipt, ["schema", "namespace_absent", "metadata", "blobs", "pool_shutdown", "clock", "consistency", "limits"])
   const metadata = closedObject(receipt.metadata, ["provider", "key_scope", "schema_setup", "row_presence", "observed_at_ns"])
-  const rows = closedObject(metadata.row_presence, ["metadata", "inodes", "compact_guards", "block_authority", "blocks"])
+  const rows = closedObject(metadata.row_presence, ["metadata", "inodes", "compact_guards", "compact_members", "compact_dentries", "block_authority", "blocks"])
   const blobs = closedObject(receipt.blobs, ["provider", "scope", "observation", "requested_max_keys", "prefix_absent", "observed_at_ns"])
   const shutdown = closedObject(receipt.pool_shutdown, ["confirmed", "elapsed_ns"])
   const limits = closedObject(receipt.limits, ["probe_deadline_ms", "pool_shutdown_deadline_ms", "list_request_keys", "response_byte_cap", "server_truncation_flag", "deadline_semantics"])
@@ -105,7 +105,7 @@ export function validateSplitNamespacePresenceReceipt(source) {
       provider: "tidb",
       key_scope: "exact_input_utf8_bytes",
       schema_setup: "shared_ddl_and_session_configuration",
-      row_presence: Object.freeze({ metadata: false, inodes: false, compact_guards: false, block_authority: false, blocks: false }),
+      row_presence: Object.freeze({ metadata: false, inodes: false, compact_guards: false, compact_members: false, compact_dentries: false, block_authority: false, blocks: false }),
       observed_at_ns: metadata.observed_at_ns,
     }),
     blobs: Object.freeze({

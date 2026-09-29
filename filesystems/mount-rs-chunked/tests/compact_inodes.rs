@@ -8,9 +8,11 @@ mod sqlite_runtime {
     use async_trait::async_trait;
     use mount_rs_core::FsDriver;
     use mount_rs_core::storage::compact::{
-        CompactInodeCapability, CompactPublication, CompactRootFileCapability, CompactRootFileRead,
+        CompactAuthority, CompactDirectoryEntry, CompactDirectoryHeader, CompactFileExpectation,
+        CompactFileRead, CompactInodeCapability, CompactPointReadCapability, CompactPublication,
+        CompactRootEntryRead, CompactRootEntryRows, CompactRootFileCapability, CompactRootFileRead,
         CompactSnapshot, CompactStructuralDelta, LoadedCompactInode, PhysicalInodeIdentity,
-        StructuralScope,
+        StructuralScope, check_compact_file_unchanged,
     };
     use mount_rs_core::storage::{
         BlockId, BlockStore, ConcurrentBackingId, ConcurrentModeState, InodeMetadataSnapshot,
@@ -92,6 +94,11 @@ mod sqlite_runtime {
         root_file_supported: Arc<AtomicBool>,
         root_file_loads: Arc<AtomicU64>,
         corrupt_root_file_body: Arc<AtomicBool>,
+        point_supported: Arc<AtomicBool>,
+        point_file_loads: Arc<AtomicU64>,
+        point_entry_loads: Arc<AtomicU64>,
+        point_file_fault: Arc<AtomicU64>,
+        point_entry_fault: Arc<AtomicU64>,
         load_entered: Arc<tokio::sync::Notify>,
         load_resume: Arc<tokio::sync::Notify>,
         hold_full_once: Arc<AtomicBool>,
@@ -130,6 +137,11 @@ mod sqlite_runtime {
                 root_file_supported: Arc::new(AtomicBool::new(false)),
                 root_file_loads: Arc::new(AtomicU64::new(0)),
                 corrupt_root_file_body: Arc::new(AtomicBool::new(false)),
+                point_supported: Arc::new(AtomicBool::new(false)),
+                point_file_loads: Arc::new(AtomicU64::new(0)),
+                point_entry_loads: Arc::new(AtomicU64::new(0)),
+                point_file_fault: Arc::new(AtomicU64::new(0)),
+                point_entry_fault: Arc::new(AtomicU64::new(0)),
                 load_entered: Arc::new(tokio::sync::Notify::new()),
                 load_resume: Arc::new(tokio::sync::Notify::new()),
                 hold_full_once: Arc::new(AtomicBool::new(false)),
@@ -147,6 +159,135 @@ mod sqlite_runtime {
 
     #[async_trait]
     impl MetadataStore for RecordingMetadata {
+        fn compact_point_read_capability(&self) -> CompactPointReadCapability {
+            if self.point_supported.load(Ordering::SeqCst) {
+                CompactPointReadCapability::Supported
+            } else {
+                CompactPointReadCapability::Unsupported
+            }
+        }
+        async fn read_compact_file(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: u64,
+            expected: CompactFileExpectation<'_>,
+        ) -> mount_rs_core::Result<CompactFileRead> {
+            self.point_file_loads.fetch_add(1, Ordering::SeqCst);
+            // This reference provider tests filesystem dispatch/admission only.
+            // The TiDB proxy suite independently measures physical SQL scope.
+            let snapshot = self.inner.load_compact_snapshot(backing).await?;
+            let mut authority = CompactAuthority::from_anchor(&snapshot.anchor)?;
+            let mut guard = snapshot.guards.get(&inode).cloned();
+            let mut member = snapshot.anchor.members.contains(&inode).then_some(inode);
+            let fault = self.point_file_fault.swap(0, Ordering::SeqCst);
+            match fault {
+                1 => guard.as_mut().unwrap().node.stats.ctime_ms += 1,
+                2 => {
+                    member = None;
+                    guard = None;
+                }
+                3 => guard.as_mut().unwrap().identity.epoch = authority.generation + 1,
+                4 => authority.default_gid += 1,
+                _ => {}
+            }
+            if self.hold_load_once.swap(false, Ordering::SeqCst) {
+                self.load_entered.notify_one();
+                self.load_resume.notified().await;
+            }
+            if fault == 5 {
+                return CompactFileRead::from_guard(
+                    authority,
+                    backing,
+                    inode,
+                    member,
+                    Err(mount_rs_core::FsError::new(ErrorCode::Eio)),
+                );
+            }
+            if fault == 0
+                && let Some(guard) = &guard
+                && let Some(checked) = check_compact_file_unchanged(
+                    &serde_json::to_vec(&authority).unwrap(),
+                    backing,
+                    inode,
+                    member,
+                    guard.identity,
+                    &serde_json::to_vec(&guard.node).unwrap(),
+                    expected,
+                )
+            {
+                return Ok(checked);
+            }
+            CompactFileRead::from_guard(authority, backing, inode, member, Ok(guard))
+        }
+        async fn read_compact_root_entry(
+            &self,
+            backing: ConcurrentBackingId,
+            root: u64,
+            inode: u64,
+            name: &str,
+            expected: CompactFileExpectation<'_>,
+        ) -> mount_rs_core::Result<CompactRootEntryRead> {
+            self.point_entry_loads.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(expected.node().stats.ino, inode);
+            let snapshot = self.inner.load_compact_snapshot(backing).await?;
+            let authority = CompactAuthority::from_anchor(&snapshot.anchor)?;
+            let parent = snapshot.guards.get(&root);
+            let entries = parent.and_then(|guard| match &guard.node.data {
+                NodeData::Directory { entries } => Some(entries),
+                _ => None,
+            });
+            let mut rows = CompactRootEntryRows {
+                root_member: snapshot.anchor.members.contains(&root).then_some(root),
+                root: parent.zip(entries).map(|(guard, entries)| {
+                    (
+                        guard.identity,
+                        CompactDirectoryHeader {
+                            stats: guard.node.stats.clone(),
+                            entry_count: entries.len() as u64,
+                            next_ordinal: entries.len() as u64,
+                        },
+                    )
+                }),
+                entry: entries.and_then(|entries| {
+                    entries
+                        .iter()
+                        .enumerate()
+                        .find(|(_, entry)| entry.name == name)
+                        .map(|(ordinal, entry)| CompactDirectoryEntry {
+                            parent: root,
+                            ordinal: ordinal as u64,
+                            name: entry.name.clone(),
+                            inode: entry.inode,
+                        })
+                }),
+                file_member: snapshot.anchor.members.contains(&inode).then_some(inode),
+                file: snapshot.guards.get(&inode).cloned(),
+            };
+            let fault = self.point_entry_fault.swap(0, Ordering::SeqCst);
+            match fault {
+                1 => rows.root.as_mut().unwrap().1.stats.ctime_ms += 1,
+                2 => rows.entry.as_mut().unwrap().name.push_str("-wrong"),
+                3 => rows.file = None,
+                4 => rows.file.as_mut().unwrap().identity.epoch = authority.generation + 1,
+                _ => {}
+            }
+            if self.hold_load_once.swap(false, Ordering::SeqCst) {
+                self.load_entered.notify_one();
+                self.load_resume.notified().await;
+            }
+            CompactRootEntryRead::from_rows(
+                authority,
+                backing,
+                root,
+                inode,
+                name,
+                if fault == 5 {
+                    Err(mount_rs_core::FsError::new(ErrorCode::Eio))
+                } else {
+                    Ok(rows)
+                },
+            )
+        }
         fn compact_root_file_capability(&self) -> CompactRootFileCapability {
             if self.root_file_supported.load(Ordering::SeqCst) {
                 CompactRootFileCapability::Supported
@@ -3213,6 +3354,329 @@ mod sqlite_runtime {
                 ErrorCode::Enoent
             );
             oracle.shutdown().await.unwrap();
+        });
+    }
+
+    async fn point_read_fixture(
+        owner: &str,
+        supported: bool,
+    ) -> (
+        Volume,
+        RecordingMetadata,
+        ChunkedFs<RecordingMetadata, SqliteBlockStore>,
+    ) {
+        let volume = Volume::new();
+        let setup = volume.open("point-read-setup").await;
+        setup.write_file("/file", b"point payload").await.unwrap();
+        setup.mkdir("/nested", Default::default()).await.unwrap();
+        setup
+            .write_file("/nested/file", b"nested payload")
+            .await
+            .unwrap();
+        setup.symlink("/file", "/link").await.unwrap();
+        setup.shutdown().await.unwrap();
+        let recorder = RecordingMetadata::new(volume.metadata());
+        recorder.point_supported.store(supported, Ordering::SeqCst);
+        let fs = ChunkedFs::open(
+            recorder.clone(),
+            volume.blocks(),
+            ChunkedOptions::fixed(owner, 16)
+                .unwrap()
+                .with_compact_inode_updates(true),
+        )
+        .await
+        .unwrap();
+        recorder.loaded_inodes.lock().unwrap().clear();
+        (volume, recorder, fs)
+    }
+
+    #[test]
+    fn point_root_open_and_selected_handle_reads_avoid_complete_root_reads() {
+        futures_lite::future::block_on(async {
+            let (_volume, recorder, fs) = point_read_fixture("point-open", true).await;
+            let full_before = recorder.snapshot_loads.load(Ordering::SeqCst);
+            let handle = fs.open("/file", "r+", 0).await.unwrap();
+            assert_eq!(recorder.point_entry_loads.load(Ordering::SeqCst), 1);
+            assert_eq!(recorder.point_file_loads.load(Ordering::SeqCst), 0);
+            assert!(recorder.loaded_inodes.lock().unwrap().is_empty());
+            let mut bytes = [0; 32];
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], b"point payload");
+            assert_eq!(recorder.point_file_loads.load(Ordering::SeqCst), 2);
+            assert_eq!(recorder.snapshot_loads.load(Ordering::SeqCst), full_before);
+            assert!(recorder.loaded_inodes.lock().unwrap().is_empty());
+            assert!(!fs.failed());
+            handle.close().await.unwrap();
+            fs.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn point_read_unsupported_provider_retains_complete_selected_fallback() {
+        futures_lite::future::block_on(async {
+            let (_volume, recorder, fs) = point_read_fixture("point-unsupported", false).await;
+            let handle = fs.open("/file", "r", 0).await.unwrap();
+            let mut bytes = [0; 32];
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], b"point payload");
+            assert_eq!(recorder.point_entry_loads.load(Ordering::SeqCst), 0);
+            assert_eq!(recorder.point_file_loads.load(Ordering::SeqCst), 0);
+            assert!(!recorder.loaded_inodes.lock().unwrap().is_empty());
+            handle.close().await.unwrap();
+            fs.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn point_root_open_excludes_nested_symlink_directory_missing_and_mutating_flags() {
+        futures_lite::future::block_on(async {
+            let (_volume, recorder, fs) = point_read_fixture("point-exclusions", true).await;
+            for (path, flags) in [
+                ("/nested/file", "r"),
+                ("/link", "r"),
+                ("/", "r"),
+                ("/file", "a"),
+                ("/file", "w"),
+                ("/created", "wx+"),
+            ] {
+                fs.open(path, flags, 0o640)
+                    .await
+                    .unwrap()
+                    .close()
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                fs.open("/missing", "r", 0).await.err().unwrap().code,
+                ErrorCode::Enoent
+            );
+            assert_eq!(
+                fs.open("/file", "wx+", 0).await.err().unwrap().code,
+                ErrorCode::Eexist
+            );
+            let root = fs.stat("/").await.unwrap();
+            let opened = fs
+                .guarded_mutation(mount_rs_core::driver::GuardedMutation::Open {
+                    parent: mount_rs_core::driver::PathGuard {
+                        path: "/".into(),
+                        identity: mount_rs_core::driver::PathIdentity {
+                            dev: root.dev,
+                            ino: root.ino,
+                        },
+                    },
+                    name: "file".into(),
+                    observed: mount_rs_core::driver::ObservedEntry::Any,
+                    flags: mount_rs_core::OpenFlags::parse("r", "/file").unwrap(),
+                    mode: 0,
+                })
+                .await
+                .unwrap();
+            let mount_rs_core::driver::GuardedMutationResult::Opened { handle, .. } = opened else {
+                panic!("guarded ordinary Open must preserve its opened result")
+            };
+            handle.close().await.unwrap();
+            assert_eq!(recorder.point_entry_loads.load(Ordering::SeqCst), 0);
+            assert!(!recorder.loaded_inodes.lock().unwrap().is_empty());
+            assert!(!fs.failed());
+            fs.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn point_selected_equal_generation_contradictions_fail_closed() {
+        futures_lite::future::block_on(async {
+            for fault in 1..=5 {
+                let (_volume, recorder, fs) = point_read_fixture("point-file-corrupt", true).await;
+                let handle = fs.open("/file", "r", 0).await.unwrap();
+                let full_before = recorder.snapshot_loads.load(Ordering::SeqCst);
+                recorder.point_file_fault.store(fault, Ordering::SeqCst);
+                let mut bytes = [0; 32];
+                assert!(
+                    handle.read(&mut bytes, Some(0)).await.is_err(),
+                    "fault {fault}"
+                );
+                assert!(fs.failed(), "fault {fault}");
+                assert_eq!(recorder.snapshot_loads.load(Ordering::SeqCst), full_before);
+                assert_eq!(recorder.point_file_loads.load(Ordering::SeqCst), 1);
+                drop(handle);
+                drop(fs);
+            }
+        });
+    }
+
+    #[test]
+    fn point_root_entry_equal_generation_contradictions_fail_closed() {
+        futures_lite::future::block_on(async {
+            for fault in 1..=5 {
+                let (_volume, recorder, fs) = point_read_fixture("point-entry-corrupt", true).await;
+                let full_before = recorder.snapshot_loads.load(Ordering::SeqCst);
+                recorder.point_entry_fault.store(fault, Ordering::SeqCst);
+                assert!(fs.open("/file", "r", 0).await.is_err(), "fault {fault}");
+                assert!(fs.failed(), "fault {fault}");
+                assert_eq!(recorder.snapshot_loads.load(Ordering::SeqCst), full_before);
+                assert_eq!(recorder.point_entry_loads.load(Ordering::SeqCst), 1);
+                drop(fs);
+            }
+        });
+    }
+
+    #[test]
+    fn point_changed_generation_refreshes_before_missing_or_decode_errors() {
+        futures_lite::future::block_on(async {
+            for (entry, fault) in [(false, 2), (false, 5), (true, 3), (true, 5)] {
+                let (volume, recorder, fs) = point_read_fixture("point-new-generation", true).await;
+                let handle = if entry {
+                    None
+                } else {
+                    Some(fs.open("/file", "r", 0).await.unwrap())
+                };
+                let peer = volume.open("point-new-generation-peer").await;
+                peer.write_file("/added", b"new member").await.unwrap();
+                let full_before = recorder.snapshot_loads.load(Ordering::SeqCst);
+                if entry {
+                    recorder.point_entry_fault.store(fault, Ordering::SeqCst);
+                } else {
+                    recorder.point_file_fault.store(fault, Ordering::SeqCst);
+                }
+                let handle = match handle {
+                    Some(handle) => handle,
+                    None => fs.open("/file", "r", 0).await.unwrap(),
+                };
+                let mut bytes = [0; 32];
+                let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+                assert_eq!(&bytes[..count], b"point payload");
+                assert_eq!(
+                    recorder.snapshot_loads.load(Ordering::SeqCst),
+                    full_before + 1
+                );
+                assert!(!fs.failed());
+                handle.close().await.unwrap();
+                fs.shutdown().await.unwrap();
+                peer.shutdown().await.unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn point_selected_updates_preserve_fresh_body_and_open_unlinked_overlay() {
+        futures_lite::future::block_on(async {
+            let (volume, recorder, fs) = point_read_fixture("point-overlay", true).await;
+            let handle = fs.open("/file", "r+", 0).await.unwrap();
+            let peer = volume.open("point-overlay-peer").await;
+            peer.write_file("/file", b"fresh peer bytes").await.unwrap();
+            let mut bytes = [0; 32];
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], b"fresh peer bytes");
+            fs.unlink("/file").await.unwrap();
+            let points_before = recorder.point_file_loads.load(Ordering::SeqCst);
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], b"fresh peer bytes");
+            // Concurrent compact mode retains a persisted nlink=0 tombstone
+            // for handles in every runtime, so both selected freshness checks
+            // must still read that inode after its pathname is removed.
+            assert_eq!(
+                recorder.point_file_loads.load(Ordering::SeqCst),
+                points_before + 2
+            );
+            assert_eq!(handle.stat().await.unwrap().nlink, 0);
+            assert_eq!(fs.stat("/file").await.unwrap_err().code, ErrorCode::Enoent);
+            assert!(!fs.failed());
+            handle.close().await.unwrap();
+            fs.shutdown().await.unwrap();
+            peer.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn point_sparse_write_truncate_regrow_and_fresh_reopen_preserve_bytes() {
+        futures_lite::future::block_on(async {
+            let (volume, recorder, fs) = point_read_fixture("point-sparse", true).await;
+            let handle = fs.open("/file", "r+", 0).await.unwrap();
+            assert_eq!(recorder.point_entry_loads.load(Ordering::SeqCst), 1);
+            assert_eq!(handle.write(b"tail", Some(48)).await.unwrap(), 4);
+            assert_eq!(handle.stat().await.unwrap().size, 52);
+            let mut expected = b"point payload".to_vec();
+            expected.resize(48, 0);
+            expected.extend_from_slice(b"tail");
+            let mut bytes = [0; 64];
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], expected.as_slice());
+
+            handle.truncate(20).await.unwrap();
+            expected.truncate(20);
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], expected.as_slice());
+            handle.truncate(40).await.unwrap();
+            expected.resize(40, 0);
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], expected.as_slice());
+            assert_eq!(handle.write(b"end", Some(37)).await.unwrap(), 3);
+            expected[37..].copy_from_slice(b"end");
+            assert!(recorder.point_file_loads.load(Ordering::SeqCst) > 0);
+            handle.close().await.unwrap();
+            assert!(!fs.failed());
+            fs.shutdown().await.unwrap();
+
+            let fresh_recorder = RecordingMetadata::new(volume.metadata());
+            fresh_recorder.point_supported.store(true, Ordering::SeqCst);
+            let fresh = ChunkedFs::open(
+                fresh_recorder.clone(),
+                volume.blocks(),
+                ChunkedOptions::fixed("point-sparse-fresh", 16)
+                    .unwrap()
+                    .with_compact_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            fresh_recorder.loaded_inodes.lock().unwrap().clear();
+            let reader = fresh.open("/file", "r", 0).await.unwrap();
+            assert_eq!(fresh_recorder.point_entry_loads.load(Ordering::SeqCst), 1);
+            assert!(fresh_recorder.loaded_inodes.lock().unwrap().is_empty());
+            assert_eq!(reader.stat().await.unwrap().size, 40);
+            // fstat retains its complete root structure check. Measure byte
+            // reads separately so the point dispatch assertion covers their
+            // selected freshness checks without changing fstat's contract.
+            let legacy_after_stat = fresh_recorder.loaded_inodes.lock().unwrap().clone();
+            assert!(!legacy_after_stat.is_empty());
+            let count = reader.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], expected.as_slice());
+            assert!(fresh_recorder.point_file_loads.load(Ordering::SeqCst) > 0);
+            assert_eq!(
+                *fresh_recorder.loaded_inodes.lock().unwrap(),
+                legacy_after_stat
+            );
+            reader.close().await.unwrap();
+
+            let entry_reads_before = fresh_recorder.point_entry_loads.load(Ordering::SeqCst);
+            let snapshots_before = fresh_recorder.snapshot_loads.load(Ordering::SeqCst);
+            let publications_before = fresh_recorder.selected_calls.load(Ordering::SeqCst);
+            fresh
+                .open("/file", "w", 0)
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            assert_eq!(
+                fresh_recorder.point_entry_loads.load(Ordering::SeqCst),
+                entry_reads_before
+            );
+            // Truncating Open retains the coherent Full capture and selected
+            // publication path, which does not load individual inode guards.
+            assert_eq!(
+                fresh_recorder.snapshot_loads.load(Ordering::SeqCst),
+                snapshots_before + 1
+            );
+            assert_eq!(
+                fresh_recorder.selected_calls.load(Ordering::SeqCst),
+                publications_before + 1
+            );
+            let reader = fresh.open("/file", "r", 0).await.unwrap();
+            assert_eq!(fresh_recorder.point_entry_loads.load(Ordering::SeqCst), 2);
+            assert_eq!(reader.read(&mut bytes, Some(0)).await.unwrap(), 0);
+            reader.close().await.unwrap();
+            assert!(!fresh.failed());
+            fresh.shutdown().await.unwrap();
         });
     }
 

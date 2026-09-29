@@ -22,8 +22,11 @@ pub struct Trace {
     pub dropped_acks: AtomicUsize,
     pub drop_commit_ack: AtomicBool,
     pub abort_anchor_write: AtomicBool,
+    pub abort_dentry_write: AtomicBool,
     pub pause_guards: AtomicBool,
     pub pause_anchor: AtomicBool,
+    pub pause_members: AtomicBool,
+    pub pause_dentries: AtomicBool,
     pub reached: Notify,
     pub resume: Notify,
 }
@@ -182,22 +185,40 @@ async fn relay(client: TcpStream, server: TcpStream, trace: Arc<Trace>) {
                 sql = String::from_utf8(p[5..].to_vec()).ok();
             }
             if let Some(sql) = sql {
-                let guard = sql.starts_with(
-                    "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards",
-                ) || (sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
-                    && (sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
+                let guard = sql.starts_with("SELECT ")
+                    && ((sql.contains("node FROM mount_rs_tidb_compact_guards ")
+                        && sql.starts_with("SELECT inode,"))
+                        || sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
                         || (sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS r ")
-                            && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS f "))));
+                            && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS f ")));
                 guard_response.store(guard, Ordering::SeqCst);
                 if trace.armed.load(Ordering::SeqCst) {
                     // All retained statements are controlled provider SQL, with
                     // prepared values kept entirely out of the trace.
                     trace.queries.lock().unwrap().push(sql.clone());
-                    if (guard && trace.pause_guards.swap(false,Ordering::SeqCst)) || (sql.starts_with("SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation") && trace.pause_anchor.swap(false,Ordering::SeqCst)) {
-                        trace.reached.notify_one();trace.resume.notified().await;
+                    let authority = sql.starts_with("SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation")
+                        || sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,");
+                    let member = sql.starts_with("SELECT ")
+                        && sql.contains(" FROM mount_rs_tidb_compact_members ");
+                    let dentry = sql.starts_with("SELECT ")
+                        && sql.contains(" FROM mount_rs_tidb_compact_dentries ");
+                    if (guard && trace.pause_guards.swap(false, Ordering::SeqCst))
+                        || (authority && trace.pause_anchor.swap(false, Ordering::SeqCst))
+                        || (member && trace.pause_members.swap(false, Ordering::SeqCst))
+                        || (dentry && trace.pause_dentries.swap(false, Ordering::SeqCst))
+                    {
+                        trace.reached.notify_one();
+                        trace.resume.notified().await;
                     }
                     if sql.starts_with("UPDATE mount_rs_tidb_metadata SET revision=")
                         && trace.abort_anchor_write.swap(false, Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                    if (sql.starts_with("INSERT INTO mount_rs_tidb_compact_dentries")
+                        || sql.starts_with("UPDATE mount_rs_tidb_compact_dentries")
+                        || sql.starts_with("DELETE FROM mount_rs_tidb_compact_dentries"))
+                        && trace.abort_dentry_write.swap(false, Ordering::SeqCst)
                     {
                         break;
                     }

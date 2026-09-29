@@ -323,6 +323,8 @@ const NAMESPACE_PRESENCE_SQL: &str = "SELECT
     EXISTS(SELECT 1 FROM mount_rs_tidb_metadata WHERE volume_key=?),
     EXISTS(SELECT 1 FROM mount_rs_tidb_inodes WHERE volume_key=?),
     EXISTS(SELECT 1 FROM mount_rs_tidb_compact_guards WHERE volume_key=?),
+    EXISTS(SELECT 1 FROM mount_rs_tidb_compact_members WHERE volume_key=?),
+    EXISTS(SELECT 1 FROM mount_rs_tidb_compact_dentries WHERE volume_key=?),
     EXISTS(SELECT 1 FROM mount_rs_tidb_block_authority WHERE volume_key=?),
     EXISTS(SELECT 1 FROM mount_rs_tidb_blocks WHERE volume_key=?)";
 
@@ -573,16 +575,20 @@ pub struct TidbNamespacePresence {
     pub metadata: bool,
     pub inodes: bool,
     pub compact_guards: bool,
+    pub compact_members: bool,
+    pub compact_dentries: bool,
     pub block_authority: bool,
     pub blocks: bool,
 }
 
 impl TidbNamespacePresence {
-    /// Whether the inspection observed no rows in any of the five tables.
+    /// Whether the inspection observed no rows in any metadata or block table.
     pub fn is_absent(&self) -> bool {
         !self.metadata
             && !self.inodes
             && !self.compact_guards
+            && !self.compact_members
+            && !self.compact_dentries
             && !self.block_authority
             && !self.blocks
     }
@@ -665,7 +671,7 @@ impl TidbPoolContext {
     /// This prepares the provider's shared schemas with DDL and additive upgrades;
     /// opening a session also performs the usual verified session SET statements.
     /// It inserts no namespace, inode, guard, authority, or block rows. One fixed
-    /// parameterized SELECT observes all five row families in one statement.
+    /// parameterized SELECT observes all seven row families in one statement.
     /// The result is an observation, not a reservation: later writers can race it.
     /// Callers remain responsible for closing this context on every outcome.
     pub async fn inspect_namespace_presence(
@@ -682,21 +688,33 @@ impl TidbPoolContext {
             .await
             .map_err(|e| db_error("inspect TiDB namespace presence", e))?;
         self.require_open()?;
-        let row: Option<(bool, bool, bool, bool, bool)> = connection
+        let row: Option<(bool, bool, bool, bool, bool, bool, bool)> = connection
             .exec_first_observed(
                 StorageOperation::TidbSqlMetadataRead,
                 NAMESPACE_PRESENCE_SQL,
-                (volume_key, volume_key, volume_key, volume_key, volume_key),
+                (
+                    volume_key, volume_key, volume_key, volume_key, volume_key, volume_key,
+                    volume_key,
+                ),
             )
             .await
             .map_err(|e| db_error("inspect TiDB namespace presence", e))?;
-        let (metadata, inodes, compact_guards, block_authority, blocks) =
-            row.ok_or_else(|| backend_error("TiDB namespace presence query returned no row"))?;
+        let (
+            metadata,
+            inodes,
+            compact_guards,
+            compact_members,
+            compact_dentries,
+            block_authority,
+            blocks,
+        ) = row.ok_or_else(|| backend_error("TiDB namespace presence query returned no row"))?;
         self.require_open()?;
         Ok(TidbNamespacePresence {
             metadata,
             inodes,
             compact_guards,
+            compact_members,
+            compact_dentries,
             block_authority,
             blocks,
         })
@@ -911,6 +929,62 @@ async fn concurrent_row<C: Queryable>(
         fence,
         expires,
     })
+}
+
+/// Cold mode discovery and migration need the physical payload alongside its
+/// authority. Keep concurrent_row's covered header query for publication paths.
+async fn concurrent_row_with_namespace<C: Queryable>(
+    connection: &mut C,
+    volume_key: &str,
+) -> Result<(ConcurrentRow, Option<String>)> {
+    type ModePayloadRow = (
+        i64,
+        Option<String>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        i64,
+        i64,
+    );
+    let row: Option<ModePayloadRow> = connection
+        .exec_first_observed(
+            StorageOperation::TidbSqlMetadataRead,
+            "SELECT revision,namespace,write_mode,backing_id,owner,fence,expires
+             FROM mount_rs_tidb_metadata WHERE volume_key=?",
+            (volume_key,),
+        )
+        .await
+        .map_err(|error| db_error("read TiDB mode and physical payload", error))?;
+    let (revision, namespace, mode, backing, owner, fence, expires) =
+        row.ok_or_else(|| backend_error("TiDB metadata row is missing"))?;
+    if let Some(namespace) = &namespace {
+        profile::add(Event::NamespaceReturned, namespace.len() as u64);
+    }
+    Ok((
+        ConcurrentRow {
+            revision: nonnegative(revision, "metadata revision")?,
+            namespace_empty: namespace.is_none(),
+            mode,
+            backing,
+            owner,
+            fence,
+            expires,
+        },
+        namespace,
+    ))
+}
+
+/// Payload and normalized marker scans must observe one committed view.
+async fn begin_mode_inspection(connection: &mut Conn) -> Result<Transaction<'_>> {
+    let mut options = TxOpts::default();
+    options.with_isolation_level(IsolationLevel::RepeatableRead);
+    observe_result_future(
+        StorageOperation::TidbBeginCompactRead,
+        connection.start_transaction(options),
+        0,
+    )
+    .await
+    .map_err(|error| db_error("begin TiDB mode inspection", error))
 }
 
 fn concurrent_busy(operation: &str) -> FsError {
@@ -1405,6 +1479,8 @@ impl TidbMetadataStore {
             "SELECT revision, namespace, write_mode, backing_id, owner, fence, expires, delegation FROM mount_rs_tidb_metadata WHERE volume_key=? FOR UPDATE",(&self.0.volume_key,)).await.map_err(|e| db_error("lock TiDB delegation",e))?;
         let (revision, namespace, mode, backing, owner, fence, expires, raw) =
             row.ok_or_else(|| backend_error("missing TiDB delegation row"))?;
+        compact::require_no_compact_markers(&mut tx, &self.0.volume_key, namespace.as_deref())
+            .await?;
         let mut revision = nonnegative(revision, "delegation revision")?;
         let backing_binary = backing
             .as_deref()
@@ -1673,6 +1749,30 @@ impl MetadataStore for TidbMetadataStore {
     fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
         mount_rs_core::storage::compact::CompactInodeCapability::V1
     }
+    fn compact_point_read_capability(
+        &self,
+    ) -> mount_rs_core::storage::compact::CompactPointReadCapability {
+        mount_rs_core::storage::compact::CompactPointReadCapability::Supported
+    }
+    async fn read_compact_file(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: mount_rs_core::storage::compact::CompactFileExpectation<'_>,
+    ) -> Result<mount_rs_core::storage::compact::CompactFileRead> {
+        self.compact_file(backing, inode, expected).await
+    }
+    async fn read_compact_root_entry(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: InodeId,
+        candidate_file: InodeId,
+        name: &str,
+        expected: mount_rs_core::storage::compact::CompactFileExpectation<'_>,
+    ) -> Result<mount_rs_core::storage::compact::CompactRootEntryRead> {
+        self.compact_root_entry(backing, expected_root, candidate_file, name, expected)
+            .await
+    }
     fn compact_root_file_capability(
         &self,
     ) -> mount_rs_core::storage::compact::CompactRootFileCapability {
@@ -1789,19 +1889,19 @@ impl MetadataStore for TidbMetadataStore {
             .get_conn_observed()
             .await
             .map_err(|e| db_error("read TiDB inode mode", e))?;
-        let row: Option<InodeAuthoritySqlRow> = conn
-            .exec_first_observed(
-                StorageOperation::TidbSqlInodeRead,
-                INODE_AUTHORITY_SQL,
-                (&self.0.volume_key,),
-            )
+        let mut tx = begin_mode_inspection(&mut conn).await?;
+        let (row, namespace) = concurrent_row_with_namespace(&mut tx, &self.0.volume_key).await?;
+        compact::require_no_compact_markers(&mut tx, &self.0.volume_key, namespace.as_deref())
+            .await?;
+        let result = if row.mode.as_deref() == Some(b"MRC4") {
+            Some(inode_authority(&row, None)?)
+        } else {
+            None
+        };
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
-            .map_err(|e| db_error("read TiDB inode mode", e))?;
-        let row = row.ok_or_else(stale)?;
-        if row.1.as_deref() != Some(b"MRC4") {
-            return Ok(None);
-        }
-        compact_inode_authority(row, None).map(Some)
+            .map_err(|error| db_error("finish TiDB inode mode inspection", error))?;
+        Ok(result)
     }
 
     async fn prepare_inode_mode(
@@ -1841,6 +1941,7 @@ impl MetadataStore for TidbMetadataStore {
             .await
             .map_err(|e| db_error("read TiDB inode enrollment namespace", e))?
             .ok_or_else(stale)?;
+        compact::require_no_compact_markers(&mut tx, &self.0.volume_key, Some(&json)).await?;
         let namespace: Namespace = serde_json::from_str(&json).map_err(backend_error)?;
         namespace.validate()?;
         let wrapped = encode_inode_namespace(&namespace)?;
@@ -2256,9 +2357,15 @@ impl MetadataStore for TidbMetadataStore {
             .get_conn_observed()
             .await
             .map_err(|error| db_error("read TiDB concurrent mode", error))?;
-        concurrent_row(&mut connection, &self.0.volume_key)
-            .await?
-            .mode_state()
+        let mut tx = begin_mode_inspection(&mut connection).await?;
+        let (row, namespace) = concurrent_row_with_namespace(&mut tx, &self.0.volume_key).await?;
+        compact::require_no_compact_markers(&mut tx, &self.0.volume_key, namespace.as_deref())
+            .await?;
+        let mode = row.mode_state()?;
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
+            .await
+            .map_err(|error| db_error("finish TiDB concurrent mode inspection", error))?;
+        Ok(mode)
     }
 
     async fn preflight_new_bound_mode(&self) -> Result<()> {
@@ -2270,6 +2377,7 @@ impl MetadataStore for TidbMetadataStore {
             .map_err(|error| db_error("preflight new bound TiDB metadata", error))?;
         let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
         if row.is_pristine() {
+            compact::require_no_compact_markers(&mut connection, &self.0.volume_key, None).await?;
             Ok(())
         } else {
             Err(concurrent_busy("preflight new bound TiDB metadata"))
@@ -2283,16 +2391,23 @@ impl MetadataStore for TidbMetadataStore {
             .get_conn_observed()
             .await
             .map_err(|error| db_error("prepare bound concurrent TiDB metadata", error))?;
+        compact::require_no_compact_markers(&mut connection, &self.0.volume_key, None).await?;
         let changed = changed_autocommit_query(
             StorageOperation::TidbSqlMetadataWrite,
             &mut connection,
             "UPDATE mount_rs_tidb_metadata SET write_mode=?, backing_id=?, fence=?
              WHERE volume_key=? AND write_mode IS NULL AND backing_id IS NULL
-               AND revision=0 AND namespace IS NULL AND owner IS NULL AND fence=0 AND expires=0",
+               AND revision=0 AND namespace IS NULL AND owner IS NULL AND fence=0 AND expires=0
+               AND NOT EXISTS(SELECT 1 FROM mount_rs_tidb_compact_guards WHERE volume_key=?)
+               AND NOT EXISTS(SELECT 1 FROM mount_rs_tidb_compact_members WHERE volume_key=?)
+               AND NOT EXISTS(SELECT 1 FROM mount_rs_tidb_compact_dentries WHERE volume_key=?)",
             (
                 BOUND_CONCURRENT_WRITE_MODE,
                 backing.to_hex(),
                 CONCURRENT_FENCE_SENTINEL,
+                &self.0.volume_key,
+                &self.0.volume_key,
+                &self.0.volume_key,
                 &self.0.volume_key,
             ),
             "prepare bound concurrent TiDB metadata",
@@ -2680,12 +2795,31 @@ impl MetadataStore for TidbMetadataStore {
             .get_conn_observed()
             .await
             .map_err(|error| db_error("migrate MRC1 TiDB metadata", error))?;
-        let changed = changed_autocommit_query(
+        // Lock authority first and read its actual physical payload after any
+        // wait. The lock fences payload changes through the conditional UPDATE
+        // and COMMIT; RC avoids using a pre-wait consistent-read snapshot.
+        let mut tx = begin_inode_write(&mut connection).await?;
+        locked_lease_row(&mut tx, &self.0.volume_key)
+            .await?
+            .ok_or_else(stale)?;
+        let (row, namespace) = concurrent_row_with_namespace(&mut tx, &self.0.volume_key).await?;
+        compact::require_no_compact_markers(&mut tx, &self.0.volume_key, namespace.as_deref())
+            .await?;
+        if row.revision != expected_revision {
+            return rollback_and(tx, revision_conflict()).await;
+        }
+        if row.mode_state()? != ConcurrentModeState::Mrc1 {
+            return rollback_and(tx, concurrent_busy("migrate MRC1 TiDB metadata")).await;
+        }
+        let changed = changed_query(
             StorageOperation::TidbSqlMetadataWrite,
-            &mut connection,
+            &mut tx,
             "UPDATE mount_rs_tidb_metadata SET write_mode=?, backing_id=?
              WHERE volume_key=? AND revision=? AND write_mode=? AND backing_id IS NULL
-               AND owner IS NULL AND fence=? AND expires=0",
+               AND owner IS NULL AND fence=? AND expires=0
+               AND NOT EXISTS(SELECT 1 FROM mount_rs_tidb_compact_guards WHERE volume_key=?)
+               AND NOT EXISTS(SELECT 1 FROM mount_rs_tidb_compact_members WHERE volume_key=?)
+               AND NOT EXISTS(SELECT 1 FROM mount_rs_tidb_compact_dentries WHERE volume_key=?)",
             (
                 BOUND_CONCURRENT_WRITE_MODE,
                 backing.to_hex(),
@@ -2693,22 +2827,18 @@ impl MetadataStore for TidbMetadataStore {
                 expected,
                 CONCURRENT_WRITE_MODE,
                 CONCURRENT_FENCE_SENTINEL,
+                &self.0.volume_key,
+                &self.0.volume_key,
+                &self.0.volume_key,
             ),
             "migrate MRC1 TiDB metadata",
         )
         .await?;
-        if changed == 1 {
-            return Ok(());
+        if changed != 1 {
+            return rollback_and(tx, concurrent_busy("migrate MRC1 TiDB metadata")).await;
         }
-        if changed != 0 {
-            return Err(backend_error("TiDB MRC1 migration changed multiple rows"));
-        }
-        let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
-        if row.revision != expected_revision {
-            Err(revision_conflict())
-        } else {
-            Err(concurrent_busy("migrate MRC1 TiDB metadata"))
-        }
+        // A lost COMMIT acknowledgment remains unknown; never replay migration.
+        commit(tx, "migrate MRC1 TiDB metadata").await
     }
 
     async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
@@ -2719,16 +2849,23 @@ impl MetadataStore for TidbMetadataStore {
             .get_conn_observed()
             .await
             .map_err(|error| db_error("preflight MRC1 TiDB metadata", error))?;
-        let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
+        let mut tx = begin_mode_inspection(&mut connection).await?;
+        let (row, namespace) = concurrent_row_with_namespace(&mut tx, &self.0.volume_key).await?;
+        compact::require_no_compact_markers(&mut tx, &self.0.volume_key, namespace.as_deref())
+            .await?;
         if row.revision != expected_revision {
-            return Err(revision_conflict());
+            return rollback_and(tx, revision_conflict()).await;
         }
         match row.mode_state()? {
-            ConcurrentModeState::Mrc1 => Ok(()),
+            ConcurrentModeState::Mrc1 => {}
             ConcurrentModeState::Legacy | ConcurrentModeState::Mrc2(_) => {
-                Err(concurrent_busy("preflight MRC1 TiDB metadata"))
+                return rollback_and(tx, concurrent_busy("preflight MRC1 TiDB metadata")).await;
             }
         }
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
+            .await
+            .map_err(|error| db_error("finish TiDB MRC1 preflight", error))?;
+        Ok(())
     }
 
     async fn flush(&self) -> Result<()> {

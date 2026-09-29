@@ -159,6 +159,8 @@ where
             "row_presence": {
                 "metadata": rows.metadata, "inodes": rows.inodes,
                 "compact_guards": rows.compact_guards,
+                "compact_members": rows.compact_members,
+                "compact_dentries": rows.compact_dentries,
                 "block_authority": rows.block_authority, "blocks": rows.blocks,
             },
             "observed_at_ns": metadata_elapsed.as_nanos().to_string(),
@@ -258,6 +260,8 @@ mod tests {
             metadata: false,
             inodes: false,
             compact_guards: false,
+            compact_members: false,
+            compact_dentries: false,
             block_authority: false,
             blocks: false,
         }
@@ -378,11 +382,20 @@ mod tests {
             "metadata",
             "inodes",
             "compact_guards",
+            "compact_members",
+            "compact_dentries",
             "block_authority",
             "blocks",
         ] {
             assert_eq!(receipt["metadata"]["row_presence"][field], false);
         }
+        assert_eq!(
+            receipt["metadata"]["row_presence"]
+                .as_object()
+                .unwrap()
+                .len(),
+            7
+        );
         let mn = receipt["metadata"]["observed_at_ns"]
             .as_str()
             .unwrap()
@@ -411,19 +424,21 @@ mod tests {
 
     #[tokio::test]
     async fn each_contaminated_table_or_blob_stays_present_without_namespace_creation() {
-        for index in 0..6 {
+        for index in 0..8 {
             let mut presence = absent();
             match index {
                 0 => presence.metadata = true,
                 1 => presence.inodes = true,
                 2 => presence.compact_guards = true,
-                3 => presence.block_authority = true,
-                4 => presence.blocks = true,
+                3 => presence.compact_members = true,
+                4 => presence.compact_dentries = true,
+                5 => presence.block_authority = true,
+                6 => presence.blocks = true,
                 _ => {}
             }
             let raw = inspect_operations(
                 || async { Ok(presence) },
-                || async { Ok(index != 5) },
+                || async { Ok(index != 7) },
                 || async { Ok(()) },
                 limits(),
             )
@@ -431,6 +446,21 @@ mod tests {
             .unwrap();
             let receipt: Value = serde_json::from_str(&raw).unwrap();
             assert_eq!(receipt["namespace_absent"], false);
+            if let Some(&field) = [
+                "metadata",
+                "inodes",
+                "compact_guards",
+                "compact_members",
+                "compact_dentries",
+                "block_authority",
+                "blocks",
+            ]
+            .get(index)
+            {
+                assert_eq!(receipt["metadata"]["row_presence"][field], true);
+            } else {
+                assert_eq!(receipt["blobs"]["prefix_absent"], false);
+            }
         }
     }
 

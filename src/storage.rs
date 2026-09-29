@@ -1013,6 +1013,36 @@ pub trait MetadataStore: Send + Sync {
     fn compact_inode_capability(&self) -> compact::CompactInodeCapability {
         compact::CompactInodeCapability::Unsupported
     }
+    /// Indexed selected-file and root-entry reads from one coherent statement.
+    /// Capability does not enroll or migrate any stored representation.
+    fn compact_point_read_capability(&self) -> compact::CompactPointReadCapability {
+        compact::CompactPointReadCapability::Unsupported
+    }
+    /// Read fresh authority, selected membership and the complete file guard in
+    /// one provider statement snapshot. Never substitute cached membership or
+    /// split reads across statements; check generation before selected errors.
+    async fn read_compact_file(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+        _expected: compact::CompactFileExpectation<'_>,
+    ) -> Result<compact::CompactFileRead> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read authority, actual root/file memberships, directory header, exact
+    /// requested dentry and file guard in one provider statement snapshot.
+    /// Providers retain missing/malformed selected groups behind the receipt's
+    /// generation. This scope does not assert a complete fresh directory body.
+    async fn read_compact_root_entry(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_root: InodeId,
+        _candidate_file: InodeId,
+        _name: &str,
+        _expected: compact::CompactFileExpectation<'_>,
+    ) -> Result<compact::CompactRootEntryRead> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
     /// Support for fixed coherent root/file captures and both sealed structural
     /// transitions. Resolve before choosing a targeted publication strategy.
     fn compact_root_file_capability(&self) -> compact::CompactRootFileCapability {
@@ -1020,7 +1050,9 @@ pub trait MetadataStore: Send + Sync {
     }
     /// Read authority, the complete anchor and two optional complete guards in
     /// one coherent view. Missing guards are retained for generation recovery;
-    /// malformed guard groups remain errors. No hidden Full scan is permitted.
+    /// malformed guard groups remain errors. Normalized providers reconstruct
+    /// actual complete membership and the affected directory from indexed rows
+    /// within that view. Use read_compact_root_entry for a scoped point read.
     async fn load_compact_root_file(
         &self,
         _backing: ConcurrentBackingId,

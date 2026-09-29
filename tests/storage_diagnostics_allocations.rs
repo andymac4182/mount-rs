@@ -135,7 +135,7 @@ fn warmed_core_spans_record_without_added_allocations() {
         "warmed actual core Span added an allocation"
     );
     let delta = storage::snapshot().delta(&before).unwrap();
-    assert_eq!(before.entries.len(), 116);
+    assert_eq!(before.entries.len(), 118);
     assert_eq!(delta.in_flight, 0);
     for operation in operations {
         let row = &delta.entries[operation as usize];
@@ -246,7 +246,7 @@ fn warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations() {
         0
     );
     assert!(!final_state.saturated);
-    assert_eq!(storage::snapshot().entries.len(), 116);
+    assert_eq!(storage::snapshot().entries.len(), 118);
     // Excludes serialization, startup Arc/token construction, wrapper Box sites,
     // backing clients and the existing allocating storage::snapshot() above.
 }

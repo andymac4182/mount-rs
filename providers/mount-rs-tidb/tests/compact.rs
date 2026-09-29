@@ -268,7 +268,7 @@ async fn actual_compact_selected_streaming_certifies_full_audited_root_and_file(
 
 #[tokio::test]
 #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
-async fn actual_compact_selected_streaming_fallback_reuses_one_fresh_joined_row() {
+async fn actual_compact_selected_streaming_fallback_preserves_fresh_complete_logical_read() {
     let f = fixture(true).await;
     let inode = create(&f, "streamed-fallback").await;
     let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
@@ -299,11 +299,11 @@ async fn actual_compact_selected_streaming_fallback_reuses_one_fresh_joined_row(
     let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
         .await
         .unwrap();
-    // Warm the joined statement on canonical bytes before the encoding control.
+    // Warm the complete logical read before the encoding control.
     reader.load_compact_inode(f.backing, inode).await.unwrap();
 
-    // Derived Serde accepts positional struct representations. The conservative
-    // map-only seed must decline this encoding and decode this exact fresh row.
+    // Derived Serde accepts positional struct representations. The complete
+    // fallback reconstructs the fresh logical guard from this server row.
     let sequence = serde_json::to_string(&serde_json::json!([
         &acknowledged.guard.node.stats,
         &acknowledged.guard.node.data,
@@ -358,30 +358,28 @@ async fn actual_compact_selected_streaming_fallback_reuses_one_fresh_joined_row(
         sequence,
         "the actual server row retains the positional representation",
     );
-    let CompactInodeRead::Loaded(sequence_read) = sequence_read.unwrap() else {
-        panic!("accepted sequence encoding must use the same-byte owned fallback")
-    };
-    assert_eq!(sequence_read, sequence_owned.unwrap());
-    assert_eq!(sequence_read, acknowledged);
+    let sequence_owned = sequence_owned.unwrap();
+    assert_eq!(sequence_owned, acknowledged);
+    match sequence_read.unwrap() {
+        CompactInodeRead::Loaded(sequence_read) => assert_eq!(sequence_read, sequence_owned),
+        CompactInodeRead::Unchanged(checked) => {
+            assert_eq!(checked.generation(), sequence_owned.generation);
+            assert_eq!(checked.identity(), sequence_owned.guard.identity);
+            assert!(checked.into_verified_root().is_none());
+        }
+    }
     assert_eq!(rows, 1);
-    assert_eq!(
+    assert!(
         queries
             .iter()
-            .filter(|sql| sql.starts_with("SELECT "))
-            .count(),
-        1
+            .any(|sql| sql.contains("FROM mount_rs_tidb_compact_members"))
     );
     assert!(
         queries
             .iter()
-            .any(|sql| sql.contains("LEFT JOIN mount_rs_tidb_compact_guards"))
+            .any(|sql| sql.starts_with("START TRANSACTION"))
     );
-    assert!(queries.iter().all(|sql| {
-        !sql.contains("FOR UPDATE")
-            && !sql.starts_with("START TRANSACTION")
-            && !sql.eq_ignore_ascii_case("COMMIT")
-            && !sql.eq_ignore_ascii_case("ROLLBACK")
-    }));
+    assert!(queries.iter().all(|sql| !sql.contains("FOR UPDATE")));
 }
 
 #[tokio::test]
@@ -435,7 +433,7 @@ async fn actual_compact_selected_streaming_preserves_authority_anchor_guard_erro
                 .unwrap()
                 .unwrap();
             let mut anchor: serde_json::Value = serde_json::from_str(&anchor).unwrap();
-            anchor["anchor"]["default_chunker"]["algorithm"] =
+            anchor["authority"]["default_chunker"]["algorithm"] =
                 serde_json::json!("unsupported-streamed-precedence-chunker");
             connection
                 .exec_drop(
@@ -500,22 +498,18 @@ async fn actual_compact_selected_streaming_preserves_authority_anchor_guard_erro
             before, after,
             "{case}: read failures must preserve all raw rows"
         );
-        assert_eq!(
-            rows, 1,
-            "{case}: one joined result row, including the absent guard"
-        );
-        assert_eq!(
-            queries
-                .iter()
-                .filter(|sql| sql.starts_with("SELECT "))
-                .count(),
-            1,
-            "{case}"
+        assert!(
+            rows <= 1,
+            "{case}: complete logical selected read must not enumerate unrelated guards"
         );
         assert!(
             queries
                 .iter()
-                .any(|sql| sql.contains("LEFT JOIN mount_rs_tidb_compact_guards")),
+                .any(|sql| sql.starts_with("START TRANSACTION")),
+            "{case}: complete logical read uses one snapshot"
+        );
+        assert!(
+            queries.iter().all(|sql| !sql.contains("FOR UPDATE")),
             "{case}"
         );
     }
@@ -677,12 +671,30 @@ async fn actual_compact_root_file_transitions_target_two_guards() {
             .iter()
             .filter(|sql| sql.starts_with("SELECT "))
             .collect();
-        assert_eq!(selects.len(), 1, "{siblings} siblings: one coherent SELECT");
-        assert!(selects[0].contains("mount_rs_tidb_metadata AS m"));
-        assert!(selects[0].contains(" AS r ON r.volume_key=m.volume_key"));
-        assert!(selects[0].contains(" AS f ON f.volume_key=m.volume_key"));
-        assert!(!selects[0].contains("FOR UPDATE"));
-        assert!(!selects[0].starts_with("SELECT inode,incarnation,epoch,revision,node"));
+        assert!(
+            selects
+                .iter()
+                .any(|sql| sql.contains("FROM mount_rs_tidb_metadata"))
+        );
+        assert!(
+            selects
+                .iter()
+                .any(|sql| sql.contains("FROM mount_rs_tidb_compact_members"))
+        );
+        assert!(
+            selects
+                .iter()
+                .any(|sql| sql.contains("FROM mount_rs_tidb_compact_dentries"))
+        );
+        assert!(selects.iter().all(|sql| !sql.contains("FOR UPDATE")));
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.starts_with("START TRANSACTION"))
+                .count(),
+            1,
+            "{siblings} siblings: complete root-file capture uses one coherent snapshot"
+        );
         let (_, _, audited) = expected.clone().into_validated_namespace().unwrap();
         let verified = audited
             .verify_root_file(
@@ -774,7 +786,7 @@ async fn actual_compact_root_file_transitions_target_two_guards() {
         proxy.shutdown().await;
         f.store.close().await.unwrap();
         eprintln!(
-            "compact root-file transitions: siblings={siblings}; one joined capture; each publication two locked guards, two guard updates and one anchor update; source tombstone retained"
+            "compact root-file transitions: siblings={siblings}; one coherent complete capture; each publication two locked guards, two guard updates and one authority update; source tombstone retained"
         );
     }
 }
@@ -795,7 +807,7 @@ async fn actual_compact_root_file_capture_uses_one_view() {
         .await
         .unwrap();
     proxy.begin();
-    proxy.trace.pause_guards.store(true, Ordering::SeqCst);
+    proxy.trace.pause_anchor.store(true, Ordering::SeqCst);
     let backing = f.backing;
     let root = before.anchor.root;
     let reading = tokio::spawn(async move {
@@ -804,8 +816,9 @@ async fn actual_compact_root_file_capture_uses_one_view() {
         result
     });
     proxy.reached().await;
-    // The joined SELECT is paused before it reaches TiDB. Commit both affected
-    // structural bodies, then an independent selected source revision.
+    // TiDB fixes this repeatable-read view when the transaction starts, before
+    // the paused authority SELECT. Commit both structural bodies, then an
+    // independent selected revision; every captured row must stay old.
     f.store
         .publish_compact_structure(transition.delta())
         .await
@@ -820,15 +833,24 @@ async fn actual_compact_root_file_capture_uses_one_view() {
     let expected = f.store.load_compact_snapshot(f.backing).await.unwrap();
     proxy.trace.resume.notify_one();
     let captured = reading.await.unwrap().unwrap();
-    let (queries, joined_rows) = proxy.end();
-    assert_eq!(joined_rows, 1, "one physical row contains two guard bodies");
+    let (queries, guard_rows) = proxy.end();
+    let fresh = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    assert_eq!(
+        guard_rows, 2,
+        "both complete guards share the authority transaction view"
+    );
     assert_eq!(
         captured.into_parts(),
         (
-            expected.anchor.clone(),
-            Some(expected.guards[&root].clone()),
-            Some(expected.guards[&file].clone()),
-        )
+            before.anchor.clone(),
+            Some(before.guards[&root].clone()),
+            Some(before.guards[&file].clone()),
+        ),
+        "authority, root and file must all retain the transaction-start view",
+    );
+    assert_eq!(
+        fresh, expected,
+        "independent fresh reads observe both committed updates"
     );
     assert_ne!(expected.anchor, before.anchor);
     assert_ne!(expected.guards[&root], before.guards[&root]);
@@ -837,10 +859,23 @@ async fn actual_compact_root_file_capture_uses_one_view() {
         .iter()
         .filter(|sql| sql.starts_with("SELECT "))
         .collect();
-    assert_eq!(selects.len(), 1);
-    assert!(selects[0].contains(" AS r ON r.volume_key=m.volume_key"));
-    assert!(selects[0].contains(" AS f ON f.volume_key=m.volume_key"));
-    assert!(!selects[0].contains("FOR UPDATE"));
+    assert!(
+        selects
+            .iter()
+            .any(|sql| sql.contains("FROM mount_rs_tidb_compact_members"))
+    );
+    assert!(
+        selects
+            .iter()
+            .any(|sql| sql.contains("FROM mount_rs_tidb_compact_dentries"))
+    );
+    assert!(selects.iter().all(|sql| !sql.contains("FOR UPDATE")));
+    let starts: Vec<_> = queries
+        .iter()
+        .map(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|sql| sql.starts_with("START TRANSACTION"))
+        .collect();
+    assert_eq!(starts.len(), 1);
     proxy.shutdown().await;
     f.store.close().await.unwrap();
 }
@@ -877,6 +912,24 @@ fn assert_root_file_publication_queries(queries: &[String], returned_guard_rows:
             .filter(|sql| sql.eq_ignore_ascii_case("COMMIT"))
             .count(),
         1
+    );
+    assert!(
+        !queries.iter().any(|sql| {
+            (sql.starts_with("INSERT ") || sql.starts_with("UPDATE ") || sql.starts_with("DELETE "))
+                && sql.contains("mount_rs_tidb_compact_members")
+        }),
+        "rename/unlink retain the selected member, including its tombstone"
+    );
+    let dentry_writes = queries
+        .iter()
+        .filter(|sql| {
+            (sql.starts_with("INSERT ") || sql.starts_with("UPDATE ") || sql.starts_with("DELETE "))
+                && sql.contains("mount_rs_tidb_compact_dentries")
+        })
+        .count();
+    assert!(
+        (1..=2).contains(&dentry_writes),
+        "root transition changes only its removed/appended dentry"
     );
 }
 
@@ -1249,6 +1302,7 @@ async fn actual_compact_snapshot_uses_one_view_without_generation_change() {
 async fn actual_compact_aborted_structure_rolls_back_prior_guard_writes() {
     let f = fixture(true).await;
     let before = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let raw_before = raw(&f).await;
     let mut ns = before.namespace().unwrap();
     add_file(&mut ns, "aborted");
     let delta = CompactStructuralDelta::capture(&before, &ns, StructuralScope::FileCreate).unwrap();
@@ -1277,6 +1331,22 @@ async fn actual_compact_aborted_structure_rolls_back_prior_guard_writes() {
         1
     );
     assert_eq!(proxy.trace.commits.load(Ordering::SeqCst), 0);
+    for table in [
+        "mount_rs_tidb_compact_members",
+        "mount_rs_tidb_compact_dentries",
+    ] {
+        assert!(
+            queries
+                .iter()
+                .any(|sql| sql.starts_with("INSERT INTO ") && sql.contains(table)),
+            "fault must occur after new {table} rows were written"
+        );
+    }
+    assert_eq!(
+        raw(&f).await,
+        raw_before,
+        "rollback restores authority, guards, members and dentries"
+    );
     let fresh = TidbMetadataStore::connect_with_key(&f.url, &f.key)
         .await
         .unwrap();
@@ -1477,6 +1547,10 @@ async fn actual_compact_file_create_lost_commit_ack_is_unknown_and_not_replayed(
         ("UPDATE mount_rs_tidb_compact_guards", 1),
         ("DELETE FROM mount_rs_tidb_compact_guards", 0),
         ("UPDATE mount_rs_tidb_metadata", 1),
+        ("INSERT INTO mount_rs_tidb_compact_members", 1),
+        ("DELETE FROM mount_rs_tidb_compact_members", 0),
+        ("INSERT INTO mount_rs_tidb_compact_dentries", 1),
+        ("DELETE FROM mount_rs_tidb_compact_dentries", 0),
     ] {
         assert_eq!(
             queries.iter().filter(|sql| sql.starts_with(prefix)).count(),
@@ -1718,6 +1792,8 @@ type Raw = (
     ),
     Vec<(i64, i64, i64, i64, String)>,
     Option<Vec<u8>>,
+    Vec<i64>,
+    Vec<(i64, i64, Vec<u8>, Vec<u8>, i64)>,
 );
 async fn raw(f: &Fixture) -> Raw {
     let pool = Pool::from_url(&f.url).unwrap();
@@ -1731,10 +1807,27 @@ async fn raw(f: &Fixture) -> Raw {
         )
         .await
         .unwrap();
+    let members = conn
+        .exec(
+            "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? ORDER BY inode",
+            (&f.key,),
+        )
+        .await
+        .unwrap();
+    let dentries = conn
+        .exec(
+            "SELECT parent,ordinal,name_hash,name,inode FROM mount_rs_tidb_compact_dentries WHERE volume_key=? ORDER BY parent,ordinal",
+            (&f.key,),
+        )
+        .await
+        .unwrap();
     drop(conn);
     pool.disconnect().await.unwrap();
-    (authority, rows, marker)
+    (authority, rows, marker, members, dentries)
 }
+
+#[path = "support/indexed_compact.rs"]
+mod indexed_compact;
 async fn corrupt(f: &Fixture, sql: &str) {
     let pool = Pool::from_url(&f.url).unwrap();
     let mut conn = pool.get_conn().await.unwrap();
@@ -1842,11 +1935,13 @@ async fn actual_compact_mode_discovery_rejects_each_retained_mrc5_marker_alone()
         drop(conn);
         pool.disconnect().await.unwrap();
         if anchor_only {
-            corrupt(
-                &f,
-                "DELETE FROM mount_rs_tidb_compact_guards WHERE volume_key=?",
-            )
-            .await;
+            for table in [
+                "mount_rs_tidb_compact_guards",
+                "mount_rs_tidb_compact_members",
+                "mount_rs_tidb_compact_dentries",
+            ] {
+                corrupt(&f, &format!("DELETE FROM {table} WHERE volume_key=?")).await;
+            }
         } else {
             let pool = Pool::from_url(&f.url).unwrap();
             let mut conn = pool.get_conn().await.unwrap();
@@ -1860,6 +1955,17 @@ async fn actual_compact_mode_discovery_rejects_each_retained_mrc5_marker_alone()
             pool.disconnect().await.unwrap();
         }
         let before = raw(&f).await;
+        if anchor_only {
+            assert!(before.1.is_empty(), "anchor-only control retains no guards");
+            assert!(
+                before.3.is_empty(),
+                "anchor-only control retains no members"
+            );
+            assert!(
+                before.4.is_empty(),
+                "anchor-only control retains no dentries"
+            );
+        }
         assert!(
             f.store.compact_inode_mode_state().await.is_err(),
             "mode={mode} anchor_only={anchor_only}"
@@ -2169,23 +2275,38 @@ async fn actual_compact_selected_load_uses_one_autocommit_joined_query() {
     let f = fixture(true).await;
     let inode = create(&f, "joined-read").await;
     let expected = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let (_, _, audited) = expected.clone().into_validated_namespace().unwrap();
+    let file = &expected.guards[&inode];
+    let expectation =
+        CompactFileExpectation::from_structure(&audited, file.identity, &file.node).unwrap();
     let proxy = compact_proxy::Proxy::new(&f.url).await;
     let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
         .await
         .unwrap();
     // Warm the owned pool/session and prepared statement outside measurement.
-    reader.load_compact_inode(f.backing, inode).await.unwrap();
+    reader
+        .read_compact_file(f.backing, inode, expectation)
+        .await
+        .unwrap();
     proxy.begin();
     let before = storage::snapshot();
-    let loaded = reader.load_compact_inode(f.backing, inode).await.unwrap();
+    let loaded = reader
+        .read_compact_file(f.backing, inode, expectation)
+        .await
+        .unwrap();
     let delta = storage::snapshot().delta(&before).unwrap();
     let (queries, rows) = proxy.end();
     // Expected semantic RED must still explicitly settle owned provider resources.
     reader.close().await.unwrap();
     f.store.close().await.unwrap();
 
-    assert_eq!(loaded.generation, expected.anchor.generation);
-    assert_eq!(loaded.guard, expected.guards[&inode]);
+    assert_eq!(loaded.generation(), expected.anchor.generation);
+    loaded.validate_expectation(expectation).unwrap();
+    let CompactInodeRead::Unchanged(checked) = loaded.into_inode_read().unwrap() else {
+        panic!("canonical scoped file bytes must certify the unchanged expectation");
+    };
+    assert_eq!(checked.identity(), file.identity);
+    assert!(checked.into_verified_root().is_none());
     assert_eq!(rows, 1, "one complete selected guard row must be observed");
     let selects: Vec<_> = queries
         .iter()
@@ -2194,10 +2315,12 @@ async fn actual_compact_selected_load_uses_one_autocommit_joined_query() {
     assert_eq!(
         selects.len(),
         1,
-        "one actual SQL SELECT must supply anchor and selected guard"
+        "one actual SQL SELECT must supply small authority, selected member and complete file"
     );
     assert!(selects[0].contains("mount_rs_tidb_metadata"));
     assert!(selects[0].contains("LEFT JOIN mount_rs_tidb_compact_guards"));
+    assert!(selects[0].contains("LEFT JOIN mount_rs_tidb_compact_members"));
+    assert!(!selects[0].contains("mount_rs_tidb_compact_dentries"));
     assert!(
         !selects[0].contains("FOR UPDATE"),
         "selected read remains nonlocking"
@@ -2244,6 +2367,14 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     let f = fixture(true).await;
     let inode = create(&f, "session-reuse").await;
     let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
+    let initial = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let authority = CompactAuthority::from_anchor(&initial.anchor).unwrap();
+    let expected = CompactFileExpectation::from_authority(
+        &authority,
+        original.guard.identity,
+        &original.guard.node,
+    )
+    .unwrap();
     let proxy = compact_proxy::Proxy::new(&f.url).await;
 
     // Trace starts before the first connection. A cap of one and exactly one
@@ -2254,8 +2385,8 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
         .metadata(TidbStorageOptions::new(&f.key))
         .await
         .unwrap();
-    let warm_first = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
-    let warm_second = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let warm_first = timeout(BOUND, reader.read_compact_file(f.backing, inode, expected)).await;
+    let warm_second = timeout(BOUND, reader.read_compact_file(f.backing, inode, expected)).await;
     let (warm_queries, _) = proxy.end();
 
     // The independent writer advances the physical identity. Rejecting an
@@ -2302,15 +2433,26 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
         ),
     )
     .await;
-    let after_drop = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let after_drop = timeout(BOUND, reader.read_compact_file(f.backing, inode, expected)).await;
     let (drop_queries, _) = proxy.end();
 
     proxy.begin();
     proxy.trace.pause_guards.store(true, Ordering::SeqCst);
     let interrupted_reader = reader.clone();
     let backing = f.backing;
-    let reading =
-        tokio::spawn(async move { interrupted_reader.load_compact_inode(backing, inode).await });
+    let interrupted_authority = authority.clone();
+    let interrupted_file = original.guard.clone();
+    let reading = tokio::spawn(async move {
+        let expected = CompactFileExpectation::from_authority(
+            &interrupted_authority,
+            interrupted_file.identity,
+            &interrupted_file.node,
+        )
+        .unwrap();
+        interrupted_reader
+            .read_compact_file(backing, inode, expected)
+            .await
+    });
     // Existing pause_guards holds the prepared EXECUTE before forwarding it
     // to TiDB. Awaiting the abort and then resuming settles this exact boundary.
     let reached = timeout(BOUND, proxy.trace.reached.notified()).await;
@@ -2319,8 +2461,9 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     proxy.trace.resume.notify_one();
 
     let published = timeout(BOUND, f.store.publish_compact_structure(&fresh_delta)).await;
-    let after_cancel = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
-    let after_cancel_again = timeout(BOUND, reader.load_compact_inode(f.backing, inode)).await;
+    let after_cancel = timeout(BOUND, reader.read_compact_file(f.backing, inode, expected)).await;
+    let after_cancel_again =
+        timeout(BOUND, reader.read_compact_file(f.backing, inode, expected)).await;
     let (cancel_queries, _) = proxy.end();
 
     // Attempt every shutdown before semantic assertions. Store close releases
@@ -2361,8 +2504,12 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     assert_eq!(warm_queries.iter().filter(|sql| joined(sql)).count(), 2);
     for loaded in [warm_first, warm_second] {
         let loaded = loaded.expect("warm cap-one checkout completed").unwrap();
-        assert_eq!(loaded.generation, original.generation);
-        assert_eq!(loaded.guard, original.guard);
+        assert_eq!(loaded.generation(), original.generation);
+        loaded.validate_expectation(expected).unwrap();
+        let CompactInodeRead::Unchanged(checked) = loaded.into_inode_read().unwrap() else {
+            panic!("warm file must certify complete unchanged bytes")
+        };
+        assert_eq!(checked.identity(), original.guard.identity);
     }
 
     assert!(
@@ -2374,7 +2521,11 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     let after_drop = after_drop
         .expect("checkout after tracked transaction drop completed")
         .unwrap();
-    assert_eq!(after_drop.generation, updated.generation);
+    assert_eq!(after_drop.generation(), updated.generation);
+    after_drop.validate_expectation(expected).unwrap();
+    let CompactInodeRead::Loaded(after_drop) = after_drop.into_inode_read().unwrap() else {
+        panic!("changed physical identity must return fresh owned file")
+    };
     assert_eq!(after_drop.guard, updated.guard);
     let rollback = drop_queries
         .iter()
@@ -2405,7 +2556,17 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
         let loaded = loaded
             .expect("selected read recovered without cap-one starvation")
             .unwrap();
-        assert_eq!(loaded.generation, publication.anchor.generation);
+        assert_eq!(loaded.generation(), publication.anchor.generation);
+        assert!(
+            loaded
+                .validate_expectation(expected)
+                .unwrap_err()
+                .is(ErrorCode::Eagain),
+            "caller observes changed authority before admitting a selected result"
+        );
+        let CompactInodeRead::Loaded(loaded) = loaded.into_inode_read().unwrap() else {
+            panic!("fresh structure must return a fresh complete file")
+        };
         assert_eq!(&loaded.guard, expected_guard);
     }
     assert_eq!(cancel_queries.iter().filter(|sql| joined(sql)).count(), 3);

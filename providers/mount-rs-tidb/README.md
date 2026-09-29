@@ -82,6 +82,46 @@ Concurrent online GC remains disabled until distributed open-handle pins and
 a reclamation policy exist. Whole-namespace publication is still subject to
 the configured 4 MiB limit; conflict blocks and tombstones can accumulate.
 
+## Indexed compact metadata
+
+The opt-in `compact_inode_updates` mode uses a distinct TiDB representation:
+
+| Record | Contents |
+| --- | --- |
+| Drive authority | Backing identity, structural generation, defaults, root, inode allocator and member count |
+| Inode membership | One indexed row per drive/inode |
+| Inode guard | Physical incarnation, epoch, revision and file layout or attributes |
+| Directory header | Attributes, entry count and ordinal allocator |
+| Directory entry | Parent, ordinal, complete binary name and child inode |
+
+Regular file reads use one coherent joined statement for authority, selected
+membership and the complete file guard. Existing ordinary root-child file
+opens use a point lookup over the directory header, exact name and child guard.
+The name digest selects candidates; the complete binary name establishes
+equality. Long names are bounded by the configured record and packet limits.
+Directory ordinals preserve listing order, including rename append behavior.
+
+File writes lock their guard first, then check fresh authority and membership.
+They update one guard without locking the drive authority. Structural writes
+retain the authority lock and publish only changed membership, directory-entry
+and guard rows. The first implementation still enumerates actual membership
+and affected directory entries when validating structural changes; complete
+snapshots audit the full graph. Those paths remain proportional to graph size.
+
+Every publication preflights encoded records and the effective packet limit
+before its first mutation. An acknowledged write requires durable blob
+publication followed by the metadata commit. A lost commit acknowledgement
+remains unknown and is never automatically replayed. Open-unlinked file guards
+and their layouts remain present until the existing reclamation rules permit
+removal.
+
+Shared tables are added during schema initialization. Enrollment accepts only
+an owned fresh empty MRC2 namespace and atomically establishes the indexed
+records. This unpublished format rejects earlier TiDB compact encodings;
+schema initialization does not convert their data. Other providers retain
+their existing representations and use the complete-read fallback unless they
+advertise the scoped point-read capability.
+
 ## TiDB limits and service requirements
 
 The defaults cap blocks and serialized namespace JSON at 4 MiB. This keeps

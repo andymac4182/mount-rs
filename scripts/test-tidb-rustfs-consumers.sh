@@ -34,6 +34,13 @@ export MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$phase_run_id"
 
 "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb \
   --test chunked_rustfs -- --ignored --nocapture
+MOUNT_RS_RUSTFS_ENDPOINT="$RUSTFS_ENDPOINT" \
+MOUNT_RS_RUSTFS_BUCKET="$RUSTFS_BUCKET" \
+MOUNT_RS_RUSTFS_REGION="$RUSTFS_REGION" \
+MOUNT_RS_RUSTFS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY_ID" \
+MOUNT_RS_RUSTFS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_ACCESS_KEY" \
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-sdk \
+    --test tidb_rustfs_indexed -- --ignored --nocapture --test-threads=1
 node "$repo_dir/tests/provider_matrix/node-sdk.mjs"
 node "$repo_dir/tests/provider_matrix/cli.mjs"
 node "$repo_dir/tests/provider_matrix/tidb-rustfs-soak.mjs"

@@ -19,7 +19,7 @@ const good = () => ({
     provider: "tidb",
     key_scope: "exact_input_utf8_bytes",
     schema_setup: "shared_ddl_and_session_configuration",
-    row_presence: { metadata: false, inodes: false, compact_guards: false, block_authority: false, blocks: false },
+    row_presence: { metadata: false, inodes: false, compact_guards: false, compact_members: false, compact_dentries: false, block_authority: false, blocks: false },
     observed_at_ns: "123456789",
   },
   blobs: {
@@ -77,6 +77,7 @@ function deeplyFrozen(value) {
 test("accepted receipt owns a deeply frozen fixed copy with explicit observation limits", () => {
   const { validateSplitNamespacePresenceReceipt } = implementation()
   const source = good()
+  assert.deepEqual(Object.keys(source.metadata.row_presence), ["metadata", "inodes", "compact_guards", "compact_members", "compact_dentries", "block_authority", "blocks"])
   const first = validateSplitNamespacePresenceReceipt(JSON.stringify(source))
   const second = validateSplitNamespacePresenceReceipt(JSON.stringify(source))
   assert.deepEqual(first, source)

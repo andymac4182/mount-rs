@@ -892,6 +892,21 @@ mod tests {
                 "object_store.backing_marker.retry_backoff",
             ]
         );
+        // Scoped file reads reuse SdkMetadataLoadCompactInode; point capability
+        // reuses SdkMetadataCompactInodeCapability. Root-entry reads share the
+        // appended complete root/file read slot, keeping the bank finite.
+        assert_eq!(
+            Operation::SdkMetadataCompactRootFileCapability as usize,
+            116
+        );
+        assert_eq!(Operation::SdkMetadataLoadCompactRootFile as usize, 117);
+        assert_eq!(
+            &names[116..118],
+            &[
+                "sdk.metadata.compact_root_file_capability",
+                "sdk.metadata.load_compact_root_file",
+            ]
+        );
         assert_eq!(
             names
                 .iter()

@@ -41,9 +41,9 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::compact::{
-    CompactInodeCapability, CompactInodeExpectation, CompactInodeRead, CompactRootFileCreate,
-    CompactSnapshot, CompactStructuralDelta, PhysicalInodeIdentity, StructuralScope,
-    ValidatedCompactStructure, VerifiedCompactRoot,
+    CompactFileExpectation, CompactInodeCapability, CompactInodeExpectation, CompactInodeRead,
+    CompactPointReadCapability, CompactRootFileCreate, CompactSnapshot, CompactStructuralDelta,
+    PhysicalInodeIdentity, StructuralScope, ValidatedCompactStructure, VerifiedCompactRoot,
 };
 use mount_rs_core::storage::{
     BlockExtent, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
@@ -2456,15 +2456,43 @@ where
                 Arc::clone(&state.namespace),
                 state.selected_inodes.get(&inode).cloned(),
                 compact.physical.get(&inode).copied(),
-                (inode == state.namespace.root).then(|| compact.structure.clone()),
+                compact.structure.clone(),
             )
         };
         let node = selected.as_deref().or_else(|| namespace.nodes.get(&inode));
+        if let (Some(node), Some(identity)) = (node, physical)
+            && matches!(node.data, NodeData::File(_))
+            && self.inner.metadata.compact_point_read_capability()
+                == CompactPointReadCapability::Supported
+        {
+            let expected = CompactFileExpectation::from_structure(&structure, identity, node)
+                .map_err(|error| self.fail_closed(error))?;
+            let receipt = self
+                .inner
+                .metadata
+                .read_compact_file(backing, inode, expected)
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+            // A removed/malformed selected row may belong to a new structure.
+            // Recover that structure before interpreting the deferred outcome.
+            if receipt.generation() != generation {
+                self.refresh_concurrent_namespace().await?;
+                return Ok(false);
+            }
+            receipt
+                .validate_expectation(expected)
+                .map_err(|error| self.fail_closed(error))?;
+            let read = receipt
+                .into_inode_read()
+                .map_err(|error| self.fail_closed(error))?;
+            return self.admit_compact_inode_read(inode, generation, revision, Some(node), read);
+        }
         let result = if let (Some(node), Some(identity)) = (node, physical) {
-            let expected = structure.as_ref().map_or_else(
-                || CompactInodeExpectation::selected(generation, identity, node),
-                ValidatedCompactStructure::expect_root,
-            );
+            let expected = if inode == namespace.root {
+                structure.expect_root()
+            } else {
+                CompactInodeExpectation::selected(generation, identity, node)
+            };
             self.inner
                 .metadata
                 .read_compact_inode(backing, inode, expected)
@@ -2484,19 +2512,40 @@ where
             }
             Err(error) => return Err(self.fail_closed(error)),
         };
+        let read_generation = match &read {
+            CompactInodeRead::Unchanged(checked) => checked.generation(),
+            CompactInodeRead::Loaded(loaded) => loaded.generation,
+        };
+        if read_generation != generation {
+            self.refresh_concurrent_namespace().await?;
+            return Ok(false);
+        }
+        self.admit_compact_inode_read(inode, generation, revision, node, read)
+    }
+
+    /// Admit either complete selected reads or scoped file reads only after
+    /// their caller checked the observed generation and scoped authority.
+    fn admit_compact_inode_read(
+        &self,
+        inode: InodeId,
+        generation: u64,
+        revision: u64,
+        node: Option<&NodeMetadata>,
+        read: CompactInodeRead,
+    ) -> Result<bool> {
+        self.check_inode_runtime()?;
         let loaded = match read {
             CompactInodeRead::Loaded(loaded) => loaded,
             CompactInodeRead::Unchanged(checked) => {
                 if checked.generation() != generation {
-                    self.refresh_concurrent_namespace().await?;
-                    return Ok(false);
+                    return Err(self.fail_closed(stale_inode_structure()));
                 }
                 let logical = checked
                     .identity()
                     .logical_version(generation)
                     .map_err(|error| self.fail_closed(error))?;
                 let mut state = self.lock_state()?;
-                if state.revision != revision {
+                if state.revision != revision || state.persisted_revision != generation {
                     return Ok(false);
                 }
                 if checked.inode() != inode
@@ -2515,6 +2564,16 @@ where
                     drop(state);
                     return Err(self.fail_closed(stale_inode_structure()));
                 };
+                if state
+                    .selected_inodes
+                    .get(&inode)
+                    .map(|node| node.as_ref())
+                    .or_else(|| state.namespace.nodes.get(&inode))
+                    != Some(node)
+                {
+                    drop(state);
+                    return Err(self.fail_closed(stale_inode_structure()));
+                }
                 // First admission after Full needs the existing selected
                 // overlay contract. Subsequent unchanged reads reuse it.
                 state
@@ -2525,15 +2584,14 @@ where
             }
         };
         if loaded.generation != generation {
-            self.refresh_concurrent_namespace().await?;
-            return Ok(false);
+            return Err(self.fail_closed(stale_inode_structure()));
         }
         let identity = loaded.guard.identity;
         let logical = identity
             .logical_version(generation)
             .map_err(|error| self.fail_closed(error))?;
         let mut state = self.lock_state()?;
-        if state.revision != revision {
+        if state.revision != revision || state.persisted_revision != generation {
             return Ok(false);
         }
         let Some(old_node) = state.namespace.nodes.get(&inode) else {
@@ -6028,6 +6086,115 @@ where
             .with_message("another writer repeatedly changed the namespace"))
     }
 
+    /// One scoped entry/file statement for an existing ordinary root child.
+    /// Its header/link receipt never becomes a complete fresh root proof.
+    async fn open_compact_root_entry(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        phase: GatePhasePermit<'_>,
+    ) -> Result<Option<(Arc<dyn FileHandle>, PathIdentity)>> {
+        if self.inner.metadata.compact_point_read_capability()
+            != CompactPointReadCapability::Supported
+        {
+            return Ok(None);
+        }
+        let Some(name) = path
+            .strip_prefix('/')
+            .filter(|name| !name.is_empty() && !name.contains('/'))
+        else {
+            return Ok(None);
+        };
+        let _refresh = phase.phase(GatePhase::Refresh);
+        let backing = self
+            .inner
+            .concurrent_backing
+            .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+        for _ in 0..MAX_CONCURRENT_CAS_RETRIES {
+            self.check_inode_runtime()?;
+            let (namespace, selected, structure, identity, revision, generation, root, inode) = {
+                let state = self.lock_state()?;
+                let namespace = &state.namespace;
+                let root = namespace.root;
+                let Some(NodeMetadata {
+                    data: NodeData::Directory { entries },
+                    ..
+                }) = namespace.nodes.get(&root)
+                else {
+                    drop(state);
+                    return Err(self.fail_closed(stale_inode_structure()));
+                };
+                let Some(entry) = entries.iter().find(|entry| entry.name == name) else {
+                    return Ok(None);
+                };
+                let inode = entry.inode;
+                if !namespace
+                    .nodes
+                    .get(&inode)
+                    .is_some_and(|node| matches!(node.data, NodeData::File(_)))
+                {
+                    return Ok(None);
+                }
+                let compact = state.compact.as_ref().ok_or_else(stale_inode_structure)?;
+                (
+                    Arc::clone(namespace),
+                    state.selected_inodes.get(&inode).cloned(),
+                    compact.structure.clone(),
+                    *compact
+                        .physical
+                        .get(&inode)
+                        .ok_or_else(stale_inode_structure)?,
+                    state.revision,
+                    state.persisted_revision,
+                    root,
+                    inode,
+                )
+            };
+            let node = selected
+                .as_deref()
+                .or_else(|| namespace.nodes.get(&inode))
+                .ok_or_else(stale_inode_structure)?;
+            let expected = CompactFileExpectation::from_structure(&structure, identity, node)
+                .map_err(|error| self.fail_closed(error))?;
+            self.inner
+                .blocks
+                .verify_concurrent_backing(backing)
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+            let receipt = self
+                .inner
+                .metadata
+                .read_compact_root_entry(backing, root, inode, name, expected)
+                .await
+                .map_err(|error| self.fail_closed(error))?;
+            if receipt.generation() != generation {
+                let snapshot = self
+                    .inner
+                    .metadata
+                    .load_compact_snapshot(backing)
+                    .await
+                    .map_err(|error| self.fail_closed(error))?;
+                match self.install_compact_snapshot(snapshot, revision, None) {
+                    Ok(()) => continue,
+                    Err(error) if error.code == ErrorCode::Eagain => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            let read = receipt
+                .into_inode_read(&structure)
+                .map_err(|error| self.fail_closed(error))?;
+            if !self.admit_compact_inode_read(inode, generation, revision, Some(node), read)? {
+                continue;
+            }
+            return self
+                .open_inode_handle(inode, path.to_owned(), flags)
+                .map(Some);
+        }
+        Err(FsError::new(ErrorCode::Eagain)
+            .with_syscall("open")
+            .with_message("root entry structure repeatedly changed"))
+    }
+
     async fn open_flags_inner(
         &self,
         path: &str,
@@ -6055,6 +6222,20 @@ where
         let _gate = self.operation_gate(GateKind::Metadata).await;
         drop(gate_profile);
         trace.stage("gate_acquired", format_args!("path={normalized:?}"));
+        if self.inner.options.compact_inode_updates
+            && guard.is_none()
+            && flags.read
+            && !flags.create
+            && !flags.exclusive
+            && !flags.truncate
+            && !flags.append
+            && let Some(opened) = self
+                .open_compact_root_entry(&normalized, flags, _gate.phase_permit())
+                .await?
+        {
+            trace.finish(format_args!("point_entry=true"));
+            return Ok(opened);
+        }
         if self.inner.options.compact_inode_updates
             && !self.inner.options.delegated
             && flags.read
@@ -11643,6 +11824,12 @@ mod compact_preparation_tests {
         inner: SqliteMetadataStore,
         old_calls: Arc<AtomicU64>,
         full_reads: Arc<AtomicU64>,
+        point_supported: Arc<AtomicBool>,
+        point_unchanged: Arc<AtomicBool>,
+        point_reads: Arc<AtomicU64>,
+        hold_point_once: Arc<AtomicBool>,
+        point_entered: Arc<tokio::sync::Notify>,
+        point_resume: Arc<tokio::sync::Notify>,
         hold_full_once: Arc<AtomicBool>,
         full_entered: Arc<tokio::sync::Notify>,
         full_resume: Arc<tokio::sync::Notify>,
@@ -11653,6 +11840,12 @@ mod compact_preparation_tests {
                 inner,
                 old_calls: Arc::new(AtomicU64::new(0)),
                 full_reads: Arc::new(AtomicU64::new(0)),
+                point_supported: Arc::new(AtomicBool::new(false)),
+                point_unchanged: Arc::new(AtomicBool::new(false)),
+                point_reads: Arc::new(AtomicU64::new(0)),
+                hold_point_once: Arc::new(AtomicBool::new(false)),
+                point_entered: Arc::new(tokio::sync::Notify::new()),
+                point_resume: Arc::new(tokio::sync::Notify::new()),
                 hold_full_once: Arc::new(AtomicBool::new(false)),
                 full_entered: Arc::new(tokio::sync::Notify::new()),
                 full_resume: Arc::new(tokio::sync::Notify::new()),
@@ -11665,6 +11858,47 @@ mod compact_preparation_tests {
     }
     #[async_trait]
     impl MetadataStore for RecordingMetadata {
+        fn compact_point_read_capability(
+            &self,
+        ) -> mount_rs_core::storage::compact::CompactPointReadCapability {
+            if self.point_supported.load(Ordering::SeqCst) {
+                mount_rs_core::storage::compact::CompactPointReadCapability::Supported
+            } else {
+                mount_rs_core::storage::compact::CompactPointReadCapability::Unsupported
+            }
+        }
+        async fn read_compact_file(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: u64,
+            expected: mount_rs_core::storage::compact::CompactFileExpectation<'_>,
+        ) -> Result<mount_rs_core::storage::compact::CompactFileRead> {
+            use mount_rs_core::storage::compact::{
+                CompactAuthority, CompactFileRead, check_compact_file_unchanged,
+            };
+            self.point_reads.fetch_add(1, Ordering::SeqCst);
+            let snapshot = self.inner.load_compact_snapshot(backing).await?;
+            let authority = CompactAuthority::from_anchor(&snapshot.anchor)?;
+            let guard = snapshot.guards.get(&inode).cloned();
+            if self.hold_point_once.swap(false, Ordering::SeqCst) {
+                self.point_entered.notify_one();
+                self.point_resume.notified().await;
+            }
+            if self.point_unchanged.load(Ordering::SeqCst) {
+                let guard = guard.as_ref().unwrap();
+                return Ok(check_compact_file_unchanged(
+                    &serde_json::to_vec(&authority).unwrap(),
+                    backing,
+                    inode,
+                    Some(inode),
+                    guard.identity,
+                    &serde_json::to_vec(&guard.node).unwrap(),
+                    expected,
+                )
+                .expect("the unchanged test receipt must certify the captured body"));
+            }
+            CompactFileRead::from_guard(authority, backing, inode, Some(inode), Ok(guard))
+        }
         fn durable(&self) -> bool {
             self.inner.durable()
         }
@@ -11689,6 +11923,10 @@ mod compact_preparation_tests {
             backing: ConcurrentBackingId,
             inode: u64,
         ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+            if self.hold_point_once.swap(false, Ordering::SeqCst) {
+                self.point_entered.notify_one();
+                self.point_resume.notified().await;
+            }
             self.inner.load_compact_inode(backing, inode).await
         }
         async fn publish_compact_structure(
@@ -11875,6 +12113,55 @@ mod compact_preparation_tests {
             resume: Arc::new(tokio::sync::Notify::new()),
             puts: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    #[test]
+    fn point_receipt_cannot_admit_after_local_revision_advances() {
+        block_on(async {
+            for unchanged in [false, true] {
+                let volume = Volume::new();
+                let setup = volume.open("point-race-setup").await;
+                setup.write_file("/file", b"retained body").await.unwrap();
+                let inode = setup.stat("/file").await.unwrap().ino;
+                setup.shutdown().await.unwrap();
+                let recorder = RecordingMetadata::new(volume.metadata());
+                let fs = ChunkedFs::open(
+                    recorder.clone(),
+                    volume.blocks(),
+                    ChunkedOptions::fixed("point-race", 16)
+                        .unwrap()
+                        .with_compact_inode_updates(true),
+                )
+                .await
+                .unwrap();
+                recorder.point_supported.store(true, Ordering::SeqCst);
+                recorder.point_unchanged.store(unchanged, Ordering::SeqCst);
+                recorder.hold_point_once.store(true, Ordering::SeqCst);
+                let mut read = Box::pin(fs.refresh_compact_inode_once(inode));
+                at_pause(&mut read, &recorder.point_entered).await;
+                let (generation, revision, physical) = {
+                    let mut state = fs.lock_state().unwrap();
+                    state.revision += 1;
+                    (
+                        state.persisted_revision,
+                        state.revision,
+                        state.compact.as_ref().unwrap().physical.clone(),
+                    )
+                };
+                recorder.point_resume.notify_one();
+                assert!(!read.await.unwrap());
+                assert_eq!(recorder.point_reads.load(Ordering::SeqCst), 1);
+                {
+                    let state = fs.lock_state().unwrap();
+                    assert_eq!(state.persisted_revision, generation);
+                    assert_eq!(state.revision, revision);
+                    assert_eq!(state.compact.as_ref().unwrap().physical, physical);
+                    assert!(state.selected_inodes.is_empty());
+                }
+                assert!(!fs.failed());
+                fs.shutdown().await.unwrap();
+            }
+        });
     }
 
     #[test]

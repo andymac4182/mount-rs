@@ -18,6 +18,13 @@
 use super::*;
 use crate::diagnostics::profile::{self, Event, Span};
 
+mod indexed;
+pub use indexed::{
+    CompactAuthority, CompactDirectoryEntry, CompactDirectoryHeader, CompactFileExpectation,
+    CompactFileRead, CompactPointReadCapability, CompactRootEntryRead, CompactRootEntryRows,
+    check_compact_file_unchanged, validate_compact_file_update,
+};
+
 mod root_file;
 pub use root_file::{
     CompactRootFileCapability, CompactRootFileIntent, CompactRootFileRead, CompactRootFileTimes,
@@ -863,6 +870,11 @@ mod streamed {
             }
             d.deserialize_struct("BlockExtent", NAMES, ExtentVisitor(self.0))
         }
+    }
+
+    pub(super) fn node_equal(bytes: &[u8], expected: &NodeMetadata) -> bool {
+        let mut decoder = serde_json::Deserializer::from_slice(bytes);
+        Node(expected).deserialize(&mut decoder).ok() == Some(true) && decoder.end().is_ok()
     }
 
     pub(super) fn check(
@@ -2035,7 +2047,7 @@ mod streamed_tests {
     #[global_allocator]
     static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-    fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
+    pub(super) fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
         CALLS.with(|calls| calls.set(0));
         BYTES.with(|bytes| bytes.set(0));
         ENABLED.with(|enabled| enabled.set(true));

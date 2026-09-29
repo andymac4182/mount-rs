@@ -17,6 +17,7 @@ async-trait = "0.1"
 mount-rs-core = { path = "../.." }
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 
 [dev-dependencies]

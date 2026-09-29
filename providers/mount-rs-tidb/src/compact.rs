@@ -1,7 +1,11 @@
-//! MRC5 consistent reads and explicit publication transactions; MRC4 authority stays distinct.
+//! Indexed MRC5 metadata. Complete logical proofs reconstruct actual stored rows;
+//! scoped file and root-entry reads transfer only point-selected records.
 use super::*;
 use mount_rs_core::storage::{NodeData, compact::*};
 use mysql_async::{Row, Value, consts::StatusFlags, from_value_opt, prelude::FromValue};
+#[path = "compact/indexed.rs"]
+mod indexed;
+use indexed::*;
 
 const TABLE: &str = "mount_rs_tidb_compact_guards";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
@@ -13,11 +17,11 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
     node LONGTEXT NOT NULL,
     PRIMARY KEY(volume_key,inode)
 )";
-
-const SELECTED_JOINED_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,g.inode,g.incarnation,g.epoch,g.revision,g.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_guards AS g ON g.volume_key=m.volume_key AND g.inode=? WHERE m.volume_key=?";
-const ROOT_FILE_JOINED_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,r.inode,r.incarnation,r.epoch,r.revision,r.node,f.inode,f.incarnation,f.epoch,f.revision,f.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_guards AS r ON r.volume_key=m.volume_key AND r.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS f ON f.volume_key=m.volume_key AND f.inode=? WHERE m.volume_key=?";
-
+const AUTHORITY_SQL: &str = "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?";
+const FILE_POINT_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,s.inode,g.inode,g.incarnation,g.epoch,g.revision,g.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS s ON s.volume_key=m.volume_key AND s.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS g ON g.volume_key=m.volume_key AND g.inode=? WHERE m.volume_key=?";
+const ROOT_ENTRY_POINT_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,rm.inode,r.inode,r.incarnation,r.epoch,r.revision,r.node,d.parent,d.ordinal,d.name,d.inode,fm.inode,f.inode,f.incarnation,f.epoch,f.revision,f.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS rm ON rm.volume_key=m.volume_key AND rm.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS r ON r.volume_key=m.volume_key AND r.inode=? LEFT JOIN mount_rs_tidb_compact_dentries AS d ON d.volume_key=m.volume_key AND d.parent=? AND d.name_hash=? AND d.name=? LEFT JOIN mount_rs_tidb_compact_members AS fm ON fm.volume_key=m.volume_key AND fm.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS f ON f.volume_key=m.volume_key AND f.inode=? WHERE m.volume_key=?";
 type GuardRow = (i64, i64, i64, i64, String);
+type DentryRow = (i64, i64, Vec<u8>, Vec<u8>, i64);
 type AnchorRow = (
     i64,
     Option<Vec<u8>>,
@@ -31,24 +35,73 @@ type AnchorRow = (
 type Column = (String, String, String, String, String);
 
 pub(super) async fn initialize(conn: &mut Conn) -> Result<()> {
-    conn.query_drop_observed(StorageOperation::TidbSqlDdl, SCHEMA)
-        .await
-        .map_err(|e| db_error("initialize TiDB compact guards", e))?;
-    validate_schema(conn, TABLE).await
+    for schema in [SCHEMA, MEMBERS_SCHEMA, DENTRIES_SCHEMA] {
+        conn.query_drop_observed(StorageOperation::TidbSqlDdl, schema)
+            .await
+            .map_err(|e| db_error("initialize indexed TiDB compact tables", e))?;
+    }
+    validate_schemas(conn).await
 }
-
+async fn validate_schemas<C: Queryable>(conn: &mut C) -> Result<()> {
+    validate_schema(conn, TABLE).await?;
+    validate_members_schema(conn, MEMBERS_TABLE).await?;
+    validate_dentries_schema(conn, DENTRIES_TABLE).await
+}
+async fn validate_members_schema<C: Queryable>(conn: &mut C, table: &str) -> Result<()> {
+    validate_table(
+        conn,
+        table,
+        &[("volume_key", "varbinary"), ("inode", "bigint")],
+        &[("PRIMARY", 0, 1, "volume_key"), ("PRIMARY", 0, 2, "inode")],
+    )
+    .await
+}
+async fn validate_dentries_schema<C: Queryable>(conn: &mut C, table: &str) -> Result<()> {
+    validate_table(
+        conn,
+        table,
+        &[
+            ("volume_key", "varbinary"),
+            ("parent", "bigint"),
+            ("ordinal", "bigint"),
+            ("name_hash", "binary"),
+            ("name", "longblob"),
+            ("inode", "bigint"),
+        ],
+        &[
+            ("PRIMARY", 0, 1, "volume_key"),
+            ("PRIMARY", 0, 2, "parent"),
+            ("PRIMARY", 0, 3, "ordinal"),
+            ("name_lookup", 1, 1, "volume_key"),
+            ("name_lookup", 1, 2, "parent"),
+            ("name_lookup", 1, 3, "name_hash"),
+        ],
+    )
+    .await
+}
 async fn validate_schema<C: Queryable>(conn: &mut C, table: &str) -> Result<()> {
-    let columns: Vec<Column> = conn.exec_observed(StorageOperation::TidbSqlMetadataRead,
-        "SELECT COLUMN_NAME,DATA_TYPE,COLUMN_TYPE,IS_NULLABLE,EXTRA FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", (table,)
-    ).await.map_err(|e| db_error("validate TiDB compact columns", e))?;
-    let expected = [
-        ("volume_key", "varbinary"),
-        ("inode", "bigint"),
-        ("incarnation", "bigint"),
-        ("epoch", "bigint"),
-        ("revision", "bigint"),
-        ("node", "longtext"),
-    ];
+    validate_table(
+        conn,
+        table,
+        &[
+            ("volume_key", "varbinary"),
+            ("inode", "bigint"),
+            ("incarnation", "bigint"),
+            ("epoch", "bigint"),
+            ("revision", "bigint"),
+            ("node", "longtext"),
+        ],
+        &[("PRIMARY", 0, 1, "volume_key"), ("PRIMARY", 0, 2, "inode")],
+    )
+    .await
+}
+async fn validate_table<C: Queryable>(
+    conn: &mut C,
+    table: &str,
+    expected: &[(&str, &str)],
+    expected_indexes: &[(&str, u64, u64, &str)],
+) -> Result<()> {
+    let columns: Vec<Column> = conn.exec_observed(StorageOperation::TidbSqlMetadataRead, "SELECT COLUMN_NAME,DATA_TYPE,COLUMN_TYPE,IS_NULLABLE,EXTRA FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", (table,)).await.map_err(|e| db_error("validate indexed TiDB compact columns", e))?;
     if columns.len() != expected.len()
         || columns
             .iter()
@@ -59,37 +112,35 @@ async fn validate_schema<C: Queryable>(conn: &mut C, table: &str) -> Result<()> 
                     || nullable != "NO"
                     || !extra.is_empty()
                     || full.contains("unsigned")
-                    || (n == "volume_key" && full != "varbinary(1020)")
+                    || (*n == "volume_key" && full != "varbinary(1020)")
+                    || (*n == "name_hash" && full != "binary(32)")
             })
     {
-        return Err(backend_error("incompatible TiDB compact guard columns"));
+        return Err(backend_error("incompatible indexed TiDB compact columns"));
     }
-    let indexes: Vec<(String, u64, String, Option<u64>)> = conn.exec_observed(StorageOperation::TidbSqlMetadataRead,
-        "SELECT INDEX_NAME,SEQ_IN_INDEX,COLUMN_NAME,SUB_PART FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY INDEX_NAME,SEQ_IN_INDEX", (table,)
-    ).await.map_err(|e| db_error("validate TiDB compact primary key", e))?;
-    if indexes
-        != vec![
-            ("PRIMARY".into(), 1, "volume_key".into(), None),
-            ("PRIMARY".into(), 2, "inode".into(), None),
-        ]
-    {
-        return Err(backend_error("incompatible TiDB compact guard primary key"));
+    let indexes: Vec<(String, u64, u64, String, Option<u64>)> = conn.exec_observed(StorageOperation::TidbSqlMetadataRead, "SELECT INDEX_NAME,NON_UNIQUE,SEQ_IN_INDEX,COLUMN_NAME,SUB_PART FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY INDEX_NAME,SEQ_IN_INDEX", (table,)).await.map_err(|e| db_error("validate indexed TiDB compact indexes", e))?;
+    // Compare sets because INFORMATION_SCHEMA's index-name collation can order
+    // PRIMARY before or after name_lookup. Exact full-width keys are required.
+    let actual: std::collections::BTreeSet<_> = indexes.into_iter().collect();
+    let expected: std::collections::BTreeSet<_> = expected_indexes
+        .iter()
+        .map(|(name, unique, seq, column)| {
+            (
+                (*name).to_owned(),
+                *unique,
+                *seq,
+                (*column).to_owned(),
+                None,
+            )
+        })
+        .collect();
+    if actual != expected {
+        return Err(backend_error("incompatible indexed TiDB compact indexes"));
     }
     Ok(())
 }
 
-async fn anchor<C: Queryable>(
-    conn: &mut C,
-    volume: &str,
-    backing: ConcurrentBackingId,
-) -> Result<CompactAnchor> {
-    let row: AnchorRow = conn.exec_first_observed(StorageOperation::TidbSqlMetadataRead,
-        "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?", (volume,)
-    ).await.map_err(|e| db_error("read TiDB compact anchor", e))?.ok_or_else(stale)?;
-    decode_anchor_row(row, backing)
-}
-
-fn decode_anchor_row(row: AnchorRow, backing: ConcurrentBackingId) -> Result<CompactAnchor> {
+fn decode_authority_row(row: AnchorRow, backing: ConcurrentBackingId) -> Result<CompactAuthority> {
     if row.1.as_deref() != Some(b"MRC5")
         || row.2.as_deref() != Some(backing.to_hex().as_bytes())
         || row.3.is_some()
@@ -101,20 +152,90 @@ fn decode_anchor_row(row: AnchorRow, backing: ConcurrentBackingId) -> Result<Com
     }
     let json = row.6.ok_or_else(stale)?;
     profile::add(Event::CompactAnchorReturned, json.len() as u64);
-    let anchor = decode_compact_anchor(json.as_bytes())?;
-    if nonnegative(row.0, "compact generation")? != anchor.generation || anchor.backing != backing {
-        return Err(backend_error("TiDB compact anchor authority mismatch"));
+    let authority = decode_authority(json.as_bytes())?;
+    if nonnegative(row.0, "compact generation")? != authority.generation
+        || authority.backing != backing
+    {
+        return Err(backend_error("indexed TiDB compact authority mismatch"));
     }
-    Ok(anchor)
+    Ok(authority)
 }
-
-async fn guards<C: Queryable>(
+async fn authority<C: Queryable>(
+    conn: &mut C,
+    volume: &str,
+    backing: ConcurrentBackingId,
+) -> Result<CompactAuthority> {
+    let row = conn
+        .exec_first_observed(
+            StorageOperation::TidbSqlMetadataRead,
+            AUTHORITY_SQL,
+            (volume,),
+        )
+        .await
+        .map_err(|e| db_error("read indexed TiDB compact authority", e))?
+        .ok_or_else(stale)?;
+    decode_authority_row(row, backing)
+}
+async fn members<C: Queryable>(conn: &mut C, volume: &str) -> Result<Vec<u64>> {
+    let rows: Vec<i64> = conn
+        .exec_observed(
+            StorageOperation::TidbSqlInodeRead,
+            "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? ORDER BY inode",
+            (volume,),
+        )
+        .await
+        .map_err(|e| db_error("read indexed TiDB compact members", e))?;
+    rows.into_iter()
+        .map(|v| nonnegative(v, "compact member"))
+        .collect()
+}
+async fn member<C: Queryable>(conn: &mut C, volume: &str, inode: u64) -> Result<Option<u64>> {
+    let row: Option<i64> = conn
+        .exec_first_observed(
+            StorageOperation::TidbSqlInodeRead,
+            "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? AND inode=?",
+            (volume, signed(inode, "compact member")?),
+        )
+        .await
+        .map_err(|e| db_error("read indexed TiDB compact member", e))?;
+    row.map(|v| nonnegative(v, "compact member")).transpose()
+}
+async fn anchor<C: Queryable>(
+    conn: &mut C,
+    volume: &str,
+    backing: ConcurrentBackingId,
+) -> Result<CompactAnchor> {
+    authority(conn, volume, backing)
+        .await?
+        .into_anchor(members(conn, volume).await?)
+}
+struct StoredGuard {
+    identity: PhysicalInodeIdentity,
+    body: StoredBody,
+}
+fn decode_guard_row(row: GuardRow) -> Result<(u64, StoredGuard)> {
+    let (inode, incarnation, epoch, revision, json) = row;
+    let inode = nonnegative(inode, "compact inode")?;
+    profile::add(Event::InodeReturned, json.len() as u64);
+    let identity = PhysicalInodeIdentity {
+        incarnation: nonnegative(incarnation, "compact incarnation")?,
+        epoch: nonnegative(epoch, "compact epoch")?,
+        revision: nonnegative(revision, "compact revision")?,
+    };
+    Ok((
+        inode,
+        StoredGuard {
+            identity,
+            body: decode_body(inode, &json)?,
+        },
+    ))
+}
+async fn stored_guards<C: Queryable>(
     conn: &mut C,
     volume: &str,
     selected: Option<u64>,
     locking: bool,
-) -> Result<BTreeMap<u64, CompactGuard>> {
-    let suffix = if locking { " FOR UPDATE" } else { "" };
+) -> Result<BTreeMap<u64, StoredGuard>> {
     let mut sql = "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards WHERE volume_key=?".to_owned();
     let params = if let Some(inode) = selected {
         sql.push_str(" AND inode=?");
@@ -123,142 +244,183 @@ async fn guards<C: Queryable>(
         Params::from((volume,))
     };
     sql.push_str(" ORDER BY inode");
-    sql.push_str(suffix);
+    if locking {
+        sql.push_str(" FOR UPDATE");
+    }
     let rows: Vec<GuardRow> = conn
         .exec_observed(StorageOperation::TidbSqlInodeRead, sql, params)
         .await
-        .map_err(|e| db_error("read TiDB compact guards", e))?;
-    let mut guards = BTreeMap::new();
+        .map_err(|e| db_error("read indexed TiDB compact guards", e))?;
+    let mut result = BTreeMap::new();
     for row in rows {
         let (inode, guard) = decode_guard_row(row)?;
-        if guards.insert(inode, guard).is_some() {
-            return Err(backend_error("duplicate TiDB compact guard"));
+        if result.insert(inode, guard).is_some() {
+            return Err(backend_error("duplicate indexed TiDB compact guard"));
         }
     }
-    Ok(guards)
+    Ok(result)
 }
-
 async fn locked_root_file_guards(
     tx: &mut Transaction<'_>,
     volume: &str,
     expected: &BTreeMap<u64, PhysicalInodeIdentity>,
-) -> Result<BTreeMap<u64, CompactGuard>> {
-    let mut expected_iter = expected.keys();
-    let (Some(&root), Some(&file), None) = (
-        expected_iter.next(),
-        expected_iter.next(),
-        expected_iter.next(),
-    ) else {
+) -> Result<BTreeMap<u64, StoredGuard>> {
+    let ids: Vec<_> = expected.keys().copied().collect();
+    let [root, file] = ids.as_slice() else {
         return Err(backend_error(
-            "TiDB compact root-file publication needs two guards",
+            "compact root-file publication requires two guards",
         ));
     };
-    if root == file {
-        return Err(backend_error("duplicate TiDB compact root-file guard"));
-    }
-    let rows: Vec<GuardRow> = tx
-        .exec_observed(
-            StorageOperation::TidbSqlInodeRead,
-            "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode IN (?,?) ORDER BY inode FOR UPDATE",
-            (volume, signed(root, "compact root inode")?, signed(file, "compact file inode")?),
-        )
-        .await
-        .map_err(|e| db_error("read TiDB compact root-file guards", e))?;
-    let mut guards = BTreeMap::new();
+    let rows: Vec<GuardRow> = tx.exec_observed(StorageOperation::TidbSqlInodeRead, "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode IN (?,?) ORDER BY inode FOR UPDATE", (volume, signed(*root, "compact root")?, signed(*file, "compact file")?)).await.map_err(|e| db_error("lock indexed TiDB root-file guards", e))?;
+    let mut result = BTreeMap::new();
     for row in rows {
         let (inode, guard) = decode_guard_row(row)?;
-        if guards.insert(inode, guard).is_some() {
-            return Err(backend_error("duplicate TiDB compact root-file guard"));
+        if result.insert(inode, guard).is_some() {
+            return Err(backend_error("duplicate compact root-file guard"));
         }
     }
-    if guards.len() != 2 || guards.keys().copied().ne([root, file]) {
+    if result.keys().copied().ne(ids) {
         return Err(stale());
     }
-    Ok(guards)
+    Ok(result)
 }
-
-fn decode_guard_row(row: GuardRow) -> Result<(u64, CompactGuard)> {
-    let (inode, incarnation, epoch, revision, json) = row;
-    profile::add(Event::InodeReturned, json.len() as u64);
-    let inode = nonnegative(inode, "compact inode")?;
-    let guard = CompactGuard {
-        identity: PhysicalInodeIdentity {
-            incarnation: nonnegative(incarnation, "compact incarnation")?,
-            epoch: nonnegative(epoch, "compact epoch")?,
-            revision: nonnegative(revision, "compact revision")?,
-        },
-        node: serde_json::from_str(&json).map_err(backend_error)?,
+async fn entries<C: Queryable>(
+    conn: &mut C,
+    volume: &str,
+    parent: Option<u64>,
+    locking: bool,
+) -> Result<BTreeMap<u64, Vec<StoredEntry>>> {
+    let mut sql = "SELECT parent,ordinal,name_hash,name,inode FROM mount_rs_tidb_compact_dentries WHERE volume_key=?".to_owned();
+    let params = if let Some(parent) = parent {
+        sql.push_str(" AND parent=?");
+        Params::from((volume, signed(parent, "compact directory parent")?))
+    } else {
+        Params::from((volume,))
     };
-    Ok((inode, guard))
+    sql.push_str(" ORDER BY parent,ordinal");
+    if locking {
+        sql.push_str(" FOR UPDATE");
+    }
+    let rows: Vec<DentryRow> = conn
+        .exec_observed(StorageOperation::TidbSqlInodeRead, sql, params)
+        .await
+        .map_err(|e| db_error("read indexed TiDB directory entries", e))?;
+    let mut result: BTreeMap<u64, Vec<StoredEntry>> = BTreeMap::new();
+    for (parent, ordinal, hash, name, inode) in rows {
+        let name = String::from_utf8(name).map_err(backend_error)?;
+        validate_name(&name)?;
+        if hash.as_slice() != name_hash(&name) {
+            return Err(backend_error("indexed TiDB directory name digest mismatch"));
+        }
+        let parent = nonnegative(parent, "compact directory parent")?;
+        let entry = StoredEntry {
+            ordinal: nonnegative(ordinal, "compact directory ordinal")?,
+            name,
+            inode: nonnegative(inode, "compact directory child")?,
+        };
+        let group = result.entry(parent).or_default();
+        if group
+            .last()
+            .is_some_and(|last| last.ordinal >= entry.ordinal)
+        {
+            return Err(backend_error("duplicate indexed TiDB directory ordinal"));
+        }
+        group.push(entry);
+    }
+    Ok(result)
 }
-
+fn materialize_guards(
+    stored: BTreeMap<u64, StoredGuard>,
+    entries: &BTreeMap<u64, Vec<StoredEntry>>,
+    complete: bool,
+) -> Result<BTreeMap<u64, CompactGuard>> {
+    if complete
+        && entries.keys().any(|parent| {
+            !matches!(
+                stored.get(parent).map(|g| &g.body),
+                Some(StoredBody::Directory(_))
+            )
+        })
+    {
+        return Err(backend_error(
+            "indexed TiDB entries without directory guard",
+        ));
+    }
+    stored
+        .into_iter()
+        .map(|(inode, guard)| {
+            let node = match guard.body {
+                StoredBody::Node(node) => {
+                    if entries.get(&inode).is_some_and(|rows| !rows.is_empty()) {
+                        return Err(backend_error("indexed TiDB entries under non-directory"));
+                    }
+                    node
+                }
+                StoredBody::Directory(header) => materialize_directory(
+                    inode,
+                    &header,
+                    entries.get(&inode).map(Vec::as_slice).unwrap_or_default(),
+                )?,
+            };
+            Ok((
+                inode,
+                CompactGuard {
+                    identity: guard.identity,
+                    node,
+                },
+            ))
+        })
+        .collect()
+}
+async fn selected_complete<C: Queryable>(
+    conn: &mut C,
+    volume: &str,
+    inode: u64,
+    locking: bool,
+) -> Result<Option<CompactGuard>> {
+    let stored = stored_guards(conn, volume, Some(inode), locking).await?;
+    let rows = entries(conn, volume, Some(inode), locking).await?;
+    Ok(materialize_guards(stored, &rows, true)?.remove(&inode))
+}
 fn joined_field<T: FromValue>(values: &mut [Option<Value>], index: usize) -> Result<T> {
     let value = values
         .get_mut(index)
         .and_then(Option::take)
-        .ok_or_else(|| backend_error("incomplete TiDB compact joined row"))?;
-    from_value_opt(value).map_err(|_| backend_error("invalid TiDB compact joined field"))
+        .ok_or_else(|| backend_error("incomplete indexed TiDB joined row"))?;
+    from_value_opt(value).map_err(|_| backend_error("invalid indexed TiDB joined field"))
 }
-
-fn decode_joined_rows(
-    rows: impl IntoIterator<Item = Vec<Option<Value>>>,
+fn joined_authority(
+    values: &mut [Option<Value>],
     backing: ConcurrentBackingId,
-    inode: u64,
-) -> Result<LoadedCompactInode> {
-    let mut rows = rows.into_iter();
-    let mut values = rows.next().ok_or_else(stale)?;
-    if rows.next().is_some() {
-        return Err(backend_error("duplicate TiDB compact joined row"));
-    }
-    if values.len() != 13 {
-        return Err(backend_error("invalid TiDB compact joined row shape"));
-    }
-    // mysql_common's typed tuples stop at 12 columns. Decode all 13 fields
-    // without cloning bodies or allowing conversion failures to panic.
-    // Authority precedes missing, malformed or out-of-range guard handling.
-    let anchor = decode_anchor_row(
+) -> Result<CompactAuthority> {
+    decode_authority_row(
         (
-            joined_field(&mut values, 0)?,
-            joined_field(&mut values, 1)?,
-            joined_field(&mut values, 2)?,
-            joined_field(&mut values, 3)?,
-            joined_field(&mut values, 4)?,
-            joined_field(&mut values, 5)?,
-            joined_field(&mut values, 6)?,
-            joined_field(&mut values, 7)?,
+            joined_field(values, 0)?,
+            joined_field(values, 1)?,
+            joined_field(values, 2)?,
+            joined_field(values, 3)?,
+            joined_field(values, 4)?,
+            joined_field(values, 5)?,
+            joined_field(values, 6)?,
+            joined_field(values, 7)?,
         ),
         backing,
-    )?;
-    signed(inode, "compact inode")?;
-    // A LEFT JOIN without a guard produces five NULLs. Partial NULL rows are
-    // corrupt and must reach checked conversion rather than look absent.
-    if values[8..]
-        .iter()
-        .all(|value| matches!(value, Some(Value::NULL)))
-    {
-        return Err(stale());
-    }
-    let (selected, guard) = decode_guard_row((
-        joined_field(&mut values, 8)?,
-        joined_field(&mut values, 9)?,
-        joined_field(&mut values, 10)?,
-        joined_field(&mut values, 11)?,
-        joined_field(&mut values, 12)?,
-    ))?;
-    if selected != inode {
-        return Err(stale());
-    }
-    LoadedCompactInode::from_guard(&anchor, inode, guard)
+    )
 }
-
-fn decode_root_file_guard_group(
+fn optional_member(values: &mut [Option<Value>], index: usize) -> Result<Option<u64>> {
+    let value: Option<i64> = joined_field(values, index)?;
+    value
+        .map(|v| nonnegative(v, "compact point member"))
+        .transpose()
+}
+fn optional_guard(
     values: &mut [Option<Value>],
     start: usize,
     requested: u64,
-) -> Result<Option<CompactGuard>> {
+) -> Result<Option<StoredGuard>> {
     if values[start..start + 5]
         .iter()
-        .all(|value| matches!(value, Some(Value::NULL)))
+        .all(|v| matches!(v, Some(Value::NULL)))
     {
         return Ok(None);
     }
@@ -274,65 +436,74 @@ fn decode_root_file_guard_group(
     }
     Ok(Some(guard))
 }
-
-fn decode_root_file_joined_rows(
-    rows: impl IntoIterator<Item = Vec<Option<Value>>>,
-    backing: ConcurrentBackingId,
-    expected_root: u64,
-    candidate_file: u64,
-) -> Result<CompactRootFileRead> {
-    let mut rows = rows.into_iter();
-    let mut values = rows.next().ok_or_else(stale)?;
-    if rows.next().is_some() {
-        return Err(backend_error("duplicate TiDB compact root-file joined row"));
-    }
-    if values.len() != 18 {
-        return Err(backend_error(
-            "invalid TiDB compact root-file joined row shape",
-        ));
-    }
-    // Decode authority first, including the anchor generation and backing.
-    // Only then inspect requested IDs or either optional LEFT JOIN group.
-    let anchor = decode_anchor_row(
-        (
-            joined_field(&mut values, 0)?,
-            joined_field(&mut values, 1)?,
-            joined_field(&mut values, 2)?,
-            joined_field(&mut values, 3)?,
-            joined_field(&mut values, 4)?,
-            joined_field(&mut values, 5)?,
-            joined_field(&mut values, 6)?,
-            joined_field(&mut values, 7)?,
-        ),
-        backing,
-    )?;
-    signed(expected_root, "compact root inode")?;
-    signed(candidate_file, "compact file inode")?;
-    let root = decode_root_file_guard_group(&mut values, 8, expected_root)?;
-    let file = decode_root_file_guard_group(&mut values, 13, candidate_file)?;
-    CompactRootFileRead::from_guards(anchor, expected_root, candidate_file, root, file)
+fn complete_file(guard: Option<StoredGuard>) -> Result<Option<CompactGuard>> {
+    guard
+        .map(|guard| match guard.body {
+            StoredBody::Node(node) => Ok(CompactGuard {
+                identity: guard.identity,
+                node,
+            }),
+            StoredBody::Directory(_) => Err(backend_error("selected compact file is a directory")),
+        })
+        .transpose()
 }
-
-// Borrow public Row values while their receive buffers remain owned by the
-// result. Unusual driver representations use the existing checked conversion.
-fn check_joined_unchanged(
+fn point_rows(rows: Vec<Row>, width: usize) -> Result<(Vec<Option<Value>>, bool)> {
+    let mut rows = rows.into_iter();
+    let row = rows.next().ok_or_else(stale)?;
+    // Decode fresh authority before rejecting selected cardinality/shape. In
+    // particular duplicate exact dentries must not hide a changed generation.
+    if row.len() < 8 {
+        return Err(backend_error("incomplete indexed TiDB point authority"));
+    }
+    let shape = rows.next().is_none() && row.len() == width;
+    Ok((row.unwrap_raw(), shape))
+}
+fn decode_file_point(
+    rows: Vec<Row>,
+    backing: ConcurrentBackingId,
+    inode: u64,
+) -> Result<CompactFileRead> {
+    let (mut values, shape) = point_rows(rows, 14)?;
+    let authority = joined_authority(&mut values, backing)?;
+    if !shape {
+        return CompactFileRead::from_guard(
+            authority,
+            backing,
+            inode,
+            None,
+            Err(backend_error(
+                "invalid indexed TiDB file point cardinality or shape",
+            )),
+        );
+    }
+    let selected = optional_member(&mut values, 8);
+    let guard = signed(inode, "compact inode")
+        .and_then(|_| optional_guard(&mut values, 9, inode))
+        .and_then(complete_file);
+    // Preserve the fresh generation even when selected rows are malformed.
+    match selected {
+        Ok(member) => CompactFileRead::from_guard(authority, backing, inode, member, guard),
+        Err(error) => CompactFileRead::from_guard(authority, backing, inode, None, Err(error)),
+    }
+}
+fn check_file_point(
     rows: &[Row],
     backing: ConcurrentBackingId,
     inode: u64,
-    expected: CompactInodeExpectation<'_>,
-) -> Option<CheckedCompactInode> {
+    expected: CompactFileExpectation<'_>,
+) -> Option<CompactFileRead> {
     let [row] = rows else {
         return None;
     };
-    if row.len() != 13 {
+    if row.len() != 14 {
         return None;
     }
-    let integer = |index| match row.as_ref(index)? {
-        Value::Int(value) => Some(*value),
+    let integer = |i| match row.as_ref(i)? {
+        Value::Int(v) => Some(*v),
         _ => None,
     };
-    let bytes = |index| match row.as_ref(index)? {
-        Value::Bytes(value) => Some(value.as_slice()),
+    let bytes = |i| match row.as_ref(i)? {
+        Value::Bytes(v) => Some(v.as_slice()),
         _ => None,
     };
     if bytes(1)? != b"MRC5"
@@ -341,44 +512,95 @@ fn check_joined_unchanged(
         || integer(4)? != CONCURRENT_FENCE_SENTINEL
         || integer(5)? != 0
         || !matches!(row.as_ref(7), Some(Value::NULL))
+        || u64::try_from(integer(0)?).ok()? != expected.generation()
+        || u64::try_from(integer(9)?).ok()? != inode
     {
         return None;
     }
-    let generation = u64::try_from(integer(0)?).ok()?;
-    if signed(inode, "compact inode").is_err() || u64::try_from(integer(8)?).ok()? != inode {
-        return None;
-    }
+    let member = u64::try_from(integer(8)?).ok()?;
     let identity = PhysicalInodeIdentity {
-        incarnation: u64::try_from(integer(9)?).ok()?,
-        epoch: u64::try_from(integer(10)?).ok()?,
-        revision: u64::try_from(integer(11)?).ok()?,
+        incarnation: u64::try_from(integer(10)?).ok()?,
+        epoch: u64::try_from(integer(11)?).ok()?,
+        revision: u64::try_from(integer(12)?).ok()?,
     };
-    let anchor = bytes(6)?;
-    let node = bytes(12)?;
-    let checked = check_compact_inode_unchanged(
-        anchor, backing, generation, inode, identity, node, expected,
+    let authority = bytes(6)?;
+    let node = bytes(13)?;
+    let read = check_compact_file_unchanged(
+        authority_inner(authority)?,
+        backing,
+        inode,
+        Some(member),
+        identity,
+        node,
+        expected,
     )?;
-    profile::add(Event::CompactAnchorReturned, anchor.len() as u64);
+    profile::add(Event::CompactAnchorReturned, authority.len() as u64);
     profile::add(Event::InodeReturned, node.len() as u64);
-    Some(checked)
+    Some(read)
 }
-
+fn decode_root_entry_point(
+    rows: Vec<Row>,
+    backing: ConcurrentBackingId,
+    root: u64,
+    file: u64,
+    name: &str,
+) -> Result<CompactRootEntryRead> {
+    let (mut values, shape) = point_rows(rows, 24)?;
+    let authority = joined_authority(&mut values, backing)?;
+    let selected = (|| {
+        if !shape {
+            return Err(backend_error(
+                "invalid indexed TiDB root-entry point cardinality or shape",
+            ));
+        }
+        signed(root, "compact root")?;
+        signed(file, "compact file")?;
+        let root_member = optional_member(&mut values, 8)?;
+        let root = optional_guard(&mut values, 9, root)?
+            .map(|guard| match guard.body {
+                StoredBody::Directory(header) => Ok((guard.identity, header)),
+                StoredBody::Node(_) => {
+                    Err(backend_error("compact point root is not indexed directory"))
+                }
+            })
+            .transpose()?;
+        let entry = if values[14..18]
+            .iter()
+            .all(|v| matches!(v, Some(Value::NULL)))
+        {
+            None
+        } else {
+            let name: Vec<u8> = joined_field(&mut values, 16)?;
+            Some(CompactDirectoryEntry {
+                parent: nonnegative(joined_field(&mut values, 14)?, "compact directory parent")?,
+                ordinal: nonnegative(joined_field(&mut values, 15)?, "compact directory ordinal")?,
+                name: String::from_utf8(name).map_err(backend_error)?,
+                inode: nonnegative(joined_field(&mut values, 17)?, "compact directory child")?,
+            })
+        };
+        let file_member = optional_member(&mut values, 18)?;
+        let file = complete_file(optional_guard(&mut values, 19, file)?)?;
+        Ok(CompactRootEntryRows {
+            root_member,
+            root,
+            entry,
+            file_member,
+            file,
+        })
+    })();
+    CompactRootEntryRead::from_rows(authority, backing, root, file, name, selected)
+}
 fn encode_anchor(anchor: &CompactAnchor) -> Result<Vec<u8>> {
-    signed(anchor.generation, "compact generation")?;
-    signed(anchor.next_inode, "compact next inode")?;
-    for &inode in &anchor.members {
-        signed(inode, "compact member")?;
-    }
-    let bytes = encode_compact_anchor(anchor)?;
+    let bytes = encode_authority(anchor)?;
     profile::add(Event::CompactAnchorSerialized, bytes.len() as u64);
     Ok(bytes)
 }
-fn encode_guard(inode: u64, guard: &CompactGuard) -> Result<String> {
+fn encode_guard(inode: u64, guard: &CompactGuard, next_ordinal: u64) -> Result<String> {
     signed(inode, "compact inode")?;
     signed(guard.identity.incarnation, "compact incarnation")?;
     signed(guard.identity.epoch, "compact epoch")?;
     signed(guard.identity.revision, "compact revision")?;
-    let json = serde_json::to_string(&guard.node).map_err(backend_error)?;
+    let json = encode_body(&guard.node, next_ordinal)?;
     profile::add(Event::InodeSerialized, json.len() as u64);
     Ok(json)
 }
@@ -395,8 +617,6 @@ async fn packet_budget(tx: &mut Transaction<'_>) -> Result<usize> {
     Ok(client.min(usize::try_from(session).unwrap_or(usize::MAX)))
 }
 fn check_bytes(db: &Database, bytes: usize, packet: usize) -> Result<()> {
-    // All statements carry one volume, one body, <=5 integers. This conservative
-    // budget covers both SQL prepare and binary execution packets/length prefixes.
     let wire = bytes
         .checked_add(db.volume_key.len())
         .and_then(|n| n.checked_add(1024));
@@ -430,7 +650,7 @@ async fn write_guard(
             volume,
             signed(inode, "compact inode")?,
         ),
-        "write TiDB compact guard",
+        "write indexed TiDB compact guard",
     )
     .await?;
     if changed != 1 {
@@ -439,17 +659,29 @@ async fn write_guard(
     Ok(())
 }
 fn selected_session_ready(flags: Option<StatusFlags>) -> bool {
-    flags.is_some_and(|flags| {
-        flags.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT)
-            && !flags.intersects(
+    flags.is_some_and(|f| {
+        f.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT)
+            && !f.intersects(
                 StatusFlags::SERVER_STATUS_IN_TRANS | StatusFlags::SERVER_STATUS_IN_TRANS_READONLY,
             )
     })
 }
-
+async fn point_connection(store: &TidbMetadataStore) -> Result<Conn> {
+    let conn = store
+        .0
+        .pool
+        .get_conn_observed()
+        .await
+        .map_err(|e| db_error("read indexed TiDB compact point", e))?;
+    if !selected_session_ready(conn.last_ok_packet().map(|p| p.status_flags())) {
+        let _ = conn.disconnect().await;
+        return Err(backend_error(
+            "TiDB compact point read requires verified autocommit outside a transaction",
+        ));
+    }
+    Ok(conn)
+}
 async fn read_transaction(conn: &mut Conn) -> Result<Transaction<'_>> {
-    // Nonlocking consistent reads share a single TiDB start_ts even when selected
-    // writes commit between statements without advancing anchor generation.
     let mut opts = TxOpts::default();
     opts.with_isolation_level(IsolationLevel::RepeatableRead);
     observe_result_future(
@@ -458,26 +690,39 @@ async fn read_transaction(conn: &mut Conn) -> Result<Transaction<'_>> {
         0,
     )
     .await
-    .map_err(|e| db_error("begin TiDB compact snapshot", e))
+    .map_err(|e| db_error("begin indexed TiDB compact snapshot", e))
+}
+#[derive(serde::Deserialize)]
+struct NamespaceFormatMarker {
+    #[serde(default, deserialize_with = "present_namespace_layout")]
+    layout: bool,
 }
 
-async fn require_no_compact_markers<C: Queryable>(
-    tx: &mut C,
+fn present_namespace_layout<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<bool, D::Error> {
+    let _: serde::de::IgnoredAny = serde::Deserialize::deserialize(deserializer)?;
+    Ok(true)
+}
+
+fn require_plain_namespace_format(body: &str) -> Result<()> {
+    // Plain namespaces have no outer layout tag. Any tagged envelope,
+    // including an unsupported or damaged version, must retain its mode fence.
+    // Ignored fields are streamed rather than allocating the complete graph.
+    let marker: NamespaceFormatMarker = serde_json::from_str(body).map_err(backend_error)?;
+    if marker.layout { Err(stale()) } else { Ok(()) }
+}
+
+pub(super) async fn require_no_compact_markers<C: Queryable>(
+    conn: &mut C,
     volume: &str,
     namespace: Option<&str>,
 ) -> Result<()> {
-    if namespace.is_some_and(|body| decode_compact_anchor(body.as_bytes()).is_ok()) {
-        return Err(stale());
+    if let Some(body) = namespace {
+        require_plain_namespace_format(body)?;
     }
-    let guard: Option<u8> = tx
-        .exec_first_observed(
-            StorageOperation::TidbSqlInodeRead,
-            "SELECT 1 FROM mount_rs_tidb_compact_guards WHERE volume_key=? LIMIT 1",
-            (volume,),
-        )
-        .await
-        .map_err(|e| db_error("inspect TiDB compact guards", e))?;
-    if guard.is_some() {
+    let row: Option<(u8, u8, u8)> = conn.exec_first_observed(StorageOperation::TidbSqlInodeRead, "SELECT EXISTS(SELECT 1 FROM mount_rs_tidb_compact_guards WHERE volume_key=?),EXISTS(SELECT 1 FROM mount_rs_tidb_compact_members WHERE volume_key=?),EXISTS(SELECT 1 FROM mount_rs_tidb_compact_dentries WHERE volume_key=?)", (volume, volume, volume)).await.map_err(|e| db_error("inspect indexed TiDB compact markers", e))?;
+    if row.is_none_or(|r| r != (0, 0, 0)) {
         return Err(stale());
     }
     Ok(())
@@ -492,18 +737,23 @@ impl TidbMetadataStore {
             .await
             .map_err(|e| db_error("inspect TiDB compact mode", e))?;
         let mut tx = read_transaction(&mut conn).await?;
-        let row: AnchorRow = tx.exec_first_observed(StorageOperation::TidbSqlMetadataRead,
-            "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?",
-            (&self.0.volume_key,),
-        ).await.map_err(|e| db_error("inspect TiDB compact mode", e))?.ok_or_else(stale)?;
+        let row: AnchorRow = tx
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
+                AUTHORITY_SQL,
+                (&self.0.volume_key,),
+            )
+            .await
+            .map_err(|e| db_error("inspect TiDB compact mode", e))?
+            .ok_or_else(stale)?;
         let result = match (row.1.as_deref(), row.2.as_deref()) {
             (Some(b"MRC5"), Some(id)) => {
                 let backing = backing_from_bytes(id)?;
-                let anchor = decode_anchor_row(row, backing)?;
-                Ok(Some(InodeModeState {
+                let authority = decode_authority_row(row, backing)?;
+                Some(InodeModeState {
                     backing,
-                    structural_generation: anchor.generation,
-                }))
+                    structural_generation: authority.generation,
+                })
             }
             (Some(b"MRC4"), Some(_)) => {
                 compact_inode_authority((row.0, row.1, row.2, row.3, row.4, row.5), None)?;
@@ -511,7 +761,7 @@ impl TidbMetadataStore {
                     return Err(stale());
                 }
                 require_no_compact_markers(&mut tx, &self.0.volume_key, row.6.as_deref()).await?;
-                Ok(None)
+                None
             }
             (Some(b"MRC2"), Some(id)) => {
                 backing_from_bytes(id)?;
@@ -523,7 +773,7 @@ impl TidbMetadataStore {
                     return Err(stale());
                 }
                 require_no_compact_markers(&mut tx, &self.0.volume_key, row.6.as_deref()).await?;
-                Ok(None)
+                None
             }
             (None, None) | (Some(b"MRC1"), None) if row.7.is_none() => {
                 if (row.1.is_some()
@@ -533,10 +783,10 @@ impl TidbMetadataStore {
                     return Err(stale());
                 }
                 require_no_compact_markers(&mut tx, &self.0.volume_key, row.6.as_deref()).await?;
-                Ok(None)
+                None
             }
-            _ => Err(stale()),
-        }?;
+            _ => return Err(stale()),
+        };
         observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
             .map_err(|e| db_error("finish TiDB compact inspection", e))?;
@@ -556,9 +806,9 @@ impl TidbMetadataStore {
             .pool
             .get_conn_observed()
             .await
-            .map_err(|e| db_error("enroll TiDB compact", e))?;
+            .map_err(|e| db_error("enroll indexed TiDB compact", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
-        validate_schema(&mut tx, TABLE).await?;
+        validate_schemas(&mut tx).await?;
         locked_lease_row(&mut tx, &self.0.volume_key)
             .await?
             .ok_or_else(stale)?;
@@ -581,7 +831,7 @@ impl TidbMetadataStore {
         profile::add(Event::NamespaceReturned, json.len() as u64);
         let ns: Namespace = serde_json::from_str(&json).map_err(backend_error)?;
         ns.validate()?;
-        let root = ns.nodes.get(&ns.root).ok_or_else(stale)?;
+        let root_node = ns.nodes.get(&ns.root).ok_or_else(stale)?;
         if delegation.is_some()
             || ns.nodes.len() != 1
             || ns.next_inode
@@ -589,11 +839,20 @@ impl TidbMetadataStore {
                     .root
                     .checked_add(1)
                     .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?
-            || !matches!(&root.data, NodeData::Directory { entries } if entries.is_empty())
+            || !matches!(&root_node.data, NodeData::Directory { entries } if entries.is_empty())
         {
             return Err(FsError::new(ErrorCode::Ebusy));
         }
-        let count: u64 = tx.exec_first_observed(StorageOperation::TidbSqlMetadataRead, "SELECT (SELECT count(*) FROM mount_rs_tidb_inodes WHERE volume_key=?)+(SELECT count(*) FROM mount_rs_tidb_compact_guards WHERE volume_key=?)", (&self.0.volume_key, &self.0.volume_key)).await.map_err(|e| db_error("check TiDB compact enrollment history", e))?.ok_or_else(stale)?;
+        require_no_compact_markers(&mut tx, &self.0.volume_key, Some(&json)).await?;
+        let count: u64 = tx
+            .exec_first_observed(
+                StorageOperation::TidbSqlMetadataRead,
+                "SELECT count(*) FROM mount_rs_tidb_inodes WHERE volume_key=?",
+                (&self.0.volume_key,),
+            )
+            .await
+            .map_err(|e| db_error("check TiDB compact enrollment history", e))?
+            .ok_or_else(stale)?;
         if count != 0 {
             return Err(FsError::new(ErrorCode::Ebusy));
         }
@@ -614,18 +873,25 @@ impl TidbMetadataStore {
                 epoch: generation,
                 revision: 0,
             },
-            node: root.clone(),
+            node: root_node.clone(),
         };
         let body = encode_anchor(&anchor)?;
-        let node = encode_guard(ns.root, &root)?;
+        let node = encode_guard(ns.root, &root, 0)?;
         let budget = packet_budget(&mut tx).await?;
         check_bytes(&self.0, body.len(), budget)?;
         check_bytes(&self.0, node.len(), budget)?;
+        check_bytes(&self.0, 0, budget)?;
+        tx.exec_drop_observed(
+            StorageOperation::TidbSqlInodeWrite,
+            "INSERT INTO mount_rs_tidb_compact_members(volume_key,inode) VALUES(?,?)",
+            (&self.0.volume_key, signed(ns.root, "compact member")?),
+        )
+        .await
+        .map_err(|e| db_error("enroll TiDB compact root member", e))?;
         write_guard(&mut tx, &self.0.volume_key, ns.root, &root, node, true).await?;
-        tx.exec_drop_observed(StorageOperation::TidbSqlMetadataWrite, "UPDATE mount_rs_tidb_metadata SET write_mode='MRC5',revision=?,namespace=? WHERE volume_key=?", (signed(generation,"compact generation")?, body, &self.0.volume_key)).await.map_err(|e| db_error("enroll TiDB compact anchor", e))?;
+        tx.exec_drop_observed(StorageOperation::TidbSqlMetadataWrite, "UPDATE mount_rs_tidb_metadata SET write_mode='MRC5',revision=?,namespace=? WHERE volume_key=?", (signed(generation, "compact generation")?, body, &self.0.volume_key)).await.map_err(|e| db_error("enroll indexed TiDB compact authority", e))?;
         commit(tx, "enroll compact mode").await
     }
-
     pub(super) async fn compact_snapshot(
         &self,
         backing: ConcurrentBackingId,
@@ -638,9 +904,11 @@ impl TidbMetadataStore {
             .map_err(|e| db_error("load TiDB compact snapshot", e))?;
         let mut tx = read_transaction(&mut conn).await?;
         let anchor = anchor(&mut tx, &self.0.volume_key, backing).await?;
+        let stored = stored_guards(&mut tx, &self.0.volume_key, None, false).await?;
+        let rows = entries(&mut tx, &self.0.volume_key, None, false).await?;
         let snapshot = CompactSnapshot {
             anchor,
-            guards: guards(&mut tx, &self.0.volume_key, None, false).await?,
+            guards: materialize_guards(stored, &rows, true)?,
         };
         snapshot.namespace()?;
         observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
@@ -653,24 +921,63 @@ impl TidbMetadataStore {
         backing: ConcurrentBackingId,
         inode: u64,
     ) -> Result<LoadedCompactInode> {
-        let rows = self.compact_selected_rows(inode).await?;
-        decode_joined_rows(rows.into_iter().map(Row::unwrap_raw), backing, inode)
+        let mut conn = self
+            .0
+            .pool
+            .get_conn_observed()
+            .await
+            .map_err(|e| db_error("load complete TiDB compact inode", e))?;
+        let mut tx = read_transaction(&mut conn).await?;
+        let anchor = anchor(&mut tx, &self.0.volume_key, backing).await?;
+        signed(inode, "compact inode")?;
+        let guard = selected_complete(&mut tx, &self.0.volume_key, inode, false)
+            .await?
+            .ok_or_else(stale)?;
+        let loaded = LoadedCompactInode::from_guard(&anchor, inode, guard)?;
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
+            .await
+            .map_err(|e| db_error("finish complete TiDB compact inode", e))?;
+        Ok(loaded)
     }
-
     pub(super) async fn compact_read(
         &self,
         backing: ConcurrentBackingId,
         inode: u64,
         expected: CompactInodeExpectation<'_>,
     ) -> Result<CompactInodeRead> {
-        let rows = self.compact_selected_rows(inode).await?;
-        if let Some(checked) = check_joined_unchanged(&rows, backing, inode, expected) {
-            return Ok(CompactInodeRead::Unchanged(checked));
-        }
-        decode_joined_rows(rows.into_iter().map(Row::unwrap_raw), backing, inode)
-            .map(CompactInodeRead::Loaded)
+        let mut conn = self
+            .0
+            .pool
+            .get_conn_observed()
+            .await
+            .map_err(|e| db_error("read complete TiDB compact inode", e))?;
+        let mut tx = read_transaction(&mut conn).await?;
+        let anchor = anchor(&mut tx, &self.0.volume_key, backing).await?;
+        signed(inode, "compact inode")?;
+        let guard = selected_complete(&mut tx, &self.0.volume_key, inode, false)
+            .await?
+            .ok_or_else(stale)?;
+        let loaded = LoadedCompactInode::from_guard(&anchor, inode, guard)?;
+        // The complete proof uses freshly reconstructed SQL rows, never cached
+        // topology. Scoped hot-path reads avoid this explicit full fallback.
+        let a = encode_compact_anchor(&anchor)?;
+        let body = serde_json::to_vec(&loaded.guard.node).map_err(backend_error)?;
+        let checked = check_compact_inode_unchanged(
+            &a,
+            backing,
+            anchor.generation,
+            inode,
+            loaded.guard.identity,
+            &body,
+            expected,
+        );
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
+            .await
+            .map_err(|e| db_error("finish complete TiDB compact inode", e))?;
+        Ok(checked
+            .map(CompactInodeRead::Unchanged)
+            .unwrap_or(CompactInodeRead::Loaded(loaded)))
     }
-
     pub(super) async fn compact_root_file(
         &self,
         backing: ConcurrentBackingId,
@@ -682,63 +989,70 @@ impl TidbMetadataStore {
             .pool
             .get_conn_observed()
             .await
-            .map_err(|e| db_error("load TiDB compact root and file", e))?;
-        if !selected_session_ready(conn.last_ok_packet().map(|packet| packet.status_flags())) {
-            let _ = conn.disconnect().await;
-            return Err(backend_error(
-                "TiDB compact root-file read requires verified autocommit outside a transaction",
-            ));
-        }
-        // Both optional guard bodies and the authority anchor share one
-        // nonlocking statement snapshot. Range errors follow authority decode.
-        let root = signed(expected_root, "compact root inode").unwrap_or(0);
-        let file = signed(candidate_file, "compact file inode").unwrap_or(0);
-        let rows: Vec<Row> = conn
-            .exec_observed(
-                StorageOperation::TidbSqlInodeRead,
-                ROOT_FILE_JOINED_SQL,
-                (root, file, &self.0.volume_key),
-            )
+            .map_err(|e| db_error("read complete TiDB compact root-file", e))?;
+        let mut tx = read_transaction(&mut conn).await?;
+        let anchor = anchor(&mut tx, &self.0.volume_key, backing).await?;
+        signed(expected_root, "compact root")?;
+        signed(candidate_file, "compact file")?;
+        let root = selected_complete(&mut tx, &self.0.volume_key, expected_root, false).await?;
+        let file = selected_complete(&mut tx, &self.0.volume_key, candidate_file, false).await?;
+        let read =
+            CompactRootFileRead::from_guards(anchor, expected_root, candidate_file, root, file)?;
+        observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
-            .map_err(|e| db_error("read TiDB compact root and file", e))?;
-        decode_root_file_joined_rows(
-            rows.into_iter().map(Row::unwrap_raw),
-            backing,
-            expected_root,
-            candidate_file,
-        )
+            .map_err(|e| db_error("finish complete TiDB root-file", e))?;
+        Ok(read)
     }
-
-    async fn compact_selected_rows(&self, inode: u64) -> Result<Vec<Row>> {
-        let mut conn = self
-            .0
-            .pool
-            .get_conn_observed()
-            .await
-            .map_err(|e| db_error("load TiDB compact inode", e))?;
-        // The private pool configures autocommit and finishes tracked dirty
-        // cleanup before checkout. Require the latest server status witness;
-        // never turn an unexpected active transaction into an implicit commit.
-        if !selected_session_ready(conn.last_ok_packet().map(|packet| packet.status_flags())) {
-            let _ = conn.disconnect().await;
-            return Err(backend_error(
-                "TiDB compact selected read requires verified autocommit outside a transaction",
-            ));
-        }
-        // One nonlocking joined SELECT reads anchor and guard at one TiDB
-        // statement snapshot. Full snapshots still require explicit RR.
-        // Preserve authority-before-range-error precedence from the two-query
-        // path. The decoder rejects an out-of-range inode before guard use.
+    pub(super) async fn compact_file(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        expected: CompactFileExpectation<'_>,
+    ) -> Result<CompactFileRead> {
+        let mut conn = point_connection(self).await?;
         let selected = signed(inode, "compact inode").unwrap_or(0);
         let rows: Vec<Row> = conn
             .exec_observed(
                 StorageOperation::TidbSqlInodeRead,
-                SELECTED_JOINED_SQL,
-                (selected, &self.0.volume_key),
+                FILE_POINT_SQL,
+                (selected, selected, &self.0.volume_key),
             )
             .await
-            .map_err(|e| db_error("read TiDB compact inode", e))?;
-        Ok(rows)
+            .map_err(|e| db_error("read TiDB compact file point", e))?;
+        if let Some(read) = check_file_point(&rows, backing, inode, expected) {
+            return Ok(read);
+        }
+        decode_file_point(rows, backing, inode)
+    }
+    pub(super) async fn compact_root_entry(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: u64,
+        candidate_file: u64,
+        name: &str,
+        _expected: CompactFileExpectation<'_>,
+    ) -> Result<CompactRootEntryRead> {
+        let mut conn = point_connection(self).await?;
+        let root = signed(expected_root, "compact root").unwrap_or(0);
+        let file = signed(candidate_file, "compact file").unwrap_or(0);
+        let rows: Vec<Row> = conn
+            .exec_observed(
+                StorageOperation::TidbSqlInodeRead,
+                ROOT_ENTRY_POINT_SQL,
+                (
+                    root,
+                    root,
+                    root,
+                    name_hash(name).to_vec(),
+                    name.as_bytes(),
+                    file,
+                    file,
+                    &self.0.volume_key,
+                ),
+            )
+            .await
+            .map_err(|e| db_error("read TiDB compact root-entry point", e))?;
+        decode_root_entry_point(rows, backing, expected_root, candidate_file, name)
     }
     pub(super) async fn compact_publish_inode(
         &self,
@@ -755,23 +1069,70 @@ impl TidbMetadataStore {
             .await
             .map_err(|e| db_error("publish TiDB compact inode", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
-        // Guard first, fresh nonlocking authority AFTER any wait. Selected writers
-        // never acquire root authority, so structural root->guard has no lock cycle.
-        let current = guards(&mut tx, &self.0.volume_key, Some(inode), true)
+        // Guard first; authority and explicit membership are fresh after a wait.
+        // No structural authority lock is taken by selected file publication.
+        let stored = stored_guards(&mut tx, &self.0.volume_key, Some(inode), true)
             .await?
             .remove(&inode)
             .ok_or_else(stale)?;
-        let anchor = anchor(&mut tx, &self.0.volume_key, backing).await?;
-        let guard = validate_selected_update(
-            &anchor, backing, generation, inode, &current, expected, node,
-        )?;
-        let json = encode_guard(inode, &guard)?;
+        let authority = authority(&mut tx, &self.0.volume_key, backing).await?;
+        let selected_member = member(&mut tx, &self.0.volume_key, inode).await?;
+        let (guard, next_ordinal) = match stored.body {
+            StoredBody::Node(current_node) if matches!(current_node.data, NodeData::File(_)) => {
+                let current = CompactGuard {
+                    identity: stored.identity,
+                    node: current_node,
+                };
+                (
+                    validate_compact_file_update(
+                        &authority,
+                        backing,
+                        generation,
+                        inode,
+                        selected_member,
+                        &current,
+                        expected,
+                        node,
+                    )?,
+                    0,
+                )
+            }
+            body => {
+                let anchor = authority
+                    .clone()
+                    .into_anchor(members(&mut tx, &self.0.volume_key).await?)?;
+                let next_ordinal = match &body {
+                    StoredBody::Directory(h) => h.next_ordinal,
+                    _ => 0,
+                };
+                let rows = entries(&mut tx, &self.0.volume_key, Some(inode), true).await?;
+                let mut current = materialize_guards(
+                    BTreeMap::from([(
+                        inode,
+                        StoredGuard {
+                            identity: stored.identity,
+                            body,
+                        },
+                    )]),
+                    &rows,
+                    true,
+                )?;
+                let current = current.remove(&inode).ok_or_else(stale)?;
+                (
+                    validate_selected_update(
+                        &anchor, backing, generation, inode, &current, expected, node,
+                    )?,
+                    next_ordinal,
+                )
+            }
+        };
+        let json = encode_guard(inode, &guard, next_ordinal)?;
         let budget = packet_budget(&mut tx).await?;
         check_bytes(&self.0, json.len(), budget)?;
         write_guard(&mut tx, &self.0.volume_key, inode, &guard, json, false).await?;
         commit(tx, "publish compact inode").await?;
         Ok(LoadedCompactInode {
-            generation: anchor.generation,
+            generation: authority.generation,
             guard,
         })
     }
@@ -786,52 +1147,169 @@ impl TidbMetadataStore {
             .await
             .map_err(|e| db_error("publish TiDB compact structure", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
-        // TiDB has no gap locks. Every API insert/delete/structural transition
-        // holds this root authority lock; Full additionally locks every existing
-        // guard and validates its exact membership against the immutable anchor.
         locked_lease_row(&mut tx, &self.0.volume_key)
             .await?
             .ok_or_else(stale)?;
         let anchor = anchor(&mut tx, &self.0.volume_key, delta.base_anchor().backing).await?;
-        let current = match delta.scope() {
-            StructuralScope::Full => guards(&mut tx, &self.0.volume_key, None, true).await?,
+        let stored = match delta.scope() {
+            StructuralScope::Full => stored_guards(&mut tx, &self.0.volume_key, None, true).await?,
             StructuralScope::FileCreate => {
-                let mut map = BTreeMap::new();
+                let mut guards = BTreeMap::new();
                 for &inode in delta.expected().keys() {
-                    map.extend(guards(&mut tx, &self.0.volume_key, Some(inode), true).await?);
+                    guards.extend(
+                        stored_guards(&mut tx, &self.0.volume_key, Some(inode), true).await?,
+                    );
                 }
-                map
+                guards
             }
             StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink => {
                 locked_root_file_guards(&mut tx, &self.0.volume_key, delta.expected()).await?
             }
         };
+        let mut directory_rows = BTreeMap::new();
+        if delta.scope() == StructuralScope::Full {
+            directory_rows = entries(&mut tx, &self.0.volume_key, None, true).await?;
+        } else {
+            for (&inode, guard) in &stored {
+                if matches!(guard.body, StoredBody::Directory(_)) {
+                    directory_rows
+                        .extend(entries(&mut tx, &self.0.volume_key, Some(inode), true).await?);
+                }
+            }
+        }
+        let old_ordinals: BTreeMap<_, _> = stored
+            .iter()
+            .filter_map(|(&inode, guard)| match &guard.body {
+                StoredBody::Directory(h) => Some((inode, h.next_ordinal)),
+                _ => None,
+            })
+            .collect();
+        let current = materialize_guards(
+            stored,
+            &directory_rows,
+            delta.scope() == StructuralScope::Full,
+        )?;
         let publication = delta.validate_current(&anchor, &current)?;
         let body = encode_anchor(&publication.anchor)?;
         let budget = packet_budget(&mut tx).await?;
         check_bytes(&self.0, body.len(), budget)?;
+        check_bytes(&self.0, 0, budget)?;
         let mut encoded = BTreeMap::new();
+        let mut plans = BTreeMap::new();
         for (&inode, guard) in &publication.upserts {
-            let json = encode_guard(inode, guard)?;
+            let ordinal = if let NodeData::Directory { entries } = &guard.node.data {
+                let old = directory_rows
+                    .get(&inode)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let plan =
+                    DirectoryPlan::new(old, *old_ordinals.get(&inode).unwrap_or(&0), entries)?;
+                for entry in &plan.upserts {
+                    signed(entry.ordinal, "compact directory ordinal")?;
+                    signed(entry.inode, "compact directory child")?;
+                    check_bytes(
+                        &self.0,
+                        entry
+                            .name
+                            .len()
+                            .checked_add(32)
+                            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?,
+                        budget,
+                    )?;
+                }
+                let ordinal = plan.next_ordinal;
+                plans.insert(inode, plan);
+                ordinal
+            } else {
+                0
+            };
+            let json = encode_guard(inode, guard, ordinal)?;
             check_bytes(&self.0, json.len(), budget)?;
             encoded.insert(inode, json);
         }
         for &inode in &publication.removed {
             signed(inode, "compact inode")?;
         }
-        // No guard or anchor mutations occur before all SQL/byte checks above.
-        for &inode in &publication.removed {
+        let added: Vec<_> = publication
+            .anchor
+            .members
+            .iter()
+            .copied()
+            .filter(|inode| anchor.members.binary_search(inode).is_err())
+            .collect();
+        let removed: Vec<_> = anchor
+            .members
+            .iter()
+            .copied()
+            .filter(|inode| publication.anchor.members.binary_search(inode).is_err())
+            .collect();
+        // Every encoding, name, integer and packet is preflighted before DML.
+        for &inode in &removed {
             if changed_query(
                 StorageOperation::TidbSqlInodeWrite,
                 &mut tx,
-                "DELETE FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode=?",
-                (&self.0.volume_key, signed(inode, "compact inode")?),
-                "delete TiDB compact guard",
+                "DELETE FROM mount_rs_tidb_compact_members WHERE volume_key=? AND inode=?",
+                (&self.0.volume_key, signed(inode, "compact member")?),
+                "remove TiDB compact member",
             )
             .await?
                 != 1
             {
                 return Err(stale());
+            }
+        }
+        for &inode in &added {
+            tx.exec_drop_observed(
+                StorageOperation::TidbSqlInodeWrite,
+                "INSERT INTO mount_rs_tidb_compact_members(volume_key,inode) VALUES(?,?)",
+                (&self.0.volume_key, signed(inode, "compact member")?),
+            )
+            .await
+            .map_err(|e| db_error("add TiDB compact member", e))?;
+        }
+        for &inode in &publication.removed {
+            tx.exec_drop_observed(
+                StorageOperation::TidbSqlInodeWrite,
+                "DELETE FROM mount_rs_tidb_compact_dentries WHERE volume_key=? AND parent=?",
+                (
+                    &self.0.volume_key,
+                    signed(inode, "compact directory parent")?,
+                ),
+            )
+            .await
+            .map_err(|e| db_error("remove TiDB compact directory rows", e))?;
+            if changed_query(
+                StorageOperation::TidbSqlInodeWrite,
+                &mut tx,
+                "DELETE FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode=?",
+                (&self.0.volume_key, signed(inode, "compact inode")?),
+                "remove TiDB compact guard",
+            )
+            .await?
+                != 1
+            {
+                return Err(stale());
+            }
+        }
+        for (&inode, plan) in &plans {
+            if plan.rewrite {
+                tx.exec_drop_observed(
+                    StorageOperation::TidbSqlInodeWrite,
+                    "DELETE FROM mount_rs_tidb_compact_dentries WHERE volume_key=? AND parent=?",
+                    (
+                        &self.0.volume_key,
+                        signed(inode, "compact directory parent")?,
+                    ),
+                )
+                .await
+                .map_err(|e| db_error("rewrite TiDB compact directory", e))?;
+            } else {
+                for &ordinal in &plan.removed {
+                    if changed_query(StorageOperation::TidbSqlInodeWrite, &mut tx, "DELETE FROM mount_rs_tidb_compact_dentries WHERE volume_key=? AND parent=? AND ordinal=?", (&self.0.volume_key, signed(inode, "compact directory parent")?, signed(ordinal, "compact directory ordinal")?), "remove TiDB compact directory entry").await? != 1 { return Err(stale()); }
+                }
+            }
+            for entry in &plan.upserts {
+                tx.exec_drop_observed(StorageOperation::TidbSqlInodeWrite, "INSERT INTO mount_rs_tidb_compact_dentries(volume_key,parent,ordinal,name_hash,name,inode) VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name_hash=VALUES(name_hash),name=VALUES(name),inode=VALUES(inode)", (&self.0.volume_key, signed(inode, "compact directory parent")?, signed(entry.ordinal, "compact directory ordinal")?, name_hash(&entry.name).to_vec(), entry.name.as_bytes(), signed(entry.inode, "compact directory child")?)).await.map_err(|e| db_error("write TiDB compact directory entry", e))?;
             }
         }
         for (&inode, guard) in &publication.upserts {
@@ -840,7 +1318,7 @@ impl TidbMetadataStore {
                 &self.0.volume_key,
                 inode,
                 guard,
-                encoded.remove(&inode).expect("encoded upsert"),
+                encoded.remove(&inode).expect("preflighted compact guard"),
                 delta.created().contains_key(&inode),
             )
             .await?;
@@ -855,7 +1333,7 @@ impl TidbMetadataStore {
             ),
         )
         .await
-        .map_err(|e| db_error("publish TiDB compact anchor", e))?;
+        .map_err(|e| db_error("publish indexed TiDB compact authority", e))?;
         commit(tx, "publish compact structure").await?;
         Ok(publication)
     }
@@ -866,6 +1344,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_namespace_layout_fences_unknown_and_damaged_envelopes() {
+        assert!(require_plain_namespace_format(r#"{"root":1,"nodes":{}}"#).is_ok());
+        for body in [
+            r#"{"layout":"mount-rs-tidb-indexed-compact","version":99}"#,
+            r#"{"layout":"mount-rs-compact-inodes","anchor":{}}"#,
+            r#"{"layout":null}"#,
+            r#"{"layout":"unknown-future-format"}"#,
+            r#"{"layout":"mount-rs-tidb-indexed-compact","layout":null}"#,
+            r#"{"layout":"mount-rs-tidb-indexed-compact""#,
+        ] {
+            assert!(
+                require_plain_namespace_format(body).is_err(),
+                "accepted {body}"
+            );
+        }
+    }
+    #[test]
     fn selected_session_requires_autocommit_and_no_active_transaction() {
         assert!(!selected_session_ready(None));
         for flags in [
@@ -874,379 +1369,19 @@ mod tests {
             StatusFlags::SERVER_STATUS_IN_TRANS_READONLY,
             StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_STATUS_IN_TRANS,
             StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_STATUS_IN_TRANS_READONLY,
-            StatusFlags::SERVER_STATUS_AUTOCOMMIT
-                | StatusFlags::SERVER_STATUS_IN_TRANS
-                | StatusFlags::SERVER_STATUS_IN_TRANS_READONLY,
         ] {
-            assert!(!selected_session_ready(Some(flags)), "{flags:?}");
+            assert!(!selected_session_ready(Some(flags)));
         }
         assert!(selected_session_ready(Some(
             StatusFlags::SERVER_STATUS_AUTOCOMMIT
         )));
-        assert!(selected_session_ready(Some(
-            StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_STATUS_NO_INDEX_USED
-        )));
     }
-
-    fn joined_fixture() -> (CompactAnchor, CompactGuard, Vec<Option<Value>>) {
-        use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
-        use mount_rs_core::storage::FileLayout;
-        use mount_rs_core::{S_IFREG, Stats};
-
-        let chunker = FixedSizeChunker::new(4096).unwrap().config();
-        let anchor = CompactAnchor {
-            backing: ConcurrentBackingId::from_bytes([0x65; 16]).unwrap(),
-            generation: 7,
-            root: 1,
-            next_inode: 3,
-            default_uid: 0,
-            default_gid: 0,
-            umask: 0o022,
-            default_chunker: chunker.clone(),
-            members: vec![1, 2],
-        };
-        let guard = CompactGuard {
-            identity: PhysicalInodeIdentity {
-                incarnation: 2,
-                epoch: 6,
-                revision: 9,
-            },
-            node: NodeMetadata {
-                stats: Stats {
-                    dev: 0,
-                    ino: 2,
-                    mode: S_IFREG | 0o644,
-                    nlink: 1,
-                    uid: 0,
-                    gid: 0,
-                    rdev: 0,
-                    size: 0,
-                    blksize: 4096,
-                    blocks: 0,
-                    atime_ms: 0,
-                    mtime_ms: 0,
-                    ctime_ms: 0,
-                    birthtime_ms: 0,
-                },
-                data: NodeData::File(FileLayout {
-                    chunker,
-                    extents: vec![],
-                }),
-            },
-        };
-        let row = vec![
-            Some(Value::Int(7)),
-            Some(Value::Bytes(b"MRC5".to_vec())),
-            Some(Value::Bytes(anchor.backing.to_hex().into_bytes())),
-            Some(Value::NULL),
-            Some(Value::Int(CONCURRENT_FENCE_SENTINEL)),
-            Some(Value::Int(0)),
-            Some(Value::Bytes(encode_compact_anchor(&anchor).unwrap())),
-            Some(Value::NULL),
-            Some(Value::Int(2)),
-            Some(Value::Int(2)),
-            Some(Value::Int(6)),
-            Some(Value::Int(9)),
-            Some(Value::Bytes(serde_json::to_vec(&guard.node).unwrap())),
-        ];
-        (anchor, guard, row)
-    }
-
     #[test]
-    fn joined_selected_decodes_exact_body_and_physical_identity() {
-        let (anchor, guard, row) = joined_fixture();
-        let loaded = decode_joined_rows([row], anchor.backing, 2).unwrap();
-        assert_eq!(
-            loaded,
-            LoadedCompactInode {
-                generation: 7,
-                guard,
-            }
-        );
-    }
-
-    #[test]
-    fn joined_selected_missing_authority_or_guard_is_stale() {
-        let (anchor, _, mut row) = joined_fixture();
-        assert!(
-            decode_joined_rows(Vec::new(), anchor.backing, 2)
-                .unwrap_err()
-                .is(ErrorCode::Estale)
-        );
-        row[8..].fill(Some(Value::NULL));
-        assert!(
-            decode_joined_rows([row], anchor.backing, 2)
-                .unwrap_err()
-                .is(ErrorCode::Estale)
-        );
-    }
-
-    #[test]
-    fn joined_selected_checks_authority_before_malformed_guard() {
-        let (anchor, _, original) = joined_fixture();
-        let invalid_authority = [
-            (1, Value::Bytes(b"MRC4".to_vec())),
-            (2, Value::Bytes(vec![b'0'; 32])),
-            (3, Value::Bytes(b"owner".to_vec())),
-            (4, Value::Int(0)),
-            (5, Value::Int(1)),
-            (6, Value::NULL),
-            (7, Value::Bytes(b"{}".to_vec())),
-        ];
-        for (index, value) in invalid_authority {
-            let mut row = original.clone();
-            row[index] = Some(value);
-            row[8] = Some(Value::NULL);
-            row[9] = Some(Value::Bytes(b"invalid integer".to_vec()));
-            row[12] = Some(Value::Bytes(vec![0xff]));
-            assert!(
-                decode_joined_rows([row], anchor.backing, 2)
-                    .unwrap_err()
-                    .is(ErrorCode::Estale),
-                "authority column {index} did not fail first"
-            );
-        }
-    }
-
-    #[test]
-    fn joined_selected_preserves_authority_before_inode_range_error() {
-        let (anchor, _, row) = joined_fixture();
-        assert!(
-            decode_joined_rows([row.clone()], anchor.backing, u64::MAX)
-                .unwrap_err()
-                .is(ErrorCode::Eoverflow)
-        );
-        let mut stale_row = row;
-        stale_row[1] = Some(Value::Bytes(b"MRC4".to_vec()));
-        assert!(
-            decode_joined_rows([stale_row], anchor.backing, u64::MAX)
-                .unwrap_err()
-                .is(ErrorCode::Estale)
-        );
-    }
-
-    #[test]
-    fn joined_selected_rejects_partial_null_and_unconvertible_cells() {
-        let (anchor, _, row) = joined_fixture();
-        for index in 8..13 {
-            let mut partial = row.clone();
-            partial[index] = Some(Value::NULL);
-            assert!(
-                decode_joined_rows([partial], anchor.backing, 2)
-                    .unwrap_err()
-                    .is(ErrorCode::Eio),
-                "partial NULL in guard column {index} accepted"
-            );
-        }
-        let mut invalid_number = row.clone();
-        invalid_number[9] = Some(Value::Bytes(b"not an integer".to_vec()));
-        let mut invalid_utf8 = row.clone();
-        invalid_utf8[12] = Some(Value::Bytes(vec![0xff]));
-        let mut incomplete = row.clone();
-        incomplete[10] = None;
-        let mut short = row.clone();
-        short.pop();
-        let mut extra = row.clone();
-        extra.push(Some(Value::NULL));
-        for invalid in [invalid_number, invalid_utf8, incomplete, short, extra] {
-            assert!(
-                decode_joined_rows([invalid], anchor.backing, 2)
-                    .unwrap_err()
-                    .is(ErrorCode::Eio)
-            );
-        }
-    }
-
-    #[test]
-    fn joined_selected_rejects_duplicate_rows_and_wrong_selected_inode() {
-        let (anchor, _, row) = joined_fixture();
-        assert!(
-            decode_joined_rows([row.clone(), row.clone()], anchor.backing, 2)
-                .unwrap_err()
-                .is(ErrorCode::Eio)
-        );
-        let mut wrong = row;
-        wrong[8] = Some(Value::Int(1));
-        assert!(
-            decode_joined_rows([wrong], anchor.backing, 2)
-                .unwrap_err()
-                .is(ErrorCode::Estale)
-        );
-    }
-
-    #[test]
-    fn joined_selected_rejects_negative_identity_and_malformed_body() {
-        let (anchor, _, row) = joined_fixture();
-        for index in 8..12 {
-            let mut negative = row.clone();
-            negative[index] = Some(Value::Int(-1));
-            assert!(
-                decode_joined_rows([negative], anchor.backing, 2)
-                    .unwrap_err()
-                    .is(ErrorCode::Eio),
-                "negative guard column {index} accepted"
-            );
-        }
-        let mut malformed = row;
-        malformed[12] = Some(Value::Bytes(b"{".to_vec()));
-        assert!(
-            decode_joined_rows([malformed], anchor.backing, 2)
-                .unwrap_err()
-                .is(ErrorCode::Eio)
-        );
-    }
-
-    #[test]
-    fn joined_selected_keeps_membership_body_and_epoch_validation() {
-        let (anchor, mut guard, row) = joined_fixture();
-        let mut missing_membership = row.clone();
-        let mut absent = anchor.clone();
-        absent.members = vec![1];
-        missing_membership[6] = Some(Value::Bytes(encode_compact_anchor(&absent).unwrap()));
-        let mut future_epoch = row.clone();
-        future_epoch[10] = Some(Value::Int(8));
-        let mut wrong_body_inode = row.clone();
-        guard.node.stats.ino = 1;
-        wrong_body_inode[12] = Some(Value::Bytes(serde_json::to_vec(&guard.node).unwrap()));
-        let mut generation_mismatch = row.clone();
-        generation_mismatch[0] = Some(Value::Int(8));
-        let mut malformed_anchor = row;
-        malformed_anchor[6] = Some(Value::Bytes(b"{".to_vec()));
-        for (invalid, expected_code) in [
-            (missing_membership, ErrorCode::Einval),
-            (future_epoch, ErrorCode::Einval),
-            (wrong_body_inode, ErrorCode::Einval),
-            (generation_mismatch, ErrorCode::Eio),
-            (malformed_anchor, ErrorCode::Eio),
-        ] {
-            assert!(
-                decode_joined_rows([invalid], anchor.backing, 2)
-                    .unwrap_err()
-                    .is(expected_code)
-            );
-        }
-    }
-
-    fn root_file_joined_fixture() -> (
-        CompactAnchor,
-        CompactGuard,
-        CompactGuard,
-        Vec<Option<Value>>,
-    ) {
-        use mount_rs_core::S_IFDIR;
-        use mount_rs_core::storage::DirectoryEntry;
-
-        let (anchor, file, selected) = joined_fixture();
-        let mut root = file.clone();
-        root.node.stats.ino = anchor.root;
-        root.node.stats.mode = S_IFDIR | 0o755;
-        root.node.stats.nlink = 2;
-        root.node.data = NodeData::Directory {
-            entries: vec![DirectoryEntry {
-                name: "source".into(),
-                inode: 2,
-            }],
-        };
-        let mut row = selected[..8].to_vec();
-        row.extend([
-            Some(Value::Int(1)),
-            Some(Value::Int(2)),
-            Some(Value::Int(6)),
-            Some(Value::Int(9)),
-            Some(Value::Bytes(serde_json::to_vec(&root.node).unwrap())),
-        ]);
-        row.extend_from_slice(&selected[8..]);
-        (anchor, root, file, row)
-    }
-
-    #[test]
-    fn joined_root_file_decodes_one_coherent_eighteen_column_row() {
-        let (anchor, root, file, row) = root_file_joined_fixture();
-        let read = decode_root_file_joined_rows([row], anchor.backing, 1, 2).unwrap();
-        assert_eq!(read.into_parts(), (anchor, Some(root), Some(file)));
-    }
-
-    #[test]
-    fn joined_root_file_retains_complete_missing_groups_for_coordinator() {
-        let (anchor, root, file, row) = root_file_joined_fixture();
-        for missing in [8..13, 13..18] {
-            let mut absent = row.clone();
-            absent[missing.clone()].fill(Some(Value::NULL));
-            let read = decode_root_file_joined_rows([absent], anchor.backing, 1, 2).unwrap();
-            let (returned_anchor, returned_root, returned_file) = read.into_parts();
-            assert_eq!(returned_anchor, anchor);
-            assert_eq!(returned_root, (missing.start != 8).then(|| root.clone()));
-            assert_eq!(returned_file, (missing.start != 13).then(|| file.clone()));
-        }
-        let mut both_absent = row;
-        both_absent[8..18].fill(Some(Value::NULL));
-        let read = decode_root_file_joined_rows([both_absent], anchor.backing, 1, 2).unwrap();
-        assert_eq!(read.into_parts(), (anchor, None, None));
-    }
-
-    #[test]
-    fn joined_root_file_checks_authority_before_bad_guards_and_requested_range() {
-        let (anchor, _, _, row) = root_file_joined_fixture();
-        let mut stale_authority = row.clone();
-        stale_authority[1] = Some(Value::Bytes(b"MRC4".to_vec()));
-        stale_authority[8] = Some(Value::Bytes(b"invalid integer".to_vec()));
-        stale_authority[17] = Some(Value::Bytes(vec![0xff]));
-        assert!(
-            decode_root_file_joined_rows([stale_authority], anchor.backing, u64::MAX, 2)
-                .unwrap_err()
-                .is(ErrorCode::Estale)
-        );
-        assert!(
-            decode_root_file_joined_rows([row], anchor.backing, u64::MAX, 2)
-                .unwrap_err()
-                .is(ErrorCode::Eoverflow)
-        );
-    }
-
-    #[test]
-    fn joined_root_file_rejects_partial_null_wrong_ids_and_malformed_bodies() {
-        let (anchor, _, _, row) = root_file_joined_fixture();
-        for index in 8..18 {
-            let mut partial = row.clone();
-            partial[index] = Some(Value::NULL);
-            assert!(
-                decode_root_file_joined_rows([partial], anchor.backing, 1, 2).is_err(),
-                "partial NULL in joined guard column {index} accepted"
-            );
-        }
-        for (index, invalid) in [
-            (8, Value::Int(2)),
-            (13, Value::Int(1)),
-            (9, Value::Int(-1)),
-            (14, Value::Int(-1)),
-            (12, Value::Bytes(b"{".to_vec())),
-            (17, Value::Bytes(vec![0xff])),
-        ] {
-            let mut bad = row.clone();
-            bad[index] = Some(invalid);
-            assert!(
-                decode_root_file_joined_rows([bad], anchor.backing, 1, 2).is_err(),
-                "invalid joined guard column {index} accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn joined_root_file_rejects_duplicate_and_wrong_width_results() {
-        let (anchor, _, _, row) = root_file_joined_fixture();
-        assert!(
-            decode_root_file_joined_rows([row.clone(), row.clone()], anchor.backing, 1, 2).is_err()
-        );
-        assert!(decode_root_file_joined_rows(Vec::new(), anchor.backing, 1, 2).is_err());
-        let mut short = row.clone();
-        short.pop();
-        assert!(decode_root_file_joined_rows([short], anchor.backing, 1, 2).is_err());
-        let mut extra = row.clone();
-        extra.push(Some(Value::NULL));
-        assert!(decode_root_file_joined_rows([extra], anchor.backing, 1, 2).is_err());
-        let mut malformed_anchor = row;
-        malformed_anchor[6] = Some(Value::Bytes(b"{".to_vec()));
-        assert!(decode_root_file_joined_rows([malformed_anchor], anchor.backing, 1, 2).is_err());
+    fn point_sql_has_exact_binary_name_and_selected_membership() {
+        assert!(FILE_POINT_SQL.contains("s.inode=?"));
+        assert!(ROOT_ENTRY_POINT_SQL.contains("d.name_hash=? AND d.name=?"));
+        assert!(!FILE_POINT_SQL.contains("ORDER BY"));
+        assert!(!ROOT_ENTRY_POINT_SQL.contains("ORDER BY"));
     }
     #[tokio::test]
     #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
@@ -1263,7 +1398,7 @@ mod tests {
                 .as_nanos()
         );
         let correct = SCHEMA.replace(TABLE, &name);
-        let cases = [
+        for (label, sql) in [
             (
                 "prefix primary",
                 correct.replace(
@@ -1294,19 +1429,107 @@ mod tests {
                 "short volume",
                 correct.replace("VARBINARY(1020)", "VARBINARY(64)"),
             ),
-        ];
-        for (label, sql) in cases {
+        ] {
             conn.query_drop(sql).await.unwrap();
             let result = validate_schema(&mut conn, &name).await;
             conn.query_drop(format!("DROP TABLE {name}")).await.unwrap();
-            assert!(
-                result.is_err(),
-                "incompatible scoped schema accepted: {label}"
-            );
-            eprintln!("compact TiDB scoped schema {label}: refused before enrollment");
+            assert!(result.is_err(), "accepted {label}");
         }
         conn.query_drop(correct).await.unwrap();
         assert!(validate_schema(&mut conn, &name).await.is_ok());
+        conn.query_drop(format!("DROP TABLE {name}")).await.unwrap();
+        let correct = MEMBERS_SCHEMA.replace(MEMBERS_TABLE, &name);
+        for (label, sql) in [
+            (
+                "member primary prefix",
+                correct.replace(
+                    "PRIMARY KEY(volume_key,inode)",
+                    "PRIMARY KEY(volume_key(16),inode)",
+                ),
+            ),
+            (
+                "unsigned member",
+                correct.replace("inode BIGINT", "inode BIGINT UNSIGNED"),
+            ),
+            (
+                "member wrong primary",
+                correct.replace("PRIMARY KEY(volume_key,inode)", "PRIMARY KEY(volume_key)"),
+            ),
+            (
+                "member short volume",
+                correct.replace("VARBINARY(1020)", "VARBINARY(64)"),
+            ),
+            (
+                "nullable member without its primary",
+                correct
+                    .replace("inode BIGINT NOT NULL", "inode BIGINT NULL")
+                    .replace("PRIMARY KEY(volume_key,inode)", "PRIMARY KEY(volume_key)"),
+            ),
+        ] {
+            conn.query_drop(sql).await.unwrap();
+            let result = validate_members_schema(&mut conn, &name).await;
+            conn.query_drop(format!("DROP TABLE {name}")).await.unwrap();
+            assert!(result.is_err(), "accepted {label}");
+        }
+        conn.query_drop(correct).await.unwrap();
+        assert!(validate_members_schema(&mut conn, &name).await.is_ok());
+        conn.query_drop(format!("DROP TABLE {name}")).await.unwrap();
+        let correct = DENTRIES_SCHEMA.replace(DENTRIES_TABLE, &name);
+        for (label, sql) in [
+            (
+                "dentry primary prefix",
+                correct.replace(
+                    "PRIMARY KEY(volume_key,parent,ordinal)",
+                    "PRIMARY KEY(volume_key(16),parent,ordinal)",
+                ),
+            ),
+            (
+                "dentry wrong primary",
+                correct.replace(
+                    "PRIMARY KEY(volume_key,parent,ordinal)",
+                    "PRIMARY KEY(volume_key,parent)",
+                ),
+            ),
+            (
+                "unsigned ordinal",
+                correct.replace("ordinal BIGINT", "ordinal BIGINT UNSIGNED"),
+            ),
+            (
+                "nullable child",
+                correct.replace("inode BIGINT NOT NULL", "inode BIGINT NULL"),
+            ),
+            ("short digest", correct.replace("BINARY(32)", "BINARY(16)")),
+            (
+                "variable digest",
+                correct.replace("name_hash BINARY(32)", "name_hash VARBINARY(32)"),
+            ),
+            (
+                "text name",
+                correct.replace("name LONGBLOB", "name LONGTEXT"),
+            ),
+            (
+                "unique digest lookup",
+                correct.replace("KEY name_lookup", "UNIQUE KEY name_lookup"),
+            ),
+            (
+                "prefix digest lookup",
+                correct.replace(
+                    "name_lookup(volume_key,parent,name_hash)",
+                    "name_lookup(volume_key,parent,name_hash(16))",
+                ),
+            ),
+            (
+                "missing digest lookup",
+                correct.replace(",\n    KEY name_lookup(volume_key,parent,name_hash)", ""),
+            ),
+        ] {
+            conn.query_drop(sql).await.unwrap();
+            let result = validate_dentries_schema(&mut conn, &name).await;
+            conn.query_drop(format!("DROP TABLE {name}")).await.unwrap();
+            assert!(result.is_err(), "accepted {label}");
+        }
+        conn.query_drop(correct).await.unwrap();
+        assert!(validate_dentries_schema(&mut conn, &name).await.is_ok());
         conn.query_drop(format!("DROP TABLE {name}")).await.unwrap();
         drop(conn);
         pool.disconnect().await.unwrap();

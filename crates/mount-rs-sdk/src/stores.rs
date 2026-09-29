@@ -12,7 +12,8 @@ use mount_rs_core::diagnostics::profile::{Event, Span, add};
 use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::InodeId;
 use mount_rs_core::storage::compact::{
-    CompactInodeCapability, CompactInodeExpectation, CompactInodeRead, CompactPublication,
+    CompactFileExpectation, CompactFileRead, CompactInodeCapability, CompactInodeExpectation,
+    CompactInodeRead, CompactPointReadCapability, CompactPublication, CompactRootEntryRead,
     CompactRootFileCapability, CompactRootFileRead, CompactSnapshot, CompactStructuralDelta,
     LoadedCompactInode, PhysicalInodeIdentity,
 };
@@ -55,6 +56,81 @@ impl ErasedMetadataStore {
 
 #[async_trait]
 impl MetadataStore for ErasedMetadataStore {
+    fn compact_point_read_capability(&self) -> CompactPointReadCapability {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataCompactInodeCapability);
+        let result = self.inner.compact_point_read_capability();
+        storage_span.finish_success(0);
+        result
+    }
+
+    async fn read_compact_file(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: CompactFileExpectation<'_>,
+    ) -> Result<CompactFileRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactInode);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.point_file",
+                    None,
+                    self.inner.read_compact_file(backing, inode, expected),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.read_compact_file(backing, inode, expected).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn read_compact_root_entry(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: InodeId,
+        candidate_file: InodeId,
+        name: &str,
+        expected: CompactFileExpectation<'_>,
+    ) -> Result<CompactRootEntryRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactRootFile);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.point_entry",
+                    None,
+                    self.inner.read_compact_root_entry(
+                        backing,
+                        expected_root,
+                        candidate_file,
+                        name,
+                        expected,
+                    ),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .read_compact_root_entry(backing, expected_root, candidate_file, name, expected)
+                .await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
     fn compact_root_file_capability(&self) -> CompactRootFileCapability {
         let mut storage_span =
             StorageSpan::new(StorageOperation::SdkMetadataCompactRootFileCapability);
@@ -1330,6 +1406,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn erased_compact_point_reads_preserve_scope_expectation_and_delegate_errors() {
+        use mount_rs_core::storage::compact::{CompactFileExpectation, CompactPointReadCapability};
+        let backing = ConcurrentBackingId::from_bytes([0xb1; 16]).unwrap();
+        let probe = Arc::new(IdentityProbeMetadataStore::new(backing));
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(probe.clone(), Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(probe.clone());
+        let mut snapshot = compact_probe_snapshot(backing);
+        let mut file = snapshot.guards[&1].clone();
+        file.node.stats.ino = 2;
+        file.node.stats.mode = mount_rs_core::S_IFREG | 0o640;
+        file.node.stats.nlink = 1;
+        file.node.data =
+            mount_rs_core::storage::NodeData::File(mount_rs_core::storage::FileLayout {
+                chunker: snapshot.anchor.default_chunker.clone(),
+                extents: Vec::new(),
+            });
+        snapshot.anchor.next_inode = 3;
+        snapshot.anchor.members.push(2);
+        let mount_rs_core::storage::NodeData::Directory { entries } =
+            &mut snapshot.guards.get_mut(&1).unwrap().node.data
+        else {
+            panic!()
+        };
+        entries.push(mount_rs_core::storage::DirectoryEntry {
+            name: "exact name".into(),
+            inode: 2,
+        });
+        snapshot.guards.insert(2, file.clone());
+        let (_, _, structure) = snapshot.into_validated_namespace().unwrap();
+        let expectation =
+            CompactFileExpectation::from_structure(&structure, file.identity, &file.node).unwrap();
+        assert_eq!(
+            erased.compact_point_read_capability(),
+            CompactPointReadCapability::Supported,
+        );
+        let file_error = erased
+            .read_compact_file(backing, 2, expectation)
+            .await
+            .unwrap_err();
+        assert_eq!(file_error.code, ErrorCode::Eperm);
+        assert_eq!(file_error.syscall.as_deref(), Some("point-probe:file"));
+        let entry_error = erased
+            .read_compact_root_entry(backing, 1, 2, "exact name", expectation)
+            .await
+            .unwrap_err();
+        assert_eq!(entry_error.code, ErrorCode::Eacces);
+        assert_eq!(entry_error.syscall.as_deref(), Some("point-probe:entry"));
+        assert_eq!(
+            *probe.1.lock().unwrap(),
+            ["point_capability", "point_file", "point_entry"],
+        );
+    }
+
+    #[tokio::test]
     async fn erased_compact_prepare_waits_for_one_delegate_and_preserves_its_error() {
         use std::future::Future;
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1618,6 +1750,42 @@ mod tests {
 
     #[async_trait]
     impl MetadataStore for IdentityProbeMetadataStore {
+        fn compact_point_read_capability(
+            &self,
+        ) -> mount_rs_core::storage::compact::CompactPointReadCapability {
+            self.1.lock().unwrap().push("point_capability");
+            mount_rs_core::storage::compact::CompactPointReadCapability::Supported
+        }
+        async fn read_compact_file(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+            expected: mount_rs_core::storage::compact::CompactFileExpectation<'_>,
+        ) -> Result<mount_rs_core::storage::compact::CompactFileRead> {
+            assert_eq!((backing, inode, expected.generation()), (self.0, 2, 37));
+            assert_eq!(expected.backing(), backing);
+            assert_eq!(expected.node().stats.ino, inode);
+            assert_eq!(
+                expected.identity(),
+                compact_probe_loaded(self.0).guard.identity
+            );
+            self.1.lock().unwrap().push("point_file");
+            Err(FsError::new(ErrorCode::Eperm).with_syscall("point-probe:file"))
+        }
+        async fn read_compact_root_entry(
+            &self,
+            backing: ConcurrentBackingId,
+            root: InodeId,
+            inode: InodeId,
+            name: &str,
+            expected: mount_rs_core::storage::compact::CompactFileExpectation<'_>,
+        ) -> Result<mount_rs_core::storage::compact::CompactRootEntryRead> {
+            assert_eq!((backing, root, inode, name), (self.0, 1, 2, "exact name"));
+            assert_eq!(expected.node().stats.ino, inode);
+            assert_eq!(expected.generation(), 37);
+            self.1.lock().unwrap().push("point_entry");
+            Err(FsError::new(ErrorCode::Eacces).with_syscall("point-probe:entry"))
+        }
         fn compact_root_file_capability(&self) -> CompactRootFileCapability {
             CompactRootFileCapability::Supported
         }
