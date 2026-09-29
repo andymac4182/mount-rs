@@ -361,6 +361,8 @@ EXPECTED_SUITES = {
         'canceled_missing_preparation_retains_no_pending_full_capture',
         'occupied_preparation_uses_full_current_selected_body',
         'damaged_traversed_or_unrelated_guard_refuses_create_without_publication',
+        'targeted_create_preserves_selected_physical_body_pairs_and_pending_atime',
+        'targeted_create_mutates_unique_namespace_and_preserves_genuine_pinned_reader',
     )),
     'createpath': (
         'missing_compact_create_preparation_avoids_full_scan_with_128_siblings',

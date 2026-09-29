@@ -927,7 +927,7 @@ class CacheStageSelectors(unittest.TestCase):
         self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest {name} ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;\n", name))
 
     def test_create_qualification_requires_complete_executed_controls(self):
-        for kind, count in [("createpath", 5), ("createunit", 4)]:
+        for kind, count in [("createpath", 5), ("createunit", 6)]:
             names = parent.EXPECTED_SUITES[kind]
             self.assertEqual(len(names), count)
             valid = f"running {count} tests\n"+"".join(f"test {name} ... ok\n" for name in names)+f"test result: ok. {count} passed; 0 failed; 0 ignored;\n"
