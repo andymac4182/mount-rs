@@ -312,7 +312,7 @@ fn process_failures_retain_partial_evidence_and_reap_children() {
         let expected_error = match injection {
             "partial_start" => "injected partial startup failure",
             "child_loss" => "owned worker 3 exited before shutdown",
-            "work_timeout" => "\"injected_timeout\" phase deadline; partial work incomplete",
+            "work_timeout" => "inherited workload phase deadline; partial work incomplete",
             _ => unreachable!(),
         };
         assert_eq!(
