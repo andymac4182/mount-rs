@@ -263,6 +263,7 @@ struct Journal {
     enclosing_deadline: Instant,
     phase_deadline: Instant,
     progress: progress::Progress,
+    oracle_progress: Option<oracle::ProgressView>,
 }
 fn project_resource_progress(
     fleet: &mut Fleet,
@@ -290,6 +291,10 @@ fn project_resource_progress(
 impl Journal {
     fn flush(&mut self) -> Result<(), String> {
         let span = metrics::observer().begin("journal_publication");
+        if let Some(oracle) = &self.oracle_progress {
+            self.value["fresh_oracle_progress"] =
+                progress::public_oracle_snapshot(&oracle.snapshot());
+        }
         self.value["lanes"] = serde_json::to_value(
             self.counts
                 .iter()
@@ -373,6 +378,26 @@ async fn supervised<T>(
                 }
     }
 }
+trait OracleBoundary {
+    fn accounting(&self) -> &metrics::Accounting;
+    fn settled(&self) -> bool;
+}
+impl OracleBoundary for oracle::Pool {
+    fn accounting(&self) -> &metrics::Accounting {
+        &self.accounting
+    }
+    fn settled(&self) -> bool {
+        oracle::Pool::settled(self)
+    }
+}
+impl OracleBoundary for oracle::Owner {
+    fn accounting(&self) -> &metrics::Accounting {
+        &self.accounting
+    }
+    fn settled(&self) -> bool {
+        oracle::Owner::settled(self)
+    }
+}
 async fn metric_boundary(
     collector: &mut metrics::Collector,
     fleet: &mut Fleet,
@@ -380,8 +405,12 @@ async fn metric_boundary(
     resources: &resources::Resources,
     journal: &mut Journal,
     boundary: (&str, &str),
-    oracle: &oracle::Owner,
+    oracle: &impl OracleBoundary,
 ) -> Result<Duration, String> {
+    if !oracle.settled() {
+        collector.complete = false;
+        return Err("metric boundary has unsettled fresh oracle slots".into());
+    }
     if journal.counts.iter().any(|counts| {
         let counts = counts.lock().unwrap();
         counts.pending.is_some() || counts.uncertain != 0
@@ -398,7 +427,7 @@ async fn metric_boundary(
             private,
             resources,
             boundary,
-            oracle.accounting.snapshot(),
+            oracle.accounting().snapshot(),
             deadline,
         ),
     )
@@ -411,6 +440,10 @@ async fn metric_boundary(
     journal.value["phase_metrics"] = collector.summary();
     journal.flush()?;
     project_resource_progress(fleet, resources, &mut journal.progress, true);
+    if !journal.progress.complete() || !oracle.settled() {
+        collector.complete = false;
+        return Err("metric boundary publication or fresh oracle settlement incomplete".into());
+    }
     if Instant::now() >= deadline {
         collector.complete = false;
         return Err("metric publication exceeded inherited phase deadline".into());
@@ -430,6 +463,221 @@ async fn connect(
         .ok_or("worker readiness missing")?
         .address;
     connect_address(endpoint, address, tokens, drive).await
+}
+fn checked_oracle_pass(
+    snapshot: &Value,
+    pass: &str,
+    expected: &[&state::Expected],
+    verified: &oracle::Verified,
+) -> Result<Value, String> {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut drives = std::collections::BTreeSet::new();
+    for ledger in expected {
+        if !drives.insert(ledger.drive as u64) {
+            return Err("fresh oracle expected Drive repeated".into());
+        }
+        files = files
+            .checked_add(ledger.files.len() as u64)
+            .ok_or("fresh oracle file total overflow")?;
+        for file in ledger.files.values() {
+            if !file.length.is_multiple_of(4096) {
+                return Err("fresh oracle expected length is not block aligned".into());
+            }
+            bytes = bytes
+                .checked_add(file.length as u64)
+                .ok_or("fresh oracle byte total overflow")?;
+        }
+    }
+    let public = progress::public_oracle_snapshot(snapshot);
+    let completed = snapshot["completed_drive_ids"]
+        .as_array()
+        .ok_or("fresh oracle completion roster missing")?;
+    let completed: Vec<_> = completed
+        .iter()
+        .map(|drive| {
+            drive
+                .as_u64()
+                .ok_or("fresh oracle completion identity invalid")
+        })
+        .collect::<Result<_, _>>()?;
+    if !matches!(pass, "initial" | "final")
+        || public["pass"] != pass
+        || public["slot_limit"] != oracle::FRESH_ORACLE_SLOTS
+        || public["expected_drives"] != expected.len()
+        || public["complete"] != true
+        || public["settled"] != true
+        || public["expected_files"] != files
+        || public["expected_bytes"] != bytes
+        || verified.files != files
+        || verified.bytes != bytes
+        || completed != drives.into_iter().collect::<Vec<_>>()
+    {
+        return Err("fresh oracle complete corpus proof mismatch".into());
+    }
+    Ok(public)
+}
+fn record_oracle_pass(
+    journal: &mut Journal,
+    pool: &oracle::Pool,
+    pass: &str,
+    expected: &[&state::Expected],
+    verified: &oracle::Verified,
+) -> Result<(), String> {
+    if !pool.settled() || Instant::now() >= journal.phase_deadline {
+        return Err("fresh oracle receipt settlement or inherited deadline incomplete".into());
+    }
+    let snapshot = pool.progress().snapshot();
+    let mut summary = checked_oracle_pass(&snapshot, pass, expected, verified)?;
+    let passes = journal.value["fresh_oracle_passes"]
+        .as_array()
+        .ok_or("fresh oracle pass receipts missing")?;
+    if passes.len() != usize::from(pass == "final") {
+        return Err("fresh oracle pass receipt order invalid".into());
+    }
+    let directory = journal.output.join("oracle-receipts");
+    std::fs::create_dir_all(&directory)
+        .map_err(|_| "fresh oracle private receipt directory unavailable")?;
+    let path = directory.join(format!("{pass}.json"));
+    if path.exists() {
+        return Err("fresh oracle refuses existing pass receipt".into());
+    }
+    write_json(&path, &snapshot)?;
+    let sha256 = file_digest(&path)?;
+    if Instant::now() >= journal.phase_deadline {
+        return Err("fresh oracle receipt exceeded inherited deadline".into());
+    }
+    summary["after_boundary_complete"] = json!(true);
+    summary["receipt"] = json!({"file":format!("oracle-receipts/{pass}.json"),"sha256":sha256});
+    journal.value["fresh_oracle_passes"]
+        .as_array_mut()
+        .unwrap()
+        .push(summary);
+    Ok(())
+}
+fn oracle_passes_complete(journal: &Value) -> bool {
+    let Some(passes) = journal["fresh_oracle_passes"].as_array() else {
+        return false;
+    };
+    if passes.len() != 2 || journal["verified_passes"] != 2 {
+        return false;
+    }
+    for (pass, label) in passes.iter().zip(["initial", "final"]) {
+        let public = progress::public_oracle_snapshot(pass);
+        if public["pass"] != label
+            || public["complete"] != true
+            || public["settled"] != true
+            || public["slot_limit"] != oracle::FRESH_ORACLE_SLOTS
+            || public["expected_drives"] != journal["configuration"]["drives"]
+            || pass["after_boundary_complete"] != true
+        {
+            return false;
+        }
+    }
+    passes[1]["completed_files"] == journal["verified_files"]
+        && passes[1]["completed_bytes"] == journal["verified_bytes"]
+}
+
+#[cfg(test)]
+mod oracle_receipt_tests {
+    use super::*;
+
+    fn corpus() -> (state::Expected, state::Expected, Value) {
+        let mut first = state::Expected::empty(4, 2);
+        first.create("payload".into(), 0);
+        first.write("payload", 0, 0);
+        first.create("empty".into(), 1);
+        let mut second = state::Expected::empty(9, 1);
+        second.create("other".into(), 0);
+        second.write("other", 0, 0);
+        let snapshot = json!({"pass":"initial","slot_limit":8,
+            "expected_drives":2,"started_drives":2,"completed_drives":2,"live_slots":0,
+            "expected_files":3,"completed_files":3,"checked_files":3,
+            "expected_bytes":8192,"completed_bytes":8192,"compared_bytes":8192,
+            "complete":true,"settled":true,"completed_drive_ids":[4,9]});
+        (first, second, snapshot)
+    }
+
+    #[test]
+    fn oracle_receipt_requires_exact_unique_corpus_beyond_matching_counts() {
+        let (first, second, snapshot) = corpus();
+        let expected = [&first, &second];
+        let verified = oracle::Verified {
+            files: 3,
+            bytes: 8192,
+        };
+        let public = checked_oracle_pass(&snapshot, "initial", &expected, &verified).unwrap();
+        assert_eq!(public.as_object().unwrap().len(), 14);
+        assert!(public.get("completed_drive_ids").is_none());
+        for roster in [
+            json!([4, 4]),
+            json!([4, 8]),
+            json!([9, 4]),
+            json!([4]),
+            json!([4, "9"]),
+        ] {
+            let mut wrong = snapshot.clone();
+            wrong["completed_drive_ids"] = roster;
+            assert!(checked_oracle_pass(&wrong, "initial", &expected, &verified).is_err());
+        }
+        assert!(checked_oracle_pass(&snapshot, "initial", &[&first, &first], &verified).is_err());
+        let wrong = oracle::Verified {
+            files: 3,
+            bytes: 4096,
+        };
+        assert!(checked_oracle_pass(&snapshot, "initial", &expected, &wrong).is_err());
+    }
+
+    #[test]
+    fn oracle_receipt_rejects_partial_wrong_pass_slots_and_unaligned_tail() {
+        let (mut first, second, snapshot) = corpus();
+        let verified = oracle::Verified {
+            files: 3,
+            bytes: 8192,
+        };
+        for (field, value) in [
+            ("complete", json!(false)),
+            ("settled", json!(false)),
+            ("live_slots", json!(1)),
+            ("slot_limit", json!(1)),
+            ("pass", json!("final")),
+            ("completed_files", json!(2)),
+            ("compared_bytes", json!(4096)),
+        ] {
+            let mut wrong = snapshot.clone();
+            wrong[field] = value;
+            assert!(
+                checked_oracle_pass(&wrong, "initial", &[&first, &second], &verified).is_err(),
+                "{field}"
+            );
+        }
+        first.truncate("payload", 4097);
+        assert!(checked_oracle_pass(&snapshot, "initial", &[&first, &second], &verified).is_err());
+    }
+
+    #[test]
+    fn oracle_receipt_terminal_requires_both_after_boundaries_and_final_totals() {
+        let (_, _, mut initial) = corpus();
+        initial["after_boundary_complete"] = json!(true);
+        let mut final_pass = initial.clone();
+        final_pass["pass"] = json!("final");
+        // Final acknowledged append changes the proof; population totals cannot substitute.
+        for field in ["expected_bytes", "completed_bytes", "compared_bytes"] {
+            final_pass[field] = json!(12288);
+        }
+        let journal = json!({"configuration":{"drives":2},"verified_passes":2,
+            "verified_files":3,"verified_bytes":12288,"fresh_oracle_passes":[initial,final_pass]});
+        assert!(oracle_passes_complete(&journal));
+        let mut wrong = journal.clone();
+        wrong["fresh_oracle_passes"][0]["after_boundary_complete"] = json!(false);
+        assert!(!oracle_passes_complete(&wrong));
+        let mut wrong = journal.clone();
+        wrong["verified_bytes"] = json!(8192);
+        assert!(!oracle_passes_complete(&wrong));
+        let mut wrong = journal.clone();
+        wrong["fresh_oracle_passes"][1]["pass"] = json!("initial");
+        assert!(!oracle_passes_complete(&wrong));
+    }
 }
 async fn connect_address(
     endpoint: &quinn::Endpoint,
@@ -492,6 +740,7 @@ pub async fn controller() -> Result<(), String> {
         enclosing_deadline: setup_deadline,
         phase_deadline: setup_deadline,
         progress: progress::Progress::disabled(),
+        oracle_progress: None,
     };
     journal.flush()?;
     let mut fleet = Fleet::new();
@@ -499,7 +748,9 @@ pub async fn controller() -> Result<(), String> {
     let mut lanes = Vec::new();
     let mut private_path = None;
     let mut resources = None;
-    let mut oracle_owner = oracle::Owner::default();
+    let mut oracle_owner = oracle::Pool::new(oracle::FRESH_ORACLE_SLOTS)?;
+    journal.oracle_progress = Some(oracle_owner.progress());
+    journal.value["fresh_oracle_passes"] = json!([]);
     let mut initializer_owner = oracle::Owner::default();
     let mut initialization_receipts = Vec::new();
     let mut initialization_start = None;
@@ -736,14 +987,15 @@ pub async fn controller() -> Result<(), String> {
             journal.value["population_bytes"] = json!(lanes.iter().flat_map(|l|l.expected.files.values()).map(|f|f.length as u64).sum::<u64>());
             journal.phase("initial_fresh_oracle")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("initial_fresh_oracle","before"),&oracle_owner).await?;
-            supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
-                for lane in &lanes {
-                    oracle::verify(&mut oracle_owner, &backend, &lane.expected).await?;
-                }
-                Ok(())
-            })
-            .await?;
+            let expected: Vec<_> = lanes.iter().map(|lane| &lane.expected).collect();
+            let oracle_deadline = journal.phase_deadline;
+            let verification = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS,
+                oracle_owner.verify_pass(oracle::Pass::Initial, &backend, &expected, oracle_deadline)).await;
+            // Publish even an immediate failure before switching to cleanup context.
+            journal.flush()?;
+            let verified = verification?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("initial_fresh_oracle","after"),&oracle_owner).await?;
+            record_oracle_pass(&mut journal, &oracle_owner, "initial", &expected, &verified)?;
             journal.value["verified_passes"] = json!(1);
             // End old connections and all replicas before reopening each worker.
             journal.phase("refresh_replicas")?;
@@ -1058,22 +1310,17 @@ pub async fn controller() -> Result<(), String> {
             }).await.map_err(|_| "post-profile reconnect inherited phase deadline")??;
             journal.phase("final_fresh_oracle")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("final_fresh_oracle","before"),&oracle_owner).await?;
-            let mut verified_files = 0;
-            let mut verified_bytes = 0;
-            supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
-                for lane in &lanes {
-                    let (files, bytes) =
-                        oracle::verify(&mut oracle_owner, &backend, &lane.expected).await?;
-                    verified_files += files;
-                    verified_bytes += bytes;
-                }
-                Ok(())
-            })
-            .await?;
+            let expected: Vec<_> = lanes.iter().map(|lane| &lane.expected).collect();
+            let oracle_deadline = journal.phase_deadline;
+            let verification = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS,
+                oracle_owner.verify_pass(oracle::Pass::Final, &backend, &expected, oracle_deadline)).await;
+            journal.flush()?;
+            let verified = verification?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("final_fresh_oracle","after"),&oracle_owner).await?;
+            record_oracle_pass(&mut journal, &oracle_owner, "final", &expected, &verified)?;
             journal.value["verified_passes"] = json!(2);
-            journal.value["verified_files"] = json!(verified_files);
-            journal.value["verified_bytes"] = json!(verified_bytes);
+            journal.value["verified_files"] = json!(verified.files);
+            journal.value["verified_bytes"] = json!(verified.bytes);
             journal.phase("revocation")?;
             metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("revocation","before"),&oracle_owner).await?;
             tokio::time::timeout_at(journal.phase_deadline.into(), async {
@@ -1145,7 +1392,7 @@ pub async fn controller() -> Result<(), String> {
         cleanup.push(json!({"error":error}));
     }
     journal.value["observer_processes"] = commands.receipts();
-    if let Err(error) = oracle_owner.close().await {
+    if let Err(error) = oracle_owner.close_once().await {
         cleanup.push(json!({
                 "error":error}
         ));
@@ -1245,6 +1492,7 @@ pub async fn controller() -> Result<(), String> {
     journal.value["cleanup_errors"] = json!(cleanup);
     journal.value["error"] = json!(result.as_ref().err());
     if let Some(collector) = &mut phase_metrics {
+        collector.complete &= oracle_owner.settled();
         if let Err(error) = collector.terminal_workers(&fleet, audit_deadline) {
             collector.complete = false;
             journal.value["worker_metrics_terminal_error"] = json!(error);
@@ -1287,10 +1535,15 @@ pub async fn controller() -> Result<(), String> {
             .as_ref()
             .is_some_and(metrics::Collector::qualified)
             && oracle_owner.accounting.complete()
+            && oracle_owner.settled()
             && initializer_owner.accounting.complete()
     );
     journal.value["cleanup_errors"] = json!(cleanup);
-    let workload_success = result.is_ok() && cleanup.is_empty();
+    let oracle_complete = oracle_owner.settled() && oracle_passes_complete(&journal.value);
+    journal.value["fresh_oracle_settled"] = json!(oracle_owner.settled());
+    journal.value["fresh_oracle_complete"] = json!(oracle_complete);
+    journal.value["workload_complete"] = json!(result.is_ok() && oracle_complete);
+    let workload_success = result.is_ok() && cleanup.is_empty() && oracle_complete;
     let metrics_required = mount_rs_core::diagnostics::profile::enabled();
     let success =
         workload_success && (!metrics_required || journal.value["metrics_complete"] == true);
@@ -1384,6 +1637,7 @@ mod population_budget_tests {
             enclosing_deadline,
             phase_deadline: enclosing_deadline,
             progress: progress::Progress::disabled(),
+            oracle_progress: None,
         };
         (directory, journal)
     }

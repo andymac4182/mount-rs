@@ -86,6 +86,147 @@ fn assert_crossnode_payload(journal: &serde_json::Value) {
     }
 }
 
+fn assert_fresh_oracle_corpus(directory: &std::path::Path, journal: &serde_json::Value) {
+    assert_eq!(journal["verified_passes"], 2);
+    assert_eq!(journal["fresh_oracle_complete"], true);
+    assert_eq!(journal["fresh_oracle_settled"], true);
+    assert_eq!(journal["expected_state_observation"]["complete"], true);
+    let drives = journal["configuration"]["drives"].as_u64().unwrap();
+    let ledger_receipts = journal["expected_state_receipts"].as_array().unwrap();
+    assert_eq!(ledger_receipts.len() as u64, drives);
+    let mut ids = std::collections::BTreeSet::new();
+    let mut final_files = 0u64;
+    let mut final_bytes = 0u64;
+    for receipt in ledger_receipts {
+        let drive = receipt["drive"].as_u64().unwrap();
+        assert!(drive < drives && ids.insert(drive));
+        let name = format!("expected/drive-{drive}.json");
+        assert_eq!(receipt["file"], name);
+        let path = directory.join(name);
+        assert_eq!(target::file_digest(&path).unwrap(), receipt["sha256"]);
+        let ledger = target::read_json(&path).unwrap();
+        assert_eq!(ledger["drive"], drive);
+        let files = ledger["files"].as_object().unwrap();
+        final_files = final_files.checked_add(files.len() as u64).unwrap();
+        for file in files.values() {
+            let length = file["length"].as_u64().unwrap();
+            assert_eq!(length % 4096, 0);
+            final_bytes = final_bytes.checked_add(length).unwrap();
+        }
+    }
+    let ids: Vec<_> = ids.into_iter().collect();
+    assert_eq!(ids, (0..drives).collect::<Vec<_>>());
+    assert_eq!(journal["verified_files"], final_files);
+    assert_eq!(journal["verified_bytes"], final_bytes);
+    let passes = journal["fresh_oracle_passes"].as_array().unwrap();
+    assert_eq!(passes.len(), 2);
+    for (index, label) in ["initial", "final"].into_iter().enumerate() {
+        let summary = &passes[index];
+        assert_eq!(summary.as_object().unwrap().len(), 16);
+        assert_eq!(summary["pass"], label);
+        assert_eq!(summary["slot_limit"], 8);
+        for field in ["expected_drives", "started_drives", "completed_drives"] {
+            assert_eq!(summary[field], drives);
+        }
+        assert_eq!(summary["live_slots"], 0);
+        assert_eq!(summary["complete"], true);
+        assert_eq!(summary["settled"], true);
+        assert_eq!(summary["after_boundary_complete"], true);
+        let (files, bytes) = if index == 0 {
+            (
+                journal["namespace_files"].as_u64().unwrap(),
+                journal["population_bytes"].as_u64().unwrap(),
+            )
+        } else {
+            (final_files, final_bytes)
+        };
+        for field in ["expected_files", "completed_files", "checked_files"] {
+            assert_eq!(summary[field], files);
+        }
+        for field in ["expected_bytes", "completed_bytes", "compared_bytes"] {
+            assert_eq!(summary[field], bytes);
+        }
+        let name = format!("oracle-receipts/{label}.json");
+        assert_eq!(summary["receipt"]["file"], name);
+        let path = directory.join(name);
+        assert_eq!(
+            target::file_digest(&path).unwrap(),
+            summary["receipt"]["sha256"]
+        );
+        let raw = target::read_json(&path).unwrap();
+        assert_eq!(raw.as_object().unwrap().len(), 15);
+        assert_eq!(raw["completed_drive_ids"], serde_json::json!(ids));
+        for (field, value) in summary.as_object().unwrap() {
+            if !matches!(field.as_str(), "after_boundary_complete" | "receipt") {
+                assert_eq!(&raw[field], value);
+            }
+        }
+        let phase = format!("{label}_fresh_oracle");
+        let after: Vec<_> = journal["phase_metrics"]["boundaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["phase"] == phase && row["boundary"] == "after")
+            .collect();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0]["complete"], true);
+        if journal["metrics_required_for_outcome"] == true {
+            assert_eq!(after[0]["metrics_complete"], true);
+        }
+        let boundary = after[0];
+        let generation = boundary["generation"].as_u64().unwrap();
+        let sequence = boundary["sequence"].as_u64().unwrap();
+        let name = format!("metrics/g{generation}-s{sequence}.json.gz");
+        assert_eq!(boundary["controller"]["file"], name);
+        let path = directory.join(name);
+        assert_eq!(
+            target::file_digest(&path).unwrap(),
+            boundary["controller"]["sha256"]
+        );
+        let controller = target::read_json(&path).unwrap();
+        let mut identity = serde_json::json!({
+            "controller_pid":journal["controller_resources"]["pid"],
+            "generation":generation,"sequence":sequence,"phase":phase,"boundary":"after",
+            "source_digest":journal["source"]["digest"],"binary_digest":journal["source"]["binary_sha256"],
+            "catalog_digest":controller["identity"]["catalog_digest"],
+            "backend_prefix":controller["identity"]["backend_prefix"],
+            "pid":journal["controller_resources"]["pid"],"role":"controller","server":null
+        });
+        let check_frame = |frame: &serde_json::Value, identity: &serde_json::Value| {
+            assert_eq!(&frame["identity"], identity);
+            assert_eq!(frame["capture_complete"], true);
+            if journal["metrics_required_for_outcome"] == true {
+                assert_eq!(frame["metrics_complete"], true);
+            }
+        };
+        check_frame(&controller, &identity);
+        let measured = boundary["workers"].as_array().unwrap();
+        assert_eq!(measured.len(), 10);
+        let mut seen = std::collections::BTreeSet::new();
+        for worker in measured {
+            let server = worker["server"].as_u64().unwrap();
+            assert!(server < 10 && seen.insert(server));
+            let owned: Vec<_> = journal["workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|owner| owner["server"] == server)
+                .collect();
+            assert_eq!(owned.len(), 1);
+            assert_eq!(owned[0]["pid"], worker["pid"]);
+            let name = format!("worker-{server}/metrics/g{generation}-s{sequence}.json.gz");
+            assert_eq!(worker["file"], name);
+            let path = directory.join(name);
+            assert_eq!(target::file_digest(&path).unwrap(), worker["sha256"]);
+            let frame = target::read_json(&path).unwrap();
+            identity["pid"] = worker["pid"].clone();
+            identity["server"] = serde_json::json!(server);
+            identity["role"] = serde_json::json!("worker");
+            check_frame(&frame, &identity);
+        }
+    }
+}
+
 #[test]
 #[ignore = "owned ten-process two-file diagnostic, explicitly invoked"]
 fn ten_process_online_smoke() {
@@ -124,7 +265,7 @@ fn ten_process_online_smoke() {
     assert_eq!(journal["population_bytes"], 81920);
     assert_eq!(journal["routes"], 100);
     assert_balanced_timed_runtime(directory.as_path(), &journal);
-    assert_eq!(journal["verified_passes"], 2);
+    assert_fresh_oracle_corpus(directory.as_path(), &journal);
 }
 
 #[test]
@@ -283,7 +424,7 @@ fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
     assert_balanced_timed_runtime(directory.as_path(), &journal);
     assert_eq!(journal["scope_denials"]["sibling"], 10);
     assert_eq!(journal["scope_denials"]["partition"], 10);
-    assert_eq!(journal["verified_passes"], 2);
+    assert_fresh_oracle_corpus(directory.as_path(), &journal);
     let workers = journal["workers"].as_array().unwrap();
     assert_eq!(workers.len(), 10);
     assert!(

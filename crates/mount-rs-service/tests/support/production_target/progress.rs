@@ -139,6 +139,98 @@ struct ResourceRecord<'a> {
     process_disk_write_bytes: Option<u64>,
     process_disk_bytes_reason: &'static str,
 }
+#[derive(Serialize, Clone, Copy)]
+struct OracleRecord {
+    pass: &'static str,
+    slot_limit: u64,
+    expected_drives: u64,
+    started_drives: u64,
+    completed_drives: u64,
+    live_slots: u64,
+    expected_files: u64,
+    completed_files: u64,
+    expected_bytes: u64,
+    completed_bytes: u64,
+    checked_files: u64,
+    compared_bytes: u64,
+    complete: bool,
+    settled: bool,
+}
+impl OracleRecord {
+    fn parse(value: &Value, drives: u64) -> Option<Self> {
+        let result = Self {
+            pass: match value["pass"].as_str()? {
+                "initial" => "initial",
+                "final" => "final",
+                _ => return None,
+            },
+            slot_limit: value["slot_limit"].as_u64()?,
+            expected_drives: value["expected_drives"].as_u64()?,
+            started_drives: value["started_drives"].as_u64()?,
+            completed_drives: value["completed_drives"].as_u64()?,
+            live_slots: value["live_slots"].as_u64()?,
+            expected_files: value["expected_files"].as_u64()?,
+            completed_files: value["completed_files"].as_u64()?,
+            expected_bytes: value["expected_bytes"].as_u64()?,
+            completed_bytes: value["completed_bytes"].as_u64()?,
+            checked_files: value["checked_files"].as_u64()?,
+            compared_bytes: value["compared_bytes"].as_u64()?,
+            complete: value["complete"].as_bool()?,
+            settled: value["settled"].as_bool()?,
+        };
+        ((1..=16).contains(&result.slot_limit)
+            && result.expected_drives == drives
+            && result.completed_drives <= result.started_drives
+            && result.started_drives <= drives
+            && result.live_slots <= result.slot_limit
+            && result.live_slots <= result.started_drives - result.completed_drives
+            && result.completed_files <= result.checked_files
+            && result.checked_files <= result.expected_files
+            && result.completed_bytes <= result.compared_bytes
+            && result.compared_bytes <= result.expected_bytes
+            && (!result.settled || result.live_slots == 0)
+            && (!result.complete
+                || (result.settled
+                    && result.completed_drives == drives
+                    && result.started_drives == drives
+                    && result.completed_files == result.expected_files
+                    && result.checked_files == result.expected_files
+                    && result.completed_bytes == result.expected_bytes
+                    && result.compared_bytes == result.expected_bytes)))
+            .then_some(result)
+    }
+    fn follows(self, previous: Self, phase: &str) -> bool {
+        if self.slot_limit != previous.slot_limit {
+            return false;
+        }
+        if self.pass != previous.pass {
+            return previous.pass == "initial"
+                && self.pass == "final"
+                && phase == "final_fresh_oracle"
+                && previous.complete
+                && previous.settled;
+        }
+        self.expected_drives == previous.expected_drives
+            && self.expected_files == previous.expected_files
+            && self.expected_bytes == previous.expected_bytes
+            && self.started_drives >= previous.started_drives
+            && self.completed_drives >= previous.completed_drives
+            && self.completed_files >= previous.completed_files
+            && self.completed_bytes >= previous.completed_bytes
+            && self.checked_files >= previous.checked_files
+            && self.compared_bytes >= previous.compared_bytes
+            && (!previous.complete || self.complete)
+    }
+}
+/// Strip the private completion roster before publication or artifact upload.
+pub(super) fn public_oracle_snapshot(value: &Value) -> Value {
+    if value["pass"].is_null() {
+        return Value::Null;
+    }
+    OracleRecord::parse(value, value["expected_drives"].as_u64().unwrap_or(0))
+        .map(|record| serde_json::to_value(record).expect("fixed oracle scalars serialize"))
+        .unwrap_or_else(|| serde_json::json!({"pass":"invalid"}))
+}
 #[derive(Serialize)]
 struct Record<'a> {
     schema: &'static str,
@@ -161,6 +253,8 @@ struct Record<'a> {
     connected_clients: u64,
     outcome: &'static str,
     accounting_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oracle: Option<OracleRecord>,
 }
 struct State {
     started: Instant,
@@ -183,6 +277,7 @@ struct State {
     resource_pending: bool,
     resource_last: [Option<(u32, ResourceObservation)>; SERVERS + 1],
     checkpoints: [super::checkpoints::Projection; SERVERS],
+    oracle: Option<OracleRecord>,
 }
 /// None is a zero-clock, zero-timer, zero-allocation disabled path.
 pub struct Progress {
@@ -465,6 +560,7 @@ impl Progress {
                     resource_pending: false,
                     resource_last: [None; SERVERS + 1],
                     checkpoints: std::array::from_fn(|_| super::checkpoints::Projection::default()),
+                    oracle: None,
                 }
             }),
         }
@@ -496,6 +592,7 @@ impl Progress {
             connected_clients: state.connected,
             outcome: state.outcome,
             accounting_complete: state.complete,
+            oracle: state.oracle,
         })
     }
     fn emit_to(&mut self, event: &'static str, writer: &mut impl Write) {
@@ -575,6 +672,28 @@ impl Progress {
         };
         let changed = state.phase != current;
         state.phase = current;
+        let previous_pass = state.oracle.map(|oracle| oracle.pass);
+        match journal
+            .get("fresh_oracle_progress")
+            .filter(|value| !value["pass"].is_null())
+        {
+            Some(value) => match OracleRecord::parse(value, state.drives) {
+                Some(oracle)
+                    if state
+                        .oracle
+                        .is_some_and(|previous| oracle.follows(previous, current))
+                        || (state.oracle.is_none()
+                            && oracle.pass == "initial"
+                            && matches!(current, "initial_fresh_oracle" | "terminal")) =>
+                {
+                    state.oracle = Some(oracle)
+                }
+                _ => state.complete = false,
+            },
+            None if state.oracle.is_some() => state.complete = false,
+            None => {}
+        }
+        let pass_changed = previous_pass != state.oracle.map(|oracle| oracle.pass);
         let initialized = journal["initialization"]["initialized_drives"]
             .as_u64()
             .unwrap_or(0);
@@ -588,7 +707,7 @@ impl Progress {
         }
         state.initialized = initialized;
         state.connected = connected;
-        if changed || Instant::now() >= state.next {
+        if changed || pass_changed || Instant::now() >= state.next {
             self.emit(if changed { "phase" } else { "progress" });
             true
         } else {
@@ -607,6 +726,10 @@ impl Progress {
         }
         state.terminal = true;
         state.phase = "terminal";
+        let success = success
+            && state
+                .oracle
+                .is_none_or(|oracle| oracle.pass == "final" && oracle.complete && oracle.settled);
         state.outcome = if success { "success" } else { "error" };
         state.complete &= complete && success;
         self.emit("terminal");
@@ -1272,5 +1395,238 @@ mod tests {
                 assert!(phase(&format!("{mode}/{pattern}")).is_some());
             }
         }
+    }
+
+    fn oracle_sample() -> Value {
+        json!({"pass":"initial","slot_limit":8,"expected_drives":10000,
+            "started_drives":8,"completed_drives":1,"live_slots":7,
+            "expected_files":10000000,"completed_files":1000,"checked_files":1001,
+            "expected_bytes":62832640000u64,"completed_bytes":6283264,
+            "compared_bytes":6287360,"complete":false,"settled":false,
+            "completed_drive_ids":[0],"private_path":"DO_NOT_PUBLISH_ORACLE_PATH"})
+    }
+    fn observe_oracle(progress: &mut Progress, phase: &str, sample: Value) {
+        progress.observe(&json!({"phase":phase,"fresh_oracle_progress":sample}));
+    }
+
+    #[test]
+    fn fresh_oracle_progress_publishes_only_bounded_scalars() {
+        let mut progress = Progress::new(true, &config());
+        observe_oracle(&mut progress, "initial_fresh_oracle", oracle_sample());
+        assert!(progress.complete());
+        let mut bytes = Vec::new();
+        progress.emit_to("progress", &mut bytes);
+        assert!(bytes.len() <= LIMIT);
+        let record: Value =
+            serde_json::from_slice(bytes.strip_prefix(b"\ntarget_progress ").unwrap()).unwrap();
+        assert_eq!(record["oracle"]["expected_drives"], 10000);
+        assert_eq!(record["oracle"]["checked_files"], 1001);
+        assert!(record["oracle"].get("completed_drive_ids").is_none());
+        assert!(
+            !String::from_utf8(bytes)
+                .unwrap()
+                .contains("DO_NOT_PUBLISH_ORACLE_PATH")
+        );
+    }
+
+    #[test]
+    fn fresh_oracle_progress_rejects_regression_and_keeps_failure_sticky() {
+        let mut progress = Progress::new(true, &config());
+        let sample = oracle_sample();
+        observe_oracle(&mut progress, "initial_fresh_oracle", sample.clone());
+        let mut regressed = sample.clone();
+        regressed["compared_bytes"] = json!(6283264);
+        observe_oracle(&mut progress, "initial_fresh_oracle", regressed);
+        assert!(
+            !progress.complete(),
+            "partial compared bytes cannot regress"
+        );
+        observe_oracle(&mut progress, "initial_fresh_oracle", sample);
+        assert!(!progress.complete());
+    }
+
+    #[test]
+    fn fresh_oracle_progress_rejects_inconsistent_counts() {
+        for (key, value) in [
+            ("started_drives", json!(10001)),
+            ("completed_drives", json!(9)),
+            ("live_slots", json!(9)),
+            ("checked_files", json!(999)),
+            ("completed_bytes", json!(6287361)),
+            ("complete", json!(true)),
+            ("settled", json!(true)),
+            ("slot_limit", json!(0)),
+        ] {
+            let mut progress = Progress::new(true, &config());
+            let mut sample = oracle_sample();
+            sample[key] = value;
+            observe_oracle(&mut progress, "initial_fresh_oracle", sample);
+            assert!(
+                !progress.complete(),
+                "invalid oracle scalar accepted: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_oracle_progress_rejects_pass_reset_outside_final_phase() {
+        let mut progress = Progress::new(true, &config());
+        observe_oracle(&mut progress, "initial_fresh_oracle", oracle_sample());
+        let mut final_pass = oracle_sample();
+        final_pass["pass"] = json!("final");
+        observe_oracle(&mut progress, "all_active/mixed", final_pass);
+        assert!(
+            !progress.complete(),
+            "pass reset cannot conceal incomplete initial proof"
+        );
+    }
+
+    fn completed_oracle_sample() -> Value {
+        let mut value = oracle_sample();
+        value["started_drives"] = json!(10000);
+        value["completed_drives"] = json!(10000);
+        value["live_slots"] = json!(0);
+        for (total, completed, partial) in [
+            ("expected_files", "completed_files", "checked_files"),
+            ("expected_bytes", "completed_bytes", "compared_bytes"),
+        ] {
+            value[completed] = value[total].clone();
+            value[partial] = value[total].clone();
+        }
+        value["complete"] = json!(true);
+        value["settled"] = json!(true);
+        value
+    }
+
+    #[test]
+    fn fresh_oracle_progress_allows_only_complete_initial_to_final_reset() {
+        let mut progress = Progress::new(true, &config());
+        observe_oracle(
+            &mut progress,
+            "initial_fresh_oracle",
+            completed_oracle_sample(),
+        );
+        let mut final_pass = oracle_sample();
+        final_pass["pass"] = json!("final");
+        // The acknowledged workload can change totals between the two fresh passes.
+        final_pass["expected_files"] = json!(10000001);
+        observe_oracle(&mut progress, "final_fresh_oracle", final_pass);
+        assert!(progress.complete());
+        observe_oracle(&mut progress, "terminal", oracle_sample());
+        assert!(
+            !progress.complete(),
+            "final-to-initial reset is never valid"
+        );
+    }
+
+    #[test]
+    fn fresh_oracle_progress_retains_partial_on_terminal_and_rejects_omission() {
+        let mut progress = Progress::new(true, &config());
+        observe_oracle(&mut progress, "initial_fresh_oracle", oracle_sample());
+        let mut partial = oracle_sample();
+        partial["live_slots"] = json!(0);
+        partial["settled"] = json!(true);
+        observe_oracle(&mut progress, "terminal", partial);
+        assert!(
+            progress.complete(),
+            "settled partial failure remains observable"
+        );
+        progress.observe(&json!({"phase":"terminal"}));
+        assert!(
+            !progress.complete(),
+            "omission cannot conceal partial verification"
+        );
+        let record = serde_json::to_value(progress.record("progress").unwrap()).unwrap();
+        assert_eq!(record["oracle"]["checked_files"], 1001);
+        assert_eq!(record["oracle"]["complete"], false);
+    }
+
+    #[test]
+    fn fresh_oracle_progress_max_u64_fields_fit_public_limit() {
+        let mut progress = Progress::new(true, &config());
+        let mut sample = completed_oracle_sample();
+        for field in [
+            "expected_files",
+            "completed_files",
+            "checked_files",
+            "expected_bytes",
+            "completed_bytes",
+            "compared_bytes",
+        ] {
+            sample[field] = json!(u64::MAX);
+        }
+        observe_oracle(&mut progress, "initial_fresh_oracle", sample.clone());
+        assert!(progress.complete());
+        let mut bytes = Vec::new();
+        progress.emit_to("progress", &mut bytes);
+        assert!(bytes.len() <= LIMIT);
+        let value = public_oracle_snapshot(&sample);
+        assert_eq!(value.as_object().unwrap().len(), 14);
+        assert_eq!(value["compared_bytes"].as_u64(), Some(u64::MAX));
+        assert!(value.get("private_path").is_none());
+        assert!(value.get("completed_drive_ids").is_none());
+        assert!(
+            String::from_utf8(bytes)
+                .unwrap()
+                .contains("18446744073709551615")
+        );
+    }
+
+    #[test]
+    fn fresh_oracle_progress_cannot_publish_success_after_only_initial_pass() {
+        let mut progress = Progress::new(true, &config());
+        observe_oracle(
+            &mut progress,
+            "initial_fresh_oracle",
+            completed_oracle_sample(),
+        );
+        progress.finish(true, true);
+        let record = serde_json::to_value(progress.record("terminal").unwrap()).unwrap();
+        assert_eq!(record["outcome"], "error");
+        assert_eq!(record["accounting_complete"], false);
+    }
+
+    #[test]
+    fn fresh_oracle_progress_success_requires_complete_final_pass() {
+        for complete in [false, true] {
+            let mut progress = Progress::new(true, &config());
+            observe_oracle(
+                &mut progress,
+                "initial_fresh_oracle",
+                completed_oracle_sample(),
+            );
+            let mut final_pass = if complete {
+                completed_oracle_sample()
+            } else {
+                oracle_sample()
+            };
+            final_pass["pass"] = json!("final");
+            observe_oracle(&mut progress, "final_fresh_oracle", final_pass);
+            progress.finish(true, true);
+            let record = serde_json::to_value(progress.record("terminal").unwrap()).unwrap();
+            assert_eq!(
+                record["outcome"],
+                if complete { "success" } else { "error" }
+            );
+            assert_eq!(record["accounting_complete"], complete);
+        }
+    }
+
+    #[test]
+    fn fresh_oracle_progress_emits_pass_change_before_cleanup_context() {
+        let mut progress = Progress::new(true, &config());
+        let initial = completed_oracle_sample();
+        observe_oracle(&mut progress, "initial_fresh_oracle", initial.clone());
+        observe_oracle(&mut progress, "final_fresh_oracle", initial);
+        progress.state.as_mut().unwrap().next =
+            Instant::now() + std::time::Duration::from_secs(3600);
+        let mut final_pass = oracle_sample();
+        final_pass["pass"] = json!("final");
+        assert!(
+            progress
+                .observe(&json!({"phase":"final_fresh_oracle","fresh_oracle_progress":final_pass})),
+            "an immediate final failure must publish the pass reset before cleanup"
+        );
+        assert!(progress.complete());
     }
 }
