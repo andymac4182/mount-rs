@@ -628,9 +628,12 @@ jobs:
             ${{ env.EVIDENCE_DIR }}
             ${{ env.MOUNT_RS_TARGET_OUTPUT }}/*.json
             ${{ env.MOUNT_RS_TARGET_OUTPUT }}/metrics/*.json
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/metrics/*.json.gz
             ${{ env.MOUNT_RS_TARGET_OUTPUT }}/expected/*.json
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/oracle-receipts/*.json
             ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/*.json
             ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/metrics/*.json
+            ${{ env.MOUNT_RS_TARGET_OUTPUT }}/worker-*/metrics/*.json.gz
           if-no-files-found: error
           retention-days: 14
   owned-backing-pilot:
