@@ -25,6 +25,12 @@ pub use indexed::{
     check_compact_file_unchanged, validate_compact_file_update,
 };
 
+mod borrowed_root;
+pub use borrowed_root::{
+    BorrowedCompactRootEntry, CompactRootDentryCursor, CompactRootGuardCursor,
+    CompactRootMemberCursor,
+};
+
 mod root_file;
 pub use root_file::{
     CompactRootFileCapability, CompactRootFileIntent, CompactRootFileRead, CompactRootFileTimes,
@@ -232,6 +238,12 @@ pub struct CompactInodeExpectation<'a> {
 }
 
 impl<'a> CompactInodeExpectation<'a> {
+    /// Optimization hint identifying the root of the retained complete audit.
+    /// This does not certify fresh authority, membership, identity, or body.
+    pub fn audited_root_inode(self) -> Option<InodeId> {
+        self.root.map(|structure| structure.anchor.root)
+    }
+
     pub fn selected(
         generation: u64,
         identity: PhysicalInodeIdentity,

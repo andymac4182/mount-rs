@@ -267,10 +267,21 @@ async fn actual_compact_selected_streaming_certifies_full_audited_root_and_file(
     let snapshot = f.store.load_compact_snapshot(f.backing).await.unwrap();
     let (_, _, audited) = snapshot.clone().into_validated_namespace().unwrap();
     let file = &snapshot.guards[&inode];
-    let root_read = f
-        .store
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    // Warm the reader and prepared projections before tracing only the root
+    // read. Unchanged alone also admits the owned fallback, so count its SQL.
+    reader
+        .read_compact_inode(f.backing, snapshot.anchor.root, audited.expect_root())
+        .await
+        .unwrap();
+    proxy.begin();
+    let root_read = reader
         .read_compact_inode(f.backing, snapshot.anchor.root, audited.expect_root())
         .await;
+    let (root_queries, root_rows) = proxy.end();
     let file_read = f
         .store
         .read_compact_inode(
@@ -288,7 +299,54 @@ async fn actual_compact_selected_streaming_certifies_full_audited_root_and_file(
         .load_compact_inode(f.backing, snapshot.anchor.root)
         .await;
     let file_owned = f.store.load_compact_inode(f.backing, inode).await;
+    reader.close().await.unwrap();
     f.store.close().await.unwrap();
+    proxy.shutdown().await;
+
+    let selects: Vec<_> = root_queries
+        .iter()
+        .filter(|sql| sql.starts_with("SELECT "))
+        .collect();
+    assert_eq!(
+        selects.len(),
+        4,
+        "borrowed root hit must not replay an owned fallback: {root_queries:?}"
+    );
+    for table in [
+        " FROM mount_rs_tidb_metadata ",
+        " FROM mount_rs_tidb_compact_members ",
+        " FROM mount_rs_tidb_compact_guards ",
+        " FROM mount_rs_tidb_compact_dentries ",
+    ] {
+        assert_eq!(
+            selects.iter().filter(|sql| sql.contains(table)).count(),
+            1,
+            "each complete root projection must execute once: {table}"
+        );
+    }
+    assert_eq!(root_rows, 1, "one selected root guard row required");
+    assert_eq!(
+        root_queries
+            .iter()
+            .filter(|sql| sql.starts_with("START TRANSACTION"))
+            .count(),
+        1,
+        "one fresh transaction supplies all complete root projections"
+    );
+    assert_eq!(
+        root_queries
+            .iter()
+            .filter(|sql| sql.eq_ignore_ascii_case("ROLLBACK"))
+            .count(),
+        1,
+        "successful borrowed certification must await one rollback"
+    );
+    assert!(
+        root_queries
+            .last()
+            .is_some_and(|sql| sql.eq_ignore_ascii_case("ROLLBACK")),
+        "rollback must settle before the traced root read returns"
+    );
 
     let CompactInodeRead::Unchanged(root) = root_read.unwrap() else {
         panic!("canonical fresh root bytes must use streamed certification")

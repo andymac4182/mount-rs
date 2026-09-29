@@ -1921,6 +1921,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-mysql-async"
+version = "0.37.1"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "crossbeam-queue",
+ "crossbeam-utils",
+ "flate2",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "keyed_priority_queue",
+ "lru",
+ "mysql_common",
+ "percent-encoding",
+ "rand 0.10.2",
+ "rustls",
+ "serde",
+ "socket2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "twox-hash",
+ "url",
+ "webpki-roots",
+]
+
+[[package]]
 name = "mount-rs-napi"
 version = "0.1.0"
 dependencies = [
@@ -2260,8 +2289,8 @@ dependencies = [
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-memfs",
+ "mount-rs-mysql-async",
  "mount-rs-r2",
- "mysql_async",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2323,16 +2352,13 @@ dependencies = [
  "mysql_common",
  "percent-encoding",
  "rand 0.10.2",
- "rustls",
  "serde",
  "socket2",
  "thiserror 2.0.20",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "twox-hash",
  "url",
- "webpki-roots",
 ]
 
 [[package]]

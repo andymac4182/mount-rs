@@ -795,6 +795,15 @@ jobs:
       # attempting to link libfdb_c while still checking every workspace target.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
+      # The scoped driver fork has a separate workspace so upstream live-DB
+      # tests remain opt-in. Exercise its borrowed API on every supported OS.
+      - name: Verify borrowed MySQL rows and lifetime contracts
+        shell: bash
+        run: |
+          ./scripts/cargo-shared fmt --manifest-path vendor/mount-rs-mysql-async/Cargo.toml -- --check
+          ./scripts/cargo-shared clippy --locked --manifest-path vendor/mount-rs-mysql-async/Cargo.toml --no-default-features --features minimal-rust --lib --tests -- -D warnings
+          ./scripts/cargo-shared test --locked --manifest-path vendor/mount-rs-mysql-async/Cargo.toml --no-default-features --features minimal-rust --lib borrowed_ -- --test-threads=1
+          ./scripts/cargo-shared test --locked --manifest-path vendor/mount-rs-mysql-async/Cargo.toml --no-default-features --features minimal-rust --doc next_binary_row_with
 
   kani-core:
     runs-on: ubuntu-24.04

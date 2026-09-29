@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    ".",
     "filesystems/mount-rs-memfs",
     "filesystems/mount-rs-persist",
     "filesystems/mount-rs-sqlite-fs",
@@ -39,7 +38,7 @@ members = [
     "crates/mount-rs-remote-client",
 ]
 resolver = "3"
-exclude = ["vendor/quinn-proto-0.11.18"]
+exclude = ["vendor/quinn-proto-0.11.18", "vendor/mount-rs-mysql-async"]
 
 [patch.crates-io]
 # Preserve natural QUIC draining when the first Initial contains CLOSE.

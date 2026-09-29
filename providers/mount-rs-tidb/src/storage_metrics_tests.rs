@@ -20,6 +20,7 @@ fn diagnostic_coverage_matches_production_source_sites() {
         include_str!("inode_batch.rs"),
         include_str!("inode_batch_size.rs"),
         include_str!("compact/member_equality.rs"),
+        include_str!("compact/borrowed.rs"),
     ];
     let count = |token: &str| -> u32 {
         sources

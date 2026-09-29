@@ -6,6 +6,8 @@ use mysql_async::{Row, Value, consts::StatusFlags, from_value_opt, prelude::From
 #[path = "compact/indexed.rs"]
 mod indexed;
 use indexed::*;
+#[path = "compact/borrowed.rs"]
+mod borrowed;
 #[path = "compact/member_equality.rs"]
 mod member_equality;
 
@@ -975,6 +977,14 @@ impl TidbMetadataStore {
             .await
             .map_err(|e| db_error("read complete TiDB compact inode", e))?;
         let mut tx = read_transaction(&mut conn).await?;
+        if let Some(checked) =
+            borrowed::try_root(&mut tx, &self.0.volume_key, backing, inode, expected).await?
+        {
+            observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
+                .await
+                .map_err(|e| db_error("finish complete TiDB compact inode", e))?;
+            return Ok(CompactInodeRead::Unchanged(checked));
+        }
         let anchor = anchor(&mut tx, &self.0.volume_key, backing).await?;
         signed(inode, "compact inode")?;
         let guard = selected_complete(&mut tx, &self.0.volume_key, inode, false)
