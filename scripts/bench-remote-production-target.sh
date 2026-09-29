@@ -14,6 +14,8 @@ if [[ -e "$MOUNT_RS_TARGET_OUTPUT/terminal.json" ]]; then
   exit 2
 fi
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/private/tmp/mount-rs-public-compact-selection-cargo-target}"
+# Runtime ownership checkpoints require the finite diagnostic recorder.
+export MOUNT_RS_PROFILE_IO=1
 status=0
 ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling \
   --test quic_production_target production_target_controller -- --ignored --exact --nocapture || status=$?

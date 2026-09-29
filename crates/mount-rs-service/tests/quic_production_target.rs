@@ -15,6 +15,13 @@ async fn production_target_worker() {
     target::worker().await.unwrap();
 }
 
+fn require_native_diagnostics(available: bool) {
+    assert!(
+        available,
+        "owned native controls require --features sdk-runtime,resource-profiling"
+    );
+}
+
 fn assert_balanced_timed_runtime(directory: &std::path::Path, journal: &serde_json::Value) {
     // Inspect actual retained runtime evidence, not a synthetic profile declaration.
     let boundaries = journal["phase_metrics"]["boundaries"].as_array().unwrap();
@@ -230,6 +237,7 @@ fn assert_fresh_oracle_corpus(directory: &std::path::Path, journal: &serde_json:
 #[test]
 #[ignore = "owned ten-process two-file diagnostic, explicitly invoked"]
 fn ten_process_online_smoke() {
+    require_native_diagnostics(cfg!(feature = "resource-profiling"));
     let directory = tempfile::Builder::new()
         .prefix("mount-rs-target-smoke-")
         .tempdir()
@@ -247,6 +255,7 @@ fn ten_process_online_smoke() {
         .env("MOUNT_RS_TARGET_DRIVES", "10")
         .env("MOUNT_RS_TARGET_FILES", "2")
         .env("MOUNT_RS_TARGET_SECONDS", "1")
+        .env("MOUNT_RS_PROFILE_IO", "1")
         .env("MOUNT_RS_TARGET_OUTPUT", directory.as_path())
         .status()
         .unwrap();
@@ -271,6 +280,7 @@ fn ten_process_online_smoke() {
 #[test]
 #[ignore = "explicit owned child-loss, timeout and partial-start controls"]
 fn process_failures_retain_partial_evidence_and_reap_children() {
+    require_native_diagnostics(cfg!(feature = "resource-profiling"));
     for injection in ["partial_start", "child_loss", "work_timeout"] {
         let directory = tempfile::Builder::new()
             .prefix("mount-rs-target-fault-")
@@ -290,6 +300,7 @@ fn process_failures_retain_partial_evidence_and_reap_children() {
             .env("MOUNT_RS_TARGET_FILES", "2")
             .env("MOUNT_RS_TARGET_SECONDS", "1")
             .env("MOUNT_RS_TARGET_INJECT", injection)
+            .env("MOUNT_RS_PROFILE_IO", "1")
             .env("MOUNT_RS_TARGET_OUTPUT", &directory)
             .status()
             .unwrap();
@@ -365,6 +376,7 @@ fn process_failures_retain_partial_evidence_and_reap_children() {
 #[test]
 #[ignore = "owned ten-process cold registration regression; explicitly invoked"]
 fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
+    require_native_diagnostics(cfg!(feature = "resource-profiling"));
     let directory = tempfile::Builder::new()
         .prefix("mount-rs-target-lazy-")
         .tempdir()
