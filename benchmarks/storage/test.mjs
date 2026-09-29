@@ -21,7 +21,7 @@ import {
 import { foundationDbMetadataOptions, providerById, providerSummary } from "./providers.mjs"
 import { cleanupOwnedPaths, helpText, parseArgs, runBenchmark, runSample, runSteadySample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
-import { deltaNativeSnapshots, takePhaseSnapshot, finishPhase, logPhaseSummary, validateRawPhaseDiagnostics, validateLocalPhaseDiagnostics, STORAGE_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS } from "./diagnostics.mjs"
+import { deltaNativeSnapshots, takePhaseSnapshot, finishPhase, logPhaseSummary, validateRawPhaseDiagnostics, validateLocalPhaseDiagnostics, STORAGE_OPERATION_NAMES, STORAGE_CALL_SEMANTICS, STORAGE_BYTE_SEMANTICS, STORAGE_ROW_SEMANTICS, TIDB_DIAGNOSTIC_COVERAGE } from "./diagnostics.mjs"
 
 const clientWebSocketNames = Object.freeze([
   "client.websocket.tcp_connect",
@@ -71,8 +71,8 @@ const foundationdbCoverageMeasurement = {
 }
 const tidbCoverageMeasurement = {
   schema: "mount-rs-tidb-client-diagnostic-coverage-v1", status: "source_sites_instrumented",
-  pool_checkout_sites: "35", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
-  transaction_begin_sites: "3", transaction_commit_sites: "1", transaction_rollback_sites: "5", sql_statement_sites: "57",
+  pool_checkout_sites: "38", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
+  transaction_begin_sites: "4", transaction_commit_sites: "1", transaction_rollback_sites: "10", sql_statement_sites: "79",
   operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("tidb.")),
   sql_returned_rows_scope: "successful SELECT Option/Vec results only; exec_iter affected_rows excluded",
   sql_payload_bytes_scope: "successful block INSERT submitted bytes and block-body SELECT returned bytes only; other SQL payload bytes unavailable",
@@ -434,6 +434,62 @@ function diagnosticSnapshot(calls, connectionId = "7", instances = []) {
     sqlite: { connections: [sqliteConnection(calls, connectionId)], sql_statements: String(calls), observer_elapsed_ns: String(calls * 1000), observer_scope: sqliteObserverScope, vfs: { ...emptySqliteVfs(), open_attempts: "1", files_opened: "1", live_files: "1", registered_vfs: "1", live_contexts: "1" } },
     r2: { scope: "process_live_instances", instances, internal_successful_retries: "unavailable" },
   }
+}
+
+// Independently audited production submissions include inode batches and the
+// scoped member-equality query; these are source sites, not logical operations.
+const currentTidbCoverageCounts = {
+  pool_checkout_sites: "38", session_configure_sites: "1", schema_initialize_sites: "1", metadata_open_sites: "1",
+  transaction_begin_sites: "4", transaction_commit_sites: "1", transaction_rollback_sites: "10", sql_statement_sites: "79",
+}
+
+function snapshotsWithTidbCoverage(counts) {
+  const before = diagnosticSnapshot(2), after = diagnosticSnapshot(5)
+  for (const snapshot of [before, after]) Object.assign(snapshot.measurement.tidb_coverage, counts)
+  return [before, after]
+}
+
+async function testCurrentTidbDiagnosticCoverage() {
+  const [before, after] = snapshotsWithTidbCoverage(currentTidbCoverageCounts)
+  const delta = deltaNativeSnapshots(before, after)
+  assert.equal(delta.complete, true, "the current complete TiDB producer coverage must permit native phase attribution")
+  assert.deepEqual(delta.issues, [])
+  assert.deepEqual(delta.measurement.tidb_coverage, after.measurement.tidb_coverage)
+  assert.equal(delta.storage.entries.find((entry) => entry.name === "blocks.put").calls, "3")
+}
+
+async function testStaleTidbDiagnosticCoverageIsRejected() {
+  for (const rollbackSites of ["4", "5"]) {
+    const stale = {
+      pool_checkout_sites: "35", transaction_begin_sites: "3", transaction_rollback_sites: rollbackSites, sql_statement_sites: "57",
+    }
+    const [before, after] = snapshotsWithTidbCoverage(stale)
+    const delta = deltaNativeSnapshots(before, after)
+    assert.equal(delta.complete, false, `stale ${rollbackSites}-rollback coverage must not certify a phase`)
+    assert.ok(delta.issues.includes("measurement metadata changed"))
+    assert.equal(delta.observations.before.measurement.tidb_coverage, "unavailable")
+    assert.equal(delta.observations.after.measurement.tidb_coverage, "unavailable")
+  }
+  for (const field of Object.keys(currentTidbCoverageCounts)) {
+    const [before, after] = snapshotsWithTidbCoverage(currentTidbCoverageCounts)
+    after.measurement.tidb_coverage[field] = String(Number(currentTidbCoverageCounts[field]) + 1)
+    assert.equal(deltaNativeSnapshots(before, after).complete, false, `changed ${field} must remain unqualified`)
+  }
+}
+
+async function testTidbProducerConsumerCoverageAgreement() {
+  const source = await readFile(new URL("../../providers/mount-rs-tidb/src/storage.rs", import.meta.url), "utf8")
+  const declaration = source.match(/pub const TIDB_DIAGNOSTIC_COVERAGE: TidbDiagnosticCoverage = TidbDiagnosticCoverage \{([\s\S]*?)\n\};/)
+  assert.ok(declaration, "the published Rust producer declaration must be present")
+  const producer = {}, consumer = {}
+  for (const field of Object.keys(currentTidbCoverageCounts)) {
+    const match = declaration[1].match(new RegExp(`\\b${field}: (\\d+),`))
+    assert.ok(match, `the Rust producer must declare ${field}`)
+    producer[field] = match[1]
+    consumer[field] = TIDB_DIAGNOSTIC_COVERAGE[field]
+  }
+  assert.deepEqual(producer, currentTidbCoverageCounts, "Rust must report the audited production source inventory")
+  assert.deepEqual(consumer, producer, "the strict JavaScript decoder must agree with the Rust producer")
 }
 
 async function testStoragePhaseDiagnostics() {
@@ -2307,7 +2363,7 @@ async function testSteadyGenerationsRejectDroppedWrites() {
 }
 if (process.argv.includes("--diagnostics-only")) {
   const failures = []
-  for (const test of [testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testSqlitePhaseDiagnostics, testSqliteVfsPhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testObjectStoreLocalPhaseDiagnostics, testRustFsPhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
+  for (const test of [testCurrentTidbDiagnosticCoverage, testStaleTidbDiagnosticCoverageIsRejected, testTidbProducerConsumerCoverageAgreement, testStorageDriverFieldDeltas, testStorageFamilyMetadata, testStoragePhaseDiagnostics, testSqlitePhaseDiagnostics, testSqliteVfsPhaseDiagnostics, testRawObjectStorePhaseDiagnostics, testObjectStoreLocalPhaseDiagnostics, testRustFsPhaseDiagnostics, testRawQualificationArtifact, testQualificationProviderCoverage, testObserverEndpointsExcludeSnapshotWork, testQualificationArtifact]) {
     try { await test(); console.log(`${test.name}: PASS`) }
     catch (error) { failures.push(test.name); console.error(`${test.name}: FAIL`, error) }
   }
@@ -2317,6 +2373,9 @@ if (process.argv.includes("--diagnostics-only")) {
 await testSteadyGenerationsRejectDroppedWrites()
 await testSteadyOverwriteOracle()
 await testStats()
+await testCurrentTidbDiagnosticCoverage()
+await testStaleTidbDiagnosticCoverageIsRejected()
+await testTidbProducerConsumerCoverageAgreement()
 await testStoragePhaseDiagnostics()
 await testSqlitePhaseDiagnostics()
 await testSqliteVfsPhaseDiagnostics()

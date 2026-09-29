@@ -1,0 +1,260 @@
+{
+  "schema": "mount-rs.tidb-membership-benchmark-summary.v1",
+  "role_legend": {
+    "A": "enumeration control",
+    "B": "candidate of the named experiment",
+    "range": "active constant range proof with borrowed anchor",
+    "rejected_in": "rejected padded IN-list proof"
+  },
+  "variants": {
+    "rejected_in": {
+      "raw_uncompressed_sha256": "48c0d61967d8d892d9c31ce4143b404899f46d739bb88c30fae0bef8feeb0ca7",
+      "artifact_sha256": "d8b7f2864e6e356f78099e3845e4eaae82619e5debc130bbac89b623b83b778d",
+      "source_pins": {
+        "providers/mount-rs-tidb/src/compact.rs": "0335e14301c074560474fdc86f50811d1a21d5d92441ca1ab3f3866dc1ea8bca",
+        "providers/mount-rs-tidb/src/compact/member_equality.rs": "2c4f47bd84b8d780d3f1e196a5ed1265ca83bcc3ef2445828d19f438a26bb32e",
+        "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+        "providers/mount-rs-tidb/tests/support/member_performance.rs": "5bce342ba28720d446212f13aaa98741125dd0a1e354d6f4fcc14f77f2b3590e",
+        "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e"
+      },
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "B",
+        "A",
+        "A",
+        "B"
+      ],
+      "binary_sha256": {
+        "A": [
+          "6f5d5a0a8be578d4ceb0db6fa64e70dc764670c1154297702c9b285c64a19850"
+        ],
+        "B": [
+          "d51d24f79f5604c52485eb31e8d5485f66ed61c14bb7f19cebe131d50999bade"
+        ]
+      },
+      "cases": {
+        "4": {
+          "A": {
+            "timed_samples": 128,
+            "publication_median_ms": 11.6387295,
+            "publication_mean_ms": 12.0480201796875,
+            "publication_p95_nearest_rank_ms": 14.025542,
+            "trial_medians_ms": [
+              12.2287085,
+              11.3420625,
+              11.6853955,
+              11.3700215
+            ],
+            "allocation_calls_mean": 473,
+            "allocation_requested_bytes_mean": 77645.96875,
+            "inode_sql_returned_rows": [
+              10
+            ],
+            "inclusive_inode_sql_read_mean_ms": 2.4733548515625
+          },
+          "B": {
+            "timed_samples": 128,
+            "publication_median_ms": 11.530479,
+            "publication_mean_ms": 12.32185971875,
+            "publication_p95_nearest_rank_ms": 14.137542,
+            "trial_medians_ms": [
+              11.30625,
+              11.942042,
+              11.958937500000001,
+              10.862937500000001
+            ],
+            "allocation_calls_mean": 463,
+            "allocation_requested_bytes_mean": 78216.96875,
+            "inode_sql_returned_rows": [
+              6
+            ],
+            "inclusive_inode_sql_read_mean_ms": 2.6308190625
+          },
+          "observed_percent_change": {
+            "publication_median_ms": -0.9300886320968371,
+            "publication_mean_ms": 2.272900733717087,
+            "publication_p95_nearest_rank_ms": 0.7985431151252387,
+            "allocation_calls_mean": -2.114164904862581,
+            "allocation_requested_bytes_mean": 0.735389111878404
+          }
+        },
+        "1000": {
+          "A": {
+            "timed_samples": 128,
+            "publication_median_ms": 16.238396,
+            "publication_mean_ms": 16.5816464453125,
+            "publication_p95_nearest_rank_ms": 19.99975,
+            "trial_medians_ms": [
+              16.537999999999997,
+              16.5640205,
+              15.709229,
+              16.024396
+            ],
+            "allocation_calls_mean": 11120,
+            "allocation_requested_bytes_mean": 892560,
+            "inode_sql_returned_rows": [
+              2002
+            ],
+            "inclusive_inode_sql_read_mean_ms": 5.5654587578125
+          },
+          "B": {
+            "timed_samples": 128,
+            "publication_median_ms": 17.682979,
+            "publication_mean_ms": 18.2960806953125,
+            "publication_p95_nearest_rank_ms": 21.655584,
+            "trial_medians_ms": [
+              17.7204375,
+              17.556521,
+              18.109104000000002,
+              17.073646
+            ],
+            "allocation_calls_mean": 8119.96875,
+            "allocation_requested_bytes_mean": 881558.75,
+            "inode_sql_returned_rows": [
+              1002
+            ],
+            "inclusive_inode_sql_read_mean_ms": 7.2351129765625
+          },
+          "observed_percent_change": {
+            "publication_median_ms": 8.896094170877443,
+            "publication_mean_ms": 10.339348723025378,
+            "publication_p95_nearest_rank_ms": 8.279273490918637,
+            "allocation_calls_mean": -26.97869829136691,
+            "allocation_requested_bytes_mean": -1.2325501927041294
+          }
+        }
+      },
+      "complete_intermediate_oracles": 592,
+      "complete_final_independent_oracles": 16,
+      "verified_owned_key_cleanups": 16
+    },
+    "range": {
+      "raw_uncompressed_sha256": "cd4461648fcde1e219152801af113b6b263b2df44f5b96b6df2c085adef0b6be",
+      "artifact_sha256": "a1189444b5078edd6f02e762678e0ea93393f6e3e698c321525f23de9eeed9af",
+      "source_pins": {
+        "providers/mount-rs-tidb/src/compact.rs": "0335e14301c074560474fdc86f50811d1a21d5d92441ca1ab3f3866dc1ea8bca",
+        "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+        "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+        "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+        "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e"
+      },
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "B",
+        "A",
+        "A",
+        "B"
+      ],
+      "binary_sha256": {
+        "A": [
+          "de921e4eddffdc7dea27bf6b7b063cee61a5b7b42f1265ce5b11751ea4b2e267"
+        ],
+        "B": [
+          "ea8fc20972655296d723cf5e158c56ce7fd11ac66250ec2a1fccb5af04bfc8ab"
+        ]
+      },
+      "cases": {
+        "4": {
+          "A": {
+            "timed_samples": 128,
+            "publication_median_ms": 11.120103499999999,
+            "publication_mean_ms": 11.371846640625,
+            "publication_p95_nearest_rank_ms": 13.82025,
+            "trial_medians_ms": [
+              11.1627915,
+              11.168084,
+              11.0645205,
+              10.892521
+            ],
+            "allocation_calls_mean": 473,
+            "allocation_requested_bytes_mean": 77705.96875,
+            "inode_sql_returned_rows": [
+              10
+            ],
+            "inclusive_inode_sql_read_mean_ms": 2.3738438203125
+          },
+          "B": {
+            "timed_samples": 128,
+            "publication_median_ms": 11.446395500000001,
+            "publication_mean_ms": 11.942355796875,
+            "publication_p95_nearest_rank_ms": 14.767959,
+            "trial_medians_ms": [
+              11.168791,
+              11.8864165,
+              11.0647915,
+              12.5733125
+            ],
+            "allocation_calls_mean": 459,
+            "allocation_requested_bytes_mean": 77626.96875,
+            "inode_sql_returned_rows": [
+              6
+            ],
+            "inclusive_inode_sql_read_mean_ms": 2.6167597890625
+          },
+          "observed_percent_change": {
+            "publication_median_ms": 2.934253264818998,
+            "publication_mean_ms": 5.016855874681814,
+            "publication_p95_nearest_rank_ms": 6.8573940413523715,
+            "allocation_calls_mean": -2.959830866807611,
+            "allocation_requested_bytes_mean": -0.10166529195995144
+          }
+        },
+        "1000": {
+          "A": {
+            "timed_samples": 128,
+            "publication_median_ms": 16.122125,
+            "publication_mean_ms": 16.5535924453125,
+            "publication_p95_nearest_rank_ms": 20.19925,
+            "trial_medians_ms": [
+              16.647188,
+              16.245562,
+              15.389375000000001,
+              16.4477705
+            ],
+            "allocation_calls_mean": 11120,
+            "allocation_requested_bytes_mean": 892620,
+            "inode_sql_returned_rows": [
+              2002
+            ],
+            "inclusive_inode_sql_read_mean_ms": 5.6103958828125
+          },
+          "B": {
+            "timed_samples": 128,
+            "publication_median_ms": 15.9334375,
+            "publication_mean_ms": 16.8490853203125,
+            "publication_p95_nearest_rank_ms": 24.188959,
+            "trial_medians_ms": [
+              19.018458,
+              15.289667,
+              15.556563,
+              15.383
+            ],
+            "allocation_calls_mean": 8111,
+            "allocation_requested_bytes_mean": 804573,
+            "inode_sql_returned_rows": [
+              1002
+            ],
+            "inclusive_inode_sql_read_mean_ms": 4.9981719218750005
+          },
+          "observed_percent_change": {
+            "publication_median_ms": -1.1703637082580598,
+            "publication_mean_ms": 1.7850679601796982,
+            "publication_p95_nearest_rank_ms": 19.751768011188542,
+            "allocation_calls_mean": -27.059352517985612,
+            "allocation_requested_bytes_mean": -9.863883847549914
+          }
+        }
+      },
+      "complete_intermediate_oracles": 592,
+      "complete_final_independent_oracles": 16,
+      "verified_owned_key_cleanups": 16
+    }
+  },
+  "scope": "actual metadata-only serial direct TiDB publication; allocation instrumentation enabled; no blob, QUIC, sustained throughput or physical IOPS claim"
+}

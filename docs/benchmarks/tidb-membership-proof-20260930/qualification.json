@@ -1,0 +1,188 @@
+{
+  "schema": "mount-rs.tidb-membership-qualification.v1",
+  "measured_production_source_pins": {
+    "providers/mount-rs-tidb/src/compact.rs": "0335e14301c074560474fdc86f50811d1a21d5d92441ca1ab3f3866dc1ea8bca",
+    "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+    "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+    "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+    "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e"
+  },
+  "paired_runtime_receipts": {
+    "experiments": 2,
+    "trials_per_experiment": 8,
+    "all_terminal_exit_zero": true,
+    "raw_output_hashes_rechecked": true,
+    "candidate_source_pins_rechecked": true,
+    "compressed_raw_hashes_rechecked": true
+  },
+  "final_source_checks": {
+    "schema": "mount-rs.tidb-membership-final-gates.v1",
+    "checks": [
+      {
+        "name": "format",
+        "argv": [
+          "./scripts/cargo-shared",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 2.656938000000082,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "terminal_evidence": "original controller emitted successful command receipt before the Node reporter parser failed"
+      },
+      {
+        "name": "enabled-tests",
+        "argv": [
+          "./scripts/cargo-shared",
+          "test",
+          "--locked",
+          "--release",
+          "-p",
+          "mount-rs-tidb",
+          "-p",
+          "mount-rs-napi",
+          "--all-targets"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 11.602050167042762,
+        "stdout_sha256": "3febd882de7c6eeb3c5c5d16ff7d31d510d9e389e45a13fe7525db85e3b91472",
+        "stderr_sha256": "f67cf9c69d3b0d722b4a7d81550e5887f654af9acdb0b54b0ea0697240adaa10",
+        "terminal_evidence": "original controller emitted successful command receipt before the Node reporter parser failed",
+        "test_binaries": 15,
+        "passed": 104,
+        "failed": 0,
+        "ignored": 102
+      },
+      {
+        "name": "clippy",
+        "argv": [
+          "./scripts/cargo-shared",
+          "clippy",
+          "--locked",
+          "--release",
+          "-p",
+          "mount-rs-tidb",
+          "-p",
+          "mount-rs-napi",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 1.8057665000669658,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "6e0a52b03276c973cbea2551009e8472ed3072e906d8d703b6d1d02c3542b463",
+        "terminal_evidence": "original controller emitted successful command receipt before the Node reporter parser failed"
+      },
+      {
+        "name": "storage-js",
+        "argv": [
+          "node",
+          "benchmarks/storage/test.mjs"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 1.4470910000381991,
+        "stdout_sha256": "3477c6ae17e67938012ac8310034f624103bca01c9894579056641650fd77efa",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "terminal_evidence": "original controller emitted successful command receipt before the Node reporter parser failed"
+      },
+      {
+        "name": "foundationdb-js-tap",
+        "argv": [
+          "node",
+          "--test",
+          "--test-reporter=tap",
+          "benchmarks/storage/foundationdb-diagnostics.test.mjs"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.31903029198292643,
+        "stdout_sha256": "c45fedc39d5040ffbbfaa16a518f7d394abb255623a5ae8bed68344a79a3c598",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "passed": 44,
+        "failed": 0
+      },
+      {
+        "name": "syntax-diagnostics",
+        "argv": [
+          "node",
+          "--check",
+          "benchmarks/storage/diagnostics.mjs"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.14644625002983958,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "syntax-storage-test",
+        "argv": [
+          "node",
+          "--check",
+          "benchmarks/storage/test.mjs"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.14411933394148946,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "syntax-foundationdb-test",
+        "argv": [
+          "node",
+          "--check",
+          "benchmarks/storage/foundationdb-diagnostics.test.mjs"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.15080012497492135,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "patch-whitespace",
+        "argv": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.046892707934603095,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "all_terminal_exit_zero": true,
+    "controller_note": "Initial gate controller completed format, enabled tests, Clippy and storage JS. It then misparsed successful Node human-reporter output. Only Node reporter/syntax/whitespace gates were repeated with explicit TAP; Cargo commands were not replayed."
+  },
+  "limits": [
+    "Actual compact suite binary precedes a test-only formatting change and CRLF normalization in the source-inventory guard; measured production and benchmark source pins are unchanged.",
+    "Current enabled tests and strict Clippy use the final source tree.",
+    "Actual correctness datasets remain retained; the metadata-only benchmark verified exact cleanup.",
+    "No new blob, QUIC, OS mount, sustained cluster capacity or physical device IOPS result.",
+    "Hosted CI, full formal qualification and production scale remain separate open gates."
+  ],
+  "actual_tidb_compact_controls": {
+    "passed": 56,
+    "failed": 0,
+    "receipt_sha256": "4bdf80ee77c87b4d225e03b44cd109f89b648852f967c5ae1ddd6beb6d628100",
+    "receipt": {
+      "schema": "mount-rs.actual-member-control.v1",
+      "phase": "range-final-all-compact",
+      "binary_sha256": "1471ed39aa63ee503bfdd8828a2875c624ca641aaacd884eda3668f8bbe3fffe",
+      "fixture_config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "owned_prefix": "member-range-final-304159e5b1fd431688efd5c3c03456a5",
+      "elapsed_seconds": 28.946676874998957,
+      "exit_code": 0,
+      "timed_out": false,
+      "forced_kill": false,
+      "reaped": true,
+      "correctness_dataset_retained": true,
+      "microbenchmark_metadata_keys_cleaned": true,
+      "stdout_sha256": "9b88f2548bbd29595eb82937fbc27800b5a829323113b677c8f81c8240611015",
+      "stderr_sha256": "e67d67ee3d92a0da2b9efde201ccd91a2ceeede0eb7f611e7dbfa6c8693c4e4e"
+    }
+  }
+}

@@ -7,6 +7,84 @@ use std::cell::Cell;
 use std::future::{Future, pending, poll_fn, ready};
 use std::task::{Context, Poll, Waker};
 
+#[test]
+fn diagnostic_coverage_matches_production_source_sites() {
+    // Count classified submissions at their production call sites, not generic
+    // TimedSql helper definitions. Tests after the final cfg(test) module are
+    // excluded; shared transaction recorder sites count once.
+    let sources = [
+        include_str!("lib.rs"),
+        include_str!("storage.rs"),
+        include_str!("compact.rs"),
+        include_str!("compact/indexed.rs"),
+        include_str!("inode_batch.rs"),
+        include_str!("inode_batch_size.rs"),
+        include_str!("compact/member_equality.rs"),
+    ];
+    let count = |token: &str| -> u32 {
+        sources
+            .iter()
+            .map(|source| {
+                let source = source.replace("\r\n", "\n");
+                source
+                    .split("\n#[cfg(test)]\nmod tests")
+                    .next()
+                    .unwrap()
+                    .matches(token)
+                    .count() as u32
+            })
+            .sum()
+    };
+    let coverage = super::TIDB_DIAGNOSTIC_COVERAGE;
+    for (name, declared, observed) in [
+        (
+            "pool checkout",
+            coverage.pool_checkout_sites,
+            count(".get_conn_observed()"),
+        ),
+        (
+            "session configure",
+            coverage.session_configure_sites,
+            count("StorageOperation::TidbSessionConfigure"),
+        ),
+        (
+            "schema initialize",
+            coverage.schema_initialize_sites,
+            count("StorageOperation::TidbSchemaInitialize"),
+        ),
+        (
+            "metadata open",
+            coverage.metadata_open_sites,
+            count("StorageOperation::TidbMetadataOpen"),
+        ),
+        (
+            "transaction begin",
+            coverage.transaction_begin_sites,
+            count("StorageOperation::TidbBegin"),
+        ),
+        (
+            "transaction commit",
+            coverage.transaction_commit_sites,
+            count("StorageOperation::TidbCommit"),
+        ),
+        (
+            "transaction rollback",
+            coverage.transaction_rollback_sites,
+            count("StorageOperation::TidbRollback"),
+        ),
+        (
+            "SQL statements",
+            coverage.sql_statement_sites,
+            count("StorageOperation::TidbSql"),
+        ),
+    ] {
+        assert_eq!(
+            declared, observed,
+            "{name} production source coverage drift"
+        );
+    }
+}
+
 fn isolated(test: &str, expected_enabled: bool) -> bool {
     const CHILD: &str = "MOUNT_RS_TIDB_METRICS_TEST_CHILD";
     if std::env::var(CHILD).as_deref() == Ok(test) {

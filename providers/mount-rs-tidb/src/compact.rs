@@ -6,6 +6,8 @@ use mysql_async::{Row, Value, consts::StatusFlags, from_value_opt, prelude::From
 #[path = "compact/indexed.rs"]
 mod indexed;
 use indexed::*;
+#[path = "compact/member_equality.rs"]
+mod member_equality;
 
 const TABLE: &str = "mount_rs_tidb_compact_guards";
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
@@ -1182,7 +1184,8 @@ impl TidbMetadataStore {
         locked_lease_row(&mut tx, &self.0.volume_key)
             .await?
             .ok_or_else(stale)?;
-        let anchor = anchor(&mut tx, &self.0.volume_key, delta.base_anchor().backing).await?;
+        let (anchor, read_budget) =
+            member_equality::structural_anchor(&mut tx, &self.0.volume_key, delta).await?;
         let stored = match delta.scope() {
             StructuralScope::Full => stored_guards(&mut tx, &self.0.volume_key, None, true).await?,
             StructuralScope::FileCreate => {
@@ -1227,7 +1230,10 @@ impl TidbMetadataStore {
         )?;
         let publication = delta.validate_current(&anchor, &current)?;
         let body = encode_anchor(&publication.anchor)?;
-        let budget = packet_budget(&mut tx).await?;
+        let budget = match read_budget {
+            Some(budget) => budget,
+            None => packet_budget(&mut tx).await?,
+        };
         check_bytes(&self.0, body.len(), budget)?;
         check_bytes(&self.0, 0, budget)?;
         let mut encoded = BTreeMap::new();

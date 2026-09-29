@@ -53,7 +53,17 @@ fn assert_complete_parent_proof(queries: &[String]) -> usize {
     );
     let lock = one_position(queries, authority_lock, "authority row lock");
     let authority = one_position(queries, |sql| sql == AUTHORITY, "fresh authority read");
-    let members = one_position(queries, |sql| sql == MEMBERS, "complete member read");
+    let members = if queries.iter().any(|sql| sql == MEMBERS) {
+        one_position(queries, |sql| sql == MEMBERS, "complete member enumeration")
+    } else {
+        one_position(
+            queries,
+            |sql| {
+                sql == "SELECT COUNT(*),COUNT(CASE WHEN inode BETWEEN ? AND ? THEN 1 END) FROM mount_rs_tidb_compact_members WHERE volume_key=?"
+            },
+            "fresh exact member equality",
+        )
+    };
     let parent = one_position(queries, |sql| sql == PARENT, "locked parent read");
     let entries = one_position(
         queries,

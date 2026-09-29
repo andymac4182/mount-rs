@@ -727,12 +727,25 @@ fn assert_no_structural_dml_or_commit(queries: &[String], complete_parent: bool)
         },
         "fresh complete authority read",
     );
-    let members = one_position(
-        |sql| {
-            sql == "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? ORDER BY inode"
-        },
-        "complete member read",
-    );
+    // Mismatches retain enumeration/error precedence. Exact equality can return
+    // one aggregate row; the unrequested dentry control must still reject.
+    let enumeration =
+        "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? ORDER BY inode";
+    let members = if queries.iter().any(|sql| sql == enumeration) {
+        one_position(
+            |sql| {
+                sql == "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? ORDER BY inode"
+            },
+            "complete member enumeration",
+        )
+    } else {
+        one_position(
+            |sql| {
+                sql == "SELECT COUNT(*),COUNT(CASE WHEN inode BETWEEN ? AND ? THEN 1 END) FROM mount_rs_tidb_compact_members WHERE volume_key=?"
+            },
+            "fresh exact member equality",
+        )
+    };
     assert!(
         started < authority_lock && authority_lock < authority && authority < members,
         "the complete member proof must follow the authority lock and fresh authority read"
@@ -848,9 +861,25 @@ async fn actual_indexed_optimistic_create_rejects_unrequested_dentry_tamper() {
 #[tokio::test]
 #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
 async fn actual_indexed_optimistic_create_rejects_equal_count_member_substitution() {
+    reject_equal_count_member_substitution(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_indexed_optimistic_create_rejects_equal_count_dense_member_substitution() {
+    reject_equal_count_member_substitution(true).await;
+}
+
+async fn reject_equal_count_member_substitution(dense: bool) {
     let f = fixture(true).await;
-    let gap = create(&f, "removed-gap").await;
-    let sibling = create(&f, "unrequested-member").await;
+    let first = create(&f, "removed-gap").await;
+    let second = create(&f, "unrequested-member").await;
+    assert_eq!((first, second), (2, 3));
+    let (gap, sibling) = if dense {
+        (second, first)
+    } else {
+        (first, second)
+    };
     let before_removal = f.store.load_compact_snapshot(f.backing).await.unwrap();
     let mut namespace = before_removal.namespace().unwrap();
     namespace.nodes.remove(&gap).unwrap();
@@ -865,6 +894,8 @@ async fn actual_indexed_optimistic_create_rejects_equal_count_member_substitutio
             .unwrap();
     f.store.publish_compact_structure(&removal).await.unwrap();
     let base = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    assert_eq!(base.anchor.members, vec![1, sibling]);
+    assert_eq!(base.anchor.next_inode, 4);
     assert!(!base.anchor.members.contains(&gap));
     assert!(gap < base.anchor.next_inode);
     let proposal = audited_create_proposal(&base, "audited-create");
@@ -926,6 +957,40 @@ async fn actual_indexed_optimistic_create_rejects_equal_count_member_substitutio
         publication.unwrap_err().is(ErrorCode::Eagain),
         "the complete fresh member IDs must differ from the audited captured anchor"
     );
+    let aggregate = "SELECT COUNT(*),COUNT(CASE WHEN inode BETWEEN ? AND ? THEN 1 END) FROM mount_rs_tidb_compact_members WHERE volume_key=?";
+    let enumeration =
+        "SELECT inode FROM mount_rs_tidb_compact_members WHERE volume_key=? ORDER BY inode";
+    let positions = |statement: &str| {
+        queries
+            .iter()
+            .enumerate()
+            .filter_map(|(position, sql)| (sql == statement).then_some(position))
+            .collect::<Vec<_>>()
+    };
+    let aggregate_positions = positions(aggregate);
+    let enumeration_positions = positions(enumeration);
+    assert_eq!(
+        enumeration_positions.len(),
+        1,
+        "one complete member reconstruction"
+    );
+    if dense {
+        assert_eq!(
+            aggregate_positions.len(),
+            1,
+            "one dense exact-set comparison"
+        );
+        assert_eq!(
+            aggregate_positions[0] + 1,
+            enumeration_positions[0],
+            "a dense membership mismatch must immediately retain enumeration fallback"
+        );
+    } else {
+        assert!(
+            aggregate_positions.is_empty(),
+            "a sparse expected set must bypass the bounded dense-set comparison"
+        );
+    }
     // Member equality can reject before affected-body validation. Do not
     // require later guard/dentry reads to prove this earlier noncommit.
     assert_no_structural_dml_or_commit(&queries, false);

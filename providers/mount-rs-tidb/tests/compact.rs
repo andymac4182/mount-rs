@@ -10,6 +10,11 @@ use mount_rs_tidb::TidbMetadataStore;
 use mysql_async::{Pool, prelude::Queryable};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/member_equality.rs"]
+mod member_equality;
+#[path = "support/member_performance.rs"]
+mod member_performance;
+
 struct Fixture {
     store: TidbMetadataStore,
     url: String,

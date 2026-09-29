@@ -199,6 +199,10 @@ pub const DEFAULT_MAX_NAMESPACE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Source-site coverage for the opt-in, process-local TiDB client recorder.
 /// These counts are static call sites, not calls, server work, or device I/O.
+/// All production modules are included, including inode batches and compact
+/// helpers. Pool and classified SQL submissions count at their caller sites;
+/// shared transaction, session, and open recorder sites count once. A loop or
+/// schema array is one site, regardless of the number of runtime submissions.
 #[derive(Clone, Copy, Debug)]
 pub struct TidbDiagnosticCoverage {
     pub schema: &'static str,
@@ -221,14 +225,14 @@ pub struct TidbDiagnosticCoverage {
 pub const TIDB_DIAGNOSTIC_COVERAGE: TidbDiagnosticCoverage = TidbDiagnosticCoverage {
     schema: "mount-rs-tidb-client-diagnostic-coverage-v1",
     status: "source_sites_instrumented",
-    pool_checkout_sites: 35,
+    pool_checkout_sites: 38,
     session_configure_sites: 1,
     schema_initialize_sites: 1,
     metadata_open_sites: 1,
-    transaction_begin_sites: 3,
+    transaction_begin_sites: 4,
     transaction_commit_sites: 1,
-    transaction_rollback_sites: 4,
-    sql_statement_sites: 57,
+    transaction_rollback_sites: 10,
+    sql_statement_sites: 79,
     operations: &[
         "tidb.pool.checkout",
         "tidb.session.configure",
