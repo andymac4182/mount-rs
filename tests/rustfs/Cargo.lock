@@ -1448,6 +1448,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-mysql-async"
+version = "0.37.1"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "crossbeam-queue",
+ "crossbeam-utils",
+ "flate2",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "keyed_priority_queue",
+ "lru",
+ "mysql_common",
+ "percent-encoding",
+ "rand 0.10.2",
+ "serde",
+ "socket2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "twox-hash",
+ "url",
+]
+
+[[package]]
 name = "mount-rs-nfs"
 version = "0.1.0"
 dependencies = [
@@ -1597,39 +1623,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mount-rs-core",
- "mysql_async",
+ "mount-rs-mysql-async",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
-]
-
-[[package]]
-name = "mysql_async"
-version = "0.37.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40d11da0e2d9fad4640c9f9198ee431c6d68444568f83ef1f10f3367270071e4"
-dependencies = [
- "arc-swap",
- "bytes",
- "crossbeam-queue",
- "crossbeam-utils",
- "flate2",
- "futures-core",
- "futures-sink",
- "futures-util",
- "keyed_priority_queue",
- "lru",
- "mysql_common",
- "percent-encoding",
- "rand 0.10.2",
- "serde",
- "socket2",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "twox-hash",
- "url",
 ]
 
 [[package]]
