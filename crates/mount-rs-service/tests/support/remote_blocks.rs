@@ -152,6 +152,49 @@ pub fn validate_owned_fixture(
     owner: &str,
     blocks: &StoreConfig,
 ) -> Result<(), String> {
+    if let Some(name) = validate_owned_fixture_mount(observed, cid, owner, blocks)? {
+        let volume = &observed["data_volume"];
+        let source_matches = observed["mounts"].as_array().is_some_and(|mounts| {
+            mounts.iter().any(|mount| {
+                mount["Destination"] == "/data" && volume["Mountpoint"] == mount["Source"]
+            })
+        });
+        let options_empty = volume.get("Options").is_some_and(|options| {
+            options.is_null()
+                || options
+                    .as_object()
+                    .is_some_and(|options| options.is_empty())
+        });
+        if volume["Name"] != name
+            || volume["Driver"] != "local"
+            || volume["Scope"] != "local"
+            || !source_matches
+            || !options_empty
+            || volume["Labels"]["com.mount-rs.rustfs-test"] != observed["owner_label"]
+            || volume["Labels"]["com.mount-rs.rustfs-test-run"] != owner
+            || volume["Labels"]["com.mount-rs.rustfs-stage-owner"] != owner
+        {
+            return Err("RustFS fixture named volume ownership or persistence mismatch".into());
+        }
+    }
+    Ok(())
+}
+
+fn safe_volume_source(source: &str) -> bool {
+    std::path::Path::new(source).is_absolute()
+        && source.split('/').any(|part| !part.is_empty())
+        && !source.split('/').any(|part| part == "." || part == "..")
+        && !source.chars().any(char::is_control)
+}
+
+/// Validate the container and exact data mount before any named-volume query.
+/// Bind fixtures keep their existing validation and require no volume lookup.
+fn validate_owned_fixture_mount(
+    observed: &Value,
+    cid: &str,
+    owner: &str,
+    blocks: &StoreConfig,
+) -> Result<Option<String>, String> {
     let port = fixture_port(blocks)?.to_string();
     let valid_cid = cid.len() == 64
         && cid
@@ -190,16 +233,33 @@ pub fn validate_owned_fixture(
         .iter()
         .filter(|mount| mount["Destination"] == "/data")
         .collect();
-    if data.len() != 1
-        || data[0]["Type"] != "bind"
-        || data[0]["RW"] != true
-        || data[0]["Source"]
-            .as_str()
-            .is_none_or(|source| !std::path::Path::new(source).is_absolute() || source == "/")
-    {
+    if data.len() != 1 {
         return Err("RustFS fixture requires its persistent writable data bind".into());
     }
-    Ok(())
+    let data = data[0];
+    if data["Type"] == "bind" {
+        if data["RW"] != true
+            || data["Source"]
+                .as_str()
+                .is_none_or(|source| !std::path::Path::new(source).is_absolute() || source == "/")
+        {
+            return Err("RustFS fixture requires its persistent writable data bind".into());
+        }
+        return Ok(None);
+    }
+    let expected_name = format!("{owner}-data");
+    if data["Type"] != "volume"
+        || data["Name"] != expected_name
+        || data["Driver"] != "local"
+        || data["RW"] != true
+        || data["Source"]
+            .as_str()
+            .is_none_or(|source| !safe_volume_source(source))
+        || observed["stage_owner"] != owner
+    {
+        return Err("RustFS fixture requires its owned persistent writable data volume".into());
+    }
+    Ok(Some(expected_name))
 }
 
 #[cfg(unix)]
@@ -280,7 +340,7 @@ pub async fn preflight(
     {
         return Err("durable TiDB/RustFS requires measured10GiB Docker VM memory and4 CPUs".into());
     }
-    let projection = r#"{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"image_id":{{json .Image}},"running":{{json .State.Running}},"owner_label":{{json (index .Config.Labels "com.mount-rs.rustfs-test")}},"run":{{json (index .Config.Labels "com.mount-rs.rustfs-test-run")}},"purpose":{{json (index .Config.Labels "com.mount-rs.rustfs-test-purpose")}},"ports":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}}}"#;
+    let projection = r#"{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Config.Image}},"image_id":{{json .Image}},"running":{{json .State.Running}},"owner_label":{{json (index .Config.Labels "com.mount-rs.rustfs-test")}},"run":{{json (index .Config.Labels "com.mount-rs.rustfs-test-run")}},"stage_owner":{{json (index .Config.Labels "com.mount-rs.rustfs-stage-owner")}},"purpose":{{json (index .Config.Labels "com.mount-rs.rustfs-test-purpose")}},"ports":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}}}"#;
     let observed = commands
         .capture(
             "docker",
@@ -289,8 +349,22 @@ pub async fn preflight(
             Duration::from_secs(10),
         )
         .await?;
-    let observed: Value =
+    let mut observed: Value =
         serde_json::from_str(&observed).map_err(|_| "RustFS fixture observation invalid")?;
+    let volume_name = validate_owned_fixture_mount(&observed, &cid, &owner, blocks)?;
+    if let Some(name) = &volume_name {
+        let projection = r#"{"Name":{{json .Name}},"Driver":{{json .Driver}},"Scope":{{json .Scope}},"Mountpoint":{{json .Mountpoint}},"Options":{{json .Options}},"Labels":{"com.mount-rs.rustfs-test":{{json (index .Labels "com.mount-rs.rustfs-test")}},"com.mount-rs.rustfs-test-run":{{json (index .Labels "com.mount-rs.rustfs-test-run")}},"com.mount-rs.rustfs-stage-owner":{{json (index .Labels "com.mount-rs.rustfs-stage-owner")}}}}"#;
+        let volume = commands
+            .capture(
+                "docker",
+                &["volume", "inspect", "--format", projection, name],
+                None,
+                Duration::from_secs(10),
+            )
+            .await?;
+        observed["data_volume"] =
+            serde_json::from_str(&volume).map_err(|_| "RustFS named volume observation invalid")?;
+    }
     validate_owned_fixture(&observed, &cid, &owner, blocks)?;
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -308,8 +382,174 @@ pub async fn preflight(
     }
     Ok(
         json!({"provider":"rustfs","complete":true,"qualified":true,"creation_cid":cid,"owner":owner,
-        "image":PINNED_RUSTFS_IMAGE,"image_id":observed["image_id"],"endpoint_port":port,"persistent_data_bind":true,
+        "image":PINNED_RUSTFS_IMAGE,"image_id":observed["image_id"],"endpoint_port":port,
+        "persistent_data_bind":volume_name.is_none(),"persistent_data_mount":if volume_name.is_some(){"volume"}else{"bind"},
+        "persistent_data_volume":volume_name.as_ref().map(|_|json!({"owned_name_matches":true,"driver":"local","scope":"local",
+            "writable_data_mount":true,"mountpoint_matches_source":true,"ownership_labels_match":true,"options_empty":true,
+            "identity_redacted":true})),
         "scope":"owned existing loopback fixture and configured durable blocks; no process-crash or power-loss proof",
         "docker_vm_memory_bytes":info["memory_bytes"],"docker_vm_cpus":info["cpus"]}),
     )
+}
+
+#[cfg(all(test, unix))]
+mod owned_named_volume_tests {
+    use super::{PINNED_RUSTFS_IMAGE, validate_owned_fixture};
+    use mount_rs_sdk::StoreConfig;
+    use serde_json::{Value, json};
+
+    const OWNER: &str = "mount-rs-rustfs-stage-unit";
+    const DATA_SOURCE: &str = "/var/lib/docker/volumes/mount-rs-rustfs-stage-unit-data/_data";
+
+    fn blocks() -> StoreConfig {
+        StoreConfig::RustFs {
+            endpoint: "http://127.0.0.1:9878".into(),
+            bucket: "owned-fixture-test".into(),
+            region: "us-east-1".into(),
+            prefix: "owned/blocks".into(),
+            access_key_id: "synthetic-key".into(),
+            secret_access_key: "synthetic-secret".into(),
+            durable: true,
+        }
+    }
+
+    fn observed_named_volume() -> Value {
+        json!({
+            "id":"a".repeat(64), "name":format!("/{OWNER}"),
+            "owner_label":"mount-rs-rustfs-test", "run":OWNER, "stage_owner":OWNER,
+            "purpose":null, "running":true, "image":PINNED_RUSTFS_IMAGE,
+            "image_id":format!("sha256:{}", "b".repeat(64)),
+            "ports":{"9000/tcp":[{"HostIp":"127.0.0.1","HostPort":"9878"}]},
+            "mounts":[{
+                "Type":"volume", "Name":format!("{OWNER}-data"), "Driver":"local",
+                "Source":DATA_SOURCE, "Destination":"/data", "RW":true
+            }],
+            "data_volume":{
+                "Name":format!("{OWNER}-data"), "Driver":"local", "Scope":"local",
+                "Mountpoint":DATA_SOURCE, "Options":null,
+                "Labels":{
+                    "com.mount-rs.rustfs-test":"mount-rs-rustfs-test",
+                    "com.mount-rs.rustfs-test-run":OWNER,
+                    "com.mount-rs.rustfs-stage-owner":OWNER
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn owned_named_volume_accepts_exact_persistent_local_data_mount() {
+        let blocks = blocks();
+        let cid = "a".repeat(64);
+        for source in [DATA_SOURCE, "/srv/docker-data/owned-volume/_data"] {
+            for options in [Value::Null, json!({})] {
+                let mut observed = observed_named_volume();
+                observed["mounts"][0]["Source"] = json!(source);
+                observed["data_volume"]["Mountpoint"] = json!(source);
+                observed["data_volume"]["Options"] = options;
+                validate_owned_fixture(&observed, &cid, OWNER, &blocks)
+                    .expect("the exact owned persistent local named volume must be accepted");
+            }
+        }
+    }
+
+    #[test]
+    fn owned_named_volume_rejects_unproven_mount_and_volume_identity() {
+        let blocks = blocks();
+        let cid = "a".repeat(64);
+        for (pointer, changed) in [
+            ("/mounts/0/Type", json!("tmpfs")),
+            ("/mounts/0/Name", json!("")),
+            ("/mounts/0/Name", json!("anonymous-volume")),
+            ("/mounts/0/Name", json!("mount-rs-rustfs-foreign-data")),
+            ("/mounts/0/Driver", json!("foreign-driver")),
+            ("/mounts/0/Destination", json!("/foreign")),
+            ("/mounts/0/RW", json!(false)),
+            ("/mounts/0/Source", json!("/different-volume/_data")),
+            ("/data_volume", Value::Null),
+            ("/data_volume/Name", json!("mount-rs-rustfs-foreign-data")),
+            ("/data_volume/Driver", json!("foreign-driver")),
+            ("/data_volume/Scope", json!("global")),
+            ("/data_volume/Mountpoint", json!("/different-volume/_data")),
+            ("/data_volume/Labels", Value::Null),
+            (
+                "/data_volume/Labels/com.mount-rs.rustfs-test",
+                json!("foreign-test"),
+            ),
+            (
+                "/data_volume/Labels/com.mount-rs.rustfs-test-run",
+                json!("mount-rs-rustfs-foreign"),
+            ),
+            (
+                "/data_volume/Labels/com.mount-rs.rustfs-stage-owner",
+                json!("mount-rs-rustfs-foreign"),
+            ),
+            (
+                "/data_volume/Options",
+                json!({"type":"tmpfs","device":"tmpfs"}),
+            ),
+            ("/data_volume/Options", json!([])),
+            ("/data_volume/Options", json!("")),
+            ("/stage_owner", json!("mount-rs-rustfs-foreign")),
+        ] {
+            let mut observed = observed_named_volume();
+            *observed.pointer_mut(pointer).unwrap() = changed;
+            assert!(
+                validate_owned_fixture(&observed, &cid, OWNER, &blocks).is_err(),
+                "unproven named volume field {pointer} must be rejected",
+            );
+        }
+        let mut duplicate = observed_named_volume();
+        let repeated = duplicate["mounts"][0].clone();
+        duplicate["mounts"].as_array_mut().unwrap().push(repeated);
+        assert!(validate_owned_fixture(&duplicate, &cid, OWNER, &blocks).is_err());
+        let mut missing_options = observed_named_volume();
+        missing_options["data_volume"]
+            .as_object_mut()
+            .unwrap()
+            .remove("Options");
+        assert!(validate_owned_fixture(&missing_options, &cid, OWNER, &blocks).is_err());
+        for source in [
+            "",
+            "/",
+            "relative-volume/_data",
+            "/var/lib/docker/volumes/../foreign/_data",
+            "/var/lib/docker/volumes/./foreign/_data",
+            "/var/lib/docker/volumes/owned/\n_data",
+            "/var/lib/docker/volumes/owned/\r_data",
+            "/var/lib/docker/volumes/owned/\0_data",
+        ] {
+            let mut observed = observed_named_volume();
+            observed["mounts"][0]["Source"] = json!(source);
+            observed["data_volume"]["Mountpoint"] = json!(source);
+            assert!(
+                validate_owned_fixture(&observed, &cid, OWNER, &blocks).is_err(),
+                "matching paths must also be safe absolute persistent volume paths",
+            );
+        }
+    }
+
+    #[test]
+    fn owned_named_volume_preserves_container_and_loopback_guards() {
+        let blocks = blocks();
+        let cid = "a".repeat(64);
+        for (pointer, changed) in [
+            ("/id", json!("c".repeat(64))),
+            ("/name", json!("/mount-rs-rustfs-foreign")),
+            ("/owner_label", json!("foreign-test")),
+            ("/run", json!("mount-rs-rustfs-foreign")),
+            ("/purpose", json!("cleanup")),
+            ("/running", json!(false)),
+            ("/image", json!("rustfs/rustfs:latest")),
+            ("/image_id", json!("")),
+            ("/ports/9000~1tcp/0/HostIp", json!("0.0.0.0")),
+            ("/ports/9000~1tcp/0/HostPort", json!("9879")),
+        ] {
+            let mut observed = observed_named_volume();
+            *observed.pointer_mut(pointer).unwrap() = changed;
+            assert!(
+                validate_owned_fixture(&observed, &cid, OWNER, &blocks).is_err(),
+                "named volume support must retain existing guard {pointer}",
+            );
+        }
+    }
 }

@@ -1,0 +1,4981 @@
+{
+  "comparison": [
+    {
+      "bind_ops_per_second": "1873.93948712086979029690569038082736",
+      "concurrency": 1,
+      "pattern": "raw_get",
+      "volume_ops_per_second": "1898.32976179881344390257560470262600",
+      "volume_over_bind_ops_ratio": "1.01301550815571798229804878222707467"
+    },
+    {
+      "bind_ops_per_second": "91.7811787457306207570854550598214296",
+      "concurrency": 1,
+      "pattern": "raw_unique_put",
+      "volume_ops_per_second": "176.552855973633640477151588597054871",
+      "volume_over_bind_ops_ratio": "1.92362811620401354267374575654698331"
+    },
+    {
+      "bind_ops_per_second": "1138.96048763834704551963565100784950",
+      "concurrency": 1,
+      "pattern": "configured_authority_verify",
+      "volume_ops_per_second": "971.391492164755024209595962674720510",
+      "volume_over_bind_ops_ratio": "0.852875497181601937686561749160684138"
+    },
+    {
+      "bind_ops_per_second": "10803.5989066420356503166230764600686",
+      "concurrency": 10,
+      "pattern": "raw_get",
+      "volume_ops_per_second": "11555.5848935273513871154893770830146",
+      "volume_over_bind_ops_ratio": "1.06960513745313109804455816575433109"
+    },
+    {
+      "bind_ops_per_second": "244.235708010655158769505525781837132",
+      "concurrency": 10,
+      "pattern": "raw_unique_put",
+      "volume_ops_per_second": "569.805118666157068627088994378787682",
+      "volume_over_bind_ops_ratio": "2.33301315072773242107063509011496942"
+    },
+    {
+      "bind_ops_per_second": "6712.45384129977809477404917491976047",
+      "concurrency": 10,
+      "pattern": "configured_authority_verify",
+      "volume_ops_per_second": "6016.25657699551989720109110224735967",
+      "volume_over_bind_ops_ratio": "0.896282748341484492678902028080699331"
+    },
+    {
+      "bind_ops_per_second": "16025.3014667535422435656870315419247",
+      "concurrency": 100,
+      "pattern": "raw_get",
+      "volume_ops_per_second": "15083.9570863462992287665855064188435",
+      "volume_over_bind_ops_ratio": "0.941258866027564121400228291013726146"
+    },
+    {
+      "bind_ops_per_second": "284.909496579122668107547933998594467",
+      "concurrency": 100,
+      "pattern": "raw_unique_put",
+      "volume_ops_per_second": "502.269936914239050454685905528270331",
+      "volume_over_bind_ops_ratio": "1.76291047839731403887808518506955270"
+    },
+    {
+      "bind_ops_per_second": "9852.52570733605823927192587142760306",
+      "concurrency": 100,
+      "pattern": "configured_authority_verify",
+      "volume_ops_per_second": "10381.1741982102455338340704344583951",
+      "volume_over_bind_ops_ratio": "1.05365613920505304872834726450542086"
+    }
+  ],
+  "limitations": [
+    "Ordered fresh bind then fresh volume; one trial each, not repeated causal proof.",
+    "Strict bucket override authenticated before object writes; process-global fsync stage advances corroborate it. No crash/power-loss durability qualification.",
+    "4KiB prefix1 raw-store diagnostic, not the full production geometry.",
+    "Nested/concurrent/repeated-label stages overlap and cannot be summed as exclusive work.",
+    "Partial 2s sampled phase windows rely on uncalibrated guest/host UTC alignment; exact wall/monotonic differences are retained. Outer windows include adjacent phases and overlap.",
+    "Cgroup memory is not process RSS; throttled time is aggregate, not exclusive wall duration.",
+    "Bind VirtioFS data incompletely covered by guest io.stat; named-volume guest counts are not host physical NVMe IOPS.",
+    "Docker operation counts unavailable; no per-PUT block amplification factor claimed.",
+    "Successful PUT empty response body_dropped is expected unpolled-response coverage, not a failure.",
+    "Observed HTTP dispatch-to-headers includes scheduling/network/service waits, not exclusive CPU/disk attribution.",
+    "Original RustFS network check coverage remains explicitly incomplete in health receipts."
+  ],
+  "limits": {
+    "admission_seconds": 5,
+    "block_bytes": 4096,
+    "cleanup_reserve_seconds": 80,
+    "concurrencies": [
+      1,
+      10,
+      100
+    ],
+    "cpu_cores": 2,
+    "during_guest_mem_min_bytes": 1073741824,
+    "initial_guest_mem_min_bytes": 3221225472,
+    "loopback_only": true,
+    "memory_bytes": 2147483648,
+    "memory_swap_bytes": 2147483648,
+    "native_test_owner_seconds": 630,
+    "otel_cap_bytes": 134217728,
+    "payload_cleanup_seconds": 30,
+    "phase_seconds": 120,
+    "pids": 512,
+    "prefix_count": 1,
+    "raw_stdout_stderr_resource_cap_bytes": 67108864,
+    "request_seconds": 10,
+    "resource_sample_cadence_seconds": 2,
+    "seeds": 256,
+    "suite_seconds": 600,
+    "total_owner_seconds": 800
+  },
+  "measurement": {
+    "admission_seconds": 5,
+    "application_cache_zero": true,
+    "drive_or_tidb_capacity_qualified": false,
+    "ordered_trials": [
+      "bind",
+      "volume"
+    ],
+    "server_os_cache_warm_eligible": true,
+    "trials_per_mount": 1
+  },
+  "schema": "mount-rs.rustfs-strict-bind-volume-pair.v1",
+  "source": {
+    "archive_manifest": {
+      "bytes": 2852,
+      "name": "manifest.json",
+      "sha256": "48ba7fb30916eda518c270861f62b35fcc260ab44762816788dca7d793993b63"
+    },
+    "executable": {
+      "bytes": 7637344,
+      "name": "raw_saturation",
+      "sha256": "29a2766c96d5133fbe02bbae161737bc0eabee85b3d2aace26ac4da939a32e24"
+    },
+    "measured_commit": "5d3391ddb424686db94d421a30304f50b288ba76",
+    "owner": {
+      "bytes": 40968,
+      "name": "mount-rs-rustfs-stage-owner-v3-20260929.py",
+      "sha256": "6a9a9f4544edf38e0e0bf424bcc69119ee79c069fe5d1b2abba6d46b0830fabc"
+    },
+    "primary_source_files": {
+      "crates/ecstore/src/bucket/durability.rs": {
+        "bytes": 6979,
+        "name": "durability.rs",
+        "sha256": "fd3beb4ff5dd0bbd1bee09d43751d2de89c982a59d0902799e8759e45f83983f"
+      },
+      "crates/ecstore/src/disk/local/commit.rs": {
+        "bytes": 61210,
+        "name": "commit.rs",
+        "sha256": "f5853b959f9b07d6837f7de5bf0b463a7688f495f9faff79ef8fb87f8ebb2fce"
+      },
+      "crates/ecstore/src/disk/os.rs": {
+        "bytes": 326524,
+        "name": "os.rs",
+        "sha256": "5a06325f859f9a8110bfe78f518c17d6795165574ce98649b8aec95142779b4f"
+      },
+      "crates/ecstore/src/set_disk/core/io_primitives.rs": {
+        "bytes": 574000,
+        "name": "io_primitives.rs",
+        "sha256": "bc651a49f7ef24a7d272c5e77cb9bb1e9e73458ff0305f2e5f06a2943d64469c"
+      },
+      "crates/ecstore/src/set_disk/mod.rs": {
+        "bytes": 627850,
+        "name": "mod.rs",
+        "sha256": "02e8e7cea1d13d612145c00a888a9c45f89c981109458f4339f3bf567683e2b2"
+      },
+      "docs/operations/durability-modes.md": {
+        "bytes": 11749,
+        "name": "durability-modes.md",
+        "sha256": "15fbd31419d4dcff8bc5ed846994a90af6a784f1b23520e70eec6bd781cd3ac0"
+      },
+      "rustfs/src/app/object/put.rs": {
+        "bytes": 184639,
+        "name": "put.rs",
+        "sha256": "d4551755a108e8df9232342db6e5fb05d4e7a0f22c928db1faa2bedbd4b8874c"
+      }
+    },
+    "rustfs_primary_tag_reference": "d47f54bfb2f39f48bd1adda334bd27e151fe85b8",
+    "source_files": {
+      "Cargo.lock": {
+        "bytes": 118146,
+        "sha256": "f79031a6bb5845d231ae339cc43a988f9bc5c0ca19f80b0a3fbcbb12294853f0"
+      },
+      "Cargo.toml": {
+        "bytes": 3552,
+        "sha256": "437c5a8dcab46be8ab2ebf17e6bb7c74fa84438a68b1636748bb70b82bc5b3e1"
+      },
+      "providers/mount-rs-object-store-blocks/Cargo.toml": {
+        "bytes": 670,
+        "sha256": "b18f2ebe159842850fe79408aeb2d9b7635022ae1012680e19ac68c7d8d0efee"
+      },
+      "providers/mount-rs-object-store-blocks/src/lib.rs": {
+        "bytes": 113240,
+        "sha256": "f765a8c1fc8d39580c2b0236612c0026945f52b36e1fc040758004a9ced65aae"
+      },
+      "providers/mount-rs-object-store-blocks/src/qualification.rs": {
+        "bytes": 16510,
+        "sha256": "2225c98ba8dccc797b508d0262884a790d3a1173c0606605cb8a3f3bef87813d"
+      },
+      "providers/mount-rs-object-store-blocks/src/raw_metrics.rs": {
+        "bytes": 18717,
+        "sha256": "4d543a48c2a1ec38ad7a5835b032544dd36e2fea845b04eef7df9e0d20a874b0"
+      },
+      "providers/mount-rs-rustfs/Cargo.toml": {
+        "bytes": 655,
+        "sha256": "254255050a2b212669e20bd4d4b843b287dbffe4d75df95f497a0f96acc8e7ee"
+      },
+      "providers/mount-rs-rustfs/src/http_observation.rs": {
+        "bytes": 6894,
+        "sha256": "8dff86404b4367f88ec1a938ac3f8ec02c6b0787b8748e7da12fa16b45d4f900"
+      },
+      "providers/mount-rs-rustfs/src/lib.rs": {
+        "bytes": 24090,
+        "sha256": "979061c61c39f630addeacc59e8cdb6b256b04328bcb6138a2f95b5604d95645"
+      },
+      "providers/mount-rs-rustfs/tests/raw_saturation.rs": {
+        "bytes": 58214,
+        "sha256": "f11bded3a0255f879abdc43b0b1a7df28515ea3b4fb280e48805830ca3b2ddfb"
+      },
+      "src/diagnostics.rs": {
+        "bytes": 7827,
+        "sha256": "04c0b91b8a4101f0194172e66fc9c635b095c901ec86d1a2564e46f3e2697db7"
+      },
+      "src/diagnostics/object_store.rs": {
+        "bytes": 25994,
+        "sha256": "ea9bd70a32cf02ebae349679492437f27c83cd422f5af7ad13e34b0fa3ec89bb"
+      },
+      "src/diagnostics/storage.rs": {
+        "bytes": 32372,
+        "sha256": "37f9c8e6d4bd4474b733379703ad43fb04f8359b9e64c9ced8f89c788717fd5c"
+      },
+      "src/lib.rs": {
+        "bytes": 1010,
+        "sha256": "8b7571250aca6ad94c52ba1197b8d897869b8cf110a112bd933eb5830550147d"
+      },
+      "src/storage.rs": {
+        "bytes": 78351,
+        "sha256": "b35945f3dba67af96174ce20e82488dabab8cf281c644a9b9cd043851d85828e"
+      },
+      "src/storage/compact.rs": {
+        "bytes": 94250,
+        "sha256": "af6fdf76f2a6a446240e85b20528ed3a64cbc76fa2251962eb6d7636c3c59d18"
+      }
+    }
+  },
+  "status": "derived_strict_diagnostic_controls",
+  "trials": [
+    {
+      "cleanup": {
+        "backing_marker_retained": true,
+        "cleanup_authority_verified": true,
+        "deleted_exact_blocks": 3422,
+        "failed_deletes": 0,
+        "known_acknowledged_blocks": 3422,
+        "payload_cleanup_complete": true,
+        "quarantined": false,
+        "range_deletion_or_reconcile_used": false,
+        "suite_elapsed_ns": "65654039250",
+        "unattempted_deletes": 0,
+        "uncertain_deletes": 0,
+        "workers_settled": true
+      },
+      "client_geometry": {
+        "authority": [
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 105295583,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 105295583,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "primary_data_mixed"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 99232458,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 99232458,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "primary_probe_mixed"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 100667459,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 100667459,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "qualification_data"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 99109791,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 99109791,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "qualification_probe"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "standalone_data"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 95463000,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 95463000,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 0,
+            "released": 1,
+            "role": "standalone_probe"
+          }
+        ],
+        "authority_clients_live": 4,
+        "raw_data": [
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "primary_data_mixed"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "primary_probe_mixed"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "qualification_data"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "qualification_probe"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 117440334,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 117440334,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "standalone_data"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "standalone_probe"
+          }
+        ],
+        "raw_shared_clients_live": 1
+      },
+      "guest_cgroup_io": {
+        "devices": [
+          {
+            "after": {
+              "dbytes": 0,
+              "dios": 0,
+              "rbytes": 0,
+              "rios": 0,
+              "wbytes": 12288,
+              "wios": 2
+            },
+            "availability": "missing_boundary_unavailable",
+            "before": null,
+            "delta": null,
+            "major_minor": "254:0",
+            "rios_per_second": null,
+            "wios_per_second": null
+          }
+        ],
+        "host_physical_iops_available": false,
+        "mount_coverage": "incomplete VirtioFS data accounting",
+        "scope": "whole guest cgroup window, preparation/workload/payload cleanup",
+        "wall_endpoints_ns": [
+          1790651326180520000,
+          1790651392991527000
+        ],
+        "window_ns": 66810338250
+      },
+      "identity": {
+        "all_samples_same_instance_labels_mounts": true,
+        "container_identity_sha256": "a82dad41ab5732406b403fc781bb8e091cd3b8fcc167bfac3c8e0df19bb24fcb",
+        "engine_sha256": "e18cf29f776a32071bfe0bfb057a2ab465f155a14027ebc2d9c6202a62325199",
+        "image_sha256": "sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff",
+        "original_eight_health": [
+          {
+            "boundary": "original_health_before",
+            "eight_identity_limits_ports_mounts_lifecycle_match": true,
+            "mutation_executed": false,
+            "network_coverage": [
+              {
+                "checked": true,
+                "role": "pd1",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "pd2",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "pd3",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv1",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv2",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv3",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tidb",
+                "scope": "exact_original"
+              },
+              {
+                "checked": false,
+                "role": "rustfs",
+                "scope": "not_pinned_in_original_ready_manifest"
+              }
+            ],
+            "provider_durability_qualified": false,
+            "receipt": {
+              "bytes": 5265,
+              "name": "receipt.json",
+              "sha256": "ecc565b788704a9f32051040583641165e37eebc92a6f66306fd9985838a016f"
+            }
+          },
+          {
+            "boundary": "original_health_after",
+            "eight_identity_limits_ports_mounts_lifecycle_match": true,
+            "mutation_executed": false,
+            "network_coverage": [
+              {
+                "checked": true,
+                "role": "pd1",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "pd2",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "pd3",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv1",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv2",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv3",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tidb",
+                "scope": "exact_original"
+              },
+              {
+                "checked": false,
+                "role": "rustfs",
+                "scope": "not_pinned_in_original_ready_manifest"
+              }
+            ],
+            "provider_durability_qualified": false,
+            "receipt": {
+              "bytes": 5265,
+              "name": "receipt.json",
+              "sha256": "d94d33f4d579b07f03873b05af706f87a8d2d9c25847387fb55ef0e3272f3a63"
+            }
+          }
+        ],
+        "ready_sha256": "ca1f4833feb3cf54c75a1e13c4977645b52fa0add3f18b88af19396bde2d561a",
+        "source_before_after_equal": true
+      },
+      "mount": "bind",
+      "phases": [
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 46443082,
+          "concurrency": 1,
+          "elapsed_ns": 5000161459,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "494215.910458911419423692636072572038",
+          "header_await_sum_ns": 4630803081,
+          "local_work": [
+            {
+              "calls_delta": 9370,
+              "duration_ns_delta": 140612235,
+              "mean_ns": "15006.6419423692636072572038420490928",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 9370,
+              "duration_ns_delta": 16456485,
+              "mean_ns": "1756.29509071504802561366061899679829",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 9370,
+              "duration_ns_delta": 1665370,
+              "mean_ns": "177.734258271077908217716115261472785",
+              "name": "copy.return_vec"
+            },
+            {
+              "calls_delta": 9370,
+              "duration_ns_delta": 506228,
+              "mean_ns": "54.0264674493062966915688367129135539",
+              "name": "cache.lock_acquire"
+            }
+          ],
+          "logical_bytes": 38379520,
+          "logical_latency_sum_ns": 4994494238,
+          "logical_max_ns": 16403875,
+          "logical_mean_ns": "533030.334898612593383137673425827108",
+          "operations": 9370,
+          "ops_per_second": "1873.93948712086979029690569038082736",
+          "pattern": "raw_get",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 9370,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 9370,
+                "body_bytes": 38379520,
+                "body_chunks": 9370,
+                "body_dropped": 0,
+                "body_elapsed_ns": 46443082,
+                "body_eof": 9370,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  0,
+                  506250
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 4630803081,
+                "dispatch_max_ns_endpoints": [
+                  0,
+                  16342500
+                ],
+                "header_responses": 9370,
+                "known_extra_future_boxes": 9370,
+                "known_extra_response_body_boxes": 9370,
+                "offered_bytes": 0,
+                "offered_known": 9370,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  9370,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5000238000,
+            "inner": {
+              "average_cores": "0.280947027528910053874632194456105952",
+              "counter_read_wall_ns": [
+                1790651330302537422,
+                1790651334438847424
+              ],
+              "cpu_ns_delta": 1162084000,
+              "enclosure_coverage_fraction": "0.827222624603068893920649377089650533",
+              "host_monotonic_ns": [
+                539362566345833,
+                539366707789375
+              ],
+              "host_postread_wall_ns": [
+                1790651330360252000,
+                1790651334501737000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 37183488,
+                "cgroup_usage": 44593152,
+                "file": 2170880
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 5273497,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 7850,
+                  "tx_bytes": 35321913,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 7850
+                }
+              },
+              "sample_count": 3,
+              "sample_indices": [
+                9,
+                11
+              ],
+              "throttling": {
+                "periods": 42,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 4136310002
+            },
+            "outer": {
+              "average_cores": "0.340095075028581403879820911021811589",
+              "counter_read_wall_ns": [
+                1790651328214437963,
+                1790651336608129050
+              ],
+              "cpu_ns_delta": 2854653000,
+              "host_monotonic_ns": [
+                539360500887416,
+                539368876009458
+              ],
+              "host_postread_wall_ns": [
+                1790651328294773000,
+                1790651336669979000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 38690816,
+                "cgroup_usage": 47513600,
+                "file": 2183168
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 7724512,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 9671,
+                  "tx_bytes": 42273967,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 9672
+                }
+              },
+              "sample_count": 5,
+              "sample_indices": [
+                8,
+                12
+              ],
+              "throttling": {
+                "periods": 83,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 8393691087
+            },
+            "phase_wall_enclosure_ns": [
+              1790651329997662000,
+              1790651334997900000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 76541
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 9370,
+              "duration_ns_delta": 4784944394,
+              "mean_ns": "510666.424119530416221985058697972252",
+              "name": "get.block_read"
+            },
+            {
+              "calls_delta": 9370,
+              "duration_ns_delta": 19823459,
+              "mean_ns": "2115.63062966915688367129135538954109",
+              "name": "body_read.block_read"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 4666258,
+          "concurrency": 1,
+          "elapsed_ns": 5001025333,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "10792887.0697167755991285403050108932",
+          "header_await_sum_ns": 4953935165,
+          "local_work": [
+            {
+              "calls_delta": 459,
+              "duration_ns_delta": 11721200,
+              "mean_ns": "25536.3834422657952069716775599128540",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 459,
+              "duration_ns_delta": 1346467,
+              "mean_ns": "2933.47930283224400871459694989106754",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 459,
+              "duration_ns_delta": 268852,
+              "mean_ns": "585.734204793028322440087145969498911",
+              "name": "copy.upload_payload"
+            }
+          ],
+          "logical_bytes": 1880064,
+          "logical_latency_sum_ns": 5000632870,
+          "logical_max_ns": 22287042,
+          "logical_mean_ns": "10894624.9891067538126361655773420479",
+          "operations": 459,
+          "ops_per_second": "91.7811787457306207570854550598214296",
+          "pattern": "raw_unique_put",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": "0.994972782406348816988028831309590185",
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 459,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 459,
+                "body_bytes": 0,
+                "body_chunks": 0,
+                "body_dropped": 459,
+                "body_elapsed_ns": 4666258,
+                "body_eof": 0,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  43084,
+                  74042
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 4953935165,
+                "dispatch_max_ns_endpoints": [
+                  48365000,
+                  48365000
+                ],
+                "header_responses": 459,
+                "known_extra_future_boxes": 459,
+                "known_extra_response_body_boxes": 459,
+                "offered_bytes": 1880064,
+                "offered_known": 459,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  459,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "put",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5001096000,
+            "inner": {
+              "average_cores": "0.432616726598459600294966911888861237",
+              "counter_read_wall_ns": [
+                1790651336608129050,
+                1790651338677820176
+              ],
+              "cpu_ns_delta": 895383000,
+              "enclosure_coverage_fraction": "0.413847509825846174518545534818767726",
+              "host_monotonic_ns": [
+                539368876009458,
+                539370949513375
+              ],
+              "host_postread_wall_ns": [
+                1790651336669979000,
+                1790651338743503000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 38912000,
+                "cgroup_usage": 47742976,
+                "file": 2183168
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 921249,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 193,
+                  "tx_bytes": 77406,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 193
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                12,
+                13
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2069691126
+            },
+            "outer": {
+              "average_cores": "0.366974256938085223095202145282236833",
+              "counter_read_wall_ns": [
+                1790651334438847424,
+                1790651340754107844
+              ],
+              "cpu_ns_delta": 2317538000,
+              "host_monotonic_ns": [
+                539366707789375,
+                539373022194666
+              ],
+              "host_postread_wall_ns": [
+                1790651334501737000,
+                1790651340816205000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 39108608,
+                "cgroup_usage": 47742976,
+                "file": 2183168
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 3011275,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 1649,
+                  "tx_bytes": 5494520,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 1648
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                11,
+                14
+              ],
+              "throttling": {
+                "periods": 57,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6315260420
+            },
+            "phase_wall_enclosure_ns": [
+              1790651334999171000,
+              1790651340000267000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 70667
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 459,
+              "duration_ns_delta": 4978965508,
+              "mean_ns": "10847419.4074074074074074074074074074",
+              "name": "put_opts.block_create"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 5695,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 5695,
+                "body_bytes": 113900,
+                "body_chunks": 5695,
+                "body_dropped": 0,
+                "body_elapsed_ns": 23480001,
+                "body_eof": 5695,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  19000,
+                  712750
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 2369062803,
+                "dispatch_max_ns_endpoints": [
+                  1938708,
+                  10839084
+                ],
+                "header_responses": 5695,
+                "known_extra_future_boxes": 5695,
+                "known_extra_response_body_boxes": 5695,
+                "offered_bytes": 0,
+                "offered_known": 5695,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  5695,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_data_mixed"
+            },
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 5695,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 5695,
+                "body_bytes": 113900,
+                "body_chunks": 5695,
+                "body_dropped": 0,
+                "body_elapsed_ns": 24023059,
+                "body_eof": 5695,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  10625,
+                  443375
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 2386901517,
+                "dispatch_max_ns_endpoints": [
+                  2051000,
+                  13042167
+                ],
+                "header_responses": 5695,
+                "known_extra_future_boxes": 5695,
+                "known_extra_response_body_boxes": 5695,
+                "offered_bytes": 0,
+                "offered_known": 5695,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  5695,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_probe_mixed"
+            }
+          ],
+          "body_observed_lifetime_sum_ns": 47503060,
+          "concurrency": 1,
+          "elapsed_ns": 5000173458,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "835112.259877085162423178226514486392",
+          "header_await_sum_ns": 4755964320,
+          "local_work": [],
+          "logical_bytes": 0,
+          "logical_latency_sum_ns": 4999348742,
+          "logical_max_ns": 13711916,
+          "logical_mean_ns": "877848.769446883230904302019315188762",
+          "operations": 5695,
+          "ops_per_second": "1138.96048763834704551963565100784950",
+          "pattern": "configured_authority_verify",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [],
+          "sampled_resources": {
+            "enclosure_ns": 5000244000,
+            "inner": {
+              "average_cores": "0.259544766765898939587829120634771028",
+              "counter_read_wall_ns": [
+                1790651342824705095,
+                1790651344892329138
+              ],
+              "cpu_ns_delta": 536641000,
+              "enclosure_coverage_fraction": "0.413504629574076785052889418996352978",
+              "host_monotonic_ns": [
+                539375088879833,
+                539377154787833
+              ],
+              "host_postread_wall_ns": [
+                1790651342882911000,
+                1790651344948840000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 40153088,
+                "cgroup_usage": 49049600,
+                "file": 2306048
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 3002827,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 4768,
+                  "tx_bytes": 2023598,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 4768
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                15,
+                16
+              ],
+              "throttling": {
+                "periods": 20,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2067624043
+            },
+            "outer": {
+              "average_cores": "0.483873847225965368701960764017788605",
+              "counter_read_wall_ns": [
+                1790651340754107844,
+                1790651347029873764
+              ],
+              "cpu_ns_delta": 3036679000,
+              "host_monotonic_ns": [
+                539373022194666,
+                539379304881625
+              ],
+              "host_postread_wall_ns": [
+                1790651340816205000,
+                1790651347098955000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 45232128,
+                "cgroup_usage": 55119872,
+                "file": 3276800
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 16738939,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 25655,
+                  "tx_bytes": 68777626,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 25634
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                14,
+                17
+              ],
+              "throttling": {
+                "periods": 62,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6275765920
+            },
+            "phase_wall_enclosure_ns": [
+              1790651340816660000,
+              1790651345816904000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 70542
+          },
+          "sdk_api": [],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 231865020,
+          "concurrency": 10,
+          "elapsed_ns": 5000741000,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "896554.286214045089401399326250323918",
+          "header_await_sum_ns": 48437241867,
+          "local_work": [
+            {
+              "calls_delta": 54026,
+              "duration_ns_delta": 520525120,
+              "mean_ns": "9634.71513715618405952689445822381816",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 54026,
+              "duration_ns_delta": 62596775,
+              "mean_ns": "1158.64167252804205382593566060785548",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 54026,
+              "duration_ns_delta": 13093386,
+              "mean_ns": "242.353422426239218154222041239403250",
+              "name": "copy.return_vec"
+            },
+            {
+              "calls_delta": 54026,
+              "duration_ns_delta": 6035854,
+              "mean_ns": "111.721282345537333876281790249139303",
+              "name": "cache.lock_acquire"
+            }
+          ],
+          "logical_bytes": 221290496,
+          "logical_latency_sum_ns": 49974330422,
+          "logical_max_ns": 59800875,
+          "logical_mean_ns": "925005.190500869951504831007292784955",
+          "operations": 54026,
+          "ops_per_second": "10803.5989066420356503166230764600686",
+          "pattern": "raw_get",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 54026,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 54026,
+                "body_bytes": 221290496,
+                "body_chunks": 54026,
+                "body_dropped": 0,
+                "body_elapsed_ns": 231865020,
+                "body_eof": 54026,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  506250,
+                  842542
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 48437241867,
+                "dispatch_max_ns_endpoints": [
+                  16342500,
+                  59753875
+                ],
+                "header_responses": 54026,
+                "known_extra_future_boxes": 54026,
+                "known_extra_response_body_boxes": 54026,
+                "offered_bytes": 0,
+                "offered_known": 54026,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  54026,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5000872000,
+            "inner": {
+              "average_cores": "1.40996169163583557778421647573902255",
+              "counter_read_wall_ns": [
+                1790651347029873764,
+                1790651349107723125
+              ],
+              "cpu_ns_delta": 2929688000,
+              "enclosure_coverage_fraction": "0.415497409451791607543644388418659786",
+              "host_monotonic_ns": [
+                539379304881625,
+                539381381524083
+              ],
+              "host_postread_wall_ns": [
+                1790651347098955000,
+                1790651349175618000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 48701440,
+                "cgroup_usage": 60215296,
+                "file": 3956736
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 16348663,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 24330,
+                  "tx_bytes": 109446994,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 24329
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                17,
+                18
+              ],
+              "throttling": {
+                "periods": 20,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2077849361
+            },
+            "outer": {
+              "average_cores": "1.12460105404283106906117693572653890",
+              "counter_read_wall_ns": [
+                1790651344892329138,
+                1790651351184423543
+              ],
+              "cpu_ns_delta": 7076096000,
+              "host_monotonic_ns": [
+                539377154787833,
+                539383458556333
+              ],
+              "host_postread_wall_ns": [
+                1790651344948840000,
+                1790651351252672000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 50987008,
+                "cgroup_usage": 62128128,
+                "file": 4816896
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 37674433,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 56247,
+                  "tx_bytes": 243944496,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 56213
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                16,
+                19
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6292094405
+            },
+            "phase_wall_enclosure_ns": [
+              1790651345820182000,
+              1790651350821054000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 131000
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 54026,
+              "duration_ns_delta": 49105236500,
+              "mean_ns": "908918.604005478843519786769333283974",
+              "name": "get.block_read"
+            },
+            {
+              "calls_delta": 54026,
+              "duration_ns_delta": 91567495,
+              "mean_ns": "1694.87829933735608780957316847443823",
+              "name": "body_read.block_read"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 7017615,
+          "concurrency": 10,
+          "elapsed_ns": 5023835417,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "40784816.4213528932355338223308883456",
+          "header_await_sum_ns": 50042969749,
+          "local_work": [
+            {
+              "calls_delta": 1227,
+              "duration_ns_delta": 15778279,
+              "mean_ns": "12859.2330888345558272208638956805216",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 1227,
+              "duration_ns_delta": 2102796,
+              "mean_ns": "1713.77017114914425427872860635696822",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 1227,
+              "duration_ns_delta": 616805,
+              "mean_ns": "502.693561532192339038304808475957620",
+              "name": "copy.upload_payload"
+            }
+          ],
+          "logical_bytes": 5025792,
+          "logical_latency_sum_ns": 50111967012,
+          "logical_max_ns": 78211375,
+          "logical_mean_ns": "40841048.9095354523227383863080684597",
+          "operations": 1227,
+          "ops_per_second": "244.235708010655158769505525781837132",
+          "pattern": "raw_unique_put",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": "0.999224787551114443879472290816167174",
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 1227,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 1227,
+                "body_bytes": 0,
+                "body_chunks": 0,
+                "body_dropped": 1227,
+                "body_elapsed_ns": 7017615,
+                "body_eof": 0,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  74042,
+                  188166
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 50042969749,
+                "dispatch_max_ns_endpoints": [
+                  48365000,
+                  78146375
+                ],
+                "header_responses": 1227,
+                "known_extra_future_boxes": 1227,
+                "known_extra_response_body_boxes": 1227,
+                "offered_bytes": 5025792,
+                "offered_known": 1227,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  1227,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "put",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5023908000,
+            "inner": {
+              "average_cores": "0.921049624637544500531498339295004661",
+              "counter_read_wall_ns": [
+                1790651353262890794,
+                1790651355330781545
+              ],
+              "cpu_ns_delta": 1904630000,
+              "enclosure_coverage_fraction": "0.411609995843872937163658251703653809",
+              "host_monotonic_ns": [
+                539385528802708,
+                539387593220083
+              ],
+              "host_postread_wall_ns": [
+                1790651353322939000,
+                1790651355387377000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 60092416,
+                "cgroup_usage": 77045760,
+                "file": 6238208
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 2498043,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 520,
+                  "tx_bytes": 196040,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 761
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                20,
+                21
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2067890751
+            },
+            "outer": {
+              "average_cores": "0.998697121061392668934553203526289833",
+              "counter_read_wall_ns": [
+                1790651351184423543,
+                1790651357484928338
+              ],
+              "cpu_ns_delta": 6292296000,
+              "host_monotonic_ns": [
+                539383458556333,
+                539389770016333
+              ],
+              "host_postread_wall_ns": [
+                1790651351252672000,
+                1790651357564195000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 61984768,
+                "cgroup_usage": 79609856,
+                "file": 6238208
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 15856417,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 17133,
+                  "tx_bytes": 7049678,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 17688
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                19,
+                22
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6300504795
+            },
+            "phase_wall_enclosure_ns": [
+              1790651351253086000,
+              1790651356276994000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 72583
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 1227,
+              "duration_ns_delta": 50081793779,
+              "mean_ns": "40816457.8475957620211898940505297474",
+              "name": "put_opts.block_create"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 33570,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 33570,
+                "body_bytes": 671400,
+                "body_chunks": 33570,
+                "body_dropped": 0,
+                "body_elapsed_ns": 136676246,
+                "body_eof": 33570,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  712750,
+                  712750
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 24469277938,
+                "dispatch_max_ns_endpoints": [
+                  10839084,
+                  11751250
+                ],
+                "header_responses": 33570,
+                "known_extra_future_boxes": 33570,
+                "known_extra_response_body_boxes": 33570,
+                "offered_bytes": 0,
+                "offered_known": 33570,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  33570,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_data_mixed"
+            },
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 33570,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 33570,
+                "body_bytes": 671400,
+                "body_chunks": 33570,
+                "body_dropped": 0,
+                "body_elapsed_ns": 136426671,
+                "body_eof": 33570,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  443375,
+                  443375
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 24375340973,
+                "dispatch_max_ns_endpoints": [
+                  13042167,
+                  13042167
+                ],
+                "header_responses": 33570,
+                "known_extra_future_boxes": 33570,
+                "known_extra_response_body_boxes": 33570,
+                "offered_bytes": 0,
+                "offered_known": 33570,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  33570,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_probe_mixed"
+            }
+          ],
+          "body_observed_lifetime_sum_ns": 273102917,
+          "concurrency": 10,
+          "elapsed_ns": 5001151709,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "1455008.01045576407506702412868632708",
+          "header_await_sum_ns": 48844618911,
+          "local_work": [],
+          "logical_bytes": 0,
+          "logical_latency_sum_ns": 50000170267,
+          "logical_max_ns": 12963792,
+          "logical_mean_ns": "1489430.15391718796544533809949359547",
+          "operations": 33570,
+          "ops_per_second": "6712.45384129977809477404917491976047",
+          "pattern": "configured_authority_verify",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [],
+          "sampled_resources": {
+            "enclosure_ns": 5001219000,
+            "inner": {
+              "average_cores": "1.47983180648735306288150489218939705",
+              "counter_read_wall_ns": [
+                1790651357484928338,
+                1790651359572770339
+              ],
+              "cpu_ns_delta": 3089655000,
+              "enclosure_coverage_fraction": "0.417466621837595994096639239353445630",
+              "host_monotonic_ns": [
+                539389770016333,
+                539391845417625
+              ],
+              "host_postread_wall_ns": [
+                1790651357564195000,
+                1790651359639617000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 62230528,
+                "cgroup_usage": 79609856,
+                "file": 6201344
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 18320917,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 29163,
+                  "tx_bytes": 12241499,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 29079
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                22,
+                23
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2087842001
+            },
+            "outer": {
+              "average_cores": "1.28308750499512376809980169417415347",
+              "counter_read_wall_ns": [
+                1790651355330781545,
+                1790651361649401256
+              ],
+              "cpu_ns_delta": 8107342000,
+              "host_monotonic_ns": [
+                539387593220083,
+                539393910200250
+              ],
+              "host_postread_wall_ns": [
+                1790651355387377000,
+                1790651361704420000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 62300160,
+                "cgroup_usage": 79609856,
+                "file": 6238208
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 43278761,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 67653,
+                  "tx_bytes": 28302407,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 67548
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                21,
+                24
+              ],
+              "throttling": {
+                "periods": 61,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6318619711
+            },
+            "phase_wall_enclosure_ns": [
+              1790651356277642000,
+              1790651361278861000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 67291
+          },
+          "sdk_api": [],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 373854069,
+          "concurrency": 100,
+          "elapsed_ns": 5003899625,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "6204917.91013730062726807916297746574",
+          "header_await_sum_ns": 497566162296,
+          "local_work": [
+            {
+              "calls_delta": 80189,
+              "duration_ns_delta": 801202858,
+              "mean_ns": "9991.43096933494618962700619785756151",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 80189,
+              "duration_ns_delta": 93890049,
+              "mean_ns": "1170.85945703276010425370063225629450",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 80189,
+              "duration_ns_delta": 25828506,
+              "mean_ns": "322.095374677324820112484255945329160",
+              "name": "copy.return_vec"
+            },
+            {
+              "calls_delta": 80189,
+              "duration_ns_delta": 12651132,
+              "mean_ns": "157.766426816645674593772213146441532",
+              "name": "cache.lock_acquire"
+            }
+          ],
+          "logical_bytes": 328454144,
+          "logical_latency_sum_ns": 500030032234,
+          "logical_max_ns": 134112000,
+          "logical_mean_ns": "6235643.69469628003840925812767337166",
+          "operations": 80189,
+          "ops_per_second": "16025.3014667535422435656870315419247",
+          "pattern": "raw_get",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 80189,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 80189,
+                "body_bytes": 328454144,
+                "body_chunks": 80189,
+                "body_dropped": 0,
+                "body_elapsed_ns": 373854069,
+                "body_eof": 80189,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  842542,
+                  842542
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 497566162296,
+                "dispatch_max_ns_endpoints": [
+                  59753875,
+                  134064667
+                ],
+                "header_responses": 80189,
+                "known_extra_future_boxes": 80189,
+                "known_extra_response_body_boxes": 80189,
+                "offered_bytes": 0,
+                "offered_known": 80189,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  80189,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5003982000,
+            "inner": {
+              "average_cores": "1.80299760195625068379238079310730518",
+              "counter_read_wall_ns": [
+                1790651363720650882,
+                1790651365811846675
+              ],
+              "cpu_ns_delta": 3770421000,
+              "enclosure_coverage_fraction": "0.417906337992422834454640324445611515",
+              "host_monotonic_ns": [
+                539396009037666,
+                539398093126166
+              ],
+              "host_postread_wall_ns": [
+                1790651363803278000,
+                1790651365887388000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 74919936,
+                "cgroup_usage": 93380608,
+                "file": 6201344
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 22018074,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 32820,
+                  "tx_bytes": 146926348,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 32854
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                25,
+                26
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2091195793
+            },
+            "outer": {
+              "average_cores": "1.60886373560592396200149123529833480",
+              "counter_read_wall_ns": [
+                1790651361649401256,
+                1790651367915088509
+              ],
+              "cpu_ns_delta": 10080637000,
+              "host_monotonic_ns": [
+                539393910200250,
+                539400188443500
+              ],
+              "host_postread_wall_ns": [
+                1790651361704420000,
+                1790651367982726000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 102572032,
+                "cgroup_usage": 124059648,
+                "file": 6213632
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 55963801,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 81232,
+                  "tx_bytes": 360877831,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 81467
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                24,
+                27
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6265687253
+            },
+            "phase_wall_enclosure_ns": [
+              1790651361704975000,
+              1790651366708957000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 82375
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 80189,
+              "duration_ns_delta": 498650962725,
+              "mean_ns": "6218445.95549264861764082355435284141",
+              "name": "get.block_read"
+            },
+            {
+              "calls_delta": 80189,
+              "duration_ns_delta": 140539847,
+              "mean_ns": "1752.60755215802666201099901482747010",
+              "name": "body_read.block_read"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 11399494,
+          "concurrency": 100,
+          "elapsed_ns": 5194632042,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "344825463.651351351351351351351351351",
+          "header_await_sum_ns": 510341686204,
+          "local_work": [
+            {
+              "calls_delta": 1480,
+              "duration_ns_delta": 27961369,
+              "mean_ns": "18892.8168918918918918918918918918919",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 1480,
+              "duration_ns_delta": 3308547,
+              "mean_ns": "2235.50472972972972972972972972972973",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 1480,
+              "duration_ns_delta": 914742,
+              "mean_ns": "618.068918918918918918918918918918919",
+              "name": "copy.upload_payload"
+            }
+          ],
+          "logical_bytes": 6062080,
+          "logical_latency_sum_ns": 510449752818,
+          "logical_max_ns": 695723083,
+          "logical_mean_ns": "344898481.633783783783783783783783784",
+          "operations": 1480,
+          "ops_per_second": "284.909496579122668107547933998594467",
+          "pattern": "raw_unique_put",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": "0.999886483566664475237221987059842219",
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 1480,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 1480,
+                "body_bytes": 0,
+                "body_chunks": 0,
+                "body_dropped": 1480,
+                "body_elapsed_ns": 11399494,
+                "body_eof": 0,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  188166,
+                  188166
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 510341686204,
+                "dispatch_max_ns_endpoints": [
+                  78146375,
+                  695646041
+                ],
+                "header_responses": 1480,
+                "known_extra_future_boxes": 1480,
+                "known_extra_response_body_boxes": 1480,
+                "offered_bytes": 6062080,
+                "offered_known": 1480,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  1480,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "put",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5194739000,
+            "inner": {
+              "average_cores": "1.28212575526257090748880422562147164",
+              "counter_read_wall_ns": [
+                1790651367915088509,
+                1790651369992655385
+              ],
+              "cpu_ns_delta": 2663702000,
+              "enclosure_coverage_fraction": "0.399936719823652352890106702184652588",
+              "host_monotonic_ns": [
+                539400188443500,
+                539402265272666
+              ],
+              "host_postread_wall_ns": [
+                1790651367982726000,
+                1790651370059576000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 104300544,
+                "cgroup_usage": 127148032,
+                "file": 6213632
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 2599305,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 541,
+                  "tx_bytes": 222301,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 1079
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                27,
+                28
+              ],
+              "throttling": {
+                "periods": 20,
+                "throttled_periods": 4,
+                "throttled_time": 4401053000
+              },
+              "window_ns": 2077566876
+            },
+            "outer": {
+              "average_cores": "1.15352438164817038323868243818560710",
+              "counter_read_wall_ns": [
+                1790651365811846675,
+                1790651372072050720
+              ],
+              "cpu_ns_delta": 7221298000,
+              "host_monotonic_ns": [
+                539398093126166,
+                539404332993375
+              ],
+              "host_postread_wall_ns": [
+                1790651365887388000,
+                1790651372127317000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 108699648,
+                "cgroup_usage": 132591616,
+                "file": 6213632
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 16202783,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 15157,
+                  "tx_bytes": 61596963,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 16675
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                26,
+                29
+              ],
+              "throttling": {
+                "periods": 62,
+                "throttled_periods": 5,
+                "throttled_time": 4650430000
+              },
+              "window_ns": 6260204045
+            },
+            "phase_wall_enclosure_ns": [
+              1790651366709856000,
+              1790651371904595000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 106958
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 1480,
+              "duration_ns_delta": 510399624949,
+              "mean_ns": "344864611.452027027027027027027027027",
+              "name": "put_opts.block_create"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 49418,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 49418,
+                "body_bytes": 988360,
+                "body_chunks": 49418,
+                "body_dropped": 0,
+                "body_elapsed_ns": 218352869,
+                "body_eof": 49418,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  712750,
+                  712750
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 249057776266,
+                "dispatch_max_ns_endpoints": [
+                  11751250,
+                  62550875
+                ],
+                "header_responses": 49418,
+                "known_extra_future_boxes": 49418,
+                "known_extra_response_body_boxes": 49418,
+                "offered_bytes": 0,
+                "offered_known": 49418,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  49418,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_data_mixed"
+            },
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 49418,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 49418,
+                "body_bytes": 988360,
+                "body_chunks": 49418,
+                "body_dropped": 0,
+                "body_elapsed_ns": 219883776,
+                "body_eof": 49418,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  443375,
+                  443375
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 249995527581,
+                "dispatch_max_ns_endpoints": [
+                  13042167,
+                  62715584
+                ],
+                "header_responses": 49418,
+                "known_extra_future_boxes": 49418,
+                "known_extra_response_body_boxes": 49418,
+                "offered_bytes": 0,
+                "offered_known": 49418,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  49418,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_probe_mixed"
+            }
+          ],
+          "body_observed_lifetime_sum_ns": 438236645,
+          "concurrency": 100,
+          "elapsed_ns": 5015769709,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "10098613.9432393055162086689060666154",
+          "header_await_sum_ns": 499053303847,
+          "local_work": [],
+          "logical_bytes": 0,
+          "logical_latency_sum_ns": 500865942903,
+          "logical_max_ns": 72773833,
+          "logical_mean_ns": "10135293.6764539236715366870371119835",
+          "operations": 49418,
+          "ops_per_second": "9852.52570733605823927192587142760306",
+          "pattern": "configured_authority_verify",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [],
+          "sampled_resources": {
+            "enclosure_ns": 5015859000,
+            "inner": {
+              "average_cores": "1.99366186974652433435691653810801185",
+              "counter_read_wall_ns": [
+                1790651374134816804,
+                1790651376239591472
+              ],
+              "cpu_ns_delta": 4196209000,
+              "enclosure_coverage_fraction": "0.419623970291030908165480728226212100",
+              "host_monotonic_ns": [
+                539406432529166,
+                539408514302666
+              ],
+              "host_postread_wall_ns": [
+                1790651374226874000,
+                1790651376308668000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 147222528,
+                "cgroup_usage": 177532928,
+                "file": 9805824
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 25748682,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 41195,
+                  "tx_bytes": 17141880,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 40814
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                30,
+                31
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 10,
+                "throttled_time": 13910000
+              },
+              "window_ns": 2104774668
+            },
+            "outer": {
+              "average_cores": "1.84249054087832465924984553767077750",
+              "counter_read_wall_ns": [
+                1790651372072050720,
+                1790651378350465042
+              ],
+              "cpu_ns_delta": 11567919000,
+              "host_monotonic_ns": [
+                539404332993375,
+                539410615119958
+              ],
+              "host_postread_wall_ns": [
+                1790651372127317000,
+                1790651378409507000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 160079872,
+                "cgroup_usage": 189435904,
+                "file": 9805824
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 62825457,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 101312,
+                  "tx_bytes": 41798953,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 100381
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                29,
+                32
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 18,
+                "throttled_time": 30700000
+              },
+              "window_ns": 6278414322
+            },
+            "phase_wall_enclosure_ns": [
+              1790651372127814000,
+              1790651377143673000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 89291
+          },
+          "sdk_api": [],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        }
+      ],
+      "qualification": {
+        "benchmark_process_retirement": "successful owner process()/retire source path; no standalone observed PID/group receipt field",
+        "collector_group_absent": true,
+        "crash_durability_qualified": false,
+        "data_retained": true,
+        "failure": null,
+        "live_strict_bucket_policy_verified_before_writes": true,
+        "native_exact_case_passed": true,
+        "new_fixture_stopped": true,
+        "nine_positive_uncapped_settled_cells": true,
+        "preflight_actual_counter_and_stage_positive": true,
+        "preflight_signed_4KiB_put_get_equal": true,
+        "status": "benchmarked"
+      },
+      "raw_artifacts": [
+        {
+          "bytes": 753673,
+          "name": "benchmark.stdout",
+          "sha256": "dccfe0670d70cedc7d1cada2ea3768129d0d996e776099de7761aa14bd8b960e"
+        },
+        {
+          "bytes": 0,
+          "name": "benchmark.stderr",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 4699737,
+          "name": "otel-metrics.ndjson",
+          "sha256": "63f2c0ae81629ccff546a267c04893e55a2a0b1a94b2e56b18a37bb793966418"
+        },
+        {
+          "bytes": 346489,
+          "name": "resource-samples.ndjson",
+          "sha256": "bc20548e2fa01d8bd85f981f08913e29ece5b65edec466e3094e232affa506c3"
+        },
+        {
+          "bytes": 0,
+          "name": "guest-io-before.stdout",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 58,
+          "name": "guest-io-after.stdout",
+          "sha256": "6e835a7331713626d085f4652b5e5c716912bde9e69fc8ee3e6cbe88bbd19368"
+        }
+      ],
+      "receipt": {
+        "bytes": 4906,
+        "name": "receipt.json",
+        "sha256": "6ccd328b4dc11ca6eb1cea2732333ac1218bd781202e8775732d5f9755045b4c"
+      },
+      "strict_policy_and_stage_witnesses": {
+        "authenticated_policy": {
+          "bucket_matches": true,
+          "mode": "strict",
+          "verified_before_object_put": true
+        },
+        "crash_power_loss_durability_qualified": false,
+        "global_stage_witnesses": {
+          "after": {
+            "set_disk_rename_ancestor_dir_fsync": 30,
+            "set_disk_rename_dst_dir_fsync": 27
+          },
+          "before": {
+            "set_disk_rename_ancestor_dir_fsync": 26,
+            "set_disk_rename_dst_dir_fsync": 19
+          },
+          "export_covers_probe_completion": true,
+          "latest_stage_export_wall_ns": 1790651323507145502,
+          "positive_advances": {
+            "set_disk_rename_ancestor_dir_fsync": 4,
+            "set_disk_rename_dst_dir_fsync": 8
+          },
+          "scope": "new_server_process_global_corroboration_not_per_request_attribution"
+        },
+        "requested_new_bucket_mode": "strict",
+        "signed_probe_completed_wall_ns": 1790651318908796000,
+        "verified_before_object_put": true
+      },
+      "whole_sampled_resources": {
+        "average_cores": "0.756505841966356729780675459415011078",
+        "counter_read_wall_ns": [
+          1790651309615658177,
+          1790651394876226466
+        ],
+        "cpu_ns_delta": 64500118000,
+        "docker_blkio_operation_counts": "unavailable",
+        "host_monotonic_ns": [
+          539341894492833,
+          539427145261750
+        ],
+        "host_postread_lag_ns_range": [
+          53077624,
+          92057196
+        ],
+        "host_postread_wall_ns": [
+          1790651309688192000,
+          1790651394939814000
+        ],
+        "memory_sampled_peak_bytes": {
+          "anon": 165494784,
+          "cgroup_usage": 194363392,
+          "file": 9805824
+        },
+        "minimum_guest_mem_available_bytes": 3896463360,
+        "network_delta": {
+          "eth0": {
+            "rx_bytes": 229624171,
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "rx_packets": 335020,
+            "tx_bytes": 724753827,
+            "tx_dropped": 0,
+            "tx_errors": 0,
+            "tx_packets": 341633
+          }
+        },
+        "sample_count": 41,
+        "sample_indices": [
+          0,
+          40
+        ],
+        "throttling": {
+          "periods": 687,
+          "throttled_periods": 26,
+          "throttled_time": 5011215000
+        },
+        "window_ns": 85260568289
+      }
+    },
+    {
+      "cleanup": {
+        "backing_marker_retained": true,
+        "cleanup_authority_verified": true,
+        "deleted_exact_blocks": 6632,
+        "failed_deletes": 0,
+        "known_acknowledged_blocks": 6632,
+        "payload_cleanup_complete": true,
+        "quarantined": false,
+        "range_deletion_or_reconcile_used": false,
+        "suite_elapsed_ns": "58241657833",
+        "unattempted_deletes": 0,
+        "uncertain_deletes": 0,
+        "workers_settled": true
+      },
+      "client_geometry": {
+        "authority": [
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 101314541,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 101314541,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "primary_data_mixed"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 108035833,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 108035833,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "primary_probe_mixed"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 107998042,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 107998042,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "qualification_data"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 104678041,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 104678041,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "qualification_probe"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "standalone_data"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 111406208,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 111406208,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 0,
+            "released": 1,
+            "role": "standalone_probe"
+          }
+        ],
+        "authority_clients_live": 4,
+        "raw_data": [
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "primary_data_mixed"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "primary_probe_mixed"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "qualification_data"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "qualification_probe"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 115058709,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 115058709,
+              "started": 1,
+              "succeeded": 1
+            },
+            "constructed": 1,
+            "live": 1,
+            "released": 0,
+            "role": "standalone_data"
+          },
+          {
+            "build": {
+              "abandoned": 0,
+              "elapsed_ns": 0,
+              "failed": 0,
+              "inflight": 0,
+              "max_ns": 0,
+              "started": 0,
+              "succeeded": 0
+            },
+            "constructed": 0,
+            "live": 0,
+            "released": 0,
+            "role": "standalone_probe"
+          }
+        ],
+        "raw_shared_clients_live": 1
+      },
+      "guest_cgroup_io": {
+        "devices": [
+          {
+            "after": {
+              "dbytes": 0,
+              "dios": 0,
+              "rbytes": 34353152,
+              "rios": 4285,
+              "wbytes": 88801280,
+              "wios": 16718
+            },
+            "availability": "complete_before_after",
+            "before": {
+              "dbytes": 0,
+              "dios": 0,
+              "rbytes": 147456,
+              "rios": 34,
+              "wbytes": 147456,
+              "wios": 51
+            },
+            "delta": {
+              "dbytes": 0,
+              "dios": 0,
+              "rbytes": 34205696,
+              "rios": 4251,
+              "wbytes": 88653824,
+              "wios": 16667
+            },
+            "major_minor": "254:0",
+            "rios_per_second": "72.6625954907457373314762043142535712",
+            "wios_per_second": "284.890020946661774665658409152120506"
+          }
+        ],
+        "host_physical_iops_available": false,
+        "mount_coverage": "guest block-device accounting only",
+        "scope": "whole guest cgroup window, preparation/workload/payload cleanup",
+        "wall_endpoints_ns": [
+          1790651777245084000,
+          1790651835748946000
+        ],
+        "window_ns": 58503277667
+      },
+      "identity": {
+        "all_samples_same_instance_labels_mounts": true,
+        "container_identity_sha256": "c11c6667a19b45a4c2f7c0da715c0c57cac62c8a06e490b6c008ff91ba6ed8d3",
+        "engine_sha256": "e18cf29f776a32071bfe0bfb057a2ab465f155a14027ebc2d9c6202a62325199",
+        "image_sha256": "sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff",
+        "original_eight_health": [
+          {
+            "boundary": "original_health_before",
+            "eight_identity_limits_ports_mounts_lifecycle_match": true,
+            "mutation_executed": false,
+            "network_coverage": [
+              {
+                "checked": true,
+                "role": "pd1",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "pd2",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "pd3",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv1",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv2",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv3",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tidb",
+                "scope": "exact_original"
+              },
+              {
+                "checked": false,
+                "role": "rustfs",
+                "scope": "not_pinned_in_original_ready_manifest"
+              }
+            ],
+            "provider_durability_qualified": false,
+            "receipt": {
+              "bytes": 5266,
+              "name": "receipt.json",
+              "sha256": "d9b372c2d47980291823577e771546f8feb6448b8ee553c7536bae0653523f23"
+            }
+          },
+          {
+            "boundary": "original_health_after",
+            "eight_identity_limits_ports_mounts_lifecycle_match": true,
+            "mutation_executed": false,
+            "network_coverage": [
+              {
+                "checked": true,
+                "role": "pd1",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "pd2",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "pd3",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv1",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv2",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tikv3",
+                "scope": "exact_original"
+              },
+              {
+                "checked": true,
+                "role": "tidb",
+                "scope": "exact_original"
+              },
+              {
+                "checked": false,
+                "role": "rustfs",
+                "scope": "not_pinned_in_original_ready_manifest"
+              }
+            ],
+            "provider_durability_qualified": false,
+            "receipt": {
+              "bytes": 5266,
+              "name": "receipt.json",
+              "sha256": "4916758c03a80c3f97a2b6a3a9d5c7bc256bdfdfc2c34d58931097ae570afac8"
+            }
+          }
+        ],
+        "ready_sha256": "ca1f4833feb3cf54c75a1e13c4977645b52fa0add3f18b88af19396bde2d561a",
+        "source_before_after_equal": true
+      },
+      "mount": "volume",
+      "phases": [
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 36329731,
+          "concurrency": 1,
+          "elapsed_ns": 5000185000,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "494757.916772018541930046354825115887",
+          "header_await_sum_ns": 4696242146,
+          "local_work": [
+            {
+              "calls_delta": 9492,
+              "duration_ns_delta": 121022684,
+              "mean_ns": "12749.9667088074167720185419300463548",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 9492,
+              "duration_ns_delta": 14019774,
+              "mean_ns": "1477.00948166877370417193426042983565",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 9492,
+              "duration_ns_delta": 1336188,
+              "mean_ns": "140.769911504424778761061946902654867",
+              "name": "copy.return_vec"
+            },
+            {
+              "calls_delta": 9492,
+              "duration_ns_delta": 476312,
+              "mean_ns": "50.1803624104509060261272650653181627",
+              "name": "cache.lock_acquire"
+            }
+          ],
+          "logical_bytes": 38879232,
+          "logical_latency_sum_ns": 4995785362,
+          "logical_max_ns": 14987125,
+          "logical_mean_ns": "526315.356300042140750105351875263380",
+          "operations": 9492,
+          "ops_per_second": "1898.32976179881344390257560470262600",
+          "pattern": "raw_get",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 9492,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 9492,
+                "body_bytes": 38879232,
+                "body_chunks": 9492,
+                "body_dropped": 0,
+                "body_elapsed_ns": 36329731,
+                "body_eof": 9492,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  0,
+                  1189416
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 4696242146,
+                "dispatch_max_ns_endpoints": [
+                  0,
+                  14885458
+                ],
+                "header_responses": 9492,
+                "known_extra_future_boxes": 9492,
+                "known_extra_response_body_boxes": 9492,
+                "offered_bytes": 0,
+                "offered_known": 9492,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  9492,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5000279000,
+            "inner": {
+              "average_cores": "0.273929331839896442221616306461706299",
+              "counter_read_wall_ns": [
+                1790651781336355923,
+                1790651783408576507
+              ],
+              "cpu_ns_delta": 567642000,
+              "enclosure_coverage_fraction": "0.414420992108640337869146901602890559",
+              "host_monotonic_ns": [
+                539813598901500,
+                539815672614208
+              ],
+              "host_postread_wall_ns": [
+                1790651781397320000,
+                1790651783471054000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 36470784,
+                "cgroup_usage": 45830144,
+                "file": 3731456
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 2683296,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 3993,
+                  "tx_bytes": 17960514,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 3993
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                9,
+                10
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2072220584
+            },
+            "outer": {
+              "average_cores": "0.256028926361957560775499056957165053",
+              "counter_read_wall_ns": [
+                1790651779293615422,
+                1790651785478397050
+              ],
+              "cpu_ns_delta": 1583483000,
+              "host_monotonic_ns": [
+                539811545631875,
+                539817756913541
+              ],
+              "host_postread_wall_ns": [
+                1790651779344030000,
+                1790651785555374000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 40222720,
+                "cgroup_usage": 48939008,
+                "file": 4009984
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 6562420,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 9535,
+                  "tx_bytes": 42746670,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 9534
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                8,
+                11
+              ],
+              "throttling": {
+                "periods": 56,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6184781628
+            },
+            "phase_wall_enclosure_ns": [
+              1790651779528635000,
+              1790651784528914000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 94000
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 9492,
+              "duration_ns_delta": 4818188934,
+              "mean_ns": "507605.239570164348925410872313527181",
+              "name": "get.block_read"
+            },
+            {
+              "calls_delta": 9492,
+              "duration_ns_delta": 14691365,
+              "mean_ns": "1547.76285292878213232195533080488833",
+              "name": "body_read.block_read"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 6477003,
+          "concurrency": 1,
+          "elapsed_ns": 5001335125,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "5581293.75424688561721404303510758777",
+          "header_await_sum_ns": 4928282385,
+          "local_work": [
+            {
+              "calls_delta": 883,
+              "duration_ns_delta": 19029916,
+              "mean_ns": "21551.4337485843714609286523216308041",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 883,
+              "duration_ns_delta": 2470030,
+              "mean_ns": "2797.31596828992072480181200453001133",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 883,
+              "duration_ns_delta": 1388694,
+              "mean_ns": "1572.69988674971687429218573046432616",
+              "name": "copy.upload_payload"
+            }
+          ],
+          "logical_bytes": 3616768,
+          "logical_latency_sum_ns": 5000863911,
+          "logical_max_ns": 36650625,
+          "logical_mean_ns": "5663492.53793884484711211778029445074",
+          "operations": 883,
+          "ops_per_second": "176.552855973633640477151588597054871",
+          "pattern": "raw_unique_put",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": "0.992365161814100638003353175266056678",
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 883,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 883,
+                "body_bytes": 0,
+                "body_chunks": 0,
+                "body_dropped": 883,
+                "body_elapsed_ns": 6477003,
+                "body_eof": 0,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  72792,
+                  218542
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 4928282385,
+                "dispatch_max_ns_endpoints": [
+                  20679041,
+                  36391500
+                ],
+                "header_responses": 883,
+                "known_extra_future_boxes": 883,
+                "known_extra_response_body_boxes": 883,
+                "offered_bytes": 3616768,
+                "offered_known": 883,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  883,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "put",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5001404000,
+            "inner": {
+              "average_cores": "0.715889146489157495478246642652579948",
+              "counter_read_wall_ns": [
+                1790651787564312217,
+                1790651789646697468
+              ],
+              "cpu_ns_delta": 1490757000,
+              "enclosure_coverage_fraction": "0.416360136273734335398620067485050198",
+              "host_monotonic_ns": [
+                539819839508333,
+                539821911214958
+              ],
+              "host_postread_wall_ns": [
+                1790651787637990000,
+                1790651789709717000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 45748224,
+                "cgroup_usage": 68513792,
+                "file": 13520896
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 1765099,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 368,
+                  "tx_bytes": 129661,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 368
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                12,
+                13
+              ],
+              "throttling": {
+                "periods": 20,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2082385251
+            },
+            "outer": {
+              "average_cores": "0.636302082272720054857528906723825795",
+              "counter_read_wall_ns": [
+                1790651785478397050,
+                1790651791765885511
+              ],
+              "cpu_ns_delta": 4000742000,
+              "host_monotonic_ns": [
+                539817756913541,
+                539824028923916
+              ],
+              "host_postread_wall_ns": [
+                1790651785555374000,
+                1790651791827447000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 45748224,
+                "cgroup_usage": 68886528,
+                "file": 15736832
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 5798189,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 3335,
+                  "tx_bytes": 1306588,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 3329
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                11,
+                14
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6287488461
+            },
+            "phase_wall_enclosure_ns": [
+              1790651785555826000,
+              1790651790557230000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 68875
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 883,
+              "duration_ns_delta": 4966198507,
+              "mean_ns": "5624233.86976217440543601359003397508",
+              "name": "put_opts.block_create"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 4857,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 4857,
+                "body_bytes": 97140,
+                "body_chunks": 4857,
+                "body_dropped": 0,
+                "body_elapsed_ns": 18874036,
+                "body_eof": 4857,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  199167,
+                  342375
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 2398851863,
+                "dispatch_max_ns_endpoints": [
+                  1078792,
+                  16380792
+                ],
+                "header_responses": 4857,
+                "known_extra_future_boxes": 4857,
+                "known_extra_response_body_boxes": 4857,
+                "offered_bytes": 0,
+                "offered_known": 4857,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  4857,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_data_mixed"
+            },
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 4857,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 4857,
+                "body_bytes": 97140,
+                "body_chunks": 4857,
+                "body_dropped": 0,
+                "body_elapsed_ns": 19193978,
+                "body_eof": 4857,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  14875,
+                  196375
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 2405106223,
+                "dispatch_max_ns_endpoints": [
+                  1376000,
+                  24327208
+                ],
+                "header_responses": 4857,
+                "known_extra_future_boxes": 4857,
+                "known_extra_response_body_boxes": 4857,
+                "offered_bytes": 0,
+                "offered_known": 4857,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  4857,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_probe_mixed"
+            }
+          ],
+          "body_observed_lifetime_sum_ns": 38068014,
+          "concurrency": 1,
+          "elapsed_ns": 5000043792,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "989079.284743668931439159975293390982",
+          "header_await_sum_ns": 4803958086,
+          "local_work": [],
+          "logical_bytes": 0,
+          "logical_latency_sum_ns": 4999336211,
+          "logical_max_ns": 37862792,
+          "logical_mean_ns": "1029305.37595223388923203623635989294",
+          "operations": 4857,
+          "ops_per_second": "971.391492164755024209595962674720510",
+          "pattern": "configured_authority_verify",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [],
+          "sampled_resources": {
+            "enclosure_ns": 5000114000,
+            "inner": {
+              "average_cores": "0.351220211881717380014691295606690125",
+              "counter_read_wall_ns": [
+                1790651791765885511,
+                1790651793835997012
+              ],
+              "cpu_ns_delta": 727065000,
+              "enclosure_coverage_fraction": "0.414012860706775885509810376323419826",
+              "host_monotonic_ns": [
+                539824028923916,
+                539826100769750
+              ],
+              "host_postread_wall_ns": [
+                1790651791827447000,
+                1790651793899313000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 47972352,
+                "cgroup_usage": 72994816,
+                "file": 15736832
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 2467212,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 3918,
+                  "tx_bytes": 1644852,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 3918
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                14,
+                15
+              ],
+              "throttling": {
+                "periods": 20,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2070111501
+            },
+            "outer": {
+              "average_cores": "0.374600681145546819306320867619597164",
+              "counter_read_wall_ns": [
+                1790651789646697468,
+                1790651795908613471
+              ],
+              "cpu_ns_delta": 2345718000,
+              "host_monotonic_ns": [
+                539821911214958,
+                539828171706416
+              ],
+              "host_postread_wall_ns": [
+                1790651789709717000,
+                1790651795970271000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 48353280,
+                "cgroup_usage": 73969664,
+                "file": 15736832
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 6950045,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 9897,
+                  "tx_bytes": 4153801,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 9891
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                13,
+                16
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6261916003
+            },
+            "phase_wall_enclosure_ns": [
+              1790651790558855000,
+              1790651795558969000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 70208
+          },
+          "sdk_api": [],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 237377556,
+          "concurrency": 10,
+          "elapsed_ns": 5001996916,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "837416.530423349077005588138613518797",
+          "header_await_sum_ns": 48403512875,
+          "local_work": [
+            {
+              "calls_delta": 57801,
+              "duration_ns_delta": 536655022,
+              "mean_ns": "9284.52832995968927873220186501963634",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 57801,
+              "duration_ns_delta": 64130125,
+              "mean_ns": "1109.49853808757633950969706406463556",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 57801,
+              "duration_ns_delta": 13691509,
+              "mean_ns": "236.873220186501963633847165273957198",
+              "name": "copy.return_vec"
+            },
+            {
+              "calls_delta": 57801,
+              "duration_ns_delta": 6628917,
+              "mean_ns": "114.685161156381377484818601754294908",
+              "name": "cache.lock_acquire"
+            }
+          ],
+          "logical_bytes": 236752896,
+          "logical_latency_sum_ns": 49991876943,
+          "logical_max_ns": 12745417,
+          "logical_mean_ns": "864896.402190273524679503814812892511",
+          "operations": 57801,
+          "ops_per_second": "11555.5848935273513871154893770830146",
+          "pattern": "raw_get",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 57801,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 57801,
+                "body_bytes": 236752896,
+                "body_chunks": 57801,
+                "body_dropped": 0,
+                "body_elapsed_ns": 237377556,
+                "body_eof": 57801,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  1189416,
+                  1189416
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 48403512875,
+                "dispatch_max_ns_endpoints": [
+                  14885458,
+                  14885458
+                ],
+                "header_responses": 57801,
+                "known_extra_future_boxes": 57801,
+                "known_extra_response_body_boxes": 57801,
+                "offered_bytes": 0,
+                "offered_known": 57801,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  57801,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5002067000,
+            "inner": {
+              "average_cores": "1.41467570481025284323684996955927606",
+              "counter_read_wall_ns": [
+                1790651797985161541,
+                1790651800064515834
+              ],
+              "cpu_ns_delta": 2941612000,
+              "enclosure_coverage_fraction": "0.415699008629832427274564694955105559",
+              "host_monotonic_ns": [
+                539830255706000,
+                539832332913208
+              ],
+              "host_postread_wall_ns": [
+                1790651798054291000,
+                1790651800131519000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 54939648,
+                "cgroup_usage": 80633856,
+                "file": 15736832
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 16704823,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 24860,
+                  "tx_bytes": 111866283,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 24867
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                17,
+                18
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2079354293
+            },
+            "outer": {
+              "average_cores": "1.50718128068783813063786467131717385",
+              "counter_read_wall_ns": [
+                1790651795908613471,
+                1790651802178684710
+              ],
+              "cpu_ns_delta": 9450134000,
+              "host_monotonic_ns": [
+                539828171706416,
+                539834445353250
+              ],
+              "host_postread_wall_ns": [
+                1790651795970271000,
+                1790651802243980000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 70041600,
+                "cgroup_usage": 109727744,
+                "file": 26136576
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 42258415,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 58539,
+                  "tx_bytes": 260217371,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 58521
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                16,
+                19
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 11,
+                "throttled_time": 565154000
+              },
+              "window_ns": 6270071239
+            },
+            "phase_wall_enclosure_ns": [
+              1790651795970759000,
+              1790651800972826000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 70084
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 57801,
+              "duration_ns_delta": 49089527030,
+              "mean_ns": "849285.082092005328627532395633293542",
+              "name": "get.block_read"
+            },
+            {
+              "calls_delta": 57801,
+              "duration_ns_delta": 95993919,
+              "mean_ns": "1660.76571339596200757772356879638761",
+              "name": "body_read.block_read"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 15099709,
+          "concurrency": 10,
+          "elapsed_ns": 5010485000,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "17468214.5803852889667250437828371278",
+          "header_await_sum_ns": 49871752627,
+          "local_work": [
+            {
+              "calls_delta": 2855,
+              "duration_ns_delta": 52347136,
+              "mean_ns": "18335.2490367775831873905429071803853",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 2855,
+              "duration_ns_delta": 5862795,
+              "mean_ns": "2053.51838879159369527145359019264448",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 2855,
+              "duration_ns_delta": 1653138,
+              "mean_ns": "579.032574430823117338003502626970228",
+              "name": "copy.upload_payload"
+            }
+          ],
+          "logical_bytes": 11694080,
+          "logical_latency_sum_ns": 50052044949,
+          "logical_max_ns": 63177167,
+          "logical_mean_ns": "17531364.2553415061295971978984238179",
+          "operations": 2855,
+          "ops_per_second": "569.805118666157068627088994378787682",
+          "pattern": "raw_unique_put",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": "0.998093467992043801029242495628912961",
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 2855,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 2855,
+                "body_bytes": 0,
+                "body_chunks": 0,
+                "body_dropped": 2855,
+                "body_elapsed_ns": 15099709,
+                "body_eof": 0,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  218542,
+                  218542
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 49871752627,
+                "dispatch_max_ns_endpoints": [
+                  36391500,
+                  63120208
+                ],
+                "header_responses": 2855,
+                "known_extra_future_boxes": 2855,
+                "known_extra_response_body_boxes": 2855,
+                "offered_bytes": 11694080,
+                "offered_known": 2855,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  2855,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "put",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5010552000,
+            "inner": {
+              "average_cores": "2.00816034112283309514758770381470859",
+              "counter_read_wall_ns": [
+                1790651802178684710,
+                1790651804252392628
+              ],
+              "cpu_ns_delta": 4164338000,
+              "enclosure_coverage_fraction": "0.413868156243064636391359674542844780",
+              "host_monotonic_ns": [
+                539834445353250,
+                539836519975125
+              ],
+              "host_postread_wall_ns": [
+                1790651802243980000,
+                1790651804318623000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 70041600,
+                "cgroup_usage": 127406080,
+                "file": 40873984
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 5651384,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 1172,
+                  "tx_bytes": 340602,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 1172
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                19,
+                20
+              ],
+              "throttling": {
+                "periods": 20,
+                "throttled_periods": 20,
+                "throttled_time": 1005125000
+              },
+              "window_ns": 2073707918
+            },
+            "outer": {
+              "average_cores": "1.80306124052079622331668508087955003",
+              "counter_read_wall_ns": [
+                1790651800064515834,
+                1790651806331009587
+              ],
+              "cpu_ns_delta": 11298872000,
+              "host_monotonic_ns": [
+                539832332913208,
+                539838853590416
+              ],
+              "host_postread_wall_ns": [
+                1790651800131519000,
+                1790651806652262000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 70377472,
+                "cgroup_usage": 146071552,
+                "file": 53506048
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 20824389,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 13368,
+                  "tx_bytes": 48094843,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 13380
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                18,
+                21
+              ],
+              "throttling": {
+                "periods": 61,
+                "throttled_periods": 49,
+                "throttled_time": 2464741000
+              },
+              "window_ns": 6266493753
+            },
+            "phase_wall_enclosure_ns": [
+              1790651800973446000,
+              1790651805983998000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 67000
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 2855,
+              "duration_ns_delta": 49967016343,
+              "mean_ns": "17501581.9064798598949211908931698774",
+              "name": "put_opts.block_create"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 30094,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 30094,
+                "body_bytes": 601880,
+                "body_chunks": 30094,
+                "body_dropped": 0,
+                "body_elapsed_ns": 133496367,
+                "body_eof": 30094,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  342375,
+                  342375
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 24422754044,
+                "dispatch_max_ns_endpoints": [
+                  16380792,
+                  16380792
+                ],
+                "header_responses": 30094,
+                "known_extra_future_boxes": 30094,
+                "known_extra_response_body_boxes": 30094,
+                "offered_bytes": 0,
+                "offered_known": 30094,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  30094,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_data_mixed"
+            },
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 30094,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 30094,
+                "body_bytes": 601880,
+                "body_chunks": 30094,
+                "body_dropped": 0,
+                "body_elapsed_ns": 134281708,
+                "body_eof": 30094,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  196375,
+                  197375
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 24450151825,
+                "dispatch_max_ns_endpoints": [
+                  24327208,
+                  24327208
+                ],
+                "header_responses": 30094,
+                "known_extra_future_boxes": 30094,
+                "known_extra_response_body_boxes": 30094,
+                "offered_bytes": 0,
+                "offered_known": 30094,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  30094,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_probe_mixed"
+            }
+          ],
+          "body_observed_lifetime_sum_ns": 267778075,
+          "concurrency": 10,
+          "elapsed_ns": 5002113792,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "1624008.30295075430318335880906492989",
+          "header_await_sum_ns": 48872905869,
+          "local_work": [],
+          "logical_bytes": 0,
+          "logical_latency_sum_ns": 50007827045,
+          "logical_max_ns": 12512000,
+          "logical_mean_ns": "1661720.84285904166943576792716156044",
+          "operations": 30094,
+          "ops_per_second": "6016.25657699551989720109110224735967",
+          "pattern": "configured_authority_verify",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [],
+          "sampled_resources": {
+            "enclosure_ns": 5002189000,
+            "inner": {
+              "average_cores": "1.47518058783889243504019201501989109",
+              "counter_read_wall_ns": [
+                1790651808461851755,
+                1790651810540690797
+              ],
+              "cpu_ns_delta": 3066663000,
+              "enclosure_coverage_fraction": "0.415585864908343127378833546673266444",
+              "host_monotonic_ns": [
+                539840732964666,
+                539842814642416
+              ],
+              "host_postread_wall_ns": [
+                1790651808531655000,
+                1790651810613353000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 70819840,
+                "cgroup_usage": 148103168,
+                "file": 53506048
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 16459825,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 26225,
+                  "tx_bytes": 10996844,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 26117
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                22,
+                23
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 2078839042
+            },
+            "outer": {
+              "average_cores": "1.32914488846918336635148437498731018",
+              "counter_read_wall_ns": [
+                1790651806331009587,
+                1790651812622963965
+              ],
+              "cpu_ns_delta": 8362919000,
+              "host_monotonic_ns": [
+                539838853590416,
+                539844890678291
+              ],
+              "host_postread_wall_ns": [
+                1790651806652262000,
+                1790651812689410000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 79499264,
+                "cgroup_usage": 154714112,
+                "file": 53506048
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 37940149,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 60513,
+                  "tx_bytes": 25310864,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 60228
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                21,
+                24
+              ],
+              "throttling": {
+                "periods": 60,
+                "throttled_periods": 0,
+                "throttled_time": 0
+              },
+              "window_ns": 6291954378
+            },
+            "phase_wall_enclosure_ns": [
+              1790651806653430000,
+              1790651811655619000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 75208
+          },
+          "sdk_api": [],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 355872332,
+          "concurrency": 100,
+          "elapsed_ns": 5004654917,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "6593161.86149158828983971386938667373",
+          "header_await_sum_ns": 497717788924,
+          "local_work": [
+            {
+              "calls_delta": 75490,
+              "duration_ns_delta": 762169408,
+              "mean_ns": "10096.2963041462445357000927275135780",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 75490,
+              "duration_ns_delta": 89149005,
+              "mean_ns": "1180.93793879984103854815207312226785",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 75490,
+              "duration_ns_delta": 23748527,
+              "mean_ns": "314.591694264140945820638495164922506",
+              "name": "copy.return_vec"
+            },
+            {
+              "calls_delta": 75490,
+              "duration_ns_delta": 13538737,
+              "mean_ns": "179.344774142270499403894555570274209",
+              "name": "cache.lock_acquire"
+            }
+          ],
+          "logical_bytes": 309207040,
+          "logical_latency_sum_ns": 500062297098,
+          "logical_max_ns": 93754834,
+          "logical_mean_ns": "6624219.06342561928732282421512783150",
+          "operations": 75490,
+          "ops_per_second": "15083.9570863462992287665855064188435",
+          "pattern": "raw_get",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 75490,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 75490,
+                "body_bytes": 309207040,
+                "body_chunks": 75490,
+                "body_dropped": 0,
+                "body_elapsed_ns": 355872332,
+                "body_eof": 75490,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  1189416,
+                  1189416
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 497717788924,
+                "dispatch_max_ns_endpoints": [
+                  14885458,
+                  93727625
+                ],
+                "header_responses": 75490,
+                "known_extra_future_boxes": 75490,
+                "known_extra_response_body_boxes": 75490,
+                "offered_bytes": 0,
+                "offered_known": 75490,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  75490,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5004774000,
+            "inner": {
+              "average_cores": "1.84911117557187215701376347374781556",
+              "counter_read_wall_ns": [
+                1790651814699410091,
+                1790651816786505800
+              ],
+              "cpu_ns_delta": 3859272000,
+              "enclosure_coverage_fraction": "0.417020970177674356524390511939200451",
+              "host_monotonic_ns": [
+                539846974658458,
+                539849077637000
+              ],
+              "host_postread_wall_ns": [
+                1790651814773411000,
+                1790651816876411000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 105410560,
+                "cgroup_usage": 182714368,
+                "file": 53358592
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 24404352,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 36316,
+                  "tx_bytes": 163385352,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 36324
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                25,
+                26
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 1,
+                "throttled_time": 399000
+              },
+              "window_ns": 2087095709
+            },
+            "outer": {
+              "average_cores": "1.88379060561277814636359369692440669",
+              "counter_read_wall_ns": [
+                1790651812622963965,
+                1790651818900926051
+              ],
+              "cpu_ns_delta": 11826366000,
+              "host_monotonic_ns": [
+                539844890678291,
+                539851166384791
+              ],
+              "host_postread_wall_ns": [
+                1790651812689410000,
+                1790651818965179000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 115740672,
+                "cgroup_usage": 205099008,
+                "file": 62648320
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 54487177,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 76567,
+                  "tx_bytes": 339875689,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 77586
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                24,
+                27
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 6,
+                "throttled_time": 63791000
+              },
+              "window_ns": 6277962086
+            },
+            "phase_wall_enclosure_ns": [
+              1790651812689872000,
+              1790651817694646000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 119083
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 75490,
+              "duration_ns_delta": 498746697801,
+              "mean_ns": "6606791.59890051662471850576235262949",
+              "name": "get.block_read"
+            },
+            {
+              "calls_delta": 75490,
+              "duration_ns_delta": 133470401,
+              "mean_ns": "1768.05406014041594913233540866339913",
+              "name": "body_read.block_read"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [],
+          "body_observed_lifetime_sum_ns": 15449883,
+          "concurrency": 100,
+          "elapsed_ns": 5252155875,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "195425687.844958301743745261561789234",
+          "header_await_sum_ns": 515532964535,
+          "local_work": [
+            {
+              "calls_delta": 2638,
+              "duration_ns_delta": 51048777,
+              "mean_ns": "19351.3180439727065959059893858984079",
+              "name": "sha256.digest"
+            },
+            {
+              "calls_delta": 2638,
+              "duration_ns_delta": 5709958,
+              "mean_ns": "2164.50265352539802880970432145564822",
+              "name": "block_id.encode"
+            },
+            {
+              "calls_delta": 2638,
+              "duration_ns_delta": 2308118,
+              "mean_ns": "874.949962092494313874147081122062168",
+              "name": "copy.upload_payload"
+            }
+          ],
+          "logical_bytes": 10805248,
+          "logical_latency_sum_ns": 515702235759,
+          "logical_max_ns": 496684250,
+          "logical_mean_ns": "195489854.343821076573161485974222896",
+          "operations": 2638,
+          "ops_per_second": "502.269936914239050454685905528270331",
+          "pattern": "raw_unique_put",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": "0.999836165776417685334885445425403819",
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 2638,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 2638,
+                "body_bytes": 0,
+                "body_chunks": 0,
+                "body_dropped": 2638,
+                "body_elapsed_ns": 15449883,
+                "body_eof": 0,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  218542,
+                  218542
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 515532964535,
+                "dispatch_max_ns_endpoints": [
+                  63120208,
+                  496652667
+                ],
+                "header_responses": 2638,
+                "known_extra_future_boxes": 2638,
+                "known_extra_response_body_boxes": 2638,
+                "offered_bytes": 10805248,
+                "offered_known": 2638,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  2638,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "put",
+              "role": "standalone_data"
+            }
+          ],
+          "sampled_resources": {
+            "enclosure_ns": 5252253000,
+            "inner": {
+              "average_cores": "1.89696837121084233971042494148470581",
+              "counter_read_wall_ns": [
+                1790651818900926051,
+                1790651820973212052
+              ],
+              "cpu_ns_delta": 3931061000,
+              "enclosure_coverage_fraction": "0.394551823950597962436310665156457619",
+              "host_monotonic_ns": [
+                539851166384791,
+                539853321234416
+              ],
+              "host_postread_wall_ns": [
+                1790651818965179000,
+                1790651821120051000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 120872960,
+                "cgroup_usage": 231481344,
+                "file": 78561280
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 5945773,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 1235,
+                  "tx_bytes": 471149,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 2468
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                27,
+                28
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 6,
+                "throttled_time": 101904000
+              },
+              "window_ns": 2072286001
+            },
+            "outer": {
+              "average_cores": "1.72114530708554131483093576900495887",
+              "counter_read_wall_ns": [
+                1790651816786505800,
+                1790651823127635137
+              ],
+              "cpu_ns_delta": 10914005000,
+              "host_monotonic_ns": [
+                539849077637000,
+                539855394052041
+              ],
+              "host_postread_wall_ns": [
+                1790651816876411000,
+                1790651823192889000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 127315968,
+                "cgroup_usage": 241717248,
+                "file": 80003072
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 23018963,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 18055,
+                  "tx_bytes": 70129484,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 20653
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                26,
+                29
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 20,
+                "throttled_time": 2093037000
+              },
+              "window_ns": 6341129337
+            },
+            "phase_wall_enclosure_ns": [
+              1790651817695507000,
+              1790651822947760000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 97125
+          },
+          "sdk_api": [
+            {
+              "calls_delta": 2638,
+              "duration_ns_delta": 515617440318,
+              "mean_ns": "195457710.507202426080363912054586808",
+              "name": "put_opts.block_create"
+            }
+          ],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        },
+        {
+          "application_cache_hits_delta": 0,
+          "application_cache_zero": true,
+          "authority_http": [
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 51965,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 51965,
+                "body_bytes": 1039300,
+                "body_chunks": 51965,
+                "body_dropped": 0,
+                "body_elapsed_ns": 229491670,
+                "body_eof": 51965,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  342375,
+                  342375
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 249511988973,
+                "dispatch_max_ns_endpoints": [
+                  16380792,
+                  67125084
+                ],
+                "header_responses": 51965,
+                "known_extra_future_boxes": 51965,
+                "known_extra_response_body_boxes": 51965,
+                "offered_bytes": 0,
+                "offered_known": 51965,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  51965,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_data_mixed"
+            },
+            {
+              "delta": {
+                "attempts_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "attempts_started": 51965,
+                "bodies_inflight_endpoints": [
+                  0,
+                  0
+                ],
+                "bodies_started": 51965,
+                "body_bytes": 1039300,
+                "body_chunks": 51965,
+                "body_dropped": 0,
+                "body_elapsed_ns": 228944753,
+                "body_eof": 51965,
+                "body_errors": 0,
+                "body_max_ns_endpoints": [
+                  197375,
+                  393583
+                ],
+                "cancelled_before_headers": 0,
+                "dispatch_elapsed_ns": 248787528701,
+                "dispatch_max_ns_endpoints": [
+                  24327208,
+                  65907167
+                ],
+                "header_responses": 51965,
+                "known_extra_future_boxes": 51965,
+                "known_extra_response_body_boxes": 51965,
+                "offered_bytes": 0,
+                "offered_known": 51965,
+                "offered_unknown": 0,
+                "status": [
+                  0,
+                  51965,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "transport_errors": 0
+              },
+              "method": "get",
+              "role": "primary_probe_mixed"
+            }
+          ],
+          "body_observed_lifetime_sum_ns": 458436423,
+          "concurrency": 100,
+          "elapsed_ns": 5005695792,
+          "failed_operations": 0,
+          "harness_retries": 0,
+          "header_await_mean_ns": "9589137.25919368805927066294621379775",
+          "header_await_sum_ns": 498299517674,
+          "local_work": [],
+          "logical_bytes": 0,
+          "logical_latency_sum_ns": 500224594783,
+          "logical_max_ns": 73623667,
+          "logical_mean_ns": "9626182.90739921100740883286827672472",
+          "operations": 51965,
+          "ops_per_second": "10381.1741982102455338340704344583951",
+          "pattern": "configured_authority_verify",
+          "physical_iops_claim": false,
+          "put_headers_over_sdk_wall_fraction": null,
+          "qualified_positive_uncapped_settled": true,
+          "raw_http": [],
+          "sampled_resources": {
+            "enclosure_ns": 5005790000,
+            "inner": {
+              "average_cores": "1.99676747471054342752424668213054140",
+              "counter_read_wall_ns": [
+                1790651825202945346,
+                1790651827289575889
+              ],
+              "cpu_ns_delta": 4166516000,
+              "enclosure_coverage_fraction": "0.416843403938239518637417870106416769",
+              "host_monotonic_ns": [
+                539857479979041,
+                539859568018416
+              ],
+              "host_postread_wall_ns": [
+                1790651825278837000,
+                1790651827366897000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 134578176,
+                "cgroup_usage": 254722048,
+                "file": 84414464
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 28222854,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 45133,
+                  "tx_bytes": 18793740,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 44747
+                }
+              },
+              "sample_count": 2,
+              "sample_indices": [
+                30,
+                31
+              ],
+              "throttling": {
+                "periods": 21,
+                "throttled_periods": 15,
+                "throttled_time": 58703000
+              },
+              "window_ns": 2086630543
+            },
+            "outer": {
+              "average_cores": "1.97637299407701508275223005967917732",
+              "counter_read_wall_ns": [
+                1790651823127635137,
+                1790651829406342667
+              ],
+              "cpu_ns_delta": 12409068000,
+              "host_monotonic_ns": [
+                539855394052041,
+                539861666878625
+              ],
+              "host_postread_wall_ns": [
+                1790651823192889000,
+                1790651829465778000
+              ],
+              "memory_sampled_peak_bytes": {
+                "anon": 148672512,
+                "cgroup_usage": 269737984,
+                "file": 84414464
+              },
+              "network_delta": {
+                "eth0": {
+                  "rx_bytes": 67215130,
+                  "rx_dropped": 0,
+                  "rx_errors": 0,
+                  "rx_packets": 108214,
+                  "tx_bytes": 44637114,
+                  "tx_dropped": 0,
+                  "tx_errors": 0,
+                  "tx_packets": 108962
+                }
+              },
+              "sample_count": 4,
+              "sample_indices": [
+                29,
+                32
+              ],
+              "throttling": {
+                "periods": 63,
+                "throttled_periods": 45,
+                "throttled_time": 1592771000
+              },
+              "window_ns": 6278707530
+            },
+            "phase_wall_enclosure_ns": [
+              1790651823193401000,
+              1790651828199191000
+            ],
+            "wall_enclosure_minus_monotonic_elapsed_ns": 94208
+          },
+          "sdk_api": [],
+          "sdk_max_retries": 0,
+          "uncertain_operations": 0
+        }
+      ],
+      "qualification": {
+        "benchmark_process_retirement": "successful owner process()/retire source path; no standalone observed PID/group receipt field",
+        "collector_group_absent": true,
+        "crash_durability_qualified": false,
+        "data_retained": true,
+        "failure": null,
+        "live_strict_bucket_policy_verified_before_writes": true,
+        "native_exact_case_passed": true,
+        "new_fixture_stopped": true,
+        "nine_positive_uncapped_settled_cells": true,
+        "preflight_actual_counter_and_stage_positive": true,
+        "preflight_signed_4KiB_put_get_equal": true,
+        "status": "benchmarked"
+      },
+      "raw_artifacts": [
+        {
+          "bytes": 753933,
+          "name": "benchmark.stdout",
+          "sha256": "7213860a7848b43e0a1947e5815f7fd28c1ee6b7ab46915bafdc437f06da0de9"
+        },
+        {
+          "bytes": 0,
+          "name": "benchmark.stderr",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "bytes": 4433072,
+          "name": "otel-metrics.ndjson",
+          "sha256": "466a2ff58155e460ac594ca302882920a826acfba9514cf7eaf67e3bbbe82cc9"
+        },
+        {
+          "bytes": 323416,
+          "name": "resource-samples.ndjson",
+          "sha256": "91bd31dfeb553c20397b939c15a78950e5f71b06796bc96bcb4541c49c4dd30f"
+        },
+        {
+          "bytes": 66,
+          "name": "guest-io-before.stdout",
+          "sha256": "efbb3574a2388366b4fa29a1e5740df13e1aa94bd5723f5aab0dc22f5ebfeded"
+        },
+        {
+          "bytes": 75,
+          "name": "guest-io-after.stdout",
+          "sha256": "9ea5f00e5e7b1258215d2388dece2d06252960ff605dd1e889a4b09cefe51a10"
+        }
+      ],
+      "receipt": {
+        "bytes": 4859,
+        "name": "receipt.json",
+        "sha256": "a2785c7c27031ab4ad325d2816fa7ab6f2e55f501642df7210d0a421d026201d"
+      },
+      "strict_policy_and_stage_witnesses": {
+        "authenticated_policy": {
+          "bucket_matches": true,
+          "mode": "strict",
+          "verified_before_object_put": true
+        },
+        "crash_power_loss_durability_qualified": false,
+        "global_stage_witnesses": {
+          "after": {
+            "set_disk_rename_ancestor_dir_fsync": 30,
+            "set_disk_rename_dst_dir_fsync": 27
+          },
+          "before": {
+            "set_disk_rename_ancestor_dir_fsync": 26,
+            "set_disk_rename_dst_dir_fsync": 19
+          },
+          "export_covers_probe_completion": true,
+          "latest_stage_export_wall_ns": 1790651774511601795,
+          "positive_advances": {
+            "set_disk_rename_ancestor_dir_fsync": 4,
+            "set_disk_rename_dst_dir_fsync": 8
+          },
+          "scope": "new_server_process_global_corroboration_not_per_request_attribution"
+        },
+        "requested_new_bucket_mode": "strict",
+        "signed_probe_completed_wall_ns": 1790651769951209000,
+        "verified_before_object_put": true
+      },
+      "whole_sampled_resources": {
+        "average_cores": "0.969308145394363049259345261963322541",
+        "counter_read_wall_ns": [
+          1790651760622669302,
+          1790651839962663880
+        ],
+        "cpu_ns_delta": 76904903000,
+        "docker_blkio_operation_counts": "unavailable",
+        "host_monotonic_ns": [
+          539793094476666,
+          539872432190083
+        ],
+        "host_postread_lag_ns_range": [
+          50414578,
+          321252413
+        ],
+        "host_postread_wall_ns": [
+          1790651760892690000,
+          1790651840231197000
+        ],
+        "memory_sampled_peak_bytes": {
+          "anon": 160428032,
+          "cgroup_usage": 352473088,
+          "file": 140075008
+        },
+        "minimum_guest_mem_available_bytes": 3835166720,
+        "network_delta": {
+          "eth0": {
+            "rx_bytes": 246640930,
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "rx_packets": 339956,
+            "tx_bytes": 723176520,
+            "tx_dropped": 0,
+            "tx_errors": 0,
+            "tx_packets": 353950
+          }
+        },
+        "sample_count": 38,
+        "sample_indices": [
+          0,
+          37
+        ],
+        "throttling": {
+          "periods": 597,
+          "throttled_periods": 178,
+          "throttled_time": 16592040000
+        },
+        "window_ns": 79339994578
+      }
+    }
+  ]
+}
