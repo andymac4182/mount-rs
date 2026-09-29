@@ -903,26 +903,26 @@ jobs:
       - name: Run the unchanged full general proof runner
         if: ${{ !cancelled() && steps.formal_tools.outcome == 'success' }}
         run: |
+          set -o pipefail
           status=0
-          PS4='+ ' bash -x ./scripts/verify-formal > "$FORMAL_EVIDENCE/verify-formal.log" 2>&1 || status=$?
+          PS4='+ ' bash -x ./scripts/verify-formal 2>&1 | tee "$FORMAL_EVIDENCE/verify-formal.log" || status=$?
           printf '%s\n' "$status" > "$FORMAL_EVIDENCE/verify-formal.exit"
-          cat "$FORMAL_EVIDENCE/verify-formal.log"
           exit "$status"
       - name: Run the unchanged remote proof runner
         if: ${{ !cancelled() && steps.formal_tools.outcome == 'success' }}
         run: |
+          set -o pipefail
           status=0
-          PS4='+ ' bash -x ./scripts/verify-remote-formal > "$FORMAL_EVIDENCE/verify-remote-formal.log" 2>&1 || status=$?
+          PS4='+ ' bash -x ./scripts/verify-remote-formal 2>&1 | tee "$FORMAL_EVIDENCE/verify-remote-formal.log" || status=$?
           printf '%s\n' "$status" > "$FORMAL_EVIDENCE/verify-remote-formal.exit"
-          cat "$FORMAL_EVIDENCE/verify-remote-formal.log"
           exit "$status"
       - name: Run the unchanged cache proof runner
         if: ${{ !cancelled() && steps.formal_tools.outcome == 'success' }}
         run: |
+          set -o pipefail
           status=0
-          PS4='+ ' bash -x ./scripts/verify-cache-formal > "$FORMAL_EVIDENCE/verify-cache-formal.log" 2>&1 || status=$?
+          PS4='+ ' bash -x ./scripts/verify-cache-formal 2>&1 | tee "$FORMAL_EVIDENCE/verify-cache-formal.log" || status=$?
           printf '%s\n' "$status" > "$FORMAL_EVIDENCE/verify-cache-formal.exit"
-          cat "$FORMAL_EVIDENCE/verify-cache-formal.log"
           exit "$status"
       - name: Retain per-harness checks, covers, incomplete proofs, locks and source identity
         if: always() && env.FORMAL_EVIDENCE != ''

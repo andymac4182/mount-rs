@@ -252,7 +252,7 @@ impl AdmittedCache {
     ) -> Option<Vec<u8>> {
         self.cache.get_disk_admitted(scope, id, policy)
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn insert(
         &self,
         scope: &CacheScope,
