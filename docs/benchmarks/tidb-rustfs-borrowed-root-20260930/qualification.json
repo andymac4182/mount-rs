@@ -1,0 +1,161 @@
+{
+  "archive_manifest_sha256": "0a24d4d965eed06599f615dc4c871f28da722e3a5a4808a380eb988972b3167d",
+  "archive_source_count": 632,
+  "binary_sha256": "70584b5a00f7bc1046c5e9db90a693a7fd0b1d28a4bf889879d85f50e133a257",
+  "failed_20_client_controls": [
+    {
+      "elapsed_seconds": 12.742133375024423,
+      "failure": "TimeoutError",
+      "finish_errors": [
+        "original_eight_after_unqualified"
+      ],
+      "original_container_mutations": false,
+      "receipt_sha256": "55de6b74d3179fc9024e47b8fcf26ce2d1fbbfd4e9c16f14f8b7caabede963fe",
+      "source_pins_unchanged": true,
+      "status": "failed",
+      "timed_throughput_qualified": false
+    },
+    {
+      "elapsed_seconds": 107.60690545896068,
+      "failure": "TimeoutError",
+      "finish_errors": [
+        "exact_new_container_stop_unproven",
+        "original_eight_after_unqualified"
+      ],
+      "original_container_mutations": false,
+      "receipt_sha256": "d8b4bff158bb30dfd97a6f8523763d621a2c1177efab0965e847ef3e5edc139a",
+      "source_pins_unchanged": true,
+      "status": "failed",
+      "timed_throughput_qualified": false
+    },
+    {
+      "elapsed_seconds": 2.196382375084795,
+      "failure": "guest_headroom_below_3GiB",
+      "finish_errors": [],
+      "original_container_mutations": false,
+      "receipt_sha256": "a3412d7c31925866ddae80066e25f879e7961bfb011a95397ace087a82ab0ee9",
+      "source_pins_unchanged": true,
+      "status": "failed",
+      "timed_throughput_qualified": false
+    }
+  ],
+  "inventory_tests": 178,
+  "measured_source_revision": "24aabef70726f1bf05cda0f713d69094803736d2",
+  "native_correctness": {
+    "crossnode_completed_pairs": 100,
+    "crossnode_verified_bytes": 409600,
+    "cumulative_requests": {
+      "acknowledged": 90251,
+      "attempts": 90251,
+      "failed": 0,
+      "uncertain": 0
+    },
+    "fresh_corpus": {
+      "final_bytes": 62865408,
+      "final_files": 10000,
+      "final_receipt_sha256": "436fd9d10d7ff2dcf25ebbf702dd3f52b0569295c3b2cbc46e81b20bf700fa67",
+      "initial_bytes": 62832640,
+      "initial_files": 10000,
+      "initial_receipt_sha256": "9fe91b8ee3fd57ecfec4f1c14c5891bbfbf5d3cac2d136084493ec0e3a809e3b"
+    },
+    "fresh_oracle_complete": true,
+    "owner_benchmarked": true,
+    "revocation_denials": 10,
+    "scope_denials": {
+      "partition": 10,
+      "sibling": 10
+    },
+    "verified_passes": 2,
+    "workers_clean_reaped": true,
+    "workload_complete": true
+  },
+  "native_guard_limits": {
+    "child_cleanup_seconds": 95,
+    "client_cleanup_seconds": 30,
+    "expected_receipt_seconds": 30,
+    "host_free_floor": 68719476736,
+    "oracle_cleanup_seconds": 30,
+    "phase_seconds": 600,
+    "population_seconds": 600,
+    "request_seconds": 30,
+    "rss_cap_per_owned_process": 25769803776,
+    "setup_seconds": 600,
+    "work_seconds": 1800
+  },
+  "native_owner_receipt_sha256": "8fa849edf4e4b878fa936be9a83889f4377da6260629e0ae06c3d46afbe52156",
+  "native_owner_sha256": "2e88e4e3dffe58b08bbead523d8daa7807a9b469e747b6e642ec74f47eac4d92",
+  "native_terminal_sha256": "22735822f8bc2aa051cdafab5b2e322271f6ecb1400c11da15268eb10c966f3f",
+  "offline_extraction": {
+    "decoded_observations_bytes": 18590899,
+    "decoded_observations_sha256": "ef8ae52e04068b8a751ea97400d4b015ca7f33687a027424078bb01a8c131cff",
+    "direct_child_reaped": true,
+    "exit_code": 0,
+    "extractor_sha256": "76d51243c4ad489fa8b73ad360c96fbd20e83f573c017ef9345e0d95d6871a4c",
+    "input_spec_sha256": "802f76f92c1d7e8624145891b4065a8db925744368219de14cc5260033d3d8ff",
+    "process_group_absent": true,
+    "receipt_sha256": "8373c08b99aa053676c977cee25bda072b0b0fdaa3181c83931a901fad141872"
+  },
+  "owner_limits": {
+    "capture_tree_bytes": 134217728,
+    "capture_tree_files": 4096,
+    "cleanup_reserve_seconds": 120,
+    "guest_continuous_available_bytes": 1073741824,
+    "guest_startup_available_bytes": 3221225472,
+    "host_free_floor_bytes": 68719476736,
+    "native_file_bytes": 16777216,
+    "native_seconds": 3000,
+    "terminal_capture_bytes": 67108864,
+    "whole_seconds": 3300
+  },
+  "pure_controls": {
+    "failed": 0,
+    "ignored": 6,
+    "passed": 172,
+    "receipt_sha256": "223cb17be098a8fbf52ffebfb6c6c9ea5bc35cbc5e7aec758e5f18d183a3aaea"
+  },
+  "release_build_command": [
+    "./scripts/cargo-shared",
+    "test",
+    "--locked",
+    "--release",
+    "-p",
+    "mount-rs-service",
+    "--test",
+    "quic_production_target",
+    "--features",
+    "io-profiling,resource-profiling,sdk-runtime",
+    "--no-run",
+    "--message-format=json"
+  ],
+  "release_build_receipt_sha256": "fae735e1c64b021a6b1a0ca74dde51a05e08886ad5d2fd52e8a74b2338f2fe8f",
+  "remaining_gaps": [
+    "unpaired short historical throughput comparison",
+    "20-client timed performance unqualified",
+    "10000-client production target unqualified",
+    "no OS mount, external OIDC or cross-host network",
+    "distributed blob cache tiers disabled",
+    "allocation profiling disabled in native run",
+    "HTTP instrumentation partial",
+    "TiKV and host physical IOPS not extracted",
+    "CI gates failing; PR unmerged",
+    "complete formal execution unqualified",
+    "scratch grant index and evidence shards not integrated or measured"
+  ],
+  "schema": "mount-rs-tidb-rustfs-borrowed-root-qualification-v1",
+  "second_failed_owned_container_retirement": {
+    "data_retained": true,
+    "receipt_sha256": "0462d12fb884d8663171b305d67943cfbaae77c37a3ba9098294f3be769c7f06",
+    "stop_attempted": false,
+    "stopped_confirmed": true,
+    "unknown_writes_replayed": false
+  },
+  "source_closure_sha256": "00db4da354d21b3e7d7e9d4b2bd1cea4195c08f0779c6daa98ac4d4673a9e79e",
+  "third_failed_control": {
+    "fixture_created": false,
+    "guest_available_bytes": 2253705216,
+    "guest_total_bytes": 16745295872,
+    "observer_only_change": "container stats query adds one-shot=true; limits unchanged",
+    "original_fixture_health_before_and_after": true,
+    "producer_sha256": "aa49fb412fc79d43c10d94c91cda49e5a0d22e1b7c1634ad50f2befbe329b694"
+  }
+}

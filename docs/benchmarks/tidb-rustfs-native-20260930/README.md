@@ -1,5 +1,8 @@
 # TiDB + RustFS native benchmark — 2026-09-30
 
+This report retains the `fa70c17` observation. The subsequent `24aabef` run is
+reported in [the borrowed-root benchmark](../tidb-rustfs-borrowed-root-20260930/README.md).
+
 ## Result
 
 The current revision completes the 10-server correctness control, but **these

@@ -129,8 +129,10 @@ their lifecycle and storage configuration were not changed.
 
 Six new bounded Kani harnesses are registered alongside all 62 existing named
 invocations. Their source and 98 direct covers are not executed proof evidence.
-Full formal execution, CI, native TiDB/RustFS performance and 10,000-client
-capacity remain outstanding.
+The subsequent [native TiDB/RustFS benchmark](../tidb-rustfs-borrowed-root-20260930/README.md)
+completed the 10-server / 10-client control on this revision. It demonstrates
+no throughput win; larger controls produced no timed result. Full formal
+execution, CI and 10,000-client capacity remain outstanding.
 
 See [summary.json](summary.json), [paired-results.json.gz](paired-results.json.gz)
 and [qualification.json](qualification.json) for statistics, observations,
