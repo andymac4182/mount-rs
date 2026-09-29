@@ -7480,7 +7480,7 @@ mod tests {
             .flat_map(|family| family["operations"].as_array().unwrap())
             .map(|name| name.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(declared.len(), 116);
+        assert_eq!(declared.len(), 118);
         assert_eq!(
             declared
                 .into_iter()
@@ -7510,7 +7510,7 @@ mod tests {
             "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
         );
         let names = storage::operation_names();
-        assert_eq!(names.len(), 116);
+        assert_eq!(names.len(), 118);
         assert_eq!(
             &names[110..116],
             OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS
@@ -7525,6 +7525,16 @@ mod tests {
         );
         for (index, name) in names[110..116].iter().enumerate() {
             assert_eq!(snapshot["storage"]["entries"][110 + index]["name"], *name);
+        }
+        assert_eq!(
+            &names[116..118],
+            &[
+                "sdk.metadata.compact_root_file_capability",
+                "sdk.metadata.load_compact_root_file",
+            ]
+        );
+        for (index, name) in names[116..118].iter().enumerate() {
+            assert_eq!(snapshot["storage"]["entries"][116 + index]["name"], *name);
         }
         assert_eq!(
             &names[78..85],
@@ -7685,7 +7695,7 @@ mod tests {
         }
         assert_eq!(
             snapshot["storage"]["entries"].as_array().unwrap().len(),
-            116
+            118
         );
         for (index, name) in names[91..110].iter().enumerate() {
             let transport_row = &snapshot["storage"]["entries"][91 + index];
@@ -7794,7 +7804,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            116
+            118
         );
         assert!(
             instrumented

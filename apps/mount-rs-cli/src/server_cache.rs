@@ -318,7 +318,7 @@ fn roots(path: &Path) -> std::result::Result<rustls::RootCertStore, CliError> {
     Ok(roots)
 }
 impl ServerCache {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn start(
         config: &CacheServiceConfig,
         path: &Path,
