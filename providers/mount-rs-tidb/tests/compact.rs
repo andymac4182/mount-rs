@@ -1876,6 +1876,8 @@ mod indexed_compact;
 mod indexed_point_scope;
 #[path = "support/indexed_write_query.rs"]
 mod indexed_write_query;
+#[path = "support/structural_lock_scope.rs"]
+mod structural_lock_scope;
 async fn corrupt(f: &Fixture, sql: &str) {
     let pool = Pool::from_url(&f.url).unwrap();
     let mut conn = pool.get_conn().await.unwrap();

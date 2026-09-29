@@ -1199,13 +1199,17 @@ impl TidbMetadataStore {
             }
         };
         let mut directory_rows = BTreeMap::new();
+        // The volume authority lock serializes every cooperative membership and
+        // dentry writer. Read Committed keeps these complete reads fresh after
+        // acquiring it; locking untouched siblings would add lock-only commit
+        // mutations. Retain the guard locks and complete structural validation.
         if delta.scope() == StructuralScope::Full {
-            directory_rows = entries(&mut tx, &self.0.volume_key, None, true).await?;
+            directory_rows = entries(&mut tx, &self.0.volume_key, None, false).await?;
         } else {
             for (&inode, guard) in &stored {
                 if matches!(guard.body, StoredBody::Directory(_)) {
                     directory_rows
-                        .extend(entries(&mut tx, &self.0.volume_key, Some(inode), true).await?);
+                        .extend(entries(&mut tx, &self.0.volume_key, Some(inode), false).await?);
                 }
             }
         }

@@ -43,6 +43,7 @@ pub struct Trace {
     pub pause_guard_response: AtomicBool,
     pub paused_guard_rows: AtomicUsize,
     pub pause_anchor: AtomicBool,
+    pub pause_authority_lock: AtomicBool,
     pub pause_members: AtomicBool,
     pub pause_dentries: AtomicBool,
     pub reached: Notify,
@@ -225,12 +226,18 @@ async fn relay(client: TcpStream, server: TcpStream, trace: Arc<Trace>) {
                     trace.queries.lock().unwrap().push(sql.clone());
                     let authority = sql.starts_with("SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation")
                         || joined_authority_select(&sql);
+                    let authority_lock = sql.starts_with("SELECT owner, fence, expires, ")
+                        && sql.contains("FROM mount_rs_tidb_metadata")
+                        && sql.contains("WHERE volume_key=?")
+                        && sql.contains("FOR UPDATE");
                     let member = sql.starts_with("SELECT ")
                         && sql.contains(" FROM mount_rs_tidb_compact_members ");
                     let dentry = sql.starts_with("SELECT ")
                         && sql.contains(" FROM mount_rs_tidb_compact_dentries ");
                     if (guard && trace.pause_guards.swap(false, Ordering::SeqCst))
                         || (authority && trace.pause_anchor.swap(false, Ordering::SeqCst))
+                        || (authority_lock
+                            && trace.pause_authority_lock.swap(false, Ordering::SeqCst))
                         || (member && trace.pause_members.swap(false, Ordering::SeqCst))
                         || (dentry && trace.pause_dentries.swap(false, Ordering::SeqCst))
                     {

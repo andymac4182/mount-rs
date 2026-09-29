@@ -746,9 +746,9 @@ fn assert_no_structural_dml_or_commit(queries: &[String], complete_parent: bool)
         );
         let entries = one_position(
             |sql| {
-                sql == "SELECT parent,ordinal,name_hash,name,inode FROM mount_rs_tidb_compact_dentries WHERE volume_key=? AND parent=? ORDER BY parent,ordinal FOR UPDATE"
+                sql == "SELECT parent,ordinal,name_hash,name,inode FROM mount_rs_tidb_compact_dentries WHERE volume_key=? AND parent=? ORDER BY parent,ordinal"
             },
-            "locked complete parent dentry read",
+            "fresh complete parent dentry read",
         );
         assert!(
             members < parent && parent < entries,
