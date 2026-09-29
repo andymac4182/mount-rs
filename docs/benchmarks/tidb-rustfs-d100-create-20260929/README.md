@@ -1,6 +1,8 @@
 # TiDB/RustFS: 100-drive namespace diagnostic
 
-The latest completed steady workload measurement remains the
+The latest completed combined service measurement is the
+[strict ten-drive control](../tidb-rustfs-strict-d10-20260929/README.md).
+The historical baseline for this diagnostic was the
 [guarded autocommit control](../tidb-rustfs-autocommit-20260928/README.md):
 ten servers, ten active clients, ten Drives, five Partitions and 100 files per
 Drive, using a release build at `52c1cdee`. Its whole-fleet logical cycle rates

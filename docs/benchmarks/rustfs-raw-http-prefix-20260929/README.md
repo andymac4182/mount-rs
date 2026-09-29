@@ -137,8 +137,10 @@ They do not establish physical NVMe IOPS, cold backend reads, power-loss
 durability, long-duration capacity or 10,000-client qualification. The caller's
 durability declaration does not qualify RustFS fsync or crash behavior.
 
-The last completed combined service measurement remains the
-[ten-drive guarded-autocommit report](../tidb-rustfs-autocommit-20260928/README.md):
+The latest completed combined service measurement is the
+[strict ten-drive control](../tidb-rustfs-strict-d10-20260929/README.md).
+The historical [ten-drive guarded-autocommit report](../tidb-rustfs-autocommit-20260928/README.md)
+measured
 737–819 aggregate read cycles/s, 194–201 overwrite cycles/s and 331 mixed
 cycles/s. A read or overwrite cycle includes one 4 KiB data operation plus
 open and close. The [100-drive release run](../tidb-rustfs-d100-release-20260929/README.md)

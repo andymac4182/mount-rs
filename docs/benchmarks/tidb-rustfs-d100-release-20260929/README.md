@@ -7,8 +7,8 @@ the signed local fixture. This was a Rust service harness, not an operating
 system mounted CLI test or a cross-host deployment.
 
 **The run failed during payload population.** It reached no sustained workload
-stages and no fresh backend reopen oracles. The last complete sustained results
-remain the [ten-drive measurement](../tidb-rustfs-autocommit-20260928/README.md).
+stages and no fresh backend reopen oracles. The latest completed combined service
+measurement is the [strict ten-drive control](../tidb-rustfs-strict-d10-20260929/README.md).
 
 ## Completed namespace phase
 

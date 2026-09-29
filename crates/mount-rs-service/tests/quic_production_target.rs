@@ -57,6 +57,35 @@ fn assert_balanced_timed_runtime(directory: &std::path::Path, journal: &serde_js
     );
 }
 
+fn assert_crossnode_payload(journal: &serde_json::Value) {
+    let payload = &journal["crossnode_payload"];
+    assert_eq!(
+        payload["verified_reads"], 100,
+        "every Drive/server pair must verify acknowledged payload bytes over QUIC"
+    );
+    assert_eq!(payload["verified_bytes"], 409_600);
+    assert_eq!(payload["completed_pairs"], 100);
+    assert_eq!(payload["expected_pairs"], 100);
+    assert_eq!(payload["complete"], true);
+
+    let batches = journal["crossnode_route_batches"].as_array().unwrap();
+    assert_eq!(batches.len(), 10);
+    let mut offsets = std::collections::BTreeSet::new();
+    for (rotation, batch) in batches.iter().enumerate() {
+        let offset = (rotation + 1) % 10;
+        assert_eq!(batch["generation"], rotation as u64 + 2);
+        assert_eq!(batch["offset"], offset);
+        assert!(offsets.insert(offset));
+        assert_eq!(batch["acknowledged_stats"], 10);
+        assert_eq!(batch["verified_reads"], 10);
+        assert_eq!(batch["verified_bytes"], 40_960);
+        assert_eq!(batch["expected_reads"], 10);
+        assert_eq!(batch["expected_bytes"], 40_960);
+        assert_eq!(batch["rpc_complete"], true);
+        assert_eq!(batch["validation_complete"], true);
+    }
+}
+
 #[test]
 #[ignore = "owned ten-process two-file diagnostic, explicitly invoked"]
 fn ten_process_online_smoke() {
@@ -80,13 +109,14 @@ fn ten_process_online_smoke() {
         .env("MOUNT_RS_TARGET_OUTPUT", directory.as_path())
         .status()
         .unwrap();
+    let journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.as_path().join("terminal.json")).unwrap())
+            .unwrap();
     assert!(
         status.success(),
         "invoked online process path must complete"
     );
-    let journal: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(directory.as_path().join("terminal.json")).unwrap())
-            .unwrap();
+    assert_crossnode_payload(&journal);
     assert_eq!(journal["full_target"], false);
     assert_eq!(journal["outcome"], "success");
     assert_eq!(journal["workers"].as_array().unwrap().len(), 10);
@@ -243,6 +273,7 @@ fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
         status.success(),
         "must finish the real signed workload and owned cleanup before the cold assertion"
     );
+    assert_crossnode_payload(&journal);
     assert_eq!(journal["full_target"], false);
     assert_eq!(journal["outcome"], "success");
     assert_eq!(journal["metrics_complete"], true);

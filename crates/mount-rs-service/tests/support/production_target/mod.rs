@@ -34,7 +34,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use workload::Lane;
+use workload::{CrossnodeCoverage, Lane};
 type Client = Lane;
 #[cfg(test)]
 pub use checkpoints::retained_checkpoint;
@@ -981,6 +981,8 @@ pub async fn controller() -> Result<(), String> {
             // generation's acknowledged drain; no batch receives a fresh phase.
             journal.phase("crossnode_routes")?;
             journal.value["crossnode_route_batches"] = json!([]);
+            let mut payload_coverage = CrossnodeCoverage::new(config.drives)?;
+            journal.value["crossnode_payload"] = json!({"verified_reads":0,"verified_bytes":0,"completed_pairs":0,"expected_pairs":payload_coverage.expected_pairs(),"complete":false,"scope":"one existing acknowledged 4096-byte block per Drive/server pair over rotated QUIC sessions; no payload writes; outside timed modes"});
             let mut routes = 0;
             for rotation in 1..=SERVERS {
                 let generation = rotation as u64 + 1;
@@ -1002,30 +1004,37 @@ pub async fn controller() -> Result<(), String> {
                     return Err("crossnode worker geometry missing".into());
                 }
                 let mut batch_routes = 0;
+                let mut batch_reads = 0;
+                let mut batch_bytes = 0;
                 let batch = supervised(&mut fleet, resource, &mut journal, PHASE_SECONDS, async {
-                    for drive in 0..config.drives {
+                    for (drive, lane) in lanes.iter_mut().enumerate() {
                         let server = (drive + offset) % SERVERS;
-                        let connection = connect_address(&endpoints[server], addresses[server], &tokens, drive).await?;
-                        tokio::time::timeout(
-                            Duration::from_secs(REQUEST_SECONDS),
-                            wire::success(
-                                &connection,
-                                1,
-                                &format!("sandbox-{drive}"),
-                                mount_rs_remote_protocol::OperationName::Stat,
-                                json!({"path":"/mixed-0"}),
-                            ),
-                        ).await.map_err(|_| "crossnode route request deadline")??;
+                        lane.connection = connect_address(&endpoints[server], addresses[server], &tokens, drive).await?;
+                        lane.request(
+                            mount_rs_remote_protocol::OperationName::Stat,
+                            json!({"path":"/mixed-0"}),
+                        ).await?;
                         batch_routes += 1;
-                        connection.close(0u32.into(), b"post-profile route complete");
+                        let bytes = lane.crossnode_sentinel().await?;
+                        payload_coverage.record(drive, server)?;
+                        batch_reads += 1;
+                        batch_bytes += bytes;
+                        lane.connection.close(0u32.into(), b"post-profile payload verified");
                     }
                     Ok(())
                 }).await;
                 routes += batch_routes;
                 journal.value["routes"] = json!(routes);
-                journal.value["crossnode_route_batches"].as_array_mut().unwrap().push(json!({"generation":generation,"offset":offset,"acknowledged_stats":batch_routes,"expected_stats":config.drives,"ready_sequence":ready_sequence,"rpc_complete":batch.is_ok(),"validation_complete":false}));
+                let completed_pairs = payload_coverage.completed_pairs();
+                journal.value["crossnode_payload"]["verified_reads"] = json!(completed_pairs);
+                journal.value["crossnode_payload"]["verified_bytes"] = json!(completed_pairs * 4096);
+                journal.value["crossnode_payload"]["completed_pairs"] = json!(completed_pairs);
+                journal.value["crossnode_route_batches"].as_array_mut().unwrap().push(json!({"generation":generation,"offset":offset,"acknowledged_stats":batch_routes,"expected_stats":config.drives,"verified_reads":batch_reads,"verified_bytes":batch_bytes,"expected_reads":config.drives,"expected_bytes":config.drives*4096,"ready_sequence":ready_sequence,"rpc_complete":batch.is_ok(),"validation_complete":false}));
                 journal.flush()?;
                 batch?;
+                if batch_routes != config.drives || batch_reads != config.drives || batch_bytes != config.drives * 4096 {
+                    return Err("crossnode payload batch incomplete".into());
+                }
                 let batch_sequence = phase_metrics.as_ref().unwrap().sequence + 1;
                 metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,("crossnode_routes","after_batch"),&oracle_owner).await?;
                 let receipt = journal.value["crossnode_route_batches"].as_array_mut().unwrap().last_mut().unwrap();
@@ -1036,6 +1045,9 @@ pub async fn controller() -> Result<(), String> {
             if routes != config.drives * SERVERS {
                 return Err("complete crossnode route coverage missing".into());
             }
+            payload_coverage.verify_complete()?;
+            journal.value["crossnode_payload"]["complete"] = json!(true);
+            journal.flush()?;
             // The last rotation has offset0. Retain fresh original-assignment
             // sessions for the existing final durability and revocation checks.
             tokio::time::timeout_at(journal.phase_deadline.into(), async {
