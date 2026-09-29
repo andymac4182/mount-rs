@@ -106,7 +106,7 @@ function fakeClock() {
 const presence = () => ({
   schema: "mount-rs.split-namespace-presence.v1", namespace_absent: true,
   metadata: { provider: "tidb", key_scope: "exact_input_utf8_bytes", schema_setup: "shared_ddl_and_session_configuration",
-    row_presence: { metadata: false, inodes: false, compact_guards: false, block_authority: false, blocks: false }, observed_at_ns: "1" },
+    row_presence: { metadata: false, inodes: false, compact_guards: false, compact_members: false, compact_dentries: false, block_authority: false, blocks: false }, observed_at_ns: "1" },
   blobs: { provider: "rustfs", scope: "canonical_ascii_prefix_descendants", observation: "signed_list_page_api", requested_max_keys: 1, prefix_absent: true, observed_at_ns: "2" },
   pool_shutdown: { confirmed: true, elapsed_ns: "1" }, clock: "elapsed_monotonic_since_native_preflight_start", consistency: "separate_observations_no_reservation",
   limits: { probe_deadline_ms: 30000, pool_shutdown_deadline_ms: 15000, list_request_keys: 1,
