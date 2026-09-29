@@ -184,6 +184,8 @@ export const STORAGE_OPERATION_NAMES = [
   "object_store.backing_marker.data.body_read",
   "object_store.backing_marker.probe.create",
   "object_store.backing_marker.retry_backoff",
+  "sdk.metadata.compact_root_file_capability",
+  "sdk.metadata.load_compact_root_file",
 ]
 const storageNames = STORAGE_OPERATION_NAMES
 export const STORAGE_CALL_SEMANTICS = "fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops"

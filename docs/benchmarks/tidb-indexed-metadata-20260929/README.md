@@ -73,7 +73,7 @@ One matched run per variant is available at each file count, using the same sour
 | 1000 | sequential_overwrite | 155.3 → 126.0 | -18.9% | 80.097 → 105.639 | 50259.4 → 2689.9 |
 | 1000 | sequential_read | 515.6 → 192.0 | -62.8% | 24.461 → 59.784 | 59597.9 → 4268.4 |
 
-Current performs one successful `sdk.metadata.load_compact_root_file` call per cycle in every pattern. Capability initialization is outside timed windows; the timed root-file-capability count is zero. Selected SQL calls fall 6 → 5/read, stay 6/overwrite, and fall 6 → 5.5/mixed. **Selected SQL** means inode/metadata reads and writes; session calls and transaction boundaries are separate. Including session queries, overwrite totals are 7 → 7 and mixed totals 6.5 → 6.0. These method counts are distinct from TiDB process statement counters.
+Current performs one successful root-entry lookup per cycle in every pattern. The SDK records `read_compact_root_entry` under the shared `sdk.metadata.load_compact_root_file` metric; this is not a complete root-file snapshot read. Capability initialization is outside timed windows; the timed root-file-capability count is zero. Selected SQL calls fall 6 → 5/read, stay 6/overwrite, and fall 6 → 5.5/mixed. **Selected SQL** means inode/metadata reads and writes; session calls and transaction boundaries are separate. Including session queries, overwrite totals are 7 → 7 and mixed totals 6.5 → 6.0. These method counts are distinct from TiDB process statement counters.
 
 At F1000, known returned metadata falls 92.8% for reads, 94.6% for overwrites and 93.7% for mixed. Allocated bytes/payload fall 24.9–26.9% for reads, 19.2–19.3% for overwrites and 22.6% for mixed. Inode serialization remains about 456 B/write. Byte savings are verified; throughput improvements are not.
 
@@ -86,9 +86,37 @@ All SDK runs verify every stored file in full, check EOF and exact root membersh
 
 ## Localized waiting and remaining evidence gap
 
-Within current F100 → F1000, root-file lookup inclusive spans rise 4.550 → 33.780 ms/sequential read and 4.374 → 31.955 ms/random read. Total inode SQL spans rise 14.179 → 46.224 ms and 13.794 → 44.246 ms per cycle, with bounded bytes and unchanged call counts. Additional cold payload requests also contribute: HTTP attempts/cycle rise 2.16 → 2.8 and 2 → 2.388, with dispatch spans 1.912 → 4.132 ms and 1.502 → 3.031 ms.
+Within current F100 → F1000, root-entry lookup inclusive spans rise 4.550 → 33.780 ms/sequential read and 4.374 → 31.955 ms/random read. Total inode SQL spans rise 14.179 → 46.224 ms and 13.794 → 44.246 ms per cycle, with bounded bytes and unchanged call counts. Additional cold payload requests also contribute: HTTP attempts/cycle rise 2.16 → 2.8 and 2 → 2.388, with dispatch spans 1.912 → 4.132 ms and 1.502 → 3.031 ms.
 
-The root-entry query has verified LEFT joins with primary-key/name-hash predicates and full-name equality. No EXPLAIN plan or request-specific TiKV trace establishes the exact plan cause. Runs are serial against changing retained datastore state; the F1000 root-file span falls across stages from 33.8/32.0 ms in reads to 23.5/11.4/5.6 ms later. These spans localize waiting and do not prove a cardinality-only cause. Inclusive nested spans overlap and must not be added as exclusive CPU time.
+The root-entry query joins authority, two memberships, two guards and a dentry in one statement. Baseline ordinary Open instead refreshes the root and selected file in two authority/guard statements. Available indexes match the logical point predicates, including name hash and complete binary name. The original workload runs captured neither EXPLAIN plans nor request-specific TiKV traces. Runs are serial against changing retained datastore state; the F1000 root-entry span falls across stages from 33.8/32.0 ms in reads to 23.5/11.4/5.6 ms later. These spans localize waiting and do not prove a cardinality-only cause. Inclusive nested spans overlap and must not be added as exclusive CPU time.
+
+## Follow-up prepared SQL diagnostics
+
+Two separate metadata-only probes at provider HEAD `380e7fc` use fresh scopes with 100 and 1,000 empty regular files. Each probe uses one warmed connection, verified provider session settings, four warm pairs and 30 alternating timed pairs per variant. Full typed row equality is checked for hits and missing groups before timing; both scopes pass a complete namespace oracle and exact seven-family cleanup observed from a fresh pool. No RustFS traffic occurs. [query-shapes.json](query-shapes.json) contains derived timings, operator counts, source/input hashes and limitations.
+
+The live schemas have clustered primary keys on all four selected tables. Prepared plan caching is enabled, and every timed SELECT reports a cache hit (30/30 per variant). The separately executed EXPLAIN wrappers are not eligible for prepared plan caching. These are new diagnostic executions, not plans reconstructed from the earlier workload windows.
+
+**Guard access:** replacing each joined volume equality with an explicit binding of the same volume changes dynamic guard IndexJoin/TableReader access into Point_Get access. All predicates, LEFT joins, authority columns and complete binary-name equality remain. First-probe means are:
+
+| Files | Query | Current mean ms | Explicit-volume mean ms | Change |
+|---|---|---:|---:|---:|
+| 100 | selected file | 1.473 | 1.136 | -22.9% |
+| 100 | root entry | 2.465 | 1.579 | -36.0% |
+| 1000 | selected file | 1.256 | 0.916 | -27.1% |
+| 1000 | root entry | 2.387 | 1.603 | -32.9% |
+
+The direction repeats in the second probe, with larger outliers. These results support a query-shape improvement; they do not establish improved end-to-end Drive IOPS. The authority/member join is also tested as an isolated SELECT candidate, with mixed mean results across probes; no write transaction or CAS claim follows.
+
+**Directory access:** both current and explicit-volume root-entry plans choose the clustered `(volume_key,parent,ordinal)` range instead of `name_lookup`. EXPLAIN ANALYZE reads all 100 or 1,000 sibling rows to return one exact name. The 1,000-file selection reports 1,000 processed keys and about 214.8 KB, while estimating one row with uninitialized name statistics. This establishes directory scan amplification in these diagnostic executions.
+
+An isolated second-probe comparison adds only `FORCE INDEX(name_lookup)` to the explicit-volume query. The resulting access reads one index entry and one table row, preserving all five root-entry row-equality controls. Warm latency has a tradeoff:
+
+| Files | Range-scan median ms | Name-index median ms | Range-scan p95 ms | Name-index p95 ms |
+|---|---:|---:|---:|---:|
+| 100 | 1.926 | 2.212 | 23.384 | 7.493 |
+| 1000 | 1.795 | 1.743 | 2.337 | 2.460 |
+
+The 100-file comparison has large outliers and a slower indexed median. At 1,000 files, latency is roughly flat while scanned rows fall sharply. The secondary index needs a table lookup; a covering or clustered name layout is a further design candidate. Neither experimental query has been adopted into production code by this report. Cross-volume, corruption, duplicate-cardinality and cancellation controls, followed by matched end-to-end measurements, are required before claiming a resolved regression. These small warm samples have no statistical confidence interval and measure no physical SSD IOPS.
 
 ## Reproduce the SDK harness
 

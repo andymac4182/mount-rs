@@ -61,7 +61,7 @@ const storageFamilyMeasurement = {
   object_store_backing_marker: { operations: STORAGE_OPERATION_NAMES.filter((name) => name.startsWith("object_store.backing_marker.")), calls: "object_store_marker_get_body_create_and_backoff_invocations; includes_success_error_and_cancellation; not_http_attempts_or_application_iops", bytes: "known_successful_materialized_body_bytes_before_identity_validation_and_accepted_create_input_bytes; get_backoff_error_and_cancellation_bytes_unavailable", returned_rows: "unavailable", duration: "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap" },
 }
 // This synthetic native snapshot represents a default, feature-off addon: the
-// fixed bank declares 116 rows; the legacy/TiDB prefix and six marker producers are audited.
+// fixed bank declares 118 rows; the legacy/TiDB prefix and six marker producers are audited.
 const storageInstrumentedOperations = [...STORAGE_OPERATION_NAMES.slice(0, 78), ...STORAGE_OPERATION_NAMES.slice(110, 116)]
 const foundationdbCoverageMeasurement = {
   schema: "mount-rs-foundationdb-client-diagnostic-coverage-v1",
@@ -438,7 +438,7 @@ function diagnosticSnapshot(calls, connectionId = "7", instances = []) {
 
 async function testStoragePhaseDiagnostics() {
   const snapshot = diagnosticSnapshot
-  assert.equal(snapshot(2).storage.entries.length, 116)
+  assert.equal(snapshot(2).storage.entries.length, 118)
   assert.equal(Object.keys(snapshot(2).measurement.storage_families).length, 24)
   const delta = deltaNativeSnapshots(snapshot(2), snapshot(5))
   assert.equal(delta.complete, true)
@@ -1010,7 +1010,7 @@ async function testStorageFamilyMetadata() {
   assert.deepEqual(delta.measurement.storage_instrumented_operations, storageInstrumentedOperations, "coverage must retain the producer's audited operation list")
   assert.deepEqual(delta.measurement.tidb_coverage, tidbCoverageMeasurement, "static coverage is distinct from dynamic operation counters")
   assert.deepEqual(delta.measurement.foundationdb_coverage, foundationdbCoverageMeasurement, "feature-off FoundationDB coverage is unavailable despite fixed zero rows")
-  assert.equal(delta.storage.entries.length, 116)
+  assert.equal(delta.storage.entries.length, 118)
   assert.deepEqual(delta.storage.entries.slice(110, 116).map((entry) => entry.name), [
     "object_store.backing_marker.probe.get", "object_store.backing_marker.probe.body_read",
     "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",

@@ -1905,7 +1905,7 @@
   },
   "date": "2026-09-29",
   "limitations": [
-    "One process hosts clients and all ten service instances; ten drives share one Partition. This is not ten independent deployed service processes.",
+    "Wire runs host clients and all ten service instances in one process; their ten or 100 drives share one Partition. SDK runs invoke stores directly. This is not ten independent deployed service processes.",
     "Retained diagnostic TiDB/PD/TiKV cluster counters include background traffic. Datastore capture windows are broader than workload windows, so normalized backend costs are observed fixture amplification rather than exclusive request attribution.",
     "VM cgroup and proc counters do not measure physical Mac SSD operations, flash writes, or production capacity; no host block device was selected. RustFS physical/backend I/O is not captured by these TiDB observer metrics.",
     "System Rust allocation totals cover the whole clients/server pipeline and background; foreign C allocators, including SQLite heap activity, are excluded. Atomic allocator instrumentation affects throughput. Nonzero values cannot support zero-allocation claims.",
@@ -1919,7 +1919,7 @@
     "Process allocations cover the full measured SDK pipeline and background, exclude foreign C allocators, and profiling atomics affect throughput.",
     "Named SQL counts and HTTP connector attempts are method accounting, not physical SSD IOPS. SQL byte fields are unavailable; core provider counters give known returned/serialized bytes.",
     "Successful whole-file byte, EOF, exact root membership and cleanup checks do not test crash durability.",
-    "Compact root-file capability is initialized outside the timed windows. Timed load_compact_root_file calls show the fast path was used; timed root-file-capability calls are zero."
+    "Compact root-file capability is initialized outside the timed windows. The SDK records read_compact_root_entry under the shared load_compact_root_file label: timed calls are ordinary root-entry lookups, not complete root-file snapshot reads. Timed root-file-capability calls are zero."
   ],
   "method": {
     "SDK": "two drives and five independent filesystem/pool clients per drive; 100 or 1000 files/drive; 100 iterations/lane/pattern; 1000 cycles/pattern; cycle includes Open, one 4KiB Read plus byte/EOF checks or Overwrite, and Close; SDK cycles are not preopened wire IOPS; default SDK cache, hit/miss counts unavailable, no peer cache",

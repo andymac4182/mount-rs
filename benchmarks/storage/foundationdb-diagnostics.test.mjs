@@ -3,7 +3,7 @@ import test from "node:test"
 import {
   deltaNativeSnapshots, logPhaseSummary, NATIVE_DIAGNOSTICS_SCHEMA,
   STORAGE_BYTE_SEMANTICS, STORAGE_CALL_SEMANTICS, STORAGE_ROW_SEMANTICS,
-  STORAGE_OPERATION_FAMILIES, TIDB_DIAGNOSTIC_COVERAGE,
+  STORAGE_OPERATION_NAMES, STORAGE_OPERATION_FAMILIES, TIDB_DIAGNOSTIC_COVERAGE,
   SQLITE_VFS_MEASUREMENT, SQLITE_VFS_ENTRY_NAMES,
 } from "./diagnostics.mjs"
 
@@ -137,7 +137,12 @@ const markerNames = Object.freeze([
   "object_store.backing_marker.data.get", "object_store.backing_marker.data.body_read",
   "object_store.backing_marker.probe.create", "object_store.backing_marker.retry_backoff",
 ])
-const operationNames = Object.freeze([...historical108Names, ...setupDiscoveryNames, ...markerNames])
+const historical116Names = Object.freeze([...historical108Names, ...setupDiscoveryNames, ...markerNames])
+const compactRootNames = Object.freeze([
+  "sdk.metadata.compact_root_file_capability",
+  "sdk.metadata.load_compact_root_file",
+])
+const operationNames = Object.freeze([...historical116Names, ...compactRootNames])
 // Literal historical 100-row inventory, independent of the current declaration.
 const historical100Names = Object.freeze([
   "metadata.load",
@@ -414,11 +419,14 @@ function emptySqliteVfs() {
     entries: SQLITE_VFS_ENTRY_NAMES.map((name) => ({ name, ...timing(), ...zero(["errors", "requested_bytes", "confirmed_bytes", "short_reads"]) })),
     checkpoint: { ...zero(["starts", "dones", "unmatched_starts", "unmatched_dones", "aborted_windows", "active_windows"]), paired: timing() } }
 }
-function snapshot({ legacy = false, preCache = false, preClient = false, preTransport = false, preWebSocket = false, preSetup = false, feature = true } = {}) {
+function snapshot({ legacy = false, preCache = false, preClient = false, preTransport = false, preWebSocket = false, preSetup = false, preCompactRoot = false, feature = true } = {}) {
   const historical = legacy || preCache || preClient || preTransport
-  const names = legacy ? legacyNames : preCache ? preCacheNames : preClient ? preClientNames : preTransport ? historical92Names : preWebSocket ? historical100Names : preSetup ? historical108Names : operationNames
+  const names = legacy ? legacyNames : preCache ? preCacheNames : preClient ? preClientNames : preTransport ? historical92Names : preWebSocket ? historical100Names : preSetup ? historical108Names : preCompactRoot ? historical116Names : operationNames
   const families = historical ? Object.fromEntries(Object.entries(historical92Families)
-    .filter(([, family]) => family.operations.every((name) => names.includes(name)))) : preWebSocket ? historical100Families : preSetup ? historical108Families : STORAGE_OPERATION_FAMILIES
+    .filter(([, family]) => family.operations.every((name) => names.includes(name)))) : preWebSocket ? historical100Families : preSetup ? historical108Families : {
+      ...STORAGE_OPERATION_FAMILIES,
+      sdk_provider: { ...STORAGE_OPERATION_FAMILIES.sdk_provider, operations: names.filter((name) => name.startsWith("sdk.")) },
+    }
   return {
     schema_version: NATIVE_DIAGNOSTICS_SCHEMA, enabled: true, scope: "process",
     quiescent_snapshot_required: true, elapsed_semantics: "inclusive_wall_nanoseconds",
@@ -479,9 +487,9 @@ function summary(native) {
   return JSON.parse(lines[0].replace(/^MOUNT_RS_STORAGE_PHASE /u, ""))
 }
 
-test("new 116-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
+test("new 118-row fixture has reconciled exact decimal endpoints before consumer validation", () => {
   const value = snapshot()
-  assert.equal(value.storage.entries.length, 116)
+  assert.equal(value.storage.entries.length, 118)
   assert.deepEqual(value.storage.entries.map((entry) => entry.name), operationNames)
   assert.deepEqual(value.storage.entries.slice(78, 85).map((entry) => entry.name), foundationdbNames)
   assert.deepEqual(value.storage.entries.slice(85, 91).map((entry) => entry.name), cacheNames)
@@ -492,6 +500,7 @@ test("new 116-row fixture has reconciled exact decimal endpoints before consumer
   assert.deepEqual(value.storage.entries.slice(0, 108).map((entry) => entry.name), historical108Names)
   assert.deepEqual(value.storage.entries.slice(108, 110).map((entry) => entry.name), setupDiscoveryNames)
   assert.deepEqual(value.storage.entries.slice(110, 116).map((entry) => entry.name), markerNames)
+  assert.deepEqual(value.storage.entries.slice(116, 118).map((entry) => entry.name), compactRootNames)
   assert.deepEqual(value.measurement.storage_families.object_store_backing_marker.operations, markerNames)
   assert.deepEqual(value.measurement.storage_instrumented_operations.slice(-6), markerNames)
   for (const entry of value.storage.entries) {
@@ -499,6 +508,36 @@ test("new 116-row fixture has reconciled exact decimal endpoints before consumer
     assert.equal(entry.latency_log2_us.reduce((sum, count) => sum + BigInt(count), 0n), BigInt(entry.calls))
     assert.equal(entry.returned_rows, "0"); assert.equal(entry.returned_row_observations, "0")
   }
+})
+test("current 118-row inventory accepts the independently declared compact-root SDK rows", () => {
+  const before = snapshot(), after = snapshot()
+  for (const name of compactRootNames) oneSuccess(after, name)
+  const value = observed(before, after)
+  assert.deepEqual(STORAGE_OPERATION_NAMES, operationNames)
+  assert.deepEqual(value.storage.entries.slice(0, 116).map((entry) => entry.name), historical116Names)
+  assert.deepEqual(value.storage.entries.slice(116, 118).map((entry) => entry.name), compactRootNames)
+  assert.equal(value.measurement.storage_families.sdk_provider.operations.length, 49)
+  assert.deepEqual(value.measurement.storage_families.sdk_provider.operations.slice(-2), compactRootNames)
+  for (const name of compactRootNames) assert.equal(find(value, name).success, "1")
+  assert.equal(value.measurement.storage_instrumented_operations.some((name) => compactRootNames.includes(name)), false)
+  assert.equal(value.measurement.tidb_coverage.pool_checkout_sites, "35")
+  assert.equal(value.measurement.tidb_coverage.sql_statement_sites, "57")
+})
+test("old 116-row observation stays incomplete without invented compact-root SDK rows", () => {
+  const before = snapshot({ preCompactRoot: true }), after = snapshot({ preCompactRoot: true })
+  assert.deepEqual(after.measurement.storage_operations, historical116Names)
+  assert.equal(after.measurement.storage_families.sdk_provider.operations.length, 47)
+  const value = incomplete(before, after, /measurement metadata changed/u)
+  assert.equal(value.observations.after.storage.entries.length, 116)
+  assert.equal(value.observations.after.storage.entries.values.some((entry) => compactRootNames.includes(entry.name)), false)
+  assert.equal(value.observations.after.measurement.storage_operations, "unavailable")
+  assert.equal(value.observations.after.measurement.storage_families, "unavailable")
+})
+for (const name of compactRootNames) test(`current compact-root inventory still rejects malformed outcomes for ${name}`, () => {
+  const before = snapshot(), after = snapshot()
+  oneSuccess(after, name)
+  find(after, name).success = "0"
+  incomplete(before, after, /outcomes/u)
 })
 test("old 78-row observation remains incomplete without seven invented zero rows", () => {
   const before = snapshot({ legacy: true }), after = snapshot({ legacy: true })
@@ -558,7 +597,7 @@ test("literal historical 100-row inventory stays incomplete without invented Web
   assert.equal(value.observations.after.storage.entries.values.some((entry) => websocketNames.includes(entry.name)), false)
   assert.equal(value.observations.after.storage.entries.values.find((entry) => entry.name === "client.quic.request_send").calls, base)
 })
-test("current 116-row inventory refuses the historical payload-only byte descriptor", () => {
+test("current 118-row inventory refuses the historical payload-only byte descriptor", () => {
   const before = snapshot(), after = snapshot()
   before.measurement.storage_bytes = historical92ByteSemantics
   after.measurement.storage_bytes = historical92ByteSemantics
@@ -600,13 +639,13 @@ test("successful empty get payload is a known zero without inventing SQL rows", 
   assert.match(value.measurement.storage_bytes, /zero_does_not_establish_no_payload/u)
   assert.equal(value.measurement.storage_families.foundationdb_read.returned_rows, "unavailable")
 })
-test("feature-off 116-row phase keeps FDB and cache source coverage unavailable", () => {
+test("feature-off 118-row phase keeps FDB and cache source coverage unavailable", () => {
   const value = observed(snapshot({ feature: false }), snapshot({ feature: false }))
   assert.deepEqual(value.measurement.foundationdb_coverage, disabledCoverage)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("foundationdb.")), false)
   assert.equal(value.measurement.storage_instrumented_operations.length, 84)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("blob_cache.")), false)
-  assert.equal(value.storage.entries.length, 116)
+  assert.equal(value.storage.entries.length, 118)
   assert.equal(value.measurement.storage_instrumented_operations.some((name) => name.startsWith("client.")), false)
 })
 test("declared cache family stays unavailable in addon summaries with FDB enabled or disabled", () => {
@@ -642,8 +681,8 @@ test("eight transport families retain separate units without claiming addon sour
   }
   assert.equal(Object.keys(STORAGE_OPERATION_FAMILIES).length, 24)
   const declared = Object.values(STORAGE_OPERATION_FAMILIES).flatMap((family) => family.operations)
-  assert.equal(declared.length, 116)
-  assert.equal(new Set(declared).size, 116)
+  assert.equal(declared.length, 118)
+  assert.equal(new Set(declared).size, 118)
   assert.deepEqual(STORAGE_OPERATION_FAMILIES.blob_cache.operations, cacheNames)
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_request_send.bytes, "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments")
   assert.equal(STORAGE_OPERATION_FAMILIES.blob_cache_peer_response_receive.bytes, "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes")
