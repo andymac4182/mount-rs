@@ -1,0 +1,217 @@
+{
+  "build_children": [
+    {
+      "capture_cap_per_file_bytes": 67108864,
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 44.279283083975315,
+      "exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "label": "cargo-build",
+      "minimum_host_free_bytes": 80126881792,
+      "process_group_absent": true,
+      "stderr_bytes": 2921,
+      "stderr_sha256": "715f3429dce6db4bf5579ebcaec761e4178602ef5d7eff60febb1610b35132ac",
+      "stdout_bytes": 328338,
+      "stdout_sha256": "3845e3819041550ef6985e8ca52728c2fbea195c85ae1fc02ae0b95c5a118c36"
+    },
+    {
+      "capture_cap_per_file_bytes": 67108864,
+      "deadline_seconds": 30,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 0.6211922500515357,
+      "exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "label": "native-list",
+      "minimum_host_free_bytes": 80157114368,
+      "process_group_absent": true,
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 17486,
+      "stdout_sha256": "352e6b64a63beceb2687a3bbb3d56394dc7096069799f7140b94f37d9ebdf923"
+    },
+    {
+      "capture_cap_per_file_bytes": 67108864,
+      "deadline_seconds": 180,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 4.143468291964382,
+      "exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "label": "native-pure",
+      "minimum_host_free_bytes": 80155148288,
+      "process_group_absent": true,
+      "stderr_bytes": 84801,
+      "stderr_sha256": "aa9f223b160b94ed9b345288bab5b08342898791494485d2a74d51e70010511a",
+      "stdout_bytes": 19046,
+      "stdout_sha256": "c61ffca84a0ae1054e2a16e5f3b29178e3902c2933cd929d4108902cd59f37c5"
+    }
+  ],
+  "build_receipt_sha256": "b19dc82f63cf9ce8287bb89531a398173c71d84096c4ee5248122545b72802da",
+  "ci_metadata": {
+    "current_create_rebase_kani_pull_request": "cancelled",
+    "current_create_rebase_kani_push": "cancelled",
+    "durable_tidb_rustfs_pull_request": "success",
+    "durable_tidb_rustfs_push": "success",
+    "full_formal_complete": false,
+    "head": "fa70c174cc050b68863477abd38947e097264fac",
+    "metadata_receipt_sha256": "2433964dfa2d3a3eb175d0b43e67fc95f95711e600187b1cc62031699c54274b",
+    "observed_at_utc": "2026-09-29T20:53:01Z",
+    "outstanding_failed_gates": [
+      "Ozone throughput",
+      "W26 evidence"
+    ],
+    "pull_request_run_conclusion": "failure",
+    "pull_request_run_id": 36623559911,
+    "push_run_id": 36623553586,
+    "windows_node_pull_request": "success",
+    "windows_node_push": "success",
+    "windows_rust_pull_request": "success",
+    "windows_rust_push": "success"
+  },
+  "extractor": {
+    "independently_checked_active_boundary_files": 704,
+    "public_strings_reviewed_for_private_paths_and_credentials": 2592,
+    "raw_counter_arithmetic_mismatches": 0,
+    "sha256": "9e5e217d4e4e3de65784fdf46eb2f91760ef665cbd788e07cbde46f7ea11a624",
+    "uncompressed_result_bytes": 1245713,
+    "uncompressed_result_sha256": "aac8b3a534154788dcf7d3d3b0130722fb483827101b174236c0cf6df7f0405e"
+  },
+  "first_attempt": {
+    "acknowledged": 6714,
+    "attempts": 6724,
+    "automatic_replay": false,
+    "classification": "excluded from qualified throughput; retained failed attempt, not evidence of a storage failure root cause",
+    "collector_group_absent": true,
+    "completed_fresh_oracles": 0,
+    "data_retained": "mount-rs-rustfs-stage-f434322f3830417e91530997-data",
+    "elapsed_seconds": 46.47853812505491,
+    "exact_rejected_timestamp_retained": false,
+    "failed": 0,
+    "failure": "benchmark_nonzero",
+    "finish_errors": [],
+    "initiating_timestamp_reason": "unresolved: zero, future, or older than 10 seconds are rejected",
+    "original_container_mutations": false,
+    "owned_rustfs_stopped": true,
+    "owner_receipt_sha256": "533b901f526ad7186d19b2698e60133a9a62b6084bc037d0fdc3a004354c4ea1",
+    "recorded_worker_error": "resource coverage stale or invalid",
+    "status": "failed",
+    "terminal_sha256": "fdb4f78b9995860b17ca56aa5392c0c793f9a29ff9284ff93fc12169fc63457c",
+    "timed_cells": 0,
+    "uncertain": 10,
+    "unknown_operation": "Open"
+  },
+  "interpretation_limits": [
+    "historical baseline is unpaired and differs in multiple production changes, date, cache history and evolving workload state",
+    "five-second cells are descriptive observations, not confidence intervals or saturation capacity",
+    "native workload omits handle Stat; separate paired allocation experiment includes Stat",
+    "allocation profiling disabled in native control",
+    "blob RAM, disk and peer cache not configured in this control",
+    "local loopback and signed local ES256 fixture authentication; no OS mount, cross-host capacity or external OIDC issuer qualification",
+    "10 clients, 10 drives and 5 partitions; full 10000-client production geometry remains unqualified",
+    "client-observed SQL rows, logical blob calls and inclusive await time are not physical IOPS or isolated backend execution time",
+    "no contemporaneous TiKV cgroup or host physical disk IOPS in this report; RustFS cgroup includes setup, oracles, background and writeback",
+    "complete formal verification and CI throughput floors remain outstanding"
+  ],
+  "measured_revision": "fa70c174cc050b68863477abd38947e097264fac",
+  "native_release": {
+    "binary_sha256": "cfa72ec3368e3a8fe447529bc13c6abfd358654e73053cd0d1e4778cde6487b2",
+    "elapsed_seconds": 49.90601054194849,
+    "head": "fa70c174cc050b68863477abd38947e097264fac",
+    "host_free_at_end_bytes": 80094474240,
+    "manifest_sha256": "67810fc7a7cc4073d88697a98533ca0a902c72210ff4669a8b607a44acabd0ca",
+    "native_inventory": {
+      "benchmarks": 0,
+      "controller_filtered": 175,
+      "list_sha256": "352e6b64a63beceb2687a3bbb3d56394dc7096069799f7140b94f37d9ebdf923",
+      "tests": 176
+    },
+    "producer_sha256": "78a12b160aab4698190761e047bad668c5108d50109f7413536913e56a361757",
+    "pure_tests": {
+      "exit_code": 0,
+      "failed": 0,
+      "ignored": 6,
+      "passed": 170,
+      "stderr_sha256": "aa9f223b160b94ed9b345288bab5b08342898791494485d2a74d51e70010511a",
+      "stdout_sha256": "c61ffca84a0ae1054e2a16e5f3b29178e3902c2933cd929d4108902cd59f37c5",
+      "test_threads": 1
+    },
+    "runtime_executed": false,
+    "source_closure_sha256": "41664d80575f0c557a7b36857396c436c7c656fac55622415d1bb82e4b07cb5d",
+    "source_count": 570,
+    "status": "qualified_archive"
+  },
+  "root_tool_exit_witnesses": [
+    {
+      "chunk": "7576d2",
+      "exit_code": 0,
+      "scope": "build archive producer"
+    },
+    {
+      "chunk": "2e3d43",
+      "exit_code": 1,
+      "scope": "first native owner attempt"
+    },
+    {
+      "chunk": "d35bd1",
+      "exit_code": 0,
+      "scope": "second native owner attempt"
+    },
+    {
+      "chunk": "b19759",
+      "exit_code": 0,
+      "scope": "public whitelist extraction"
+    }
+  ],
+  "schema": "mount-rs-tidb-rustfs-native-d10-qualification-v1",
+  "successful_control": {
+    "collector_group_absent": true,
+    "correctness": {
+      "crossnode_completed_pairs": 100,
+      "crossnode_verified_bytes": 409600,
+      "cumulative_requests": {
+        "acknowledged": 100826,
+        "attempts": 100826,
+        "failed": 0,
+        "uncertain": 0
+      },
+      "fresh_corpus": {
+        "final_bytes": 62865408,
+        "final_files": 10000,
+        "final_receipt_sha256": "436fd9d10d7ff2dcf25ebbf702dd3f52b0569295c3b2cbc46e81b20bf700fa67",
+        "initial_bytes": 62832640,
+        "initial_files": 10000,
+        "initial_receipt_sha256": "9fe91b8ee3fd57ecfec4f1c14c5891bbfbf5d3cac2d136084493ec0e3a809e3b"
+      },
+      "fresh_oracle_complete": true,
+      "owner_benchmarked": true,
+      "revocation_denials": 10,
+      "scope_denials": {
+        "partition": 10,
+        "sibling": 10
+      },
+      "verified_passes": 2,
+      "workers_clean_reaped": true,
+      "workload_complete": true
+    },
+    "data_retained": "mount-rs-rustfs-stage-8026124ae6fd4ea1b29a5cab-data",
+    "finish_errors": [],
+    "guest_mem_available_before_bytes": 3800084480,
+    "minimum_guest_mem_available_bytes": 2908278784,
+    "original_container_mutations": false,
+    "owned_rustfs_stopped": true,
+    "owner_elapsed_seconds": 429.31246766704135,
+    "owner_producer_sha256": "fff2119efaeac7e4cdb6b2c00d6244427e40b30392e6b5de9d14822ed9469f43",
+    "owner_receipt_sha256": "50573f4989eee0cf4024df88bcf9b04db3c458acb4c939bd271d305e602f61b8",
+    "owner_status": "benchmarked",
+    "source_pins_unchanged": true,
+    "terminal_sha256": "30e915f0615e0baf780d49366b27b64b7ebc12f484a49b3f8a64ea173353d0d3"
+  },
+  "unchanged_gates": {
+    "allocation_calls_per_selected_read_cycle_limit": 256,
+    "ci_legacy_lifecycle_logical_ops_per_second_floor": 1000,
+    "host_free_floor_bytes": 68719476736
+  }
+}
