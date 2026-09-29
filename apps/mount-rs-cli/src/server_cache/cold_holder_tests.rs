@@ -1280,7 +1280,9 @@ async fn terminal_publication_poison_preserves_an_existing_typed_drain_error() {
     std::mem::forget(f);
 }
 
+#[cfg(unix)]
 struct ReleaseProofGateOnDrop(Arc<ProofReleaseGate>);
+#[cfg(unix)]
 impl Drop for ReleaseProofGateOnDrop {
     fn drop(&mut self) {
         // Always release the actual blocking owner, including observer/assertion

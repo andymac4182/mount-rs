@@ -467,7 +467,7 @@ test("current verifier refuses a complete historical 134-core / 85-storage snaps
   const { pilot, build } = model()
   const workload = pilot.native_phases.phases[0]
   assert.equal(workload.core_profile.entries.length, 136)
-  assert.equal(workload.storage.length, 116)
+  assert.equal(workload.storage.length, 118)
   workload.core_profile.entries.splice(134)
   workload.storage = historicalStorageRows(workload.storage, historical85Names)
   assert.equal(workload.core_profile.entries.length, 134)
@@ -478,7 +478,7 @@ test("current verifier refuses a complete historical 136-core / 92-storage snaps
   const { pilot, build } = model()
   const workload = pilot.native_phases.phases[0]
   assert.equal(workload.core_profile.entries.length, 136)
-  assert.equal(workload.storage.length, 116)
+  assert.equal(workload.storage.length, 118)
   workload.storage = historicalStorageRows(workload.storage, historical92Names)
   assert.equal(workload.core_profile.entries.length, 136)
   assert.equal(workload.storage.length, 92)
@@ -524,7 +524,7 @@ for (const name of [
 ]) test(`current exact missing ${name} storage row rejects qualification`, () => {
   const { pilot, build } = model()
   const rows = pilot.native_phases.phases[0].storage
-  assert.equal(rows.length, 116)
+  assert.equal(rows.length, 118)
   const index = rows.findIndex((row) => row.name === name)
   assert.notEqual(index, -1)
   rows.splice(index, 1)
