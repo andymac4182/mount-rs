@@ -357,6 +357,7 @@ EXPECTED_SUITES = {
         'sqlite_compact_selected_gates_and_phases_preserve_payload_after_reopen',
     ),
     'createunit': tuple('compact_preparation_tests::'+name for name in (
+        'point_receipt_cannot_admit_after_local_revision_advances',
         'missing_preparation_waits_for_full_publication_and_releases_gate_before_blocks',
         'canceled_missing_preparation_retains_no_pending_full_capture',
         'occupied_preparation_uses_full_current_selected_body',

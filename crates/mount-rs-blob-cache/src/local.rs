@@ -1,4 +1,6 @@
-use crate::owned::{OwnedTask, notify_waker};
+use crate::owned::OwnedTask;
+#[cfg(unix)]
+use crate::owned::notify_waker;
 use crate::*;
 use std::{
     collections::BTreeMap,
@@ -165,6 +167,7 @@ struct IoRegistry {
     wake: Waker,
 }
 impl IoRegistry {
+    #[cfg(unix)]
     fn new() -> Arc<Self> {
         let changed = Arc::new(tokio::sync::Notify::new());
         let wake = notify_waker(&changed);

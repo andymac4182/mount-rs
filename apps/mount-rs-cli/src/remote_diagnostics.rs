@@ -825,7 +825,7 @@ mod tests {
         let entries = process["storage"]["snapshot"]["entries"]
             .as_array()
             .unwrap();
-        assert_eq!(entries.len(), 116);
+        assert_eq!(entries.len(), 118);
         assert_eq!(
             entries[110..116]
                 .iter()
@@ -838,6 +838,16 @@ mod tests {
                 "object_store.backing_marker.data.body_read",
                 "object_store.backing_marker.probe.create",
                 "object_store.backing_marker.retry_backoff",
+            ]
+        );
+        assert_eq!(
+            entries[116..118]
+                .iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "sdk.metadata.compact_root_file_capability",
+                "sdk.metadata.load_compact_root_file",
             ]
         );
         for (actual, expected) in entries.iter().zip(&storage.entries) {
@@ -924,7 +934,7 @@ mod tests {
         assert_eq!(profile_entry["units"].as_u64(), Some(exact));
         assert_eq!(profile_entry["calls"].as_u64(), Some(exact));
         for (family, count) in [
-            ("sdk", 47),
+            ("sdk", 49),
             ("tidb", 18),
             ("napi_forwarding", 12),
             ("pglite", 1),
@@ -943,7 +953,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            116
+            118
         );
         assert_eq!(
             process["coverage"]["client_websocket"]["observation"],
@@ -1088,7 +1098,17 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .len(),
-                116
+                118
+            );
+            assert_eq!(
+                banks["storage"]["snapshot"]["entries"].as_array().unwrap()[116..118]
+                    .iter()
+                    .map(|row| row["name"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "sdk.metadata.compact_root_file_capability",
+                    "sdk.metadata.load_compact_root_file",
+                ]
             );
             for index in [134, 135] {
                 let row = &banks["profile"]["snapshot"]["entries"][index];

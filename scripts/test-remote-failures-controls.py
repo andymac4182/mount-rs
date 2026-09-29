@@ -803,6 +803,54 @@ class ResultControls(unittest.TestCase):
         self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest fixture::nameXwithXdot ... ok\n{SUMMARY}", literal))
 
 
+class CreateUnitSelectors(unittest.TestCase):
+    # Independent inventory: the selected module includes the indexed-read race control.
+    names = tuple('compact_preparation_tests::' + name for name in (
+        'point_receipt_cannot_admit_after_local_revision_advances',
+        'missing_preparation_waits_for_full_publication_and_releases_gate_before_blocks',
+        'canceled_missing_preparation_retains_no_pending_full_capture',
+        'occupied_preparation_uses_full_current_selected_body',
+        'damaged_traversed_or_unrelated_guard_refuses_create_without_publication',
+        'targeted_create_preserves_selected_physical_body_pairs_and_pending_atime',
+        'targeted_create_mutates_unique_namespace_and_preserves_genuine_pinned_reader',
+    ))
+
+    @staticmethod
+    def fixture(names):
+        count = len(names)
+        return (
+            f'running {count} tests\n'
+            + ''.join(f'test {name} ... ok\n' for name in names)
+            + f'test result: ok. {count} passed; 0 failed; 0 ignored;\n'
+        )
+
+    def test_inventory_binds_all_seven_cases_and_existing_module_filter(self):
+        self.assertEqual(parent.EXPECTED_SUITES['createunit'], self.names)
+        self.assertEqual(parent.COMMANDS['createunit'], (
+            ['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '--lib',
+             '--locked', '--offline', 'compact_preparation_tests::', '--',
+             '--test-threads=1', '--nocapture'],
+            180, 0, 0,
+        ))
+
+    def test_complete_current_suite_is_required_with_nocapture(self):
+        names = parent.EXPECTED_SUITES['createunit']
+        complete = self.fixture(self.names)
+        self.assertTrue(parent.named_suite_passed(complete, names, nocapture=True))
+        self.assertFalse(parent.named_suite_passed(
+            complete.replace(self.names[0], 'unrelated'), names, nocapture=True))
+        self.assertFalse(parent.named_suite_passed(
+            complete + f'test {self.names[0]} ... ok\n', names, nocapture=True))
+        self.assertFalse(parent.named_suite_passed(
+            'running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n',
+            names, nocapture=True))
+
+    def test_previous_six_case_suite_cannot_qualify_current_module(self):
+        previous = self.fixture(self.names[1:])
+        self.assertFalse(parent.named_suite_passed(
+            previous, parent.EXPECTED_SUITES['createunit'], nocapture=True))
+
+
 class CacheStageSelectors(unittest.TestCase):
     def test_websocket_general_suite_keeps_process_recorder_off_in_both_builds(self):
         for kind in ['wspackages', 'wspackagesprofiled']:
@@ -927,7 +975,7 @@ class CacheStageSelectors(unittest.TestCase):
         self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest {name} ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;\n", name))
 
     def test_create_qualification_requires_complete_executed_controls(self):
-        for kind, count in [("createpath", 5), ("createunit", 6)]:
+        for kind, count in [("createpath", 5), ("createunit", 7)]:
             names = parent.EXPECTED_SUITES[kind]
             self.assertEqual(len(names), count)
             valid = f"running {count} tests\n"+"".join(f"test {name} ... ok\n" for name in names)+f"test result: ok. {count} passed; 0 failed; 0 ignored;\n"
