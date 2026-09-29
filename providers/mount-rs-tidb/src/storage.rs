@@ -1696,6 +1696,14 @@ impl MetadataStore for TidbMetadataStore {
     ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
         self.compact_load(backing, inode).await
     }
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: mount_rs_core::storage::compact::CompactInodeExpectation<'_>,
+    ) -> Result<mount_rs_core::storage::compact::CompactInodeRead> {
+        self.compact_read(backing, inode, expected).await
+    }
     async fn publish_compact_inode(
         &self,
         backing: ConcurrentBackingId,

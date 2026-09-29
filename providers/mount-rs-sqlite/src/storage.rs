@@ -379,6 +379,43 @@ fn require_matching_metadata_stamp(
 }
 
 #[cfg(unix)]
+fn require_matching_selected_metadata_stamp(
+    database: &Database,
+    stored_dev: Option<&str>,
+    stored_ino: Option<&str>,
+    stored_path: Option<&str>,
+) -> Result<FileStamp> {
+    // Keep the owned verifier's check order and fresh filesystem operations.
+    // Only the selected read's auxiliary-path comparison borrows its buffer.
+    let stored = FileStamp::from_text(stored_dev, stored_ino)?
+        .ok_or_else(|| incompatible_schema("SQLite metadata has no trusted file stamp for MRC2"))?;
+    let actual = database.require_concurrent_local_file("metadata")?;
+    if stored != actual {
+        return Err(FsError::new(ErrorCode::Estale)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message("SQLite metadata authority belongs to another physical file"));
+    }
+    let stored_path = stored_path
+        .filter(|path| {
+            !path.is_empty()
+                && path.len().is_multiple_of(2)
+                && path
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| {
+            incompatible_schema("SQLite MRC2 authority has no trusted auxiliary path")
+        })?;
+    let actual_path = database.current_auxiliary_path_borrowed()?;
+    if stored_path != actual_path {
+        return Err(FsError::new(ErrorCode::Estale)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message("SQLite auxiliary file authority belongs to another pathname"));
+    }
+    Ok(actual)
+}
+
+#[cfg(unix)]
 fn require_matching_auxiliary_path(database: &Database, stored: Option<&str>) -> Result<()> {
     let stored = stored
         .filter(|path| {
@@ -584,6 +621,15 @@ impl Database {
             FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent SQLite backing")
         })?;
         Ok(opened.auxiliary_path.clone())
+    }
+
+    #[cfg(unix)]
+    fn current_auxiliary_path_borrowed(&self) -> Result<&str> {
+        self.current_file_stamp()?;
+        let opened = self.opened_file.as_ref().ok_or_else(|| {
+            FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent SQLite backing")
+        })?;
+        Ok(&opened.auxiliary_path)
     }
 
     #[cfg(unix)]
@@ -2139,6 +2185,22 @@ impl MetadataStore for SqliteMetadataStore {
         #[cfg(not(unix))]
         {
             let _ = (backing, inode);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        expected: mount_rs_core::storage::compact::CompactInodeExpectation<'_>,
+    ) -> Result<mount_rs_core::storage::compact::CompactInodeRead> {
+        #[cfg(unix)]
+        {
+            self.compact_read(backing, inode, expected)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode, expected);
             Err(FsError::new(ErrorCode::Enotsup))
         }
     }

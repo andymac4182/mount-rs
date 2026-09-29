@@ -211,6 +211,56 @@ fn decode_joined_rows(
     LoadedCompactInode::from_guard(&anchor, inode, guard)
 }
 
+// Borrow public Row values while their receive buffers remain owned by the
+// result. Unusual driver representations use the existing checked conversion.
+fn check_joined_unchanged(
+    rows: &[Row],
+    backing: ConcurrentBackingId,
+    inode: u64,
+    expected: CompactInodeExpectation<'_>,
+) -> Option<CheckedCompactInode> {
+    let [row] = rows else {
+        return None;
+    };
+    if row.len() != 13 {
+        return None;
+    }
+    let integer = |index| match row.as_ref(index)? {
+        Value::Int(value) => Some(*value),
+        _ => None,
+    };
+    let bytes = |index| match row.as_ref(index)? {
+        Value::Bytes(value) => Some(value.as_slice()),
+        _ => None,
+    };
+    if bytes(1)? != b"MRC5"
+        || ConcurrentBackingId::from_hex(std::str::from_utf8(bytes(2)?).ok()?).ok()? != backing
+        || !matches!(row.as_ref(3), Some(Value::NULL))
+        || integer(4)? != CONCURRENT_FENCE_SENTINEL
+        || integer(5)? != 0
+        || !matches!(row.as_ref(7), Some(Value::NULL))
+    {
+        return None;
+    }
+    let generation = u64::try_from(integer(0)?).ok()?;
+    if signed(inode, "compact inode").is_err() || u64::try_from(integer(8)?).ok()? != inode {
+        return None;
+    }
+    let identity = PhysicalInodeIdentity {
+        incarnation: u64::try_from(integer(9)?).ok()?,
+        epoch: u64::try_from(integer(10)?).ok()?,
+        revision: u64::try_from(integer(11)?).ok()?,
+    };
+    let anchor = bytes(6)?;
+    let node = bytes(12)?;
+    let checked = check_compact_inode_unchanged(
+        anchor, backing, generation, inode, identity, node, expected,
+    )?;
+    profile::add(Event::CompactAnchorReturned, anchor.len() as u64);
+    profile::add(Event::InodeReturned, node.len() as u64);
+    Some(checked)
+}
+
 fn encode_anchor(anchor: &CompactAnchor) -> Result<Vec<u8>> {
     signed(anchor.generation, "compact generation")?;
     signed(anchor.next_inode, "compact next inode")?;
@@ -501,6 +551,25 @@ impl TidbMetadataStore {
         backing: ConcurrentBackingId,
         inode: u64,
     ) -> Result<LoadedCompactInode> {
+        let rows = self.compact_selected_rows(inode).await?;
+        decode_joined_rows(rows.into_iter().map(Row::unwrap_raw), backing, inode)
+    }
+
+    pub(super) async fn compact_read(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        expected: CompactInodeExpectation<'_>,
+    ) -> Result<CompactInodeRead> {
+        let rows = self.compact_selected_rows(inode).await?;
+        if let Some(checked) = check_joined_unchanged(&rows, backing, inode, expected) {
+            return Ok(CompactInodeRead::Unchanged(checked));
+        }
+        decode_joined_rows(rows.into_iter().map(Row::unwrap_raw), backing, inode)
+            .map(CompactInodeRead::Loaded)
+    }
+
+    async fn compact_selected_rows(&self, inode: u64) -> Result<Vec<Row>> {
         let mut conn = self
             .0
             .pool
@@ -529,7 +598,7 @@ impl TidbMetadataStore {
             )
             .await
             .map_err(|e| db_error("read TiDB compact inode", e))?;
-        decode_joined_rows(rows.into_iter().map(Row::unwrap_raw), backing, inode)
+        Ok(rows)
     }
     pub(super) async fn compact_publish_inode(
         &self,

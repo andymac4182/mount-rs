@@ -423,8 +423,30 @@ pub fn validate_node_kind(node: &NodeMetadata) -> Result<()> {
 fn validate_file_layout(layout: &FileLayout, file_size: u64) -> Result<()> {
     // An empty list represents an empty or entirely sparse/zero-filled file.
     // Every stored extent, however, must be a nonempty bounded range.
-    from_config(&layout.chunker)?;
+    validate_chunker_config(&layout.chunker)?;
     validate_file_extents(&layout.extents, file_size)
+}
+
+// Validation must not construct a boxed Chunker just to inspect a persisted
+// layout. Keep these rules aligned with chunking::from_config.
+fn validate_chunker_config(config: &ChunkerConfig) -> Result<usize> {
+    if config.algorithm != "fixed-size" || config.version != 1 {
+        return Err(
+            FsError::new(ErrorCode::Enotsup).with_message("unsupported chunker algorithm/version")
+        );
+    }
+    if config.parameters.len() != 1 {
+        return Err(FsError::new(ErrorCode::Einval).with_message("invalid fixed-size parameters"));
+    }
+    let size = config
+        .parameters
+        .get("chunk_size")
+        .and_then(|size| usize::try_from(*size).ok())
+        .ok_or_else(|| FsError::new(ErrorCode::Einval).with_message("invalid chunk_size"))?;
+    if size == 0 {
+        return Err(FsError::new(ErrorCode::Einval).with_message("chunk size must be positive"));
+    }
+    Ok(size)
 }
 
 fn validate_file_extents(extents: &[BlockExtent], file_size: u64) -> Result<()> {
@@ -1020,6 +1042,19 @@ pub trait MetadataStore: Send + Sync {
         _inode: InodeId,
     ) -> Result<compact::LoadedCompactInode> {
         Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read current anchor and guard at one provider view and either certify
+    /// exact equality to the borrowed body or return the ordinary owned result.
+    /// The default preserves the fresh read contract for other providers.
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        _expected: compact::CompactInodeExpectation<'_>,
+    ) -> Result<compact::CompactInodeRead> {
+        self.load_compact_inode(backing, inode)
+            .await
+            .map(compact::CompactInodeRead::Loaded)
     }
     /// Atomically validate anchor generation and physical identity, then update
     /// only the selected guard. Immutable blocks must be durable before this call.

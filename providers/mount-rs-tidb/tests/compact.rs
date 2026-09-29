@@ -211,6 +211,318 @@ async fn actual_compact_selected_physical_identity_survives_independent_structur
 
 #[tokio::test]
 #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
+async fn actual_compact_selected_streaming_certifies_full_audited_root_and_file() {
+    let f = fixture(true).await;
+    let inode = create(&f, "streamed-file").await;
+    create(&f, "unrequested-sibling").await;
+    let snapshot = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let (_, _, audited) = snapshot.clone().into_validated_namespace().unwrap();
+    let file = &snapshot.guards[&inode];
+    let root_read = f
+        .store
+        .read_compact_inode(f.backing, snapshot.anchor.root, audited.expect_root())
+        .await;
+    let file_read = f
+        .store
+        .read_compact_inode(
+            f.backing,
+            inode,
+            CompactInodeExpectation::selected(
+                snapshot.anchor.generation,
+                file.identity,
+                &file.node,
+            ),
+        )
+        .await;
+    let root_owned = f
+        .store
+        .load_compact_inode(f.backing, snapshot.anchor.root)
+        .await;
+    let file_owned = f.store.load_compact_inode(f.backing, inode).await;
+    f.store.close().await.unwrap();
+
+    let CompactInodeRead::Unchanged(root) = root_read.unwrap() else {
+        panic!("canonical fresh root bytes must use streamed certification")
+    };
+    assert_eq!(root.generation(), snapshot.anchor.generation);
+    assert_eq!(root.inode(), snapshot.anchor.root);
+    assert_eq!(
+        root.identity(),
+        snapshot.guards[&snapshot.anchor.root].identity
+    );
+    let verified = root
+        .into_verified_root()
+        .expect("Full-audited root receipt required");
+    assert_eq!(verified.generation(), snapshot.anchor.generation);
+    assert_eq!(verified.guard(), &snapshot.guards[&snapshot.anchor.root]);
+    assert_eq!(verified.guard(), &root_owned.unwrap().guard);
+    let CompactInodeRead::Unchanged(file_read) = file_read.unwrap() else {
+        panic!("canonical fresh file bytes must use streamed certification")
+    };
+    assert_eq!(file_read.generation(), snapshot.anchor.generation);
+    assert_eq!(file_read.inode(), inode);
+    assert_eq!(file_read.identity(), file.identity);
+    assert!(file_read.into_verified_root().is_none());
+    assert_eq!(file_owned.unwrap().guard, *file);
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_selected_streaming_fallback_reuses_one_fresh_joined_row() {
+    let f = fixture(true).await;
+    let inode = create(&f, "streamed-fallback").await;
+    let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
+    let mut changed = original.guard.node.clone();
+    changed.stats.mtime_ms += 17;
+    let acknowledged = f
+        .store
+        .publish_compact_inode(
+            f.backing,
+            inode,
+            original.generation,
+            original.guard.identity,
+            changed,
+        )
+        .await
+        .unwrap();
+    let stale_expectation = CompactInodeExpectation::selected(
+        original.generation,
+        original.guard.identity,
+        &original.guard.node,
+    );
+    let revision_read = f
+        .store
+        .read_compact_inode(f.backing, inode, stale_expectation)
+        .await;
+    let revision_owned = f.store.load_compact_inode(f.backing, inode).await;
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    // Warm the joined statement on canonical bytes before the encoding control.
+    reader.load_compact_inode(f.backing, inode).await.unwrap();
+
+    // Derived Serde accepts positional struct representations. The conservative
+    // map-only seed must decline this encoding and decode this exact fresh row.
+    let sequence = serde_json::to_string(&serde_json::json!([
+        &acknowledged.guard.node.stats,
+        &acknowledged.guard.node.data,
+    ]))
+    .unwrap();
+    let sequence_reference =
+        serde_json::from_str::<mount_rs_core::storage::NodeMetadata>(&sequence);
+    let pool = Pool::from_url(&f.url).unwrap();
+    let mut connection = pool.get_conn().await.unwrap();
+    connection
+        .exec_drop(
+            "UPDATE mount_rs_tidb_compact_guards SET node=? WHERE volume_key=? AND inode=?",
+            (&sequence, &f.key, inode as i64),
+        )
+        .await
+        .unwrap();
+    drop(connection);
+    pool.disconnect().await.unwrap();
+    let before = raw(&f).await;
+    proxy.begin();
+    let sequence_read = reader
+        .read_compact_inode(
+            f.backing,
+            inode,
+            CompactInodeExpectation::selected(
+                acknowledged.generation,
+                acknowledged.guard.identity,
+                &acknowledged.guard.node,
+            ),
+        )
+        .await;
+    let (queries, rows) = proxy.end();
+    let sequence_owned = f.store.load_compact_inode(f.backing, inode).await;
+    let after = raw(&f).await;
+    reader.close().await.unwrap();
+    f.store.close().await.unwrap();
+    proxy.shutdown().await;
+
+    let CompactInodeRead::Loaded(revision_read) = revision_read.unwrap() else {
+        panic!("changed physical revision must return the fresh owned result")
+    };
+    assert_eq!(revision_read, revision_owned.unwrap());
+    assert_eq!(revision_read, acknowledged);
+    assert_ne!(revision_read.guard.identity, original.guard.identity);
+    assert_eq!(sequence_reference.unwrap(), acknowledged.guard.node);
+    assert_eq!(
+        before, after,
+        "fallback must preserve the same authority and guard bytes"
+    );
+    assert_eq!(
+        before.1.iter().find(|row| row.0 == inode as i64).unwrap().4,
+        sequence,
+        "the actual server row retains the positional representation",
+    );
+    let CompactInodeRead::Loaded(sequence_read) = sequence_read.unwrap() else {
+        panic!("accepted sequence encoding must use the same-byte owned fallback")
+    };
+    assert_eq!(sequence_read, sequence_owned.unwrap());
+    assert_eq!(sequence_read, acknowledged);
+    assert_eq!(rows, 1);
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("SELECT "))
+            .count(),
+        1
+    );
+    assert!(
+        queries
+            .iter()
+            .any(|sql| sql.contains("LEFT JOIN mount_rs_tidb_compact_guards"))
+    );
+    assert!(queries.iter().all(|sql| {
+        !sql.contains("FOR UPDATE")
+            && !sql.starts_with("START TRANSACTION")
+            && !sql.eq_ignore_ascii_case("COMMIT")
+            && !sql.eq_ignore_ascii_case("ROLLBACK")
+    }));
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_selected_streaming_preserves_authority_anchor_guard_error_precedence() {
+    for case in [
+        "stale-authority",
+        "unsupported-anchor",
+        "bad-guard",
+        "missing-guard",
+    ] {
+        let f = fixture(true).await;
+        let inode = create(&f, "streamed-precedence").await;
+        let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
+        let proxy = compact_proxy::Proxy::new(&f.url).await;
+        let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+            .await
+            .unwrap();
+        reader.load_compact_inode(f.backing, inode).await.unwrap();
+        let pool = Pool::from_url(&f.url).unwrap();
+        let mut connection = pool.get_conn().await.unwrap();
+        if case == "missing-guard" {
+            connection
+                .exec_drop(
+                    "DELETE FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode=?",
+                    (&f.key, inode as i64),
+                )
+                .await
+                .unwrap();
+        } else {
+            connection.exec_drop(
+                "UPDATE mount_rs_tidb_compact_guards SET node='{}' WHERE volume_key=? AND inode=?",
+                (&f.key, inode as i64),
+            ).await.unwrap();
+        }
+        if case == "stale-authority" {
+            connection
+                .exec_drop(
+                    "UPDATE mount_rs_tidb_metadata SET write_mode='MRC4' WHERE volume_key=?",
+                    (&f.key,),
+                )
+                .await
+                .unwrap();
+        } else if case == "unsupported-anchor" {
+            let (anchor,): (String,) = connection
+                .exec_first(
+                    "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                    (&f.key,),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let mut anchor: serde_json::Value = serde_json::from_str(&anchor).unwrap();
+            anchor["anchor"]["default_chunker"]["algorithm"] =
+                serde_json::json!("unsupported-streamed-precedence-chunker");
+            connection
+                .exec_drop(
+                    "UPDATE mount_rs_tidb_metadata SET namespace=? WHERE volume_key=?",
+                    (serde_json::to_string(&anchor).unwrap(), &f.key),
+                )
+                .await
+                .unwrap();
+        }
+        drop(connection);
+        pool.disconnect().await.unwrap();
+        let before = raw(&f).await;
+        let owned = f.store.load_compact_inode(f.backing, inode).await;
+        proxy.begin();
+        let streamed = reader
+            .read_compact_inode(
+                f.backing,
+                inode,
+                CompactInodeExpectation::selected(
+                    original.generation,
+                    original.guard.identity,
+                    &original.guard.node,
+                ),
+            )
+            .await;
+        let (queries, rows) = proxy.end();
+        let after = raw(&f).await;
+        reader.close().await.unwrap();
+        f.store.close().await.unwrap();
+        proxy.shutdown().await;
+
+        let owned = owned.unwrap_err();
+        let streamed = streamed.unwrap_err();
+        let expected_code = match case {
+            "stale-authority" | "missing-guard" => ErrorCode::Estale,
+            "unsupported-anchor" => ErrorCode::Enotsup,
+            "bad-guard" => ErrorCode::Eio,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            owned.code, expected_code,
+            "{case}: reference decoder precedence"
+        );
+        assert_eq!(
+            (
+                streamed.code,
+                &streamed.syscall,
+                &streamed.path,
+                &streamed.dest,
+                streamed.to_string()
+            ),
+            (
+                owned.code,
+                &owned.syscall,
+                &owned.path,
+                &owned.dest,
+                owned.to_string()
+            ),
+            "{case}: borrowed-row fallback must preserve the complete reference error",
+        );
+        assert_eq!(
+            before, after,
+            "{case}: read failures must preserve all raw rows"
+        );
+        assert_eq!(
+            rows, 1,
+            "{case}: one joined result row, including the absent guard"
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|sql| sql.starts_with("SELECT "))
+                .count(),
+            1,
+            "{case}"
+        );
+        assert!(
+            queries
+                .iter()
+                .any(|sql| sql.contains("LEFT JOIN mount_rs_tidb_compact_guards")),
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
 async fn actual_compact_same_inode_one_winner_and_unrelated_preserved() {
     let f = fixture(true).await;
     let a = create(&f, "a").await;

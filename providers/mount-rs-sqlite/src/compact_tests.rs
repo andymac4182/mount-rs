@@ -101,6 +101,193 @@ fn raw(f: &Fixture) -> (u64, String, RawGuards, String) {
     let authority: MetadataPublicationRow = conn.query_row("SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).unwrap();
     (generation, anchor, rows, format!("{authority:?}"))
 }
+
+#[test]
+fn compact_selected_read_preserves_anchor_error_before_guard_query_failure() {
+    fn authority_anchor_and_guard_table(f: &Fixture) -> (String, String, bool) {
+        let connection = f.store.0.lock().unwrap();
+        let authority: MetadataPublicationRow = connection.query_row(
+            "SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+        ).unwrap();
+        let anchor: String = connection
+            .query_row(
+                "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let guard_table: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mount_rs_compact_guards')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (format!("{authority:?}"), anchor, guard_table)
+    }
+    let identity = |error: &FsError| {
+        (
+            error.code,
+            error.syscall.clone(),
+            error.path.clone(),
+            error.dest.clone(),
+            error.to_string(),
+        )
+    };
+
+    let f = fixture(true);
+    let inode = create(&f, "dual-corruption-selected");
+    let original = run(f.store.load_compact_inode(f.backing, inode)).unwrap();
+    let expectation = CompactInodeExpectation::selected(
+        original.generation,
+        original.guard.identity,
+        &original.guard.node,
+    );
+    let healthy = run(f.store.read_compact_inode(f.backing, inode, expectation)).unwrap();
+    match healthy {
+        CompactInodeRead::Unchanged(checked) => {
+            assert_eq!(checked.generation(), original.generation);
+            assert_eq!(checked.inode(), inode);
+            assert_eq!(checked.identity(), original.guard.identity);
+        }
+        CompactInodeRead::Loaded(loaded) => assert_eq!(loaded, original),
+    }
+    let before = authority_anchor_and_guard_table(&f);
+    assert!(
+        before.2,
+        "the healthy real provider must have its guard table"
+    );
+    let mut unsupported: serde_json::Value = serde_json::from_str(&before.1).unwrap();
+    unsupported["anchor"]["default_chunker"]["algorithm"] =
+        serde_json::json!("unsupported-dual-corruption-chunker");
+    let unsupported = serde_json::to_string(&unsupported).unwrap();
+    {
+        let connection = f.store.0.lock().unwrap();
+        connection
+            .execute(
+                "UPDATE mount_rs_metadata SET namespace=?1 WHERE id=1",
+                [&unsupported],
+            )
+            .unwrap();
+        connection
+            .execute("DROP TABLE mount_rs_compact_guards", [])
+            .unwrap();
+    }
+    let damaged = authority_anchor_and_guard_table(&f);
+    assert_eq!(
+        damaged.0, before.0,
+        "both corruptions retain valid authority"
+    );
+    assert_eq!(damaged.1, unsupported);
+    assert!(
+        !damaged.2,
+        "the guard query must fail independently of decoding"
+    );
+
+    // The real old read validates the anchor before querying any guards. The
+    // new read must retain that precedence, including errors preparing SQL.
+    let old_error = run(f.store.load_compact_inode(f.backing, inode)).unwrap_err();
+    let new_error = run(f.store.read_compact_inode(f.backing, inode, expectation)).unwrap_err();
+    assert_eq!(authority_anchor_and_guard_table(&f), damaged);
+    assert_eq!(old_error.code, ErrorCode::Enotsup);
+    assert_eq!(
+        old_error.to_string(),
+        "unsupported chunker algorithm/version"
+    );
+    assert_eq!(
+        identity(&new_error),
+        identity(&old_error),
+        "the new selected read must report the same anchor error before its missing-table SQL error"
+    );
+}
+
+fn check_selected_anchor_column_error(sql: &str) {
+    fn retained_row(f: &Fixture) -> (MetadataPublicationRow, String, Option<Vec<u8>>, bool) {
+        let connection = f.store.0.lock().unwrap();
+        let authority = connection.query_row(
+            "SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+        ).unwrap();
+        let (kind, bytes) = connection
+            .query_row(
+                "SELECT typeof(namespace),CAST(namespace AS BLOB) FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let guards = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mount_rs_compact_guards')",
+            [], |row| row.get(0),
+        ).unwrap();
+        (authority, kind, bytes, guards)
+    }
+    let identity = |error: &FsError| {
+        (
+            error.code,
+            error.syscall.clone(),
+            error.path.clone(),
+            error.dest.clone(),
+            error.to_string(),
+        )
+    };
+    for missing_guards in [false, true] {
+        let f = fixture(true);
+        let inode = create(&f, "anchor-column-error");
+        let original = run(f.store.load_compact_inode(f.backing, inode)).unwrap();
+        let expected = CompactInodeExpectation::selected(
+            original.generation,
+            original.guard.identity,
+            &original.guard.node,
+        );
+        let before = retained_row(&f);
+        {
+            let connection = f.store.0.lock().unwrap();
+            connection.execute(sql, []).unwrap();
+            if missing_guards {
+                connection
+                    .execute("DROP TABLE mount_rs_compact_guards", [])
+                    .unwrap();
+            }
+        }
+        let damaged = retained_row(&f);
+        assert_eq!(damaged.0, before.0, "authority remains valid");
+        assert_eq!(damaged.3, !missing_guards);
+        let reference = run(f.store.load_compact_inode(f.backing, inode)).unwrap_err();
+        let selected = run(f.store.read_compact_inode(f.backing, inode, expected)).unwrap_err();
+        assert_eq!(reference.code, ErrorCode::Eio);
+        assert_eq!(
+            retained_row(&f),
+            damaged,
+            "both reads preserve the damaged row"
+        );
+        assert_eq!(
+            identity(&selected),
+            identity(&reference),
+            "same SQL column error, missing guards={missing_guards}"
+        );
+    }
+}
+
+#[test]
+fn compact_selected_anchor_column_null_preserves_reference_error() {
+    check_selected_anchor_column_error("UPDATE mount_rs_metadata SET namespace=NULL WHERE id=1");
+}
+
+#[test]
+fn compact_selected_anchor_column_blob_preserves_reference_error() {
+    check_selected_anchor_column_error("UPDATE mount_rs_metadata SET namespace=X'7b7d' WHERE id=1");
+}
+
+#[test]
+fn compact_selected_anchor_column_invalid_utf8_preserves_reference_error() {
+    check_selected_anchor_column_error(
+        "UPDATE mount_rs_metadata SET namespace=CAST(X'80ff00' AS TEXT) WHERE id=1",
+    );
+}
+
 #[test]
 fn compact_mode_discovery_is_read_only_and_rejects_damaged_authority() {
     let dir = tempfile::tempdir().unwrap();

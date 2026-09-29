@@ -39,8 +39,9 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::compact::{
-    CompactInodeCapability, CompactRootFileCreate, CompactSnapshot, CompactStructuralDelta,
-    LoadedCompactInode, PhysicalInodeIdentity, StructuralScope, ValidatedCompactStructure,
+    CompactInodeCapability, CompactInodeExpectation, CompactInodeRead, CompactRootFileCreate,
+    CompactSnapshot, CompactStructuralDelta, PhysicalInodeIdentity, StructuralScope,
+    ValidatedCompactStructure, VerifiedCompactRoot,
 };
 use mount_rs_core::storage::{
     BlockExtent, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
@@ -2363,18 +2364,24 @@ where
 
     /// A selected root read checked against the retained structural body and
     /// physical identity. A changed generation installs one coherent Full view.
-    async fn load_current_compact_root(&self) -> Result<Option<LoadedCompactInode>> {
+    async fn load_current_compact_root(&self) -> Result<Option<VerifiedCompactRoot>> {
         self.check_inode_runtime()?;
         let backing = self
             .inner
             .concurrent_backing
             .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
-        let (root, revision, generation) = {
+        let (root, revision, generation, structure) = {
             let state = self.lock_state()?;
             (
                 state.namespace.root,
                 state.revision,
                 state.persisted_revision,
+                state
+                    .compact
+                    .as_ref()
+                    .ok_or_else(stale_inode_structure)?
+                    .structure
+                    .clone(),
             )
         };
         self.inner
@@ -2382,13 +2389,17 @@ where
             .verify_concurrent_backing(backing)
             .await
             .map_err(|error| self.fail_closed(error))?;
-        let loaded = self
+        let read = self
             .inner
             .metadata
-            .load_compact_inode(backing, root)
+            .read_compact_inode(backing, root, structure.expect_root())
             .await
             .map_err(|error| self.fail_closed(error))?;
-        if loaded.generation != generation {
+        let read_generation = match &read {
+            CompactInodeRead::Unchanged(checked) => checked.generation(),
+            CompactInodeRead::Loaded(loaded) => loaded.generation,
+        };
+        if read_generation != generation {
             let snapshot = self
                 .inner
                 .metadata
@@ -2402,19 +2413,27 @@ where
         if state.revision != revision {
             return Ok(None);
         }
+        let verified = match read {
+            CompactInodeRead::Unchanged(checked) => checked.into_verified_root(),
+            CompactInodeRead::Loaded(loaded) => structure.verify_loaded_root(&loaded).ok(),
+        };
+        let Some(verified) = verified else {
+            drop(state);
+            return Err(self.fail_closed(stale_inode_structure()));
+        };
         let physical = state
             .compact
             .as_ref()
             .ok_or_else(stale_inode_structure)?
             .physical
             .get(&root);
-        if physical != Some(&loaded.guard.identity)
-            || state.namespace.nodes.get(&root) != Some(&loaded.guard.node)
+        if physical != Some(&verified.guard().identity)
+            || state.namespace.nodes.get(&root) != Some(&verified.guard().node)
         {
             drop(state);
             return Err(self.fail_closed(stale_inode_structure()));
         }
-        Ok(Some(loaded))
+        Ok(Some(verified))
     }
 
     async fn refresh_compact_inode_once(&self, inode: InodeId) -> Result<bool> {
@@ -2423,20 +2442,85 @@ where
             .inner
             .concurrent_backing
             .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
-        let (generation, revision) = {
+        let (generation, revision, namespace, selected, physical, structure) = {
             let state = self.lock_state()?;
             if state.orphans.contains_key(&inode) {
                 return Ok(true);
             }
-            (state.persisted_revision, state.revision)
+            let compact = state.compact.as_ref().ok_or_else(stale_inode_structure)?;
+            (
+                state.persisted_revision,
+                state.revision,
+                Arc::clone(&state.namespace),
+                state.selected_inodes.get(&inode).cloned(),
+                compact.physical.get(&inode).copied(),
+                (inode == state.namespace.root).then(|| compact.structure.clone()),
+            )
         };
-        let loaded = match self.inner.metadata.load_compact_inode(backing, inode).await {
-            Ok(loaded) => loaded,
+        let node = selected.as_deref().or_else(|| namespace.nodes.get(&inode));
+        let result = if let (Some(node), Some(identity)) = (node, physical) {
+            let expected = structure.as_ref().map_or_else(
+                || CompactInodeExpectation::selected(generation, identity, node),
+                ValidatedCompactStructure::expect_root,
+            );
+            self.inner
+                .metadata
+                .read_compact_inode(backing, inode, expected)
+                .await
+        } else {
+            self.inner
+                .metadata
+                .load_compact_inode(backing, inode)
+                .await
+                .map(CompactInodeRead::Loaded)
+        };
+        let read = match result {
+            Ok(read) => read,
             Err(error) if matches!(error.code, ErrorCode::Estale | ErrorCode::Enoent) => {
                 self.refresh_concurrent_namespace().await?;
                 return Ok(false);
             }
             Err(error) => return Err(self.fail_closed(error)),
+        };
+        let loaded = match read {
+            CompactInodeRead::Loaded(loaded) => loaded,
+            CompactInodeRead::Unchanged(checked) => {
+                if checked.generation() != generation {
+                    self.refresh_concurrent_namespace().await?;
+                    return Ok(false);
+                }
+                let logical = checked
+                    .identity()
+                    .logical_version(generation)
+                    .map_err(|error| self.fail_closed(error))?;
+                let mut state = self.lock_state()?;
+                if state.revision != revision {
+                    return Ok(false);
+                }
+                if checked.inode() != inode
+                    || state
+                        .compact
+                        .as_ref()
+                        .and_then(|compact| compact.physical.get(&inode))
+                        .copied()
+                        != Some(checked.identity())
+                {
+                    drop(state);
+                    return Err(self.fail_closed(stale_inode_structure()));
+                }
+                state.inode_revisions.insert(inode, logical.inode_revision);
+                let Some(node) = node else {
+                    drop(state);
+                    return Err(self.fail_closed(stale_inode_structure()));
+                };
+                // First admission after Full needs the existing selected
+                // overlay contract. Subsequent unchanged reads reuse it.
+                state
+                    .selected_inodes
+                    .entry(inode)
+                    .or_insert_with(|| Arc::new(node.clone()));
+                return Ok(true);
+            }
         };
         if loaded.generation != generation {
             self.refresh_concurrent_namespace().await?;
@@ -2787,7 +2871,7 @@ where
                                     .is_some_and(|node| matches!(node.data, NodeData::File(_)))
                             })
                     })
-                    && root.generation == generation
+                    && root.generation() == generation
             });
 
             let mut retry = false;
@@ -2799,12 +2883,12 @@ where
                     if state.revision != revision
                         || state.persisted_revision != generation
                         || !Arc::ptr_eq(&state.namespace, &namespace)
-                        || state.namespace.nodes.get(&inode) != Some(&root.guard.node)
+                        || state.namespace.nodes.get(&inode) != Some(&root.guard().node)
                         || state
                             .compact
                             .as_ref()
                             .and_then(|compact| compact.physical.get(&inode))
-                            != Some(&root.guard.identity)
+                            != Some(&root.guard().identity)
                     {
                         retry = true;
                         break;
@@ -5851,9 +5935,9 @@ where
                     namespace.default_gid,
                     namespace.default_chunker.clone(),
                 );
-                let mut parent_stats = parent.guard.node.stats.clone();
+                let mut parent_stats = parent.guard().node.stats.clone();
                 touch_modified(&mut parent_stats, true)?;
-                let proposal = CompactRootFileCreate::capture(
+                let proposal = CompactRootFileCreate::capture_verified(
                     &compact.structure,
                     &parent,
                     *compact

@@ -12,8 +12,8 @@ use mount_rs_core::diagnostics::profile::{Event, Span, add};
 use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::InodeId;
 use mount_rs_core::storage::compact::{
-    CompactInodeCapability, CompactPublication, CompactSnapshot, CompactStructuralDelta,
-    LoadedCompactInode, PhysicalInodeIdentity,
+    CompactInodeCapability, CompactInodeExpectation, CompactInodeRead, CompactPublication,
+    CompactSnapshot, CompactStructuralDelta, LoadedCompactInode, PhysicalInodeIdentity,
 };
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
@@ -160,6 +160,37 @@ impl MetadataStore for ErasedMetadataStore {
                 .await;
             #[cfg(not(feature = "observability"))]
             let result = self.inner.load_compact_inode(backing, inode).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: CompactInodeExpectation<'_>,
+    ) -> Result<CompactInodeRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactInode);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.load",
+                    None,
+                    self.inner.read_compact_inode(backing, inode, expected),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .read_compact_inode(backing, inode, expected)
+                .await;
             result
         }
         .await;

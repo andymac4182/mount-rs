@@ -59,11 +59,11 @@ fn validate_schema(connection: &Connection) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn anchor(
+fn authority(
     database: &Database,
     connection: &Connection,
     backing: ConcurrentBackingId,
-) -> Result<CompactAnchor> {
+) -> Result<u64> {
     let row: MetadataPublicationRow = {
         let _profile = Span::new(Event::SqliteCompactAuthorityQuery);
         connection.query_row(
@@ -85,6 +85,90 @@ fn anchor(
             "invalid compact authority fence or generation",
         ));
     }
+    Ok(generation as u64)
+}
+
+#[cfg(unix)]
+fn selected_optional_text<'row>(row: &'row Row<'_>, index: usize) -> Option<Option<&'row str>> {
+    match row.get_ref(index).ok()? {
+        rusqlite::types::ValueRef::Null => Some(None),
+        value => Some(Some(value.as_str().ok()?)),
+    }
+}
+
+#[cfg(unix)]
+fn selected_backing_matches(text: Option<&str>, backing: ConcurrentBackingId) -> bool {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let Some(text) = text else {
+        return false;
+    };
+    let text = text.as_bytes();
+    text.len() == 32
+        && backing.as_bytes().iter().enumerate().all(|(index, &byte)| {
+            text[2 * index] == HEX[(byte >> 4) as usize]
+                && text[2 * index + 1] == HEX[(byte & 0x0f) as usize]
+        })
+}
+
+#[cfg(unix)]
+fn selected_authority(
+    database: &Database,
+    connection: &Connection,
+    backing: ConcurrentBackingId,
+) -> Result<u64> {
+    let query_profile = Span::new(Event::SqliteCompactAuthorityQuery);
+    let mut statement = connection
+        .prepare(
+            "SELECT write_mode,backing_id,owner,fence,expires,revision,physical_dev,physical_ino,physical_path FROM mount_rs_metadata INDEXED BY mount_rs_inode_authority WHERE id=1",
+        )
+        .map_err(backend_error)?;
+    let mut rows = statement.query([]).map_err(backend_error)?;
+    let row = rows
+        .next()
+        .map_err(backend_error)?
+        .ok_or_else(|| backend_error(rusqlite::Error::QueryReturnedNoRows))?;
+    // Inspect every field before authority checks, just as the owned tuple
+    // decoder does. Unsupported representations use that exact decoder in the
+    // same transaction, preserving conversion errors and their precedence.
+    let borrowed = (|| {
+        Some((
+            selected_optional_text(row, 0)?,
+            selected_optional_text(row, 1)?,
+            selected_optional_text(row, 2)?,
+            row.get::<_, i64>(3).ok()?,
+            row.get::<_, i64>(4).ok()?,
+            row.get::<_, i64>(5).ok()?,
+            selected_optional_text(row, 6)?,
+            selected_optional_text(row, 7)?,
+            selected_optional_text(row, 8)?,
+        ))
+    })();
+    drop(query_profile);
+    let Some((mode, stored, owner, fence, expires, generation, dev, ino, path)) = borrowed else {
+        return authority(database, connection, backing);
+    };
+    if mode != Some(COMPACT_WRITE_MODE) || !selected_backing_matches(stored, backing) {
+        return Err(stale());
+    }
+    {
+        let _profile = Span::new(Event::SqliteCompactAuthorityPath);
+        require_matching_selected_metadata_stamp(database, dev, ino, path)?;
+    }
+    if owner.is_some() || fence != CONCURRENT_FENCE_SENTINEL || expires != 0 || generation <= 0 {
+        return Err(incompatible_schema(
+            "invalid compact authority fence or generation",
+        ));
+    }
+    Ok(generation as u64)
+}
+
+#[cfg(unix)]
+fn anchor(
+    database: &Database,
+    connection: &Connection,
+    backing: ConcurrentBackingId,
+) -> Result<CompactAnchor> {
+    let generation = authority(database, connection, backing)?;
     let json: String = {
         let mut observed = Span::new(Event::SqliteCompactAnchorQueryBytes);
         let json: String = connection
@@ -101,12 +185,31 @@ fn anchor(
     let anchor = {
         let _profile = Span::new(Event::SqliteCompactAnchorDecodeBytes).units(json.len() as u64);
         let anchor = decode_compact_anchor(json.as_bytes())?;
-        if anchor.generation != generation as u64 || anchor.backing != backing {
+        if anchor.generation != generation || anchor.backing != backing {
             return Err(incompatible_schema("compact anchor authority mismatch"));
         }
         anchor
     };
     Ok(anchor)
+}
+
+#[cfg(unix)]
+fn anchor_before_guard_error(
+    anchor_json: &str,
+    backing: ConcurrentBackingId,
+    generation: u64,
+    query_error: rusqlite::Error,
+) -> FsError {
+    // The owned path validates the fresh anchor before querying its guard.
+    // Preserve that precedence only on SQL failure, using the same view bytes.
+    let _profile = Span::new(Event::SqliteCompactAnchorDecodeBytes).units(anchor_json.len() as u64);
+    match decode_compact_anchor(anchor_json.as_bytes()) {
+        Err(error) => error,
+        Ok(anchor) if anchor.generation != generation || anchor.backing != backing => {
+            incompatible_schema("compact anchor authority mismatch")
+        }
+        Ok(_) => backend_error(query_error),
+    }
 }
 
 #[cfg(unix)]
@@ -440,6 +543,107 @@ impl SqliteMetadataStore {
         let loaded = LoadedCompactInode::from_guard(&anchor, inode, guard)?;
         self.0.current_file_stamp()?;
         Ok(loaded)
+    }
+
+    pub(super) fn compact_read(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        expected: CompactInodeExpectation<'_>,
+    ) -> Result<CompactInodeRead> {
+        let mut connection = {
+            let _profile = Span::new(Event::SqliteCompactReadLockWait);
+            self.0.lock()?
+        };
+        let tx = {
+            let _profile = Span::new(Event::SqliteCompactReadBegin);
+            connection.transaction().map_err(backend_error)?
+        };
+        let generation = selected_authority(&self.0, &tx, backing)?;
+        let mut anchor_statement = tx
+            .prepare("SELECT namespace FROM mount_rs_metadata WHERE id=1")
+            .map_err(backend_error)?;
+        let mut anchor_rows = anchor_statement.query([]).map_err(backend_error)?;
+        let mut anchor_observed = Span::new(Event::SqliteCompactAnchorQueryBytes);
+        let anchor_row = anchor_rows
+            .next()
+            .map_err(backend_error)?
+            .ok_or_else(stale)?;
+        // Both SQLite cursor owners and the transaction stay live through the
+        // comparator and fallback. No TEXT buffer is copied for an exact hit.
+        let anchor_json = match anchor_row.get_ref(0).map_err(backend_error)?.as_str() {
+            Ok(json) => std::borrow::Cow::Borrowed(json),
+            // Use the original typed conversion on this same row for its
+            // column index/name/type and UTF-8 error context. This cold path
+            // adds no copy to a valid borrowed TEXT read and performs no I/O.
+            Err(_) => {
+                std::borrow::Cow::Owned(anchor_row.get::<_, String>(0).map_err(backend_error)?)
+            }
+        };
+        anchor_observed.set_units(anchor_json.len() as u64);
+        drop(anchor_observed);
+        profile::add(Event::CompactAnchorReturned, anchor_json.len() as u64);
+        let mut observed = Span::new(Event::SqliteCompactGuardSelectedRows);
+        let mut statement = tx.prepare("SELECT inode,incarnation,epoch,revision,node FROM mount_rs_compact_guards WHERE inode=?1")
+            .map_err(|error| anchor_before_guard_error(&anchor_json, backing, generation, error))?;
+        let mut rows = statement
+            .query([inode.to_string()])
+            .map_err(|error| anchor_before_guard_error(&anchor_json, backing, generation, error))?;
+        let row = rows
+            .next()
+            .map_err(|error| anchor_before_guard_error(&anchor_json, backing, generation, error))?;
+        observed.set_units(u64::from(row.is_some()));
+        let checked = row.and_then(|row| {
+            let text = row.get_ref(0).ok()?.as_str().ok()?;
+            let selected = text.parse::<u64>().ok()?;
+            if selected != inode || selected.to_string() != text {
+                return None;
+            }
+            let identity = PhysicalInodeIdentity {
+                incarnation: row.get(1).ok()?,
+                epoch: row.get(2).ok()?,
+                revision: row.get(3).ok()?,
+            };
+            let node = row.get_ref(4).ok()?.as_str().ok()?;
+            let _anchor_profile =
+                Span::new(Event::SqliteCompactAnchorDecodeBytes).units(anchor_json.len() as u64);
+            let _guard_profile =
+                Span::new(Event::SqliteCompactGuardSelectedDecodeBytes).units(node.len() as u64);
+            check_compact_inode_unchanged(
+                anchor_json.as_bytes(),
+                backing,
+                generation,
+                inode,
+                identity,
+                node.as_bytes(),
+                expected,
+            )
+        });
+        let result = if let Some(checked) = checked {
+            CompactInodeRead::Unchanged(checked)
+        } else {
+            // Preserve anchor-before-guard errors, including corrupt physical
+            // tokens, using the reference decoder on the same transaction.
+            let anchor = decode_compact_anchor(anchor_json.as_bytes())?;
+            if anchor.generation != generation || anchor.backing != backing {
+                return Err(incompatible_schema("compact anchor authority mismatch"));
+            }
+            let row = row.ok_or_else(stale)?;
+            let (selected, guard) = decode_guard(row, true)?;
+            if selected != inode {
+                return Err(stale());
+            }
+            CompactInodeRead::Loaded(LoadedCompactInode::from_guard(&anchor, inode, guard)?)
+        };
+        if rows
+            .next()
+            .map_err(|error| anchor_before_guard_error(&anchor_json, backing, generation, error))?
+            .is_some()
+        {
+            return Err(incompatible_schema("duplicate compact guard identity"));
+        }
+        self.0.current_file_stamp()?;
+        Ok(result)
     }
 
     pub(super) fn compact_publish_inode(
