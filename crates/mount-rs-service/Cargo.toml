@@ -50,6 +50,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [[test]]
 name = "quic_production_target"

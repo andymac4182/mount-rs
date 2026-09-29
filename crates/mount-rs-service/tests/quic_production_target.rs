@@ -312,7 +312,7 @@ fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
                         .unwrap()
             );
         }
-        let startup = target::read_json(&root.join("metrics/startup-g0.json")).unwrap();
+        let startup = target::read_json(&root.join("metrics/startup-g0.json.gz")).unwrap();
         let completed_calls = |value: &serde_json::Value| -> u128 {
             value["storage"]["entries"]
                 .as_array()

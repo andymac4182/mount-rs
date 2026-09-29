@@ -286,25 +286,62 @@ pub fn publish_immutable(path: &Path, value: &Value) -> Result<(), String> {
     result.map(|_| ())
 }
 fn publish_immutable_inner(path: &Path, value: &Value) -> Result<u64, String> {
-    let bytes = serde_json::to_vec(value).map_err(|_| "metric encoding failed")?;
     let pending = path.with_extension(format!("pending-{}", std::process::id()));
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&pending)
         .map_err(|_| "metric pending file already exists or unavailable")?;
-    let result: Result<(), String> = (|| {
-        file.write_all(&bytes).map_err(|_| "metric write failed")?;
+    let result: Result<u64, String> = (|| {
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        serde_json::to_writer(&mut encoder, value).map_err(|_| "metric encoding failed")?;
+        let mut file = encoder
+            .finish()
+            .map_err(|_| "metric compression finish failed")?;
         file.flush().map_err(|_| "metric flush failed")?;
+        let bytes = file.metadata().map_err(|_| "metric metadata failed")?.len();
+        if bytes > ENCODED_METRIC_LIMIT {
+            return Err("encoded metric limit exceeded".into());
+        }
+        drop(file);
         std::fs::hard_link(&pending, path)
             .map_err(|_| "immutable metric receipt exists or publication failed")?;
-        Ok(())
+        Ok(bytes)
     })();
-    drop(file);
     let removed = std::fs::remove_file(&pending);
-    let result =
-        result.and_then(|()| removed.map_err(|_| "metric pending cleanup failed".to_string()));
-    result.map(|()| bytes.len() as u64)
+    result.and_then(|bytes| {
+        removed
+            .map_err(|_| "metric pending cleanup failed".to_string())
+            .map(|()| bytes)
+    })
+}
+pub(crate) const ENCODED_METRIC_LIMIT: u64 = 16 * 1024 * 1024;
+pub(crate) const DECODED_METRIC_LIMIT: u64 = 64 * 1024 * 1024;
+pub(crate) fn read_compressed(path: &Path) -> Result<Value, String> {
+    use std::io::{BufRead, BufReader, Read};
+    let file = std::fs::File::open(path).map_err(|_| "metric receipt unavailable")?;
+    if file.metadata().map_err(|_| "metric metadata failed")?.len() > ENCODED_METRIC_LIMIT {
+        return Err("encoded metric limit exceeded".into());
+    }
+    let mut decoder = flate2::bufread::GzDecoder::new(BufReader::new(file));
+    let mut bytes = Vec::new();
+    decoder
+        .by_ref()
+        .take(DECODED_METRIC_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "compressed metric invalid")?;
+    if bytes.len() as u64 > DECODED_METRIC_LIMIT {
+        return Err("decoded metric limit exceeded".into());
+    }
+    if !decoder
+        .into_inner()
+        .fill_buf()
+        .map_err(|_| "metric trailing input unavailable")?
+        .is_empty()
+    {
+        return Err("compressed metric trailing input".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "metric receipt invalid".into())
 }
 const CATEGORIES: [&str; 21] = [
     "context_open",
@@ -1202,7 +1239,7 @@ impl Collector {
             id["sequence"] = json!(self.sequence + 1);
             id["phase"] = json!("worker_cleanup");
             id["boundary"] = json!("terminal");
-            let path = child.root.join("metrics/terminal.json");
+            let path = child.root.join("metrics/terminal.json.gz");
             match super::read_json(&path) {
                 Ok(value) => {
                     let valid = validate_receipt(&value["identity"], &id);
@@ -1220,7 +1257,7 @@ impl Collector {
                     self.complete &= complete && accounting_complete;
                     identities.push(value["identity"].clone());
                     expected.push(id);
-                    rows.push(json!({"server":child.server,"pid":child.child.id(),"file":format!("worker-{}/metrics/terminal.json",child.server),"sha256":super::file_digest(&path)?,"complete":complete,"metrics_complete":value["metrics_complete"]==true && accounting_complete,"observer_accounting_complete":accounting_complete,"identity_error":valid.err()}));
+                    rows.push(json!({"server":child.server,"pid":child.child.id(),"file":format!("worker-{}/metrics/terminal.json.gz",child.server),"sha256":super::file_digest(&path)?,"complete":complete,"metrics_complete":value["metrics_complete"]==true && accounting_complete,"observer_accounting_complete":accounting_complete,"identity_error":valid.err()}));
                 }
                 Err(error) => {
                     self.complete = false;
@@ -1266,12 +1303,12 @@ impl Collector {
         id["phase"] = json!("controller_cleanup");
         id["boundary"] = json!("terminal");
         let value = self.local.capture(id, None, oracle)?;
-        let path = output.join("metrics/terminal.json");
+        let path = output.join("metrics/terminal.json.gz");
         publish_immutable(&path, &value)?;
         let complete = Instant::now() <= deadline && value["capture_complete"] == true;
         let metrics_complete = complete && value["metrics_complete"] == true;
         self.complete &= metrics_complete;
-        self.records.push(json!({"phase":"controller_cleanup","boundary":"terminal","complete":complete,"controller":{"file":"metrics/terminal.json","sha256":super::file_digest(&path)?},"metrics_complete":metrics_complete,"scope":"after cleanup; worker terminal observations retained separately; existing audit observation deadline"}));
+        self.records.push(json!({"phase":"controller_cleanup","boundary":"terminal","complete":complete,"controller":{"file":"metrics/terminal.json.gz","sha256":super::file_digest(&path)?},"metrics_complete":metrics_complete,"scope":"after cleanup; worker terminal observations retained separately; existing audit observation deadline"}));
         if Instant::now() > deadline {
             self.complete = false;
             if let Some(record) = self.records.last_mut() {
@@ -1349,7 +1386,7 @@ impl Collector {
                 let startup_path = child
                     .root
                     .join("metrics")
-                    .join(format!("startup-g{generation}.json"));
+                    .join(format!("startup-g{generation}.json.gz"));
                 let startup = super::read_json(&startup_path)?;
                 let expected_startup = identity(
                     private,
@@ -1363,7 +1400,8 @@ impl Collector {
                 validate_receipt(&startup["identity"], &expected_startup)?;
                 let hash = super::file_digest(&startup_path)?;
                 if ready.phase_metrics["sha256"] != hash
-                    || ready.phase_metrics["file"] != format!("metrics/startup-g{generation}.json")
+                    || ready.phase_metrics["file"]
+                        != format!("metrics/startup-g{generation}.json.gz")
                 {
                     return Err("startup metric readiness reference mismatch".into());
                 }
@@ -1378,13 +1416,13 @@ impl Collector {
                     child.server,
                 )?;
                 self.complete &= startup["metrics_complete"] == true;
-                readiness_metrics.push(json!({"server":child.server,"generation":generation,"file":format!("worker-{}/metrics/startup-g{generation}.json",child.server),"sha256":hash,"metrics_complete":startup["metrics_complete"]}));
+                readiness_metrics.push(json!({"server":child.server,"generation":generation,"file":format!("worker-{}/metrics/startup-g{generation}.json.gz",child.server),"sha256":hash,"metrics_complete":startup["metrics_complete"]}));
                 if generation > 0 {
                     let old = generation - 1;
                     let closed_path = child
                         .root
                         .join("metrics")
-                        .join(format!("closed-g{old}.json"));
+                        .join(format!("closed-g{old}.json.gz"));
                     let closed = super::read_json(&closed_path)?;
                     let expected_closed = identity(
                         private,
@@ -1401,7 +1439,7 @@ impl Collector {
                         return Err("closed generation runtime observation incomplete".into());
                     }
                     self.complete &= closed["metrics_complete"] == true;
-                    readiness_metrics.push(json!({"server":child.server,"generation":old,"file":format!("worker-{}/metrics/closed-g{old}.json",child.server),"sha256":super::file_digest(&closed_path)?,"metrics_complete":closed["metrics_complete"]}));
+                    readiness_metrics.push(json!({"server":child.server,"generation":old,"file":format!("worker-{}/metrics/closed-g{old}.json.gz",child.server),"sha256":super::file_digest(&closed_path)?,"metrics_complete":closed["metrics_complete"]}));
                 }
             }
             let existing =
@@ -1431,19 +1469,19 @@ impl Collector {
                 // Read all known receipts before checking child loss, retaining the other nine.
                 for (slot,child) in receipts.iter_mut().zip(&fleet.children) {
                     if slot.is_some(){continue;}
-                    let path=child.root.join("metrics").join(format!("g{generation}-s{sequence}.json"));
+                    let path=child.root.join("metrics").join(format!("g{generation}-s{sequence}.json.gz"));
                     if path.exists(){
                         let ack=super::read_json(&child.root.join("metrics-ack.json")).unwrap_or(Value::Null);
                         if ack["identity"]["sequence"].as_u64().is_none_or(|s|s<sequence){continue;}
                         validate_receipt(&ack["identity"],&expected[child.server])?;
                         let mut receipt=super::read_json(&path)?;validate_receipt(&receipt["identity"],&expected[child.server])?;
                         let hash=super::file_digest(&path)?;
-                        if ack["file"]!=format!("metrics/g{generation}-s{sequence}.json") || ack["sha256"]!=hash {return Err("metric acknowledgment artifact mismatch".into());}
+                        if ack["file"]!=format!("metrics/g{generation}-s{sequence}.json.gz") || ack["sha256"]!=hash {return Err("metric acknowledgment artifact mismatch".into());}
                         runtime_boundary(&receipt,&private.expected_backings,phase,boundary,child.server)?;
                         receipt["_artifact_sha256"]=json!(hash);*slot=Some(receipt);
                     }
                 }
-                self.records[index]["workers"]=json!(receipts.iter().enumerate().filter_map(|(server,r)|r.as_ref().map(|r|json!({"server":server,"pid":r["identity"]["pid"],"file":format!("worker-{server}/metrics/g{generation}-s{sequence}.json"),"metrics_complete":r["metrics_complete"],"sha256":r["_artifact_sha256"]}))).collect::<Vec<_>>());
+                self.records[index]["workers"]=json!(receipts.iter().enumerate().filter_map(|(server,r)|r.as_ref().map(|r|json!({"server":server,"pid":r["identity"]["pid"],"file":format!("worker-{server}/metrics/g{generation}-s{sequence}.json.gz"),"metrics_complete":r["metrics_complete"],"sha256":r["_artifact_sha256"]}))).collect::<Vec<_>>());
                 fleet.check()?;
                 if Instant::now()>=deadline{return Err("shared metric barrier deadline".into());}
                 if receipts.iter().all(Option::is_some){break;}
@@ -1452,10 +1490,10 @@ impl Collector {
             let identities:Vec<_>=receipts.iter().map(|r|r.as_ref().unwrap()["identity"].clone()).collect();validate_fleet(&identities,&expected)?;
             let id=identity(private,std::process::id(),None,generation,sequence,phase,boundary);
             let receipt=self.local.capture(id,None,oracle)?;
-            let path=root.join(format!("g{generation}-s{sequence}.json"));publish_immutable(&path,&receipt)?;
+            let path=root.join(format!("g{generation}-s{sequence}.json.gz"));publish_immutable(&path,&receipt)?;
             let metrics_complete=receipts.iter().all(|r|r.as_ref().unwrap()["metrics_complete"]==true) && receipt["metrics_complete"]==true;
             self.complete &= metrics_complete;
-            self.records[index]["controller"]=json!({"file":format!("metrics/g{generation}-s{sequence}.json"),"sha256":super::file_digest(&path)?,"metrics_complete":receipt["metrics_complete"]});
+            self.records[index]["controller"]=json!({"file":format!("metrics/g{generation}-s{sequence}.json.gz"),"sha256":super::file_digest(&path)?,"metrics_complete":receipt["metrics_complete"]});
             self.records[index]["metrics_complete"]=json!(metrics_complete);
             if Instant::now()>deadline{return Err("metric capture/publication exceeded shared deadline".into());}
             Ok::<_,String>(())
@@ -2011,12 +2049,120 @@ mod tests {
     #[test]
     fn phase_receipt_publication_never_overwrites_prior_evidence() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("g1-s4.json");
+        let path = directory.path().join("g1-s4.json.gz");
         let first = json!({"identity":identity(),"complete":false,"reason":"nonquiescent"});
         publish_immutable(&path, &first).expect("first immutable receipt must publish");
         let bytes = std::fs::read(&path).unwrap();
         assert!(publish_immutable(&path, &json!({"complete":true})).is_err());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+    #[test]
+    fn large_metric_frame_is_compressed_readable_and_immutable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("g1-s4.json.gz");
+        let counters: Vec<Value> = (0..256)
+            .map(|index| {
+                json!({
+                    "name": format!("operation_{index}"),
+                    "calls": index + 1,
+                    "success": index + 1,
+                    "error": 0,
+                    "latency_log2_us": vec![0u64; 32],
+                })
+            })
+            .collect();
+        let frame = json!({
+            "identity": identity(),
+            "core": {"entries": counters},
+            "runtime_activation": runtime_fixture(1, 100, 1),
+            "oracle": {"complete": true, "verified_passes": 1},
+        });
+        let plain_len = serde_json::to_vec(&frame).unwrap().len();
+
+        publish_immutable(&path, &frame).expect("metric frame must publish");
+        let encoded = std::fs::read(&path).unwrap();
+        assert!(
+            encoded.starts_with(&[0x1f, 0x8b, 0x08]),
+            "a .json.gz metric frame must be gzip encoded"
+        );
+        assert!(
+            encoded.len() * 4 <= plain_len,
+            "repetitive counter frames must occupy at most one quarter of their JSON size"
+        );
+        let decoded = super::super::read_json(&path).expect("metric reader must decode gzip");
+        assert_eq!(decoded["identity"], frame["identity"]);
+        assert_eq!(decoded["core"]["entries"], frame["core"]["entries"]);
+        assert_eq!(decoded, frame);
+
+        assert!(publish_immutable(&path, &json!({"identity":identity()})).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), encoded);
+    }
+    fn gzip_test_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+    #[test]
+    fn metric_reader_accepts_one_complete_gzip_member_and_ordinary_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let value = json!({"identity":identity(),"core":{"entries":[{"calls":7}]}});
+        let json_bytes = serde_json::to_vec(&value).unwrap();
+        let compressed = directory.path().join("one.json.gz");
+        std::fs::write(&compressed, gzip_test_bytes(&json_bytes)).unwrap();
+        assert_eq!(super::super::read_json(&compressed).unwrap(), value);
+
+        let ordinary = directory.path().join("ordinary.json");
+        std::fs::write(&ordinary, &json_bytes).unwrap();
+        assert_eq!(super::super::read_json(&ordinary).unwrap(), value);
+    }
+    #[test]
+    fn metric_reader_rejects_malformed_or_extra_gzip_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let valid = gzip_test_bytes(br#"{"identity":{"sequence":4},"complete":true}"#);
+        let mut checksum_corrupt = valid.clone();
+        let crc_index = checksum_corrupt.len() - 8;
+        checksum_corrupt[crc_index] ^= 1;
+        let mut trailing_bytes = valid.clone();
+        trailing_bytes.extend_from_slice(b"trailing bytes");
+        let mut concatenated_members = valid.clone();
+        concatenated_members.extend_from_slice(&gzip_test_bytes(br#"{"second":true}"#));
+        for (name, bytes) in [
+            ("plain-json", br#"{"complete":true}"#.to_vec()),
+            ("invalid-header", vec![0x1f, 0x8b, 0x08]),
+            ("truncated", valid[..valid.len() - 2].to_vec()),
+            ("checksum-corrupt", checksum_corrupt),
+            ("trailing-bytes", trailing_bytes),
+            ("concatenated-members", concatenated_members),
+        ] {
+            let path = directory.path().join(format!("{name}.json.gz"));
+            std::fs::write(&path, bytes).unwrap();
+            assert!(
+                super::super::read_json(&path).is_err(),
+                "{name} must not qualify as one complete gzip metric frame"
+            );
+        }
+    }
+    #[test]
+    fn metric_reader_rejects_decoded_size_bomb_without_building_plain_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.json.gz");
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(b"\"").unwrap();
+        let chunk = [b'a'; 64 * 1024];
+        let mut remaining = DECODED_METRIC_LIMIT as usize;
+        while remaining != 0 {
+            let count = remaining.min(chunk.len());
+            encoder.write_all(&chunk[..count]).unwrap();
+            remaining -= count;
+        }
+        encoder.write_all(b"\"").unwrap();
+        let encoded = encoder.finish().unwrap();
+        assert!(
+            encoded.len() < ENCODED_METRIC_LIMIT as usize,
+            "small encoded frame must exercise the decoded limit"
+        );
+        std::fs::write(&path, encoded).unwrap();
+        assert!(super::super::read_json(&path).is_err());
     }
     fn object_store_sample(value: &Value) -> mount_rs_service::object_store_diagnostics::Sample {
         let codec_records = value["records"].as_array().expect("bounded record array");

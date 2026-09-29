@@ -1236,7 +1236,7 @@ async fn worker_observed(
                 super::metrics::identity(&p, std::process::id(), Some(index), generation, last_metric_sequence, "worker_startup", "ready"),
                 server_diagnostics.as_ref(), || runtime.runtime_activation_snapshot(),
             )?;
-            let startup_path = metrics_root.join(format!("startup-g{generation}.json"));
+            let startup_path = metrics_root.join(format!("startup-g{generation}.json.gz"));
             super::metrics::publish_immutable(&startup_path, &startup_metrics)?;
             let ready = Ready {
                 pid: std::process::id(),
@@ -1256,7 +1256,7 @@ async fn worker_observed(
                 runtime_activation: startup_metrics["runtime_activation"].clone(),
                 resources: resources.snapshot(),
                 startup_diagnostics: startup.snapshot().map(|value| serde_json::to_value(value).unwrap()),
-                phase_metrics: json!({"file":format!("metrics/startup-g{generation}.json"),"sha256":super::file_digest(&startup_path)?,"metrics_complete":startup_metrics["metrics_complete"]}),
+                phase_metrics: json!({"file":format!("metrics/startup-g{generation}.json.gz"),"sha256":super::file_digest(&startup_path)?,"metrics_complete":startup_metrics["metrics_complete"]}),
                 core_profile: json!({
                         "enabled":mount_rs_core::diagnostics::profile::enabled(),
                         "scope":"worker service SDK startup and replica refresh cumulative counters",
@@ -1287,9 +1287,9 @@ async fn worker_observed(
                     super::metrics::validate_receipt(requested, &expected)?;
                     if metric_sequence.accept(requested)? {
                         let captured = phase_metrics.capture_with_runtime(expected, server_diagnostics.as_ref(), || runtime.runtime_activation_snapshot())?;
-                        let path = metrics_root.join(format!("g{generation}-s{sequence}.json"));
+                        let path = metrics_root.join(format!("g{generation}-s{sequence}.json.gz"));
                         super::metrics::publish_immutable(&path, &captured)?;
-                        super::write_json(&root.join("metrics-ack.json"), &json!({"identity":requested,"file":format!("metrics/g{generation}-s{sequence}.json"),"sha256":super::file_digest(&path)?}))?;
+                        super::write_json(&root.join("metrics-ack.json"), &json!({"identity":requested,"file":format!("metrics/g{generation}-s{sequence}.json.gz"),"sha256":super::file_digest(&path)?}))?;
                         last_metric_sequence = sequence;
                     }
                 }
@@ -1302,7 +1302,7 @@ async fn worker_observed(
                 super::metrics::identity(&p,std::process::id(),Some(index),generation,last_metric_sequence+1,"replica_close","after"),
                 server_diagnostics.as_ref(),|| runtime.runtime_activation_snapshot(),
             )?;
-            super::metrics::publish_immutable(&metrics_root.join(format!("closed-g{generation}.json")),&closed_metrics)?;
+            super::metrics::publish_immutable(&metrics_root.join(format!("closed-g{generation}.json.gz")),&closed_metrics)?;
             generation += 1;
         }
     })
@@ -1352,7 +1352,7 @@ async fn worker_observed(
             )
         })
         .and_then(|value| {
-            super::metrics::publish_immutable(&metrics_root.join("terminal.json"), &value)?;
+            super::metrics::publish_immutable(&metrics_root.join("terminal.json.gz"), &value)?;
             Ok(value)
         });
     let sampler_close = resources.finish().await;
@@ -1378,7 +1378,7 @@ async fn worker_observed(
                 "replica_close_error":close.err(),
                 "context_closed":matches!(context_close,
                     Ok(Ok(()))),
-                "phase_metrics":{"file":"metrics/terminal.json","capture_error":terminal_metrics.as_ref().err(),"metrics_complete":terminal_metrics.as_ref().ok().map(|m| &m["metrics_complete"])},
+                "phase_metrics":{"file":"metrics/terminal.json.gz","capture_error":terminal_metrics.as_ref().err(),"metrics_complete":terminal_metrics.as_ref().ok().map(|m| &m["metrics_complete"])},
                 "startup_diagnostics":startup.snapshot(),
                 "replica_opens":opens,"sampler_shutdown_error":sampler_close.err(),"observer_close_error":observer_close.err(),"observer_processes":commands.receipts(),
                 "resources":resources.snapshot(),

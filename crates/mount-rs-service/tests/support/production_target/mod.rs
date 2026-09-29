@@ -62,6 +62,9 @@ pub fn file_digest(path: &Path) -> Result<String, String> {
     result
 }
 pub fn read_json(path: &Path) -> Result<Value, String> {
+    if path.extension().is_some_and(|extension| extension == "gz") {
+        return metrics::read_compressed(path);
+    }
     serde_json::from_slice(&std::fs::read(path).map_err(|_| "receipt unavailable")?)
         .map_err(|_| "receipt invalid".into())
 }
