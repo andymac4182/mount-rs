@@ -1561,7 +1561,7 @@ async fn actual_compact_file_create_lost_commit_ack_is_unknown_and_not_replayed(
         1
     );
     let joined = |sql: &String| {
-        sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
+        compact_proxy::joined_authority_select(sql)
             && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
     };
     assert_eq!(
@@ -2416,6 +2416,7 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     let inode = create(&f, "session-reuse").await;
     let original = f.store.load_compact_inode(f.backing, inode).await.unwrap();
     let initial = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let (_, _, old_audited) = initial.clone().into_validated_namespace().unwrap();
     let authority = CompactAuthority::from_anchor(&initial.anchor).unwrap();
     let expected = CompactFileExpectation::from_authority(
         &authority,
@@ -2484,8 +2485,12 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     let after_drop = timeout(BOUND, reader.read_compact_file(f.backing, inode, expected)).await;
     let (drop_queries, _) = proxy.end();
 
+    let before_cancel = timeout(BOUND, raw(&f)).await;
     proxy.begin();
-    proxy.trace.pause_guards.store(true, Ordering::SeqCst);
+    proxy
+        .trace
+        .pause_guard_response
+        .store(true, Ordering::SeqCst);
     let interrupted_reader = reader.clone();
     let backing = f.backing;
     let interrupted_authority = authority.clone();
@@ -2501,18 +2506,46 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
             .read_compact_file(backing, inode, expected)
             .await
     });
-    // Existing pause_guards holds the prepared EXECUTE before forwarding it
-    // to TiDB. Awaiting the abort and then resuming settles this exact boundary.
+    // The response pause holds an actual binary guard row already returned
+    // by TiDB. Cancellation therefore follows server execution of the FILE
+    // hint. Releasing the row lets the cap-one pool drain or discard the result.
     let reached = timeout(BOUND, proxy.trace.reached.notified()).await;
     reading.abort();
     let canceled = reading.await;
     proxy.trace.resume.notify_one();
 
+    let after_cancel_before_publication = timeout(BOUND, raw(&f)).await;
     let published = timeout(BOUND, f.store.publish_compact_structure(&fresh_delta)).await;
+    let fresh_snapshot = timeout(BOUND, f.store.load_compact_snapshot(f.backing)).await;
+    let before_recovery = timeout(BOUND, raw(&f)).await;
     let after_cancel = timeout(BOUND, reader.read_compact_file(f.backing, inode, expected)).await;
     let after_cancel_again =
         timeout(BOUND, reader.read_compact_file(f.backing, inode, expected)).await;
-    let (cancel_queries, _) = proxy.end();
+    let recovered_root_stale = timeout(
+        BOUND,
+        reader.read_compact_root_entry(
+            f.backing,
+            initial.anchor.root,
+            inode,
+            "session-reuse",
+            expected,
+        ),
+    )
+    .await;
+    let recovered_root_fresh = timeout(
+        BOUND,
+        reader.read_compact_root_entry(
+            f.backing,
+            initial.anchor.root,
+            inode,
+            "session-reuse",
+            expected,
+        ),
+    )
+    .await;
+    let (cancel_queries, cancel_rows) = proxy.end();
+    let paused_guard_rows = proxy.trace.paused_guard_rows.load(Ordering::SeqCst);
+    let after_recovery = timeout(BOUND, raw(&f)).await;
 
     // Attempt every shutdown before semantic assertions. Store close releases
     // its lifecycle; the shared context owns disconnect. Proxy shutdown drains
@@ -2532,7 +2565,7 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     proxy_closed.expect("proxy listener and relays settled");
 
     let joined = |sql: &String| {
-        sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
+        compact_proxy::joined_authority_select(sql)
             && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
     };
     let session_sets = |queries: &[String]| {
@@ -2591,8 +2624,22 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     );
     assert_eq!(session_checks(&drop_queries), 0);
 
-    reached.expect("selected EXECUTE reached controlled proxy pause");
+    reached.expect("actual selected guard row reached controlled response pause");
+    assert_eq!(
+        paused_guard_rows, 1,
+        "one server-produced FILE row was paused"
+    );
     assert!(canceled.unwrap_err().is_cancelled());
+    assert_eq!(
+        before_cancel.expect("pre-cancel frame completed"),
+        after_cancel_before_publication.expect("post-cancel frame completed"),
+        "canceled server-executed FILE read preserves every captured row"
+    );
+    assert_eq!(
+        before_recovery.expect("pre-recovery frame completed"),
+        after_recovery.expect("post-recovery frame completed"),
+        "recovered FILE and ROOT reads preserve every captured fresh row"
+    );
     let publication = published
         .expect("fresh independent structural publication completed")
         .unwrap();
@@ -2600,6 +2647,16 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
     let expected_guard = &publication.upserts[&inode];
     assert_eq!(expected_guard.node, fresh_namespace.nodes[&inode]);
     assert_ne!(expected_guard, &updated.guard);
+    let fresh_snapshot = fresh_snapshot
+        .expect("fresh complete snapshot completed")
+        .unwrap();
+    assert_eq!(fresh_snapshot.anchor, publication.anchor);
+    assert_eq!(&fresh_snapshot.guards[&inode], expected_guard);
+    assert_eq!(
+        serde_json::to_value(fresh_snapshot.namespace().unwrap()).unwrap(),
+        serde_json::to_value(&fresh_namespace).unwrap()
+    );
+    let (_, _, fresh_audited) = fresh_snapshot.into_validated_namespace().unwrap();
     for loaded in [after_cancel, after_cancel_again] {
         let loaded = loaded
             .expect("selected read recovered without cap-one starvation")
@@ -2617,7 +2674,42 @@ async fn actual_compact_selected_load_reuses_one_session_after_drop_and_cancella
         };
         assert_eq!(&loaded.guard, expected_guard);
     }
+    let root_stale = recovered_root_stale
+        .expect("unhinted ROOT recovered without cap-one starvation")
+        .unwrap();
+    assert_eq!(root_stale.generation(), publication.anchor.generation);
+    assert!(
+        root_stale
+            .into_inode_read(&old_audited)
+            .unwrap_err()
+            .is(ErrorCode::Eagain)
+    );
+    let root_fresh = recovered_root_fresh
+        .expect("second unhinted ROOT recovery completed")
+        .unwrap();
+    assert_eq!(root_fresh.generation(), publication.anchor.generation);
+    let CompactInodeRead::Loaded(root_fresh) = root_fresh.into_inode_read(&fresh_audited).unwrap()
+    else {
+        panic!("recovered ROOT must expose the complete fresh selected guard")
+    };
+    assert_eq!(&root_fresh.guard, expected_guard);
     assert_eq!(cancel_queries.iter().filter(|sql| joined(sql)).count(), 3);
+    let root_queries: Vec<_> = cancel_queries
+        .iter()
+        .filter(|sql| {
+            sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS r ")
+                && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS f ")
+        })
+        .collect();
+    assert_eq!(root_queries.len(), 2);
+    assert!(root_queries.iter().all(|sql| {
+        sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
+            && !sql.contains("SET_VAR")
+    }));
+    assert_eq!(
+        cancel_rows, 5,
+        "one canceled FILE, two fresh FILE and two ROOT rows"
+    );
     // Safe reuse or one newly verified replacement is permitted after abort.
     // These counts do not claim a server connection ID or blanket discard.
     assert_eq!(

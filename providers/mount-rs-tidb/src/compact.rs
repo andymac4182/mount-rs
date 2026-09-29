@@ -20,7 +20,9 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
 const AUTHORITY_SQL: &str = "SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation FROM mount_rs_tidb_metadata WHERE volume_key=?";
 // Explicit bindings let TiDB plan each composite key as a point access rather
 // than a dynamic index join. Every binding is the same configured volume.
-const FILE_POINT_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,s.inode,g.inode,g.incarnation,g.epoch,g.revision,g.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS s ON s.volume_key=? AND s.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS g ON g.volume_key=? AND g.inode=? WHERE m.volume_key=?";
+// This statement selects at most one row from each primary key. Keep its
+// executor batches and worker count small without changing bulk-read sessions.
+const FILE_POINT_SQL: &str = "SELECT /*+ SET_VAR(tidb_max_chunk_size=32) SET_VAR(tidb_executor_concurrency=1) */ m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,s.inode,g.inode,g.incarnation,g.epoch,g.revision,g.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS s ON s.volume_key=? AND s.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS g ON g.volume_key=? AND g.inode=? WHERE m.volume_key=?";
 // The name index avoids scanning every sibling when TiDB estimates one row
 // for the parent range. Full binary-name equality and all matching rows remain
 // required, so a hash collision or duplicate cannot become an admitted hit.

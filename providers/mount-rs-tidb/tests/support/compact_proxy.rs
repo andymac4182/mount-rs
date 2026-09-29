@@ -13,6 +13,22 @@ use tokio::{
     task::JoinHandle,
 };
 
+// Only controlled provider SQL reaches this test proxy. Recognize the exact
+// adopted FILE hint while retaining the existing joined authority projection.
+const FILE_POINT_HINT: &str =
+    "/*+ SET_VAR(tidb_max_chunk_size=32) SET_VAR(tidb_executor_concurrency=1) */ ";
+pub fn joined_authority_select(sql: &str) -> bool {
+    sql.strip_prefix("SELECT ")
+        .map(|projection| {
+            projection
+                .strip_prefix(FILE_POINT_HINT)
+                .unwrap_or(projection)
+        })
+        .is_some_and(|projection| {
+            projection.starts_with("m.revision,m.write_mode,m.backing_id,m.owner,")
+        })
+}
+
 #[derive(Default)]
 pub struct Trace {
     pub armed: AtomicBool,
@@ -24,6 +40,8 @@ pub struct Trace {
     pub abort_anchor_write: AtomicBool,
     pub abort_dentry_write: AtomicBool,
     pub pause_guards: AtomicBool,
+    pub pause_guard_response: AtomicBool,
+    pub paused_guard_rows: AtomicUsize,
     pub pause_anchor: AtomicBool,
     pub pause_members: AtomicBool,
     pub pause_dentries: AtomicBool,
@@ -111,6 +129,7 @@ impl Proxy {
     pub fn begin(&self) {
         self.trace.queries.lock().unwrap().clear();
         self.trace.guard_rows.store(0, Ordering::SeqCst);
+        self.trace.paused_guard_rows.store(0, Ordering::SeqCst);
         self.trace.commits.store(0, Ordering::SeqCst);
         self.trace.armed.store(true, Ordering::SeqCst);
     }
@@ -153,7 +172,8 @@ async fn relay(client: TcpStream, server: TcpStream, trace: Arc<Trace>) {
                     trace.dropped_acks.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
-                if let Some(sql) = pending.lock().unwrap().take() {
+                let prepared_sql = pending.lock().unwrap().take();
+                if let Some(sql) = prepared_sql {
                     if p[4] == 0 {
                         let id = u32::from_le_bytes(p[5..9].try_into().unwrap());
                         statements.lock().unwrap().insert(id, sql);
@@ -165,6 +185,13 @@ async fn relay(client: TcpStream, server: TcpStream, trace: Arc<Trace>) {
                     // Prepared SELECT binary rows start with 0x00; column count,
                     // definitions and EOF use other markers. Only guard SELECTs arm it.
                     trace.guard_rows.fetch_add(1, Ordering::SeqCst);
+                    if trace.pause_guard_response.swap(false, Ordering::SeqCst) {
+                        // TiDB has executed the selected statement and produced
+                        // an actual binary row. Hold its delivery to the caller.
+                        trace.paused_guard_rows.fetch_add(1, Ordering::SeqCst);
+                        trace.reached.notify_one();
+                        trace.resume.notified().await;
+                    }
                 }
                 if cw.write_all(&p).await.is_err() {
                     break;
@@ -197,7 +224,7 @@ async fn relay(client: TcpStream, server: TcpStream, trace: Arc<Trace>) {
                     // prepared values kept entirely out of the trace.
                     trace.queries.lock().unwrap().push(sql.clone());
                     let authority = sql.starts_with("SELECT revision,write_mode,backing_id,owner,fence,expires,namespace,delegation")
-                        || sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,");
+                        || joined_authority_select(&sql);
                     let member = sql.starts_with("SELECT ")
                         && sql.contains(" FROM mount_rs_tidb_compact_members ");
                     let dentry = sql.starts_with("SELECT ")
