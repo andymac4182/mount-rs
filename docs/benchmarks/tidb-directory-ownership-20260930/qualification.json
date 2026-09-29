@@ -1,0 +1,346 @@
+{
+  "schema": "mount-rs.tidb-directory-ownership-qualification.v1",
+  "publication_benchmark_qualified": true,
+  "release_ready": false,
+  "base_head": "1a80576456378a81f74eb72922bba813f765c852",
+  "measured_tree": "working tree; both role source pins are explicit; not a committed source revision",
+  "measured_source_pins": {
+    "providers/mount-rs-tidb/src/compact.rs": "128591ec7b89b190663247a10fd92998c68cf8c8441c2208da1f72357211da6e",
+    "providers/mount-rs-tidb/src/compact/indexed.rs": "68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206",
+    "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+    "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+    "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+    "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+    "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+    "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+    "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+  },
+  "artifacts": {
+    "exploratory-wide-keys": {
+      "raw_sha256": "3a3d94c3002e9e3d5c348001e62a08e3cb698105913406539427969ab247ac96",
+      "gzip_sha256": "e479bc5e3747ad3e72d6a63656ef6cecf9712a24f272e516de4520d3a5cc8b56",
+      "raw_bytes": 300608,
+      "gzip_bytes": 14284
+    },
+    "final-thin-keys": {
+      "raw_sha256": "14eff4ee72241194c90c97d6f810d68d58942ecf82b2f450dc47f24206abde07",
+      "gzip_sha256": "b942f8ca9b1c30ce8ae69dbda04337623862c546af8eeb4dc1724efa60a6ba1d",
+      "raw_bytes": 300615,
+      "gzip_bytes": 14313
+    }
+  },
+  "paired_build_result_sha256": "322143959befaac26bf8f52ab9be4d38557b96e80888671ae5a3bab543a6bc5a",
+  "paired_builds": [
+    {
+      "role": "copy_names",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "mount-rs-tidb",
+        "--test",
+        "compact",
+        "--test",
+        "compact_selected_read_allocations",
+        "--no-run"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 14.261643499950878,
+      "whole_deadline_seconds": 300,
+      "timed_out": false,
+      "forced_kill": false,
+      "reaped": true,
+      "source_pins": {
+        "providers/mount-rs-tidb/src/compact.rs": "0335e14301c074560474fdc86f50811d1a21d5d92441ca1ab3f3866dc1ea8bca",
+        "providers/mount-rs-tidb/src/compact/indexed.rs": "2bdbf1b33860f519776a47fe9341633ceddc41a26046632280c7831e41f53e30",
+        "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+        "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+        "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+        "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+        "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+        "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+        "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+      },
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "5b06f639b982e3192fc59a6338b9e1eaaf86f7a687ee8e7dfdab440b2f8ee801",
+      "binaries": {
+        "compact": {
+          "path": "compact",
+          "sha256": "5244c82cae598a763fb12ec9a9b50f356c21a7c63076b759bc36dadba921433d",
+          "cargo_path": "compact-9d4edf107d639987",
+          "original_copied_path": "compact",
+          "private_paths_replaced_with_basenames": true
+        },
+        "selected": {
+          "path": "selected",
+          "sha256": "2906f8839d19615c4eedc4d44e2e5a4df45fc3773bf2289558c50c9558122e39",
+          "cargo_path": "compact_selected_read_allocations-79db9e83367f1878",
+          "original_copied_path": "selected",
+          "private_paths_replaced_with_basenames": true
+        }
+      },
+      "reused_exact_build_receipt_sha256": "7376a6be394eb09d0b66f2b67521bf9d5c5d2bb4aefee6d1717bb346c5445c46"
+    },
+    {
+      "role": "move_names",
+      "command": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "mount-rs-tidb",
+        "--test",
+        "compact",
+        "--test",
+        "compact_selected_read_allocations",
+        "--no-run"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 14.594928957987577,
+      "whole_deadline_seconds": 300,
+      "timed_out": false,
+      "forced_kill": false,
+      "reaped": true,
+      "source_pins": {
+        "providers/mount-rs-tidb/src/compact.rs": "128591ec7b89b190663247a10fd92998c68cf8c8441c2208da1f72357211da6e",
+        "providers/mount-rs-tidb/src/compact/indexed.rs": "68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206",
+        "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+        "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+        "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+        "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+        "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+        "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+        "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+      },
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "59c94d275d71ec757a1f7075d4e00e008c6cf7b0b8a82037f53742874f4376c6",
+      "binaries": {
+        "compact": {
+          "path": "compact",
+          "sha256": "de2e2961e77fdb5f2c4d13bdd9264df7dd4831db79ca80ed3b6bf152b68c5b64",
+          "cargo_path": "compact-9d4edf107d639987",
+          "private_paths_replaced_with_basenames": true
+        },
+        "selected": {
+          "path": "selected",
+          "sha256": "0361f6cc2d1901c98691c482ba351cc2b82a6eefc2312371a641eccaa8adf76b",
+          "cargo_path": "compact_selected_read_allocations-79db9e83367f1878",
+          "private_paths_replaced_with_basenames": true
+        }
+      }
+    }
+  ],
+  "control_build_reuse": true,
+  "local_final_gates_result_sha256": "8b15e265b925e4d7c9733b97efb53f2f880c9bcedb06253094821eb8e7cb675d",
+  "local_final_gates": {
+    "schema": "mount-rs.directory-name-final-gates.v1",
+    "all_terminal_exit_zero": true,
+    "checks": [
+      {
+        "name": "format",
+        "argv": [
+          "./scripts/cargo-shared",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "whole_deadline_seconds": 60,
+        "elapsed_seconds": 2.6435614170040935,
+        "timed_out": false,
+        "forced_kill": false,
+        "reaped": true,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_pins": {
+          "providers/mount-rs-tidb/src/compact.rs": "128591ec7b89b190663247a10fd92998c68cf8c8441c2208da1f72357211da6e",
+          "providers/mount-rs-tidb/src/compact/indexed.rs": "68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206",
+          "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+          "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+          "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+          "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+          "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+          "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+          "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+        }
+      },
+      {
+        "name": "enabled",
+        "argv": [
+          "./scripts/cargo-shared",
+          "test",
+          "--locked",
+          "--release",
+          "-p",
+          "mount-rs-tidb",
+          "-p",
+          "mount-rs-napi",
+          "--all-targets"
+        ],
+        "exit_code": 0,
+        "whole_deadline_seconds": 300,
+        "elapsed_seconds": 40.42726833396591,
+        "timed_out": false,
+        "forced_kill": false,
+        "reaped": true,
+        "stdout_sha256": "14142e0948a1f6d3c6f9863cf9feb0e8900351a19d4215b1570d86b3e530b96f",
+        "stderr_sha256": "6e538b77555a8f4f599433888f89b83f474c96a5c8caa6b9d5e4f1a58717a79a",
+        "source_pins": {
+          "providers/mount-rs-tidb/src/compact.rs": "128591ec7b89b190663247a10fd92998c68cf8c8441c2208da1f72357211da6e",
+          "providers/mount-rs-tidb/src/compact/indexed.rs": "68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206",
+          "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+          "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+          "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+          "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+          "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+          "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+          "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+        },
+        "passed": 107,
+        "failed": 0,
+        "ignored": 102,
+        "test_binaries": 15
+      },
+      {
+        "name": "clippy",
+        "argv": [
+          "./scripts/cargo-shared",
+          "clippy",
+          "--locked",
+          "--release",
+          "-p",
+          "mount-rs-tidb",
+          "-p",
+          "mount-rs-napi",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "whole_deadline_seconds": 240,
+        "elapsed_seconds": 7.282003375003114,
+        "timed_out": false,
+        "forced_kill": false,
+        "reaped": true,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "3f055654537d6f1f0897d39caee2a50576388fa59a9eddc8d5a745d989b7519c",
+        "source_pins": {
+          "providers/mount-rs-tidb/src/compact.rs": "128591ec7b89b190663247a10fd92998c68cf8c8441c2208da1f72357211da6e",
+          "providers/mount-rs-tidb/src/compact/indexed.rs": "68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206",
+          "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+          "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+          "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+          "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+          "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+          "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+          "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+        }
+      },
+      {
+        "name": "whitespace",
+        "argv": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit_code": 0,
+        "whole_deadline_seconds": 60,
+        "elapsed_seconds": 0.04715800005942583,
+        "timed_out": false,
+        "forced_kill": false,
+        "reaped": true,
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_pins": {
+          "providers/mount-rs-tidb/src/compact.rs": "128591ec7b89b190663247a10fd92998c68cf8c8441c2208da1f72357211da6e",
+          "providers/mount-rs-tidb/src/compact/indexed.rs": "68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206",
+          "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+          "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+          "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+          "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+          "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+          "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+          "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+        }
+      },
+      {
+        "name": "actual-compact",
+        "argv": [
+          "compact-49eca4fcd9ff90b3",
+          "--ignored",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit_code": 0,
+        "whole_deadline_seconds": 300,
+        "elapsed_seconds": 31.9058589580236,
+        "timed_out": false,
+        "forced_kill": false,
+        "reaped": true,
+        "stdout_sha256": "9b144efc87640c17d2c1ed403082193c86d3350dd4c892b9e8c5b7dcf26d45ca",
+        "stderr_sha256": "47be79e449dcf708133f0d977f5be89aa0f9583af01e46c05562e13717e19746",
+        "source_pins": {
+          "providers/mount-rs-tidb/src/compact.rs": "128591ec7b89b190663247a10fd92998c68cf8c8441c2208da1f72357211da6e",
+          "providers/mount-rs-tidb/src/compact/indexed.rs": "68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206",
+          "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+          "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+          "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+          "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+          "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+          "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+          "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+        },
+        "passed": 56,
+        "failed": 0,
+        "ignored": 0,
+        "binary_sha256": "727c9aae2454535eb94f79bdb0237bced7607d38b242288104f828eee049e401",
+        "fixture_config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+        "owned_prefix": "directory-move-final-9df4b1c6dc444a718546d4c41725e702",
+        "correctness_dataset_retained": true,
+        "microbenchmark_exact_key_cleanup_verified_by_actual_assertions": true,
+        "private_binary_path_replaced_with_basename": true
+      }
+    ],
+    "source_pins": {
+      "providers/mount-rs-tidb/src/compact.rs": "128591ec7b89b190663247a10fd92998c68cf8c8441c2208da1f72357211da6e",
+      "providers/mount-rs-tidb/src/compact/indexed.rs": "68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206",
+      "providers/mount-rs-tidb/src/compact/member_equality.rs": "03a87cce1de8350e6722b41dfc2586fbac49ff18434620d29705c7e7951a918d",
+      "providers/mount-rs-tidb/src/storage.rs": "e9e5ecdc67eac17e79abf3439e148bf44e2fc40e22b77a94857bdc6a1138f5b3",
+      "providers/mount-rs-tidb/tests/compact.rs": "f395e97aaf93f881024f85f6d5565224ec6379c4a700d603fa2e20746290b987",
+      "providers/mount-rs-tidb/tests/support/member_performance.rs": "328fbe0ff0298dc32d5f2148d9470aad060a810f32be7be4639b31ebf6703afb",
+      "providers/mount-rs-tidb/tests/support/member_performance_alloc.rs": "b94a7c52e58fff5b819dd738b6f0563de1285a39948afe0c1f3ef93523bf818e",
+      "providers/mount-rs-tidb/tests/compact_selected_read_allocations.rs": "3048d97744e721006461dc0c74212461bf76b67f20c60dd928c91d3fffee1249",
+      "Cargo.lock": "9c4980167f86b3b8648a96a405f100368dd285d709493f1dea0905e34095a93a"
+    },
+    "separate_selected_cycle_allocation_ceiling_passed": false,
+    "separate_selected_cycle_source_and_result_sha256": "14eff4ee72241194c90c97d6f810d68d58942ecf82b2f450dc47f24206abde07"
+  },
+  "separate_selected_cycle_allocation_ceiling_passed": false,
+  "separate_selected_cycle_allocation_ceiling": 256,
+  "source_review": "independent review accepted moved ownership, ordinal pairing and thin borrowed name keys; complete validation/locking/preflight/COMMIT unchanged",
+  "statistics_review": "independent reviewer reproduced final statistics, all20 raw output hashes, ten execution and extended receipts, four binary hashes and nine current source pins",
+  "limits": [
+    "Actual serial TiDB metadata FileCreate publication only; no blobs, QUIC, OS mounts, sustained cluster throughput or physical IOPS in the publication benchmark.",
+    "Client-thread Rust allocation requests include driver/runtime; server and foreign-thread allocations excluded; requested bytes are not live heap or RSS.",
+    "Selected Open/Stat/Read/Close diagnostics use TiDB for metadata AND blocks; one observation per case; full anchor/root/dentry/order and selected byte oracles passed before the unchanged allocation ceiling failed.",
+    "Both baseline and candidate exceed256 allocation calls; this gate remains unresolved and no zero-allocation claim is made.",
+    "SQL still returnsF+2 inode rows/create in both variants; no new SQL call, scan or physical I/O reduction is claimed.",
+    "Raw output size limits are verified after child execution; receipts prove direct-child reaping, not independent process-group absence.",
+    "First diagnostic-only controller refused its output because libtest placed a totals line after the test prefix; it is excluded, retained privately and was not a write retry.",
+    "Exploratory wide-key and final thin-key experiments remain separate; only final samples qualify the current production source.",
+    "Hosted CI metadata at1a805 is for the baseline commit; it cannot qualify these uncommitted production edits.",
+    "Current exact-head full formal ended on runner shutdown after five proofs; no counterexample logged; full proof set incomplete.",
+    "Correctness-suite datasets are retained; microbenchmarks verify exact five-table cleanup, allocation diagnostics exact seven-table cleanup.",
+    "Full ten-server/10000-client/10000-Drive/5000-Partition/1000-file target remains unqualified."
+  ],
+  "public_receipt_sanitization": {
+    "private_absolute_paths_replaced_with_basenames": 11,
+    "original_private_build_and_gate_receipt_hashes_preserved": true,
+    "public_sanitized_receipts_are_not_byte_identical_to_original_private_receipts": true
+  }
+}

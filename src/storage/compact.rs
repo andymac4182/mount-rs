@@ -247,16 +247,68 @@ impl<'a> CompactInodeExpectation<'a> {
 }
 
 /// A provider read either returns an exact checked match or the existing owned
-/// read. Changed or unsupported encodings always retain the owned decoder.
+/// read. Changed or unsupported inputs retain ordinary owned validation.
 #[derive(Debug)]
 pub enum CompactInodeRead {
     Unchanged(CheckedCompactInode),
     Loaded(LoadedCompactInode),
 }
 
-/// Constructed only by the complete streamed comparator. Providers must retain
-/// the SQL row/view owner through this check; these fields do not establish I/O
-/// provenance on their own. The filesystem rechecks its captured local revision.
+impl CompactInodeRead {
+    /// Certify a materialized guard from one coherent provider view without
+    /// encoding it again. The expectation is only an optimization hint: any
+    /// mismatch retains ordinary owned validation of the supplied fresh guard.
+    ///
+    /// Exact root equality inherits kind/name validity from its sealed complete
+    /// audit, while every child must still belong to the fresh membership. The
+    /// fresh root, defaults and unused members need not equal the audit's anchor.
+    pub fn from_materialized_guard(
+        anchor: &CompactAnchor,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        guard: CompactGuard,
+        expected: CompactInodeExpectation<'_>,
+    ) -> Result<Self> {
+        if anchor.backing == backing
+            && anchor.generation == expected.generation
+            && guard.identity == expected.identity
+            && inode != 0
+            && expected.node.stats.ino == inode
+            && &guard.node == expected.node
+        {
+            let valid_body = match (&guard.node.data, expected.root) {
+                (NodeData::File(_), None) => validate_node_kind(&guard.node).is_ok(),
+                (NodeData::Directory { .. }, Some(root)) if root.anchor.root == inode => root
+                    .root_children
+                    .iter()
+                    .all(|child| anchor.members.binary_search(child).is_ok()),
+                _ => false,
+            };
+            if valid_body
+                && anchor.validate().is_ok()
+                && anchor.members.binary_search(&inode).is_ok()
+                && guard.identity.logical_version(anchor.generation).is_ok()
+            {
+                return Ok(Self::Unchanged(CheckedCompactInode {
+                    generation: anchor.generation,
+                    inode,
+                    identity: guard.identity,
+                    root: expected.root.map(|structure| VerifiedCompactRoot {
+                        structure: structure.clone(),
+                    }),
+                }));
+            }
+        }
+        // Preserve the ordinary validator's error precedence and return the
+        // original owned buffers on every hint miss, including backing mismatch.
+        LoadedCompactInode::from_guard(anchor, inode, guard).map(Self::Loaded)
+    }
+}
+
+/// Constructed only by the complete streamed comparator or the exact typed
+/// materialized-guard factory. Providers must retain the row/view owner through
+/// the check; these fields do not establish I/O provenance on their own. The
+/// filesystem rechecks its captured local revision.
 #[derive(Debug)]
 pub struct CheckedCompactInode {
     generation: u64,

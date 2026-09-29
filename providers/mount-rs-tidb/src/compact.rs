@@ -354,7 +354,7 @@ async fn entries<C: Queryable>(
 }
 fn materialize_guards(
     stored: BTreeMap<u64, StoredGuard>,
-    entries: &BTreeMap<u64, Vec<StoredEntry>>,
+    mut entries: BTreeMap<u64, Vec<StoredEntry>>,
     complete: bool,
 ) -> Result<BTreeMap<u64, CompactGuard>> {
     if complete
@@ -382,7 +382,7 @@ fn materialize_guards(
                 StoredBody::Directory(header) => materialize_directory(
                     inode,
                     &header,
-                    entries.get(&inode).map(Vec::as_slice).unwrap_or_default(),
+                    entries.remove(&inode).unwrap_or_default(),
                 )?,
             };
             Ok((
@@ -403,7 +403,7 @@ async fn selected_complete<C: Queryable>(
 ) -> Result<Option<CompactGuard>> {
     let stored = stored_guards(conn, volume, Some(inode), locking).await?;
     let rows = entries(conn, volume, Some(inode), locking).await?;
-    Ok(materialize_guards(stored, &rows, true)?.remove(&inode))
+    Ok(materialize_guards(stored, rows, true)?.remove(&inode))
 }
 fn joined_field<T: FromValue>(values: &mut [Option<Value>], index: usize) -> Result<T> {
     let value = values
@@ -931,7 +931,7 @@ impl TidbMetadataStore {
         let rows = entries(&mut tx, &self.0.volume_key, None, false).await?;
         let snapshot = CompactSnapshot {
             anchor,
-            guards: materialize_guards(stored, &rows, true)?,
+            guards: materialize_guards(stored, rows, true)?,
         };
         snapshot.namespace()?;
         observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
@@ -980,26 +980,14 @@ impl TidbMetadataStore {
         let guard = selected_complete(&mut tx, &self.0.volume_key, inode, false)
             .await?
             .ok_or_else(stale)?;
-        let loaded = LoadedCompactInode::from_guard(&anchor, inode, guard)?;
-        // The complete proof uses freshly reconstructed SQL rows, never cached
-        // topology. Scoped hot-path reads avoid this explicit full fallback.
-        let a = encode_compact_anchor(&anchor)?;
-        let body = serde_json::to_vec(&loaded.guard.node).map_err(backend_error)?;
-        let checked = check_compact_inode_unchanged(
-            &a,
-            backing,
-            anchor.generation,
-            inode,
-            loaded.guard.identity,
-            &body,
-            expected,
-        );
+        // The complete proof uses freshly reconstructed SQL rows from this
+        // transaction. Typed comparison avoids encoding those rows again.
+        let read =
+            CompactInodeRead::from_materialized_guard(&anchor, backing, inode, guard, expected)?;
         observe_result_future(StorageOperation::TidbRollback, tx.rollback(), 0)
             .await
             .map_err(|e| db_error("finish complete TiDB compact inode", e))?;
-        Ok(checked
-            .map(CompactInodeRead::Unchanged)
-            .unwrap_or(CompactInodeRead::Loaded(loaded)))
+        Ok(read)
     }
     pub(super) async fn compact_root_file(
         &self,
@@ -1148,7 +1136,7 @@ impl TidbMetadataStore {
                             body,
                         },
                     )]),
-                    &rows,
+                    rows,
                     true,
                 )?;
                 let current = current.remove(&inode).ok_or_else(stale)?;
@@ -1216,16 +1204,27 @@ impl TidbMetadataStore {
                 }
             }
         }
-        let old_ordinals: BTreeMap<_, _> = stored
+        // Retain only the physical positions for write planning. Materializing
+        // below transfers SQL name buffers into the complete logical guards.
+        let old_directories: BTreeMap<_, _> = stored
             .iter()
             .filter_map(|(&inode, guard)| match &guard.body {
-                StoredBody::Directory(h) => Some((inode, h.next_ordinal)),
+                StoredBody::Directory(h) => Some((
+                    inode,
+                    (
+                        h.next_ordinal,
+                        directory_rows
+                            .get(&inode)
+                            .map(|rows| rows.iter().map(|entry| entry.ordinal).collect::<Vec<_>>())
+                            .unwrap_or_default(),
+                    ),
+                )),
                 _ => None,
             })
             .collect();
         let current = materialize_guards(
             stored,
-            &directory_rows,
+            directory_rows,
             delta.scope() == StructuralScope::Full,
         )?;
         let publication = delta.validate_current(&anchor, &current)?;
@@ -1240,12 +1239,23 @@ impl TidbMetadataStore {
         let mut plans = BTreeMap::new();
         for (&inode, guard) in &publication.upserts {
             let ordinal = if let NodeData::Directory { entries } = &guard.node.data {
-                let old = directory_rows
+                let (next_ordinal, old_positions) = old_directories
                     .get(&inode)
-                    .map(Vec::as_slice)
+                    .map(|(next, positions)| (*next, positions.as_slice()))
+                    .unwrap_or((0, &[]));
+                let old = current
+                    .get(&inode)
+                    .and_then(|guard| match &guard.node.data {
+                        NodeData::Directory { entries } => Some(entries.as_slice()),
+                        _ => None,
+                    })
                     .unwrap_or_default();
-                let plan =
-                    DirectoryPlan::new(old, *old_ordinals.get(&inode).unwrap_or(&0), entries)?;
+                let plan = DirectoryPlan::new_from_materialized(
+                    old_positions,
+                    old,
+                    next_ordinal,
+                    entries,
+                )?;
                 for entry in &plan.upserts {
                     signed(entry.ordinal, "compact directory ordinal")?;
                     signed(entry.inode, "compact directory child")?;

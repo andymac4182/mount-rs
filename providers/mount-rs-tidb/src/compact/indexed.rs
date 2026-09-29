@@ -157,10 +157,10 @@ pub(super) fn name_hash(name: &str) -> [u8; 32] {
 pub(super) fn materialize_directory(
     inode: u64,
     header: &CompactDirectoryHeader,
-    entries: &[StoredEntry],
+    entries: Vec<StoredEntry>,
 ) -> Result<NodeMetadata> {
     header.validate(inode)?;
-    validate_entries(entries, header.next_ordinal)?;
+    validate_entries(entry_views(&entries), header.next_ordinal)?;
     if entries.len() as u64 != header.entry_count {
         return Err(backend_error("indexed TiDB directory count mismatch"));
     }
@@ -168,9 +168,9 @@ pub(super) fn materialize_directory(
         stats: header.stats.clone(),
         data: NodeData::Directory {
             entries: entries
-                .iter()
+                .into_iter()
                 .map(|e| DirectoryEntry {
-                    name: e.name.clone(),
+                    name: e.name,
                     inode: e.inode,
                 })
                 .collect(),
@@ -178,18 +178,36 @@ pub(super) fn materialize_directory(
     })
 }
 
-fn validate_entries(entries: &[StoredEntry], next_ordinal: u64) -> Result<()> {
+#[derive(Clone, Copy)]
+struct EntryView<'a> {
+    ordinal: u64,
+    name: &'a String,
+    inode: u64,
+}
+
+fn entry_views(entries: &[StoredEntry]) -> impl Iterator<Item = EntryView<'_>> + Clone {
+    entries.iter().map(|entry| EntryView {
+        ordinal: entry.ordinal,
+        name: &entry.name,
+        inode: entry.inode,
+    })
+}
+
+fn validate_entries<'a>(
+    entries: impl IntoIterator<Item = EntryView<'a>>,
+    next_ordinal: u64,
+) -> Result<()> {
     signed(next_ordinal, "compact next directory ordinal")?;
     let mut names = BTreeSet::new();
     let mut previous = None;
     for entry in entries {
-        validate_name(&entry.name)?;
+        validate_name(entry.name)?;
         signed(entry.inode, "compact directory child")?;
         signed(entry.ordinal, "compact directory ordinal")?;
         if entry.inode == 0
             || entry.ordinal >= next_ordinal
             || previous.is_some_and(|old| old >= entry.ordinal)
-            || !names.insert(&entry.name)
+            || !names.insert(entry.name)
         {
             return Err(backend_error("invalid indexed TiDB directory rows"));
         }
@@ -206,10 +224,43 @@ pub(super) struct DirectoryPlan {
 }
 
 impl DirectoryPlan {
+    #[cfg(test)]
     pub fn new(old: &[StoredEntry], next_ordinal: u64, next: &[DirectoryEntry]) -> Result<Self> {
-        validate_entries(old, next_ordinal)?;
-        let by_name: HashMap<&str, &StoredEntry> =
-            old.iter().map(|e| (e.name.as_str(), e)).collect();
+        Self::from_views(entry_views(old), next_ordinal, next)
+    }
+
+    pub fn new_from_materialized(
+        old_ordinals: &[u64],
+        old_entries: &[DirectoryEntry],
+        next_ordinal: u64,
+        next: &[DirectoryEntry],
+    ) -> Result<Self> {
+        if old_ordinals.len() != old_entries.len() {
+            return Err(backend_error(
+                "indexed TiDB directory ordinal count mismatch",
+            ));
+        }
+        let old = old_ordinals
+            .iter()
+            .zip(old_entries)
+            .map(|(&ordinal, entry)| EntryView {
+                ordinal,
+                name: &entry.name,
+                inode: entry.inode,
+            });
+        Self::from_views(old, next_ordinal, next)
+    }
+
+    fn from_views<'a>(
+        old: impl Iterator<Item = EntryView<'a>> + Clone,
+        next_ordinal: u64,
+        next: &[DirectoryEntry],
+    ) -> Result<Self> {
+        validate_entries(old.clone(), next_ordinal)?;
+        let by_name: HashMap<&String, (u64, u64)> = old
+            .clone()
+            .map(|e| (e.name, (e.ordinal, e.inode)))
+            .collect();
         let mut seen = BTreeSet::new();
         let mut previous = None;
         let mut appended = false;
@@ -217,14 +268,14 @@ impl DirectoryPlan {
         for entry in next {
             validate_name(&entry.name)?;
             signed(entry.inode, "compact directory child")?;
-            if entry.inode == 0 || !seen.insert(entry.name.as_str()) {
+            if entry.inode == 0 || !seen.insert(&entry.name) {
                 return Err(backend_error("duplicate indexed TiDB directory name"));
             }
-            if let Some(old) = by_name.get(entry.name.as_str()) {
-                if appended || previous.is_some_and(|p| p >= old.ordinal) {
+            if let Some(&(old_ordinal, _)) = by_name.get(&entry.name) {
+                if appended || previous.is_some_and(|p| p >= old_ordinal) {
                     retain_order = false;
                 }
-                previous = Some(old.ordinal);
+                previous = Some(old_ordinal);
             } else {
                 appended = true;
             }
@@ -250,10 +301,10 @@ impl DirectoryPlan {
         let mut ordinal = next_ordinal;
         let mut upserts = Vec::new();
         for entry in next {
-            if let Some(old) = by_name.get(entry.name.as_str()) {
-                if old.inode != entry.inode {
+            if let Some(&(old_ordinal, old_inode)) = by_name.get(&entry.name) {
+                if old_inode != entry.inode {
                     upserts.push(StoredEntry {
-                        ordinal: old.ordinal,
+                        ordinal: old_ordinal,
                         name: entry.name.clone(),
                         inode: entry.inode,
                     });
@@ -274,8 +325,7 @@ impl DirectoryPlan {
         Ok(Self {
             rewrite: false,
             removed: old
-                .iter()
-                .filter(|e| !seen.contains(e.name.as_str()))
+                .filter(|e| !seen.contains(e.name))
                 .map(|e| e.ordinal)
                 .collect(),
             upserts,
@@ -344,11 +394,11 @@ mod tests {
             panic!("header required")
         };
         assert_eq!(
-            materialize_directory(1, &header, &[entry(3, "a", 2)]).unwrap(),
+            materialize_directory(1, &header, vec![entry(3, "a", 2)]).unwrap(),
             node
         );
-        assert!(materialize_directory(1, &header, &[]).is_err());
-        assert!(materialize_directory(1, &header, &[entry(4, "a", 2)]).is_err());
+        assert!(materialize_directory(1, &header, Vec::new()).is_err());
+        assert!(materialize_directory(1, &header, vec![entry(4, "a", 2)]).is_err());
         assert!(decode_body(1, &serde_json::to_string(&node).unwrap()).is_err());
         let large = directory(
             (0..10_000)
@@ -364,6 +414,49 @@ mod tests {
         value["stats"] = serde_json::to_value(&node.stats).unwrap();
         value["data"] = serde_json::to_value(&node.data).unwrap();
         assert!(decode_body(1, &serde_json::to_string(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn materialize_directory_preserves_name_buffers_attributes_and_order() {
+        let input = vec![
+            entry(2, "zeta-first-owned-buffer", 7),
+            entry(9, "alpha-second-owned-buffer", 3),
+        ];
+        let pointers: Vec<_> = input.iter().map(|entry| entry.name.as_ptr()).collect();
+        let mut stats = directory(Vec::new()).stats;
+        stats.uid = 17;
+        stats.gid = 19;
+        stats.mtime_ms = 23;
+        stats.ctime_ms = 29;
+        let header = CompactDirectoryHeader {
+            stats,
+            entry_count: 2,
+            next_ordinal: 12,
+        };
+        let actual = materialize_directory(1, &header, input).unwrap();
+        assert_eq!(actual.stats, header.stats);
+        let NodeData::Directory { entries } = &actual.data else {
+            panic!("materialized directory required")
+        };
+        assert!(
+            entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.inode))
+                .eq([
+                    ("zeta-first-owned-buffer", 7),
+                    ("alpha-second-owned-buffer", 3),
+                ])
+        );
+        for (entry, original) in entries.iter().zip(pointers) {
+            assert_eq!(
+                entry.name.as_ptr(),
+                original,
+                "materialization must transfer each name buffer rather than copy it"
+            );
+        }
+        // The consumed strings' buffers must now belong to the output with
+        // their original contents; a cloned-name implementation fails this.
+        std::hint::black_box(&actual);
     }
 
     #[test]
@@ -427,6 +520,87 @@ mod tests {
         assert!(plan.rewrite);
         assert_eq!(plan.upserts, vec![entry(0, "b", 3), entry(1, "a", 2)]);
         assert_eq!(plan.next_ordinal, 2);
+    }
+
+    #[test]
+    fn materialized_directory_plan_preserves_physical_survivors_and_changed_children() {
+        let old = vec![
+            DirectoryEntry {
+                name: "source".into(),
+                inode: 2,
+            },
+            DirectoryEntry {
+                name: "stay".into(),
+                inode: 3,
+            },
+            DirectoryEntry {
+                name: "retarget".into(),
+                inode: 4,
+            },
+        ];
+        let next = vec![
+            DirectoryEntry {
+                name: "stay".into(),
+                inode: 3,
+            },
+            DirectoryEntry {
+                name: "retarget".into(),
+                inode: 8,
+            },
+            DirectoryEntry {
+                name: "renamed".into(),
+                inode: 2,
+            },
+        ];
+        let plan = DirectoryPlan::new_from_materialized(&[2, 9, 12], &old, 15, &next).unwrap();
+        assert!(!plan.rewrite);
+        assert_eq!(plan.removed, vec![2]);
+        assert_eq!(
+            plan.upserts,
+            vec![entry(12, "retarget", 8), entry(15, "renamed", 2)]
+        );
+        assert_eq!(plan.next_ordinal, 16);
+
+        let reordered = vec![old[2].clone(), old[0].clone(), old[1].clone()];
+        let plan = DirectoryPlan::new_from_materialized(&[2, 9, 12], &old, 15, &reordered).unwrap();
+        assert!(plan.rewrite);
+        assert!(plan.removed.is_empty());
+        assert_eq!(
+            plan.upserts,
+            vec![
+                entry(0, "retarget", 4),
+                entry(1, "source", 2),
+                entry(2, "stay", 3)
+            ]
+        );
+        assert_eq!(plan.next_ordinal, 3);
+    }
+
+    #[test]
+    fn materialized_directory_plan_rejects_misaligned_or_corrupt_views() {
+        let old = vec![
+            DirectoryEntry {
+                name: "a".into(),
+                inode: 2,
+            },
+            DirectoryEntry {
+                name: "b".into(),
+                inode: 3,
+            },
+        ];
+        assert!(DirectoryPlan::new_from_materialized(&[2], &old, 10, &[]).is_err());
+        for ordinals in [[2, 2], [9, 2], [2, 10]] {
+            assert!(DirectoryPlan::new_from_materialized(&ordinals, &old, 10, &[]).is_err());
+        }
+        let duplicate = vec![old[0].clone(), old[0].clone()];
+        assert!(DirectoryPlan::new_from_materialized(&[2, 9], &duplicate, 10, &[]).is_err());
+        assert!(DirectoryPlan::new_from_materialized(&[2, 9], &old, 10, &duplicate).is_err());
+        let invalid = vec![DirectoryEntry {
+            name: "bad/name".into(),
+            inode: 2,
+        }];
+        assert!(DirectoryPlan::new_from_materialized(&[2], &invalid, 10, &[]).is_err());
+        assert!(DirectoryPlan::new_from_materialized(&[], &[], i64::MAX as u64, &old).is_err());
     }
 
     #[test]
