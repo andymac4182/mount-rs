@@ -672,6 +672,12 @@ impl SqliteMetadataStore {
         &self,
         delta: &CompactStructuralDelta,
     ) -> Result<CompactPublication> {
+        if matches!(
+            delta.scope(),
+            StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink
+        ) {
+            return Err(FsError::new(ErrorCode::Enotsup));
+        }
         self.compact_transaction(|tx| {
             let anchor=anchor(&self.0,tx,delta.base_anchor().backing)?;
             let current=match delta.scope() {
@@ -680,6 +686,9 @@ impl SqliteMetadataStore {
                     let mut current=BTreeMap::new();
                     for &inode in delta.expected().keys() { current.extend(guards(tx,Some(inode))?); }
                     current
+                }
+                StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink => {
+                    return Err(FsError::new(ErrorCode::Enotsup));
                 }
             };
             let publication=delta.validate_current(&anchor,&current)?;

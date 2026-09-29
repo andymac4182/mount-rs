@@ -185,7 +185,9 @@ async fn relay(client: TcpStream, server: TcpStream, trace: Arc<Trace>) {
                 let guard = sql.starts_with(
                     "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards",
                 ) || (sql.starts_with("SELECT m.revision,m.write_mode,m.backing_id,m.owner,")
-                    && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g "));
+                    && (sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS g ")
+                        || (sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS r ")
+                            && sql.contains(" LEFT JOIN mount_rs_tidb_compact_guards AS f "))));
                 guard_response.store(guard, Ordering::SeqCst);
                 if trace.armed.load(Ordering::SeqCst) {
                     // All retained statements are controlled provider SQL, with

@@ -99,6 +99,49 @@ SQLite and PGlite keep the versioning schema at version 1 on ordinary open/reope
 
 Each future harness needs its own property, input assumptions, bound, and result before it enters the proved inventory.
 
+### Compact root-file transitions: pending execution
+
+Six `mount-rs-core` harnesses in
+`src/storage/compact/root_file/verification.rs` call the actual packed edit,
+lookup, sealed capture, affected-guard validator and receipt/publication
+functions. Fixture builders and scalar field assertions supply independent
+input construction and sequence/arithmetic oracles; they do not replace any
+production decision. No production function is stubbed.
+
+The transition mode domain fixes directory/regular type bits and admits every
+`u32` bit outside `S_IFMT`, including setuid/setgid/sticky and high non-type
+bits. Current `Namespace::validate` and `validate_node_kind` constrain only
+`mode & S_IFMT`; selected inode publication and sealed transitions retain full
+mode equality. This domain follows those actual metadata contracts and makes
+no claim about how a native transport or operating system interprets the bits.
+
+| Harness | Input assumptions and production calls | Requested property | Bound and execution status |
+| --- | --- | --- | --- |
+| `compact_root_file_append_preserves_packed_eligibility` | Actual `append_eligible_bit`; 0–129 children and three independent arbitrary words, restricted only to the used words and zero unused tail bits. An arbitrary index ranges over all old positions. | Every old eligibility bit is preserved, the appended bit is true, word count is exact, and unused tail bits are zero. Eight direct covers include empty, 63/64/65, 127/128/129, and mixed eligibility. | Unwind 32; pending execution. The input is a valid paired packed representation; graph classification and allocation cost are outside this proof. |
+| `compact_root_file_remove_preserves_packed_eligibility` | Actual `remove_eligible_bit`; 1–129 children, every valid removal position, arbitrary valid packed words and every surviving position. | Each survivor equals the original position before the cut or original position plus one after it; exact word count and zero tail bits. Eight covers include first/last removal and carries at 63/64 and 127/128. | Unwind 32; pending execution. No namespace traversal or allocation-cost claim. |
+| `compact_root_file_sparse_lookup_uses_child_position` | Actual `root_single_link_file`; three arbitrary strictly increasing IDs greater than root ID 1 and below `u64::MAX`, three independent eligibility flags, and an arbitrary full-range query ID. A prior audit establishing these paired arrays is assumed. | Lookup equals exact ID membership plus the corresponding eligibility flag, independently of numeric ID size. Five covers include a widely spaced near-maximum ID, an ineligible present ID, a gap, zero and `u64::MAX`. | Unwind 32; pending execution. The dummy anchor/root are unused by lookup; this representation proof does not establish audit provenance. |
+| `compact_root_file_transition_conserves_exact_write_frame` | Both rename-to-absent and last-link unlink, each of three source positions, a complete five-node audited graph with a populated sparse one-extent file and an unrelated tombstone; arbitrary positive non-maximum generation, independently arbitrary valid root/source physical identities; arbitrary dev/uid/gid/rdev/blksize/blocks/atime/birthtime, every non-type u32 mode bit (directory/regular type fixed), full-range root size and source size at least the populated extent end; all fitting signed clock proposals. Actual full audit, read construction, `verify_root_file`, `capture`, `validate_current` and `validate_publication`. | Exact root/source preconditions and writes, unchanged anchor metadata/membership, complete source content/layout/immutable stats, independent entry-order oracle, unlink tombstone retention, and unchanged eligibility of unrelated children. Eleven covers include both scopes at each position, maximum successor generation, negative clocks, a prior physical epoch with distinct incarnations, setuid/setgid/sticky bits during rename and high non-type bits during unlink. | Unwind 128; pending execution. Topology, inode IDs/link counts, layout and chunker shape are fixed; unrelated physical identities use incarnation 1 and current epoch. Unrelated guards are absent from writes; their fresh bodies are not claimed. |
+| `compact_root_file_receipt_rejects_single_field_tampering` | Both scopes at each source position; an actual validated receipt followed by a symbolic selector among no tamper and 22 single-field/key changes. Changes cover all anchor fields, root/source stats, populated layout block ID, each physical identity field, missing/extra writes, removals and root entries. Actual `validate_receipt` and `validate_publication`. | Only the untampered receipt is accepted. Every selected changed receipt fails with `EINVAL` before a successor witness is returned. Sixteen direct covers include both untouched scopes and anchor/body/identity/key/removal changes. | Unwind 128; pending execution. This is the stated finite tamper family, not all arbitrary malformed receipts or graphs. |
+| `compact_root_file_checked_times_and_generation_do_not_wrap` | Actual `validate_times` with unrestricted signed clocks/proposals, parent increment +1/+2 and file increment +1; independent `i128` arithmetic. Actual audited capture with all positive `u64` generations and valid fixed clocks; independent `u128` successor arithmetic. | Time acceptance equals mathematical fit and required advances; overflow is `EOVERFLOW`, insufficient advance is `EINVAL`. Generation advances exactly or rejects `u64::MAX` with `EOVERFLOW`. Ten covers include both scopes, negative/exact-maximum clocks, parent/file overflow and maximum generation boundaries. | Unwind 128; pending execution. Does not establish clock trust, wall-clock helper behavior, provider fencing or commit outcome. |
+
+Kani is absent on the current macOS host. No checks, satisfied covers, solver
+times or current-head qualification are reported for these harnesses. In
+particular, the actual full calls retain BTreeMap/Arc/string validation and
+diagnostic environment/OnceLock paths; solver and supported-construct
+feasibility remain to be established on the pinned Linux runner. An incomplete
+invocation or unwinding failure remains incomplete qualification; it must not
+be reported as success or replaced silently by a narrower predicate.
+
+`scripts/verify-formal` names all six separately. The existing hosted source
+inventory discovers ordinary `#[kani::proof]` declarations, named invocations
+and direct proof-body covers, including this separate source module, once
+committed. No inventory parser or workflow modification is needed. The
+historical 55-harness results below remain the results at their stated commit;
+they do not qualify this new path. Existing runners and the hosted job's
+100-minute deadline are unchanged. Provider transactions, remote coherent
+reads, cancellation/unknown commits, tombstone byte reads and persistence
+still require their separate executable/runtime gates.
+
 ### Current fresh-create rebinding: pending execution
 
 `current_fresh_create_rebinds_only_eligible_preparation` calls the actual private

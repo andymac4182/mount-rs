@@ -135,8 +135,10 @@ pub enum Operation {
     ObjectStoreBackingMarkerDataBodyRead,
     ObjectStoreBackingMarkerProbeCreate,
     ObjectStoreBackingMarkerRetryBackoff,
+    SdkMetadataCompactRootFileCapability,
+    SdkMetadataLoadCompactRootFile,
 }
-const NAMES: [&str; 116] = [
+const NAMES: [&str; 118] = [
     "metadata.load",
     "metadata.load_if_changed",
     "metadata.snapshot",
@@ -253,6 +255,8 @@ const NAMES: [&str; 116] = [
     "object_store.backing_marker.data.body_read",
     "object_store.backing_marker.probe.create",
     "object_store.backing_marker.retry_backoff",
+    "sdk.metadata.compact_root_file_capability",
+    "sdk.metadata.load_compact_root_file",
 ];
 
 /// Fixed serialized row order. Appended families have separate invocation semantics.
@@ -746,7 +750,7 @@ mod tests {
     #[test]
     fn fixed_names_match_appended_sdk_tidb_and_foundationdb_rows() {
         let names = operation_names();
-        assert_eq!(names.len(), 116);
+        assert_eq!(names.len(), 118);
         assert_eq!(
             names[Operation::SdkMetadataLoadIfChanged as usize],
             "sdk.metadata.load_if_changed"

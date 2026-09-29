@@ -1349,3 +1349,806 @@ fn structural_receipt_rejects_extra_or_changed_upserts() {
     forged.upserts.get_mut(&1).unwrap().identity.revision += 1;
     assert!(delta.validate_receipt(&forged).is_err());
 }
+
+fn root_file_fixture() -> CompactSnapshot {
+    let mut base = fixture();
+    let file = &mut base.guards.get_mut(&2).unwrap().node;
+    file.stats.size = 8192;
+    file.stats.blocks = 8;
+    let NodeData::File(layout) = &mut file.data else {
+        panic!()
+    };
+    layout.extents = vec![BlockExtent {
+        file_offset: 4096,
+        block: BlockId("source-content-block".into()),
+        block_offset: 128,
+        length: 4096,
+    }];
+    let mut tombstone = base.guards[&2].clone();
+    tombstone.node.stats.ino = 4;
+    tombstone.node.stats.nlink = 0;
+    base.guards.insert(4, tombstone);
+    base.anchor.members.push(4);
+    base.anchor.next_inode = 5;
+    base.namespace().unwrap();
+    base
+}
+
+fn root_file_read(base: &CompactSnapshot, inode: InodeId) -> CompactRootFileRead {
+    CompactRootFileRead::from_guards(
+        base.anchor.clone(),
+        base.anchor.root,
+        inode,
+        Some(base.guards[&base.anchor.root].clone()),
+        base.guards.get(&inode).cloned(),
+    )
+    .unwrap()
+}
+
+fn root_file_proposal(
+    base: &CompactSnapshot,
+    structure: &ValidatedCompactStructure,
+    inode: InodeId,
+    intent: CompactRootFileIntent,
+) -> CompactRootFileTransition {
+    let verified = structure
+        .verify_root_file(
+            root_file_read(base, inode),
+            inode,
+            &base.guards[&inode].node,
+            base.guards[&inode].identity,
+        )
+        .unwrap();
+    let increment = match intent {
+        CompactRootFileIntent::RenameAbsent { .. } => 2,
+        CompactRootFileIntent::UnlinkLastLink { .. } => 1,
+    };
+    let times = CompactRootFileTimes {
+        parent_mtime_ms: verified.root().node.stats.mtime_ms + increment,
+        parent_ctime_ms: verified.root().node.stats.ctime_ms + increment,
+        file_ctime_ms: verified.file().node.stats.ctime_ms + 1,
+    };
+    CompactRootFileTransition::capture(verified, intent, times).unwrap()
+}
+
+fn root_file_reference_candidate(base: &CompactSnapshot, rename: bool) -> Namespace {
+    let mut candidate = base.namespace().unwrap();
+    let root = candidate.nodes.get_mut(&1).unwrap();
+    let NodeData::Directory { entries } = &mut root.data else {
+        panic!()
+    };
+    entries.retain(|entry| entry.name != "a");
+    if rename {
+        entries.push(DirectoryEntry {
+            name: "renamed".into(),
+            inode: 2,
+        });
+    }
+    root.stats.mtime_ms += if rename { 2 } else { 1 };
+    root.stats.ctime_ms += if rename { 2 } else { 1 };
+    let file = candidate.nodes.get_mut(&2).unwrap();
+    file.stats.ctime_ms += 1;
+    if !rename {
+        file.stats.nlink = 0;
+    }
+    candidate
+}
+
+#[test]
+fn root_file_rename_absent_matches_full_transition() {
+    let base = root_file_fixture();
+    let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let proposal = root_file_proposal(
+        &base,
+        &structure,
+        2,
+        CompactRootFileIntent::RenameAbsent {
+            from: "a".into(),
+            to: "renamed".into(),
+        },
+    );
+    let candidate = root_file_reference_candidate(&base, true);
+    let reference =
+        CompactStructuralDelta::capture(&base, &candidate, StructuralScope::Full).unwrap();
+    assert_eq!(
+        proposal.delta().scope(),
+        StructuralScope::RootFileRenameAbsent
+    );
+    assert_eq!(
+        proposal
+            .delta()
+            .expected()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let affected = BTreeMap::from([(1, base.guards[&1].clone()), (2, base.guards[&2].clone())]);
+    let receipt = proposal
+        .delta()
+        .validate_current(&base.anchor, &affected)
+        .unwrap();
+    assert_eq!(
+        receipt,
+        reference
+            .validate_current(&base.anchor, &base.guards)
+            .unwrap()
+    );
+    assert_eq!(
+        proposal.delta().evaluate(&base).unwrap(),
+        reference.evaluate(&base).unwrap()
+    );
+    let next = proposal.validate_publication(&receipt).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &next.root_children,
+        &structure.root_children
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &next.root_single_link_file_bits,
+        &structure.root_single_link_file_bits
+    ));
+    assert!(next.root_single_link_file(2));
+    assert!(structure.root_single_link_file(2));
+    let concurrent = update(&base, 3, 4097);
+    let after = proposal.delta().evaluate(&concurrent).unwrap();
+    assert_eq!(after.guards[&3], concurrent.guards[&3]);
+}
+
+#[test]
+fn root_file_unlink_last_link_matches_full_tombstone_transition() {
+    let base = root_file_fixture();
+    let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let proposal = root_file_proposal(
+        &base,
+        &structure,
+        2,
+        CompactRootFileIntent::UnlinkLastLink { name: "a".into() },
+    );
+    let reference = CompactStructuralDelta::capture(
+        &base,
+        &root_file_reference_candidate(&base, false),
+        StructuralScope::Full,
+    )
+    .unwrap();
+    assert_eq!(
+        proposal.delta().scope(),
+        StructuralScope::RootFileUnlinkLastLink
+    );
+    let affected = BTreeMap::from([(1, base.guards[&1].clone()), (2, base.guards[&2].clone())]);
+    let receipt = proposal
+        .delta()
+        .validate_current(&base.anchor, &affected)
+        .unwrap();
+    assert_eq!(
+        receipt,
+        reference
+            .validate_current(&base.anchor, &base.guards)
+            .unwrap()
+    );
+    let next = proposal.delta().evaluate(&base).unwrap();
+    assert_eq!(next, reference.evaluate(&base).unwrap());
+    assert_eq!(next.anchor.members, base.anchor.members);
+    assert_eq!(next.anchor.next_inode, base.anchor.next_inode);
+    assert_eq!(next.guards[&2].node.stats.nlink, 0);
+    assert_eq!(next.guards[&2].node.data, base.guards[&2].node.data);
+    let witness = proposal.validate_publication(&receipt).unwrap();
+    assert!(!witness.root_single_link_file(2));
+    assert!(witness.root_single_link_file(3));
+    assert!(structure.root_single_link_file(2));
+    let mut written = next.guards[&2].node.clone();
+    written.stats.size = 9000;
+    written.stats.mtime_ms += 1;
+    let next = next
+        .selected_update(
+            next.anchor.backing,
+            next.anchor.generation,
+            2,
+            next.guards[&2].identity,
+            written,
+        )
+        .unwrap();
+    assert_eq!(next.guards[&2].node.stats.nlink, 0);
+    assert_eq!(next.guards[&2].node.stats.size, 9000);
+}
+
+#[test]
+fn root_file_publication_requires_exact_bodies_and_receipts() {
+    let base = fixture();
+    let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let proposal = root_file_proposal(
+        &base,
+        &structure,
+        2,
+        CompactRootFileIntent::UnlinkLastLink { name: "a".into() },
+    );
+    let affected = BTreeMap::from([(1, base.guards[&1].clone()), (2, base.guards[&2].clone())]);
+    for inode in [1, 2] {
+        let mut changed = affected.clone();
+        changed.get_mut(&inode).unwrap().node.stats.mtime_ms += 1;
+        code(
+            proposal.delta().validate_current(&base.anchor, &changed),
+            ErrorCode::Einval,
+        );
+        let mut changed = affected.clone();
+        changed.get_mut(&inode).unwrap().identity.revision += 1;
+        code(
+            proposal.delta().validate_current(&base.anchor, &changed),
+            ErrorCode::Eagain,
+        );
+        let mut changed = affected.clone();
+        changed.remove(&inode);
+        code(
+            proposal.delta().validate_current(&base.anchor, &changed),
+            ErrorCode::Einval,
+        );
+    }
+    let mut changed = affected.clone();
+    changed.insert(3, base.guards[&3].clone());
+    code(
+        proposal.delta().validate_current(&base.anchor, &changed),
+        ErrorCode::Einval,
+    );
+    let receipt = proposal
+        .delta()
+        .validate_current(&base.anchor, &affected)
+        .unwrap();
+    for field in 0..8 {
+        let mut forged = receipt.clone();
+        match field {
+            0 => forged.anchor.members.pop().map(|_| ()).unwrap(),
+            1 => forged.anchor.default_uid += 1,
+            2 => forged.anchor.next_inode += 1,
+            3 => forged.anchor.generation += 1,
+            4 => {
+                forged.removed.insert(2);
+            }
+            5 => {
+                forged.upserts.remove(&2);
+            }
+            6 => forged.upserts.get_mut(&2).unwrap().identity.incarnation += 1,
+            _ => forged.upserts.get_mut(&2).unwrap().node.stats.size += 1,
+        }
+        code(proposal.validate_publication(&forged), ErrorCode::Einval);
+    }
+    for scope in [
+        StructuralScope::RootFileRenameAbsent,
+        StructuralScope::RootFileUnlinkLastLink,
+    ] {
+        code(
+            CompactStructuralDelta::capture(
+                &base,
+                &root_file_reference_candidate(&base, false),
+                scope,
+            ),
+            ErrorCode::Einval,
+        );
+    }
+}
+
+#[test]
+fn root_file_capture_preserves_missing_groups_and_rejects_identity_regression() {
+    let base = fixture();
+    let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let absent = CompactRootFileRead::from_guards(base.anchor.clone(), 1, 2, None, None).unwrap();
+    assert!(absent.root().is_none());
+    assert!(absent.file().is_none());
+    code(
+        structure.verify_root_file(absent, 2, &base.guards[&2].node, base.guards[&2].identity),
+        ErrorCode::Einval,
+    );
+    let mut changed = base.clone();
+    changed.guards.get_mut(&2).unwrap().node.stats.size = 10;
+    code(
+        structure.verify_root_file(
+            root_file_read(&changed, 2),
+            2,
+            &base.guards[&2].node,
+            base.guards[&2].identity,
+        ),
+        ErrorCode::Estale,
+    );
+    changed.guards.get_mut(&2).unwrap().identity.revision += 1;
+    let verified = structure
+        .verify_root_file(
+            root_file_read(&changed, 2),
+            2,
+            &base.guards[&2].node,
+            base.guards[&2].identity,
+        )
+        .unwrap();
+    assert_eq!(verified.file(), &changed.guards[&2]);
+    let mut regressed = changed.clone();
+    regressed.guards.get_mut(&2).unwrap().identity.revision = 0;
+    code(
+        structure.verify_root_file(
+            root_file_read(&regressed, 2),
+            2,
+            &changed.guards[&2].node,
+            changed.guards[&2].identity,
+        ),
+        ErrorCode::Estale,
+    );
+}
+
+#[test]
+fn root_file_capture_rejects_wrong_names_mapping_and_clock_exhaustion() {
+    let base = fixture();
+    let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let verify = || {
+        structure
+            .verify_root_file(
+                root_file_read(&base, 2),
+                2,
+                &base.guards[&2].node,
+                base.guards[&2].identity,
+            )
+            .unwrap()
+    };
+    let times = CompactRootFileTimes {
+        parent_mtime_ms: 2,
+        parent_ctime_ms: 2,
+        file_ctime_ms: 1,
+    };
+    for name in ["", ".", "..", "a/b", "a\0b"] {
+        code(
+            CompactRootFileTransition::capture(
+                verify(),
+                CompactRootFileIntent::UnlinkLastLink { name: name.into() },
+                times,
+            ),
+            ErrorCode::Einval,
+        );
+    }
+    code(
+        CompactRootFileTransition::capture(
+            verify(),
+            CompactRootFileIntent::UnlinkLastLink { name: "b".into() },
+            times,
+        ),
+        ErrorCode::Enoent,
+    );
+    code(
+        CompactRootFileTransition::capture(
+            verify(),
+            CompactRootFileIntent::RenameAbsent {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            times,
+        ),
+        ErrorCode::Eexist,
+    );
+    code(
+        CompactRootFileTransition::capture(
+            verify(),
+            CompactRootFileIntent::RenameAbsent {
+                from: "a".into(),
+                to: "a".into(),
+            },
+            times,
+        ),
+        ErrorCode::Einval,
+    );
+    for field in 0..3 {
+        let mut stale_times = times;
+        match field {
+            0 => stale_times.parent_mtime_ms = 1,
+            1 => stale_times.parent_ctime_ms = 1,
+            _ => stale_times.file_ctime_ms = 0,
+        }
+        code(
+            CompactRootFileTransition::capture(
+                verify(),
+                CompactRootFileIntent::RenameAbsent {
+                    from: "a".into(),
+                    to: "new".into(),
+                },
+                stale_times,
+            ),
+            ErrorCode::Einval,
+        );
+    }
+    let long_name = "n".repeat(1000);
+    CompactRootFileTransition::capture(
+        verify(),
+        CompactRootFileIntent::RenameAbsent {
+            from: "a".into(),
+            to: long_name,
+        },
+        times,
+    )
+    .unwrap();
+    for field in 0..4 {
+        let mut exhausted = base.clone();
+        match field {
+            0 => exhausted.anchor.generation = u64::MAX,
+            1 => exhausted.guards.get_mut(&1).unwrap().node.stats.mtime_ms = i64::MAX,
+            2 => exhausted.guards.get_mut(&1).unwrap().node.stats.ctime_ms = i64::MAX,
+            _ => exhausted.guards.get_mut(&2).unwrap().node.stats.ctime_ms = i64::MAX,
+        }
+        let (_, _, witness) = exhausted.clone().into_validated_namespace().unwrap();
+        let verified = witness
+            .verify_root_file(
+                root_file_read(&exhausted, 2),
+                2,
+                &exhausted.guards[&2].node,
+                exhausted.guards[&2].identity,
+            )
+            .unwrap();
+        code(
+            CompactRootFileTransition::capture(
+                verified,
+                CompactRootFileIntent::UnlinkLastLink { name: "a".into() },
+                CompactRootFileTimes {
+                    parent_mtime_ms: i64::MAX,
+                    parent_ctime_ms: i64::MAX,
+                    file_ctime_ms: i64::MAX,
+                },
+            ),
+            ErrorCode::Eoverflow,
+        );
+    }
+}
+
+#[test]
+fn root_file_capture_does_not_certify_same_generation_anchor_or_structural_changes() {
+    let base = fixture();
+    let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+    for field in 0..7 {
+        let mut changed = base.clone();
+        match field {
+            0 => changed.anchor.default_uid += 1,
+            1 => changed.anchor.next_inode += 1,
+            2 => changed.guards.get_mut(&1).unwrap().node.stats.mode ^= 1,
+            3 => changed.guards.get_mut(&2).unwrap().node.stats.mode ^= 1,
+            4 => changed.guards.get_mut(&2).unwrap().node.stats.nlink = 0,
+            5 => {
+                let file = &mut changed.guards.get_mut(&2).unwrap().node;
+                file.stats.mode = S_IFLNK | 0o777;
+                file.data = NodeData::Symlink {
+                    target: "target".into(),
+                };
+            }
+            _ => changed.guards.get_mut(&2).unwrap().identity.incarnation = 2,
+        }
+        let expected = if field < 3 {
+            ErrorCode::Einval
+        } else {
+            ErrorCode::Estale
+        };
+        code(
+            structure.verify_root_file(
+                root_file_read(&changed, 2),
+                2,
+                &base.guards[&2].node,
+                base.guards[&2].identity,
+            ),
+            expected,
+        );
+    }
+    let mut changed = base.clone();
+    changed.anchor.generation += 1;
+    let read = CompactRootFileRead::from_guards(changed.anchor.clone(), 1, 2, None, None).unwrap();
+    code(
+        structure.verify_root_file(read, 2, &base.guards[&2].node, base.guards[&2].identity),
+        ErrorCode::Eagain,
+    );
+    for (root, source) in [(0, 2), (1, 0), (1, 1)] {
+        code(
+            CompactRootFileRead::from_guards(base.anchor.clone(), root, source, None, None),
+            ErrorCode::Einval,
+        );
+    }
+    code(
+        CompactRootFileRead::from_guards(
+            base.anchor.clone(),
+            1,
+            2,
+            Some(base.guards[&3].clone()),
+            Some(base.guards[&2].clone()),
+        ),
+        ErrorCode::Einval,
+    );
+}
+
+fn mixed_sparse_root_children(count: usize) -> CompactSnapshot {
+    let base = fixture();
+    let mut result = CompactSnapshot {
+        anchor: base.anchor.clone(),
+        guards: BTreeMap::new(),
+    };
+    let mut entries = Vec::new();
+    let mut directories = 0;
+    for position in (0..count).rev() {
+        let inode = (1_u64 << 40) + position as u64 * 17;
+        let mut guard = base.guards[&2].clone();
+        guard.node.stats.ino = inode;
+        if [0, count / 2, count - 1].contains(&position) {
+            // Keep the independently chosen removal positions eligible.
+        } else {
+            match position % 4 {
+                0 => {}
+                1 => {
+                    guard.node.stats.nlink = 2;
+                    entries.push(DirectoryEntry {
+                        name: format!("alias-{position}"),
+                        inode,
+                    });
+                }
+                2 => {
+                    guard.node.stats.mode = S_IFLNK | 0o777;
+                    guard.node.data = NodeData::Symlink {
+                        target: "target".into(),
+                    };
+                }
+                _ => {
+                    guard.node.stats.mode = S_IFDIR | 0o755;
+                    guard.node.stats.nlink = 2;
+                    guard.node.data = NodeData::Directory { entries: vec![] };
+                    directories += 1;
+                }
+            }
+        }
+        entries.push(DirectoryEntry {
+            name: format!("child-{position}"),
+            inode,
+        });
+        result.guards.insert(inode, guard);
+    }
+    let mut root = base.guards[&1].clone();
+    root.node.stats.nlink = 2 + directories;
+    root.node.data = NodeData::Directory { entries };
+    result.guards.insert(1, root);
+    let orphan_inode = (1_u64 << 40) + count as u64 * 17;
+    let mut orphan = base.guards[&2].clone();
+    orphan.node.stats.ino = orphan_inode;
+    orphan.node.stats.nlink = 0;
+    result.guards.insert(orphan_inode, orphan);
+    result.anchor.members = result.guards.keys().copied().collect();
+    result.anchor.next_inode = orphan_inode + 1;
+    result.namespace().unwrap();
+    result
+}
+
+#[test]
+fn root_file_eligibility_bits_follow_exact_child_index() {
+    for count in [1, 63, 64, 65, 128, 1000, 1023, 1024, 1025] {
+        let base = mixed_sparse_root_children(count);
+        let namespace = base.namespace().unwrap();
+        let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+        assert_eq!(structure.root_children.len(), count);
+        assert_eq!(
+            structure.root_single_link_file_bits.len(),
+            count.div_ceil(64)
+        );
+        if count % 64 != 0 {
+            assert_eq!(
+                structure.root_single_link_file_bits.last().unwrap() >> (count % 64),
+                0
+            );
+        }
+        let root_ids: BTreeSet<_> = match &namespace.nodes[&1].data {
+            NodeData::Directory { entries } => entries.iter().map(|entry| entry.inode).collect(),
+            _ => panic!(),
+        };
+        for (&inode, node) in &namespace.nodes {
+            let expected = root_ids.contains(&inode)
+                && matches!(node.data, NodeData::File(_))
+                && node.stats.nlink == 1;
+            assert_eq!(structure.root_single_link_file(inode), expected);
+        }
+        assert!(!structure.root_single_link_file(u64::MAX));
+        for position in [0, count / 2, count - 1] {
+            let source = (1_u64 << 40) + position as u64 * 17;
+            let proposal = root_file_proposal(
+                &base,
+                &structure,
+                source,
+                CompactRootFileIntent::UnlinkLastLink {
+                    name: format!("child-{position}"),
+                },
+            );
+            let affected = BTreeMap::from([
+                (1, base.guards[&1].clone()),
+                (source, base.guards[&source].clone()),
+            ]);
+            let receipt = proposal
+                .delta()
+                .validate_current(&base.anchor, &affected)
+                .unwrap();
+            let next = proposal.validate_publication(&receipt).unwrap();
+            let reference = proposal
+                .delta()
+                .evaluate(&base)
+                .unwrap()
+                .namespace()
+                .unwrap();
+            let remaining: BTreeSet<_> = match &reference.nodes[&1].data {
+                NodeData::Directory { entries } => {
+                    entries.iter().map(|entry| entry.inode).collect()
+                }
+                _ => panic!(),
+            };
+            assert_eq!(
+                next.root_children.as_ref(),
+                remaining.iter().copied().collect::<Vec<_>>()
+            );
+            for (&inode, node) in &reference.nodes {
+                let expected = remaining.contains(&inode)
+                    && matches!(node.data, NodeData::File(_))
+                    && node.stats.nlink == 1;
+                assert_eq!(
+                    next.root_single_link_file(inode),
+                    expected,
+                    "count={count} position={position} inode={inode}"
+                );
+            }
+            assert!(structure.root_single_link_file(source));
+            assert!(!next.root_single_link_file(source));
+        }
+        let parent =
+            LoadedCompactInode::from_guard(&base.anchor, 1, base.guards[&1].clone()).unwrap();
+        let mut created = fixture().guards[&2].node.clone();
+        created.stats.ino = base.anchor.next_inode;
+        let proposal = CompactRootFileCreate::capture(
+            &structure,
+            &parent,
+            parent.guard.identity,
+            "appended".into(),
+            created,
+            1,
+            1,
+        )
+        .unwrap();
+        let affected = BTreeMap::from([(1, base.guards[&1].clone())]);
+        let receipt = proposal
+            .delta()
+            .validate_current(&base.anchor, &affected)
+            .unwrap();
+        let next = proposal.validate_publication(&receipt).unwrap();
+        assert!(next.root_single_link_file(base.anchor.next_inode));
+        for &inode in structure.root_children.iter() {
+            assert_eq!(
+                next.root_single_link_file(inode),
+                structure.root_single_link_file(inode)
+            );
+        }
+        assert_eq!(structure.root_children.len(), count);
+    }
+}
+
+#[test]
+fn full_witness_rejects_different_receipt_time_eligibility() {
+    let base = fixture();
+    let candidate = base.namespace().unwrap();
+    let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let delta = CompactStructuralDelta::capture(&base, &candidate, StructuralScope::Full).unwrap();
+    let receipt = delta.validate_current(&base.anchor, &base.guards).unwrap();
+    let mut changed = candidate;
+    let file = changed.nodes.get_mut(&2).unwrap();
+    file.stats.mode = S_IFLNK | 0o777;
+    file.data = NodeData::Symlink {
+        target: "different-kind".into(),
+    };
+    changed.validate().unwrap();
+    code(
+        delta.validate_next_structure(&structure, &receipt, &changed),
+        ErrorCode::Einval,
+    );
+}
+
+#[test]
+fn root_file_validator_rejects_arbitrary_candidate_edits() {
+    let base = root_file_fixture();
+    let (_, _, structure) = base.clone().into_validated_namespace().unwrap();
+    let proposal = root_file_proposal(
+        &base,
+        &structure,
+        2,
+        CompactRootFileIntent::RenameAbsent {
+            from: "a".into(),
+            to: "renamed".into(),
+        },
+    );
+    let affected = BTreeMap::from([(1, base.guards[&1].clone()), (2, base.guards[&2].clone())]);
+    for field in 0..12 {
+        let mut forged = proposal.delta().clone();
+        match field {
+            0 => forged.next.default_gid += 1,
+            1 => forged.next.next_inode += 1,
+            2 => {
+                forged.next.members.pop();
+            }
+            3 => forged.changed.get_mut(&1).unwrap().stats.mode ^= 1,
+            4 => forged.changed.get_mut(&2).unwrap().stats.uid += 1,
+            5 => forged.changed.get_mut(&2).unwrap().stats.size += 1,
+            6 => {
+                let NodeData::File(layout) = &mut forged.changed.get_mut(&2).unwrap().data else {
+                    panic!()
+                };
+                layout.extents[0].block = BlockId("other-content-block".into());
+            }
+            7 => {
+                forged.expected.remove(&2);
+            }
+            8 => {
+                forged.created.insert(5, fixture().guards[&2].node.clone());
+            }
+            9 => {
+                forged.removed.insert(2);
+            }
+            10 => forged.entries[1].name = forged.entries[0].name.clone(),
+            _ => forged.changed.get_mut(&2).unwrap().stats.nlink = 0,
+        }
+        code(
+            forged.validate_current(&base.anchor, &affected),
+            ErrorCode::Einval,
+        );
+    }
+    let mut duplicated = base.clone();
+    let NodeData::Directory { entries } = &mut duplicated.guards.get_mut(&1).unwrap().node.data
+    else {
+        panic!()
+    };
+    entries.push(entries[0].clone());
+    code(
+        CompactRootFileRead::from_guards(
+            duplicated.anchor.clone(),
+            1,
+            2,
+            Some(duplicated.guards[&1].clone()),
+            Some(duplicated.guards[&2].clone()),
+        ),
+        ErrorCode::Einval,
+    );
+}
+
+#[test]
+fn legacy_file_create_rejects_cached_root_child_eligibility_grafting() {
+    for persisted_regular in [false, true] {
+        let mut persisted = fixture();
+        if !persisted_regular {
+            let node = &mut persisted.guards.get_mut(&3).unwrap().node;
+            node.stats.mode = S_IFLNK | 0o777;
+            node.data = NodeData::Symlink {
+                target: "persisted-symlink".into(),
+            };
+        }
+        let (mut cached, structure, parent) = retained_create_inputs(&persisted);
+        let node = cached.nodes.get_mut(&3).unwrap();
+        if persisted_regular {
+            node.stats.mode = S_IFLNK | 0o777;
+            node.data = NodeData::Symlink {
+                target: "grafted-symlink".into(),
+            };
+        } else {
+            *node = fixture().guards[&3].node.clone();
+        }
+        // Both graphs validate and the fresh root is byte-for-byte identical.
+        // The cached classification is nevertheless unrelated to this audit.
+        cached.validate().unwrap();
+        let mut candidate = cached.clone();
+        let mut file = fixture().guards[&2].node.clone();
+        file.stats.ino = candidate.next_inode;
+        candidate.nodes.insert(candidate.next_inode, file);
+        candidate.next_inode += 1;
+        let NodeData::Directory { entries } = &mut candidate.nodes.get_mut(&1).unwrap().data else {
+            panic!()
+        };
+        entries.push(DirectoryEntry {
+            name: "created".into(),
+            inode: cached.next_inode,
+        });
+        candidate.validate().unwrap();
+        code(
+            CompactStructuralDelta::capture_file_create(
+                &structure,
+                &cached,
+                &parent,
+                parent.guard.identity,
+                &candidate,
+            ),
+            ErrorCode::Einval,
+        );
+    }
+}

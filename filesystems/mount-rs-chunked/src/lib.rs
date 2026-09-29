@@ -13,6 +13,7 @@ mod construction_tests;
 mod create_guard_metrics_tests;
 mod create_rebase;
 mod migration;
+mod root_file_mutations;
 #[cfg(test)]
 mod runtime_health_tests;
 #[cfg(all(test, unix))]
@@ -25,6 +26,7 @@ use causal_metrics::{
     RequestOutcome,
 };
 use create_rebase::{PreparedCreateRebase, rebase_prepared_create};
+use root_file_mutations::RootFileAttempt;
 
 use async_trait::async_trait;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker, from_config};
@@ -4487,6 +4489,56 @@ where
         let gate_profile = Span::new(Event::GateWait);
         let _gate = self.operation_gate(GateKind::MutationBatch).await;
         drop(gate_profile);
+        // Keep singleton unlink inside the queue owner and its original
+        // committed-response acknowledgement protocol. Mixed batches retain Full.
+        if requests.len() == 1
+            && let MutationRequest::Unlink {
+                path,
+                reply,
+                observation,
+                ..
+            } = &mut requests[0]
+        {
+            if reply.is_closed() {
+                observation.cancelled_receiver();
+                return;
+            }
+            for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
+                match self
+                    .try_compact_root_file_mutation(path, None, _gate.phase_permit(), Some(reply))
+                    .await
+                {
+                    Ok(RootFileAttempt::Committed) => {
+                        let request = requests.pop().expect("singleton unlink remains owned");
+                        request.mark_committed();
+                        if !mutation_reply(request, Ok(MutationResult::Unit)) {
+                            let _ = self.fail_closed(FsError::new(ErrorCode::Eio).with_syscall("mutation-batch")
+                                .with_message("committed mutation response was canceled before acknowledgement"));
+                        }
+                        return;
+                    }
+                    Ok(RootFileAttempt::Unsupported) => break,
+                    Ok(RootFileAttempt::Cancelled) => {
+                        observation.cancelled_receiver();
+                        return;
+                    }
+                    Err(error)
+                        if error.code == ErrorCode::Eagain
+                            && attempt + 1 < MAX_CONCURRENT_CAS_RETRIES =>
+                    {
+                        let _backoff = _gate.phase_permit().phase(GatePhase::CasBackoff);
+                        concurrent_cas_backoff(attempt, &self.inner.options.owner).await;
+                    }
+                    Err(error) => {
+                        mutation_reply(
+                            requests.pop().expect("singleton unlink remains owned"),
+                            Err(error),
+                        );
+                        return;
+                    }
+                }
+            }
+        }
         let attempts = if self.inner.options.concurrent_writes {
             MAX_CONCURRENT_CAS_RETRIES
         } else {
@@ -7039,6 +7091,12 @@ where
     async fn rename(&self, old_path: &str, new_path: &str) -> Result<()> {
         let old_normalized = normalize_path(old_path);
         let new_normalized = normalize_path(new_path);
+        if self
+            .try_compact_root_file_rename(&old_normalized, &new_normalized)
+            .await?
+        {
+            return Ok(());
+        }
         let runtime = self.clone();
         self.mutate(|namespace| {
             apply_rename_mutation(&runtime, namespace, &old_normalized, &new_normalized)

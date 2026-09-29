@@ -1013,6 +1013,22 @@ pub trait MetadataStore: Send + Sync {
     fn compact_inode_capability(&self) -> compact::CompactInodeCapability {
         compact::CompactInodeCapability::Unsupported
     }
+    /// Support for fixed coherent root/file captures and both sealed structural
+    /// transitions. Resolve before choosing a targeted publication strategy.
+    fn compact_root_file_capability(&self) -> compact::CompactRootFileCapability {
+        compact::CompactRootFileCapability::Unsupported
+    }
+    /// Read authority, the complete anchor and two optional complete guards in
+    /// one coherent view. Missing guards are retained for generation recovery;
+    /// malformed guard groups remain errors. No hidden Full scan is permitted.
+    async fn load_compact_root_file(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_root: InodeId,
+        _candidate_file: InodeId,
+    ) -> Result<compact::CompactRootFileRead> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
     /// Inspect exact persisted MRC5 authority without enrollment or repair.
     /// `None` denotes a coherently recognized noncompact mode, not a fresh volume.
     async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {

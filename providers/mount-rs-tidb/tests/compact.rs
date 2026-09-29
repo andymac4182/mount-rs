@@ -632,6 +632,551 @@ mod compact_proxy;
 use std::sync::atomic::Ordering;
 
 #[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_transitions_target_two_guards() {
+    for siblings in [128, 1000] {
+        let f = fixture(true).await;
+        let base = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        let mut ns = base.namespace().unwrap();
+        let file = add_file(&mut ns, "selected-source");
+        for n in 0..siblings {
+            add_file(&mut ns, &format!("sibling-{n}"));
+        }
+        let setup = CompactStructuralDelta::capture(&base, &ns, StructuralScope::Full).unwrap();
+        f.store.publish_compact_structure(&setup).await.unwrap();
+        let expected = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        assert_eq!(expected.guards.len(), siblings + 2);
+
+        let proxy = compact_proxy::Proxy::new(&f.url).await;
+        let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.compact_root_file_capability(),
+            CompactRootFileCapability::Supported
+        );
+        // Warm the owned connection and prepared statement outside the trace.
+        reader
+            .load_compact_root_file(f.backing, expected.anchor.root, file)
+            .await
+            .unwrap();
+        proxy.begin();
+        let captured = reader
+            .load_compact_root_file(f.backing, expected.anchor.root, file)
+            .await
+            .unwrap();
+        let (queries, _) = proxy.end();
+
+        assert_eq!(captured.anchor(), &expected.anchor);
+        assert_eq!(
+            captured.root(),
+            Some(&expected.guards[&expected.anchor.root])
+        );
+        assert_eq!(captured.file(), Some(&expected.guards[&file]));
+        let selects: Vec<_> = queries
+            .iter()
+            .filter(|sql| sql.starts_with("SELECT "))
+            .collect();
+        assert_eq!(selects.len(), 1, "{siblings} siblings: one coherent SELECT");
+        assert!(selects[0].contains("mount_rs_tidb_metadata AS m"));
+        assert!(selects[0].contains(" AS r ON r.volume_key=m.volume_key"));
+        assert!(selects[0].contains(" AS f ON f.volume_key=m.volume_key"));
+        assert!(!selects[0].contains("FOR UPDATE"));
+        assert!(!selects[0].starts_with("SELECT inode,incarnation,epoch,revision,node"));
+        let (_, _, audited) = expected.clone().into_validated_namespace().unwrap();
+        let verified = audited
+            .verify_root_file(
+                captured,
+                file,
+                &expected.guards[&file].node,
+                expected.guards[&file].identity,
+            )
+            .unwrap();
+        let root_stats = &expected.guards[&expected.anchor.root].node.stats;
+        let file_stats = &expected.guards[&file].node.stats;
+        let rename = CompactRootFileTransition::capture(
+            verified,
+            CompactRootFileIntent::RenameAbsent {
+                from: "selected-source".into(),
+                to: "renamed-source".into(),
+            },
+            CompactRootFileTimes {
+                parent_mtime_ms: root_stats.mtime_ms + 2,
+                parent_ctime_ms: root_stats.ctime_ms + 2,
+                file_ctime_ms: file_stats.ctime_ms + 1,
+            },
+        )
+        .unwrap();
+        proxy.begin();
+        reader
+            .publish_compact_structure(rename.delta())
+            .await
+            .unwrap();
+        let (rename_queries, rename_rows) = proxy.end();
+        assert_root_file_publication_queries(&rename_queries, rename_rows);
+        let renamed = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        let NodeData::Directory { entries } = &renamed.guards[&renamed.anchor.root].node.data
+        else {
+            panic!("root directory required");
+        };
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "renamed-source" && entry.inode == file)
+        );
+        assert!(!entries.iter().any(|entry| entry.name == "selected-source"));
+        assert_eq!(renamed.guards[&file].node.stats.nlink, 1);
+
+        let (_, _, audited) = renamed.clone().into_validated_namespace().unwrap();
+        let read = reader
+            .load_compact_root_file(f.backing, renamed.anchor.root, file)
+            .await
+            .unwrap();
+        let verified = audited
+            .verify_root_file(
+                read,
+                file,
+                &renamed.guards[&file].node,
+                renamed.guards[&file].identity,
+            )
+            .unwrap();
+        let root_stats = &renamed.guards[&renamed.anchor.root].node.stats;
+        let file_stats = &renamed.guards[&file].node.stats;
+        let unlink = CompactRootFileTransition::capture(
+            verified,
+            CompactRootFileIntent::UnlinkLastLink {
+                name: "renamed-source".into(),
+            },
+            CompactRootFileTimes {
+                parent_mtime_ms: root_stats.mtime_ms + 1,
+                parent_ctime_ms: root_stats.ctime_ms + 1,
+                file_ctime_ms: file_stats.ctime_ms + 1,
+            },
+        )
+        .unwrap();
+        proxy.begin();
+        reader
+            .publish_compact_structure(unlink.delta())
+            .await
+            .unwrap();
+        let (unlink_queries, unlink_rows) = proxy.end();
+        assert_root_file_publication_queries(&unlink_queries, unlink_rows);
+        let unlinked = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        let NodeData::Directory { entries } = &unlinked.guards[&unlinked.anchor.root].node.data
+        else {
+            panic!("root directory required");
+        };
+        assert!(!entries.iter().any(|entry| entry.inode == file));
+        assert_eq!(unlinked.guards[&file].node.stats.nlink, 0);
+        assert!(unlinked.anchor.members.contains(&file));
+        assert_eq!(unlinked.guards.len(), siblings + 2);
+        reader.close().await.unwrap();
+        proxy.shutdown().await;
+        f.store.close().await.unwrap();
+        eprintln!(
+            "compact root-file transitions: siblings={siblings}; one joined capture; each publication two locked guards, two guard updates and one anchor update; source tombstone retained"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_capture_uses_one_view() {
+    let f = fixture(true).await;
+    let file = create(&f, "source").await;
+    let before = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let transition = root_file_rename_transition(&f, &f.store, file, "source", "moved").await;
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let reader = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    reader
+        .load_compact_root_file(f.backing, before.anchor.root, file)
+        .await
+        .unwrap();
+    proxy.begin();
+    proxy.trace.pause_guards.store(true, Ordering::SeqCst);
+    let backing = f.backing;
+    let root = before.anchor.root;
+    let reading = tokio::spawn(async move {
+        let result = reader.load_compact_root_file(backing, root, file).await;
+        reader.close().await.unwrap();
+        result
+    });
+    proxy.reached().await;
+    // The joined SELECT is paused before it reaches TiDB. Commit both affected
+    // structural bodies, then an independent selected source revision.
+    f.store
+        .publish_compact_structure(transition.delta())
+        .await
+        .unwrap();
+    let old = f.store.load_compact_inode(f.backing, file).await.unwrap();
+    let mut node = old.guard.node;
+    node.stats.mtime_ms += 1;
+    f.store
+        .publish_compact_inode(f.backing, file, old.generation, old.guard.identity, node)
+        .await
+        .unwrap();
+    let expected = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    proxy.trace.resume.notify_one();
+    let captured = reading.await.unwrap().unwrap();
+    let (queries, joined_rows) = proxy.end();
+    assert_eq!(joined_rows, 1, "one physical row contains two guard bodies");
+    assert_eq!(
+        captured.into_parts(),
+        (
+            expected.anchor.clone(),
+            Some(expected.guards[&root].clone()),
+            Some(expected.guards[&file].clone()),
+        )
+    );
+    assert_ne!(expected.anchor, before.anchor);
+    assert_ne!(expected.guards[&root], before.guards[&root]);
+    assert_ne!(expected.guards[&file], before.guards[&file]);
+    let selects: Vec<_> = queries
+        .iter()
+        .filter(|sql| sql.starts_with("SELECT "))
+        .collect();
+    assert_eq!(selects.len(), 1);
+    assert!(selects[0].contains(" AS r ON r.volume_key=m.volume_key"));
+    assert!(selects[0].contains(" AS f ON f.volume_key=m.volume_key"));
+    assert!(!selects[0].contains("FOR UPDATE"));
+    proxy.shutdown().await;
+    f.store.close().await.unwrap();
+}
+
+fn assert_root_file_publication_queries(queries: &[String], returned_guard_rows: usize) {
+    assert_eq!(returned_guard_rows, 2, "exactly two locked guard rows");
+    let guard_reads: Vec<_> = queries
+        .iter()
+        .filter(|sql| {
+            sql.starts_with(
+                "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards",
+            )
+        })
+        .collect();
+    assert_eq!(guard_reads.len(), 1);
+    assert!(guard_reads[0].contains("inode IN (?,?) ORDER BY inode FOR UPDATE"));
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("UPDATE mount_rs_tidb_compact_guards"))
+            .count(),
+        2,
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("UPDATE mount_rs_tidb_metadata SET revision="))
+            .count(),
+        1,
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.eq_ignore_ascii_case("COMMIT"))
+            .count(),
+        1
+    );
+}
+
+async fn root_file_rename_transition(
+    f: &Fixture,
+    reader: &TidbMetadataStore,
+    file: u64,
+    from: &str,
+    to: &str,
+) -> CompactRootFileTransition {
+    let snapshot = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let (_, _, audited) = snapshot.clone().into_validated_namespace().unwrap();
+    let read = reader
+        .load_compact_root_file(f.backing, snapshot.anchor.root, file)
+        .await
+        .unwrap();
+    let verified = audited
+        .verify_root_file(
+            read,
+            file,
+            &snapshot.guards[&file].node,
+            snapshot.guards[&file].identity,
+        )
+        .unwrap();
+    let root = &snapshot.guards[&snapshot.anchor.root].node.stats;
+    let file_stats = &snapshot.guards[&file].node.stats;
+    CompactRootFileTransition::capture(
+        verified,
+        CompactRootFileIntent::RenameAbsent {
+            from: from.into(),
+            to: to.into(),
+        },
+        CompactRootFileTimes {
+            parent_mtime_ms: root.mtime_ms.checked_add(2).unwrap(),
+            parent_ctime_ms: root.ctime_ms.checked_add(2).unwrap(),
+            file_ctime_ms: file_stats.ctime_ms.checked_add(1).unwrap(),
+        },
+    )
+    .unwrap()
+}
+
+async fn root_file_unlink_transition(
+    f: &Fixture,
+    reader: &TidbMetadataStore,
+    file: u64,
+    name: &str,
+) -> CompactRootFileTransition {
+    let snapshot = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    let (_, _, audited) = snapshot.clone().into_validated_namespace().unwrap();
+    let read = reader
+        .load_compact_root_file(f.backing, snapshot.anchor.root, file)
+        .await
+        .unwrap();
+    let verified = audited
+        .verify_root_file(
+            read,
+            file,
+            &snapshot.guards[&file].node,
+            snapshot.guards[&file].identity,
+        )
+        .unwrap();
+    let root = &snapshot.guards[&snapshot.anchor.root].node.stats;
+    let file_stats = &snapshot.guards[&file].node.stats;
+    CompactRootFileTransition::capture(
+        verified,
+        CompactRootFileIntent::UnlinkLastLink { name: name.into() },
+        CompactRootFileTimes {
+            parent_mtime_ms: root.mtime_ms.checked_add(1).unwrap(),
+            parent_ctime_ms: root.ctime_ms.checked_add(1).unwrap(),
+            file_ctime_ms: file_stats.ctime_ms.checked_add(1).unwrap(),
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_wait_rechecks_source_and_authority() {
+    let f = fixture(true).await;
+    let file = create(&f, "source").await;
+    let proxy = compact_proxy::Proxy::new(&f.url).await;
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    let transition = root_file_rename_transition(&f, &writer, file, "source", "moved").await;
+    let pool = Pool::from_url(&f.url).unwrap();
+    let mut conn = pool.get_conn().await.unwrap();
+    conn.query_drop("SET SESSION tidb_txn_mode='pessimistic'")
+        .await
+        .unwrap();
+    let mut tx = conn
+        .start_transaction(mysql_async::TxOpts::default())
+        .await
+        .unwrap();
+    let (revision, body): (i64, String) = tx
+        .exec_first(
+            "SELECT revision,node FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode=? FOR UPDATE",
+            (&f.key, file),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut node: mount_rs_core::storage::NodeMetadata = serde_json::from_str(&body).unwrap();
+    node.stats.mtime_ms += 1;
+    tx.exec_drop(
+        "UPDATE mount_rs_tidb_compact_guards SET revision=?,node=? WHERE volume_key=? AND inode=?",
+        (
+            revision + 1,
+            serde_json::to_string(&node).unwrap(),
+            &f.key,
+            file,
+        ),
+    )
+    .await
+    .unwrap();
+    proxy.begin();
+    proxy.trace.pause_guards.store(true, Ordering::SeqCst);
+    let publishing = tokio::spawn(async move {
+        let result = writer.publish_compact_structure(transition.delta()).await;
+        writer.close().await.unwrap();
+        result
+    });
+    proxy.reached().await;
+    proxy.trace.resume.notify_one();
+    tx.commit().await.unwrap();
+    let result = publishing.await.unwrap();
+    assert!(result.unwrap_err().is(ErrorCode::Eagain));
+    let (queries, _) = proxy.end();
+    assert!(!queries.iter().any(|sql| sql.starts_with("UPDATE ")
+        || sql.starts_with("INSERT ")
+        || sql.starts_with("DELETE ")));
+    let after_source = f.store.load_compact_snapshot(f.backing).await.unwrap();
+    assert_eq!(after_source.guards[&file].node, node);
+    assert_eq!(
+        after_source.guards[&file].identity.revision,
+        revision as u64 + 1
+    );
+    assert_eq!(after_source.anchor.members.len(), 2);
+
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    let transition = root_file_rename_transition(&f, &writer, file, "source", "moved").await;
+    create(&f, "independent").await;
+    let before = raw(&f).await;
+    proxy.begin();
+    assert!(
+        writer
+            .publish_compact_structure(transition.delta())
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Eagain)
+    );
+    let (queries, _) = proxy.end();
+    assert!(!queries.iter().any(|sql| sql.starts_with("UPDATE ")
+        || sql.starts_with("INSERT ")
+        || sql.starts_with("DELETE ")));
+    assert_eq!(raw(&f).await, before);
+    writer.close().await.unwrap();
+    proxy.shutdown().await;
+    drop(conn);
+    pool.disconnect().await.unwrap();
+    f.store.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_commit_ack_unknown_not_replayed() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let f = fixture(true).await;
+    let file = create(&f, "source").await;
+    for rename in [true, false] {
+        let before = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        let proxy = compact_proxy::Proxy::new(&f.url).await;
+        let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+            .await
+            .unwrap();
+        let transition = if rename {
+            root_file_rename_transition(&f, &writer, file, "source", "moved").await
+        } else {
+            root_file_unlink_transition(&f, &writer, file, "moved").await
+        };
+        proxy.begin();
+        proxy.trace.drop_commit_ack.store(true, Ordering::SeqCst);
+        let result = timeout(
+            Duration::from_secs(10),
+            writer.publish_compact_structure(transition.delta()),
+        )
+        .await
+        .expect("controlled root-file publication completed");
+        let (queries, rows) = proxy.end();
+        let commits = proxy.trace.commits.load(Ordering::SeqCst);
+        let dropped = proxy.trace.dropped_acks.load(Ordering::SeqCst);
+        let fresh = f.store.load_compact_snapshot(f.backing).await.unwrap();
+        timeout(Duration::from_secs(10), writer.close())
+            .await
+            .expect("writer disconnect completed")
+            .unwrap();
+        timeout(Duration::from_secs(10), proxy.shutdown())
+            .await
+            .expect("proxy relay settled");
+        let error = result.unwrap_err();
+        assert!(error.is(ErrorCode::Eio));
+        assert!(!error.is(ErrorCode::Eagain));
+        assert!(error.to_string().contains("commit outcome is unknown"));
+        assert_eq!(commits, 1);
+        assert_eq!(dropped, 1);
+        assert_root_file_publication_queries(&queries, rows);
+        assert_eq!(fresh.anchor.generation, before.anchor.generation + 1);
+        assert_eq!(fresh.guards[&file].identity.epoch, fresh.anchor.generation);
+        let NodeData::Directory { entries } = &fresh.guards[&fresh.anchor.root].node.data else {
+            panic!("root directory required");
+        };
+        if rename {
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.name == "moved" && entry.inode == file)
+            );
+            assert!(!entries.iter().any(|entry| entry.name == "source"));
+            assert_eq!(fresh.guards[&file].node.stats.nlink, 1);
+        } else {
+            assert!(!entries.iter().any(|entry| entry.inode == file));
+            assert_eq!(fresh.guards[&file].node.stats.nlink, 0);
+            assert!(fresh.anchor.members.contains(&file));
+        }
+    }
+    f.store.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL; run serial"]
+async fn actual_compact_root_file_packet_rejects_before_mutation() {
+    use mount_rs_core::storage::{BlockExtent, BlockId};
+
+    let f = fixture(true).await;
+    let file = create(&f, "source").await;
+    let old = f.store.load_compact_inode(f.backing, file).await.unwrap();
+    let mut node = old.guard.node.clone();
+    node.stats.size = 1024;
+    node.stats.blocks = 2;
+    // The locked input row must fit the client's receive packet. Make the
+    // serialized body close enough to that limit for the provider's outgoing
+    // statement budget to reject it before any DML, for either transition.
+    for offset in 0..1024 {
+        let NodeData::File(layout) = &mut node.data else {
+            panic!("source file required")
+        };
+        layout.extents.push(BlockExtent {
+            file_offset: offset,
+            block: BlockId(format!("b{}", "1".repeat(64))),
+            block_offset: 0,
+            length: 1,
+        });
+        if serde_json::to_vec(&node).unwrap().len() >= 64900 {
+            break;
+        }
+    }
+    let input_bytes = serde_json::to_vec(&node).unwrap().len();
+    assert!((64900..=65100).contains(&input_bytes));
+    assert!(
+        input_bytes + 128 < 65536,
+        "complete guard row fits receive packet"
+    );
+    f.store
+        .publish_compact_inode(f.backing, file, old.generation, old.guard.identity, node)
+        .await
+        .unwrap();
+    let rename = root_file_rename_transition(&f, &f.store, file, "source", "moved").await;
+    let unlink = root_file_unlink_transition(&f, &f.store, file, "source").await;
+    let before = raw(&f).await;
+    let mut url = url::Url::parse(&f.url).unwrap();
+    url.query_pairs_mut()
+        .append_pair("max_allowed_packet", "65536");
+    let proxy = compact_proxy::Proxy::new(url.as_str()).await;
+    let writer = TidbMetadataStore::connect_with_key(&proxy.url, &f.key)
+        .await
+        .unwrap();
+    for transition in [&rename, &unlink] {
+        proxy.begin();
+        let error = writer
+            .publish_compact_structure(transition.delta())
+            .await
+            .unwrap_err();
+        let (queries, rows) = proxy.end();
+        assert!(error.is(ErrorCode::Efbig));
+        assert_eq!(rows, 2);
+        assert!(!queries.iter().any(|sql| sql.starts_with("UPDATE ")
+            || sql.starts_with("INSERT ")
+            || sql.starts_with("DELETE ")));
+        assert_eq!(raw(&f).await, before);
+    }
+    writer.close().await.unwrap();
+    proxy.shutdown().await;
+    f.store.close().await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]
 async fn actual_compact_snapshot_uses_one_view_without_generation_change() {
     let f = fixture(true).await;

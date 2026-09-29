@@ -564,7 +564,16 @@ mod periodic_checkpoint_tests {
             .expect("owned sampler must publish a periodic checkpoint before phase completion");
         assert_modeled_identity(&sample);
         assert_eq!(sample["core"]["entries"].as_array().unwrap().len(), 136);
-        assert_eq!(sample["storage"]["entries"].as_array().unwrap().len(), 116);
+        let storage_rows = sample["storage"]["entries"].as_array().unwrap();
+        assert_eq!(storage_rows.len(), 118);
+        assert_eq!(
+            storage_rows[116]["name"],
+            "sdk.metadata.compact_root_file_capability"
+        );
+        assert_eq!(
+            storage_rows[117]["name"],
+            "sdk.metadata.load_compact_root_file"
+        );
         let expected = json!({"core":expected_core,"storage":expected_storage});
         for name in [
             "compact.namespace.materialize_nodes",

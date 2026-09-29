@@ -1673,6 +1673,20 @@ impl MetadataStore for TidbMetadataStore {
     fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
         mount_rs_core::storage::compact::CompactInodeCapability::V1
     }
+    fn compact_root_file_capability(
+        &self,
+    ) -> mount_rs_core::storage::compact::CompactRootFileCapability {
+        mount_rs_core::storage::compact::CompactRootFileCapability::Supported
+    }
+    async fn load_compact_root_file(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: InodeId,
+        candidate_file: InodeId,
+    ) -> Result<mount_rs_core::storage::compact::CompactRootFileRead> {
+        self.compact_root_file(backing, expected_root, candidate_file)
+            .await
+    }
     async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
         self.compact_inspect().await
     }

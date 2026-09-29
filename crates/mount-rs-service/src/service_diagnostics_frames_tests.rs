@@ -82,7 +82,17 @@ fn full_maximum_u64_banks_preserve_every_original_json_byte() {
             .collect(),
     };
     let mut profile = profile::snapshot();
-    assert_eq!(storage.entries.len(), 116);
+    assert_eq!(storage.entries.len(), 118);
+    assert_eq!(
+        storage.entries[116..]
+            .iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>(),
+        [
+            "sdk.metadata.compact_root_file_capability",
+            "sdk.metadata.load_compact_root_file"
+        ]
+    );
     assert_eq!(profile.entries.len(), 136);
     for entry in &mut profile.entries {
         entry.calls = exact;
@@ -115,7 +125,7 @@ fn full_maximum_u64_banks_preserve_every_original_json_byte() {
             .as_array()
             .unwrap()
             .len(),
-        116
+        118
     );
     assert_eq!(
         value["process_diagnostics"]["profile"]["snapshot"]["entries"]

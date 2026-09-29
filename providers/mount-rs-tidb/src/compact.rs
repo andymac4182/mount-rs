@@ -15,6 +15,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_tidb_compact_guards (
 )";
 
 const SELECTED_JOINED_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,g.inode,g.incarnation,g.epoch,g.revision,g.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_guards AS g ON g.volume_key=m.volume_key AND g.inode=? WHERE m.volume_key=?";
+const ROOT_FILE_JOINED_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,r.inode,r.incarnation,r.epoch,r.revision,r.node,f.inode,f.incarnation,f.epoch,f.revision,f.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_guards AS r ON r.volume_key=m.volume_key AND r.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS f ON f.volume_key=m.volume_key AND f.inode=? WHERE m.volume_key=?";
 
 type GuardRow = (i64, i64, i64, i64, String);
 type AnchorRow = (
@@ -137,6 +138,45 @@ async fn guards<C: Queryable>(
     Ok(guards)
 }
 
+async fn locked_root_file_guards(
+    tx: &mut Transaction<'_>,
+    volume: &str,
+    expected: &BTreeMap<u64, PhysicalInodeIdentity>,
+) -> Result<BTreeMap<u64, CompactGuard>> {
+    let mut expected_iter = expected.keys();
+    let (Some(&root), Some(&file), None) = (
+        expected_iter.next(),
+        expected_iter.next(),
+        expected_iter.next(),
+    ) else {
+        return Err(backend_error(
+            "TiDB compact root-file publication needs two guards",
+        ));
+    };
+    if root == file {
+        return Err(backend_error("duplicate TiDB compact root-file guard"));
+    }
+    let rows: Vec<GuardRow> = tx
+        .exec_observed(
+            StorageOperation::TidbSqlInodeRead,
+            "SELECT inode,incarnation,epoch,revision,node FROM mount_rs_tidb_compact_guards WHERE volume_key=? AND inode IN (?,?) ORDER BY inode FOR UPDATE",
+            (volume, signed(root, "compact root inode")?, signed(file, "compact file inode")?),
+        )
+        .await
+        .map_err(|e| db_error("read TiDB compact root-file guards", e))?;
+    let mut guards = BTreeMap::new();
+    for row in rows {
+        let (inode, guard) = decode_guard_row(row)?;
+        if guards.insert(inode, guard).is_some() {
+            return Err(backend_error("duplicate TiDB compact root-file guard"));
+        }
+    }
+    if guards.len() != 2 || guards.keys().copied().ne([root, file]) {
+        return Err(stale());
+    }
+    Ok(guards)
+}
+
 fn decode_guard_row(row: GuardRow) -> Result<(u64, CompactGuard)> {
     let (inode, incarnation, epoch, revision, json) = row;
     profile::add(Event::InodeReturned, json.len() as u64);
@@ -209,6 +249,68 @@ fn decode_joined_rows(
         return Err(stale());
     }
     LoadedCompactInode::from_guard(&anchor, inode, guard)
+}
+
+fn decode_root_file_guard_group(
+    values: &mut [Option<Value>],
+    start: usize,
+    requested: u64,
+) -> Result<Option<CompactGuard>> {
+    if values[start..start + 5]
+        .iter()
+        .all(|value| matches!(value, Some(Value::NULL)))
+    {
+        return Ok(None);
+    }
+    let (inode, guard) = decode_guard_row((
+        joined_field(values, start)?,
+        joined_field(values, start + 1)?,
+        joined_field(values, start + 2)?,
+        joined_field(values, start + 3)?,
+        joined_field(values, start + 4)?,
+    ))?;
+    if inode != requested {
+        return Err(stale());
+    }
+    Ok(Some(guard))
+}
+
+fn decode_root_file_joined_rows(
+    rows: impl IntoIterator<Item = Vec<Option<Value>>>,
+    backing: ConcurrentBackingId,
+    expected_root: u64,
+    candidate_file: u64,
+) -> Result<CompactRootFileRead> {
+    let mut rows = rows.into_iter();
+    let mut values = rows.next().ok_or_else(stale)?;
+    if rows.next().is_some() {
+        return Err(backend_error("duplicate TiDB compact root-file joined row"));
+    }
+    if values.len() != 18 {
+        return Err(backend_error(
+            "invalid TiDB compact root-file joined row shape",
+        ));
+    }
+    // Decode authority first, including the anchor generation and backing.
+    // Only then inspect requested IDs or either optional LEFT JOIN group.
+    let anchor = decode_anchor_row(
+        (
+            joined_field(&mut values, 0)?,
+            joined_field(&mut values, 1)?,
+            joined_field(&mut values, 2)?,
+            joined_field(&mut values, 3)?,
+            joined_field(&mut values, 4)?,
+            joined_field(&mut values, 5)?,
+            joined_field(&mut values, 6)?,
+            joined_field(&mut values, 7)?,
+        ),
+        backing,
+    )?;
+    signed(expected_root, "compact root inode")?;
+    signed(candidate_file, "compact file inode")?;
+    let root = decode_root_file_guard_group(&mut values, 8, expected_root)?;
+    let file = decode_root_file_guard_group(&mut values, 13, candidate_file)?;
+    CompactRootFileRead::from_guards(anchor, expected_root, candidate_file, root, file)
 }
 
 // Borrow public Row values while their receive buffers remain owned by the
@@ -569,6 +671,44 @@ impl TidbMetadataStore {
             .map(CompactInodeRead::Loaded)
     }
 
+    pub(super) async fn compact_root_file(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: u64,
+        candidate_file: u64,
+    ) -> Result<CompactRootFileRead> {
+        let mut conn = self
+            .0
+            .pool
+            .get_conn_observed()
+            .await
+            .map_err(|e| db_error("load TiDB compact root and file", e))?;
+        if !selected_session_ready(conn.last_ok_packet().map(|packet| packet.status_flags())) {
+            let _ = conn.disconnect().await;
+            return Err(backend_error(
+                "TiDB compact root-file read requires verified autocommit outside a transaction",
+            ));
+        }
+        // Both optional guard bodies and the authority anchor share one
+        // nonlocking statement snapshot. Range errors follow authority decode.
+        let root = signed(expected_root, "compact root inode").unwrap_or(0);
+        let file = signed(candidate_file, "compact file inode").unwrap_or(0);
+        let rows: Vec<Row> = conn
+            .exec_observed(
+                StorageOperation::TidbSqlInodeRead,
+                ROOT_FILE_JOINED_SQL,
+                (root, file, &self.0.volume_key),
+            )
+            .await
+            .map_err(|e| db_error("read TiDB compact root and file", e))?;
+        decode_root_file_joined_rows(
+            rows.into_iter().map(Row::unwrap_raw),
+            backing,
+            expected_root,
+            candidate_file,
+        )
+    }
+
     async fn compact_selected_rows(&self, inode: u64) -> Result<Vec<Row>> {
         let mut conn = self
             .0
@@ -661,6 +801,9 @@ impl TidbMetadataStore {
                     map.extend(guards(&mut tx, &self.0.volume_key, Some(inode), true).await?);
                 }
                 map
+            }
+            StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink => {
+                locked_root_file_guards(&mut tx, &self.0.volume_key, delta.expected()).await?
             }
         };
         let publication = delta.validate_current(&anchor, &current)?;
@@ -903,7 +1046,7 @@ mod tests {
         incomplete[10] = None;
         let mut short = row.clone();
         short.pop();
-        let mut extra = row;
+        let mut extra = row.clone();
         extra.push(Some(Value::NULL));
         for invalid in [invalid_number, invalid_utf8, incomplete, short, extra] {
             assert!(
@@ -982,6 +1125,128 @@ mod tests {
                     .is(expected_code)
             );
         }
+    }
+
+    fn root_file_joined_fixture() -> (
+        CompactAnchor,
+        CompactGuard,
+        CompactGuard,
+        Vec<Option<Value>>,
+    ) {
+        use mount_rs_core::S_IFDIR;
+        use mount_rs_core::storage::DirectoryEntry;
+
+        let (anchor, file, selected) = joined_fixture();
+        let mut root = file.clone();
+        root.node.stats.ino = anchor.root;
+        root.node.stats.mode = S_IFDIR | 0o755;
+        root.node.stats.nlink = 2;
+        root.node.data = NodeData::Directory {
+            entries: vec![DirectoryEntry {
+                name: "source".into(),
+                inode: 2,
+            }],
+        };
+        let mut row = selected[..8].to_vec();
+        row.extend([
+            Some(Value::Int(1)),
+            Some(Value::Int(2)),
+            Some(Value::Int(6)),
+            Some(Value::Int(9)),
+            Some(Value::Bytes(serde_json::to_vec(&root.node).unwrap())),
+        ]);
+        row.extend_from_slice(&selected[8..]);
+        (anchor, root, file, row)
+    }
+
+    #[test]
+    fn joined_root_file_decodes_one_coherent_eighteen_column_row() {
+        let (anchor, root, file, row) = root_file_joined_fixture();
+        let read = decode_root_file_joined_rows([row], anchor.backing, 1, 2).unwrap();
+        assert_eq!(read.into_parts(), (anchor, Some(root), Some(file)));
+    }
+
+    #[test]
+    fn joined_root_file_retains_complete_missing_groups_for_coordinator() {
+        let (anchor, root, file, row) = root_file_joined_fixture();
+        for missing in [8..13, 13..18] {
+            let mut absent = row.clone();
+            absent[missing.clone()].fill(Some(Value::NULL));
+            let read = decode_root_file_joined_rows([absent], anchor.backing, 1, 2).unwrap();
+            let (returned_anchor, returned_root, returned_file) = read.into_parts();
+            assert_eq!(returned_anchor, anchor);
+            assert_eq!(returned_root, (missing.start != 8).then(|| root.clone()));
+            assert_eq!(returned_file, (missing.start != 13).then(|| file.clone()));
+        }
+        let mut both_absent = row;
+        both_absent[8..18].fill(Some(Value::NULL));
+        let read = decode_root_file_joined_rows([both_absent], anchor.backing, 1, 2).unwrap();
+        assert_eq!(read.into_parts(), (anchor, None, None));
+    }
+
+    #[test]
+    fn joined_root_file_checks_authority_before_bad_guards_and_requested_range() {
+        let (anchor, _, _, row) = root_file_joined_fixture();
+        let mut stale_authority = row.clone();
+        stale_authority[1] = Some(Value::Bytes(b"MRC4".to_vec()));
+        stale_authority[8] = Some(Value::Bytes(b"invalid integer".to_vec()));
+        stale_authority[17] = Some(Value::Bytes(vec![0xff]));
+        assert!(
+            decode_root_file_joined_rows([stale_authority], anchor.backing, u64::MAX, 2)
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        assert!(
+            decode_root_file_joined_rows([row], anchor.backing, u64::MAX, 2)
+                .unwrap_err()
+                .is(ErrorCode::Eoverflow)
+        );
+    }
+
+    #[test]
+    fn joined_root_file_rejects_partial_null_wrong_ids_and_malformed_bodies() {
+        let (anchor, _, _, row) = root_file_joined_fixture();
+        for index in 8..18 {
+            let mut partial = row.clone();
+            partial[index] = Some(Value::NULL);
+            assert!(
+                decode_root_file_joined_rows([partial], anchor.backing, 1, 2).is_err(),
+                "partial NULL in joined guard column {index} accepted"
+            );
+        }
+        for (index, invalid) in [
+            (8, Value::Int(2)),
+            (13, Value::Int(1)),
+            (9, Value::Int(-1)),
+            (14, Value::Int(-1)),
+            (12, Value::Bytes(b"{".to_vec())),
+            (17, Value::Bytes(vec![0xff])),
+        ] {
+            let mut bad = row.clone();
+            bad[index] = Some(invalid);
+            assert!(
+                decode_root_file_joined_rows([bad], anchor.backing, 1, 2).is_err(),
+                "invalid joined guard column {index} accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn joined_root_file_rejects_duplicate_and_wrong_width_results() {
+        let (anchor, _, _, row) = root_file_joined_fixture();
+        assert!(
+            decode_root_file_joined_rows([row.clone(), row.clone()], anchor.backing, 1, 2).is_err()
+        );
+        assert!(decode_root_file_joined_rows(Vec::new(), anchor.backing, 1, 2).is_err());
+        let mut short = row.clone();
+        short.pop();
+        assert!(decode_root_file_joined_rows([short], anchor.backing, 1, 2).is_err());
+        let mut extra = row.clone();
+        extra.push(Some(Value::NULL));
+        assert!(decode_root_file_joined_rows([extra], anchor.backing, 1, 2).is_err());
+        let mut malformed_anchor = row;
+        malformed_anchor[6] = Some(Value::Bytes(b"{".to_vec()));
+        assert!(decode_root_file_joined_rows([malformed_anchor], anchor.backing, 1, 2).is_err());
     }
     #[tokio::test]
     #[ignore = "requires actual owned TiDB and MOUNT_RS_TIDB_URL"]

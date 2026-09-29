@@ -18,6 +18,12 @@
 use super::*;
 use crate::diagnostics::profile::{self, Event, Span};
 
+mod root_file;
+pub use root_file::{
+    CompactRootFileCapability, CompactRootFileIntent, CompactRootFileRead, CompactRootFileTimes,
+    CompactRootFileTransition, VerifiedCompactRootFile,
+};
+
 /// Capability advertisement only; it does not assert a volume is enrolled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompactInodeCapability {
@@ -958,6 +964,8 @@ pub struct ValidatedCompactStructure {
     // Prepared only after a complete graph audit. Entry order need not follow
     // inode order, and hard links may repeat a child ID.
     root_children: std::sync::Arc<[InodeId]>,
+    // Exactly aligned with root_children, derived only from an audited graph.
+    root_single_link_file_bits: std::sync::Arc<[u64]>,
 }
 
 impl ValidatedCompactStructure {
@@ -965,8 +973,10 @@ impl ValidatedCompactStructure {
         &self.anchor
     }
 
-    fn new(anchor: CompactAnchor, root: CompactGuard) -> Self {
-        let mut children = match &root.node.data {
+    fn audited_root_children(
+        namespace: &Namespace,
+    ) -> (std::sync::Arc<[InodeId]>, std::sync::Arc<[u64]>) {
+        let mut children = match &namespace.nodes[&namespace.root].data {
             NodeData::Directory { entries } => {
                 entries.iter().map(|entry| entry.inode).collect::<Vec<_>>()
             }
@@ -974,10 +984,23 @@ impl ValidatedCompactStructure {
         };
         children.sort_unstable();
         children.dedup();
+        let mut bits = vec![0; children.len().div_ceil(64)];
+        for (index, inode) in children.iter().enumerate() {
+            let node = &namespace.nodes[inode];
+            if matches!(node.data, NodeData::File(_)) && node.stats.nlink == 1 {
+                bits[index / 64] |= 1_u64 << (index % 64);
+            }
+        }
+        (children.into(), bits.into())
+    }
+
+    fn new(anchor: CompactAnchor, root: CompactGuard, namespace: &Namespace) -> Self {
+        let (root_children, root_single_link_file_bits) = Self::audited_root_children(namespace);
         Self {
             anchor: std::sync::Arc::new(anchor),
             root: std::sync::Arc::new(root),
-            root_children: children.into(),
+            root_children,
+            root_single_link_file_bits,
         }
     }
 
@@ -1046,11 +1069,8 @@ impl CompactSnapshot {
             identity: identities[&anchor.root],
             node: namespace.nodes[&anchor.root].clone(),
         };
-        Ok((
-            namespace,
-            identities,
-            ValidatedCompactStructure::new(anchor, root),
-        ))
+        let structure = ValidatedCompactStructure::new(anchor, root, &namespace);
+        Ok((namespace, identities, structure))
     }
 
     pub fn namespace(&self) -> Result<Namespace> {
@@ -1167,6 +1187,10 @@ pub enum StructuralScope {
     Full,
     /// One independent regular-file create; only its parent guard is expected.
     FileCreate,
+    /// Sealed root-child regular-file rename; exactly root and file expected.
+    RootFileRenameAbsent,
+    /// Sealed last-link unlink retaining the same physical file as a tombstone.
+    RootFileUnlinkLastLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1188,6 +1212,11 @@ pub struct CompactStructuralDelta {
     removed: BTreeSet<InodeId>,
     entries: Vec<ParentEntryPrecondition>,
     parent_body: Option<NodeMetadata>,
+    captured_bodies: BTreeMap<InodeId, NodeMetadata>,
+    // Generic Full/candidate captures retain the audited classification so a
+    // different valid candidate cannot supply receipt-time graph provenance.
+    next_root_children: Option<std::sync::Arc<[InodeId]>>,
+    next_root_file_bits: Option<std::sync::Arc<[u64]>>,
     scope: StructuralScope,
 }
 
@@ -1209,6 +1238,7 @@ pub struct CompactPublication {
 #[derive(Debug, Clone)]
 pub struct CompactRootFileCreate {
     delta: CompactStructuralDelta,
+    structure: ValidatedCompactStructure,
 }
 
 impl CompactRootFileCreate {
@@ -1361,11 +1391,17 @@ impl CompactRootFileCreate {
                 expected: None,
             }],
             parent_body: Some(parent.node.clone()),
+            captured_bodies: BTreeMap::new(),
+            next_root_children: None,
+            next_root_file_bits: None,
             scope: StructuralScope::FileCreate,
         };
         delta.validate_file_create_parent(&parent.node)?;
         profile::add(Event::CompactStructuralExpectedGuardNodes, 1);
-        Ok(Self { delta })
+        Ok(Self {
+            delta,
+            structure: structure.clone(),
+        })
     }
 
     pub fn delta(&self) -> &CompactStructuralDelta {
@@ -1383,10 +1419,8 @@ impl CompactRootFileCreate {
             .upserts
             .get(&receipt.anchor.root)
             .ok_or_else(|| invalid_namespace("root-child receipt omits its parent"))?;
-        Ok(ValidatedCompactStructure::new(
-            receipt.anchor.clone(),
-            root.clone(),
-        ))
+        self.structure
+            .with_created_root_file(receipt.anchor.clone(), root.clone())
     }
 }
 
@@ -1432,10 +1466,22 @@ impl CompactStructuralDelta {
                 "compact structural candidate root differs from receipt",
             ));
         }
-        Ok(ValidatedCompactStructure::new(
-            receipt.anchor.clone(),
-            root.clone(),
-        ))
+        for (&inode, node) in self.changed.iter().chain(&self.created) {
+            if candidate.nodes.get(&inode) != Some(node) {
+                return Err(invalid_namespace(
+                    "compact structural candidate body differs from receipt",
+                ));
+            }
+        }
+        let next = ValidatedCompactStructure::new(receipt.anchor.clone(), root.clone(), candidate);
+        if self.next_root_children.as_deref() != Some(next.root_children.as_ref())
+            || self.next_root_file_bits.as_deref() != Some(next.root_single_link_file_bits.as_ref())
+        {
+            return Err(invalid_namespace(
+                "compact structural candidate eligibility differs from capture",
+            ));
+        }
+        Ok(next)
     }
 
     /// Acknowledged providers may return only this exact write set. This
@@ -1456,15 +1502,16 @@ impl CompactStructuralDelta {
                 .expected
                 .get(&inode)
                 .map_or(self.next.generation, |identity| identity.incarnation);
-            let expected = CompactGuard {
-                identity: PhysicalInodeIdentity {
-                    incarnation,
-                    epoch: self.next.generation,
-                    revision: 0,
-                },
-                node: node.clone(),
+            let expected = PhysicalInodeIdentity {
+                incarnation,
+                epoch: self.next.generation,
+                revision: 0,
             };
-            if receipt.upserts.get(&inode) != Some(&expected) {
+            if receipt
+                .upserts
+                .get(&inode)
+                .is_none_or(|guard| guard.identity != expected || &guard.node != node)
+            {
                 return Err(invalid_namespace(
                     "compact structural receipt body/identity differs",
                 ));
@@ -1478,10 +1525,20 @@ impl CompactStructuralDelta {
         candidate: &Namespace,
         scope: StructuralScope,
     ) -> Result<Self> {
+        if matches!(
+            scope,
+            StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink
+        ) {
+            return Err(invalid_namespace(
+                "root-file scopes require a sealed transition",
+            ));
+        }
         let _profile = Span::new(Event::CompactStructuralDeltaCaptureNodes)
             .units(candidate.nodes.len() as u64);
         base.namespace()?;
         candidate.validate()?;
+        let (next_root_children, next_root_file_bits) =
+            ValidatedCompactStructure::audited_root_children(candidate);
         let generation = base
             .anchor
             .generation
@@ -1499,6 +1556,9 @@ impl CompactStructuralDelta {
             removed: BTreeSet::new(),
             entries: Vec::new(),
             parent_body: None,
+            captured_bodies: BTreeMap::new(),
+            next_root_children: Some(next_root_children),
+            next_root_file_bits: Some(next_root_file_bits),
             scope,
         };
         for (&inode, old) in &base.guards {
@@ -1605,6 +1665,26 @@ impl CompactStructuralDelta {
                 "compact parent body differs from cached namespace",
             ));
         }
+        // This legacy API accepts a complete cached candidate. Its unchanged
+        // child classification must still come from the retained audit; a
+        // separately valid graph cannot redefine an existing child's kind.
+        if cached.nodes.get(&anchor.root) != Some(&structure.root.node) {
+            return Err(invalid_namespace(
+                "compact cached root differs from audited graph",
+            ));
+        }
+        for (position, inode) in structure.root_children.iter().enumerate() {
+            let node = cached.nodes.get(inode).ok_or_else(fail)?;
+            let eligible = matches!(node.data, NodeData::File(_)) && node.stats.nlink == 1;
+            let audited = structure.root_single_link_file_bits[position / 64]
+                & (1_u64 << (position % 64))
+                != 0;
+            if eligible != audited {
+                return Err(invalid_namespace(
+                    "compact cached child eligibility differs from audited graph",
+                ));
+            }
+        }
         let generation = anchor
             .generation
             .checked_add(1)
@@ -1660,6 +1740,8 @@ impl CompactStructuralDelta {
         }
         let added_entry = added_entry.ok_or_else(fail)?;
         let created = candidate.nodes.get(&anchor.next_inode).ok_or_else(fail)?;
+        let (next_root_children, next_root_file_bits) =
+            ValidatedCompactStructure::audited_root_children(candidate);
         let delta = Self {
             base: anchor.clone(),
             next,
@@ -1673,6 +1755,9 @@ impl CompactStructuralDelta {
                 expected: None,
             }],
             parent_body: Some(old_parent.clone()),
+            captured_bodies: BTreeMap::new(),
+            next_root_children: Some(next_root_children),
+            next_root_file_bits: Some(next_root_file_bits),
             scope: StructuralScope::FileCreate,
         };
         delta.validate_file_create_parent(old_parent)?;
@@ -1806,6 +1891,19 @@ impl CompactStructuralDelta {
             guard.validate(inode, anchor)?;
             if guard.identity != self.expected[&inode] {
                 return Err(FsError::new(ErrorCode::Eagain));
+            }
+        }
+        if matches!(
+            self.scope,
+            StructuralScope::RootFileRenameAbsent | StructuralScope::RootFileUnlinkLastLink
+        ) {
+            self.validate_root_file_transition()?;
+            for (&inode, captured) in &self.captured_bodies {
+                if guards.get(&inode).map(|guard| &guard.node) != Some(captured) {
+                    return Err(invalid_namespace(
+                        "compact affected body differs from captured guard",
+                    ));
+                }
             }
         }
         for entry in &self.entries {
@@ -2434,6 +2532,182 @@ mod streamed_tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn root_file_eligibility_allocations_are_packed_at_1000_siblings() {
+        for siblings in [63_usize, 64, 65, 128, 1000, 1023, 1024, 1025] {
+            let snapshot = fixture(siblings);
+            let namespace = snapshot.namespace().unwrap();
+            let (_, _, structure) = snapshot.clone().into_validated_namespace().unwrap();
+            assert_eq!(
+                structure.root_single_link_file_bits.len(),
+                siblings.div_ceil(64)
+            );
+            if siblings == 1000 {
+                assert_eq!(structure.root_single_link_file_bits.len(), 16);
+            }
+            if siblings % 64 != 0 {
+                assert_eq!(
+                    structure.root_single_link_file_bits.last().unwrap() >> (siblings % 64),
+                    0
+                );
+            }
+            for (&inode, node) in &namespace.nodes {
+                assert_eq!(
+                    structure.root_single_link_file(inode),
+                    matches!(node.data, NodeData::File(_)) && node.stats.nlink == 1
+                );
+            }
+            let (eligible, calls, bytes) = measured(|| {
+                structure
+                    .root_children
+                    .iter()
+                    .all(|inode| structure.root_single_link_file(*inode))
+            });
+            assert!(eligible);
+            assert_eq!((calls, bytes), (0, 0));
+            let ((children, bits), calls, bytes) = measured(|| structure.root_file_rename_index());
+            assert_eq!((calls, bytes), (0, 0));
+            assert!(std::sync::Arc::ptr_eq(&children, &structure.root_children));
+            assert!(std::sync::Arc::ptr_eq(
+                &bits,
+                &structure.root_single_link_file_bits
+            ));
+            // These arrays and fixture assertions are outside the isolated bit
+            // measurement. Full-operation observations below include ID copies.
+            let mut created_children = structure.root_children.to_vec();
+            created_children.push(snapshot.anchor.next_inode);
+            let (created_bits, calls, bytes) = measured(|| {
+                root_file::append_eligible_bit(&structure.root_single_link_file_bits, siblings)
+            });
+            let bound = if siblings == 1000 {
+                512
+            } else {
+                2 * created_children.len().div_ceil(64) * std::mem::size_of::<u64>() + 128
+            };
+            eprintln!(
+                "eligibility create siblings={siblings} calls={calls} requested_bytes={bytes}"
+            );
+            assert!(
+                calls <= 2 && bytes <= bound,
+                "calls={calls} requested_bytes={bytes} bound={bound}"
+            );
+            assert_eq!(created_bits.len(), created_children.len().div_ceil(64));
+            assert_ne!(created_bits[siblings / 64] & (1_u64 << (siblings % 64)), 0);
+            for position in [0, siblings / 2, siblings - 1] {
+                let mut remaining_children = structure.root_children.to_vec();
+                remaining_children.remove(position);
+                let (removed_bits, calls, bytes) = measured(|| {
+                    root_file::remove_eligible_bit(
+                        &structure.root_single_link_file_bits,
+                        siblings,
+                        position,
+                    )
+                });
+                let bound = if siblings == 1000 {
+                    512
+                } else {
+                    2 * remaining_children.len().div_ceil(64) * std::mem::size_of::<u64>() + 128
+                };
+                eprintln!(
+                    "eligibility unlink siblings={siblings} position={position} calls={calls} requested_bytes={bytes}"
+                );
+                assert!(
+                    calls <= 2 && bytes <= bound,
+                    "calls={calls} requested_bytes={bytes} bound={bound}"
+                );
+                assert_eq!(removed_bits.len(), remaining_children.len().div_ceil(64));
+                for index in 0..remaining_children.len() {
+                    assert_ne!(removed_bits[index / 64] & (1_u64 << (index % 64)), 0);
+                }
+                if remaining_children.len() % 64 != 0 {
+                    assert_eq!(
+                        removed_bits.last().unwrap() >> (remaining_children.len() % 64),
+                        0
+                    );
+                }
+            }
+            // The old witness remains strongly referenced throughout successors.
+            assert_eq!(structure.root_children.len(), siblings);
+            assert_eq!(
+                structure.root_single_link_file_bits.len(),
+                siblings.div_ceil(64)
+            );
+        }
+    }
+
+    #[test]
+    fn root_file_complete_transition_allocation_observations() {
+        for siblings in [128, 1000] {
+            let snapshot = fixture(siblings);
+            let (namespace, _, structure) = snapshot.clone().into_validated_namespace().unwrap();
+            let namespace = std::sync::Arc::new(namespace);
+            let source = 2;
+            for pinned in [false, true] {
+                // This is the real Namespace Arc storage representation. A
+                // retained reader keeps its old complete view after installation.
+                let mut installed = if pinned {
+                    std::sync::Arc::clone(&namespace)
+                } else {
+                    std::sync::Arc::new(namespace.as_ref().clone())
+                };
+                let intent = CompactRootFileIntent::UnlinkLastLink {
+                    name: format!("child-{source}"),
+                };
+                let affected = BTreeMap::from([
+                    (1, snapshot.guards[&1].clone()),
+                    (source, snapshot.guards[&source].clone()),
+                ]);
+                let ((proposal, receipt, next_structure), calls, bytes) = measured(|| {
+                    let read = CompactRootFileRead::from_guards(
+                        snapshot.anchor.clone(),
+                        1,
+                        source,
+                        Some(snapshot.guards[&1].clone()),
+                        Some(snapshot.guards[&source].clone()),
+                    )
+                    .unwrap();
+                    let verified = structure
+                        .verify_root_file(
+                            read,
+                            source,
+                            &snapshot.guards[&source].node,
+                            snapshot.guards[&source].identity,
+                        )
+                        .unwrap();
+                    let proposal = CompactRootFileTransition::capture(
+                        verified,
+                        intent,
+                        CompactRootFileTimes {
+                            parent_mtime_ms: 1,
+                            parent_ctime_ms: 1,
+                            file_ctime_ms: 1,
+                        },
+                    )
+                    .unwrap();
+                    let receipt = proposal
+                        .delta()
+                        .validate_current(&snapshot.anchor, &affected)
+                        .unwrap();
+                    let next_structure = proposal.validate_publication(&receipt).unwrap();
+                    let next = std::sync::Arc::make_mut(&mut installed);
+                    for (&inode, guard) in &receipt.upserts {
+                        next.nodes.insert(inode, guard.node.clone());
+                    }
+                    (proposal, receipt, next_structure)
+                });
+                eprintln!(
+                    "root-file transition/install siblings={siblings} pinned_namespace={pinned} calls={calls} requested_bytes={bytes}"
+                );
+                installed.validate().unwrap();
+                assert_eq!(installed.nodes[&source].stats.nlink, 0);
+                assert_eq!(namespace.nodes[&source].stats.nlink, 1);
+                assert_eq!(next_structure.anchor(), &receipt.anchor);
+                proposal.delta().validate_receipt(&receipt).unwrap();
+                assert!(calls > 0 && bytes > 0);
+            }
+        }
     }
 
     #[test]
