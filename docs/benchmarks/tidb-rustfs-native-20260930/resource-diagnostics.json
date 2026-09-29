@@ -1,0 +1,143 @@
+{
+  "base_revision": "004e2deb57cf9c53658f7bf8d3cdf11c504e4f6f",
+  "green": [
+    {
+      "argv": [
+        "./scripts/cargo-shared",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "direct_child_reaped": true,
+      "elapsed_seconds": 2.656895708059892,
+      "exit_code": 0,
+      "failure": null,
+      "files": {
+        "0.stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "0.stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "minimum_host_free_bytes": 77396455424,
+      "process_group_absent": true
+    },
+    {
+      "argv": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "sdk-runtime,resource-profiling",
+        "--test",
+        "quic_production_target",
+        "--",
+        "--test-threads=1"
+      ],
+      "direct_child_reaped": true,
+      "elapsed_seconds": 31.186446417006664,
+      "exit_code": 0,
+      "failure": null,
+      "files": {
+        "1.stderr": {
+          "bytes": 85156,
+          "sha256": "450d3d35ca7101a43810fe94648c56092e17a0f2da44e3ac3fb13a2c9294b432"
+        },
+        "1.stdout": {
+          "bytes": 19232,
+          "sha256": "dc304849f2e153d07716a2ae7df8c68509abe2a3b4918b429ab719c97b3eea54"
+        }
+      },
+      "minimum_host_free_bytes": 77394493440,
+      "process_group_absent": true
+    },
+    {
+      "argv": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--release",
+        "-p",
+        "mount-rs-service",
+        "--features",
+        "sdk-runtime,resource-profiling",
+        "--test",
+        "quic_production_target",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "direct_child_reaped": true,
+      "elapsed_seconds": 13.682066041976213,
+      "exit_code": 0,
+      "failure": null,
+      "files": {
+        "2.stderr": {
+          "bytes": 2921,
+          "sha256": "6a21ec5b2df41ef2363c21cff4ffb829a957ad196275df79171f7ab4c6edac03"
+        },
+        "2.stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "minimum_host_free_bytes": 79186513920,
+      "process_group_absent": true
+    }
+  ],
+  "green_explicit_opt_ins_ignored": 6,
+  "green_native_passed": 172,
+  "green_receipt_sha256": "abe1df8fad7d3e36e8a8e66aab60dc10024fde5f5523a2e83be020499f614734",
+  "initial_failure_root_cause": "unresolved; rejected timestamp not retained in earlier artifact",
+  "new_native_runtime_benchmark_executed": false,
+  "red": {
+    "argv": [
+      "./scripts/cargo-shared",
+      "test",
+      "--locked",
+      "--release",
+      "-p",
+      "mount-rs-service",
+      "--features",
+      "sdk-runtime,resource-profiling",
+      "--test",
+      "quic_production_target",
+      "timestamp",
+      "--",
+      "--test-threads=1",
+      "--nocapture"
+    ],
+    "direct_child_reaped": true,
+    "elapsed_seconds": 28.20799599995371,
+    "exit_code": 101,
+    "failure": null,
+    "files": {
+      "stderr": {
+        "bytes": 1336,
+        "sha256": "9fd66cbc2ef213027d81161b5f80063652b7e78a32bb01da0885dfb812abd0f5"
+      },
+      "stdout": {
+        "bytes": 505,
+        "sha256": "678757c1d6df04eb5727d69ff7127be22c9f0bc1984b1d48a154668f21d97f0b"
+      }
+    },
+    "minimum_host_free_bytes": 77328842752,
+    "process_group_absent": true
+  },
+  "red_cases": 2,
+  "red_expected_outcome": "both precise diagnostic assertions fail against original generic error",
+  "red_receipt_sha256": "567d5ad38d83ad7adcdf2d13c51264a03209f2cec1b929510e2c1b8327604075",
+  "schema": "mount-rs-resource-timestamp-diagnostic-qualification-v1",
+  "source": {
+    "path": "crates/mount-rs-service/tests/support/production_target/resources.rs",
+    "sha256": "0556bcf27677f2bff5f82337260a686d4cb034149c62ac1eb980550f0ad4c91b"
+  },
+  "unchanged_rejection_predicate": "time == 0 || time > now || now - time > 10000"
+}

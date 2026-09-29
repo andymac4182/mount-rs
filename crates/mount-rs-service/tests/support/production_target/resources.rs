@@ -45,7 +45,17 @@ pub fn validate_sample(value: &Value, pid: u32, now: u64) -> Result<(), String> 
         .as_u64()
         .ok_or("resource timestamp missing")?;
     if time == 0 || time > now || now - time > 10000 {
-        return Err("resource coverage stale or invalid".into());
+        let reason = if time == 0 {
+            "zero_timestamp"
+        } else if time > now {
+            "future_timestamp"
+        } else {
+            "stale_timestamp"
+        };
+        return Err(format!(
+            "resource coverage stale or invalid: reason={reason} pid={pid} samples={} observed_unix_ms={time} checked_unix_ms={now} max_age_ms=10000",
+            value["samples"].as_u64().unwrap_or(0),
+        ));
     }
     let current = value["process_delta"]["rss_end_bytes"]
         .as_u64()
@@ -315,6 +325,50 @@ fn prereview_red_resource_coverage_and_lifetime_peak() {
     validate_sample(&sample, 123, super::utc_ms()).unwrap();
     sample["process_delta"]["lifetime_peak_rss_bytes"] = json!(RSS_CAP + 1);
     assert!(validate_sample(&sample, 123, super::utc_ms()).is_err());
+}
+#[test]
+fn resource_timestamp_rejection_retains_exact_clock_and_reason() {
+    let now = 20_000;
+    for (observed, reason) in [
+        (0, "zero_timestamp"),
+        (20_001, "future_timestamp"),
+        (9_999, "stale_timestamp"),
+    ] {
+        let mut sample = example_sample(123);
+        sample["observed_unix_ms"] = json!(observed);
+        assert_eq!(
+            validate_sample(&sample, 123, now).unwrap_err(),
+            format!(
+                "resource coverage stale or invalid: reason={reason} pid=123 samples=1 observed_unix_ms={observed} checked_unix_ms=20000 max_age_ms=10000"
+            ),
+        );
+    }
+    let mut sample = example_sample(123);
+    sample["observed_unix_ms"] = json!(10_000);
+    validate_sample(&sample, 123, now).unwrap();
+    sample["observed_unix_ms"] = json!(now);
+    validate_sample(&sample, 123, now).unwrap();
+}
+
+#[test]
+fn rejected_sampler_timestamp_survives_later_valid_terminal_sample() {
+    let mut initial = example_sample(123);
+    initial["observed_unix_ms"] = json!(20_000);
+    let mut future = initial.clone();
+    future["observed_unix_ms"] = json!(20_001);
+    let rejected = retain_observation(initial.clone(), Ok(future), false, 123, 20_000);
+    let error = rejected["error"].as_str().unwrap();
+    assert_eq!(
+        error,
+        "resource coverage stale or invalid: reason=future_timestamp pid=123 samples=1 observed_unix_ms=20001 checked_unix_ms=20000 max_age_ms=10000"
+    );
+    let terminal = retain_observation(rejected.clone(), Ok(initial), true, 123, 20_002);
+    assert_eq!(terminal["terminal_sample"], true);
+    assert_eq!(terminal["error"], rejected["error"]);
+    assert_eq!(
+        validate_terminal_sample(&terminal, 123, 20_002),
+        Err(error.into())
+    );
 }
 #[tokio::test]
 async fn readiness_has_synchronous_pid_cpu_rss_sample_and_sampler_stops() {
