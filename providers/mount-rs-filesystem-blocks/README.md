@@ -38,10 +38,11 @@ Each put completes `sync_all` on the file, shard directory, and root directory.
 macOS also completes `F_FULLFSYNC` on regular files before publication and once
 more on the retained winning file descriptor after the directory syncs, so the
 new directory entries precede the final device barrier. Barrier errors reach the
-caller. `flush` rechecks authority and syncs the root; every prior successful
-put has already completed its file and directory barriers. `durable` is the
-caller assertion about the deployed filesystem and failure domain; setting it
-false does not skip these barriers or enable weaker acknowledgment semantics.
+caller. `flush` runs two authority checks in its owned blocking task; every
+prior successful put has already completed its file, directory and final device
+barriers. `durable` is the caller assertion about the deployed filesystem and
+failure domain; setting it false does not skip these barriers or enable weaker
+acknowledgment semantics.
 Actual power-loss recovery and remote/network filesystem behavior need separate
 qualification. This local benchmark does not prove either.
 
@@ -71,8 +72,8 @@ storage trust boundary. Content and authority checks detect ordinary corruption.
 All servers sharing TiDB metadata for one Drive must access the same underlying
 block root and persisted marker. Independent server-local roots are different
 authorities and cannot substitute for a shared blob store. A single-machine
-multi-server filesystem comparison can isolate SDK/HTTP/RustFS overhead; it
-does not establish a multi-host production deployment topology.
+multi-server filesystem comparison compares the combined storage paths; it does
+not isolate SDK/HTTP/RustFS overhead or establish a multi-host production topology.
 
 Deletion and reconciliation return `ENOTSUP` in this first version. Successful
 shutdown does not imply garbage collection. Complete immutable objects left by
