@@ -26,7 +26,18 @@ try:
     root=pathlib.Path(os.environ['MOUNT_RS_TARGET_OUTPUT'])
     value=json.loads((root/'terminal.json').read_text())
     if value['phase']!='terminal' or value['outcome']!='success': raise ValueError('unsuccessful terminal')
-    if value['full_target']!=(os.environ['MOUNT_RS_TARGET_MODE']=='full'): raise ValueError('mode mismatch')
+    mode=os.environ['MOUNT_RS_TARGET_MODE']
+    if mode not in ('full','control'): raise ValueError('invalid mode')
+    full_target=mode=='full'
+    configuration=value['configuration']
+    if type(value['full_target']) is not bool or type(configuration['full_target']) is not bool:
+        raise ValueError('mode type mismatch')
+    if value['full_target'] is not full_target or configuration['full_target'] is not full_target:
+        raise ValueError('mode mismatch')
+    if full_target:
+        for field,expected in (('drives',10000),('files',1000),('seconds',30)):
+            if type(configuration[field]) is not int or configuration[field]!=expected:
+                raise ValueError('full target geometry mismatch')
     workers=value['workers']
     if len(workers)!=10 or len({w['pid'] for w in workers})!=10: raise ValueError('worker count/identity mismatch')
     if not all(w['reap_confirmed'] is True and w['exit_code']==0 for w in workers): raise ValueError('unclean workers')

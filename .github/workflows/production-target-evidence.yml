@@ -1,0 +1,33 @@
+name: Production Target Evidence
+
+on:
+  push:
+    paths:
+      - scripts/bench-remote-production-target.sh
+      - scripts/test-production-target-evidence.py
+      - scripts/verify-production-target-evidence.py
+      - .github/workflows/production-target-evidence.yml
+  pull_request:
+    paths:
+      - scripts/bench-remote-production-target.sh
+      - scripts/test-production-target-evidence.py
+      - scripts/verify-production-target-evidence.py
+      - .github/workflows/production-target-evidence.yml
+
+permissions:
+  contents: read
+
+jobs:
+  receipts:
+    name: synthetic receipt controls (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Verify full geometry and retained receipt controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-production-target-evidence.py
