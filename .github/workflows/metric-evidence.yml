@@ -1,0 +1,46 @@
+name: Metric Evidence
+
+on:
+  push:
+    paths:
+      - crates/mount-rs-service/**
+      - scripts/cargo-shared
+      - scripts/cargo-shared-env.sh
+      - Cargo.lock
+      - .github/workflows/metric-evidence.yml
+  pull_request:
+    paths:
+      - crates/mount-rs-service/**
+      - scripts/cargo-shared
+      - scripts/cargo-shared-env.sh
+      - Cargo.lock
+      - .github/workflows/metric-evidence.yml
+
+permissions:
+  contents: read
+
+jobs:
+  metrics:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+        with:
+          components: rustfmt, clippy
+      - name: Select a private target directory
+        run: printf 'CARGO_TARGET_DIR=%s\nCARGO_TERM_COLOR=never\n' "$RUNNER_TEMP/metric-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Verify formatting
+        run: ./scripts/cargo-shared fmt --all -- --check
+      - name: Verify metric evidence controls and bounded publication
+        run: |
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target target::metrics::tests:: -- --nocapture
+      - name: Verify strict metric fixture Clippy
+        run: ./scripts/cargo-shared clippy --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target -- -D warnings
