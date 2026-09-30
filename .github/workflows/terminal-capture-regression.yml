@@ -9,6 +9,7 @@ on:
       - crates/mount-rs-service/tests/support/production_target/artifact_size_tests.rs
       - crates/mount-rs-service/tests/support/production_target/mod.rs
       - crates/mount-rs-service/tests/support/resource_profile.rs
+      - crates/mount-rs-service/tests/support/device_io.rs
 
 permissions:
   contents: read
@@ -24,6 +25,7 @@ jobs:
     timeout-minutes: 30
     env:
       CASE: target::artifact_size_tests::settled_full_geometry_terminal_obeys_capture_regular_file_limit
+      DEVICE_CASE: target::resource_profile::device_io::tests::darwin_device_record_wire_identity_and_counters_preserve_u64_precision
       BASELINE_COMMIT: 25f8d6f30714cc1a937aa0fe029fe967529cf566
       BASELINE_TREE: e56798c27402ead2ca4bc450c2ae7334143e8a4a
       METRICS_SHA256: 46e39eea032f706e03af08ec146335dc2883a6c1fe280ae6a1b16b11ff3a738b
@@ -34,7 +36,6 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
         with:
-          toolchain: '1.95.0'
           components: rustfmt, clippy
       - name: Select a private target directory
         shell: bash
@@ -91,6 +92,7 @@ jobs:
           PY
           rustfmt --check --edition 2024 \
             crates/mount-rs-service/tests/support/production_target/artifact_size_tests.rs \
+            crates/mount-rs-service/tests/support/device_io.rs \
             "$proof/scoped-helper.rs" 2>&1 | tee "$proof/fmt.log"
       - name: Check shared fixture consumers with strict Clippy
         shell: bash
@@ -127,6 +129,33 @@ jobs:
           test "$(grep -c ': test$' "$proof/selection.log")" -eq 1
           grep -Fx "$CASE: test" "$proof/selection.log"
           grep -Fx '1 test, 0 benchmarks' "$proof/selection.log"
+      - name: Run the exact cross-platform device serialization control
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
+          test_binary="$(cat "$proof/test-executable.txt")"
+          sha256sum -c "$proof/binary.sha256"
+          "$test_binary" --exact "$DEVICE_CASE" --list > "$proof/darwin-wire-selection.log"
+          test "$(grep -c ': test$' "$proof/darwin-wire-selection.log")" -eq 1
+          grep -Fx "$DEVICE_CASE: test" "$proof/darwin-wire-selection.log"
+          grep -Fx '1 test, 0 benchmarks' "$proof/darwin-wire-selection.log"
+          "$test_binary" --exact "$DEVICE_CASE" --nocapture --test-threads=1 \
+            > "$proof/darwin-wire.log" 2>&1
+          python3 -B - "$proof/darwin-wire.log" "$DEVICE_CASE" <<'PY'
+          import pathlib, re, sys
+          path, case = pathlib.Path(sys.argv[1]), sys.argv[2]
+          if path.stat().st_size > 65536:
+              raise SystemExit("device serialization control output exceeds 64 KiB")
+          log = path.read_text()
+          if (len(re.findall(r"^running 1 test$", log, re.M)) != 1
+              or len(re.findall(r"^test " + re.escape(case) + r" \.\.\. ok$", log, re.M)) != 1
+              or len(re.findall(r"^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;", log, re.M)) != 1
+              or "panicked at" in log):
+              raise SystemExit("device serialization control did not execute exactly once")
+          print("DARWIN_WIRE_CONTROL_EXECUTED tests=1 ignored=0")
+          PY
+          cat "$proof/darwin-wire.log"
       - name: Run exact regression and retain only the intended RED
         timeout-minutes: 5
         shell: bash
@@ -209,6 +238,8 @@ jobs:
             ${{ runner.temp }}/terminal-capture-proof/clippy.log
             ${{ runner.temp }}/terminal-capture-proof/build.log
             ${{ runner.temp }}/terminal-capture-proof/selection.log
+            ${{ runner.temp }}/terminal-capture-proof/darwin-wire-selection.log
+            ${{ runner.temp }}/terminal-capture-proof/darwin-wire.log
             ${{ runner.temp }}/terminal-capture-proof/test-status.txt
             ${{ runner.temp }}/terminal-capture-proof/regression.log
             ${{ runner.temp }}/terminal-capture-proof/measurement.json

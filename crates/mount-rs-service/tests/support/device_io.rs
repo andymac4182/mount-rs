@@ -1090,6 +1090,45 @@ mod tests {
     }
 
     #[test]
+    fn darwin_device_record_wire_identity_and_counters_preserve_u64_precision() {
+        let record = DeviceRecord::DarwinIoKitStatistics {
+            identity: MacDriverIdentity {
+                registry_entry_id: u64::MAX,
+                observer_process: ProcessIdentity {
+                    pid: 42,
+                    start_token: 9_007_199_254_740_995,
+                },
+            },
+            counters: MacDriverCounters {
+                read_operations_processed: 9_007_199_254_740_993,
+                write_operations_processed: u64::MAX,
+                read_bytes: u64::MAX - 1,
+                write_bytes: 0,
+            },
+        };
+        let value = serde_json::to_value(record).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "source": "darwin_io_kit_statistics",
+                "identity": {
+                    "registry_entry_id": "18446744073709551615",
+                    "observer_process": {
+                        "pid": 42,
+                        "start_token": "9007199254740995"
+                    }
+                },
+                "counters": {
+                    "read_operations_processed": "9007199254740993",
+                    "write_operations_processed": "18446744073709551615",
+                    "read_bytes": "18446744073709551614",
+                    "write_bytes": "0"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn wire_counters_preserve_exact_u64_decimal_strings() {
         let counters = LinuxProcessCounters {
             rchar: u64::MAX,
