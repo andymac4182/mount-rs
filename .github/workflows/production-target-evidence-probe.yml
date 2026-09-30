@@ -21,13 +21,13 @@ jobs:
           import hashlib
           from pathlib import Path
           expected = {
-              'scripts/bench-remote-production-target.sh': 'd545b1cb14b9e3bf58efc1f74f44c32948bc73a25b7e8c6f5077ea8aaa9452e0',
+              'scripts/bench-remote-production-target.sh': 'c56b9ad37e2004c910c2d09969d93a197e5f5cbfb23f993bc4c07938315779ca',
               'scripts/test-production-target-evidence.py': '46965047133a1c5c4751559f360a540c5a0c6fb0b08108f826732172a7bb288d',
           }
           for path, digest in expected.items():
               if hashlib.sha256(Path(path).read_bytes()).hexdigest() != digest:
                   raise SystemExit('source identity mismatch: ' + path)
           PY
-      - name: Observe exact geometry RED with four passing controls
+      - name: Verify geometry fix and all retained receipt controls
         timeout-minutes: 1
-        run: python3 -B scripts/test-production-target-evidence.py --expect-geometry-red
+        run: python3 -B scripts/test-production-target-evidence.py
