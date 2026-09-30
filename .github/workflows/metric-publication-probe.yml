@@ -39,7 +39,7 @@ jobs:
           source = Path(path).read_bytes()
           blob = subprocess.check_output(['git', 'show', 'HEAD:' + path])
           print('Metric checkout SHA256:', hashlib.sha256(source).hexdigest())
-          if hashlib.sha256(blob).hexdigest() != '46e39eea032f706e03af08ec146335dc2883a6c1fe280ae6a1b16b11ff3a738b':
+          if hashlib.sha256(blob).hexdigest() != 'f6d864c26904fda0d38f7f5e55526f607faebf5174c0a784c90ed4f877a7b2a9':
               raise SystemExit('Metric publisher Git blob differs from the GREEN fixture')
           if source == blob:
               print('Metric checkout matches the pinned LF blob')
@@ -66,6 +66,8 @@ jobs:
               'bounded_metric_writer_counts_partial_writes_and_rejects_before_delegating',
               'bounded_metric_writer_caps_gzip_finalization_before_writing_it',
               'metric_publisher_rejects_decoded_size_bomb_and_cleans_pending',
+              'borrowed_metric_serialization_error_cleans_only_owned_pending_and_allows_retry',
+              'metric_reader_rejects_duplicate_object_keys_without_losing_u64_precision',
           )
           for name in names:
               test = 'target::metrics::tests::' + name
@@ -73,9 +75,9 @@ jobs:
                   raise SystemExit('Required metric regression did not execute successfully: ' + test)
           summaries = re.findall(r'(?m)^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out; finished in .+$', text)
           runs = re.findall(r'(?m)^running (\d+) tests?$', text)
-          if len(summaries) != 1 or runs != summaries or int(summaries[0]) < len(names):
+          if len(summaries) != 1 or runs != summaries or int(summaries[0]) != 42:
               raise SystemExit('Metric test run is empty, incomplete or ambiguous')
-          print('METRIC_EVIDENCE_EXECUTED tests=' + summaries[0] + ' critical=3 ignored=0')
+          print('METRIC_EVIDENCE_EXECUTED tests=' + summaries[0] + ' critical=5 ignored=0')
           PY_CHECK
       - name: Verify strict metric fixture Clippy
         run: ./scripts/cargo-shared clippy --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target -- -D warnings
