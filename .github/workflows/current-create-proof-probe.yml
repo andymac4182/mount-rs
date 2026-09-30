@@ -5,6 +5,12 @@ on:
   push:
     branches:
       - codex/full-target-evidence-probe-20260930-1106
+    paths:
+      - .github/workflows/current-create-proof-probe.yml
+      - filesystems/mount-rs-chunked/src/**
+      - src/chunking.rs
+      - Cargo.lock
+      - scripts/cargo-shared
 
 permissions:
   contents: read
@@ -169,7 +175,7 @@ jobs:
               require(not REAL_CBMC.exists(), 'unmodified binary already exists')
               version = subprocess.check_output([str(binary), '--version'], text=True).strip()
               require(version.split()[0] == '6.11.0', 'wrong CBMC version')
-              require((BUNDLE / 'rust-toolchain-version').read_text().strip() == 'nightly-2026-08-21', 'wrong Kani toolchain')
+              require((BUNDLE / 'rust-toolchain-version').read_text().strip() == 'nightly-2026-08-21-x86_64-unknown-linux-gnu', 'wrong Kani toolchain')
               binary_digest = digest_path(binary, BINARY_CAP)
               binary_bytes = binary.stat().st_size
               binary.rename(REAL_CBMC)
