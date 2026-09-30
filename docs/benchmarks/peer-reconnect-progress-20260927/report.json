@@ -1,0 +1,254 @@
+{
+  "actual_local_reconnect": {
+    "actual_log_sample_bytes": 4096,
+    "assertions_and_full_bytes_cleanup_passed": true,
+    "sampled_progress": {
+      "last_sampled_progress_marker": "after_amplification_assertions",
+      "progress_sample_window": "last_window"
+    },
+    "successful_gate_has_no_failure_diagnostic": true
+  },
+  "base_commit": "777cdccea36951e848797cd6236f97457440b43a",
+  "change": "Project only complete fixed peer-reconnect progress markers from the existing bounded stdout sample into fatal gate annotations. Two fixed markers bracket the final amplification and stage checks.",
+  "diagnostic_contract": {
+    "absence": "Unobserved does not imply that the test never reached that phase. Omitted middle and boundary records can remain unavailable.",
+    "fields": [
+      "last_sampled_progress_marker",
+      "progress_sample_window"
+    ],
+    "invalid_state": "A complete non-allowlisted or non-ASCII marker produces a fixed invalid state, retained even after later valid observations. No raw value is copied.",
+    "kind": "peerreconnect only",
+    "marker_sentinels": [
+      "invalid",
+      "unobserved"
+    ],
+    "marker_values": [
+      "after_amplification_assertions",
+      "after_blackhole_bind",
+      "after_cleanup_receipt",
+      "after_direct_get",
+      "after_drop_replica_put",
+      "after_healthy_put",
+      "after_initial_receive",
+      "after_pair_shutdown",
+      "after_partition_control",
+      "after_public_get",
+      "after_replica_first_poll",
+      "after_replica_readback_get",
+      "after_requester_shutdown",
+      "after_restart_a",
+      "after_runtime_shutdown",
+      "after_server_shutdown",
+      "after_stop_a",
+      "after_store_prepare",
+      "before_amplification_assertions",
+      "before_blackhole_bind",
+      "before_cleanup_receipt",
+      "before_direct_get",
+      "before_drop_replica_put",
+      "before_healthy_put",
+      "before_initial_receive",
+      "before_pair_shutdown",
+      "before_partition_control",
+      "before_public_get",
+      "before_replica_first_poll",
+      "before_replica_readback_get",
+      "before_restart_a",
+      "before_runtime_shutdown",
+      "before_stop_a",
+      "before_store_prepare",
+      "incoming_replica_observed"
+    ],
+    "ordering": "Last complete marker in sampled stream order, including concurrently ordered server/requester shutdown observations. This is not the last executed or completed phase.",
+    "sampling": "At most first/last 2048 raw bytes per owned log. New parser uses stdout only, separates raw windows, omits unterminated lines and the unknown first tail line. No record is assembled across a cut or synthetic separator.",
+    "success": "Successful owned gate retains no fatal diagnostic or error annotation.",
+    "unchanged": "Failure class, return status, lifecycle/deadline/unknown/source/overflow flags, process ownership, output caps and gate success conditions are unchanged.",
+    "window_values": [
+      "short_input",
+      "first_window",
+      "last_window",
+      "unobserved"
+    ]
+  },
+  "gates": [
+    {
+      "elapsed_seconds": 3.7066814169520512,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "peerreconnect",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 402,
+          "sha256": "5f0e4ab0aeca7d14646a7a99f2455cc258b6f7684b40cccc0c77c1ebc0f90bad"
+        },
+        "stdout": {
+          "bytes": 15098,
+          "sha256": "a699342fabf11f3eddc2fc2a8826ba8c9eab00b7c5b448a62ac26441c7ff5dbb"
+        }
+      },
+      "receipt_sha256": "01aa51c6852e172b4af5db6547175d4e82b53c8675e32b5c2e30f139d105f8e3",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "peer_read_reconnect_bypasses_pending_replica_handshake",
+      "source_count": 504,
+      "source_manifest_sha256": "302305f0636db5d51bc57fb664cec846875f204d56dbba46d75e4c6f7ffc73cc",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 5.821008833008818,
+      "exact_selected_case_passed": true,
+      "fixture_root_removed": true,
+      "kind": "peermetrics",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 210,
+          "sha256": "a113aa0a6c14eb9f2babc3e35ac8cb19c8477b3296458c7c0b77c537fa92cf11"
+        },
+        "stdout": {
+          "bytes": 15738,
+          "sha256": "b63b479dbdbe81cd67f981dc98cca0a0ecb9d6c1aa9157555a950c631f30112e"
+        }
+      },
+      "receipt_sha256": "a5c1d1fd3d486bce933469e81a48ea457e06009a0671a82e584dc11bdf7d35aa",
+      "returncode": 0,
+      "rust_test_executions": 1,
+      "selected_test": "peer::tests::peer_connection_stage_metrics_preserve_bytes_and_cancellation",
+      "source_count": 504,
+      "source_manifest_sha256": "302305f0636db5d51bc57fb664cec846875f204d56dbba46d75e4c6f7ffc73cc",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 9.343844542047009,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "cachetests",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 634,
+          "sha256": "40908c763b9b855039aea0415c98cec8901a8d99a9808241773a96e2ad56e9c4"
+        },
+        "stdout": {
+          "bytes": 5311,
+          "sha256": "54e613792f2e533f51f7c1d1147a7199eea70f806b6bace772b8f2ed2835c3a8"
+        }
+      },
+      "receipt_sha256": "de92b55f83bacaec731ef49ae52190af5721617db6a2c87d75170fab0b2b14d9",
+      "returncode": 0,
+      "rust_test_executions": 46,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "302305f0636db5d51bc57fb664cec846875f204d56dbba46d75e4c6f7ffc73cc",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 2.5907325000152923,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "faultclippy",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 72,
+          "sha256": "9a30d54c8b16d7e49510b182028079bca120aeebb7d662e88f8566e6196a49f6"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "receipt_sha256": "75c28eda2b5638ba882ae1a117d7aeb36f2a877d5b686acae044b171a62b4d42",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "302305f0636db5d51bc57fb664cec846875f204d56dbba46d75e4c6f7ffc73cc",
+      "source_unchanged": true
+    },
+    {
+      "elapsed_seconds": 3.8560888749780133,
+      "exact_selected_case_passed": null,
+      "fixture_root_removed": true,
+      "kind": "fmt",
+      "lifecycle_settled": true,
+      "logs": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "receipt_sha256": "55248fdc814c02833ee2881ca0982d947c3f30179cd9558561d09ef35a4cfcd6",
+      "returncode": 0,
+      "rust_test_executions": 0,
+      "selected_test": null,
+      "source_count": 504,
+      "source_manifest_sha256": "302305f0636db5d51bc57fb664cec846875f204d56dbba46d75e4c6f7ffc73cc",
+      "source_unchanged": true
+    }
+  ],
+  "limits": [
+    "No new throughput or allocation measurements",
+    "No confirmation of the earlier hosted peer failure cause",
+    "A before marker records intent; after_public_get records byte equality, not zero backing fetches",
+    "Incoming replica observation records a service owner, not TLS readiness",
+    "after_cleanup_receipt precedes amplification/stage assertions",
+    "Actions raw logs and artifacts were not accessed"
+  ],
+  "qualification": {
+    "bank_index_sha256": "c8912e5198430bad8f79f60c22f1abd64efff747895719d1ca54a8fe1145938c",
+    "format_passed": true,
+    "hosted_ci": "New source requires separate hosted qualification; no previously observed failure is attributed by this patch.",
+    "local_gate_count": 6,
+    "modeled_green": {
+      "failures": 0,
+      "logs": {
+        "controls.stderr": {
+          "bytes": 162,
+          "sha256": "5bec57ad5f8062be608425274c128de4727d4ba029f50a7627f9a55330e413bf"
+        },
+        "controls.stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "receipt_sha256": "61c8b06ea2e78d41e097f96c6adcfb745b5abed38929fd92af49dffe3713eac9",
+      "source_unchanged": true,
+      "tests": 63
+    },
+    "modeled_parent_controls": 63,
+    "modeled_semantic_red": {
+      "assertion_failures": 8,
+      "logs": {
+        "red-v2.stderr": {
+          "bytes": 9477,
+          "sha256": "3d3ae1ea832ee949da227991e7df76ebf9d8b0d19ca1b1efc8a74abf2ef9f5d0"
+        },
+        "red-v2.stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "receipt_sha256": "5e03a28091bab0322c61f007a794c08cd7f159cdf5d03909aa161640261aef4c",
+      "scope": "Missing new diagnostic fields, not a transport or production failure.",
+      "source_unchanged": true,
+      "tests": 63
+    },
+    "owned_rust_gates": 5,
+    "rust_test_executions": 48,
+    "source_count": 504,
+    "source_pins_unchanged_across_all_owned_gates": true,
+    "strict_cache_remote_clippy_passed": true
+  },
+  "schema": "mount-rs.peer-reconnect-sampled-progress.v1",
+  "source_inputs": {
+    "crates/mount-rs-blob-cache/tests/distributed_failure.rs": "e9ff06b7b54caec979bb9d430192274e14431e06b9ad2ec0d246cb2badd2b303",
+    "scripts/test-remote-failures-controls.py": "c8cd43865e6cdb59600d706009be5d5b6fcfa77fd77eb45709b245dfe5df9005",
+    "scripts/test-remote-failures.py": "f7a62ceb6fd1ab7624a919c2fd4daba47261ea3474587601b270744ccd9bebab"
+  }
+}

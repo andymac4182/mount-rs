@@ -1,0 +1,55 @@
+{
+  "allocation_measurements_available": false,
+  "binary_sha256": "df7d3d69ae514f8d17bde8d03c556c9099cb06f9e58af94ba3d6c2212ac9b72c",
+  "connected_clients": 100,
+  "dataset_absence_qualified": false,
+  "datasets_retained": true,
+  "fresh_oracle_passes_completed": 0,
+  "full_target": false,
+  "last_work_phase": "online_namespace",
+  "logical_rpc_totals": {
+    "acknowledged": 116038,
+    "attempts": 116138,
+    "failed": 0,
+    "uncertain": 100
+  },
+  "native_error": "inherited workload phase deadline; partial work incomplete",
+  "native_process_containment": {
+    "all_reaped": true,
+    "collector_group_absent": true,
+    "forced": false,
+    "fresh_rustfs_fixture_stopped": true,
+    "original_containers_mutated": false,
+    "outer_finish_errors": 0,
+    "replica_drain_unproven_count": 10,
+    "sdk_contexts_cleanly_closed": false,
+    "source_pins_unchanged": true,
+    "worker_exit_code": 101,
+    "workers": 10
+  },
+  "original_namespace_budget_seconds": 600,
+  "owner_sha256": "86b283ee48606a6f9e6c213690153622b784a5fd459a0baded986e946e491c61",
+  "physical_iops_available": false,
+  "planned_geometry": {
+    "clients": 100,
+    "drives": 100,
+    "files_per_drive": 1000,
+    "initial_bytes": 628326400,
+    "partitions": 50,
+    "servers": 10,
+    "total_files": 100000
+  },
+  "production_capacity_claim": false,
+  "qualified": false,
+  "root_terminal_witness": {
+    "chunk_id": "985bf8",
+    "exit_code": 1,
+    "session_id": 60790
+  },
+  "rpc_total_scope": "Recorded cumulative lane totals at incomplete terminal, not timed-workload throughput and not proven durable file count. Unknown creates were not replayed.",
+  "schema": "mount-rs.native-production-control-failure.v1",
+  "source_digest": "5813bd3ffb55e17c32d9137d9db1078b1e4833f4d8b7b245c0b1ff348afec753",
+  "source_revision": "78e68035793e7fac994fbc87837fefc12b25145a",
+  "terminal_sha256": "91cb2702d01a01e2709d796cfab228c49f726ec37d420ddd9ea00cfe0c089320",
+  "timed_cells_completed": 0
+}

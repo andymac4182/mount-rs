@@ -9,7 +9,14 @@ use crate::Telemetry;
 use async_trait::async_trait;
 use mount_rs_core::Result;
 use mount_rs_core::diagnostics::profile::{Event, Span, add};
+use mount_rs_core::diagnostics::storage::{Operation as StorageOperation, Span as StorageSpan};
 use mount_rs_core::storage::InodeId;
+use mount_rs_core::storage::compact::{
+    CompactFileExpectation, CompactFileRead, CompactInodeCapability, CompactInodeExpectation,
+    CompactInodeRead, CompactOptimisticCreateCapability, CompactPointReadCapability,
+    CompactPublication, CompactRootEntryRead, CompactRootFileCapability, CompactRootFileRead,
+    CompactSnapshot, CompactStructuralDelta, LoadedCompactInode, PhysicalInodeIdentity,
+};
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
@@ -17,6 +24,16 @@ use mount_rs_core::storage::{
     LoadedMetadata, MetadataStore, Namespace, NodeMetadata, WriterLease,
 };
 use mount_rs_core::versioning::VolumeId;
+
+// Metadata payload bytes are unavailable at this seam. Successful block put
+// input and get/migration output lengths are known logical bytes, not wire I/O.
+fn finish_storage_result<T>(span: &mut StorageSpan<'_>, result: &Result<T>, bytes: u64) {
+    if result.is_ok() {
+        span.finish_success(bytes);
+    } else {
+        span.finish_error();
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ErasedMetadataStore {
@@ -39,20 +56,358 @@ impl ErasedMetadataStore {
 
 #[async_trait]
 impl MetadataStore for ErasedMetadataStore {
-    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
-        let _profile = Span::new(Event::MetadataConditional);
+    fn compact_optimistic_create_capability(&self) -> CompactOptimisticCreateCapability {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataCompactInodeCapability);
+        let result = self.inner.compact_optimistic_create_capability();
+        storage_span.finish_success(0);
+        result
+    }
+
+    fn compact_point_read_capability(&self) -> CompactPointReadCapability {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataCompactInodeCapability);
+        let result = self.inner.compact_point_read_capability();
+        storage_span.finish_success(0);
+        result
+    }
+
+    async fn read_compact_file(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: CompactFileExpectation<'_>,
+    ) -> Result<CompactFileRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactInode);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.point_file",
+                    None,
+                    self.inner.read_compact_file(backing, inode, expected),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.read_compact_file(backing, inode, expected).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn read_compact_root_entry(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: InodeId,
+        candidate_file: InodeId,
+        name: &str,
+        expected: CompactFileExpectation<'_>,
+    ) -> Result<CompactRootEntryRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactRootFile);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.point_entry",
+                    None,
+                    self.inner.read_compact_root_entry(
+                        backing,
+                        expected_root,
+                        candidate_file,
+                        name,
+                        expected,
+                    ),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .read_compact_root_entry(backing, expected_root, candidate_file, name, expected)
+                .await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    fn compact_root_file_capability(&self) -> CompactRootFileCapability {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataCompactRootFileCapability);
+        let result = self.inner.compact_root_file_capability();
+        storage_span.finish_success(0);
+        result
+    }
+
+    async fn load_compact_root_file(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_root: InodeId,
+        candidate_file: InodeId,
+    ) -> Result<CompactRootFileRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactRootFile);
+        let _profile = Span::new(Event::InodeLoad).units(2);
         #[cfg(feature = "observability")]
         let result = self
             .telemetry
             .observe_fs(
                 "provider.metadata",
-                "inode.mode",
+                "compact.root_file",
                 None,
-                self.inner.inode_mode_state(),
+                self.inner
+                    .load_compact_root_file(backing, expected_root, candidate_file),
             )
             .await;
         #[cfg(not(feature = "observability"))]
-        let result = self.inner.inode_mode_state().await;
+        let result = self
+            .inner
+            .load_compact_root_file(backing, expected_root, candidate_file)
+            .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    fn compact_inode_capability(&self) -> CompactInodeCapability {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataCompactInodeCapability);
+        let result = self.inner.compact_inode_capability();
+        storage_span.finish_success(0);
+        result
+    }
+
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataCompactInodeModeState);
+        let result = async {
+            let _profile = Span::new(Event::MetadataConditional);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.mode",
+                    None,
+                    self.inner.compact_inode_mode_state(),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.compact_inode_mode_state().await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataPrepareCompactInodeMode);
+        let result = async {
+            let _profile = Span::new(Event::MetadataConditional);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.prepare",
+                    None,
+                    self.inner
+                        .prepare_compact_inode_mode(backing, expected_revision),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .prepare_compact_inode_mode(backing, expected_revision)
+                .await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn load_compact_snapshot(&self, backing: ConcurrentBackingId) -> Result<CompactSnapshot> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactSnapshot);
+        let result = async {
+            let _profile = Span::new(Event::MetadataLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.snapshot",
+                    None,
+                    self.inner.load_compact_snapshot(backing),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.load_compact_snapshot(backing).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+    ) -> Result<LoadedCompactInode> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactInode);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.load",
+                    None,
+                    self.inner.load_compact_inode(backing, inode),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.load_compact_inode(backing, inode).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        expected: CompactInodeExpectation<'_>,
+    ) -> Result<CompactInodeRead> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadCompactInode);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.load",
+                    None,
+                    self.inner.read_compact_inode(backing, inode, expected),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .read_compact_inode(backing, inode, expected)
+                .await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        generation: u64,
+        expected: PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<LoadedCompactInode> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataPublishCompactInode);
+        let result = async {
+            let _profile = Span::new(Event::InodePublication);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.publish_inode",
+                    None,
+                    self.inner
+                        .publish_compact_inode(backing, inode, generation, expected, node),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .publish_compact_inode(backing, inode, generation, expected, node)
+                .await;
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code == mount_rs_core::ErrorCode::Eagain)
+            {
+                add(Event::InodeConflict, 1);
+            }
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn publish_compact_structure(
+        &self,
+        delta: &CompactStructuralDelta,
+    ) -> Result<CompactPublication> {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataPublishCompactStructure);
+        let result = async {
+            let affected_rows =
+                delta.changed().len() + delta.created().len() + delta.removed().len();
+            let _profile = Span::new(Event::Publication).units(affected_rows as u64);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "compact.publish_structure",
+                    None,
+                    self.inner.publish_compact_structure(delta),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.publish_compact_structure(delta).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataInodeModeState);
+        let result = async {
+            let _profile = Span::new(Event::MetadataConditional);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "inode.mode",
+                    None,
+                    self.inner.inode_mode_state(),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.inode_mode_state().await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
         result
     }
 
@@ -61,22 +416,58 @@ impl MetadataStore for ErasedMetadataStore {
         backing: ConcurrentBackingId,
         expected_revision: u64,
     ) -> Result<()> {
-        let _profile = Span::new(Event::MetadataConditional);
-        #[cfg(feature = "observability")]
-        let result = self
-            .telemetry
-            .observe_fs(
-                "provider.metadata",
-                "inode.prepare",
-                None,
-                self.inner.prepare_inode_mode(backing, expected_revision),
-            )
-            .await;
-        #[cfg(not(feature = "observability"))]
-        let result = self
-            .inner
-            .prepare_inode_mode(backing, expected_revision)
-            .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataPrepareInodeMode);
+        let result = async {
+            let _profile = Span::new(Event::MetadataConditional);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "inode.prepare",
+                    None,
+                    self.inner.prepare_inode_mode(backing, expected_revision),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .prepare_inode_mode(backing, expected_revision)
+                .await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
+    }
+
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataLoadInodeSnapshotIfChanged);
+        let result = async {
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "inode.snapshot_if_changed",
+                    None,
+                    self.inner.load_inode_snapshot_if_changed(backing, known),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .load_inode_snapshot_if_changed(backing, known)
+                .await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
         result
     }
 
@@ -84,19 +475,25 @@ impl MetadataStore for ErasedMetadataStore {
         &self,
         backing: ConcurrentBackingId,
     ) -> Result<InodeMetadataSnapshot> {
-        let _profile = Span::new(Event::MetadataLoad);
-        #[cfg(feature = "observability")]
-        let result = self
-            .telemetry
-            .observe_fs(
-                "provider.metadata",
-                "inode.snapshot",
-                None,
-                self.inner.load_inode_snapshot(backing),
-            )
-            .await;
-        #[cfg(not(feature = "observability"))]
-        let result = self.inner.load_inode_snapshot(backing).await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadInodeSnapshot);
+        let result = async {
+            let _profile = Span::new(Event::MetadataLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "inode.snapshot",
+                    None,
+                    self.inner.load_inode_snapshot(backing),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.load_inode_snapshot(backing).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
         result
     }
 
@@ -105,19 +502,25 @@ impl MetadataStore for ErasedMetadataStore {
         backing: ConcurrentBackingId,
         inode: InodeId,
     ) -> Result<LoadedInode> {
-        let _profile = Span::new(Event::InodeLoad);
-        #[cfg(feature = "observability")]
-        let result = self
-            .telemetry
-            .observe_fs(
-                "provider.metadata",
-                "inode.load",
-                None,
-                self.inner.load_inode(backing, inode),
-            )
-            .await;
-        #[cfg(not(feature = "observability"))]
-        let result = self.inner.load_inode(backing, inode).await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadInode);
+        let result = async {
+            let _profile = Span::new(Event::InodeLoad);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "inode.load",
+                    None,
+                    self.inner.load_inode(backing, inode),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self.inner.load_inode(backing, inode).await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
         result
     }
 
@@ -127,22 +530,28 @@ impl MetadataStore for ErasedMetadataStore {
         inode: InodeId,
         known: Option<InodeVersion>,
     ) -> Result<Option<LoadedInode>> {
-        let _profile = Span::new(Event::InodeConditional);
-        #[cfg(feature = "observability")]
-        let result = self
-            .telemetry
-            .observe_fs(
-                "provider.metadata",
-                "inode.load_if_changed",
-                None,
-                self.inner.load_inode_if_changed(backing, inode, known),
-            )
-            .await;
-        #[cfg(not(feature = "observability"))]
-        let result = self
-            .inner
-            .load_inode_if_changed(backing, inode, known)
-            .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadInodeIfChanged);
+        let result = async {
+            let _profile = Span::new(Event::InodeConditional);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "inode.load_if_changed",
+                    None,
+                    self.inner.load_inode_if_changed(backing, inode, known),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .load_inode_if_changed(backing, inode, known)
+                .await;
+            result
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
         result
     }
 
@@ -153,29 +562,35 @@ impl MetadataStore for ErasedMetadataStore {
         expected: InodeVersion,
         node: NodeMetadata,
     ) -> Result<InodeVersion> {
-        let _profile = Span::new(Event::InodePublication);
-        #[cfg(feature = "observability")]
-        let result = self
-            .telemetry
-            .observe_fs(
-                "provider.metadata",
-                "inode.publish",
-                None,
-                self.inner
-                    .publish_inode_if_version(backing, inode, expected, node),
-            )
-            .await;
-        #[cfg(not(feature = "observability"))]
-        let result = self
-            .inner
-            .publish_inode_if_version(backing, inode, expected, node)
-            .await;
-        if result
-            .as_ref()
-            .is_err_and(|error| error.code == mount_rs_core::ErrorCode::Eagain)
-        {
-            add(Event::InodeConflict, 1);
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataPublishInodeIfVersion);
+        let result = async {
+            let _profile = Span::new(Event::InodePublication);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "inode.publish",
+                    None,
+                    self.inner
+                        .publish_inode_if_version(backing, inode, expected, node),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .publish_inode_if_version(backing, inode, expected, node)
+                .await;
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code == mount_rs_core::ErrorCode::Eagain)
+            {
+                add(Event::InodeConflict, 1);
+            }
+            result
         }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
         result
     }
 
@@ -186,43 +601,53 @@ impl MetadataStore for ErasedMetadataStore {
         expected_inode_revisions: &BTreeMap<InodeId, u64>,
         namespace: Namespace,
     ) -> Result<u64> {
-        let _profile = Span::new(Event::Publication).units(namespace.nodes.len() as u64);
-        #[cfg(feature = "observability")]
-        let result = self
-            .telemetry
-            .observe_fs(
-                "provider.metadata",
-                "inode.publish_structure",
-                None,
-                self.inner.publish_structure_if_versions(
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataPublishStructureIfVersions);
+        let result = async {
+            let _profile = Span::new(Event::Publication).units(namespace.nodes.len() as u64);
+            #[cfg(feature = "observability")]
+            let result = self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "inode.publish_structure",
+                    None,
+                    self.inner.publish_structure_if_versions(
+                        backing,
+                        expected_generation,
+                        expected_inode_revisions,
+                        namespace,
+                    ),
+                )
+                .await;
+            #[cfg(not(feature = "observability"))]
+            let result = self
+                .inner
+                .publish_structure_if_versions(
                     backing,
                     expected_generation,
                     expected_inode_revisions,
                     namespace,
-                ),
-            )
-            .await;
-        #[cfg(not(feature = "observability"))]
-        let result = self
-            .inner
-            .publish_structure_if_versions(
-                backing,
-                expected_generation,
-                expected_inode_revisions,
-                namespace,
-            )
-            .await;
-        if result
-            .as_ref()
-            .is_err_and(|error| error.code == mount_rs_core::ErrorCode::Eagain)
-        {
-            add(Event::PublishConflict, 1);
+                )
+                .await;
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code == mount_rs_core::ErrorCode::Eagain)
+            {
+                add(Event::PublishConflict, 1);
+            }
+            result
         }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
         result
     }
 
     async fn delegation_state(&self) -> Result<Option<DelegationState>> {
-        self.inner.delegation_state().await
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataDelegationState);
+        let result = async { self.inner.delegation_state().await }.await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn prepare_delegated_mode(
@@ -230,13 +655,22 @@ impl MetadataStore for ErasedMetadataStore {
         backing: ConcurrentBackingId,
         expected_revision: u64,
     ) -> Result<()> {
-        self.inner
-            .prepare_delegated_mode(backing, expected_revision)
-            .await
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataPrepareDelegatedMode);
+        let result = async {
+            self.inner
+                .prepare_delegated_mode(backing, expected_revision)
+                .await
+        }
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn checkout(&self, request: &CheckoutRequest) -> Result<DirectoryGrant> {
-        self.inner.checkout(request).await
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataCheckout);
+        let result = async { self.inner.checkout(request).await }.await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn publish_delegated(
@@ -244,156 +678,221 @@ impl MetadataStore for ErasedMetadataStore {
         request: &DelegatedPublish,
         namespace: Namespace,
     ) -> Result<u64> {
-        self.inner.publish_delegated(request, namespace).await
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataPublishDelegated);
+        let result = async { self.inner.publish_delegated(request, namespace).await }.await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn checkin(&self, request: &DelegatedCheckin) -> Result<()> {
-        self.inner.checkin(request).await
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataCheckin);
+        let result = async { self.inner.checkin(request).await }.await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn recover(&self, request: &DelegatedRecovery) -> Result<()> {
-        self.inner.recover(request).await
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataRecover);
+        let result = async { self.inner.recover(request).await }.await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     fn durable(&self) -> bool {
-        self.inner.durable()
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataDurable);
+        let result = self.inner.durable();
+        storage_span.finish_success(0);
+        result
     }
 
     fn publish_includes_flush_barrier(&self) -> bool {
-        self.inner.publish_includes_flush_barrier()
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataPublishIncludesFlushBarrier);
+        let result = self.inner.publish_includes_flush_barrier();
+        storage_span.finish_success(0);
+        result
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
-        let _profile = Span::new(Event::MetadataLoad);
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs("provider.metadata", "load", None, self.inner.load())
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoad);
+        let result = async {
+            let _profile = Span::new(Event::MetadataLoad);
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs("provider.metadata", "load", None, self.inner.load())
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.load().await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.load().await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
-        let _profile = Span::new(Event::MetadataConditional);
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "load",
-                    None,
-                    self.inner.load_if_changed(known_revision),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataLoadIfChanged);
+        let result = async {
+            let _profile = Span::new(Event::MetadataConditional);
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "load",
+                        None,
+                        self.inner.load_if_changed(known_revision),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.load_if_changed(known_revision).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.load_if_changed(known_revision).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.mode",
-                    None,
-                    self.inner.concurrent_mode_state(),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataConcurrentModeState);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "concurrent.mode",
+                        None,
+                        self.inner.concurrent_mode_state(),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.concurrent_mode_state().await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.concurrent_mode_state().await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn preflight_new_bound_mode(&self) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.preflight_new",
-                    None,
-                    self.inner.preflight_new_bound_mode(),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataPreflightNewBoundMode);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "concurrent.preflight_new",
+                        None,
+                        self.inner.preflight_new_bound_mode(),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.preflight_new_bound_mode().await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.preflight_new_bound_mode().await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.prepare_bound",
-                    None,
-                    self.inner.prepare_bound_concurrent_mode(backing),
-                )
-                .await;
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataPrepareBoundConcurrentMode);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "concurrent.prepare_bound",
+                        None,
+                        self.inner.prepare_bound_concurrent_mode(backing),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.prepare_bound_concurrent_mode(backing).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.prepare_bound_concurrent_mode(backing).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "lease.acquire",
-                    None,
-                    self.inner.acquire_writer(owner, ttl),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataAcquireWriter);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "lease.acquire",
+                        None,
+                        self.inner.acquire_writer(owner, ttl),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.acquire_writer(owner, ttl).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.acquire_writer(owner, ttl).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "lease.renew",
-                    None,
-                    self.inner.renew_writer(lease, ttl),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataRenewWriter);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "lease.renew",
+                        None,
+                        self.inner.renew_writer(lease, ttl),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.renew_writer(lease, ttl).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.renew_writer(lease, ttl).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "lease.release",
-                    None,
-                    self.inner.release_writer(lease),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataReleaseWriter);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "lease.release",
+                        None,
+                        self.inner.release_writer(lease),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.release_writer(lease).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.release_writer(lease).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn publish(
@@ -402,22 +901,28 @@ impl MetadataStore for ErasedMetadataStore {
         lease: &WriterLease,
         namespace: Namespace,
     ) -> Result<u64> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "publish",
-                    None,
-                    self.inner.publish(expected_revision, lease, namespace),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataPublish);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "publish",
+                        None,
+                        self.inner.publish(expected_revision, lease, namespace),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner
+                .publish(expected_revision, lease, namespace)
+                .await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner
-            .publish(expected_revision, lease, namespace)
-            .await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn publish_bound_if_revision(
@@ -426,24 +931,31 @@ impl MetadataStore for ErasedMetadataStore {
         expected_revision: u64,
         namespace: Namespace,
     ) -> Result<u64> {
-        let _profile = Span::new(Event::Publication).units(namespace.nodes.len() as u64);
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.publish_bound",
-                    None,
-                    self.inner
-                        .publish_bound_if_revision(backing, expected_revision, namespace),
-                )
-                .await;
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataPublishBoundIfRevision);
+        let result = async {
+            let _profile = Span::new(Event::Publication).units(namespace.nodes.len() as u64);
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "concurrent.publish_bound",
+                        None,
+                        self.inner
+                            .publish_bound_if_revision(backing, expected_revision, namespace),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner
+                .publish_bound_if_revision(backing, expected_revision, namespace)
+                .await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner
-            .publish_bound_if_revision(backing, expected_revision, namespace)
-            .await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn migrate_mrc1_to_bound_mode(
@@ -451,42 +963,56 @@ impl MetadataStore for ErasedMetadataStore {
         backing: ConcurrentBackingId,
         expected_revision: u64,
     ) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.migrate",
-                    None,
-                    self.inner
-                        .migrate_mrc1_to_bound_mode(backing, expected_revision),
-                )
-                .await;
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataMigrateMrc1ToBoundMode);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "concurrent.migrate",
+                        None,
+                        self.inner
+                            .migrate_mrc1_to_bound_mode(backing, expected_revision),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner
+                .migrate_mrc1_to_bound_mode(backing, expected_revision)
+                .await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner
-            .migrate_mrc1_to_bound_mode(backing, expected_revision)
-            .await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.preflight_mrc1",
-                    None,
-                    self.inner.preflight_mrc1_to_bound_mode(expected_revision),
-                )
-                .await;
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataPreflightMrc1ToBoundMode);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "concurrent.preflight_mrc1",
+                        None,
+                        self.inner.preflight_mrc1_to_bound_mode(expected_revision),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner
+                .preflight_mrc1_to_bound_mode(expected_revision)
+                .await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner
-            .preflight_mrc1_to_bound_mode(expected_revision)
-            .await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn preflight_trusted_unstamped_mrc1(
@@ -494,23 +1020,30 @@ impl MetadataStore for ErasedMetadataStore {
         expected_revision: u64,
         expected_volume: VolumeId,
     ) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.preflight_trusted_mrc1",
-                    None,
-                    self.inner
-                        .preflight_trusted_unstamped_mrc1(expected_revision, expected_volume),
-                )
-                .await;
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataPreflightTrustedUnstampedMrc1);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "concurrent.preflight_trusted_mrc1",
+                        None,
+                        self.inner
+                            .preflight_trusted_unstamped_mrc1(expected_revision, expected_volume),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner
+                .preflight_trusted_unstamped_mrc1(expected_revision, expected_volume)
+                .await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner
-            .preflight_trusted_unstamped_mrc1(expected_revision, expected_volume)
-            .await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn migrate_trusted_unstamped_mrc1(
@@ -519,38 +1052,51 @@ impl MetadataStore for ErasedMetadataStore {
         expected_revision: u64,
         expected_volume: VolumeId,
     ) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.metadata",
-                    "concurrent.migrate_trusted_mrc1",
-                    None,
-                    self.inner.migrate_trusted_unstamped_mrc1(
-                        backing,
-                        expected_revision,
-                        expected_volume,
-                    ),
-                )
-                .await;
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkMetadataMigrateTrustedUnstampedMrc1);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.metadata",
+                        "concurrent.migrate_trusted_mrc1",
+                        None,
+                        self.inner.migrate_trusted_unstamped_mrc1(
+                            backing,
+                            expected_revision,
+                            expected_volume,
+                        ),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner
+                .migrate_trusted_unstamped_mrc1(backing, expected_revision, expected_volume)
+                .await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner
-            .migrate_trusted_unstamped_mrc1(backing, expected_revision, expected_volume)
-            .await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn flush(&self) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs("provider.metadata", "flush", None, self.inner.flush())
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkMetadataFlush);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs("provider.metadata", "flush", None, self.inner.flush())
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.flush().await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.flush().await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 }
 
@@ -576,122 +1122,180 @@ impl ErasedBlockStore {
 #[async_trait]
 impl BlockStore for ErasedBlockStore {
     fn durable(&self) -> bool {
-        self.inner.durable()
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkBlocksDurable);
+        let result = self.inner.durable();
+        storage_span.finish_success(0);
+        result
+    }
+
+    fn persistent(&self) -> bool {
+        self.inner.persistent()
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.blocks",
-                    "concurrent.prepare_backing",
-                    None,
-                    self.inner.prepare_concurrent_backing(),
-                )
-                .await;
+        let mut storage_span =
+            StorageSpan::new(StorageOperation::SdkBlocksPrepareConcurrentBacking);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.blocks",
+                        "concurrent.prepare_backing",
+                        None,
+                        self.inner.prepare_concurrent_backing(),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.prepare_concurrent_backing().await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.prepare_concurrent_backing().await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
-        let _profile = Span::new(Event::BackingVerify);
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.blocks",
-                    "concurrent.verify_backing",
-                    None,
-                    self.inner.verify_concurrent_backing(expected),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkBlocksVerifyConcurrentBacking);
+        let result = async {
+            let _profile = Span::new(Event::BackingVerify);
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.blocks",
+                        "concurrent.verify_backing",
+                        None,
+                        self.inner.verify_concurrent_backing(expected),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.verify_concurrent_backing(expected).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.verify_concurrent_backing(expected).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs(
-                    "provider.blocks",
-                    "concurrent.migration_read",
-                    None,
-                    self.inner.get_for_migration(id),
-                )
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkBlocksGetForMigration);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs(
+                        "provider.blocks",
+                        "concurrent.migration_read",
+                        None,
+                        self.inner.get_for_migration(id),
+                    )
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.get_for_migration(id).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.get_for_migration(id).await
+        .await;
+        finish_storage_result(
+            &mut storage_span,
+            &result,
+            result.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        );
+        result
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let _profile = Span::new(Event::BlockPut).units(bytes.len() as u64);
-        #[cfg(feature = "observability")]
-        {
-            let count = bytes.len() as u64;
-            let result = self
-                .telemetry
-                .observe_fs("provider.blocks", "put", None, self.inner.put(bytes))
-                .await?;
-            self.telemetry.record_bytes("write", count);
-            return Ok(result);
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkBlocksPut);
+        let result = async {
+            let _profile = Span::new(Event::BlockPut).units(bytes.len() as u64);
+            #[cfg(feature = "observability")]
+            {
+                let count = bytes.len() as u64;
+                let result = self
+                    .telemetry
+                    .observe_fs("provider.blocks", "put", None, self.inner.put(bytes))
+                    .await?;
+                self.telemetry.record_bytes("write", count);
+                Ok(result)
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.put(bytes).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.put(bytes).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, bytes.len() as u64);
+        result
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
-        let mut profile = Span::new(Event::BlockGet);
-        #[cfg(feature = "observability")]
-        {
-            let result = self
-                .telemetry
-                .observe_fs("provider.blocks", "get", None, self.inner.get(id))
-                .await?;
-            profile.set_units(result.len() as u64);
-            self.telemetry.record_bytes("read", result.len() as u64);
-            return Ok(result);
-        }
-        #[cfg(not(feature = "observability"))]
-        {
-            let result = self.inner.get(id).await;
-            if let Ok(bytes) = &result {
-                profile.set_units(bytes.len() as u64);
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkBlocksGet);
+        let result = async {
+            let mut profile = Span::new(Event::BlockGet);
+            #[cfg(feature = "observability")]
+            {
+                let result = self
+                    .telemetry
+                    .observe_fs("provider.blocks", "get", None, self.inner.get(id))
+                    .await?;
+                profile.set_units(result.len() as u64);
+                self.telemetry.record_bytes("read", result.len() as u64);
+                Ok(result)
             }
-            result
+            #[cfg(not(feature = "observability"))]
+            {
+                let result = self.inner.get(id).await;
+                if let Ok(bytes) = &result {
+                    profile.set_units(bytes.len() as u64);
+                }
+                result
+            }
         }
+        .await;
+        finish_storage_result(
+            &mut storage_span,
+            &result,
+            result.as_ref().map_or(0, |bytes| bytes.len() as u64),
+        );
+        result
     }
 
     async fn flush(&self) -> Result<()> {
-        let _profile = Span::new(Event::BlockFlush);
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs("provider.blocks", "flush", None, self.inner.flush())
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkBlocksFlush);
+        let result = async {
+            let _profile = Span::new(Event::BlockFlush);
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs("provider.blocks", "flush", None, self.inner.flush())
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.flush().await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.flush().await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn delete(&self, id: &BlockId) -> Result<()> {
-        #[cfg(feature = "observability")]
-        {
-            return self
-                .telemetry
-                .observe_fs("provider.blocks", "delete", None, self.inner.delete(id))
-                .await;
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkBlocksDelete);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                return self
+                    .telemetry
+                    .observe_fs("provider.blocks", "delete", None, self.inner.delete(id))
+                    .await;
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.delete(id).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.delete(id).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 
     async fn reconcile(
@@ -699,22 +1303,28 @@ impl BlockStore for ErasedBlockStore {
         live: &std::collections::BTreeSet<BlockId>,
         grace: Duration,
     ) -> Result<BlockReconcileReport> {
-        #[cfg(feature = "observability")]
-        {
-            let report = self
-                .telemetry
-                .observe_fs(
-                    "provider.blocks",
-                    "reconcile",
-                    None,
-                    self.inner.reconcile(live, grace),
-                )
-                .await?;
-            self.telemetry.record_reconcile(&report);
-            return Ok(report);
+        let mut storage_span = StorageSpan::new(StorageOperation::SdkBlocksReconcile);
+        let result = async {
+            #[cfg(feature = "observability")]
+            {
+                let report = self
+                    .telemetry
+                    .observe_fs(
+                        "provider.blocks",
+                        "reconcile",
+                        None,
+                        self.inner.reconcile(live, grace),
+                    )
+                    .await?;
+                self.telemetry.record_reconcile(&report);
+                Ok(report)
+            }
+            #[cfg(not(feature = "observability"))]
+            self.inner.reconcile(live, grace).await
         }
-        #[cfg(not(feature = "observability"))]
-        self.inner.reconcile(live, grace).await
+        .await;
+        finish_storage_result(&mut storage_span, &result, 0);
+        result
     }
 }
 
@@ -731,6 +1341,10 @@ mod tests {
     #[async_trait]
     impl BlockStore for IdentityProbeBlockStore {
         fn durable(&self) -> bool {
+            false
+        }
+
+        fn persistent(&self) -> bool {
             true
         }
 
@@ -775,6 +1389,8 @@ mod tests {
         let erased = ErasedBlockStore::new(inner, Telemetry::disabled());
         #[cfg(not(feature = "observability"))]
         let erased = ErasedBlockStore::new(inner);
+        assert!(!erased.durable());
+        assert!(erased.persistent());
         assert_eq!(erased.prepare_concurrent_backing().await.unwrap(), id);
         erased.verify_concurrent_backing(id).await.unwrap();
         let different = ConcurrentBackingId::from_bytes([0x92; 16]).unwrap();
@@ -795,10 +1411,533 @@ mod tests {
         );
     }
 
-    struct IdentityProbeMetadataStore(ConcurrentBackingId);
+    struct IdentityProbeMetadataStore(
+        ConcurrentBackingId,
+        Arc<std::sync::Mutex<Vec<&'static str>>>,
+        Option<Arc<std::sync::atomic::AtomicBool>>,
+    );
+
+    impl IdentityProbeMetadataStore {
+        fn new(backing: ConcurrentBackingId) -> Self {
+            Self(backing, Arc::new(std::sync::Mutex::new(Vec::new())), None)
+        }
+    }
+
+    #[tokio::test]
+    async fn erased_optimistic_create_capability_is_explicit_and_forwarded() {
+        let backing = ConcurrentBackingId::from_bytes([0xb2; 16]).unwrap();
+        let probe = Arc::new(IdentityProbeMetadataStore::new(backing));
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(probe.clone(), Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(probe.clone());
+        assert_eq!(
+            erased.compact_optimistic_create_capability(),
+            CompactOptimisticCreateCapability::Supported
+        );
+        assert_eq!(*probe.1.lock().unwrap(), ["optimistic_create_capability"]);
+        let incapable =
+            Arc::new(mount_rs_memory::MemoryMetadataStore::new()) as Arc<dyn MetadataStore>;
+        #[cfg(feature = "observability")]
+        let incapable = ErasedMetadataStore::new(incapable, Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let incapable = ErasedMetadataStore::new(incapable);
+        assert_eq!(
+            incapable.compact_optimistic_create_capability(),
+            CompactOptimisticCreateCapability::Unsupported
+        );
+    }
+
+    #[tokio::test]
+    async fn erased_compact_point_reads_preserve_scope_expectation_and_delegate_errors() {
+        use mount_rs_core::storage::compact::{CompactFileExpectation, CompactPointReadCapability};
+        let backing = ConcurrentBackingId::from_bytes([0xb1; 16]).unwrap();
+        let probe = Arc::new(IdentityProbeMetadataStore::new(backing));
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(probe.clone(), Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(probe.clone());
+        let mut snapshot = compact_probe_snapshot(backing);
+        let mut file = snapshot.guards[&1].clone();
+        file.node.stats.ino = 2;
+        file.node.stats.mode = mount_rs_core::S_IFREG | 0o640;
+        file.node.stats.nlink = 1;
+        file.node.data =
+            mount_rs_core::storage::NodeData::File(mount_rs_core::storage::FileLayout {
+                chunker: snapshot.anchor.default_chunker.clone(),
+                extents: Vec::new(),
+            });
+        snapshot.anchor.next_inode = 3;
+        snapshot.anchor.members.push(2);
+        let mount_rs_core::storage::NodeData::Directory { entries } =
+            &mut snapshot.guards.get_mut(&1).unwrap().node.data
+        else {
+            panic!()
+        };
+        entries.push(mount_rs_core::storage::DirectoryEntry {
+            name: "exact name".into(),
+            inode: 2,
+        });
+        snapshot.guards.insert(2, file.clone());
+        let (_, _, structure) = snapshot.into_validated_namespace().unwrap();
+        let expectation =
+            CompactFileExpectation::from_structure(&structure, file.identity, &file.node).unwrap();
+        assert_eq!(
+            erased.compact_point_read_capability(),
+            CompactPointReadCapability::Supported,
+        );
+        let file_error = erased
+            .read_compact_file(backing, 2, expectation)
+            .await
+            .unwrap_err();
+        assert_eq!(file_error.code, ErrorCode::Eperm);
+        assert_eq!(file_error.syscall.as_deref(), Some("point-probe:file"));
+        let entry_error = erased
+            .read_compact_root_entry(backing, 1, 2, "exact name", expectation)
+            .await
+            .unwrap_err();
+        assert_eq!(entry_error.code, ErrorCode::Eacces);
+        assert_eq!(entry_error.syscall.as_deref(), Some("point-probe:entry"));
+        assert_eq!(
+            *probe.1.lock().unwrap(),
+            ["point_capability", "point_file", "point_entry"],
+        );
+    }
+
+    #[tokio::test]
+    async fn erased_compact_prepare_waits_for_one_delegate_and_preserves_its_error() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Waker};
+
+        let backing = ConcurrentBackingId::from_bytes([0xa8; 16]).unwrap();
+        let gate = Arc::new(AtomicBool::new(false));
+        let mut probe = IdentityProbeMetadataStore::new(backing);
+        probe.2 = Some(gate.clone());
+        let probe = Arc::new(probe);
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(probe.clone(), Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(probe.clone());
+        let mut call = Box::pin(erased.prepare_compact_inode_mode(backing, 37));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(*probe.1.lock().unwrap(), ["prepare"]);
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(*probe.1.lock().unwrap(), ["prepare"]);
+        gate.store(true, Ordering::Release);
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut context) else {
+            panic!("delegate error must be returned after release");
+        };
+        assert_eq!(error.code, ErrorCode::Eperm);
+        assert_eq!(error.syscall.as_deref(), Some("compact-probe:prepare"));
+        assert_eq!(error.to_string(), "delegate refused compact prepare");
+        assert_eq!(*probe.1.lock().unwrap(), ["prepare"]);
+    }
+
+    fn compact_probe_snapshot(
+        backing: ConcurrentBackingId,
+    ) -> mount_rs_core::storage::compact::CompactSnapshot {
+        use mount_rs_core::storage::NodeData;
+        use mount_rs_core::storage::compact::*;
+        let node = NodeMetadata {
+            stats: mount_rs_core::types::Stats {
+                dev: 0,
+                ino: 1,
+                mode: mount_rs_core::S_IFDIR | 0o755,
+                nlink: 2,
+                uid: 3,
+                gid: 4,
+                rdev: 0,
+                size: 0,
+                blksize: 4096,
+                blocks: 0,
+                atime_ms: 1,
+                mtime_ms: 2,
+                ctime_ms: 3,
+                birthtime_ms: 4,
+            },
+            data: NodeData::Directory { entries: vec![] },
+        };
+        CompactSnapshot {
+            anchor: CompactAnchor {
+                backing,
+                generation: 37,
+                root: 1,
+                next_inode: 2,
+                default_uid: 3,
+                default_gid: 4,
+                umask: 0o027,
+                default_chunker: ChunkerConfig {
+                    algorithm: "fixed-size".into(),
+                    version: 1,
+                    parameters: BTreeMap::from([("chunk_size".into(), 4096)]),
+                },
+                members: vec![1],
+            },
+            guards: BTreeMap::from([(
+                1,
+                CompactGuard {
+                    identity: PhysicalInodeIdentity {
+                        incarnation: 2,
+                        epoch: 11,
+                        revision: 13,
+                    },
+                    node,
+                },
+            )]),
+        }
+    }
+
+    fn compact_probe_loaded(
+        backing: ConcurrentBackingId,
+    ) -> mount_rs_core::storage::compact::LoadedCompactInode {
+        let snapshot = compact_probe_snapshot(backing);
+        mount_rs_core::storage::compact::LoadedCompactInode {
+            generation: snapshot.anchor.generation,
+            guard: snapshot.guards[&1].clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn erased_compact_forwards_exact_identity_body_delta_and_receipts_once() {
+        use mount_rs_core::storage::compact::{
+            CompactInodeCapability, CompactStructuralDelta, StructuralScope,
+        };
+        let backing = ConcurrentBackingId::from_bytes([0xa7; 16]).unwrap();
+        let probe = Arc::new(IdentityProbeMetadataStore::new(backing));
+        #[cfg(feature = "observability")]
+        let telemetry = Telemetry::new(mount_rs_observability::TelemetryConfig::enabled(
+            "compact-wrapper-test",
+        ));
+        #[cfg(feature = "observability")]
+        let erased = ErasedMetadataStore::new(probe.clone(), telemetry.clone());
+        #[cfg(not(feature = "observability"))]
+        let erased = ErasedMetadataStore::new(probe.clone());
+        let profile_before = mount_rs_core::diagnostics::profile::snapshot();
+        assert_eq!(
+            erased.compact_inode_capability(),
+            CompactInodeCapability::V1
+        );
+        assert_eq!(
+            erased.compact_inode_mode_state().await.unwrap(),
+            Some(InodeModeState {
+                backing,
+                structural_generation: 37
+            })
+        );
+        erased
+            .prepare_compact_inode_mode(backing, 37)
+            .await
+            .unwrap();
+        let snapshot = erased.load_compact_snapshot(backing).await.unwrap();
+        assert_eq!(snapshot, compact_probe_snapshot(backing));
+        let loaded = erased.load_compact_inode(backing, 1).await.unwrap();
+        assert_eq!(loaded, compact_probe_loaded(backing));
+        assert_eq!(
+            erased.compact_root_file_capability(),
+            CompactRootFileCapability::Supported
+        );
+        let pair = erased.load_compact_root_file(backing, 1, 2).await.unwrap();
+        assert_eq!(pair.anchor(), &snapshot.anchor);
+        assert_eq!(pair.root(), Some(&loaded.guard));
+        assert!(
+            pair.file().is_none(),
+            "a missing candidate must remain explicit"
+        );
+        let published = erased
+            .publish_compact_inode(
+                backing,
+                1,
+                37,
+                loaded.guard.identity,
+                loaded.guard.node.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(published.guard.identity.revision, 14);
+        assert_eq!(published.guard.node, loaded.guard.node);
+        let mut candidate = snapshot.namespace().unwrap();
+        candidate.nodes.get_mut(&1).unwrap().stats.mtime_ms += 1;
+        let delta =
+            CompactStructuralDelta::capture(&snapshot, &candidate, StructuralScope::Full).unwrap();
+        let receipt = erased.publish_compact_structure(&delta).await.unwrap();
+        assert_eq!(receipt.anchor, *delta.next_anchor());
+        assert_eq!(receipt.upserts[&1].node, candidate.nodes[&1]);
+        assert_eq!(receipt.upserts[&1].identity.epoch, 38);
+        assert_eq!(
+            *probe.1.lock().unwrap(),
+            [
+                "mode",
+                "prepare",
+                "snapshot",
+                "load",
+                "root_file",
+                "publish_inode",
+                "publish_structure"
+            ]
+        );
+        #[cfg(feature = "observability")]
+        assert_eq!(telemetry.snapshot().operations, 7);
+        if mount_rs_core::diagnostics::profile::enabled() {
+            let profile = mount_rs_core::diagnostics::profile::snapshot()
+                .delta(&profile_before)
+                .unwrap();
+            for name in [
+                "provider.metadata.load_if_changed",
+                "provider.metadata.load",
+                "provider.inode.load",
+                "provider.inode.publish_cas",
+                "provider.metadata.publish_cas_nodes",
+            ] {
+                assert_eq!(
+                    profile
+                        .entries
+                        .iter()
+                        .find(|entry| entry.name == name)
+                        .unwrap()
+                        .calls,
+                    if name == "provider.metadata.load_if_changed" || name == "provider.inode.load"
+                    {
+                        2
+                    } else {
+                        1
+                    },
+                    "{name}"
+                );
+            }
+            assert_eq!(
+                profile
+                    .entries
+                    .iter()
+                    .find(|entry| entry.name == "provider.metadata.publish_cas_nodes")
+                    .unwrap()
+                    .units,
+                1
+            );
+            assert!(
+                profile
+                    .entries
+                    .iter()
+                    .all(|entry| entry.name != "provider.inode.cas_conflict")
+            );
+        }
+
+        let incapable =
+            Arc::new(mount_rs_memory::MemoryMetadataStore::new()) as Arc<dyn MetadataStore>;
+        #[cfg(feature = "observability")]
+        let incapable = ErasedMetadataStore::new(incapable, Telemetry::disabled());
+        #[cfg(not(feature = "observability"))]
+        let incapable = ErasedMetadataStore::new(incapable);
+        assert_eq!(
+            incapable.compact_inode_capability(),
+            CompactInodeCapability::Unsupported
+        );
+        assert_eq!(
+            incapable.compact_root_file_capability(),
+            CompactRootFileCapability::Unsupported
+        );
+        assert_eq!(
+            incapable
+                .load_compact_root_file(backing, 1, 2)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable.compact_inode_mode_state().await.unwrap_err().code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .prepare_compact_inode_mode(backing, 37)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .load_compact_snapshot(backing)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .load_compact_inode(backing, 1)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .publish_compact_inode(backing, 1, 37, loaded.guard.identity, loaded.guard.node)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+        assert_eq!(
+            incapable
+                .publish_compact_structure(&delta)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enotsup
+        );
+    }
 
     #[async_trait]
     impl MetadataStore for IdentityProbeMetadataStore {
+        fn compact_optimistic_create_capability(&self) -> CompactOptimisticCreateCapability {
+            self.1.lock().unwrap().push("optimistic_create_capability");
+            CompactOptimisticCreateCapability::Supported
+        }
+
+        fn compact_point_read_capability(
+            &self,
+        ) -> mount_rs_core::storage::compact::CompactPointReadCapability {
+            self.1.lock().unwrap().push("point_capability");
+            mount_rs_core::storage::compact::CompactPointReadCapability::Supported
+        }
+        async fn read_compact_file(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+            expected: mount_rs_core::storage::compact::CompactFileExpectation<'_>,
+        ) -> Result<mount_rs_core::storage::compact::CompactFileRead> {
+            assert_eq!((backing, inode, expected.generation()), (self.0, 2, 37));
+            assert_eq!(expected.backing(), backing);
+            assert_eq!(expected.node().stats.ino, inode);
+            assert_eq!(
+                expected.identity(),
+                compact_probe_loaded(self.0).guard.identity
+            );
+            self.1.lock().unwrap().push("point_file");
+            Err(FsError::new(ErrorCode::Eperm).with_syscall("point-probe:file"))
+        }
+        async fn read_compact_root_entry(
+            &self,
+            backing: ConcurrentBackingId,
+            root: InodeId,
+            inode: InodeId,
+            name: &str,
+            expected: mount_rs_core::storage::compact::CompactFileExpectation<'_>,
+        ) -> Result<mount_rs_core::storage::compact::CompactRootEntryRead> {
+            assert_eq!((backing, root, inode, name), (self.0, 1, 2, "exact name"));
+            assert_eq!(expected.node().stats.ino, inode);
+            assert_eq!(expected.generation(), 37);
+            self.1.lock().unwrap().push("point_entry");
+            Err(FsError::new(ErrorCode::Eacces).with_syscall("point-probe:entry"))
+        }
+        fn compact_root_file_capability(&self) -> CompactRootFileCapability {
+            CompactRootFileCapability::Supported
+        }
+        async fn load_compact_root_file(
+            &self,
+            backing: ConcurrentBackingId,
+            root: InodeId,
+            file: InodeId,
+        ) -> Result<CompactRootFileRead> {
+            assert_eq!((backing, root, file), (self.0, 1, 2));
+            self.1.lock().unwrap().push("root_file");
+            let snapshot = compact_probe_snapshot(self.0);
+            CompactRootFileRead::from_guards(
+                snapshot.anchor,
+                root,
+                file,
+                Some(compact_probe_loaded(self.0).guard),
+                None,
+            )
+        }
+        fn compact_inode_capability(
+            &self,
+        ) -> mount_rs_core::storage::compact::CompactInodeCapability {
+            mount_rs_core::storage::compact::CompactInodeCapability::V1
+        }
+        async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+            self.1.lock().unwrap().push("mode");
+            Ok(Some(InodeModeState {
+                backing: self.0,
+                structural_generation: 37,
+            }))
+        }
+        async fn prepare_compact_inode_mode(
+            &self,
+            backing: ConcurrentBackingId,
+            revision: u64,
+        ) -> Result<()> {
+            assert_eq!((backing, revision), (self.0, 37));
+            self.1.lock().unwrap().push("prepare");
+            if let Some(gate) = &self.2 {
+                std::future::poll_fn(|_| {
+                    if gate.load(std::sync::atomic::Ordering::Acquire) {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+                return Err(FsError::new(ErrorCode::Eperm)
+                    .with_syscall("compact-probe:prepare")
+                    .with_message("delegate refused compact prepare"));
+            }
+            Ok(())
+        }
+        async fn load_compact_snapshot(
+            &self,
+            backing: ConcurrentBackingId,
+        ) -> Result<mount_rs_core::storage::compact::CompactSnapshot> {
+            assert_eq!(backing, self.0);
+            self.1.lock().unwrap().push("snapshot");
+            Ok(compact_probe_snapshot(self.0))
+        }
+        async fn load_compact_inode(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+        ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+            assert_eq!((backing, inode), (self.0, 1));
+            self.1.lock().unwrap().push("load");
+            Ok(compact_probe_loaded(self.0))
+        }
+        async fn publish_compact_inode(
+            &self,
+            backing: ConcurrentBackingId,
+            inode: InodeId,
+            generation: u64,
+            expected: mount_rs_core::storage::compact::PhysicalInodeIdentity,
+            node: NodeMetadata,
+        ) -> Result<mount_rs_core::storage::compact::LoadedCompactInode> {
+            assert_eq!((backing, inode, generation), (self.0, 1, 37));
+            assert_eq!(expected, compact_probe_loaded(self.0).guard.identity);
+            assert_eq!(node, compact_probe_loaded(self.0).guard.node);
+            self.1.lock().unwrap().push("publish_inode");
+            let mut receipt = compact_probe_loaded(self.0);
+            receipt.guard.identity.revision += 1;
+            Ok(receipt)
+        }
+        async fn publish_compact_structure(
+            &self,
+            delta: &mount_rs_core::storage::compact::CompactStructuralDelta,
+        ) -> Result<mount_rs_core::storage::compact::CompactPublication> {
+            assert_eq!(delta.base_anchor(), &compact_probe_snapshot(self.0).anchor);
+            assert_eq!(delta.changed().len(), 1);
+            self.1.lock().unwrap().push("publish_structure");
+            let mut guard = compact_probe_loaded(self.0).guard;
+            guard.node = delta.changed()[&1].clone();
+            guard.identity.epoch = delta.next_anchor().generation;
+            guard.identity.revision = 0;
+            Ok(mount_rs_core::storage::compact::CompactPublication {
+                anchor: delta.next_anchor().clone(),
+                upserts: BTreeMap::from([(1, guard)]),
+                removed: Default::default(),
+            })
+        }
         async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
             Ok(Some(InodeModeState {
                 backing: self.0,
@@ -813,6 +1952,15 @@ mod tests {
             assert_eq!(backing, self.0);
             assert_eq!(revision, 7);
             Err(FsError::new(ErrorCode::Eio))
+        }
+        async fn load_inode_snapshot_if_changed(
+            &self,
+            backing: ConcurrentBackingId,
+            known: Option<u64>,
+        ) -> Result<Option<InodeMetadataSnapshot>> {
+            assert_eq!(backing, self.0);
+            assert_eq!(known, Some(5));
+            Ok(None)
         }
         async fn load_inode_snapshot(
             &self,
@@ -1001,7 +2149,7 @@ mod tests {
     #[tokio::test]
     async fn erased_metadata_forwards_conditional_load_and_provider_errors() {
         let id = ConcurrentBackingId::from_bytes([0x95; 16]).unwrap();
-        let inner = Arc::new(IdentityProbeMetadataStore(id)) as Arc<dyn MetadataStore>;
+        let inner = Arc::new(IdentityProbeMetadataStore::new(id)) as Arc<dyn MetadataStore>;
         #[cfg(feature = "observability")]
         let telemetry = Telemetry::new(mount_rs_observability::TelemetryConfig::enabled(
             "conditional-load-test",
@@ -1030,7 +2178,7 @@ mod tests {
     async fn erased_metadata_forwards_bound_mode_cas_and_migration() {
         let id = ConcurrentBackingId::from_bytes([0x93; 16]).unwrap();
         let other = ConcurrentBackingId::from_bytes([0x94; 16]).unwrap();
-        let inner = Arc::new(IdentityProbeMetadataStore(id)) as Arc<dyn MetadataStore>;
+        let inner = Arc::new(IdentityProbeMetadataStore::new(id)) as Arc<dyn MetadataStore>;
         #[cfg(feature = "observability")]
         let erased = ErasedMetadataStore::new(inner, Telemetry::disabled());
         #[cfg(not(feature = "observability"))]
@@ -1119,6 +2267,13 @@ mod tests {
             erased.prepare_inode_mode(id, 7).await.unwrap_err().code,
             ErrorCode::Eio
         );
+        assert!(
+            erased
+                .load_inode_snapshot_if_changed(id, Some(5))
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             erased.load_inode_snapshot(id).await.unwrap_err().code,
             ErrorCode::Eio
@@ -1194,3 +2349,7 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Enotsup);
     }
 }
+
+#[cfg(test)]
+#[path = "stores_metrics_tests.rs"]
+mod metrics_tests;

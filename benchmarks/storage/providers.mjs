@@ -26,6 +26,10 @@ function loadNapi() {
   return nativeModule
 }
 
+export function nativeStorageDiagnostics() {
+  return loadNapi().storageDiagnostics()
+}
+
 function firstEnvironmentValue(environment, names) {
   for (const name of names) {
     const value = environment[name]
@@ -74,9 +78,6 @@ function readFoundationDbConfig(environment) {
       "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE (or FOUNDATIONDB_CLUSTER_FILE)",
     )
   }
-  if (sharedProvider && !authorityPrefix) {
-    missing.push("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX")
-  }
   return {
     configured: missing.length === 0,
     clusterFile,
@@ -85,6 +86,14 @@ function readFoundationDbConfig(environment) {
     leaseAuthority: sharedProvider ? "shared-provider" : "persisted-single-authority",
     missing,
   }
+}
+
+function foundationDbMissingForLayout(foundationDb, layout = "legacy") {
+  const missing = [...foundationDb.missing]
+  if (layout === "legacy" && foundationDb.sharedProvider && !foundationDb.authorityPrefix) {
+    missing.push("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX")
+  }
+  return missing
 }
 
 function readR2Config(environment) {
@@ -117,6 +126,23 @@ function readR2Config(environment) {
   }
 }
 
+function readRustFsConfig(environment) {
+  // Explicit RustFS configuration must never fall back to R2 credentials or
+  // its qualified Cloudflare constructor. Region is required by RustFS.
+  const names = {
+    endpoint: "MOUNT_RS_RUSTFS_ENDPOINT",
+    bucket: "MOUNT_RS_RUSTFS_BUCKET",
+    region: "MOUNT_RS_RUSTFS_REGION",
+    accessKeyId: "MOUNT_RS_RUSTFS_ACCESS_KEY_ID",
+    secretAccessKey: "MOUNT_RS_RUSTFS_SECRET_ACCESS_KEY",
+  }
+  const values = Object.fromEntries(Object.entries(names).map(([field, name]) =>
+    [field, firstEnvironmentValue(environment, [name])]))
+  const missing = Object.entries(names).filter(([field]) => !values[field]).map(([, name]) => name)
+  return { ...values, configured: missing.length === 0, missing,
+    durable: environment.MOUNT_RS_RUSTFS_DURABLE === "1" }
+}
+
 function mountxSource(environment) {
   return environment.MOUNTX_SOURCE || repoLocalMountxSource
 }
@@ -131,6 +157,9 @@ function gitRevision(source) {
       cwd: source,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+      maxBuffer: 1_048_576,
+      killSignal: "SIGKILL",
     }).trim() || null
   } catch {
     return null
@@ -199,6 +228,17 @@ async function openNapiPglite(context) {
   }
 }
 
+function chunkedLayoutOptions(layout) {
+  if (layout === "compact") {
+    return {
+      concurrentWrites: true,
+      inodeUpdates: true,
+      compactInodeUpdates: true,
+    }
+  }
+  return layout === "inode" ? { concurrentWrites: true, inodeUpdates: true } : {}
+}
+
 async function openNapiSplitSqlite(context) {
   const { createChunkedDriver } = loadNapi()
   const directory = await mkdtemp(join(tmpdir(), "mount-rs-storage-split-sqlite-"))
@@ -207,6 +247,7 @@ async function openNapiSplitSqlite(context) {
       metadata: { kind: "sqlite", uri: join(directory, "metadata.sqlite") },
       blocks: { kind: "sqlite", uri: join(directory, "blocks.sqlite") },
       chunkSize: context.chunkSizeBytes,
+      ...chunkedLayoutOptions(context.layout),
       owner: `storage-benchmark-${context.runId}`,
     })
     return {
@@ -236,6 +277,7 @@ async function openNapiSplitPglite(context) {
       durable: context.environment.MOUNT_RS_PGLITE_DURABLE === "1",
     },
     chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -265,6 +307,7 @@ async function openNapiSplitPgliteR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -293,6 +336,7 @@ async function openNapiSplitSqliteR2(context) {
         durable: r2.durable,
       },
       chunkSize: context.chunkSizeBytes,
+      ...chunkedLayoutOptions(context.layout),
       owner: `storage-benchmark-${context.runId}`,
     })
     return {
@@ -326,6 +370,7 @@ async function openNapiSplitTidbR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -334,10 +379,30 @@ async function openNapiSplitTidbR2(context) {
   }
 }
 
-async function openNapiSplitFoundationDbR2(context) {
+async function openNapiSplitTidbRustFs(context) {
   const { createChunkedDriver } = loadNapi()
-  const foundationDb = readFoundationDbConfig(context.environment)
-  const r2 = readR2Config(context.environment)
+  const tidb = readTidbConfig(context.environment)
+  const rustfs = readRustFsConfig(context.environment)
+  const filesystem = await createChunkedDriver({
+    metadata: {
+      kind: "tidb", uri: tidb.uri,
+      key: `storage-benchmark/${context.runId}/tidb-rustfs/metadata`,
+      durable: tidb.durable,
+    },
+    blocks: {
+      kind: "rustfs", key: `storage-benchmark/${context.runId}/tidb-rustfs/blocks`,
+      endpoint: rustfs.endpoint, bucket: rustfs.bucket, region: rustfs.region,
+      accessKeyId: rustfs.accessKeyId, secretAccessKey: rustfs.secretAccessKey,
+      durable: rustfs.durable,
+    },
+    chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
+    owner: `storage-benchmark-${context.runId}`,
+  })
+  return { filesystem, cleanup: () => onceCleanupFromFilesystem(filesystem) }
+}
+
+export function foundationDbMetadataOptions(foundationDb, context) {
   const metadata = {
     kind: "foundationdb",
     uri: foundationDb.clusterFile,
@@ -345,7 +410,18 @@ async function openNapiSplitFoundationDbR2(context) {
     durable: true,
     leaseAuthority: foundationDb.leaseAuthority,
   }
-  if (foundationDb.sharedProvider) metadata.authorityPrefix = foundationDb.authorityPrefix
+  if (["inode", "compact"].includes(context.layout)) metadata.leaseAuthority = "revision-cas"
+  if (foundationDb.sharedProvider && context.layout === "legacy") {
+    metadata.authorityPrefix = foundationDb.authorityPrefix
+  }
+  return metadata
+}
+
+async function openNapiSplitFoundationDbR2(context) {
+  const { createChunkedDriver } = loadNapi()
+  const foundationDb = readFoundationDbConfig(context.environment)
+  const r2 = readR2Config(context.environment)
+  const metadata = foundationDbMetadataOptions(foundationDb, context)
   const filesystem = await createChunkedDriver({
     metadata,
     blocks: {
@@ -358,6 +434,7 @@ async function openNapiSplitFoundationDbR2(context) {
       durable: r2.durable,
     },
     chunkSize: context.chunkSizeBytes,
+    ...chunkedLayoutOptions(context.layout),
     owner: `storage-benchmark-${context.runId}`,
   })
   return {
@@ -434,7 +511,12 @@ export function providerDefinitions(environment = process.env) {
   const tidb = readTidbConfig(environment)
   const foundationDb = readFoundationDbConfig(environment)
   const r2 = readR2Config(environment)
+  const rustfs = readRustFsConfig(environment)
   const oracle = mountxMemoryAvailability(environment)
+  const foundationDbRequiredEnvVars = (context = {}) => [
+    ...foundationDbMissingForLayout(foundationDb, context.layout),
+    ...r2.missing,
+  ]
 
   return [
     provider({
@@ -645,6 +727,29 @@ export function providerDefinitions(environment = process.env) {
       create: openNapiSplitTidbR2,
     }),
     provider({
+      id: "mount-rs-split-tidb-rustfs",
+      implementation: "mount-rs",
+      binding: "public-napi",
+      backend: "fixed-chunked",
+      topology: "split-stores",
+      metadataProvider: "tidb",
+      blockProvider: "rustfs",
+      cacheState: "fresh-provider-instance; namespace absence unverified; OS/remote caches uncontrolled",
+      durabilityClass: "mixed-configured",
+      metadataDurabilityClass: tidb.durable ? "configured-durable-remote" : "configured-volatile-remote",
+      blockDurabilityClass: rustfs.durable ? "configured-durable-remote" : "configured-volatile-remote",
+      synchronizationPolicy: "TiDB metadata publication after confirmed RustFS block upload; explicit provider shutdown",
+      chunking: { algorithm: "fixed-size", version: "1", chunkSizeBytes: DEFAULT_CHUNK_SIZE_BYTES },
+      requiredEnvVars: [...tidb.missing, ...rustfs.missing],
+      remoteRegion: null,
+      availability: () => {
+        const missing = [...tidb.missing, ...rustfs.missing]
+        return { configured: missing.length === 0, missing,
+          reason: missing.length === 0 ? undefined : "TiDB/RustFS configuration is absent; no live remote result is claimed" }
+      },
+      create: openNapiSplitTidbRustFs,
+    }),
+    provider({
       id: "mount-rs-split-foundationdb-r2",
       implementation: "mount-rs",
       binding: "public-napi",
@@ -664,10 +769,10 @@ export function providerDefinitions(environment = process.env) {
         version: "1",
         chunkSizeBytes: DEFAULT_CHUNK_SIZE_BYTES,
       },
-      requiredEnvVars: [...foundationDb.missing, ...r2.missing],
+      requiredEnvVars: foundationDbRequiredEnvVars,
       remoteRegion: r2.region || null,
-      availability: () => {
-        const missing = [...foundationDb.missing, ...r2.missing]
+      availability: (_environment, context = {}) => {
+        const missing = foundationDbRequiredEnvVars(context)
         return {
           configured: missing.length === 0,
           missing,

@@ -1,0 +1,70 @@
+name: Metric Evidence
+
+on:
+  push:
+    paths:
+      - crates/mount-rs-service/**
+      - scripts/cargo-shared
+      - scripts/cargo-shared-env.sh
+      - Cargo.lock
+      - .github/workflows/metric-evidence.yml
+  pull_request:
+    paths:
+      - crates/mount-rs-service/**
+      - scripts/cargo-shared
+      - scripts/cargo-shared-env.sh
+      - Cargo.lock
+      - .github/workflows/metric-evidence.yml
+
+permissions:
+  contents: read
+
+jobs:
+  metrics:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+        with:
+          components: rustfmt, clippy
+      - name: Select a private target directory
+        run: printf 'CARGO_TARGET_DIR=%s\nCARGO_TERM_COLOR=never\n' "$RUNNER_TEMP/metric-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Verify formatting
+        run: ./scripts/cargo-shared fmt --all -- --check
+      - name: Verify metric evidence controls and bounded publication
+        run: |
+          set -euo pipefail
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target target::metrics::tests:: -- --nocapture 2>&1 | tee "$RUNNER_TEMP/metric-evidence-tests.log"
+          python3 - <<'PY_CHECK'
+          import os
+          import re
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'metric-evidence-tests.log'
+          if path.stat().st_size > 4 * 1024 * 1024:
+              raise SystemExit('Metric test log exceeds its evidence bound')
+          text = path.read_text(encoding='utf-8')
+          names = (
+              'bounded_metric_writer_counts_partial_writes_and_rejects_before_delegating',
+              'bounded_metric_writer_caps_gzip_finalization_before_writing_it',
+              'metric_publisher_rejects_decoded_size_bomb_and_cleans_pending',
+          )
+          for name in names:
+              test = 'target::metrics::tests::' + name
+              if len(re.findall(r'(?m)^test ' + re.escape(test) + r' \.\.\. ok$', text)) != 1:
+                  raise SystemExit('Required metric regression did not execute successfully: ' + test)
+          summaries = re.findall(r'(?m)^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out; finished in .+$', text)
+          runs = re.findall(r'(?m)^running (\d+) tests?$', text)
+          if len(summaries) != 1 or runs != summaries or int(summaries[0]) < len(names):
+              raise SystemExit('Metric test run is empty, incomplete or ambiguous')
+          print('METRIC_EVIDENCE_EXECUTED tests=' + summaries[0] + ' critical=3 ignored=0')
+          PY_CHECK
+      - name: Verify strict metric fixture Clippy
+        run: ./scripts/cargo-shared clippy --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target -- -D warnings

@@ -1,0 +1,25 @@
+[package]
+name = "mount-rs-filesystem-blocks"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Durable immutable filesystem block storage for mount-rs"
+license = "Apache-2.0"
+
+[features]
+default = []
+io-profiling = []
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }
+sha2 = "0.10"
+tokio = { version = "1", default-features = false, features = ["rt"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }

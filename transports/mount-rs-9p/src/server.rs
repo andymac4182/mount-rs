@@ -161,6 +161,8 @@ struct ConnectionControl {
     shutdown: Notify,
     closed: Notify,
     done: AtomicBool,
+    #[cfg(test)]
+    after_unfinished_observation: StdMutex<Option<fn(&ConnectionControl)>>,
 }
 
 impl ConnectionControl {
@@ -169,6 +171,8 @@ impl ConnectionControl {
             shutdown: Notify::new(),
             closed: Notify::new(),
             done: AtomicBool::new(false),
+            #[cfg(test)]
+            after_unfinished_observation: StdMutex::new(None),
         }
     }
 
@@ -183,9 +187,30 @@ impl ConnectionControl {
         self.closed.notify_waiters();
     }
 
+    #[cfg(test)]
+    fn observe_unfinished(&self) {
+        let callback = self
+            .after_unfinished_observation
+            .lock()
+            .expect("connection observation test hook")
+            .take();
+        if let Some(callback) = callback {
+            callback(self);
+        }
+    }
+
     async fn wait(&self) {
-        while !self.done.load(Ordering::Acquire) {
-            self.closed.notified().await;
+        loop {
+            // A Notified future observes notify_waiters calls from its creation,
+            // even before it is polled. Create it before checking completion so
+            // finish cannot broadcast into the gap before waiter creation.
+            let closed = self.closed.notified();
+            if self.done.load(Ordering::Acquire) {
+                return;
+            }
+            #[cfg(test)]
+            self.observe_unfinished();
+            closed.await;
         }
     }
 }
@@ -1422,6 +1447,167 @@ fn bind_address(host: &str, port: u16) -> String {
 mod tests {
     use super::*;
     use crate::constants::P9_TCLUNK;
+    use std::future::Future;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn connection_with_control(control: Arc<ConnectionControl>) -> P9Connection {
+        P9Connection {
+            session: P9Session::new(mount_rs_memfs::MemoryFs::empty()),
+            peer: None,
+            id: 1,
+            control,
+        }
+    }
+
+    fn finish_after_unfinished_observation(control: &ConnectionControl) {
+        control.finish();
+    }
+
+    #[test]
+    fn connection_wait_closed_observes_finish_after_unfinished_observation() {
+        let control = Arc::new(ConnectionControl::new());
+        *control.after_unfinished_observation.lock().unwrap() =
+            Some(finish_after_unfinished_observation);
+        let connection = connection_with_control(Arc::clone(&control));
+        let mut waiting = Box::pin(connection.wait_closed());
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert_eq!(
+            waiting.as_mut().poll(&mut context),
+            Poll::Ready(()),
+            "finish between the unfinished observation and notification polling must complete wait_closed"
+        );
+        assert!(connection.is_closed());
+    }
+
+    #[test]
+    fn connection_close_observes_finish_after_unfinished_observation() {
+        let control = Arc::new(ConnectionControl::new());
+        *control.after_unfinished_observation.lock().unwrap() =
+            Some(finish_after_unfinished_observation);
+        let connection = connection_with_control(control);
+        let mut closing = Box::pin(connection.close());
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert!(matches!(
+            closing.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(connection.is_closed());
+    }
+
+    #[test]
+    fn connection_wait_closed_observes_finish_before_first_poll() {
+        let control = Arc::new(ConnectionControl::new());
+        let connection = connection_with_control(Arc::clone(&control));
+        let mut waiting = Box::pin(connection.wait_closed());
+        control.finish();
+        let mut context = Context::from_waker(Waker::noop());
+
+        assert_eq!(waiting.as_mut().poll(&mut context), Poll::Ready(()));
+        assert!(connection.is_closed());
+    }
+
+    #[test]
+    fn connection_finish_wakes_all_registered_waiters() {
+        let control = Arc::new(ConnectionControl::new());
+        let connection = connection_with_control(Arc::clone(&control));
+        let first_wakes = Arc::new(WakeCount::default());
+        let second_wakes = Arc::new(WakeCount::default());
+        let first_waker = Waker::from(Arc::clone(&first_wakes));
+        let second_waker = Waker::from(Arc::clone(&second_wakes));
+        let mut first_context = Context::from_waker(&first_waker);
+        let mut second_context = Context::from_waker(&second_waker);
+        let mut first = Box::pin(connection.wait_closed());
+        let mut second = Box::pin(connection.wait_closed());
+
+        assert_eq!(first.as_mut().poll(&mut first_context), Poll::Pending);
+        assert_eq!(second.as_mut().poll(&mut second_context), Poll::Pending);
+        assert!(!connection.is_closed());
+        control.finish();
+        assert_eq!(first_wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(first.as_mut().poll(&mut first_context), Poll::Ready(()));
+        assert_eq!(second.as_mut().poll(&mut second_context), Poll::Ready(()));
+    }
+
+    #[test]
+    fn connection_waiter_drop_does_not_finish_or_stop_remaining_waiters() {
+        let control = Arc::new(ConnectionControl::new());
+        let connection = connection_with_control(Arc::clone(&control));
+        let dropped_wakes = Arc::new(WakeCount::default());
+        let remaining_wakes = Arc::new(WakeCount::default());
+        let dropped_waker = Waker::from(Arc::clone(&dropped_wakes));
+        let remaining_waker = Waker::from(Arc::clone(&remaining_wakes));
+        let mut dropped_context = Context::from_waker(&dropped_waker);
+        let mut remaining_context = Context::from_waker(&remaining_waker);
+        let mut noop_context = Context::from_waker(Waker::noop());
+        let mut dropped = Box::pin(connection.wait_closed());
+        let mut remaining = Box::pin(connection.wait_closed());
+        let mut shutdown = Box::pin(control.shutdown.notified());
+
+        assert_eq!(dropped.as_mut().poll(&mut dropped_context), Poll::Pending);
+        assert_eq!(
+            remaining.as_mut().poll(&mut remaining_context),
+            Poll::Pending
+        );
+        assert_eq!(shutdown.as_mut().poll(&mut noop_context), Poll::Pending);
+        drop(dropped);
+        assert!(!connection.is_closed());
+        assert_eq!(shutdown.as_mut().poll(&mut noop_context), Poll::Pending);
+        assert_eq!(
+            remaining.as_mut().poll(&mut remaining_context),
+            Poll::Pending
+        );
+        control.finish();
+        assert_eq!(dropped_wakes.0.load(Ordering::SeqCst), 0);
+        assert_eq!(remaining_wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            remaining.as_mut().poll(&mut remaining_context),
+            Poll::Ready(())
+        );
+    }
+
+    #[test]
+    fn connection_clone_drop_and_close_preserve_completion_ownership() {
+        let control = Arc::new(ConnectionControl::new());
+        let connection = connection_with_control(Arc::clone(&control));
+        drop(connection.clone());
+        let mut context = Context::from_waker(Waker::noop());
+        let mut shutdown = Box::pin(control.shutdown.notified());
+        assert!(!connection.is_closed());
+        assert_eq!(shutdown.as_mut().poll(&mut context), Poll::Pending);
+
+        let mut closing = Box::pin(connection.close());
+        assert!(closing.as_mut().poll(&mut context).is_pending());
+        assert_eq!(shutdown.as_mut().poll(&mut context), Poll::Ready(()));
+        assert!(!connection.is_closed(), "a stop request is not completion");
+        control.finish();
+        assert!(matches!(
+            closing.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(connection.is_closed());
+        let mut repeated = Box::pin(connection.close());
+        assert!(matches!(
+            repeated.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+    }
 
     #[test]
     fn one_extraction_pass_keeps_a_large_coalesced_tail_for_the_next_turn() {

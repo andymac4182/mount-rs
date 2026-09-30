@@ -1,0 +1,3335 @@
+{
+  "schema": "mount-rs-production-qualification-point-v1",
+  "verdict": "FAILED bounded population control; full production target unqualified",
+  "source_review": "Required independent source review retained in evidence files; exact committed source is launch.source",
+  "acceptance_errors": [
+    "nonzero process exit",
+    "work error",
+    "journal mismatch: verified_files",
+    "journal mismatch: verified_bytes",
+    "journal mismatch: all_server_drive_routes",
+    "journal mismatch: refreshed_replica_opens",
+    "journal mismatch: refreshed_connected_clients",
+    "namespace mismatch: acknowledged_items",
+    "population mismatch: acknowledged_items",
+    "population mismatch: acknowledged_bytes",
+    "population incomplete chain observation",
+    "population invalid observed per-drive peaks",
+    "phase oracle count mismatch",
+    "datastore stage coverage incomplete"
+  ],
+  "launch": {
+    "source": "8004a4f5228cd3870c799971101d0182b5c864b6",
+    "binary_sha256": "dc912b625f59fa33450735dff3d51c989788a29a46dd2896a2d5409e964c8723",
+    "command": [
+      "/private/tmp/task4-population-controls-20260925/twentyfive-open1/checkpoint-executable",
+      "--exact",
+      "production_scale::production_checkpoint::ten_server_tidb_ten_drive_mixed_population_checkpoint",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "fixture_env_keys": [
+      "MOUNT_RS_TIDB_PD_COUNT",
+      "MOUNT_RS_TIDB_RUN_ID",
+      "MOUNT_RS_TIDB_TIKV_COUNT",
+      "MOUNT_RS_TIDB_URL"
+    ],
+    "started_utc_unix_ms": 1790335928857,
+    "build_mode": "debug",
+    "features": [
+      "resource-profiling"
+    ],
+    "no_credentials_recorded": true,
+    "configuration": {
+      "drives": 25,
+      "namespace_depth": 1,
+      "servers": 10,
+      "files_per_drive": 1000,
+      "payload_depth": 1,
+      "oracle_parallelism": 1
+    },
+    "comparison": "Fixture-only same-binary Open1/Open4 controls; Open creation publishes directly, no assumed cooperative batching; serial oracle and original limits retained",
+    "exit_code": 101,
+    "ended_utc_unix_ms": 1790336539541
+  },
+  "journal": {
+    "host_available_start_bytes": 163028414464,
+    "host_available_end_bytes": 163223531520,
+    "created_utc_unix_ms": 1790335929030,
+    "phase_started_utc_unix_ms": 1790336537655,
+    "observer_errors": [],
+    "journal_writes": 673,
+    "journal_bytes": 27995049,
+    "configuration": {
+      "ack_identity_encoding": "each slot acknowledges an ordered file prefix: slot + depth * ordinal; IDs derived from Drive/phase/file/step",
+      "auth": "signed ES256 with owned static JWK; discovery network excluded",
+      "build_mode": "debug",
+      "cleanup_scope": "concurrent listeners then drivers then contexts; unresolved listener tasks retained through terminal artifact",
+      "cleanup_stage_deadline_seconds": 30,
+      "clients": 25,
+      "drives": 25,
+      "file_sizes": "990x4096+9x131072+1x1048576 per Drive",
+      "files_per_drive": 1000,
+      "final_cleanup_async_deadline_seconds": 90,
+      "host_free_floor_bytes": 68719476736,
+      "initial_blocks": 38350,
+      "initial_payload_bytes": 157081600,
+      "journal_flush_completed": 64,
+      "journal_flush_seconds": 1,
+      "ledger_initial_generation": 0,
+      "ledger_slots_per_drive": 1534,
+      "ledger_vector_payload_bytes": 306800,
+      "namespace_depth": 1,
+      "observed_namespace_chains": {
+        "configured_depth": 1,
+        "network": {
+          "window_index": 0
+        },
+        "partial": false,
+        "path": "Open then HandleClose; direct structural path, no assumed MutationBatch coalescing",
+        "payload": false,
+        "peak": 25,
+        "per_drive_peak": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "phase": "namespace",
+        "uncompleted_chains": 0
+      },
+      "observer_success_unit": "acknowledged preparation files; not data operations or lifecycle IOPS",
+      "oracle": "40-byte LE Partition/Drive/file/block/generation tuple plus SHA256-seeded SplitMix64; compare every byte independently through fresh backend",
+      "oracle_parallelism": 1,
+      "partitions": 13,
+      "payload_depth": 1,
+      "phase_budget_seconds": 600,
+      "pool_max_per_server": 16,
+      "preparation_workers": 25,
+      "protocol_deadline_seconds": 30,
+      "rss_stop_bytes": 25769803776,
+      "runtime_workers": 4,
+      "sampler_interval_ms": 100,
+      "scope": "one process loopback; configured servers x Drives eager empty and refreshed full replicas; no10k capacity claim",
+      "servers": 10,
+      "singleton_drives": 1,
+      "token_lifetime_seconds": 2100,
+      "work_budget_scope": "async work body; excludes initial setup and synchronous observers",
+      "work_budget_seconds": 1800
+    },
+    "schema": "mount-rs-production-tidb-checkpoint-v1",
+    "source": "8004a4f5228cd3870c799971101d0182b5c864b6",
+    "provider_identity": "Release Version: v8.5.7\nEdition: Community\nGit Commit Hash: 202b7f47286a1109b5c957401d34c9358d130ae0\nGit Branch: HEAD\nUTC Build Time: 2026-08-19 04:15:17\nGoVersion: go1.25.10\nRace Enabled: false\nCheck Table Before Drop: false\nStore: tikv",
+    "provider_version": "8.0.11-TiDB-v8.5.7",
+    "phase": "cleanup",
+    "empty_replica_opens": 250,
+    "refreshed_replica_opens": 0,
+    "connected_clients": 25,
+    "refreshed_connected_clients": 0,
+    "all_server_drive_routes": 0,
+    "namespace": {
+      "name": "namespace",
+      "configured_items": 25000,
+      "configured_bytes": 0,
+      "attempted_items": 22782,
+      "acknowledged_items": 22782,
+      "uncertain_items": 0,
+      "acknowledged_bytes": 0,
+      "uncertain_bytes": 0,
+      "oracle_verified_items": 0,
+      "uncertain_samples": [],
+      "control_failures": 0,
+      "acknowledged_by_lane": [
+        965,
+        906,
+        870,
+        874,
+        942,
+        949,
+        874,
+        939,
+        885,
+        893,
+        911,
+        938,
+        884,
+        868,
+        945,
+        982,
+        865,
+        911,
+        887,
+        886,
+        944,
+        952,
+        947,
+        872,
+        893
+      ],
+      "acknowledged_by_slot": [
+        [
+          965
+        ],
+        [
+          906
+        ],
+        [
+          870
+        ],
+        [
+          874
+        ],
+        [
+          942
+        ],
+        [
+          949
+        ],
+        [
+          874
+        ],
+        [
+          939
+        ],
+        [
+          885
+        ],
+        [
+          893
+        ],
+        [
+          911
+        ],
+        [
+          938
+        ],
+        [
+          884
+        ],
+        [
+          868
+        ],
+        [
+          945
+        ],
+        [
+          982
+        ],
+        [
+          865
+        ],
+        [
+          911
+        ],
+        [
+          887
+        ],
+        [
+          886
+        ],
+        [
+          944
+        ],
+        [
+          952
+        ],
+        [
+          947
+        ],
+        [
+          872
+        ],
+        [
+          893
+        ]
+      ],
+      "uncertain_by_slot": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ]
+      ],
+      "depth": 1,
+      "pending": {}
+    },
+    "population": {
+      "name": "payload",
+      "configured_items": 25000,
+      "configured_bytes": 157081600,
+      "attempted_items": 0,
+      "acknowledged_items": 0,
+      "uncertain_items": 0,
+      "acknowledged_bytes": 0,
+      "uncertain_bytes": 0,
+      "oracle_verified_items": 0,
+      "uncertain_samples": [],
+      "control_failures": 0,
+      "acknowledged_by_lane": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "acknowledged_by_slot": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ]
+      ],
+      "uncertain_by_slot": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ]
+      ],
+      "depth": 1,
+      "pending": {}
+    },
+    "scope": {
+      "sibling_attempts": 24,
+      "sibling_denials": 24,
+      "partition_attempts": 25,
+      "partition_denials": 25,
+      "transport_errors": 0,
+      "sibling_not_applicable": 1
+    },
+    "protocol_read_requests": 0,
+    "protocol_verified_bytes": 0,
+    "verified_files": 0,
+    "verified_bytes": 0,
+    "cleanup_errors": 0,
+    "unproven_listener_drains": 0,
+    "work_error": "phase online_namespace_25_workers_depth1_per_drive exceeded600s budget; partial point unqualified",
+    "resources": {
+      "samples": 5957,
+      "resident_peak_bytes": 395788288,
+      "resident_unavailable_samples": 0,
+      "sqlite_heap_peak_bytes": 7467040,
+      "rust_live_peak_bytes": null,
+      "capture_errors": 0
+    },
+    "network_windows": [
+      {
+        "aggregate": {
+          "Ok": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 55597744,
+            "cpu_user_us": 1263955794,
+            "involuntary_context_switches": 2733780,
+            "lifetime_peak_rss_bytes": 392986624,
+            "major_faults": 0,
+            "minor_faults": 40828,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 7514227,
+              "rx_datagrams": 71319,
+              "rx_ios": 71319,
+              "sent_packets": 56229,
+              "tx_bytes": 10132051,
+              "tx_datagrams": 56229,
+              "tx_ios": 56229
+            },
+            "rss_end_bytes": 392986624,
+            "rss_start_bytes": 41566208,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 7460880,
+            "sqlite_heap_lifetime_peak_bytes": 7479360,
+            "sqlite_heap_start_bytes": 7395920,
+            "voluntary_context_switches": 244
+          }
+        },
+        "boundary": "returned phase including errors",
+        "connection_lifetime_ids": [
+          30778884112,
+          30778912784,
+          30778941456,
+          30778970128,
+          30778998800,
+          30779324432,
+          30779353104,
+          30779381776,
+          30779410448,
+          30779883536,
+          30779912208,
+          30779940880,
+          30779969552,
+          30779998224,
+          30778927120,
+          30780389392,
+          30780418064,
+          30780446736,
+          30780475408,
+          30779338768,
+          30779403280,
+          30778991632,
+          30779424784,
+          30780873744,
+          30780902416
+        ],
+        "partial": false,
+        "per_drive_lane": {
+          "Ok": [
+            {
+              "lane": 0,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 316637,
+                "rx_datagrams": 3017,
+                "rx_ios": 3017,
+                "sent_packets": 2375,
+                "tx_bytes": 426248,
+                "tx_datagrams": 2375,
+                "tx_ios": 2375
+              }
+            },
+            {
+              "lane": 1,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 297491,
+                "rx_datagrams": 2840,
+                "rx_ios": 2840,
+                "sent_packets": 2238,
+                "tx_bytes": 400483,
+                "tx_datagrams": 2238,
+                "tx_ios": 2238
+              }
+            },
+            {
+              "lane": 2,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 284997,
+                "rx_datagrams": 2709,
+                "rx_ios": 2709,
+                "sent_packets": 2151,
+                "tx_bytes": 384587,
+                "tx_datagrams": 2151,
+                "tx_ios": 2151
+              }
+            },
+            {
+              "lane": 3,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 287899,
+                "rx_datagrams": 2720,
+                "rx_ios": 2720,
+                "sent_packets": 2140,
+                "tx_bytes": 387407,
+                "tx_datagrams": 2140,
+                "tx_ios": 2140
+              }
+            },
+            {
+              "lane": 4,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 311102,
+                "rx_datagrams": 2951,
+                "rx_ios": 2951,
+                "sent_packets": 2353,
+                "tx_bytes": 419103,
+                "tx_datagrams": 2353,
+                "tx_ios": 2353
+              }
+            },
+            {
+              "lane": 5,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 313303,
+                "rx_datagrams": 2968,
+                "rx_ios": 2968,
+                "sent_packets": 2355,
+                "tx_bytes": 421683,
+                "tx_datagrams": 2355,
+                "tx_ios": 2355
+              }
+            },
+            {
+              "lane": 6,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 287745,
+                "rx_datagrams": 2715,
+                "rx_ios": 2715,
+                "sent_packets": 2153,
+                "tx_bytes": 387788,
+                "tx_datagrams": 2153,
+                "tx_ios": 2153
+              }
+            },
+            {
+              "lane": 7,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 309175,
+                "rx_datagrams": 2914,
+                "rx_ios": 2914,
+                "sent_packets": 2308,
+                "tx_bytes": 416538,
+                "tx_datagrams": 2308,
+                "tx_ios": 2308
+              }
+            },
+            {
+              "lane": 8,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 291708,
+                "rx_datagrams": 2757,
+                "rx_ios": 2757,
+                "sent_packets": 2193,
+                "tx_bytes": 393174,
+                "tx_datagrams": 2193,
+                "tx_ios": 2193
+              }
+            },
+            {
+              "lane": 9,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 294133,
+                "rx_datagrams": 2775,
+                "rx_ios": 2775,
+                "sent_packets": 2198,
+                "tx_bytes": 396228,
+                "tx_datagrams": 2198,
+                "tx_ios": 2198
+              }
+            },
+            {
+              "lane": 10,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 300865,
+                "rx_datagrams": 2855,
+                "rx_ios": 2855,
+                "sent_packets": 2244,
+                "tx_bytes": 406109,
+                "tx_datagrams": 2244,
+                "tx_ios": 2244
+              }
+            },
+            {
+              "lane": 11,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 310532,
+                "rx_datagrams": 2959,
+                "rx_ios": 2959,
+                "sent_packets": 2340,
+                "tx_bytes": 419104,
+                "tx_datagrams": 2340,
+                "tx_ios": 2340
+              }
+            },
+            {
+              "lane": 12,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 290942,
+                "rx_datagrams": 2742,
+                "rx_ios": 2742,
+                "sent_packets": 2179,
+                "tx_bytes": 394093,
+                "tx_datagrams": 2179,
+                "tx_ios": 2179
+              }
+            },
+            {
+              "lane": 13,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 285729,
+                "rx_datagrams": 2692,
+                "rx_ios": 2692,
+                "sent_packets": 2140,
+                "tx_bytes": 386959,
+                "tx_datagrams": 2140,
+                "tx_ios": 2140
+              }
+            },
+            {
+              "lane": 14,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 312039,
+                "rx_datagrams": 2958,
+                "rx_ios": 2958,
+                "sent_packets": 2347,
+                "tx_bytes": 421965,
+                "tx_datagrams": 2347,
+                "tx_ios": 2347
+              }
+            },
+            {
+              "lane": 15,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 325074,
+                "rx_datagrams": 3095,
+                "rx_ios": 3095,
+                "sent_packets": 2442,
+                "tx_bytes": 438544,
+                "tx_datagrams": 2442,
+                "tx_ios": 2442
+              }
+            },
+            {
+              "lane": 16,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 284853,
+                "rx_datagrams": 2686,
+                "rx_ios": 2686,
+                "sent_packets": 2131,
+                "tx_bytes": 385579,
+                "tx_datagrams": 2131,
+                "tx_ios": 2131
+              }
+            },
+            {
+              "lane": 17,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 299855,
+                "rx_datagrams": 2823,
+                "rx_ios": 2823,
+                "sent_packets": 2245,
+                "tx_bytes": 406107,
+                "tx_datagrams": 2245,
+                "tx_ios": 2245
+              }
+            },
+            {
+              "lane": 18,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 292688,
+                "rx_datagrams": 2772,
+                "rx_ios": 2772,
+                "sent_packets": 2202,
+                "tx_bytes": 395969,
+                "tx_datagrams": 2202,
+                "tx_ios": 2202
+              }
+            },
+            {
+              "lane": 19,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 291386,
+                "rx_datagrams": 2741,
+                "rx_ios": 2741,
+                "sent_packets": 2151,
+                "tx_bytes": 393897,
+                "tx_datagrams": 2151,
+                "tx_ios": 2151
+              }
+            },
+            {
+              "lane": 20,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 311727,
+                "rx_datagrams": 2956,
+                "rx_ios": 2956,
+                "sent_packets": 2331,
+                "tx_bytes": 421028,
+                "tx_datagrams": 2331,
+                "tx_ios": 2331
+              }
+            },
+            {
+              "lane": 21,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 314790,
+                "rx_datagrams": 2994,
+                "rx_ios": 2994,
+                "sent_packets": 2366,
+                "tx_bytes": 425066,
+                "tx_datagrams": 2366,
+                "tx_ios": 2366
+              }
+            },
+            {
+              "lane": 22,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 312753,
+                "rx_datagrams": 2965,
+                "rx_ios": 2965,
+                "sent_packets": 2357,
+                "tx_bytes": 422945,
+                "tx_datagrams": 2357,
+                "tx_ios": 2357
+              }
+            },
+            {
+              "lane": 23,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 286836,
+                "rx_datagrams": 2699,
+                "rx_ios": 2699,
+                "sent_packets": 2128,
+                "tx_bytes": 388033,
+                "tx_datagrams": 2128,
+                "tx_ios": 2128
+              }
+            },
+            {
+              "lane": 24,
+              "quic": {
+                "congestion_events": 0,
+                "lost_bytes": 0,
+                "lost_packets": 0,
+                "rx_bytes": 299968,
+                "rx_datagrams": 3016,
+                "rx_ios": 3016,
+                "sent_packets": 2162,
+                "tx_bytes": 393414,
+                "tx_datagrams": 2162,
+                "tx_ios": 2162
+              }
+            }
+          ]
+        },
+        "phase": "namespace",
+        "scope": "all configured retained primary client connections; excludes auth/setup/temporary routing probes; UDP bytes exclude IP/UDP headers"
+      }
+    ],
+    "structural_checkpoints": [
+      {
+        "elapsed_seconds": 0.059353583,
+        "global_acknowledged_files": 1,
+        "global_profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 26,
+                "elapsed_ns": 17478127,
+                "name": "catalog.load",
+                "units": 0
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 2056832,
+                "name": "catalog.queue_wait",
+                "units": 0
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 13370,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 52,
+                "elapsed_ns": 12286124,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 1421209,
+                "name": "catalog.query_document_bytes",
+                "units": 141596
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_hits",
+                "units": 73
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_misses",
+                "units": 15
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_writes",
+                "units": 0
+              },
+              {
+                "calls": 2,
+                "elapsed_ns": 57642416,
+                "name": "service.dispatch",
+                "units": 0
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 17945834,
+                "name": "service.authorization",
+                "units": 0
+              },
+              {
+                "calls": 1,
+                "elapsed_ns": 833,
+                "name": "service.handle_lock_wait",
+                "units": 0
+              },
+              {
+                "calls": 2,
+                "elapsed_ns": 62792,
+                "name": "service.audit",
+                "units": 0
+              },
+              {
+                "calls": 25,
+                "elapsed_ns": 25579,
+                "name": "filesystem.gate_wait",
+                "units": 0
+              },
+              {
+                "calls": 25,
+                "elapsed_ns": 38914,
+                "name": "filesystem.snapshot_nodes",
+                "units": 25
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 634707212,
+                "name": "filesystem.metadata_refresh",
+                "units": 0
+              },
+              {
+                "calls": 26,
+                "elapsed_ns": 492074996,
+                "name": "provider.metadata.load",
+                "units": 0
+              },
+              {
+                "calls": 25,
+                "elapsed_ns": 36607460,
+                "name": "provider.blocks.flush",
+                "units": 0
+              },
+              {
+                "calls": 59,
+                "elapsed_ns": 215658372,
+                "name": "provider.blocks.verify_authority",
+                "units": 0
+              },
+              {
+                "calls": 9,
+                "elapsed_ns": 320029625,
+                "name": "provider.metadata.publish_cas_nodes",
+                "units": 18
+              },
+              {
+                "calls": 25,
+                "elapsed_ns": 0,
+                "name": "provider.namespace_serialized_bytes",
+                "units": 20850
+              },
+              {
+                "calls": 55,
+                "elapsed_ns": 0,
+                "name": "provider.inode_returned_bytes",
+                "units": 14221
+              },
+              {
+                "calls": 46,
+                "elapsed_ns": 0,
+                "name": "provider.inode_serialized_bytes",
+                "units": 13984
+              }
+            ]
+          }
+        },
+        "scope": "global concurrent counters; not isolated Drive CPU or SQL",
+        "threshold": 1,
+        "trigger_drive": 0,
+        "trigger_drive_acknowledged_files": 1
+      },
+      {
+        "elapsed_seconds": 0.539879791,
+        "global_acknowledged_files": 242,
+        "global_profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 506,
+                "elapsed_ns": 151281126,
+                "name": "catalog.load",
+                "units": 0
+              },
+              {
+                "calls": 506,
+                "elapsed_ns": 18075779,
+                "name": "catalog.queue_wait",
+                "units": 0
+              },
+              {
+                "calls": 506,
+                "elapsed_ns": 239878,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 1012,
+                "elapsed_ns": 93094122,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 506,
+                "elapsed_ns": 16972172,
+                "name": "catalog.query_document_bytes",
+                "units": 2755676
+              },
+              {
+                "calls": 506,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_hits",
+                "units": 1513
+              },
+              {
+                "calls": 506,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_misses",
+                "units": 15
+              },
+              {
+                "calls": 506,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_writes",
+                "units": 0
+              },
+              {
+                "calls": 484,
+                "elapsed_ns": 12502239502,
+                "name": "service.dispatch",
+                "units": 0
+              },
+              {
+                "calls": 506,
+                "elapsed_ns": 159996221,
+                "name": "service.authorization",
+                "units": 0
+              },
+              {
+                "calls": 242,
+                "elapsed_ns": 109503,
+                "name": "service.handle_lock_wait",
+                "units": 0
+              },
+              {
+                "calls": 484,
+                "elapsed_ns": 13978703,
+                "name": "service.audit",
+                "units": 0
+              },
+              {
+                "calls": 264,
+                "elapsed_ns": 386114,
+                "name": "filesystem.gate_wait",
+                "units": 0
+              },
+              {
+                "calls": 260,
+                "elapsed_ns": 993706,
+                "name": "filesystem.snapshot_nodes",
+                "units": 1485
+              },
+              {
+                "calls": 502,
+                "elapsed_ns": 5039595174,
+                "name": "filesystem.metadata_refresh",
+                "units": 0
+              },
+              {
+                "calls": 502,
+                "elapsed_ns": 4113955073,
+                "name": "provider.metadata.load",
+                "units": 0
+              },
+              {
+                "calls": 260,
+                "elapsed_ns": 297382465,
+                "name": "provider.blocks.flush",
+                "units": 0
+              },
+              {
+                "calls": 773,
+                "elapsed_ns": 1374811660,
+                "name": "provider.blocks.verify_authority",
+                "units": 0
+              },
+              {
+                "calls": 251,
+                "elapsed_ns": 7031194215,
+                "name": "provider.metadata.publish_cas_nodes",
+                "units": 1637
+              },
+              {
+                "calls": 258,
+                "elapsed_ns": 0,
+                "name": "provider.namespace_serialized_bytes",
+                "units": 650565
+              },
+              {
+                "calls": 4496,
+                "elapsed_ns": 0,
+                "name": "provider.inode_returned_bytes",
+                "units": 1521776
+              },
+              {
+                "calls": 1673,
+                "elapsed_ns": 0,
+                "name": "provider.inode_serialized_bytes",
+                "units": 569350
+              }
+            ]
+          }
+        },
+        "scope": "global concurrent counters; not isolated Drive CPU or SQL",
+        "threshold": 10,
+        "trigger_drive": 0,
+        "trigger_drive_acknowledged_files": 10
+      },
+      {
+        "elapsed_seconds": 8.3208885,
+        "global_acknowledged_files": 2489,
+        "global_profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 5002,
+                "elapsed_ns": 1836782168,
+                "name": "catalog.load",
+                "units": 0
+              },
+              {
+                "calls": 5002,
+                "elapsed_ns": 185752766,
+                "name": "catalog.queue_wait",
+                "units": 0
+              },
+              {
+                "calls": 5002,
+                "elapsed_ns": 2919126,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 10004,
+                "elapsed_ns": 1082217498,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 5002,
+                "elapsed_ns": 184511656,
+                "name": "catalog.query_document_bytes",
+                "units": 27240892
+              },
+              {
+                "calls": 5002,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_hits",
+                "units": 15001
+              },
+              {
+                "calls": 5002,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_misses",
+                "units": 15
+              },
+              {
+                "calls": 5002,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_writes",
+                "units": 0
+              },
+              {
+                "calls": 4978,
+                "elapsed_ns": 203012064007,
+                "name": "service.dispatch",
+                "units": 0
+              },
+              {
+                "calls": 5002,
+                "elapsed_ns": 1930684692,
+                "name": "service.authorization",
+                "units": 0
+              },
+              {
+                "calls": 2489,
+                "elapsed_ns": 1233590,
+                "name": "service.handle_lock_wait",
+                "units": 0
+              },
+              {
+                "calls": 4978,
+                "elapsed_ns": 264713527,
+                "name": "service.audit",
+                "units": 0
+              },
+              {
+                "calls": 2513,
+                "elapsed_ns": 3046428,
+                "name": "filesystem.gate_wait",
+                "units": 0
+              },
+              {
+                "calls": 2506,
+                "elapsed_ns": 45274408,
+                "name": "filesystem.snapshot_nodes",
+                "units": 126858
+              },
+              {
+                "calls": 4995,
+                "elapsed_ns": 73764014414,
+                "name": "filesystem.metadata_refresh",
+                "units": 0
+              },
+              {
+                "calls": 4995,
+                "elapsed_ns": 62284658031,
+                "name": "provider.metadata.load",
+                "units": 0
+              },
+              {
+                "calls": 2505,
+                "elapsed_ns": 3961990664,
+                "name": "provider.blocks.flush",
+                "units": 0
+              },
+              {
+                "calls": 7505,
+                "elapsed_ns": 15951655623,
+                "name": "provider.blocks.verify_authority",
+                "units": 0
+              },
+              {
+                "calls": 2490,
+                "elapsed_ns": 117599469451,
+                "name": "provider.metadata.publish_cas_nodes",
+                "units": 127740
+              },
+              {
+                "calls": 2505,
+                "elapsed_ns": 0,
+                "name": "provider.namespace_serialized_bytes",
+                "units": 47371918
+              },
+              {
+                "calls": 380600,
+                "elapsed_ns": 0,
+                "name": "provider.inode_returned_bytes",
+                "units": 135649442
+              },
+              {
+                "calls": 127942,
+                "elapsed_ns": 0,
+                "name": "provider.inode_serialized_bytes",
+                "units": 45602385
+              }
+            ]
+          }
+        },
+        "scope": "global concurrent counters; not isolated Drive CPU or SQL",
+        "threshold": 100,
+        "trigger_drive": 0,
+        "trigger_drive_acknowledged_files": 100
+      },
+      {
+        "elapsed_seconds": 43.289548625,
+        "global_acknowledged_files": 6190,
+        "global_profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 12404,
+                "elapsed_ns": 5591717564,
+                "name": "catalog.load",
+                "units": 0
+              },
+              {
+                "calls": 12404,
+                "elapsed_ns": 560614623,
+                "name": "catalog.queue_wait",
+                "units": 0
+              },
+              {
+                "calls": 12404,
+                "elapsed_ns": 8550118,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 24808,
+                "elapsed_ns": 2992599841,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 12404,
+                "elapsed_ns": 511765392,
+                "name": "catalog.query_document_bytes",
+                "units": 67552184
+              },
+              {
+                "calls": 12404,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_hits",
+                "units": 37207
+              },
+              {
+                "calls": 12404,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_misses",
+                "units": 15
+              },
+              {
+                "calls": 12404,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_writes",
+                "units": 0
+              },
+              {
+                "calls": 12380,
+                "elapsed_ns": 1062134818224,
+                "name": "service.dispatch",
+                "units": 0
+              },
+              {
+                "calls": 12404,
+                "elapsed_ns": 5844341898,
+                "name": "service.authorization",
+                "units": 0
+              },
+              {
+                "calls": 6190,
+                "elapsed_ns": 3162542,
+                "name": "service.handle_lock_wait",
+                "units": 0
+              },
+              {
+                "calls": 12380,
+                "elapsed_ns": 890888096,
+                "name": "service.audit",
+                "units": 0
+              },
+              {
+                "calls": 6214,
+                "elapsed_ns": 8506590,
+                "name": "filesystem.gate_wait",
+                "units": 0
+              },
+              {
+                "calls": 6203,
+                "elapsed_ns": 235769201,
+                "name": "filesystem.snapshot_nodes",
+                "units": 772665
+              },
+              {
+                "calls": 12393,
+                "elapsed_ns": 454692591454,
+                "name": "filesystem.metadata_refresh",
+                "units": 0
+              },
+              {
+                "calls": 12393,
+                "elapsed_ns": 414976722578,
+                "name": "provider.metadata.load",
+                "units": 0
+              },
+              {
+                "calls": 6203,
+                "elapsed_ns": 14452005217,
+                "name": "provider.blocks.flush",
+                "units": 0
+              },
+              {
+                "calls": 18605,
+                "elapsed_ns": 51864409476,
+                "name": "provider.blocks.verify_authority",
+                "units": 0
+              },
+              {
+                "calls": 6195,
+                "elapsed_ns": 566910941352,
+                "name": "provider.metadata.publish_cas_nodes",
+                "units": 776871
+              },
+              {
+                "calls": 6202,
+                "elapsed_ns": 0,
+                "name": "provider.namespace_serialized_bytes",
+                "units": 285794217
+              },
+              {
+                "calls": 2321205,
+                "elapsed_ns": 0,
+                "name": "provider.inode_returned_bytes",
+                "units": 833350231
+              },
+              {
+                "calls": 777123,
+                "elapsed_ns": 0,
+                "name": "provider.inode_serialized_bytes",
+                "units": 279005779
+              }
+            ]
+          }
+        },
+        "scope": "global concurrent counters; not isolated Drive CPU or SQL",
+        "threshold": 250,
+        "trigger_drive": 0,
+        "trigger_drive_acknowledged_files": 250
+      },
+      {
+        "elapsed_seconds": 169.055329708,
+        "global_acknowledged_files": 12298,
+        "global_profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 24620,
+                "elapsed_ns": 12674462691,
+                "name": "catalog.load",
+                "units": 0
+              },
+              {
+                "calls": 24620,
+                "elapsed_ns": 1253238110,
+                "name": "catalog.queue_wait",
+                "units": 0
+              },
+              {
+                "calls": 24620,
+                "elapsed_ns": 18056063,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 49240,
+                "elapsed_ns": 5974167488,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 24620,
+                "elapsed_ns": 1078173210,
+                "name": "catalog.query_document_bytes",
+                "units": 134080520
+              },
+              {
+                "calls": 24620,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_hits",
+                "units": 73855
+              },
+              {
+                "calls": 24620,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_misses",
+                "units": 15
+              },
+              {
+                "calls": 24620,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_writes",
+                "units": 0
+              },
+              {
+                "calls": 24596,
+                "elapsed_ns": 4169355864037,
+                "name": "service.dispatch",
+                "units": 0
+              },
+              {
+                "calls": 24620,
+                "elapsed_ns": 13199292730,
+                "name": "service.authorization",
+                "units": 0
+              },
+              {
+                "calls": 12298,
+                "elapsed_ns": 6442142,
+                "name": "service.handle_lock_wait",
+                "units": 0
+              },
+              {
+                "calls": 24596,
+                "elapsed_ns": 3035284243,
+                "name": "service.audit",
+                "units": 0
+              },
+              {
+                "calls": 12322,
+                "elapsed_ns": 17231460,
+                "name": "filesystem.gate_wait",
+                "units": 0
+              },
+              {
+                "calls": 12319,
+                "elapsed_ns": 858239719,
+                "name": "filesystem.snapshot_nodes",
+                "units": 3041497
+              },
+              {
+                "calls": 24617,
+                "elapsed_ns": 1950161590978,
+                "name": "filesystem.metadata_refresh",
+                "units": 0
+              },
+              {
+                "calls": 24617,
+                "elapsed_ns": 1849607030274,
+                "name": "provider.metadata.load",
+                "units": 0
+              },
+              {
+                "calls": 12319,
+                "elapsed_ns": 39736736577,
+                "name": "provider.blocks.flush",
+                "units": 0
+              },
+              {
+                "calls": 36944,
+                "elapsed_ns": 123134573547,
+                "name": "provider.blocks.verify_authority",
+                "units": 0
+              },
+              {
+                "calls": 12303,
+                "elapsed_ns": 2110800019945,
+                "name": "provider.metadata.publish_cas_nodes",
+                "units": 3045915
+              },
+              {
+                "calls": 12319,
+                "elapsed_ns": 0,
+                "name": "provider.namespace_serialized_bytes",
+                "units": 1123372236
+              },
+              {
+                "calls": 9121735,
+                "elapsed_ns": 0,
+                "name": "provider.inode_returned_bytes",
+                "units": 3287232639
+              },
+              {
+                "calls": 3046667,
+                "elapsed_ns": 0,
+                "name": "provider.inode_serialized_bytes",
+                "units": 1097965244
+              }
+            ]
+          }
+        },
+        "scope": "global concurrent counters; not isolated Drive CPU or SQL",
+        "threshold": 500,
+        "trigger_drive": 0,
+        "trigger_drive_acknowledged_files": 500
+      }
+    ],
+    "stages": [
+      {
+        "elapsed_seconds": 0.019557333,
+        "ended_utc_unix_ms": 1790335929030,
+        "mutation_batch": {
+          "attempted_requests": 0,
+          "batch_calls": 0,
+          "coverage": "profile_delta",
+          "scope": "attempted requests per batch event, not acknowledged files or publications; Open creates may bypass this event"
+        },
+        "phase": "setup",
+        "profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 1,
+                "elapsed_ns": 11625,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 2,
+                "elapsed_ns": 32375,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 8,
+                "elapsed_ns": 3371625,
+                "name": "catalog.connect_configure",
+                "units": 0
+              }
+            ]
+          }
+        },
+        "resources": {
+          "Ok": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 8674,
+            "cpu_user_us": 4417,
+            "involuntary_context_switches": 101,
+            "lifetime_peak_rss_bytes": 21446656,
+            "major_faults": 0,
+            "minor_faults": 677,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 0,
+              "rx_datagrams": 0,
+              "rx_ios": 0,
+              "sent_packets": 0,
+              "tx_bytes": 0,
+              "tx_datagrams": 0,
+              "tx_ios": 0
+            },
+            "rss_end_bytes": 21446656,
+            "rss_start_bytes": 10387456,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 593520,
+            "sqlite_heap_lifetime_peak_bytes": 605808,
+            "sqlite_heap_start_bytes": 0,
+            "voluntary_context_switches": 7
+          }
+        },
+        "sampled_peaks": {
+          "Ok": {
+            "capture_errors": 0,
+            "resident_peak_bytes": 9453568,
+            "resident_unavailable_samples": 0,
+            "rust_live_peak_bytes": null,
+            "samples": 1,
+            "sqlite_heap_peak_bytes": 0
+          }
+        },
+        "started_utc_unix_ms": 1790335929030
+      },
+      {
+        "elapsed_seconds": 3.6568680000000002,
+        "ended_utc_unix_ms": 1790335933313,
+        "mutation_batch": {
+          "attempted_requests": 0,
+          "batch_calls": 0,
+          "coverage": "profile_delta",
+          "scope": "attempted requests per batch event, not acknowledged files or publications; Open creates may bypass this event"
+        },
+        "phase": "empty_replica_open",
+        "profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 10,
+                "elapsed_ns": 4323792,
+                "name": "catalog.load",
+                "units": 0
+              },
+              {
+                "calls": 10,
+                "elapsed_ns": 122625,
+                "name": "catalog.queue_wait",
+                "units": 0
+              },
+              {
+                "calls": 10,
+                "elapsed_ns": 16251,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 20,
+                "elapsed_ns": 849500,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 80,
+                "elapsed_ns": 22127499,
+                "name": "catalog.connect_configure",
+                "units": 0
+              },
+              {
+                "calls": 10,
+                "elapsed_ns": 2992707,
+                "name": "catalog.query_document_bytes",
+                "units": 54460
+              },
+              {
+                "calls": 10,
+                "elapsed_ns": 2439461,
+                "name": "catalog.decode_validate_bytes",
+                "units": 54460
+              },
+              {
+                "calls": 10,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_hits",
+                "units": 50
+              },
+              {
+                "calls": 10,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_misses",
+                "units": 30
+              },
+              {
+                "calls": 10,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_writes",
+                "units": 0
+              },
+              {
+                "calls": 500,
+                "elapsed_ns": 1381569832,
+                "name": "provider.metadata.load",
+                "units": 0
+              },
+              {
+                "calls": 525,
+                "elapsed_ns": 660204175,
+                "name": "provider.metadata.load_if_changed",
+                "units": 0
+              },
+              {
+                "calls": 25,
+                "elapsed_ns": 12814415,
+                "name": "provider.blocks.flush",
+                "units": 0
+              },
+              {
+                "calls": 275,
+                "elapsed_ns": 181112493,
+                "name": "provider.blocks.verify_authority",
+                "units": 0
+              },
+              {
+                "calls": 25,
+                "elapsed_ns": 59673793,
+                "name": "provider.metadata.publish_cas_nodes",
+                "units": 25
+              },
+              {
+                "calls": 50,
+                "elapsed_ns": 0,
+                "name": "provider.namespace_serialized_bytes",
+                "units": 22950
+              },
+              {
+                "calls": 475,
+                "elapsed_ns": 0,
+                "name": "provider.inode_returned_bytes",
+                "units": 120175
+              },
+              {
+                "calls": 25,
+                "elapsed_ns": 0,
+                "name": "provider.inode_serialized_bytes",
+                "units": 6325
+              }
+            ]
+          }
+        },
+        "resources": {
+          "Ok": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 228206,
+            "cpu_user_us": 309857,
+            "involuntary_context_switches": 18209,
+            "lifetime_peak_rss_bytes": 35389440,
+            "major_faults": 0,
+            "minor_faults": 851,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 0,
+              "rx_datagrams": 0,
+              "rx_ios": 0,
+              "sent_packets": 0,
+              "tx_bytes": 0,
+              "tx_datagrams": 0,
+              "tx_ios": 0
+            },
+            "rss_end_bytes": 35389440,
+            "rss_start_bytes": 21479424,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 6551440,
+            "sqlite_heap_lifetime_peak_bytes": 6557600,
+            "sqlite_heap_start_bytes": 593520,
+            "voluntary_context_switches": 6
+          }
+        },
+        "sampled_peaks": {
+          "Ok": {
+            "capture_errors": 0,
+            "resident_peak_bytes": 35373056,
+            "resident_unavailable_samples": 0,
+            "rust_live_peak_bytes": null,
+            "samples": 42,
+            "sqlite_heap_peak_bytes": 6551440
+          }
+        },
+        "started_utc_unix_ms": 1790335929030
+      },
+      {
+        "elapsed_seconds": 0.89792,
+        "ended_utc_unix_ms": 1790335935134,
+        "mutation_batch": {
+          "attempted_requests": 0,
+          "batch_calls": 0,
+          "coverage": "profile_delta",
+          "scope": "attempted requests per batch event, not acknowledged files or publications; Open creates may bypass this event"
+        },
+        "phase": "signed_connections",
+        "profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 74,
+                "elapsed_ns": 12970582,
+                "name": "catalog.load",
+                "units": 0
+              },
+              {
+                "calls": 74,
+                "elapsed_ns": 700746,
+                "name": "catalog.queue_wait",
+                "units": 0
+              },
+              {
+                "calls": 74,
+                "elapsed_ns": 56123,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 148,
+                "elapsed_ns": 7109797,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 74,
+                "elapsed_ns": 3260877,
+                "name": "catalog.query_document_bytes",
+                "units": 403004
+              },
+              {
+                "calls": 74,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_hits",
+                "units": 157
+              },
+              {
+                "calls": 74,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_misses",
+                "units": 195
+              },
+              {
+                "calls": 74,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_writes",
+                "units": 0
+              },
+              {
+                "calls": 24,
+                "elapsed_ns": 3987582,
+                "name": "service.dispatch",
+                "units": 0
+              },
+              {
+                "calls": 24,
+                "elapsed_ns": 3984127,
+                "name": "service.authorization",
+                "units": 0
+              }
+            ]
+          }
+        },
+        "resources": {
+          "Ok": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 50387,
+            "cpu_user_us": 172865,
+            "involuntary_context_switches": 3215,
+            "lifetime_peak_rss_bytes": 41566208,
+            "major_faults": 0,
+            "minor_faults": 377,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 0,
+              "rx_datagrams": 0,
+              "rx_ios": 0,
+              "sent_packets": 0,
+              "tx_bytes": 0,
+              "tx_datagrams": 0,
+              "tx_ios": 0
+            },
+            "rss_end_bytes": 41566208,
+            "rss_start_bytes": 35422208,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 7395920,
+            "sqlite_heap_lifetime_peak_bytes": 7402080,
+            "sqlite_heap_start_bytes": 6551440,
+            "voluntary_context_switches": 1
+          }
+        },
+        "sampled_peaks": {
+          "Ok": {
+            "capture_errors": 0,
+            "resident_peak_bytes": 41566208,
+            "resident_unavailable_samples": 0,
+            "rust_live_peak_bytes": null,
+            "samples": 17,
+            "sqlite_heap_peak_bytes": 7395920
+          }
+        },
+        "started_utc_unix_ms": 1790335933313
+      },
+      {
+        "elapsed_seconds": 601.977152041,
+        "ended_utc_unix_ms": 1790336537655,
+        "mutation_batch": {
+          "attempted_requests": 0,
+          "batch_calls": 0,
+          "coverage": "profile_delta",
+          "scope": "attempted requests per batch event, not acknowledged files or publications; Open creates may bypass this event"
+        },
+        "phase": "online_namespace_25_workers_depth1_per_drive",
+        "profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 45564,
+                "elapsed_ns": 25333926804,
+                "name": "catalog.load",
+                "units": 0
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 2181705311,
+                "name": "catalog.queue_wait",
+                "units": 0
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 34357905,
+                "name": "catalog.pool_wait",
+                "units": 0
+              },
+              {
+                "calls": 91128,
+                "elapsed_ns": 10331086846,
+                "name": "catalog.backing_verify",
+                "units": 0
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 2074814334,
+                "name": "catalog.query_document_bytes",
+                "units": 248141544
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_hits",
+                "units": 136687
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_misses",
+                "units": 15
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 0,
+                "name": "catalog.pager_writes",
+                "units": 0
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 14891933356327,
+                "name": "service.dispatch",
+                "units": 0
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 26321714652,
+                "name": "service.authorization",
+                "units": 0
+              },
+              {
+                "calls": 22782,
+                "elapsed_ns": 12185123,
+                "name": "service.handle_lock_wait",
+                "units": 0
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 4823588750,
+                "name": "service.audit",
+                "units": 0
+              },
+              {
+                "calls": 22782,
+                "elapsed_ns": 33018088,
+                "name": "filesystem.gate_wait",
+                "units": 0
+              },
+              {
+                "calls": 22782,
+                "elapsed_ns": 2758883865,
+                "name": "filesystem.snapshot_nodes",
+                "units": 10406921
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 7112349522670,
+                "name": "filesystem.metadata_refresh",
+                "units": 0
+              },
+              {
+                "calls": 45564,
+                "elapsed_ns": 6880653852611,
+                "name": "provider.metadata.load",
+                "units": 0
+              },
+              {
+                "calls": 22782,
+                "elapsed_ns": 85731972066,
+                "name": "provider.blocks.flush",
+                "units": 0
+              },
+              {
+                "calls": 68346,
+                "elapsed_ns": 245882074724,
+                "name": "provider.blocks.verify_authority",
+                "units": 0
+              },
+              {
+                "calls": 22782,
+                "elapsed_ns": 7534543242652,
+                "name": "provider.metadata.publish_cas_nodes",
+                "units": 10429703
+              },
+              {
+                "calls": 22782,
+                "elapsed_ns": 0,
+                "name": "provider.namespace_serialized_bytes",
+                "units": 3841705453
+              },
+              {
+                "calls": 31243545,
+                "elapsed_ns": 0,
+                "name": "provider.inode_returned_bytes",
+                "units": 11281745743
+              },
+              {
+                "calls": 10429703,
+                "elapsed_ns": 0,
+                "name": "provider.inode_serialized_bytes",
+                "units": 3766074587
+              }
+            ]
+          }
+        },
+        "resources": {
+          "Ok": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 55599130,
+            "cpu_user_us": 1263956990,
+            "involuntary_context_switches": 2733814,
+            "lifetime_peak_rss_bytes": 393068544,
+            "major_faults": 0,
+            "minor_faults": 40838,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 0,
+              "rx_datagrams": 0,
+              "rx_ios": 0,
+              "sent_packets": 0,
+              "tx_bytes": 0,
+              "tx_datagrams": 0,
+              "tx_ios": 0
+            },
+            "rss_end_bytes": 393068544,
+            "rss_start_bytes": 41566208,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 7460880,
+            "sqlite_heap_lifetime_peak_bytes": 7479360,
+            "sqlite_heap_start_bytes": 7395920,
+            "voluntary_context_switches": 248
+          }
+        },
+        "sampled_peaks": {
+          "Ok": {
+            "capture_errors": 0,
+            "resident_peak_bytes": 393068544,
+            "resident_unavailable_samples": 0,
+            "rust_live_peak_bytes": null,
+            "samples": 5879,
+            "sqlite_heap_peak_bytes": 7467040
+          }
+        },
+        "started_utc_unix_ms": 1790335935134
+      },
+      {
+        "elapsed_seconds": 0.919459625,
+        "ended_utc_unix_ms": 1790336539507,
+        "mutation_batch": {
+          "attempted_requests": 0,
+          "batch_calls": 0,
+          "coverage": "profile_delta",
+          "scope": "attempted requests per batch event, not acknowledged files or publications; Open creates may bypass this event"
+        },
+        "phase": "cleanup",
+        "profile": {
+          "Ok": {
+            "entries": [
+              {
+                "calls": 10,
+                "elapsed_ns": 1283793,
+                "name": "catalog.close",
+                "units": 0
+              },
+              {
+                "calls": 250,
+                "elapsed_ns": 331417,
+                "name": "filesystem.gate_wait",
+                "units": 0
+              }
+            ]
+          }
+        },
+        "resources": {
+          "Ok": {
+            "block_inputs": 0,
+            "block_outputs": 0,
+            "cpu_system_us": 7748,
+            "cpu_user_us": 29494,
+            "involuntary_context_switches": 313,
+            "lifetime_peak_rss_bytes": 395788288,
+            "major_faults": 0,
+            "minor_faults": 267,
+            "quic_client_side": {
+              "congestion_events": 0,
+              "lost_bytes": 0,
+              "lost_packets": 0,
+              "rx_bytes": 0,
+              "rx_datagrams": 0,
+              "rx_ios": 0,
+              "sent_packets": 0,
+              "tx_bytes": 0,
+              "tx_datagrams": 0,
+              "tx_ios": 0
+            },
+            "rss_end_bytes": 392609792,
+            "rss_start_bytes": 393068544,
+            "rust_allocated_bytes": null,
+            "rust_allocations": null,
+            "rust_allocator_instrumented": false,
+            "rust_deallocations": null,
+            "rust_freed_bytes": null,
+            "rust_live_end_bytes": null,
+            "rust_live_start_bytes": null,
+            "rust_reallocations": null,
+            "schema": "mount-rs-process-resource-v1",
+            "scope": "one process includes clients, servers, verification and background; System Rust allocations exclude foreign C allocators; QUIC UDP bytes exclude IP/UDP headers; atomic allocator instrumentation affects throughput",
+            "sqlite_heap_end_bytes": 594800,
+            "sqlite_heap_lifetime_peak_bytes": 7479360,
+            "sqlite_heap_start_bytes": 7460880,
+            "voluntary_context_switches": 16
+          }
+        },
+        "sampled_peaks": {
+          "Ok": {
+            "capture_errors": 0,
+            "resident_peak_bytes": 395788288,
+            "resident_unavailable_samples": 0,
+            "rust_live_peak_bytes": null,
+            "samples": 18,
+            "sqlite_heap_peak_bytes": 7460880
+          }
+        },
+        "started_utc_unix_ms": 1790336537655
+      }
+    ],
+    "backing_counts": []
+  },
+  "datastore_stage_summaries": [
+    {
+      "stage_id": "task4-56746-1-empty_replica_open",
+      "logical_successes": 0,
+      "logical_failures": 0,
+      "sample_elapsed_seconds": 3.573992333,
+      "counter_resets": [],
+      "series_coverage_incomplete": false,
+      "selected_sql_kv_rocksdb_counters": {
+        "pd": {
+          "process_cpu_seconds_total": 0.43000000000029104
+        },
+        "tidb": {
+          "pd_client_cmd_handle_cmds_duration_seconds_count": 4834.0,
+          "pd_client_cmd_handle_failed_cmds_duration_seconds_count": 0.0,
+          "pd_client_request_circuit_breaker_count": 0.0,
+          "pd_client_request_handle_query_region_batch_size_count": 0.0,
+          "pd_client_request_handle_query_region_best_batch_size_count": 0.0,
+          "pd_client_request_handle_requests_duration_seconds_count": 1954.0,
+          "pd_client_request_handle_tso_batch_size_count": 1954.0,
+          "pd_client_request_handle_tso_best_batch_size_count": 1954.0,
+          "pd_client_request_query_region_batch_send_latency_count": 0.0,
+          "pd_client_request_tso_batch_send_latency_count": 1954.0,
+          "process_cpu_seconds_total": 1.2000000000002728,
+          "tidb_executor_statement_total": 4135.0,
+          "tidb_server_query_statement_processed_keys_count": 1000.0,
+          "tidb_server_query_statement_rpc_count_count": 4151.0,
+          "tidb_server_query_total": 4151.0,
+          "tidb_tikvclient_request_retry_times_count": 0.0,
+          "tidb_tikvclient_request_seconds_count": 3011.0
+        },
+        "tikv": {
+          "process_cpu_seconds_total": 0.0,
+          "tikv_grpc_msg_duration_seconds_count": 2405.0,
+          "tikv_storage_command_total": 1306.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_filter_hit_count]": 1323.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_hit_count]": 3132.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_index_hit_count]": 1321.0,
+          "tikv_storage_rocksdb_perf[metric=block_checksum_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_decompress_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_byte]": 2583.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_count]": 1.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_time]": 3334.0,
+          "tikv_storage_rocksdb_perf[metric=block_seek_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_hit_count]": 1257.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_miss_count]": 1392.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_hit_count]": 490.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_miss_count]": 833.0,
+          "tikv_storage_rocksdb_perf[metric=db_condition_wait_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_mutex_lock_nanos]": 21328.0,
+          "tikv_storage_rocksdb_perf[metric=decrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=encrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=filter_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=find_table_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_count]": 1718.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_output_files_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_post_process_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 214844.0,
+          "tikv_storage_rocksdb_perf[metric=get_snapshot_time]": 194750.0,
+          "tikv_storage_rocksdb_perf[metric=index_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_delete_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_key_skipped_count]": 5.0,
+          "tikv_storage_rocksdb_perf[metric=internal_recent_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_next_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_prev_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 187772.0,
+          "tikv_storage_rocksdb_perf[metric=iter_seek_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_block_iter_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_iterator_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=next_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=prev_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_filter_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_index_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_count]": 2646.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_internal_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_max_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_min_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_count]": 1323.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=user_key_comparison_count]": 48083.0
+        }
+      },
+      "vm_io_per_logical_success": null,
+      "sessions_by_source": {
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 20.0,
+            "tidb_server_internal_sessions": 13.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 0.0,
+            "tidb_server_internal_sessions": 13.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "raw_path": "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-1-empty_replica_open.metrics.json",
+      "raw_sha256": "30ac979de27f1213d1592d305c8d6a2a1d20b584755ccfca836290c5b1c4fd52",
+      "vm_network_and_io": {
+        "pd": {
+          "net_dev": {
+            "rx_bytes": 444951,
+            "rx_packets": 4408,
+            "tx_bytes": 468515,
+            "tx_packets": 4417
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 0,
+            "rios": 0,
+            "wbytes": 0,
+            "wios": 0
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 168059,
+            "read_bytes": 0,
+            "syscr": 8973,
+            "syscw": 5369,
+            "wchar": 654363,
+            "write_bytes": 0
+          }
+        },
+        "tidb": {
+          "net_dev": {
+            "rx_bytes": 2360585,
+            "rx_packets": 11994,
+            "tx_bytes": 5598797,
+            "tx_packets": 11946
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 0,
+            "rios": 0,
+            "wbytes": 0,
+            "wios": 0
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 1699243,
+            "read_bytes": 0,
+            "syscr": 23911,
+            "syscw": 12497,
+            "wchar": 4816074,
+            "write_bytes": 0
+          }
+        },
+        "tikv": {
+          "net_dev": {
+            "rx_bytes": 2349703,
+            "rx_packets": 3046,
+            "tx_bytes": 1295587,
+            "tx_packets": 3130
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 1331200,
+            "rios": 31,
+            "wbytes": 2969600,
+            "wios": 1125
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 710858,
+            "read_bytes": 1331200,
+            "syscr": 7734,
+            "syscw": 3759,
+            "wchar": 3853193,
+            "write_bytes": 3641344
+          }
+        }
+      }
+    },
+    {
+      "stage_id": "task4-56746-2-signed_connections",
+      "logical_successes": 0,
+      "logical_failures": 0,
+      "sample_elapsed_seconds": 1.095589167,
+      "counter_resets": [],
+      "series_coverage_incomplete": false,
+      "selected_sql_kv_rocksdb_counters": {
+        "pd": {
+          "process_cpu_seconds_total": 0.08000000000038199
+        },
+        "tidb": {
+          "pd_client_cmd_handle_cmds_duration_seconds_count": 27.0,
+          "pd_client_cmd_handle_failed_cmds_duration_seconds_count": 0.0,
+          "pd_client_request_circuit_breaker_count": 0.0,
+          "pd_client_request_handle_query_region_batch_size_count": 0.0,
+          "pd_client_request_handle_query_region_best_batch_size_count": 0.0,
+          "pd_client_request_handle_requests_duration_seconds_count": 9.0,
+          "pd_client_request_handle_tso_batch_size_count": 9.0,
+          "pd_client_request_handle_tso_best_batch_size_count": 9.0,
+          "pd_client_request_query_region_batch_send_latency_count": 0.0,
+          "pd_client_request_tso_batch_send_latency_count": 9.0,
+          "process_cpu_seconds_total": 0.02999999999974534,
+          "tidb_executor_statement_total": 0.0,
+          "tidb_server_query_statement_processed_keys_count": 0.0,
+          "tidb_server_query_statement_rpc_count_count": 0.0,
+          "tidb_server_query_total": 0.0,
+          "tidb_tikvclient_request_retry_times_count": 0.0,
+          "tidb_tikvclient_request_seconds_count": 8.0
+        },
+        "tikv": {
+          "process_cpu_seconds_total": 0.0,
+          "tikv_grpc_msg_duration_seconds_count": 11.0,
+          "tikv_storage_command_total": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_filter_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_index_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_checksum_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_decompress_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_seek_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_miss_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_miss_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_condition_wait_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_mutex_lock_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=decrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=encrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=filter_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=find_table_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_output_files_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_post_process_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_snapshot_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=index_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_delete_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_key_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_recent_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_next_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_prev_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_seek_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_block_iter_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_iterator_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=next_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=prev_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_filter_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_index_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_internal_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_max_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_min_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=user_key_comparison_count]": 0.0
+        }
+      },
+      "vm_io_per_logical_success": null,
+      "sessions_by_source": {
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 20.0,
+            "tidb_server_internal_sessions": 13.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 20.0,
+            "tidb_server_internal_sessions": 13.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "raw_path": "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-2-signed_connections.metrics.json",
+      "raw_sha256": "6038a5202685d50fc2489c8a355c22b35c0fe12011082931daf665ef42a3af14",
+      "vm_network_and_io": {
+        "pd": {
+          "net_dev": {
+            "rx_bytes": 5817,
+            "rx_packets": 61,
+            "tx_bytes": 5592,
+            "tx_packets": 52
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 0,
+            "rios": 0,
+            "wbytes": 20480,
+            "wios": 8
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 9955,
+            "read_bytes": 0,
+            "syscr": 303,
+            "syscw": 342,
+            "wchar": 474004,
+            "write_bytes": 0
+          }
+        },
+        "tidb": {
+          "net_dev": {
+            "rx_bytes": 23578,
+            "rx_packets": 307,
+            "tx_bytes": 1128702,
+            "tx_packets": 341
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 0,
+            "rios": 0,
+            "wbytes": 0,
+            "wios": 0
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 46202,
+            "read_bytes": 0,
+            "syscr": 250,
+            "syscw": 351,
+            "wchar": 1106532,
+            "write_bytes": 0
+          }
+        },
+        "tikv": {
+          "net_dev": {
+            "rx_bytes": 8582,
+            "rx_packets": 34,
+            "tx_bytes": 4508,
+            "tx_packets": 22
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 0,
+            "rios": 0,
+            "wbytes": 4096,
+            "wios": 1
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 355586,
+            "read_bytes": 0,
+            "syscr": 1857,
+            "syscw": 17,
+            "wchar": 2500377,
+            "write_bytes": 4096
+          }
+        }
+      }
+    },
+    {
+      "stage_id": "task4-56746-3-online_namespace_25_workers_depth1_per_drive",
+      "logical_successes": 22782,
+      "logical_failures": 1,
+      "sample_elapsed_seconds": 601.703477708,
+      "counter_resets": [],
+      "series_coverage_incomplete": true,
+      "selected_sql_kv_rocksdb_counters": {
+        "pd": {
+          "process_cpu_seconds_total": 121.61000000000013
+        },
+        "tidb": {
+          "pd_client_cmd_handle_cmds_duration_seconds_count": 771718.0,
+          "pd_client_cmd_handle_failed_cmds_duration_seconds_count": 0.0,
+          "pd_client_request_circuit_breaker_count": 0.0,
+          "pd_client_request_handle_query_region_batch_size_count": 0.0,
+          "pd_client_request_handle_query_region_best_batch_size_count": 0.0,
+          "pd_client_request_handle_requests_duration_seconds_count": 381548.0,
+          "pd_client_request_handle_tso_batch_size_count": 381548.0,
+          "pd_client_request_handle_tso_best_batch_size_count": 381548.0,
+          "pd_client_request_query_region_batch_send_latency_count": 0.0,
+          "pd_client_request_tso_batch_send_latency_count": 381548.0,
+          "process_cpu_seconds_total": 586.8699999999999,
+          "tidb_executor_statement_total": 721370.0,
+          "tidb_server_query_statement_processed_keys_count": 91128.0,
+          "tidb_server_query_statement_rpc_count_count": 756620.0,
+          "tidb_server_query_total": 756620.0,
+          "tidb_tikvclient_request_retry_times_count": 1.0,
+          "tidb_tikvclient_request_seconds_count": 1000636.0
+        },
+        "tikv": {
+          "process_cpu_seconds_total": 1319.0,
+          "tikv_grpc_msg_duration_seconds_count": 1000621.0,
+          "tikv_storage_command_total": 793997.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_filter_hit_count]": 11386069.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_hit_count]": 35496943.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_index_hit_count]": 10654182.0,
+          "tikv_storage_rocksdb_perf[metric=block_checksum_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_decompress_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_byte]": 23301141820.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_count]": 2838550.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_time]": 6539765785.0,
+          "tikv_storage_rocksdb_perf[metric=block_seek_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_hit_count]": 30043116.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_miss_count]": 2243579.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_hit_count]": 16293176.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_miss_count]": 3341434.0,
+          "tikv_storage_rocksdb_perf[metric=db_condition_wait_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_mutex_lock_nanos]": 66912238.0,
+          "tikv_storage_rocksdb_perf[metric=decrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=encrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=filter_block_read_count]": 2865.0,
+          "tikv_storage_rocksdb_perf[metric=find_table_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_count]": 21749550.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_output_files_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_post_process_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 19602490024.0,
+          "tikv_storage_rocksdb_perf[metric=get_snapshot_time]": 1132688576.0,
+          "tikv_storage_rocksdb_perf[metric=index_block_read_count]": 48.0,
+          "tikv_storage_rocksdb_perf[metric=internal_delete_skipped_count]": 130580.0,
+          "tikv_storage_rocksdb_perf[metric=internal_key_skipped_count]": 1631089.0,
+          "tikv_storage_rocksdb_perf[metric=internal_recent_skipped_count]": 4467.0,
+          "tikv_storage_rocksdb_perf[metric=iter_next_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_prev_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 1362876132.0,
+          "tikv_storage_rocksdb_perf[metric=iter_seek_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_block_iter_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_iterator_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=next_on_memtable_count]": 1583948.0,
+          "tikv_storage_rocksdb_perf[metric=prev_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_filter_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_index_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_count]": 29484988.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_internal_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_max_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_min_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_count]": 10817218.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=user_key_comparison_count]": 1390600552.0
+        }
+      },
+      "vm_io_per_logical_success": {
+        "pd": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 1524.0888420682995,
+            "rios": 0.07031867263629181,
+            "wbytes": 226.17715740496882,
+            "wios": 0.07378632253533492
+          },
+          "net_dev": {
+            "rx_bytes": 3713.23101571416,
+            "rx_packets": 36.41181634623826,
+            "tx_bytes": 3883.7950136072336,
+            "tx_packets": 36.305767711351066
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 1451.7565183039242,
+            "read_bytes": 1221.3206917742077,
+            "syscr": 74.6355017118778,
+            "syscw": 46.062373803880256,
+            "wchar": 1809.6890088666491,
+            "write_bytes": 226.35694846808883
+          }
+        },
+        "tidb": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 3224.732508120446,
+            "rios": 0.14410499517162673,
+            "wbytes": 1546.2031428320604,
+            "wios": 0.003774910016679835
+          },
+          "net_dev": {
+            "rx_bytes": 1746606.7670090422,
+            "rx_packets": 162.14375384075146,
+            "tx_bytes": 1566232.4561056974,
+            "tx_packets": 190.64414888947414
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 1736874.4930647002,
+            "read_bytes": 3026.0633833728384,
+            "syscr": 251.8065139144939,
+            "syscw": 152.74071635501713,
+            "wchar": 1555226.159775261,
+            "write_bytes": 1616.681239575103
+          }
+        },
+        "tikv": {
+          "cgroup_io": {
+            "dbytes": 0.0,
+            "dios": 0.0,
+            "rbytes": 442245.3824949522,
+            "rios": 18.023044508822753,
+            "wbytes": 1351860.8698094988,
+            "wios": 15.402247388289
+          },
+          "net_dev": {
+            "rx_bytes": 503174.08120445965,
+            "rx_packets": 62.76393644104995,
+            "tx_bytes": 1363570.846940567,
+            "tx_packets": 65.63199016767624
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0.0,
+            "rchar": 14375773.997059083,
+            "read_bytes": 441931.1077166184,
+            "syscr": 1873.3643666052146,
+            "syscw": 47.30260732156966,
+            "wchar": 1323197.4202879467,
+            "write_bytes": 1351702.2940918268
+          }
+        }
+      },
+      "sessions_by_source": {
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 58.0,
+            "tidb_server_internal_sessions": 13.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 20.0,
+            "tidb_server_internal_sessions": 13.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "raw_path": "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-3-online_namespace_25_workers_depth1_per_drive.metrics.json",
+      "raw_sha256": "153c0c70d99a5d6822b9713ca3265eb733f7c9f10fce79a35587187af31fd72c",
+      "vm_network_and_io": {
+        "pd": {
+          "net_dev": {
+            "rx_bytes": 84594829,
+            "rx_packets": 829534,
+            "tx_bytes": 88480618,
+            "tx_packets": 827118
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 34721792,
+            "rios": 1602,
+            "wbytes": 5152768,
+            "wios": 1681
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 33073917,
+            "read_bytes": 27824128,
+            "syscr": 1700346,
+            "syscw": 1049393,
+            "wchar": 41228335,
+            "write_bytes": 5156864
+          }
+        },
+        "tidb": {
+          "net_dev": {
+            "rx_bytes": 39791195366,
+            "rx_packets": 3693959,
+            "tx_bytes": 35681907815,
+            "tx_packets": 4343255
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 73465856,
+            "rios": 3283,
+            "wbytes": 35225600,
+            "wios": 86
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 39569474701,
+            "read_bytes": 68939776,
+            "syscr": 5736656,
+            "syscw": 3479739,
+            "wchar": 35431162372,
+            "write_bytes": 36831232
+          }
+        },
+        "tikv": {
+          "net_dev": {
+            "rx_bytes": 11463311918,
+            "rx_packets": 1429888,
+            "tx_bytes": 31064871035,
+            "tx_packets": 1495228
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 10075234304,
+            "rios": 410601,
+            "wbytes": 30798094336,
+            "wios": 350894
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 327508883201,
+            "read_bytes": 10068074496,
+            "syscr": 42678987,
+            "syscw": 1077648,
+            "wchar": 30145083629,
+            "write_bytes": 30794481664
+          }
+        }
+      }
+    },
+    {
+      "stage_id": "task4-56746-4-cleanup",
+      "logical_successes": 0,
+      "logical_failures": 1,
+      "sample_elapsed_seconds": 1.073312167,
+      "counter_resets": [],
+      "series_coverage_incomplete": false,
+      "selected_sql_kv_rocksdb_counters": {
+        "pd": {
+          "process_cpu_seconds_total": 0.09000000000014552
+        },
+        "tidb": {
+          "pd_client_cmd_handle_cmds_duration_seconds_count": 66.0,
+          "pd_client_cmd_handle_failed_cmds_duration_seconds_count": 0.0,
+          "pd_client_request_circuit_breaker_count": 0.0,
+          "pd_client_request_handle_query_region_batch_size_count": 0.0,
+          "pd_client_request_handle_query_region_best_batch_size_count": 0.0,
+          "pd_client_request_handle_requests_duration_seconds_count": 20.0,
+          "pd_client_request_handle_tso_batch_size_count": 20.0,
+          "pd_client_request_handle_tso_best_batch_size_count": 20.0,
+          "pd_client_request_query_region_batch_send_latency_count": 0.0,
+          "pd_client_request_tso_batch_send_latency_count": 20.0,
+          "process_cpu_seconds_total": 0.07999999999992724,
+          "tidb_executor_statement_total": 0.0,
+          "tidb_server_query_statement_processed_keys_count": 0.0,
+          "tidb_server_query_statement_rpc_count_count": 58.0,
+          "tidb_server_query_total": 58.0,
+          "tidb_tikvclient_request_retry_times_count": 0.0,
+          "tidb_tikvclient_request_seconds_count": 22.0
+        },
+        "tikv": {
+          "process_cpu_seconds_total": 0.0,
+          "tikv_grpc_msg_duration_seconds_count": 15.0,
+          "tikv_storage_command_total": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_filter_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_cache_index_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_checksum_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_decompress_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_read_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=block_seek_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_memtable_miss_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_hit_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=bloom_sst_miss_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_condition_wait_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=db_mutex_lock_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=decrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=encrypt_data_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=filter_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=find_table_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_from_output_files_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_post_process_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=get_snapshot_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=index_block_read_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_delete_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_key_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=internal_recent_skipped_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_next_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_prev_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=iter_seek_cpu_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_block_iter_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=new_table_iterator_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=next_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=prev_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_filter_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=read_index_block_nanos]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_child_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_internal_seek_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_max_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_min_heap_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_count]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=seek_on_memtable_time]": 0.0,
+          "tikv_storage_rocksdb_perf[metric=user_key_comparison_count]": 0.0
+        }
+      },
+      "vm_io_per_logical_success": null,
+      "sessions_by_source": {
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-pd1": {
+          "end": {},
+          "start": {}
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tidb": {
+          "end": {
+            "tidb_server_connections{resource_group=\"default\"}": 0.0,
+            "tidb_server_internal_sessions": 13.0
+          },
+          "start": {
+            "tidb_server_connections{resource_group=\"default\"}": 58.0,
+            "tidb_server_internal_sessions": 13.0
+          }
+        },
+        "mount-rs-tidb-mount-rs-tidb-GSTKki-tikv1": {
+          "end": {},
+          "start": {}
+        }
+      },
+      "raw_path": "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-4-cleanup.metrics.json",
+      "raw_sha256": "16a94e6f40997598fb6e35c47f5af62a1eb022e4470e26c3c20943c87faa27fa",
+      "vm_network_and_io": {
+        "pd": {
+          "net_dev": {
+            "rx_bytes": 5002,
+            "rx_packets": 54,
+            "tx_bytes": 4470,
+            "tx_packets": 44
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 5074944,
+            "rios": 61,
+            "wbytes": 20480,
+            "wios": 8
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 10110,
+            "read_bytes": 5074944,
+            "syscr": 310,
+            "syscw": 351,
+            "wchar": 490893,
+            "write_bytes": 20480
+          }
+        },
+        "tidb": {
+          "net_dev": {
+            "rx_bytes": 31967,
+            "rx_packets": 440,
+            "tx_bytes": 1132570,
+            "tx_packets": 388
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 139264,
+            "rios": 10,
+            "wbytes": 0,
+            "wios": 0
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 46876,
+            "read_bytes": 139264,
+            "syscr": 314,
+            "syscw": 356,
+            "wchar": 1109260,
+            "write_bytes": 0
+          }
+        },
+        "tikv": {
+          "net_dev": {
+            "rx_bytes": 8169,
+            "rx_packets": 39,
+            "tx_bytes": 4256,
+            "tx_packets": 26
+          },
+          "cgroup_io": {
+            "dbytes": 0,
+            "dios": 0,
+            "rbytes": 0,
+            "rios": 0,
+            "wbytes": 16384,
+            "wios": 7
+          },
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 355608,
+            "read_bytes": 0,
+            "syscr": 1856,
+            "syscw": 15,
+            "wchar": 2507940,
+            "write_bytes": 8192
+          }
+        }
+      }
+    }
+  ],
+  "host_observer": {
+    "started_utc": "2026-09-25T11:31:52.852312+00:00",
+    "command": [
+      "iostat",
+      "-d",
+      "-c",
+      "3600",
+      "-w",
+      "1"
+    ],
+    "scope": "All host disk traffic, before/during/after caller workload. Discard since-boot first numeric row. Physical disk0 and virtual FDB image must not be summed. Not datastore-attributed IOPS.",
+    "disk0_identity": {
+      "DeviceIdentifier": "disk0",
+      "Internal": true,
+      "SolidState": true,
+      "BusProtocol": "Apple Fabric",
+      "VirtualOrPhysical": "Unknown"
+    },
+    "host_free_space_before": "Filesystem   1024-blocks      Used Available Capacity iused      ifree %iused  Mounted on\n/dev/disk3s5   971350180 776554760 159269348    83% 8968241 1592693480    1%   /System/Volumes/Data\n",
+    "observer_pid": 56682,
+    "ready_utc": "2026-09-25T11:31:55.013902+00:00",
+    "ended_utc": "2026-09-25T11:42:42.076332+00:00",
+    "observer_exit_code": -15,
+    "host_free_space_after": "Filesystem   1024-blocks      Used Available Capacity iused      ifree %iused  Mounted on\n/dev/disk3s5   971350180 776434556 159389552    83% 8968442 1593895520    1%   /System/Volumes/Data\n"
+  },
+  "host_interval_summary": {
+    "numeric_rows": 646,
+    "discarded_since_boot_rows": 1,
+    "interval_rows": 645,
+    "device_columns": [
+      "disk0",
+      "disk4"
+    ],
+    "whole_window_scope": "All host traffic including setup/work/cleanup/background; nominal1s samples without per-row UTC. Not datastore-attributed IOPS. Do not sum virtual disk4 with physical disk0.",
+    "disk0": {
+      "mean_transfers_per_second": 12498.168992248062,
+      "maximum_transfers_per_second": 25824.0,
+      "mean_megabytes_per_second": 112.04652713178295,
+      "maximum_megabytes_per_second": 608.65
+    },
+    "disk4": {
+      "mean_transfers_per_second": 26.427906976744186,
+      "maximum_transfers_per_second": 119.0,
+      "mean_megabytes_per_second": 0.16153488372093022,
+      "maximum_megabytes_per_second": 0.73
+    },
+    "coverage_complete": true,
+    "datastore_stage_count": 4,
+    "datastore_expected_stage_count": 10
+  },
+  "raw_hashes": {
+    "/private/tmp/mount-rs-qualification-baseline/task4-population-twentyfive-open1-host-20260925/iostat.log": "d3ae9e16a7b089b400e3ccffce61efb7dd8afa8bb4600d8e2f89236aa28c6084",
+    "/private/tmp/mount-rs-qualification-baseline/task4-population-twentyfive-open1-host-20260925/observer.json": "8cd0840579dc682781a3471c1f397ea8ab49fb7f85943e84ca40dedadf2b00d8",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/checkpoint-executable": "dc912b625f59fa33450735dff3d51c989788a29a46dd2896a2d5409e964c8723",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/checkpoint.json": "579c176ac995e15fcf77371b2b50c774d4a4f818a931b6b94bd29a55be703137",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/checkpoint.log": "b4d88b8e83ed66006a1cb9869b1675daf073e595c8dbea00994fd8a0b74392ab",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/committed-source.patch": "60c450c28bc8442c7df186a99470ec2fd22ef151e8eaff6268dc0b7921468c9b",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-1-empty_replica_open.begin.json": "d7b4878c9fddf0c99dd93fdf2b564e35df7891a0f8737ce833ae222f2b6d6e9d",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-1-empty_replica_open.end.json": "c7592296e6dec851fdd38fd71a6e5d4f654a6a1dc770e91a2db138df7565b3a0",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-1-empty_replica_open.metrics.json": "30ac979de27f1213d1592d305c8d6a2a1d20b584755ccfca836290c5b1c4fd52",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-2-signed_connections.begin.json": "e76cda9abd4c04ac9b558d7edc148a075da9590633d01aa76b1c5d26dcca277f",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-2-signed_connections.end.json": "8edcf3618f26c741305fc9863dc67880d42e9defa777a04f3e418343efb22103",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-2-signed_connections.metrics.json": "6038a5202685d50fc2489c8a355c22b35c0fe12011082931daf665ef42a3af14",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-3-online_namespace_25_workers_depth1_per_drive.begin.json": "5d78a7ca0108ff145e6dae5a240aade4dc2826b56de94be7b1a9a5bfae16cd2e",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-3-online_namespace_25_workers_depth1_per_drive.end.json": "e755121269a13d92cb4aa0bf8343241e0e6868b4a7a02245a39e1c2895622f93",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-3-online_namespace_25_workers_depth1_per_drive.metrics.json": "153c0c70d99a5d6822b9713ca3265eb733f7c9f10fce79a35587187af31fd72c",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-4-cleanup.begin.json": "0e23b46653663adc17f1d6a5bc37a172e9a8810b830430b283dd06c66992a5e2",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-4-cleanup.end.json": "9371fd29b18f9c1296b3185b7b9d88a69ff5c9acba1e7f3f1eaff1be4d06f2d1",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/datastore-observer/mount-rs-tidb-GSTKki-task4-56746-4-cleanup.metrics.json": "16a94e6f40997598fb6e35c47f5af62a1eb022e4470e26c3c20943c87faa27fa",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/launch.json": "ad443664d7f310485491fef4adaacbd1fc52c79e48a6f26cd46cf82e2a028baa",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/mount-rs-task4-owner-orchestration-review.md": "c4577fc26e943bcb00e0e18fb08315f735148f0c94be41fcbe49d4abb6b8dcce",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/production_checkpoint.rs": "9755cc2b09f7e2fa07c509d6ca5f848f2a276dbf30e65ffb7bba288c452e9f0f",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/task4-preserve-population-control.py": "94c0de23a4fb22e4341959f3f0b874d2c7f21e34991cc5d7d3205e33c3ad46d6",
+    "/private/tmp/task4-population-controls-20260925/twentyfive-open1/task4-run-population-control.py": "2385561ddb701edd141014e0a46dd53b4f6b0f599bb19475f9e8cb85446818ae"
+  },
+  "limits": [
+    "One process with ten loopback listeners; not ten independent hosts or 10,000-client qualification",
+    "Single PD/TiKV TiDB fixture with Docker 8.32 GB below the 10 GiB qualification floor; diagnostic only",
+    "Fixture Open1/Open4 controls use one reviewed binary; Open publishes directly and does not use cooperative batching",
+    "Payload depth one, serial full oracle, original 600s phase and 1800s work budgets",
+    "One run per point is not variance-controlled throughput evidence",
+    "Host I/O includes all background traffic; VM counters are not physical datastore SSD IOPS",
+    "Allocation instrumentation disabled: null does not mean zero",
+    "Full target, varied patterns, multi-process, current CI, final review and merge remain open"
+  ],
+  "independent_review": {
+    "path": "/private/tmp/mount-rs-task4-twentyfive-open1-evidence-review.md",
+    "sha256": "de99e704f9b2bce0e8e3ffbd0ae9e9c91e5f54d3297185d802ab2af30f958232",
+    "verdict": "PASS evidence retention; population FAILED"
+  }
+}

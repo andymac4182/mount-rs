@@ -9,6 +9,18 @@ cd "$(dirname "$0")/.."
 ./scripts/cargo-shared kani -p mount-rs-core --harness two_extent_validation
 ./scripts/cargo-shared kani -p mount-rs-core --harness three_extent_validation
 ./scripts/cargo-shared kani -p mount-rs-core --harness inode_publication_preserves_structural_attributes
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_append_preserves_packed_eligibility
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_remove_preserves_packed_eligibility
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_sparse_lookup_uses_child_position
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_transition_conserves_exact_write_frame
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_receipt_rejects_single_field_tampering
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_root_file_checked_times_and_generation_do_not_wrap
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_materialized_file_match_and_fallback
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_materialized_fallback_preserves_error_precedence
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_materialized_audited_root_and_provenance
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_borrowed_root_members_match_complete_authority
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_borrowed_root_guard_and_dentries_require_exact_match
+./scripts/cargo-shared kani -p mount-rs-core --harness compact_borrowed_root_stages_reject_incomplete_and_preserve_provenance
 ./scripts/cargo-shared kani -p mount-rs-core --harness directory_link_count_boundaries
 ./scripts/cargo-shared kani -p mount-rs-core --harness namespace_path_boundaries
 ./scripts/cargo-shared kani -p mount-rs-core --harness decoded_truncation_requires_write
@@ -34,6 +46,7 @@ cd "$(dirname "$0")/.."
 ./scripts/cargo-shared kani -p mount-rs-s3 --harness decoded_chunk_total_never_wraps_or_exceeds_limits
 ./scripts/cargo-shared kani -p mount-rs-s3 --harness chunk_payload_and_footer_stay_within_body
 ./scripts/cargo-shared kani -p mount-rs-chunked --harness reacquired_writer_fence_is_exactly_next
+./scripts/cargo-shared kani -p mount-rs-chunked --harness current_fresh_create_rebinds_only_eligible_preparation
 ./scripts/cargo-shared kani -p mount-rs-webdav --harness timeout_and_remaining_are_wide_before_clamping
 ./scripts/cargo-shared kani -p mount-rs-webdav --harness canonical_scope_and_two_lock_conflicts
 ./scripts/cargo-shared kani -p mount-rs-sqlite-vfs --harness sqlite_io_extent_matches_signed_range

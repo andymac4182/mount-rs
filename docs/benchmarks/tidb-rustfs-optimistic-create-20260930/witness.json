@@ -1,0 +1,73 @@
+{
+  "allocation_profile_instrumented": false,
+  "archive_manifest_sha256": "b8fa64d246b976fc7b175ef0ffa244892379148757c20011cb11a6fa26d5b606",
+  "baseline_revision": "78e68035793e7fac994fbc87837fefc12b25145a",
+  "binary_sha256": "7a8a575a5ecaaaa80726ed7f18f4a04034c3beca98ffdb5e500c2cf808412687",
+  "cells": 16,
+  "collector_group_absent": true,
+  "correctness_gates": {
+    "actual_tidb_corruption_controls_passed": 2,
+    "broad_ignored": 153,
+    "broad_passed": 591,
+    "strict_clippy_all_targets": [
+      "mount-rs-core",
+      "mount-rs-chunked",
+      "mount-rs-tidb",
+      "mount-rs-sdk"
+    ]
+  },
+  "crossnode_payload": {
+    "complete": true,
+    "completed_pairs": 100,
+    "scope": "one existing acknowledged 4096-byte block per Drive/server pair over rotated QUIC sessions; no payload writes; outside timed modes",
+    "verified_bytes": 409600,
+    "verified_reads": 100
+  },
+  "dataset_absence_proven": false,
+  "dataset_retained": true,
+  "derived_json_bytes": 5370244,
+  "derived_json_sha256": "6342b6ca23e162ad13fa6996c26b8dd50a1d1d212b69ea3b55408dffd41b7a84",
+  "extractor_sha256": "fe9d62baab425d7a132b374dfa9f5f6e38f0d6673d4cce982244d4c365aa51c1",
+  "fresh_container_stopped": true,
+  "fresh_oracles": {
+    "complete": true,
+    "completed_drives": 10,
+    "final_bytes": 62857216,
+    "final_files": 10000,
+    "final_receipt_sha256": "8588f8eb5ddf74bf417dd9c4cba5d2dfb4ec723bb6f37114601dc4517e4e4ecf",
+    "initial_bytes": 62832640,
+    "initial_files": 10000,
+    "initial_receipt_sha256": "9fe91b8ee3fd57ecfec4f1c14c5891bbfbf5d3cac2d136084493ec0e3a809e3b"
+  },
+  "geometry": {
+    "clients": 10,
+    "drives": 10,
+    "files_per_drive": 1000,
+    "partitions": 5,
+    "servers": 10
+  },
+  "measurement_revision": "6fdaabf3cf852e8d6d4853d6a54439884aab9a10",
+  "metrics_gzip_bytes": 134220,
+  "metrics_gzip_sha256": "a1cc7876f7871f01ecfaa97e3bcd7b2168585762ffddc328c95fd45d743ddd0e",
+  "original_container_mutations": false,
+  "original_container_mutations_scope": "Docker container control plane only; owned data was written to the original TiDB fixture and retained",
+  "owner_receipt_sha256": "12ae6f4f345a473356e3f64f6af2ae0ef2f1711ef7884dc62248affd5110ec8f",
+  "owner_status": "benchmarked",
+  "parallel_harness_gate": {
+    "cause": "resource process counter reset; unresolved",
+    "failed": 1,
+    "passed": 169
+  },
+  "physical_iops_claim": false,
+  "production_capacity_claim": false,
+  "schema": "mount-rs.optimistic-create-benchmark-witness.v1",
+  "serial_harness_gate": {
+    "failed": 0,
+    "ignored": 6,
+    "passed": 170
+  },
+  "source_pins_after_equal_before": true,
+  "source_rows": 563,
+  "terminal_sha256": "91aeeab11f52f2b3ebbf951ccf058ccddd6232d28251d39236d0d6e4ca788bbb",
+  "workers_reaped_cleanly": true
+}

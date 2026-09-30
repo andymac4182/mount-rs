@@ -1,0 +1,209 @@
+{
+  "schema": "mount-rs.materialized-guard-qualification.v1",
+  "release_ready": false,
+  "paired_measurement_qualified": true,
+  "allocation_ceiling_passed": false,
+  "rustfs_blob_workload": false,
+  "cluster_or_physical_iops_claim": false,
+  "base_head": "1a80576456378a81f74eb72922bba813f765c852",
+  "inputs": {
+    "paired_raw_result_sha256": "64e8cc7120961b5fff6f02939acba8acd0ddfd13b2698439dd363fd924478ebe",
+    "paired_build_result_sha256": "c176fc4cd6449a9b7d0c4559f39618899dc7ac22555b8673af453bcf2f34b2e6",
+    "final_gates_result_sha256": "99b4ac9ca91f4ba2a29a272fd1a4679c6cdba96996e12ffd1de7cb44be6bb8f0",
+    "summary_sha256": "8add3ffe3208bdc3f82f0fba726951744542313049de6298e41d08234aa13ba3",
+    "paired_results_gzip_sha256": "467525e0c9237d5e59b22f7211147730f23ca8dde1dda9f9be9edb33b1232a58"
+  },
+  "source_binding": {
+    "measured_source_manifest_location": "paired-results.json.gz: plan.candidate_source_pins",
+    "measured_source_input_count": 558,
+    "sole_paired_production_difference": [
+      "providers/mount-rs-tidb/src/compact.rs"
+    ],
+    "postmeasurement_override": {
+      "tests/compact_materialized_guard.rs": "76d0efda6ac1932e098ce9cf7fecf2b29b15e71f5dcf9cd66744ee0fc96f341f"
+    },
+    "postmeasurement_change": "generic mutation type alias replaces six identical tuple annotations; not linked into measured provider binaries",
+    "alias_only_inverse_reconstruction_verified": true,
+    "alias_only_diff_sha256": "7655b72f7b1ef97c495159026092968a3006b59e7cefbfc522e4e713f1d7a2a9",
+    "production_and_benchmark_input_pins_unchanged": true
+  },
+  "checks": [
+    {
+      "name": "format",
+      "argv": [
+        "./scripts/cargo-shared",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "whole_deadline_seconds": 60,
+      "elapsed_seconds": 2.7047193330945447,
+      "timed_out": false,
+      "forced_kill": false,
+      "reaped": true,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_manifest_sha256": "20b7c969ccb16fae0926dbfdbe5c1912d80632038e6b4e82a0309aca0bcbd612"
+    },
+    {
+      "name": "core-contract",
+      "argv": [
+        "./scripts/cargo-shared",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "mount-rs-core",
+        "--test",
+        "compact_materialized_guard",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "whole_deadline_seconds": 300,
+      "elapsed_seconds": 11.013940749922767,
+      "timed_out": false,
+      "forced_kill": false,
+      "reaped": true,
+      "stdout_sha256": "4f38232f2bd0be8a2a3139511eca39d28f2775a87694056e4da05d1446ac3ae1",
+      "stderr_sha256": "08d5c1ff616e75948e972a985df9b044ea992588cd544ca870da3cc3e220b2c6",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "source_manifest_sha256": "20b7c969ccb16fae0926dbfdbe5c1912d80632038e6b4e82a0309aca0bcbd612"
+    },
+    {
+      "name": "clippy",
+      "argv": [
+        "./scripts/cargo-shared",
+        "clippy",
+        "--locked",
+        "--release",
+        "-p",
+        "mount-rs-core",
+        "-p",
+        "mount-rs-chunked",
+        "-p",
+        "mount-rs-tidb",
+        "-p",
+        "mount-rs-napi",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "whole_deadline_seconds": 240,
+      "elapsed_seconds": 2.5433883329387754,
+      "timed_out": false,
+      "forced_kill": false,
+      "reaped": true,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "42480bcea680f7be655a12771eea268ec85bf1d12a0ce09c621e905c5ea7ad48",
+      "source_manifest_sha256": "20b7c969ccb16fae0926dbfdbe5c1912d80632038e6b4e82a0309aca0bcbd612"
+    },
+    {
+      "name": "whitespace",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "whole_deadline_seconds": 60,
+      "elapsed_seconds": 0.039303083904087543,
+      "timed_out": false,
+      "forced_kill": false,
+      "reaped": true,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_manifest_sha256": "20b7c969ccb16fae0926dbfdbe5c1912d80632038e6b4e82a0309aca0bcbd612"
+    },
+    {
+      "name": "actual-compact",
+      "argv": [
+        "compact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "whole_deadline_seconds": 300,
+      "elapsed_seconds": 32.23105716705322,
+      "timed_out": false,
+      "forced_kill": false,
+      "reaped": true,
+      "stdout_sha256": "5962ae289ef794521757a962edfa1056fc681c040b2ee64e82fe8c3ac7ed3a6a",
+      "stderr_sha256": "fceae24b13b321a111faee141d16b488b59b8306ed0da796455e981f38f51647",
+      "passed": 56,
+      "failed": 0,
+      "ignored": 0,
+      "binary_sha256": "dd86c2384c7df6a2945ef89c9d7590acdd9806ef2eb719ed8d875983d5e2719d",
+      "binary_build_sha256": "c176fc4cd6449a9b7d0c4559f39618899dc7ac22555b8673af453bcf2f34b2e6",
+      "fixture_config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "correctness_dataset_retained": true,
+      "source_manifest_sha256": "20b7c969ccb16fae0926dbfdbe5c1912d80632038e6b4e82a0309aca0bcbd612"
+    }
+  ],
+  "affected_enabled_tests": {
+    "name": "enabled",
+    "argv": [
+      "./scripts/cargo-shared",
+      "test",
+      "--locked",
+      "--release",
+      "-p",
+      "mount-rs-core",
+      "-p",
+      "mount-rs-chunked",
+      "-p",
+      "mount-rs-tidb",
+      "-p",
+      "mount-rs-napi",
+      "--all-targets"
+    ],
+    "exit_code": 0,
+    "whole_deadline_seconds": 300,
+    "elapsed_seconds": 182.29948195791803,
+    "timed_out": false,
+    "forced_kill": false,
+    "reaped": true,
+    "stdout_sha256": "8cf46fd6f9e3c2e4b91d24b79f63bd4c418f0de2aa561a9d2e3e7aaf5c32d789",
+    "stderr_sha256": "a8484ed9fc0f8e03ee03b17ed43b9799f5e67dcc78afdc8633904c86875c034d",
+    "passed": 569,
+    "failed": 0,
+    "ignored": 156,
+    "test_binaries": 58,
+    "source_manifest_sha256": "922f0f2e0824b9e6e03d8881d1b345fc6b23c7921d22f3b6a978a7471d071486"
+  },
+  "prior_enabled_receipt_sha256": "90930ab5d8c1797eb0b18e09690471a27e70b338055d2412ad55838498ae7fc2",
+  "prior_clippy_failure_receipt_sha256": "1aa63c986fa790f761c6422725bbee76d638a3a150d15945e56d52fd08449d7f",
+  "prior_clippy_failure": "six type_complexity warnings in new contract test annotations; fixed with one shared type alias",
+  "behavioral_red": {
+    "receipt_sha256": "e7a1219078965c4280d5a75ce136a9eea7c7279308eb91e19d4d154b80d73661",
+    "actual_selected": 10,
+    "passed": 7,
+    "failed": 3,
+    "failures": "original adapter allocated in exact file, audited root and changed-file fallback windows"
+  },
+  "initial_green": {
+    "receipt_sha256": "eb28a2e7b84d9549128f1a8d3d297ebc50f29a0fb750819a95f211cf3d76fc15",
+    "actual_selected": 10,
+    "passed": 10,
+    "failed": 0
+  },
+  "independent_reviews": [
+    "source-only final core/provider contract, new parity controls, preserved 256 ceiling, measurement windows and seven-family cleanup",
+    "pairing audit reproduced statistics and verified 20 runtime outputs, 4 build outputs, 4 copied binaries, 8 report hashes, receipts and 558 measured source pins before alias-only lint cleanup"
+  ],
+  "outstanding": [
+    "original 256-call cycle allocation ceiling",
+    "CI legacy lifecycle performance floors",
+    "full formal completion",
+    "fresh native TiDB/RustFS throughput and 10000-client capacity"
+  ],
+  "sanitization": "Absolute private execution argv paths are reduced to filenames; private receipt digests preserve raw provenance. No other source or measurement fields changed."
+}

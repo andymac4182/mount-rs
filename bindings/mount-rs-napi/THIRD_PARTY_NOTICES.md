@@ -1,5 +1,13 @@
 # Upstream attribution
 
+## Quinn protocol dependency
+
+Workspace builds use the scoped `quinn-proto 0.11.18` copy in
+`vendor/quinn-proto-0.11.18`, with a local first-packet CLOSE draining fix.
+The complete upstream package and its MIT and Apache-2.0 licenses are retained.
+See that directory's `MOUNT_RS_PATCH.md` and `MOUNT_RS_UPSTREAM.json` for the
+verified archive checksum, source commit, original file hashes and patch scope.
+
 mount-rs ports and adapts filesystem behavior and implementation from
 [pithings/mountx](https://github.com/pithings/mountx), pinned for differential
 testing at commit `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.

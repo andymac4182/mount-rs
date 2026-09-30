@@ -101,10 +101,12 @@ PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?ssl
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-sqlite-vfs --features pglite-harness --test pglite pglite_sqlite_vfs_round_trip_and_fresh_provider_reconnect -- --ignored --nocapture
 
-"$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-pglite close_is_shared_cancellation_safe -- --ignored --nocapture
+# Each close test starts its own engine. Keep those startups serial alongside
+# the harness engine; each test still exercises concurrent close/cancellation.
+"$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-pglite close_is_shared_cancellation_safe -- --ignored --nocapture --test-threads=1
 
 MOUNT_RS_RUN_PGLITE_SERVER_LIFECYCLE=1 \
-  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test pglite_server_lifecycle -- --ignored --nocapture
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test pglite_server_lifecycle -- --ignored --nocapture --test-threads=1
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test split_store pglite_metadata_and_blocks_compose_independently -- --ignored --nocapture

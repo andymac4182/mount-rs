@@ -1,0 +1,17 @@
+{
+  "attempted_clients": 10,
+  "auth": "real ES256 JWT signature validation; owned static JWK source; discovery/JWKS network fetching excluded",
+  "cleanup": "all owned endpoints and listeners closed/idle",
+  "concurrent_connections": 10,
+  "configured_clients": 10,
+  "files_per_drive": 1,
+  "partition_denials": 10,
+  "schema": "mount-rs-production-auth-smoke-v1",
+  "scope": "one process/runtime on loopback; ten listeners; ten shared volatile MemoryFs Drives; auth/transport correctness only",
+  "servers": 10,
+  "sibling_denials": 10,
+  "token_lifetime_seconds": 300,
+  "verified_bytes": 40960,
+  "verified_files": 10,
+  "work_error": null
+}

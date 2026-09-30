@@ -1,0 +1,1554 @@
+{
+  "allocation_scope": "existing current-thread System allocation/reallocation calls and requested bytes; separate synchronous windows; no deallocation/live/RSS or foreign allocator coverage",
+  "cfg_test_scope": "indexed audit retains two TLS candidate-visit observations/cycle; full reference has none, avoiding artificial full-map TLS cost; cold preparation includes test hook and allocation-meter overhead",
+  "complete": true,
+  "cpu_scope": "getrusage RUSAGE_SELF deltas; whole process, synchronous single-test execution",
+  "elapsed_ns": 948690458,
+  "exclusions": [
+    "catalog load and authority construction/validation",
+    "JWT verification",
+    "dispatcher freshness/wait paths",
+    "stderr OS audit I/O",
+    "transport/storage/provider/SQLite C",
+    "cluster capacity or full-production qualification"
+  ],
+  "oracles": "validated target geometry, two candidates, exact authority Arc/cache reuse, full permission equivalence, LF-terminated audit bytes/grant order, reused-index current claims and empty-condition distinction",
+  "pairs_per_scale": 8,
+  "release": true,
+  "scales": [
+    {
+      "calibration": {
+        "cold": {
+          "elapsed_ns": 1334,
+          "preparations": 1,
+          "process_system_us": 0,
+          "process_user_us": 2,
+          "rust_alloc_calls": 43,
+          "rust_alloc_requested_bytes": 4044,
+          "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+        },
+        "cycles_per_mode": 48,
+        "full": {
+          "audit_bytes": 7248,
+          "cycles": 48,
+          "elapsed_ns": 22333,
+          "process_system_us": 0,
+          "process_user_us": 22
+        },
+        "indexed": {
+          "audit_bytes": 7248,
+          "cycles": 48,
+          "elapsed_ns": 23959,
+          "process_system_us": 0,
+          "process_user_us": 24
+        }
+      },
+      "cycles_per_window": 3072,
+      "grants": 10,
+      "pairs": [
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 2000,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 1,
+            "rust_alloc_calls": 43,
+            "rust_alloc_requested_bytes": 4044,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1405334,
+              "process_system_us": 11,
+              "process_user_us": 1387
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1467334,
+              "process_system_us": 1,
+              "process_user_us": 1466
+            }
+          },
+          "pair": 0
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 2291,
+            "preparations": 1,
+            "process_system_us": 0,
+            "process_user_us": 3,
+            "rust_alloc_calls": 43,
+            "rust_alloc_requested_bytes": 4044,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1398125,
+              "process_system_us": 3,
+              "process_user_us": 1392
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1422875,
+              "process_system_us": 0,
+              "process_user_us": 1423
+            }
+          },
+          "pair": 1
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 2542,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 2,
+            "rust_alloc_calls": 43,
+            "rust_alloc_requested_bytes": 4044,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1383791,
+              "process_system_us": 0,
+              "process_user_us": 1383
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1449208,
+              "process_system_us": 0,
+              "process_user_us": 1449
+            }
+          },
+          "pair": 2
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1208,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 1,
+            "rust_alloc_calls": 43,
+            "rust_alloc_requested_bytes": 4044,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1414917,
+              "process_system_us": 4,
+              "process_user_us": 1408
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1548875,
+              "process_system_us": 19,
+              "process_user_us": 1500
+            }
+          },
+          "pair": 3
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 2625,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 3,
+            "rust_alloc_calls": 43,
+            "rust_alloc_requested_bytes": 4044,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1412292,
+              "process_system_us": 1,
+              "process_user_us": 1412
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1492292,
+              "process_system_us": 0,
+              "process_user_us": 1492
+            }
+          },
+          "pair": 4
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1625,
+            "preparations": 1,
+            "process_system_us": 0,
+            "process_user_us": 2,
+            "rust_alloc_calls": 43,
+            "rust_alloc_requested_bytes": 4044,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1371666,
+              "process_system_us": 0,
+              "process_user_us": 1372
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1472750,
+              "process_system_us": 9,
+              "process_user_us": 1458
+            }
+          },
+          "pair": 5
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 2500,
+            "preparations": 1,
+            "process_system_us": 2,
+            "process_user_us": 3,
+            "rust_alloc_calls": 43,
+            "rust_alloc_requested_bytes": 4044,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1451292,
+              "process_system_us": 8,
+              "process_user_us": 1444
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1494208,
+              "process_system_us": 16,
+              "process_user_us": 1479
+            }
+          },
+          "pair": 6
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1250,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 2,
+            "rust_alloc_calls": 43,
+            "rust_alloc_requested_bytes": 4044,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1392792,
+              "process_system_us": 0,
+              "process_user_us": 1393
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1449125,
+              "process_system_us": 0,
+              "process_user_us": 1449
+            }
+          },
+          "pair": 7
+        }
+      ],
+      "partitions": 5,
+      "query_positions": [
+        0,
+        5,
+        9
+      ],
+      "scoped_candidates": 2
+    },
+    {
+      "calibration": {
+        "cold": {
+          "elapsed_ns": 23584,
+          "preparations": 1,
+          "process_system_us": 9,
+          "process_user_us": 15,
+          "rust_alloc_calls": 410,
+          "rust_alloc_requested_bytes": 38368,
+          "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+        },
+        "cycles_per_mode": 48,
+        "full": {
+          "audit_bytes": 7248,
+          "cycles": 48,
+          "elapsed_ns": 60083,
+          "process_system_us": 0,
+          "process_user_us": 60
+        },
+        "indexed": {
+          "audit_bytes": 7248,
+          "cycles": 48,
+          "elapsed_ns": 27416,
+          "process_system_us": 0,
+          "process_user_us": 28
+        }
+      },
+      "cycles_per_window": 3072,
+      "grants": 100,
+      "pairs": [
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 12166,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 11,
+            "rust_alloc_calls": 410,
+            "rust_alloc_requested_bytes": 38368,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 3794666,
+              "process_system_us": 8,
+              "process_user_us": 3780
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1717959,
+              "process_system_us": 1,
+              "process_user_us": 1717
+            }
+          },
+          "pair": 0
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 11667,
+            "preparations": 1,
+            "process_system_us": 0,
+            "process_user_us": 12,
+            "rust_alloc_calls": 410,
+            "rust_alloc_requested_bytes": 38368,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 4033208,
+              "process_system_us": 59,
+              "process_user_us": 3861
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1733750,
+              "process_system_us": 1,
+              "process_user_us": 1733
+            }
+          },
+          "pair": 1
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 12791,
+            "preparations": 1,
+            "process_system_us": 0,
+            "process_user_us": 12,
+            "rust_alloc_calls": 410,
+            "rust_alloc_requested_bytes": 38368,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 3702625,
+              "process_system_us": 16,
+              "process_user_us": 3680
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1732125,
+              "process_system_us": 3,
+              "process_user_us": 1730
+            }
+          },
+          "pair": 2
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 15000,
+            "preparations": 1,
+            "process_system_us": 3,
+            "process_user_us": 14,
+            "rust_alloc_calls": 410,
+            "rust_alloc_requested_bytes": 38368,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 3778375,
+              "process_system_us": 35,
+              "process_user_us": 3669
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1754875,
+              "process_system_us": 11,
+              "process_user_us": 1738
+            }
+          },
+          "pair": 3
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 13625,
+            "preparations": 1,
+            "process_system_us": 0,
+            "process_user_us": 14,
+            "rust_alloc_calls": 410,
+            "rust_alloc_requested_bytes": 38368,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 3764917,
+              "process_system_us": 2,
+              "process_user_us": 3762
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1710916,
+              "process_system_us": 0,
+              "process_user_us": 1711
+            }
+          },
+          "pair": 4
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 13417,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 14,
+            "rust_alloc_calls": 410,
+            "rust_alloc_requested_bytes": 38368,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 3965542,
+              "process_system_us": 26,
+              "process_user_us": 3895
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1840000,
+              "process_system_us": 8,
+              "process_user_us": 1820
+            }
+          },
+          "pair": 5
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 12000,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 12,
+            "rust_alloc_calls": 410,
+            "rust_alloc_requested_bytes": 38368,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 3657917,
+              "process_system_us": 2,
+              "process_user_us": 3656
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1694250,
+              "process_system_us": 0,
+              "process_user_us": 1694
+            }
+          },
+          "pair": 6
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 11166,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 11,
+            "rust_alloc_calls": 410,
+            "rust_alloc_requested_bytes": 38368,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 3976084,
+              "process_system_us": 31,
+              "process_user_us": 3878
+            },
+            "indexed": {
+              "audit_bytes": 463872,
+              "cycles": 3072,
+              "elapsed_ns": 1799708,
+              "process_system_us": 6,
+              "process_user_us": 1794
+            }
+          },
+          "pair": 7
+        }
+      ],
+      "partitions": 50,
+      "query_positions": [
+        0,
+        50,
+        99
+      ],
+      "scoped_candidates": 2
+    },
+    {
+      "calibration": {
+        "cold": {
+          "elapsed_ns": 157500,
+          "preparations": 1,
+          "process_system_us": 19,
+          "process_user_us": 140,
+          "rust_alloc_calls": 4084,
+          "rust_alloc_requested_bytes": 383784,
+          "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+        },
+        "cycles_per_mode": 48,
+        "full": {
+          "audit_bytes": 7248,
+          "cycles": 48,
+          "elapsed_ns": 398292,
+          "process_system_us": 0,
+          "process_user_us": 398
+        },
+        "indexed": {
+          "audit_bytes": 7248,
+          "cycles": 48,
+          "elapsed_ns": 33625,
+          "process_system_us": 0,
+          "process_user_us": 33
+        }
+      },
+      "cycles_per_window": 3012,
+      "grants": 1000,
+      "pairs": [
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 155917,
+            "preparations": 1,
+            "process_system_us": 22,
+            "process_user_us": 134,
+            "rust_alloc_calls": 4084,
+            "rust_alloc_requested_bytes": 383784,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 22738416,
+              "process_system_us": 60,
+              "process_user_us": 22613
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 2063667,
+              "process_system_us": 11,
+              "process_user_us": 2050
+            }
+          },
+          "pair": 0
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 137375,
+            "preparations": 1,
+            "process_system_us": 8,
+            "process_user_us": 131,
+            "rust_alloc_calls": 4084,
+            "rust_alloc_requested_bytes": 383784,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 22617333,
+              "process_system_us": 75,
+              "process_user_us": 22422
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 2077833,
+              "process_system_us": 4,
+              "process_user_us": 2075
+            }
+          },
+          "pair": 1
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 131125,
+            "preparations": 1,
+            "process_system_us": 2,
+            "process_user_us": 131,
+            "rust_alloc_calls": 4084,
+            "rust_alloc_requested_bytes": 383784,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 22401542,
+              "process_system_us": 101,
+              "process_user_us": 22147
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 2003416,
+              "process_system_us": 1,
+              "process_user_us": 2003
+            }
+          },
+          "pair": 2
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 134083,
+            "preparations": 1,
+            "process_system_us": 2,
+            "process_user_us": 134,
+            "rust_alloc_calls": 4084,
+            "rust_alloc_requested_bytes": 383784,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 24182417,
+              "process_system_us": 68,
+              "process_user_us": 23867
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 2073167,
+              "process_system_us": 2,
+              "process_user_us": 2071
+            }
+          },
+          "pair": 3
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 128166,
+            "preparations": 1,
+            "process_system_us": 2,
+            "process_user_us": 129,
+            "rust_alloc_calls": 4084,
+            "rust_alloc_requested_bytes": 383784,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 22866583,
+              "process_system_us": 70,
+              "process_user_us": 22737
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 2054459,
+              "process_system_us": 10,
+              "process_user_us": 2045
+            }
+          },
+          "pair": 4
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 135875,
+            "preparations": 1,
+            "process_system_us": 2,
+            "process_user_us": 136,
+            "rust_alloc_calls": 4084,
+            "rust_alloc_requested_bytes": 383784,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 22051000,
+              "process_system_us": 64,
+              "process_user_us": 21911
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 2124500,
+              "process_system_us": 1,
+              "process_user_us": 2125
+            }
+          },
+          "pair": 5
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 129041,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 129,
+            "rust_alloc_calls": 4084,
+            "rust_alloc_requested_bytes": 383784,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 22435875,
+              "process_system_us": 54,
+              "process_user_us": 22310
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 2116167,
+              "process_system_us": 0,
+              "process_user_us": 2116
+            }
+          },
+          "pair": 6
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 150875,
+            "preparations": 1,
+            "process_system_us": 11,
+            "process_user_us": 138,
+            "rust_alloc_calls": 4084,
+            "rust_alloc_requested_bytes": 383784,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 22491709,
+              "process_system_us": 99,
+              "process_user_us": 22235
+            },
+            "indexed": {
+              "audit_bytes": 454812,
+              "cycles": 3012,
+              "elapsed_ns": 2092792,
+              "process_system_us": 19,
+              "process_user_us": 2055
+            }
+          },
+          "pair": 7
+        }
+      ],
+      "partitions": 500,
+      "query_positions": [
+        0,
+        500,
+        999
+      ],
+      "scoped_candidates": 2
+    },
+    {
+      "calibration": {
+        "cold": {
+          "elapsed_ns": 1775209,
+          "preparations": 1,
+          "process_system_us": 225,
+          "process_user_us": 1554,
+          "rust_alloc_calls": 40835,
+          "rust_alloc_requested_bytes": 3844696,
+          "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+        },
+        "cycles_per_mode": 48,
+        "full": {
+          "audit_bytes": 7248,
+          "cycles": 48,
+          "elapsed_ns": 3604209,
+          "process_system_us": 67,
+          "process_user_us": 3482
+        },
+        "indexed": {
+          "audit_bytes": 7248,
+          "cycles": 48,
+          "elapsed_ns": 46292,
+          "process_system_us": 7,
+          "process_user_us": 40
+        }
+      },
+      "cycles_per_window": 330,
+      "grants": 10000,
+      "pairs": [
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1762084,
+            "preparations": 1,
+            "process_system_us": 247,
+            "process_user_us": 1516,
+            "rust_alloc_calls": 40835,
+            "rust_alloc_requested_bytes": 3844696,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 23091084,
+              "process_system_us": 113,
+              "process_user_us": 22829
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 265458,
+              "process_system_us": 6,
+              "process_user_us": 258
+            }
+          },
+          "pair": 0
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1606250,
+            "preparations": 1,
+            "process_system_us": 8,
+            "process_user_us": 1600,
+            "rust_alloc_calls": 40835,
+            "rust_alloc_requested_bytes": 3844696,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 22767958,
+              "process_system_us": 64,
+              "process_user_us": 22577
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 249625,
+              "process_system_us": 0,
+              "process_user_us": 250
+            }
+          },
+          "pair": 1
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1484833,
+            "preparations": 1,
+            "process_system_us": 1,
+            "process_user_us": 1485,
+            "rust_alloc_calls": 40835,
+            "rust_alloc_requested_bytes": 3844696,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 23029958,
+              "process_system_us": 80,
+              "process_user_us": 22854
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 252875,
+              "process_system_us": 1,
+              "process_user_us": 253
+            }
+          },
+          "pair": 2
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1505417,
+            "preparations": 1,
+            "process_system_us": 4,
+            "process_user_us": 1503,
+            "rust_alloc_calls": 40835,
+            "rust_alloc_requested_bytes": 3844696,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 23051333,
+              "process_system_us": 58,
+              "process_user_us": 22831
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 244834,
+              "process_system_us": 0,
+              "process_user_us": 245
+            }
+          },
+          "pair": 3
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1476125,
+            "preparations": 1,
+            "process_system_us": 2,
+            "process_user_us": 1477,
+            "rust_alloc_calls": 40835,
+            "rust_alloc_requested_bytes": 3844696,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 23223917,
+              "process_system_us": 104,
+              "process_user_us": 22964
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 253875,
+              "process_system_us": 1,
+              "process_user_us": 254
+            }
+          },
+          "pair": 4
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1540250,
+            "preparations": 1,
+            "process_system_us": 3,
+            "process_user_us": 1540,
+            "rust_alloc_calls": 40835,
+            "rust_alloc_requested_bytes": 3844696,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 24566250,
+              "process_system_us": 53,
+              "process_user_us": 23602
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 247583,
+              "process_system_us": 1,
+              "process_user_us": 248
+            }
+          },
+          "pair": 5
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1496250,
+            "preparations": 1,
+            "process_system_us": 2,
+            "process_user_us": 1497,
+            "rust_alloc_calls": 40835,
+            "rust_alloc_requested_bytes": 3844696,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "full",
+          "native": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 23251166,
+              "process_system_us": 91,
+              "process_user_us": 22952
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 246958,
+              "process_system_us": 1,
+              "process_user_us": 247
+            }
+          },
+          "pair": 6
+        },
+        {
+          "allocation_only": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "rust_alloc_calls": 0,
+              "rust_alloc_requested_bytes": 0
+            }
+          },
+          "cold": {
+            "elapsed_ns": 1507125,
+            "preparations": 1,
+            "process_system_us": 3,
+            "process_user_us": 1507,
+            "rust_alloc_calls": 40835,
+            "rust_alloc_requested_bytes": 3844696,
+            "scope": "cold prepare includes current-thread allocation-meter overhead; authority construction/validation and later index drop excluded"
+          },
+          "first": "indexed",
+          "native": {
+            "full": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 23266625,
+              "process_system_us": 147,
+              "process_user_us": 22896
+            },
+            "indexed": {
+              "audit_bytes": 49830,
+              "cycles": 330,
+              "elapsed_ns": 260333,
+              "process_system_us": 5,
+              "process_user_us": 253
+            }
+          },
+          "pair": 7
+        }
+      ],
+      "partitions": 5000,
+      "query_positions": [
+        0,
+        5000,
+        9999
+      ],
+      "scoped_candidates": 2
+    }
+  ],
+  "schema": "mount-rs.grant-index-paired.v1",
+  "timed_operations": "policy matching, source/cache Arc selection, public or prepared authorization, writer mutex, buffered audit, exact permission/bytes checks, periodic budget checks"
+}

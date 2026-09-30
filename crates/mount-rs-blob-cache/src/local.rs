@@ -1,3 +1,6 @@
+use crate::owned::OwnedTask;
+#[cfg(unix)]
+use crate::owned::notify_waker;
 use crate::*;
 use std::{
     collections::BTreeMap,
@@ -8,6 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Poll, Waker},
 };
 #[cfg(unix)]
 use std::{
@@ -40,8 +44,102 @@ struct State {
     tick: u64,
     generation: u64,
     quarantined: BTreeMap<String, usize>,
-    scopes: BTreeMap<CacheKey, (CacheScope, IntegrityPolicy, usize)>,
+    scopes: BTreeMap<CacheKey, ScopeRegistration>,
+    identities: BTreeMap<ScopeIdentity, IdentityRecord>,
+    admission_failed: bool,
 }
+
+struct AdmissionOwner;
+struct IdentityRecord {
+    identity: Arc<ScopeIdentity>,
+    epoch: u64,
+    backing: Option<ConcurrentBackingId>,
+}
+struct ScopeRegistration {
+    scope: Arc<CacheScope>,
+    policy: IntegrityPolicy,
+    groups: usize,
+    epoch: u64,
+}
+/// A trusted local identity reservation captured before provider verification.
+/// The cache-owner marker prevents a token from authorizing another cache.
+/// Reservations survive an empty scope registry and are never recycled.
+#[derive(Clone)]
+pub struct IdentityEpoch {
+    owner: Arc<AdmissionOwner>,
+    identity: Arc<ScopeIdentity>,
+    epoch: u64,
+}
+/// One independently owned registration group. Cloning shares its final Drop;
+/// it does not add a registration, allocate a new group, or change authority.
+#[derive(Clone)]
+pub struct ScopeLease {
+    inner: Arc<ScopeLeaseInner>,
+}
+struct ScopeLeaseInner {
+    cache: Arc<LocalCache>,
+    scope: Arc<CacheScope>,
+    key: CacheKey,
+    policy: IntegrityPolicy,
+    epoch: u64,
+}
+impl ScopeLease {
+    #[cfg(all(test, unix))]
+    pub(crate) fn same_group(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+    pub fn policy(&self) -> IntegrityPolicy {
+        self.inner.policy
+    }
+    pub(crate) fn accepts_verified_epoch(&self, verified_from: &IdentityEpoch) -> Result<bool> {
+        if !Arc::ptr_eq(&verified_from.owner, &self.inner.cache.admission_owner)
+            || *verified_from.identity != self.inner.scope.identity
+            || verified_from.epoch != self.inner.epoch
+        {
+            return Ok(false);
+        }
+        self.is_current()
+    }
+    pub fn is_current(&self) -> Result<bool> {
+        self.inner.cache.with_admission_state(|state| {
+            Ok(state
+                .identities
+                .get(&self.inner.scope.identity)
+                .is_some_and(|identity| {
+                    identity.epoch == self.inner.epoch
+                        && identity.backing == Some(self.inner.scope.backing)
+                        && state.scopes.get(&self.inner.key).is_some_and(|entry| {
+                            *entry.scope == *self.inner.scope
+                                && entry.policy == self.inner.policy
+                                && entry.epoch == self.inner.epoch
+                                && entry.groups != 0
+                        })
+                }))
+        })
+    }
+}
+impl Drop for ScopeLeaseInner {
+    fn drop(&mut self) {
+        // Drop is administrative metadata release, never a disk operation. An
+        // old generation cannot decrement a replacement with the same digest.
+        if let Ok(mut state) = self.cache.state.lock()
+            && let Some(entry) = state.scopes.get_mut(&self.key)
+            && *entry.scope == *self.scope
+            && entry.policy == self.policy
+            && entry.epoch == self.epoch
+        {
+            if let Some(remaining) = entry.groups.checked_sub(1) {
+                entry.groups = remaining;
+                if remaining == 0 {
+                    state.scopes.remove(&self.key);
+                }
+            } else {
+                state.admission_failed = true;
+            }
+        }
+    }
+}
+
 pub struct PendingReservation {
     used: Arc<AtomicUsize>,
     bytes: usize,
@@ -51,27 +149,178 @@ impl Drop for PendingReservation {
         self.used.fetch_sub(self.bytes, Ordering::AcqRel);
     }
 }
+#[cfg(all(test, unix))]
+pub(crate) struct TestDiskInsertGate {
+    pub(crate) entered: tokio::sync::oneshot::Sender<()>,
+    pub(crate) release: std::sync::mpsc::Receiver<()>,
+}
+
+struct IoState {
+    sealed: bool,
+    permits: usize,
+    workers: Vec<Arc<OwnedTask>>,
+    failure: Option<FsError>,
+}
+struct IoRegistry {
+    state: Mutex<IoState>,
+    changed: Arc<tokio::sync::Notify>,
+    wake: Waker,
+}
+impl IoRegistry {
+    #[cfg(unix)]
+    fn new() -> Arc<Self> {
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let wake = notify_waker(&changed);
+        Arc::new(Self {
+            state: Mutex::new(IoState {
+                sealed: false,
+                permits: 0,
+                workers: Vec::with_capacity(8),
+                failure: None,
+            }),
+            changed,
+            wake,
+        })
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, IoState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.sealed = true;
+                state.failure.get_or_insert_with(error);
+                state
+            }
+        }
+    }
+    fn reap(&self, state: &mut IoState) {
+        let IoState {
+            workers,
+            sealed,
+            failure,
+            ..
+        } = state;
+        workers.retain(|worker| match worker.poll_result() {
+            Poll::Pending => true,
+            Poll::Ready(result) => {
+                if let Err(error) = result {
+                    *sealed = true;
+                    failure.get_or_insert(error);
+                }
+                false
+            }
+        });
+    }
+}
+
+/// An admitted IO slot. Dropping it wakes an owned shutdown even when the
+/// request that acquired it was canceled before submitting a blocking worker.
+pub struct CacheIoPermit {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    registry: Arc<IoRegistry>,
+}
+impl Drop for CacheIoPermit {
+    fn drop(&mut self) {
+        let mut state = self.registry.lock();
+        if let Some(remaining) = state.permits.checked_sub(1) {
+            state.permits = remaining;
+        } else {
+            state.sealed = true;
+            state.failure.get_or_insert_with(error);
+        }
+        drop(state);
+        // Publish the accounting change before making its physical slot
+        // available to another admission; the registry count stays <=8.
+        drop(self.permit.take());
+        self.registry.changed.notify_waiters();
+    }
+}
+
+/// Only the blocking launcher can create this view. Its exact cache owner and
+/// admitted slot remain alive until the callback returns, including after the
+/// cache seals admission. Callbacks borrow it and cannot take or clone its slot.
+pub(crate) struct AdmittedCache {
+    cache: Arc<LocalCache>,
+    _permit: CacheIoPermit,
+}
+impl AdmittedCache {
+    pub(crate) fn get_disk(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        policy: IntegrityPolicy,
+    ) -> Option<Vec<u8>> {
+        self.cache.get_disk_admitted(scope, id, policy)
+    }
+    #[cfg(all(test, unix))]
+    fn insert(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: &[u8],
+        policy: IntegrityPolicy,
+    ) -> Result<()> {
+        self.cache.insert_admitted(scope, id, bytes, policy)
+    }
+    pub(crate) fn insert_shared(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: Arc<[u8]>,
+        policy: IntegrityPolicy,
+    ) -> Result<()> {
+        self.cache.insert_shared_admitted(scope, id, bytes, policy)
+    }
+    pub(crate) fn invalidate(&self, scope: &CacheScope, id: &BlockId) {
+        self.cache.invalidate_admitted(scope, id)
+    }
+    pub(crate) fn invalidate_scope(&self, scope: &CacheScope) {
+        self.cache.invalidate_scope_admitted(scope)
+    }
+}
+
 /// One bounded cache shared across drives. Disk operations serialize independently
 /// of the RAM index; no filesystem operation holds the index mutex.
 pub struct LocalCache {
     config: LocalCacheConfig,
+    max_scopes: usize,
+    admission_owner: Arc<AdmissionOwner>,
     state: Mutex<State>,
     disk_io: Mutex<()>,
     root: File,
     _lock: File,
     pending: Arc<AtomicUsize>,
     pub(crate) io_permits: Arc<tokio::sync::Semaphore>,
+    io: Arc<IoRegistry>,
+    #[cfg(all(test, unix))]
+    pub(crate) test_disk_insert_gate: Mutex<Option<TestDiskInsertGate>>,
+    #[cfg(all(test, unix))]
+    pub(crate) test_fill_worker: Mutex<Option<tokio::sync::oneshot::Sender<Arc<OwnedTask>>>>,
 }
 impl LocalCache {
-    /// Secure descriptor-relative disk operations currently require Unix.
+    /// The original constructor keeps the historical distinct-scope bound.
+    pub fn new(config: LocalCacheConfig) -> Result<Arc<Self>> {
+        let max_scopes = config.max_entries;
+        Self::new_with_scope_capacity(config, max_scopes)
+    }
+    /// Scope/identity metadata has its own bound; this never changes blob entry,
+    /// RAM, disk, payload, pending-buffer or eight-worker IO budgets.
     #[cfg(not(unix))]
-    pub fn new(_config: LocalCacheConfig) -> Result<Arc<Self>> {
+    pub fn new_with_scope_capacity(
+        _config: LocalCacheConfig,
+        _max_scopes: usize,
+    ) -> Result<Arc<Self>> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("blob cache"))
     }
     #[cfg(unix)]
-    pub fn new(config: LocalCacheConfig) -> Result<Arc<Self>> {
+    pub fn new_with_scope_capacity(
+        config: LocalCacheConfig,
+        max_scopes: usize,
+    ) -> Result<Arc<Self>> {
         if config.max_entries == 0
             || config.max_entries > 1_000_000
+            || max_scopes == 0
+            || max_scopes > 1_000_000
             || config.max_blob_bytes == 0
             || config.max_blob_bytes > 256 * 1024 * 1024
             || config.memory_bytes > isize::MAX as usize
@@ -172,12 +421,19 @@ impl LocalCache {
         }
         Ok(Arc::new(Self {
             config,
+            max_scopes,
+            admission_owner: Arc::new(AdmissionOwner),
             state: Mutex::new(state),
             disk_io: Mutex::new(()),
             root,
             _lock: lock,
             pending: Arc::new(AtomicUsize::new(0)),
             io_permits: Arc::new(tokio::sync::Semaphore::new(8)),
+            io: IoRegistry::new(),
+            #[cfg(all(test, unix))]
+            test_disk_insert_gate: Mutex::new(None),
+            #[cfg(all(test, unix))]
+            test_fill_worker: Mutex::new(None),
         }))
     }
     pub fn reserve_pending(&self, payload: usize) -> Option<PendingReservation> {
@@ -199,12 +455,125 @@ impl LocalCache {
     pub fn max_blob_bytes(&self) -> usize {
         self.config.max_blob_bytes
     }
-    pub async fn io_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
-        self.io_permits
+    pub async fn io_permit(&self) -> Result<CacheIoPermit> {
+        let permit = self
+            .io_permits
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| error())
+            .map_err(|_| FsError::new(ErrorCode::Ebusy).with_syscall("closed cache IO"))?;
+        self.admit_permit(permit)
+    }
+    fn try_io_permit(&self) -> Result<CacheIoPermit> {
+        let permit = self
+            .io_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| FsError::new(ErrorCode::Ebusy).with_syscall("cache IO admission"))?;
+        self.admit_permit(permit)
+    }
+    fn admit_permit(&self, permit: tokio::sync::OwnedSemaphorePermit) -> Result<CacheIoPermit> {
+        let mut state = self.io.lock();
+        self.io.reap(&mut state);
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.sealed {
+            return Err(FsError::new(ErrorCode::Ebusy).with_syscall("closed cache IO"));
+        }
+        state.permits = state
+            .permits
+            .checked_add(1)
+            .filter(|count| *count <= 8)
+            .ok_or_else(error)?;
+        Ok(CacheIoPermit {
+            permit: Some(permit),
+            registry: self.io.clone(),
+        })
+    }
+    fn start_blocking<R: Send + 'static>(
+        self: &Arc<Self>,
+        state: &mut IoState,
+        permit: CacheIoPermit,
+        work: impl FnOnce(&AdmittedCache) -> R + Send + 'static,
+    ) -> (Arc<OwnedTask>, tokio::sync::oneshot::Receiver<R>) {
+        let cache = AdmittedCache {
+            cache: self.clone(),
+            _permit: permit,
+        };
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let handle = tokio::task::spawn_blocking(move || {
+            let result = work(&cache);
+            let _ = send.send(result);
+            Ok(())
+        });
+        let worker = OwnedTask::with_signal(handle, self.io.changed.clone(), self.io.wake.clone());
+        state.workers.push(worker.clone());
+        #[cfg(all(test, unix))]
+        if let Some(retained) = self
+            .test_fill_worker
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            let _ = retained.send(worker.clone());
+        }
+        (worker, receive)
+    }
+    /// Submit optional work without waiting for a slot or disk completion.
+    /// Actual joins remain bounded by the same eight IO slots, even if callers
+    /// abandon their result or a blocking closure panics.
+    pub(crate) fn try_spawn_blocking<R: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(&AdmittedCache) -> R + Send + 'static,
+    ) -> Result<()> {
+        let raw = self
+            .io_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| FsError::new(ErrorCode::Ebusy))?;
+        let permit = self.admit_permit(raw)?;
+        let mut state = self.io.lock();
+        self.io.reap(&mut state);
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.sealed || state.workers.len() == 8 {
+            return Err(FsError::new(ErrorCode::Ebusy).with_syscall("cache worker admission"));
+        }
+        let (_, receive) = self.start_blocking(&mut state, permit, work);
+        drop(receive);
+        Ok(())
+    }
+    pub(crate) async fn run_blocking<R: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(&AdmittedCache) -> R + Send + 'static,
+    ) -> Result<R> {
+        let permit = self.io_permit().await?;
+        let (worker, receive) = loop {
+            let changed = self.io.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = self.io.lock();
+                self.io.reap(&mut state);
+                if let Some(error) = &state.failure {
+                    return Err(error.clone());
+                }
+                if state.sealed {
+                    return Err(
+                        FsError::new(ErrorCode::Ebusy).with_syscall("cache worker admission")
+                    );
+                }
+                if state.workers.len() < 8 {
+                    break self.start_blocking(&mut state, permit, work);
+                }
+            }
+            changed.await;
+        };
+        let result = receive.await;
+        worker.join().await?;
+        result.map_err(|_| error())
     }
     pub fn scope_hash(scope: &CacheScope) -> CacheKey {
         hash_parts(&[
@@ -227,50 +596,256 @@ impl LocalCache {
     fn key(scope: &CacheScope, id: &BlockId) -> CacheKey {
         Self::key_hashed(&Self::scope_hash(scope), id)
     }
-    pub fn register_scope(&self, scope: CacheScope, policy: IntegrityPolicy) -> Result<()> {
-        if [
-            &scope.identity.cluster,
-            &scope.identity.partition,
-            &scope.identity.drive,
-        ]
-        .iter()
-        .any(|s| s.is_empty() || s.len() > 1024)
+    fn valid_identity(identity: &ScopeIdentity) -> bool {
+        [&identity.cluster, &identity.partition, &identity.drive]
+            .iter()
+            .all(|part| !part.is_empty() && part.len() <= 1024)
+    }
+    fn with_admission_state<T>(&self, work: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+        // This short metadata operation shares the seal linearization point but
+        // acquires no disk permit. Lock order is always IO registry -> RAM index.
+        let mut io = self.io.lock();
+        self.io.reap(&mut io);
+        if let Some(failure) = &io.failure {
+            return Err(failure.clone());
+        }
+        if io.sealed {
+            return Err(FsError::new(ErrorCode::Ebusy).with_syscall("closed cache admission"));
+        }
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                io.sealed = true;
+                let failure = io.failure.get_or_insert_with(error).clone();
+                return Err(failure);
+            }
+        };
+        if state.admission_failed {
+            io.sealed = true;
+            let failure = io.failure.get_or_insert_with(error).clone();
+            return Err(failure);
+        }
+        let result = work(&mut state);
+        if state.admission_failed {
+            io.sealed = true;
+            let failure = io.failure.get_or_insert_with(error).clone();
+            return Err(failure);
+        }
+        result
+    }
+    /// Only trusted configured/runtime identities may reserve an epoch. Peer
+    /// request fields are not authority and must be checked by their route map.
+    pub fn identity_epoch(&self, identity: &ScopeIdentity) -> Result<IdentityEpoch> {
+        if !Self::valid_identity(identity) {
+            return Err(error());
+        }
+        self.with_admission_state(|state| {
+            // Existing reservations need only borrowed lookup and Arc clones.
+            if let Some(record) = state.identities.get(identity) {
+                return Ok(IdentityEpoch {
+                    owner: self.admission_owner.clone(),
+                    identity: record.identity.clone(),
+                    epoch: record.epoch,
+                });
+            }
+            if state.identities.len() >= self.max_scopes {
+                return Err(FsError::new(ErrorCode::Ebusy).with_syscall("cache identity capacity"));
+            }
+            let record =
+                state
+                    .identities
+                    .entry(identity.clone())
+                    .or_insert_with(|| IdentityRecord {
+                        identity: Arc::new(identity.clone()),
+                        epoch: 0,
+                        backing: None,
+                    });
+            Ok(IdentityEpoch {
+                owner: self.admission_owner.clone(),
+                identity: record.identity.clone(),
+                epoch: record.epoch,
+            })
+        })
+    }
+    /// Publish an acknowledged local proof only if its pre-await identity epoch
+    /// is still current. A different backing advances authority before capacity
+    /// admission and removes all older backing scopes of this exact identity.
+    pub fn register_scope_lease(
+        self: &Arc<Self>,
+        scope: CacheScope,
+        policy: IntegrityPolicy,
+        verified_from: IdentityEpoch,
+    ) -> Result<ScopeLease> {
+        if !Arc::ptr_eq(&verified_from.owner, &self.admission_owner)
+            || *verified_from.identity != scope.identity
+            || !Self::valid_identity(&scope.identity)
         {
             return Err(error());
         }
-        let mut state = self.state.lock().map_err(|_| error())?;
-        let key = Self::scope_hash(&scope);
-        if let Some((_, old, count)) = state.scopes.get_mut(&key) {
-            if *old != policy {
-                return Err(error());
+        self.with_admission_state(|state| {
+            let record = state.identities.get(&scope.identity).ok_or_else(error)?;
+            if record.epoch != verified_from.epoch {
+                return Err(FsError::new(ErrorCode::Estale).with_syscall("cache authority epoch"));
             }
-            *count = count.checked_add(1).ok_or_else(error)?;
-            return Ok(());
-        }
-        if state.scopes.len() >= self.config.max_entries {
-            return Err(error());
-        }
-        state.scopes.insert(key, (scope, policy, 1));
-        Ok(())
-    }
-    pub fn unregister_scope(&self, scope: &CacheScope) {
-        if let Ok(mut state) = self.state.lock() {
-            let key = Self::scope_hash(scope);
-            if let Some((_, _, count)) = state.scopes.get_mut(&key) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    state.scopes.remove(&key);
+            if record.backing != Some(scope.backing) {
+                let had_previous_backing = record.backing.is_some();
+                let Some(next) = record.epoch.checked_add(1) else {
+                    state.admission_failed = true;
+                    return Err(error());
+                };
+                let record = state
+                    .identities
+                    .get_mut(&scope.identity)
+                    .ok_or_else(error)?;
+                record.epoch = next;
+                record.backing = Some(scope.backing);
+                // None can arise only at initial reservation or after an
+                // exact identity revoke already removed every scope. Avoid
+                // quadratic first-admission scans across distinct cold Drives.
+                if had_previous_backing {
+                    state
+                        .scopes
+                        .retain(|_, entry| entry.scope.identity != scope.identity);
                 }
             }
+            let epoch = state
+                .identities
+                .get(&scope.identity)
+                .ok_or_else(error)?
+                .epoch;
+            let key = Self::scope_hash(&scope);
+            let shared_scope = if let Some(entry) = state.scopes.get_mut(&key) {
+                // Digest equality alone is never an authority match.
+                if *entry.scope != scope || entry.policy != policy || entry.epoch != epoch {
+                    return Err(error());
+                }
+                let Some(groups) = entry.groups.checked_add(1) else {
+                    state.admission_failed = true;
+                    return Err(error());
+                };
+                entry.groups = groups;
+                entry.scope.clone()
+            } else {
+                if state.scopes.len() >= self.max_scopes {
+                    return Err(FsError::new(ErrorCode::Ebusy).with_syscall("cache scope capacity"));
+                }
+                let shared_scope = Arc::new(scope);
+                state.scopes.insert(
+                    key,
+                    ScopeRegistration {
+                        scope: shared_scope.clone(),
+                        policy,
+                        groups: 1,
+                        epoch,
+                    },
+                );
+                shared_scope
+            };
+            Ok(ScopeLease {
+                inner: Arc::new(ScopeLeaseInner {
+                    cache: self.clone(),
+                    scope: shared_scope,
+                    key,
+                    policy,
+                    epoch,
+                }),
+            })
+        })
+    }
+    /// Acquire an independent group only from an already proven current scope.
+    /// This never verifies a backing, reserves an unknown identity or advances
+    /// authority. Normal holder reuse clones its retained group instead.
+    pub fn current_scope_lease(
+        self: &Arc<Self>,
+        scope: &CacheScope,
+        policy: IntegrityPolicy,
+    ) -> Result<Option<ScopeLease>> {
+        self.with_admission_state(|state| {
+            let Some(record) = state.identities.get(&scope.identity) else {
+                return Ok(None);
+            };
+            if record.backing != Some(scope.backing) {
+                return Ok(None);
+            }
+            let epoch = record.epoch;
+            let key = Self::scope_hash(scope);
+            let Some(entry) = state.scopes.get_mut(&key) else {
+                return Ok(None);
+            };
+            if *entry.scope != *scope || entry.policy != policy || entry.epoch != epoch {
+                return Ok(None);
+            }
+            let Some(groups) = entry.groups.checked_add(1) else {
+                state.admission_failed = true;
+                return Err(error());
+            };
+            entry.groups = groups;
+            Ok(Some(ScopeLease {
+                inner: Arc::new(ScopeLeaseInner {
+                    cache: self.clone(),
+                    scope: entry.scope.clone(),
+                    key,
+                    policy,
+                    epoch,
+                }),
+            }))
+        })
+    }
+    /// An observed local authority refusal revokes this exact identity, even
+    /// when no scope is registered. This is metadata-only and remains available
+    /// while every disk permit is held. Terminal admission still returns error.
+    pub fn revoke_identity_admission(&self, identity: &ScopeIdentity) -> Result<()> {
+        if !Self::valid_identity(identity) {
+            return Err(error());
         }
+        self.with_admission_state(|state| {
+            let identity_count = state.identities.len();
+            let record = match state.identities.entry(identity.clone()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    if identity_count >= self.max_scopes {
+                        return Err(
+                            FsError::new(ErrorCode::Ebusy).with_syscall("cache identity capacity")
+                        );
+                    }
+                    entry.insert(IdentityRecord {
+                        identity: Arc::new(identity.clone()),
+                        epoch: 0,
+                        backing: None,
+                    })
+                }
+            };
+            let Some(next) = record.epoch.checked_add(1) else {
+                state.admission_failed = true;
+                return Err(error());
+            };
+            record.epoch = next;
+            record.backing = None;
+            state
+                .scopes
+                .retain(|_, entry| entry.scope.identity != *identity);
+            Ok(())
+        })
     }
     pub fn scope_policy(&self, scope: &CacheScope) -> Option<IntegrityPolicy> {
-        self.state
-            .lock()
-            .ok()?
-            .scopes
-            .get(&Self::scope_hash(scope))
-            .map(|v| v.1)
+        self.with_admission_state(|state| {
+            let Some(record) = state.identities.get(&scope.identity) else {
+                return Ok(None);
+            };
+            let policy = state
+                .scopes
+                .get(&Self::scope_hash(scope))
+                .filter(|entry| {
+                    *entry.scope == *scope
+                        && entry.epoch == record.epoch
+                        && record.backing == Some(scope.backing)
+                        && entry.groups != 0
+                })
+                .map(|entry| entry.policy);
+            Ok(policy)
+        })
+        .ok()
+        .flatten()
     }
     pub fn path_for(&self, scope: &CacheScope, id: &BlockId) -> PathBuf {
         self.config.directory.join(hex_key(&Self::key(scope, id)))
@@ -321,11 +896,22 @@ impl LocalCache {
         scope: &CacheScope,
         id: &BlockId,
         policy: IntegrityPolicy,
-    ) -> Option<Vec<u8>> {
-        self.get_memory(scope, id, policy)
-            .or_else(|| self.get_disk(scope, id, policy))
+    ) -> Result<Option<Vec<u8>>> {
+        let _permit = self.try_io_permit()?;
+        Ok(self
+            .get_memory(scope, id, policy)
+            .or_else(|| self.get_disk_admitted(scope, id, policy)))
     }
     pub fn get_disk(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        policy: IntegrityPolicy,
+    ) -> Result<Option<Vec<u8>>> {
+        let _permit = self.try_io_permit()?;
+        Ok(self.get_disk_admitted(scope, id, policy))
+    }
+    fn get_disk_admitted(
         &self,
         scope: &CacheScope,
         id: &BlockId,
@@ -399,10 +985,20 @@ impl LocalCache {
         bytes: &[u8],
         policy: IntegrityPolicy,
     ) -> Result<()> {
+        let _permit = self.try_io_permit()?;
+        self.insert_admitted(scope, id, bytes, policy)
+    }
+    fn insert_admitted(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: &[u8],
+        policy: IntegrityPolicy,
+    ) -> Result<()> {
         if bytes.len() > self.config.max_blob_bytes {
             return Err(error());
         }
-        self.insert_shared(scope, id, Arc::from(bytes), policy)
+        self.insert_shared_admitted(scope, id, Arc::from(bytes), policy)
     }
     /// Admit immutable verified bytes to RAM without touching the filesystem.
     /// New entries are skipped when making room would require a disk eviction.
@@ -477,6 +1073,16 @@ impl LocalCache {
         bytes: Arc<[u8]>,
         policy: IntegrityPolicy,
     ) -> Result<()> {
+        let _permit = self.try_io_permit()?;
+        self.insert_shared_admitted(scope, id, bytes, policy)
+    }
+    fn insert_shared_admitted(
+        &self,
+        scope: &CacheScope,
+        id: &BlockId,
+        bytes: Arc<[u8]>,
+        policy: IntegrityPolicy,
+    ) -> Result<()> {
         if bytes.len() > self.config.max_blob_bytes {
             return Err(error());
         }
@@ -485,6 +1091,19 @@ impl LocalCache {
         let disk_bytes = bytes.len().checked_add(32).ok_or_else(error)?;
         let memory = bytes.len() <= self.config.memory_bytes;
         let _disk = self.disk_io.lock().map_err(|_| error())?;
+        #[cfg(all(test, unix))]
+        {
+            let gate = self
+                .test_disk_insert_gate
+                .lock()
+                .map_err(|_| error())?
+                .take();
+            if let Some(gate) = gate {
+                let _ = gate.entered.send(());
+                // Dropping the test's release sender also releases the real worker.
+                let _ = gate.release.recv();
+            }
+        }
         self.retry_quarantine();
         let disk = disk_bytes <= self.config.disk_bytes
             && self
@@ -668,7 +1287,27 @@ impl LocalCache {
             }
         }
     }
-    pub fn invalidate(&self, scope: &CacheScope, id: &BlockId) {
+    pub fn invalidate(&self, scope: &CacheScope, id: &BlockId) -> Result<()> {
+        let _permit = self.try_io_permit()?;
+        self.invalidate_admitted(scope, id);
+        Ok(())
+    }
+    /// Invalidate within an already admitted slot, including a batch that holds
+    /// every IO slot. The exclusive borrow prevents concurrent slot reuse, and
+    /// a permit from another cache cannot authorize this cache's disk work.
+    pub fn invalidate_with_permit(
+        &self,
+        permit: &mut CacheIoPermit,
+        scope: &CacheScope,
+        id: &BlockId,
+    ) -> Result<()> {
+        if permit.permit.is_none() || !Arc::ptr_eq(&permit.registry, &self.io) {
+            return Err(error().with_syscall("cache IO permit identity"));
+        }
+        self.invalidate_admitted(scope, id);
+        Ok(())
+    }
+    fn invalidate_admitted(&self, scope: &CacheScope, id: &BlockId) {
         let key = Self::key(scope, id);
         if let Ok(_disk) = self.disk_io.lock() {
             let remove = self
@@ -681,7 +1320,12 @@ impl LocalCache {
             }
         }
     }
-    pub fn invalidate_scope(&self, scope: &CacheScope) {
+    pub fn invalidate_scope(&self, scope: &CacheScope) -> Result<()> {
+        let _permit = self.try_io_permit()?;
+        self.invalidate_scope_admitted(scope);
+        Ok(())
+    }
+    fn invalidate_scope_admitted(&self, scope: &CacheScope) {
         if let Ok(_disk) = self.disk_io.lock() {
             let hash = Self::scope_hash(scope);
             let unlink = if let Ok(mut state) = self.state.lock() {
@@ -726,12 +1370,41 @@ impl LocalCache {
             state.entries.len() + state.quarantined.len(),
         )
     }
-    pub async fn shutdown(&self) {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.io_permits.clone().acquire_many_owned(8),
-        )
-        .await;
+    pub async fn shutdown(&self) -> Result<()> {
+        {
+            let mut state = self.io.lock();
+            state.sealed = true;
+            self.io_permits.close();
+        }
+        let drain = async {
+            loop {
+                let changed = self.io.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                {
+                    let mut state = self.io.lock();
+                    self.io.reap(&mut state);
+                    if let Some(error) = &state.failure {
+                        return Err(error.clone());
+                    }
+                    if state.workers.is_empty() && state.permits == 0 {
+                        return Ok(());
+                    }
+                }
+                changed.await;
+            }
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(2), drain).await {
+            Ok(result) => result,
+            Err(_) => {
+                let mut state = self.io.lock();
+                let failure = FsError::new(ErrorCode::Ebusy).with_syscall("cache IO drain timeout");
+                let failure = state.failure.get_or_insert(failure).clone();
+                drop(state);
+                self.io.changed.notify_waiters();
+                Err(failure)
+            }
+        }
     }
 }
 fn hash_parts(parts: &[&[u8]]) -> CacheKey {
@@ -879,6 +1552,309 @@ mod tests {
             max_blob_bytes: 16,
         }
     }
+    #[tokio::test]
+    async fn public_sync_disk_work_is_drained_before_shutdown_acknowledges() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let s = scope("sync-drain");
+        let id = BlockId("finished".into());
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        *cache.test_disk_insert_gate.lock().unwrap() = Some(TestDiskInsertGate {
+            entered,
+            release: blocked,
+        });
+        let c = cache.clone();
+        let write_scope = s.clone();
+        let write_id = id.clone();
+        let worker = std::thread::spawn(move || {
+            c.insert(&write_scope, &write_id, b"done", IntegrityPolicy::Opaque)
+        });
+        ready.await.unwrap();
+        let c = cache.clone();
+        let mut close = tokio::spawn(async move { c.shutdown().await });
+        let observed = tokio::time::timeout(std::time::Duration::from_millis(50), &mut close).await;
+        let retained = LocalCache::new(config.clone()).is_err();
+        // Release and positively join the actual disk worker before any final
+        // assertion can unwind its fixture or hide a false acknowledgment.
+        drop(release);
+        let written = worker.join().unwrap();
+        let (premature, closed) = match observed {
+            Ok(result) => (true, result.unwrap()),
+            Err(_) => (false, close.await.unwrap()),
+        };
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        let bytes = fresh.get_disk(&s, &id, IntegrityPolicy::Opaque).unwrap();
+        assert!(written.is_ok());
+        assert!(closed.is_ok());
+        assert!(
+            retained,
+            "real synchronous worker must retain the disk owner"
+        );
+        assert_eq!(bytes.as_deref(), Some(b"done".as_slice()));
+        assert!(
+            !premature,
+            "shutdown acknowledged real public disk work before it drained"
+        );
+    }
+    #[tokio::test]
+    async fn public_sync_disk_work_is_rejected_after_shutdown_acknowledges() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let s = scope("sealed");
+        let kept = BlockId("kept".into());
+        let late = BlockId("late".into());
+        cache
+            .insert(&s, &kept, b"done", IntegrityPolicy::Opaque)
+            .unwrap();
+        cache.shutdown().await.unwrap();
+        let attempts = [
+            cache.get(&s, &kept, IntegrityPolicy::Opaque).map(|_| ()),
+            cache
+                .get_disk(&s, &kept, IntegrityPolicy::Opaque)
+                .map(|_| ()),
+            cache.insert(&s, &late, b"late", IntegrityPolicy::Opaque),
+            cache.insert_shared(
+                &s,
+                &late,
+                Arc::from(b"late".as_slice()),
+                IntegrityPolicy::Opaque,
+            ),
+            cache.invalidate(&s, &kept),
+            cache.invalidate_scope(&s),
+        ];
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        let bytes = fresh.get_disk(&s, &kept, IntegrityPolicy::Opaque).unwrap();
+        let absent = fresh.get_disk(&s, &late, IntegrityPolicy::Opaque).unwrap();
+        assert_eq!(bytes.as_deref(), Some(b"done".as_slice()));
+        assert!(absent.is_none(), "sealed insertion changed the disk");
+        for result in attempts {
+            assert!(result.is_err_and(|e| e.code == ErrorCode::Ebusy));
+        }
+    }
+    #[tokio::test]
+    async fn public_sync_disk_admission_shares_all_eight_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = cfg(dir.path());
+        config.memory_bytes = 0;
+        config.disk_bytes = 8 * 36;
+        config.max_entries = 8;
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let s = scope("sync-capacity");
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        *cache.test_disk_insert_gate.lock().unwrap() = Some(TestDiskInsertGate {
+            entered,
+            release: blocked,
+        });
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let cache = cache.clone();
+            let scope = s.clone();
+            workers.push(std::thread::spawn(move || {
+                cache.insert(
+                    &scope,
+                    &BlockId(index.to_string()),
+                    b"done",
+                    IntegrityPolicy::Opaque,
+                )
+            }));
+        }
+        ready.await.unwrap();
+        let full = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while cache.io.lock().permits != 8 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        let ninth = full.then(|| {
+            cache.insert(
+                &s,
+                &BlockId("ninth".into()),
+                b"late",
+                IntegrityPolicy::Opaque,
+            )
+        });
+        let c = cache.clone();
+        let mut close = tokio::spawn(async move { c.shutdown().await });
+        let observed = tokio::time::timeout(std::time::Duration::from_millis(50), &mut close).await;
+        drop(release);
+        let written = workers
+            .into_iter()
+            .map(|worker| worker.join())
+            .collect::<Vec<_>>();
+        let (premature, closed) = match observed {
+            Ok(result) => (true, result.unwrap()),
+            Err(_) => (false, close.await.unwrap()),
+        };
+        let empty = cache.io.lock().permits == 0;
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        let bytes = (0..8)
+            .map(|index| {
+                fresh
+                    .get_disk(&s, &BlockId(index.to_string()), IntegrityPolicy::Opaque)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            full,
+            "all eight actual synchronous workers must be admitted"
+        );
+        assert!(
+            ninth.is_some_and(|result| result.is_err_and(|error| error.code == ErrorCode::Ebusy))
+        );
+        assert!(!premature);
+        assert!(closed.is_ok());
+        assert!(empty);
+        assert!(
+            written
+                .into_iter()
+                .all(|result| result.is_ok_and(|result| result.is_ok()))
+        );
+        assert!(
+            bytes
+                .into_iter()
+                .all(|bytes| bytes.as_deref() == Some(b"done".as_slice()))
+        );
+    }
+    #[tokio::test]
+    async fn public_sync_disk_admission_rejects_another_caches_permit() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = LocalCache::new(cfg(&dir.path().join("a"))).unwrap();
+        let b = LocalCache::new(cfg(&dir.path().join("b"))).unwrap();
+        let s = scope("permit-identity");
+        let id = BlockId("kept".into());
+        a.insert(&s, &id, b"done", IntegrityPolicy::Opaque).unwrap();
+        let mut wrong = b.io_permit().await.unwrap();
+        let result = a.invalidate_with_permit(&mut wrong, &s, &id);
+        let bytes = a.get_disk(&s, &id, IntegrityPolicy::Opaque).unwrap();
+        drop(wrong);
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
+        assert!(result.is_err_and(|error| error.code == ErrorCode::Eio));
+        assert_eq!(bytes.as_deref(), Some(b"done".as_slice()));
+    }
+    #[tokio::test]
+    async fn cancelled_close_rejoins_actual_worker_and_seals_new_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let s = scope("drain");
+        let id = BlockId("finished".into());
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let c = cache.clone();
+        let write_scope = s.clone();
+        let write_id = id.clone();
+        let request = tokio::spawn(async move {
+            c.run_blocking(move |cache| {
+                entered.send(()).unwrap();
+                let _ = blocked.recv();
+                cache.insert(&write_scope, &write_id, b"done", IntegrityPolicy::Opaque)
+            })
+            .await
+        });
+        ready.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        let c = cache.clone();
+        let first = tokio::spawn(async move { c.shutdown().await });
+        while !cache.io.lock().sealed {
+            tokio::task::yield_now().await;
+        }
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let admission = cache
+            .run_blocking(|_| panic!("sealed work must not start"))
+            .await;
+        let c = cache.clone();
+        let mut second = tokio::spawn(async move { c.shutdown().await });
+        let premature =
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second).await;
+        // Unblock the actual worker before assertions that can unwind the fixture.
+        drop(release);
+        let joined = second.await.unwrap();
+        let drained = {
+            let state = cache.io.lock();
+            state.workers.is_empty() && state.permits == 0
+        };
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        let bytes = fresh.get_disk(&s, &id, IntegrityPolicy::Opaque).unwrap();
+        assert!(admission.is_err_and(|e| e.code == ErrorCode::Ebusy));
+        assert!(
+            premature.is_err(),
+            "second close acknowledged a live real worker"
+        );
+        assert!(
+            joined.is_ok(),
+            "second close did not positively join the worker"
+        );
+        assert!(drained);
+        assert_eq!(bytes.as_deref(), Some(b"done".as_slice()));
+    }
+    #[tokio::test]
+    async fn actual_worker_panic_is_sticky_and_keeps_directory_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let result = cache
+            .run_blocking(|_| panic!("actual cache worker failure"))
+            .await;
+        let closed = cache.shutdown().await;
+        let retry = cache.shutdown().await;
+        let retained = LocalCache::new(config.clone()).is_err();
+        let reaped = {
+            let state = cache.io.lock();
+            state.workers.is_empty() && state.permits == 0
+        };
+        drop(cache);
+        let fresh = LocalCache::new(config).unwrap();
+        drop(fresh);
+        assert!(result.is_err_and(|e| e.code == ErrorCode::Eio));
+        assert!(closed.is_err_and(|e| e.code == ErrorCode::Eio));
+        assert!(retry.is_err_and(|e| e.code == ErrorCode::Eio));
+        assert!(retained, "failed close must leave keeper ownership intact");
+        assert!(reaped, "panic must be an observed real task join");
+    }
+    #[tokio::test]
+    async fn actual_worker_registry_is_bounded_by_eight_io_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LocalCache::new(cfg(dir.path())).unwrap();
+        let mut releases = Vec::new();
+        for _ in 0..8 {
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let (release, blocked) = std::sync::mpsc::channel::<()>();
+            cache
+                .try_spawn_blocking(move |_| {
+                    entered.send(()).unwrap();
+                    let _ = blocked.recv();
+                })
+                .unwrap();
+            ready.await.unwrap();
+            releases.push(release);
+        }
+        let count = cache.io.lock().workers.len();
+        let ninth = cache.try_spawn_blocking(|_| panic!("ninth worker must not start"));
+        drop(releases);
+        let joined = cache.shutdown().await;
+        let state = cache.io.lock();
+        assert_eq!(count, 8);
+        assert!(ninth.is_err_and(|e| e.code == ErrorCode::Ebusy));
+        assert!(joined.is_ok());
+        assert!(state.workers.is_empty());
+        assert_eq!(
+            state.workers.capacity(),
+            8,
+            "completed joins must not accumulate"
+        );
+    }
     #[test]
     fn ram_hit_does_not_wait_for_a_blocked_disk_open() {
         use std::os::unix::fs::OpenOptionsExt;
@@ -904,7 +1880,7 @@ mod tests {
         let (started, ready) = std::sync::mpsc::channel();
         let disk = std::thread::spawn(move || {
             started.send(()).unwrap();
-            c.get_disk(&s, &id, IntegrityPolicy::Opaque)
+            c.get_disk(&s, &id, IntegrityPolicy::Opaque).unwrap()
         });
         ready.recv().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
@@ -976,8 +1952,18 @@ mod tests {
         let b_bytes = fs::read(&pb).unwrap();
         fs::write(&pa, b_bytes).unwrap();
         fs::write(&pb, a_bytes).unwrap();
-        assert!(cache.get_disk(&a, &id, IntegrityPolicy::Opaque).is_none());
-        assert!(cache.get_disk(&b, &id, IntegrityPolicy::Opaque).is_none());
+        assert!(
+            cache
+                .get_disk(&a, &id, IntegrityPolicy::Opaque)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .get_disk(&b, &id, IntegrityPolicy::Opaque)
+                .unwrap()
+                .is_none()
+        );
     }
     #[test]
     fn owned_temporary_quarantine_replaces_the_matching_ram_entry_charge() {
@@ -1130,7 +2116,8 @@ mod tests {
                 &scope("one"),
                 &BlockId("opaque".into()),
                 IntegrityPolicy::Opaque
-            ),
+            )
+            .unwrap(),
             Some(b"abcd".to_vec())
         );
     }
@@ -1147,11 +2134,11 @@ mod tests {
         drop(c);
         let c = LocalCache::new(config).unwrap();
         assert_eq!(
-            c.get(&s, &id, IntegrityPolicy::Opaque),
+            c.get(&s, &id, IntegrityPolicy::Opaque).unwrap(),
             Some(b"data".to_vec())
         );
         fs::write(path, b"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXoops").unwrap();
-        assert_eq!(c.get(&s, &id, IntegrityPolicy::Opaque), None);
+        assert_eq!(c.get(&s, &id, IntegrityPolicy::Opaque).unwrap(), None);
     }
     #[test]
     fn rejects_foreign_directory_and_duplicate_owner() {
@@ -1178,8 +2165,359 @@ mod tests {
         let path = c.path_for(&s, &id);
         fs::remove_file(&path).unwrap();
         symlink(&outside, &path).unwrap();
-        assert!(c.get(&s, &id, IntegrityPolicy::Opaque).is_none());
+        assert!(c.get(&s, &id, IntegrityPolicy::Opaque).unwrap().is_none());
         assert_eq!(fs::read(outside).unwrap(), b"secret");
+    }
+
+    fn proof_scope(drive: &str, backing: u8) -> CacheScope {
+        CacheScope {
+            identity: ScopeIdentity {
+                cluster: "epochs".into(),
+                partition: "p".into(),
+                drive: drive.into(),
+            },
+            backing: ConcurrentBackingId::from_bytes([backing; 16]).unwrap(),
+        }
+    }
+    fn proof_cache(dir: &tempfile::TempDir, name: &str, scope_capacity: usize) -> Arc<LocalCache> {
+        LocalCache::new_with_scope_capacity(
+            LocalCacheConfig {
+                directory: dir.path().join(name),
+                memory_bytes: 1024,
+                disk_bytes: 4096,
+                max_entries: 1,
+                max_blob_bytes: 1024,
+            },
+            scope_capacity,
+        )
+        .unwrap()
+    }
+    fn lease(cache: &Arc<LocalCache>, scope: CacheScope) -> ScopeLease {
+        let epoch = cache.identity_epoch(&scope.identity).unwrap();
+        cache
+            .register_scope_lease(scope, IntegrityPolicy::Opaque, epoch)
+            .unwrap()
+    }
+    #[test]
+    fn empty_identity_keeps_revocation_epoch_and_other_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "empty", 4);
+        let scope = proof_scope("revoked", 1);
+        let held = cache.identity_epoch(&scope.identity).unwrap();
+        let other_scope = proof_scope("unaffected", 1);
+        let other = lease(&cache, other_scope.clone());
+        cache.revoke_identity_admission(&scope.identity).unwrap();
+        let stale = cache.register_scope_lease(scope.clone(), IntegrityPolicy::Opaque, held);
+        assert!(stale.is_err_and(|e| e.code == ErrorCode::Estale));
+        assert!(other.is_current().unwrap());
+        assert_eq!(
+            cache.scope_policy(&other_scope),
+            Some(IntegrityPolicy::Opaque)
+        );
+        let fresh = lease(&cache, scope.clone());
+        assert!(fresh.is_current().unwrap());
+        assert_eq!(cache.scope_policy(&scope), Some(IntegrityPolicy::Opaque));
+    }
+    #[test]
+    fn lease_clones_share_one_group_and_independent_groups_release_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "groups", 2);
+        let scope = proof_scope("d", 1);
+        let first = lease(&cache, scope.clone());
+        let cloned = first.clone();
+        assert!(Arc::ptr_eq(&first.inner, &cloned.inner));
+        assert_eq!(
+            cache
+                .state
+                .lock()
+                .unwrap()
+                .scopes
+                .values()
+                .next()
+                .unwrap()
+                .groups,
+            1
+        );
+        let independent = cache
+            .current_scope_lease(&scope, IntegrityPolicy::Opaque)
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first.inner, &independent.inner));
+        assert_eq!(
+            cache
+                .state
+                .lock()
+                .unwrap()
+                .scopes
+                .values()
+                .next()
+                .unwrap()
+                .groups,
+            2
+        );
+        drop(first);
+        drop(cloned);
+        assert!(independent.is_current().unwrap());
+        assert_eq!(cache.scope_policy(&scope), Some(IntegrityPolicy::Opaque));
+        drop(independent);
+        assert_eq!(cache.scope_policy(&scope), None);
+        assert_eq!(cache.state.lock().unwrap().identities.len(), 1);
+    }
+    #[test]
+    fn stale_drop_cannot_remove_a_fresh_same_backing_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "drop", 2);
+        let scope = proof_scope("d", 1);
+        let stale = lease(&cache, scope.clone());
+        cache.revoke_identity_admission(&scope.identity).unwrap();
+        let fresh = lease(&cache, scope.clone());
+        assert!(!stale.is_current().unwrap());
+        assert!(fresh.is_current().unwrap());
+        drop(stale);
+        assert_eq!(cache.scope_policy(&scope), Some(IntegrityPolicy::Opaque));
+        assert!(fresh.is_current().unwrap());
+    }
+    #[test]
+    fn observed_backing_transition_invalidates_held_proofs_and_old_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "transition", 2);
+        let old_scope = proof_scope("d", 1);
+        let old = lease(&cache, old_scope.clone());
+        let held_epoch = cache.identity_epoch(&old_scope.identity).unwrap();
+        let next_scope = proof_scope("d", 2);
+        let next = lease(&cache, next_scope.clone());
+        assert!(!old.is_current().unwrap());
+        assert!(next.is_current().unwrap());
+        assert_eq!(cache.scope_policy(&old_scope), None);
+        assert!(
+            cache
+                .register_scope_lease(old_scope, IntegrityPolicy::Opaque, held_epoch)
+                .is_err()
+        );
+        drop(old);
+        assert_eq!(
+            cache.scope_policy(&next_scope),
+            Some(IntegrityPolicy::Opaque)
+        );
+    }
+    #[test]
+    fn epoch_cannot_cross_cache_owner_or_exact_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = proof_cache(&dir, "a", 2);
+        let b = proof_cache(&dir, "b", 2);
+        let scope = proof_scope("d", 1);
+        let token = a.identity_epoch(&scope.identity).unwrap();
+        let _ = b.identity_epoch(&scope.identity).unwrap();
+        assert!(
+            b.register_scope_lease(scope.clone(), IntegrityPolicy::Opaque, token.clone())
+                .is_err()
+        );
+        let mut wrong = scope.clone();
+        wrong.identity.partition = "other".into();
+        assert!(
+            a.register_scope_lease(wrong, IntegrityPolicy::Opaque, token.clone())
+                .is_err()
+        );
+        let good = a
+            .register_scope_lease(scope, IntegrityPolicy::Opaque, token)
+            .unwrap();
+        assert!(good.is_current().unwrap());
+    }
+    #[test]
+    fn scope_and_retained_identity_bounds_are_independent_of_blob_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "capacity", 3);
+        let scopes: Vec<_> = (0..3).map(|i| proof_scope(&format!("d{i}"), 1)).collect();
+        let leases: Vec<_> = scopes
+            .iter()
+            .map(|scope| lease(&cache, scope.clone()))
+            .collect();
+        assert_eq!(cache.state.lock().unwrap().scopes.len(), 3);
+        for scope in &scopes {
+            cache
+                .insert_memory_shared(
+                    scope,
+                    &BlockId("opaque".into()),
+                    Arc::from(b"bytes".as_slice()),
+                    IntegrityPolicy::Opaque,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            cache.usage().2,
+            1,
+            "blob entry capacity changed with scope capacity"
+        );
+        assert!(
+            cache
+                .identity_epoch(&proof_scope("one-too-many", 1).identity)
+                .is_err()
+        );
+        drop(leases);
+        assert!(cache.state.lock().unwrap().scopes.is_empty());
+        assert_eq!(
+            cache.state.lock().unwrap().identities.len(),
+            3,
+            "empty scopes forgot authority history"
+        );
+        assert!(
+            cache
+                .identity_epoch(&proof_scope("replacement", 1).identity)
+                .is_err()
+        );
+        assert!(
+            LocalCache::new_with_scope_capacity(
+                LocalCacheConfig {
+                    directory: dir.path().join("zero"),
+                    memory_bytes: 1,
+                    disk_bytes: 1,
+                    max_entries: 1,
+                    max_blob_bytes: 1
+                },
+                0
+            )
+            .is_err()
+        );
+        assert!(
+            LocalCache::new_with_scope_capacity(
+                LocalCacheConfig {
+                    directory: dir.path().join("too-many"),
+                    memory_bytes: 1,
+                    disk_bytes: 1,
+                    max_entries: 1,
+                    max_blob_bytes: 1
+                },
+                1_000_001
+            )
+            .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn administrative_revocation_works_with_eight_held_disk_permits_and_seals() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "saturated", 2);
+        let scope = proof_scope("d", 1);
+        let old = lease(&cache, scope.clone());
+        let token = cache.identity_epoch(&scope.identity).unwrap();
+        let mut permits = Vec::new();
+        for _ in 0..8 {
+            permits.push(cache.io_permit().await.unwrap());
+        }
+        cache.revoke_identity_admission(&scope.identity).unwrap();
+        assert!(!old.is_current().unwrap());
+        assert!(
+            cache
+                .register_scope_lease(scope.clone(), IntegrityPolicy::Opaque, token)
+                .is_err()
+        );
+        let current = lease(&cache, scope.clone());
+        assert!(current.is_current().unwrap());
+        drop(permits);
+        cache.shutdown().await.unwrap();
+        assert!(current.is_current().is_err());
+        assert!(cache.identity_epoch(&scope.identity).is_err());
+        assert!(
+            cache
+                .current_scope_lease(&scope, IntegrityPolicy::Opaque)
+                .is_err()
+        );
+        assert!(cache.revoke_identity_admission(&scope.identity).is_err());
+        assert_eq!(cache.scope_policy(&scope), None);
+    }
+    #[test]
+    fn authority_epoch_overflow_stays_failed_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "overflow", 2);
+        let scope = proof_scope("d", 1);
+        let retained = lease(&cache, scope.clone());
+        cache
+            .state
+            .lock()
+            .unwrap()
+            .identities
+            .get_mut(&scope.identity)
+            .unwrap()
+            .epoch = u64::MAX;
+        assert!(cache.revoke_identity_admission(&scope.identity).is_err());
+        assert!(retained.is_current().is_err());
+        assert_eq!(cache.scope_policy(&scope), None);
+        assert!(cache.identity_epoch(&scope.identity).is_err());
+    }
+    #[test]
+    fn poisoned_authority_index_stays_failed_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "poison", 2);
+        let scope = proof_scope("d", 1);
+        let retained = lease(&cache, scope.clone());
+        let held = cache.clone();
+        let joined = std::thread::spawn(move || {
+            let _index = held.state.lock().unwrap();
+            panic!("controlled admission index poison");
+        })
+        .join();
+        assert!(joined.is_err(), "actual poison thread must join");
+        assert!(retained.is_current().is_err());
+        assert_eq!(cache.scope_policy(&scope), None);
+        assert!(cache.identity_epoch(&scope.identity).is_err());
+    }
+
+    #[test]
+    fn twenty_thousand_scopes_fit_without_raising_the_single_blob_entry_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "production-shape-capacity", 20_000);
+        let leases: Vec<_> = (0..20_000)
+            .map(|i| lease(&cache, proof_scope(&format!("sandbox-{i}"), 1)))
+            .collect();
+        assert_eq!(cache.state.lock().unwrap().scopes.len(), 20_000);
+        assert_eq!(cache.state.lock().unwrap().identities.len(), 20_000);
+        assert!(
+            cache
+                .identity_epoch(&proof_scope("sandbox-one-too-many", 1).identity)
+                .is_err()
+        );
+        assert_eq!(cache.config.max_entries, 1);
+        assert_eq!(cache.io_permits.available_permits(), 8);
+        assert_eq!(cache.usage(), (0, 0, 0));
+        drop(leases);
+        assert!(cache.state.lock().unwrap().scopes.is_empty());
+        assert_eq!(cache.state.lock().unwrap().identities.len(), 20_000);
+    }
+
+    #[test]
+    fn adoption_refuses_unknown_scope_and_policy_mismatch_without_reserving_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = proof_cache(&dir, "policy", 2);
+        let scope = proof_scope("known", 1);
+        let unknown = proof_scope("unknown", 1);
+        assert!(
+            cache
+                .current_scope_lease(&unknown, IntegrityPolicy::Opaque)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(cache.scope_policy(&unknown), None);
+        assert!(
+            cache.state.lock().unwrap().identities.is_empty(),
+            "lookup reserved an incoming unknown identity"
+        );
+        let retained = lease(&cache, scope.clone());
+        assert!(
+            cache
+                .current_scope_lease(&scope, IntegrityPolicy::Sha256Prefixed)
+                .unwrap()
+                .is_none()
+        );
+        let token = cache.identity_epoch(&scope.identity).unwrap();
+        assert!(
+            cache
+                .register_scope_lease(scope.clone(), IntegrityPolicy::Sha256Prefixed, token)
+                .is_err()
+        );
+        assert!(
+            retained.is_current().unwrap(),
+            "policy mismatch changed the already proven policy"
+        );
+        assert_eq!(cache.scope_policy(&scope), Some(IntegrityPolicy::Opaque));
     }
 }
 

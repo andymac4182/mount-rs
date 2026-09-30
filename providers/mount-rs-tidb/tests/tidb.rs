@@ -804,3 +804,195 @@ async fn actual_tidb_conditional_metadata_load() {
     drop(connection);
     pool.disconnect().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+async fn actual_tidb_ten_way_virgin_inode_open() {
+    use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+    let url = tidb_url();
+    assert_actual_tidb(&url).await;
+    let volume = unique_volume_key();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(10));
+    let mut tasks = Vec::new();
+    for index in 0..10 {
+        let url = url.clone();
+        let volume = volume.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            let options = TidbStorageOptions::new(volume).with_durable(true);
+            let metadata = TidbMetadataStore::connect_with_options(&url, options.clone())
+                .await
+                .unwrap();
+            let blocks = TidbBlockStore::connect_with_options(&url, options)
+                .await
+                .unwrap();
+            barrier.wait().await;
+            let opened = ChunkedFs::open(
+                metadata.clone(),
+                blocks.clone(),
+                ChunkedOptions::fixed(format!("virgin-{index}"), 4096)
+                    .unwrap()
+                    .with_inode_updates(true),
+            )
+            .await;
+            (opened, metadata, blocks)
+        }));
+    }
+    let mut opened = Vec::new();
+    let mut errors = Vec::new();
+    for task in tasks {
+        let (result, metadata, blocks) = task.await.unwrap();
+        match result {
+            Ok(fs) => opened.push((fs, metadata, blocks)),
+            Err(error) => {
+                errors.push(error);
+                metadata.close().await.unwrap();
+                blocks.close().await.unwrap();
+            }
+        }
+    }
+    let successes = opened.len();
+    if let Some((first, _, _)) = opened.first() {
+        first
+            .write_file("/oracle", b"ten-way virgin inode authority")
+            .await
+            .unwrap();
+        for (fs, _, _) in &opened {
+            let handle = fs.open("/oracle", "r", 0).await.unwrap();
+            let mut bytes = [0; 30];
+            let count = handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes[..count], b"ten-way virgin inode authority");
+            handle.close().await.unwrap();
+        }
+        first.unlink("/oracle").await.unwrap();
+    }
+    for (fs, metadata, blocks) in opened {
+        fs.shutdown().await.unwrap();
+        metadata.close().await.unwrap();
+        blocks.close().await.unwrap();
+    }
+    let pool = Pool::from_url(&url).unwrap();
+    let mut conn = pool.get_conn().await.unwrap();
+    for table in [
+        "mount_rs_tidb_inodes",
+        "mount_rs_tidb_metadata",
+        "mount_rs_tidb_blocks",
+        "mount_rs_tidb_block_authority",
+    ] {
+        conn.exec_drop(
+            format!("DELETE FROM {table} WHERE volume_key=?"),
+            (&volume,),
+        )
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    pool.disconnect().await.unwrap();
+    assert_eq!(successes, 10, "virgin opens failed: {errors:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+async fn actual_tidb_context_keeps_siblings_and_bounds_sessions() {
+    use mount_rs_tidb::TidbPoolContext;
+    let url = tidb_url();
+    assert_actual_tidb(&url).await;
+    let key = unique_volume_key();
+    // Existing private connect/clone is deliberately still a single owned pool.
+    let private = TidbMetadataStore::connect_with_key(&url, format!("{key}-private"))
+        .await
+        .unwrap();
+    let clone = private.clone();
+    private.close().await.unwrap();
+    assert!(
+        clone.flush().await.is_err(),
+        "naively sharing a private pool would disconnect siblings"
+    );
+
+    let context = TidbPoolContext::new(&url, 2).unwrap();
+    let first = context
+        .metadata(TidbStorageOptions::new(&key).with_durable(true))
+        .await
+        .unwrap();
+    let sibling = context
+        .metadata(TidbStorageOptions::new(format!("{key} ")).with_durable(true))
+        .await
+        .unwrap();
+    let blocks = context
+        .blocks(TidbStorageOptions::new(&key).with_durable(true))
+        .await
+        .unwrap();
+    let lease = first
+        .acquire_writer("first", Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(sibling.load().await.unwrap().revision, 0);
+    first.release_writer(&lease).await.unwrap();
+    first.close().await.unwrap();
+    assert!(context.metadata(TidbStorageOptions::new("")).await.is_err());
+    sibling.flush().await.unwrap();
+    let id = blocks.put(b"context sibling bytes").await.unwrap();
+    assert_eq!(blocks.get(&id).await.unwrap(), b"context sibling bytes");
+    blocks.delete(&id).await.unwrap();
+    sibling.close().await.unwrap();
+    blocks.close().await.unwrap();
+    context.close().await.unwrap();
+    assert!(sibling.flush().await.is_err());
+    assert!(
+        context
+            .metadata(TidbStorageOptions::new(&key))
+            .await
+            .is_err()
+    );
+    context.close().await.unwrap();
+    let pool = Pool::from_url(&url).unwrap();
+    let mut conn = pool.get_conn().await.unwrap();
+    for volume in [&key, &format!("{key} "), &format!("{key}-private")] {
+        for table in [
+            "mount_rs_tidb_inodes",
+            "mount_rs_tidb_metadata",
+            "mount_rs_tidb_blocks",
+            "mount_rs_tidb_block_authority",
+        ] {
+            conn.exec_drop(format!("DELETE FROM {table} WHERE volume_key=?"), (volume,))
+                .await
+                .unwrap();
+        }
+    }
+    drop(conn);
+    pool.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires actual TiDB with create-database privilege and MOUNT_RS_TIDB_URL"]
+async fn actual_tidb_context_schema_initialization_retries_after_failed_connect() {
+    let url = tidb_url();
+    let database = unique_volume_key().replace('-', "_");
+    let mut scoped = url::Url::parse(&url).unwrap();
+    scoped.set_path(&format!("/{database}"));
+    let context = mount_rs_tidb::TidbPoolContext::new(scoped.as_str(), 1).unwrap();
+    assert!(
+        context
+            .metadata(TidbStorageOptions::new("first"))
+            .await
+            .is_err()
+    );
+    let admin = Pool::from_url(&url).unwrap();
+    let mut conn = admin.get_conn().await.unwrap();
+    conn.query_drop(format!("CREATE DATABASE `{database}`"))
+        .await
+        .unwrap();
+    let retried = context.metadata(TidbStorageOptions::new("first")).await;
+    let sibling = context.metadata(TidbStorageOptions::new("second")).await;
+    context.close().await.unwrap();
+    conn.query_drop(format!("DROP DATABASE `{database}`"))
+        .await
+        .unwrap();
+    drop(conn);
+    admin.disconnect().await.unwrap();
+    assert!(retried.is_ok(), "schema initializer must remain retryable");
+    assert!(
+        sibling.is_ok(),
+        "each volume row must initialize independently"
+    );
+}

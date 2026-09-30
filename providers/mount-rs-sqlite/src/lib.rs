@@ -5,6 +5,21 @@ mod storage;
 pub use io_diagnostics::{connection_page_diagnostics, sqlite_io_diagnostics};
 pub use storage::{SqliteBlockStore, SqliteMetadataStore};
 
+/// Construction-time SQLite journal policy. Preserve never assigns journal mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SqliteJournalMode {
+    #[default]
+    Preserve,
+    /// Require WAL on a qualified local file, retaining FULL synchronization.
+    Wal,
+}
+
+/// Options for independently configured SQLite metadata and block providers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SqliteStorageOptions {
+    pub journal_mode: SqliteJournalMode,
+}
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

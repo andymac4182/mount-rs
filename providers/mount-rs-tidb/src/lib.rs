@@ -30,10 +30,15 @@
 //! acknowledged database commit, but host/cluster durability still depends on
 //! the TiDB/TiKV deployment and its replication/sync-log configuration. The
 //! provider therefore never infers durability from a URL.
+//!
+//! `TidbPoolContext::inspect_namespace_presence` can inspect one exact key
+//! before opening its stores. It prepares shared schemas and verified sessions,
+//! but inserts no namespace rows. Its result is an observation, not a reservation.
 
 mod storage;
 
 pub use storage::{
-    DEFAULT_MAX_BLOCK_BYTES, DEFAULT_MAX_NAMESPACE_BYTES, TidbBlockStore, TidbMetadataStore,
+    DEFAULT_MAX_BLOCK_BYTES, DEFAULT_MAX_NAMESPACE_BYTES, TIDB_DIAGNOSTIC_COVERAGE, TidbBlockStore,
+    TidbDiagnosticCoverage, TidbMetadataStore, TidbNamespacePresence, TidbPoolContext,
     TidbStorageOptions,
 };

@@ -3,6 +3,7 @@
 use mount_rs_core::diagnostics::profile::{Event, Span};
 
 use std::collections::BTreeMap;
+use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,9 +13,12 @@ use mount_rs_remote_protocol::{Operation, OperationName, WireError};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::auth::authorize_drive;
+use crate::auth::authorize_prepared_drive;
 use crate::catalog::{CatalogStore, Permission};
-use crate::request_metadata::{AuditRecord, MatchingGrants, policy_matches, write_audit};
+use crate::request_metadata::{
+    AuditRecord, MatchingGrants, PreparedCatalog, PreparedCatalogCache, policy_matches, write_audit,
+};
+use crate::runtime_pool::{DriveRegistration, RuntimeHandle, RuntimeLease};
 
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
@@ -37,7 +41,48 @@ struct HandleState {
     next: u64,
     closed: bool,
     revision: Option<u64>,
-    entries: BTreeMap<u64, (String, u64, Arc<dyn FileHandle>)>,
+    entries: BTreeMap<u64, (String, u64, Arc<RuntimeHandle>)>,
+    pending: Vec<PendingClose>,
+}
+
+/// The task retains the actual close future across cancellation of any waiter.
+/// Completion is shared so revision cleanup and shutdown can join the same close.
+#[derive(Clone)]
+struct PendingClose {
+    receiver: tokio::sync::watch::Receiver<Option<mount_rs_core::Result<()>>>,
+}
+impl PendingClose {
+    async fn wait(mut self) -> mount_rs_core::Result<()> {
+        loop {
+            if let Some(result) = self.receiver.borrow().clone() {
+                return result;
+            }
+            if self.receiver.changed().await.is_err() {
+                return Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio)
+                    .with_syscall("handle cleanup"));
+            }
+        }
+    }
+}
+impl HandleState {
+    fn prune_closes(&mut self) {
+        self.pending
+            .retain(|close| !matches!(&*close.receiver.borrow(), Some(Ok(()))));
+    }
+    fn schedule_close(&mut self, handle: Arc<RuntimeHandle>) -> PendingClose {
+        self.prune_closes();
+        let close = PendingClose {
+            receiver: handle.close_completion(),
+        };
+        self.pending.push(close.clone());
+        close
+    }
+    fn schedule_entries(&mut self) {
+        // No await between removing handles and giving every close future an owner.
+        for (_, (_, _, handle)) in std::mem::take(&mut self.entries) {
+            self.schedule_close(handle);
+        }
+    }
 }
 
 fn handle_matches(
@@ -89,24 +134,52 @@ fn admit_handle(
 }
 
 impl SessionHandles {
-    async fn insert(
+    #[cfg(test)]
+    fn insert<'a>(
+        &'a self,
+        drive: &'a str,
+        revision: u64,
+        handle: Arc<dyn FileHandle>,
+    ) -> impl std::future::Future<Output = Result<u64, WireError>> + Send + 'a {
+        self.insert_bound(drive, revision, handle, None)
+    }
+
+    fn insert_bound<'a>(
+        &'a self,
+        drive: &'a str,
+        revision: u64,
+        handle: Arc<dyn FileHandle>,
+        runtime: Option<&RuntimeLease>,
+    ) -> impl std::future::Future<Output = Result<u64, WireError>> + Send + 'a + use<'a> {
+        // Adoption runs before the future is constructed or a session lock can
+        // suspend admission. Dropping this future still owns exact close.
+        let handle = runtime.map_or_else(
+            || RuntimeHandle::unmanaged(Arc::clone(&handle)),
+            |runtime| runtime.wrap_handle(Arc::clone(&handle)),
+        );
+        self.insert_owned(drive, revision, handle)
+    }
+
+    async fn insert_owned(
         &self,
         drive: &str,
         revision: u64,
-        handle: Arc<dyn FileHandle>,
+        handle: Arc<RuntimeHandle>,
     ) -> Result<u64, WireError> {
         let mut state = self.state.lock().await;
+        state.prune_closes();
         let next = match admit_handle(
             state.closed,
             state.revision,
             revision,
-            state.entries.len(),
+            state.entries.len() + state.pending.len(),
             state.next,
         ) {
             Ok(next) => next,
             Err(reason) => {
+                let close = state.schedule_close(handle);
                 drop(state);
-                let _ = handle.close().await;
+                let _ = close.wait().await;
                 return Err(error(reason.code()));
             }
         };
@@ -118,32 +191,65 @@ impl SessionHandles {
         Ok(id)
     }
 
-    async fn refresh_revision(&self, revision: u64) {
-        let mut state = self.state.lock().await;
+    async fn refresh_revision(&self, revision: u64) -> bool {
+        let (mut state, mut waited) = observe_wait(self.state.lock()).await;
         if state.closed || state.revision.is_some_and(|current| current >= revision) {
-            return;
+            return waited;
         }
         state.revision = Some(revision);
-        let entries = std::mem::take(&mut state.entries);
+        state.schedule_entries();
+        let pending = state.pending.clone();
         drop(state);
-        for (_, (_, _, handle)) in entries {
-            let _ = handle.close().await;
+        for close in pending {
+            let (_, close_waited) = observe_wait(close.wait()).await;
+            waited |= close_waited;
         }
+        waited
     }
 
     pub(crate) async fn is_closed(&self) -> bool {
         self.state.lock().await.closed
     }
 
+    async fn close_handle(&self, id: u64, drive_id: &str, revision: u64) -> Result<(), WireError> {
+        let mut state = self.state.lock().await;
+        let (drive, stored_revision, handle) =
+            state.entries.get(&id).ok_or_else(|| error("EBADF"))?;
+        if !handle_matches(drive, drive_id, *stored_revision, revision) {
+            return Err(error("EBADF"));
+        }
+        let handle = Arc::clone(handle);
+        state.entries.remove(&id);
+        let close = state.schedule_close(handle);
+        drop(state);
+        close.wait().await.map_err(fs_error)
+    }
+
     pub async fn close_all(&self) {
         let mut state = self.state.lock().await;
         state.closed = true;
-        let entries = std::mem::take(&mut state.entries);
+        state.schedule_entries();
+        let pending = state.pending.clone();
         drop(state);
-        for (_, (_, _, handle)) in entries {
-            let _ = handle.close().await;
+        for close in pending {
+            let _ = close.wait().await;
         }
     }
+}
+
+/// Tracks actual suspension without allocating a second boxed future.
+async fn observe_wait<F: Future>(future: F) -> (F::Output, bool) {
+    tokio::pin!(future);
+    let mut waited = false;
+    let output = poll_fn(|context| match future.as_mut().poll(context) {
+        std::task::Poll::Pending => {
+            waited = true;
+            std::task::Poll::Pending
+        }
+        std::task::Poll::Ready(output) => std::task::Poll::Ready(output),
+    })
+    .await;
+    (output, waited)
 }
 
 #[derive(Clone, Copy)]
@@ -161,9 +267,15 @@ enum PayloadMode<'a> {
     },
 }
 
+enum DriveBinding {
+    Eager(Arc<dyn FsDriver>),
+    Lazy(DriveRegistration),
+}
+
 pub struct DriveDispatcher {
     catalog: Arc<dyn CatalogStore>,
-    drives: BTreeMap<String, BTreeMap<String, Arc<dyn FsDriver>>>,
+    prepared_catalog: PreparedCatalogCache,
+    drives: BTreeMap<String, BTreeMap<String, DriveBinding>>,
     definitions: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
@@ -172,6 +284,7 @@ impl DriveDispatcher {
     pub fn new(catalog: Arc<dyn CatalogStore>) -> Self {
         Self {
             catalog,
+            prepared_catalog: PreparedCatalogCache::default(),
             drives: BTreeMap::new(),
             definitions: BTreeMap::new(),
         }
@@ -187,7 +300,7 @@ impl DriveDispatcher {
         if partition.contains_key(drive_id) {
             return Err("duplicate Drive registration");
         }
-        partition.insert(drive_id.to_owned(), driver);
+        partition.insert(drive_id.to_owned(), DriveBinding::Eager(driver));
         Ok(())
     }
 
@@ -206,19 +319,50 @@ impl DriveDispatcher {
         Ok(())
     }
 
+    /// Register an immutable lazy route without opening its storage providers.
+    pub fn register_lazy_definition(
+        &mut self,
+        partition_id: &str,
+        drive_id: &str,
+        definition: Value,
+        registration: DriveRegistration,
+    ) -> Result<(), &'static str> {
+        let partition = self.drives.entry(partition_id.to_owned()).or_default();
+        if partition.contains_key(drive_id) {
+            return Err("duplicate Drive registration");
+        }
+        partition.insert(drive_id.to_owned(), DriveBinding::Lazy(registration));
+        self.definitions
+            .entry(partition_id.to_owned())
+            .or_default()
+            .insert(drive_id.to_owned(), definition);
+        Ok(())
+    }
+
     pub async fn renewal_matches(&self, current: &SessionIdentity, next: &SessionIdentity) -> bool {
-        let Ok(catalog) = self.catalog.load_shared_current().await else {
-            return false;
-        };
-        catalog
-            .grants
-            .values()
-            .filter(|g| g.partition_id == current.partition_id && g.policy_id == current.policy_id)
-            .flat_map(|g| g.claim_conditions.keys())
-            .all(|pointer| {
-                crate::request_metadata::claim_pointer(&current.claims, pointer)
-                    == crate::request_metadata::claim_pointer(&next.claims, pointer)
-            })
+        loop {
+            let Ok(catalog) = self.catalog.load_shared_current().await else {
+                return false;
+            };
+            let Ok(prepared) = self.prepared_catalog.prepare(catalog) else {
+                return false;
+            };
+            if prepared.waited {
+                continue;
+            }
+            return prepared
+                .catalog
+                .candidates(&current.partition_id, &current.policy_id)
+                .map(|(_, grant)| grant)
+                .filter(|g| {
+                    g.partition_id == current.partition_id && g.policy_id == current.policy_id
+                })
+                .flat_map(|g| g.claim_conditions.keys())
+                .all(|pointer| {
+                    crate::request_metadata::claim_pointer(&current.claims, pointer)
+                        == crate::request_metadata::claim_pointer(&next.claims, pointer)
+                });
+        }
     }
 
     pub async fn dispatch(
@@ -309,6 +453,186 @@ impl DriveDispatcher {
         output.ok_or_else(|| error("EIO"))
     }
 
+    async fn authorize_request(
+        &self,
+        identity: &SessionIdentity,
+        drive_id: &str,
+        operation: &Operation,
+        handles: &SessionHandles,
+    ) -> Result<(Arc<PreparedCatalog>, Permission), WireError> {
+        let _authorization_profile = Span::new(Event::Authorization);
+        loop {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| error("EIO"))?
+                .as_secs() as i64;
+            if now >= identity.expires_at {
+                handles.close_all().await;
+                return Err(error("EACCES"));
+            }
+            let catalog = match self.catalog.load_shared_current().await {
+                Ok(catalog) => catalog,
+                Err(_) => {
+                    handles.close_all().await;
+                    return Err(error("EACCES"));
+                }
+            };
+            if handles.refresh_revision(catalog.revision).await {
+                // Cleanup or the session lock actually suspended this request.
+                // Repeat every check against a new snapshot, even at the same revision.
+                continue;
+            }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| error("EIO"))?
+                .as_secs() as i64;
+            if now >= identity.expires_at {
+                handles.close_all().await;
+                return Err(error("EACCES"));
+            }
+            let policy = catalog
+                .issuer_policies
+                .get(&identity.policy_id)
+                .ok_or_else(|| error("EACCES"))?;
+            if !policy_matches(policy, identity) {
+                return Err(error("EACCES"));
+            }
+            let prepared = self
+                .prepared_catalog
+                .prepare(catalog)
+                .map_err(|_| error("EACCES"))?;
+            if prepared.waited {
+                // A contended index lock can block too. Repeat the same checks
+                // required after session/lazy-runtime suspension.
+                continue;
+            }
+            let catalog = prepared.catalog;
+            let permission = authorize_prepared_drive(
+                &catalog,
+                &identity.policy_id,
+                &identity.claims,
+                &identity.partition_id,
+                drive_id,
+            )
+            .ok_or_else(|| error("EACCES"))?;
+            if !permission_allows(permission, operation.required_permission()) {
+                return Err(error("EACCES"));
+            }
+            if let Some(definition) = self
+                .definitions
+                .get(identity.partition_id.as_str())
+                .and_then(|partition| partition.get(drive_id))
+                && catalog
+                    .snapshot()
+                    .partitions
+                    .get(&identity.partition_id)
+                    .and_then(|p| p.drives.get(drive_id))
+                    .is_none_or(|d| d.driver != *definition)
+            {
+                return Err(error("ESTALE"));
+            }
+            return Ok((catalog, permission));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_handle(
+        &self,
+        drive_id: &str,
+        operation: &Operation,
+        handles: &SessionHandles,
+        request_id: u64,
+        revision: u64,
+        mode: PayloadMode<'_>,
+        raw_output: &mut Option<IoResult>,
+    ) -> Result<Value, WireError> {
+        let body = &operation.body;
+
+        let id = match mode {
+            PayloadMode::Json => number(body, "handle")?,
+            PayloadMode::Read { handle, .. } | PayloadMode::Write { handle, .. } => handle,
+        };
+        let wait_profile = Span::new(Event::HandleWait);
+        let state = handles.state.lock().await;
+        drop(wait_profile);
+        let (drive, stored_revision, handle) =
+            state.entries.get(&id).ok_or_else(|| error("EBADF"))?;
+        if !handle_matches(drive, drive_id, *stored_revision, revision) {
+            return Err(error("EBADF"));
+        }
+        let handle = Arc::clone(handle);
+        if operation.name == OperationName::HandleClose {
+            drop(state);
+            handles.close_handle(id, drive_id, revision).await?;
+            return Ok(Value::Null);
+        }
+        drop(state);
+        match operation.name {
+            OperationName::HandleRead => {
+                let (length, read_position) = match mode {
+                    PayloadMode::Read {
+                        length, position, ..
+                    } => (length as u64, position),
+                    _ => (number(body, "length")?, position(body)?),
+                };
+                if length > 1024 * 1024 {
+                    return Err(error("EINVAL"));
+                }
+                let mut data = vec![0; length as usize];
+                let read = handle.read(&mut data, read_position).await;
+                let count = checked_read_result(read, data.len(), |fields| {
+                    read_failure_diagnostic(request_id, drive_id, read_position, fields);
+                })?;
+                data.truncate(count);
+                // v2 returns the filesystem-owned raw buffer. Legacy
+                // dispatch retains its exact JSON result representation.
+                if matches!(mode, PayloadMode::Read { .. }) {
+                    *raw_output = Some(IoResult::Read(data));
+                    Ok(Value::Null)
+                } else {
+                    encode(data)
+                }
+            }
+            OperationName::HandleWrite => {
+                if let PayloadMode::Write { data, position, .. } = mode {
+                    if data.len() > 1024 * 1024 {
+                        return Err(error("EINVAL"));
+                    }
+                    let count = handle.write(data, position).await.map_err(fs_error)?;
+                    if count > data.len() {
+                        return Err(error("EIO"));
+                    }
+                    *raw_output = Some(IoResult::Write(count));
+                    Ok(Value::Null)
+                } else {
+                    encode(
+                        handle
+                            .write(&bytes(body)?, position(body)?)
+                            .await
+                            .map_err(fs_error)?,
+                    )
+                }
+            }
+            OperationName::HandleStat => encode(handle.stat().await.map_err(fs_error)?),
+            OperationName::HandleTruncate => {
+                handle
+                    .truncate(number(body, "length")?)
+                    .await
+                    .map_err(fs_error)?;
+                Ok(Value::Null)
+            }
+            OperationName::HandleSync => {
+                handle.sync().await.map_err(fs_error)?;
+                Ok(Value::Null)
+            }
+            OperationName::HandleDatasync => {
+                handle.datasync().await.map_err(fs_error)?;
+                Ok(Value::Null)
+            }
+            _ => unreachable!(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_mode(
         &self,
@@ -321,61 +645,45 @@ impl DriveDispatcher {
         raw_output: &mut Option<IoResult>,
     ) -> Result<Value, WireError> {
         let _dispatch_profile = Span::new(Event::Dispatch);
-        let authorization_profile = Span::new(Event::Authorization);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| error("EIO"))?
-            .as_secs() as i64;
-        if now >= identity.expires_at {
-            handles.close_all().await;
-            return Err(error("EACCES"));
-        }
-        let catalog = match self.catalog.load_shared_current().await {
-            Ok(catalog) => catalog,
-            Err(_) => {
-                handles.close_all().await;
-                return Err(error("EACCES"));
-            }
-        };
-        handles.refresh_revision(catalog.revision).await;
-        let policy = catalog
-            .issuer_policies
-            .get(&identity.policy_id)
-            .ok_or_else(|| error("EACCES"))?;
-        if !policy_matches(policy, identity) {
-            return Err(error("EACCES"));
-        }
-        let permission = authorize_drive(
-            &catalog,
-            &identity.policy_id,
-            &identity.claims,
-            &identity.partition_id,
-            drive_id,
-        )
-        .ok_or_else(|| error("EACCES"))?;
-        if !permission_allows(permission, operation.required_permission()) {
-            return Err(error("EACCES"));
-        }
-        if let Some(definition) = self
-            .definitions
-            .get(identity.partition_id.as_str())
-            .and_then(|partition| partition.get(drive_id))
-            && catalog
-                .partitions
-                .get(&identity.partition_id)
-                .and_then(|p| p.drives.get(drive_id))
-                .is_none_or(|d| d.driver != *definition)
-        {
-            return Err(error("ESTALE"));
-        }
-        let driver = self
+        let (mut catalog, mut permission) = self
+            .authorize_request(identity, drive_id, operation, handles)
+            .await?;
+        let binding = self
             .drives
             .get(identity.partition_id.as_str())
             .and_then(|partition| partition.get(drive_id))
             .ok_or_else(|| error("EACCES"))?;
-        drop(authorization_profile);
+        let mut runtime = None;
+        let driver = if is_handle_operation(operation.name) {
+            // Existing handles retain their original generation. Invalid handles
+            // cannot activate a cold Drive as a side effect of lookup.
+            None
+        } else {
+            match binding {
+                DriveBinding::Eager(driver) => Some(Arc::clone(driver)),
+                DriveBinding::Lazy(registration) => {
+                    let acquired = registration.acquire().await.map_err(fs_error)?;
+                    if acquired.waited() {
+                        (catalog, permission) = self
+                            .authorize_request(identity, drive_id, operation, handles)
+                            .await?;
+                    }
+                    acquired.healthy().map_err(fs_error)?;
+                    let driver = Arc::clone(acquired.driver());
+                    runtime = Some(acquired);
+                    Some(driver)
+                }
+            }
+        };
+        let mut mutation = runtime
+            .as_ref()
+            .filter(|_| {
+                operation.required_permission() == mount_rs_remote_protocol::Permission::Write
+            })
+            .map(RuntimeLease::mutation_guard);
         let body = &operation.body;
-        let result = async {
+        let result = if let Some(driver) = &driver {
+            async {
             match operation.name {
                 OperationName::Capabilities => {
                     let mut capabilities = driver.capabilities();
@@ -405,7 +713,7 @@ impl DriveDispatcher {
                             Ok(serde_json::json!({"kind":"created","identity":identity}))
                         }
                         mount_rs_core::GuardedMutationResult::Opened { handle, identity } => {
-                            let id = handles.insert(drive_id, catalog.revision, handle).await?;
+                            let id = handles.insert_bound(drive_id, catalog.snapshot().revision, handle, runtime.as_ref()).await?;
                             Ok(serde_json::json!({"kind":"opened","identity":identity,"handle":id}))
                         }
                     }
@@ -447,106 +755,11 @@ impl DriveDispatcher {
                             .await
                     }
                     .map_err(fs_error)?;
-                    encode(handles.insert(drive_id, catalog.revision, handle).await?)
+                    encode(handles.insert_bound(drive_id, catalog.snapshot().revision, handle, runtime.as_ref()).await?)
                 }
-                OperationName::HandleRead
-                | OperationName::HandleStat
-                | OperationName::HandleWrite
-                | OperationName::HandleTruncate
-                | OperationName::HandleSync
-                | OperationName::HandleDatasync
-                | OperationName::HandleClose => {
-                    let id = match mode {
-                        PayloadMode::Json => number(body, "handle")?,
-                        PayloadMode::Read { handle, .. } | PayloadMode::Write { handle, .. } => {
-                            handle
-                        }
-                    };
-                    let wait_profile = Span::new(Event::HandleWait);
-                    let mut state = handles.state.lock().await;
-                    drop(wait_profile);
-                    let (drive, revision, handle) =
-                        state.entries.get(&id).ok_or_else(|| error("EBADF"))?;
-                    if !handle_matches(drive, drive_id, *revision, catalog.revision) {
-                        return Err(error("EBADF"));
-                    }
-                    let handle = Arc::clone(handle);
-                    if operation.name == OperationName::HandleClose {
-                        state.entries.remove(&id);
-                    }
-                    drop(state);
-                    match operation.name {
-                        OperationName::HandleRead => {
-                            let (length, read_position) = match mode {
-                                PayloadMode::Read {
-                                    length, position, ..
-                                } => (length as u64, position),
-                                _ => (number(body, "length")?, position(body)?),
-                            };
-                            if length > 1024 * 1024 {
-                                return Err(error("EINVAL"));
-                            }
-                            let mut data = vec![0; length as usize];
-                            let count = handle
-                                .read(&mut data, read_position)
-                                .await
-                                .map_err(fs_error)?;
-                            if count > data.len() {
-                                return Err(error("EIO"));
-                            }
-                            data.truncate(count);
-                            // v2 returns the filesystem-owned raw buffer. Legacy
-                            // dispatch retains its exact JSON result representation.
-                            if matches!(mode, PayloadMode::Read { .. }) {
-                                *raw_output = Some(IoResult::Read(data));
-                                Ok(Value::Null)
-                            } else {
-                                encode(data)
-                            }
-                        }
-                        OperationName::HandleWrite => {
-                            if let PayloadMode::Write { data, position, .. } = mode {
-                                if data.len() > 1024 * 1024 {
-                                    return Err(error("EINVAL"));
-                                }
-                                let count = handle.write(data, position).await.map_err(fs_error)?;
-                                if count > data.len() {
-                                    return Err(error("EIO"));
-                                }
-                                *raw_output = Some(IoResult::Write(count));
-                                Ok(Value::Null)
-                            } else {
-                                encode(
-                                    handle
-                                        .write(&bytes(body)?, position(body)?)
-                                        .await
-                                        .map_err(fs_error)?,
-                                )
-                            }
-                        }
-                        OperationName::HandleStat => encode(handle.stat().await.map_err(fs_error)?),
-                        OperationName::HandleTruncate => {
-                            handle
-                                .truncate(number(body, "length")?)
-                                .await
-                                .map_err(fs_error)?;
-                            Ok(Value::Null)
-                        }
-                        OperationName::HandleSync => {
-                            handle.sync().await.map_err(fs_error)?;
-                            Ok(Value::Null)
-                        }
-                        OperationName::HandleDatasync => {
-                            handle.datasync().await.map_err(fs_error)?;
-                            Ok(Value::Null)
-                        }
-                        OperationName::HandleClose => {
-                            handle.close().await.map_err(fs_error)?;
-                            Ok(Value::Null)
-                        }
-                        _ => unreachable!(),
-                    }
-                }
+                OperationName::HandleRead | OperationName::HandleStat | OperationName::HandleWrite
+                | OperationName::HandleTruncate | OperationName::HandleSync | OperationName::HandleDatasync
+                | OperationName::HandleClose => Err(error("EINVAL")),
                 OperationName::Write => {
                     driver
                         .write_file(path(body)?, &bytes(body)?)
@@ -671,7 +884,22 @@ impl DriveDispatcher {
                 }
             }
         }
-        .await;
+        .await
+        } else {
+            self.dispatch_handle(
+                drive_id,
+                operation,
+                handles,
+                request_id,
+                catalog.snapshot().revision,
+                mode,
+                raw_output,
+            )
+            .await
+        };
+        if let Some(mutation) = &mut mutation {
+            mutation.complete();
+        }
         if request_id != 0 {
             let _audit_profile = Span::new(Event::Audit);
             let record = AuditRecord {
@@ -752,6 +980,19 @@ fn audit_line_preserves_json_with_bounded_writer_fragments() {
     }
 }
 
+fn is_handle_operation(name: OperationName) -> bool {
+    matches!(
+        name,
+        OperationName::HandleRead
+            | OperationName::HandleStat
+            | OperationName::HandleWrite
+            | OperationName::HandleTruncate
+            | OperationName::HandleSync
+            | OperationName::HandleDatasync
+            | OperationName::HandleClose
+    )
+}
+
 fn path(body: &Value) -> Result<&str, WireError> {
     named_path(body, "path")
 }
@@ -772,6 +1013,133 @@ fn error(code: &str) -> WireError {
     WireError {
         code: code.to_owned(),
     }
+}
+
+/// Bounded local read-error fields. Arbitrary provider error text is excluded.
+#[doc(hidden)]
+#[derive(Debug, serde::Serialize)]
+pub struct ReadFailureFields {
+    pub category: &'static str,
+    pub posix_code: Option<&'static str>,
+    pub syscall: Option<&'static str>,
+    pub returned_count: Option<usize>,
+    pub buffer_length: usize,
+}
+impl ReadFailureFields {
+    pub fn from_parts(
+        code: &str,
+        syscall: Option<&str>,
+        count: Option<usize>,
+        length: usize,
+    ) -> Self {
+        let posix_code = match code {
+            "EPERM" => Some("EPERM"),
+            "ENOENT" => Some("ENOENT"),
+            "EINTR" => Some("EINTR"),
+            "EIO" => Some("EIO"),
+            "ENXIO" => Some("ENXIO"),
+            "EBADF" => Some("EBADF"),
+            "EAGAIN" => Some("EAGAIN"),
+            "ENOMEM" => Some("ENOMEM"),
+            "EACCES" => Some("EACCES"),
+            "EBUSY" => Some("EBUSY"),
+            "EEXIST" => Some("EEXIST"),
+            "EXDEV" => Some("EXDEV"),
+            "ENODEV" => Some("ENODEV"),
+            "ENOTDIR" => Some("ENOTDIR"),
+            "EISDIR" => Some("EISDIR"),
+            "EINVAL" => Some("EINVAL"),
+            "ENFILE" => Some("ENFILE"),
+            "EMFILE" => Some("EMFILE"),
+            "EFBIG" => Some("EFBIG"),
+            "ENOSPC" => Some("ENOSPC"),
+            "ESPIPE" => Some("ESPIPE"),
+            "EROFS" => Some("EROFS"),
+            "EMLINK" => Some("EMLINK"),
+            "ERANGE" => Some("ERANGE"),
+            "ENAMETOOLONG" => Some("ENAMETOOLONG"),
+            "ENOSYS" => Some("ENOSYS"),
+            "ENOTEMPTY" => Some("ENOTEMPTY"),
+            "ELOOP" => Some("ELOOP"),
+            "ENODATA" => Some("ENODATA"),
+            "EPROTO" => Some("EPROTO"),
+            "EOVERFLOW" => Some("EOVERFLOW"),
+            "ENOTSUP" => Some("ENOTSUP"),
+            "ESTALE" => Some("ESTALE"),
+            "EDQUOT" => Some("EDQUOT"),
+            _ => None,
+        };
+        let syscall = match syscall {
+            Some("read") => Some("read"),
+            Some("get") => Some("get"),
+            Some("handle_read") => Some("handle_read"),
+            Some(_) => Some("other"),
+            None => None,
+        };
+        Self {
+            category: if count.is_some_and(|count| count > length) {
+                "driver_count_exceeds_buffer"
+            } else {
+                "driver_error"
+            },
+            posix_code,
+            syscall,
+            returned_count: count,
+            buffer_length: length,
+        }
+    }
+    pub fn try_from_success(count: usize, length: usize) -> Option<Self> {
+        (count > length).then(|| Self::from_parts("EIO", None, Some(count), length))
+    }
+}
+#[cfg(test)]
+async fn checked_handle_read(
+    handle: &dyn FileHandle,
+    data: &mut [u8],
+    position: Option<u64>,
+    emit: impl FnMut(ReadFailureFields),
+) -> Result<usize, WireError> {
+    checked_read_result(handle.read(data, position).await, data.len(), emit)
+}
+fn checked_read_result(
+    result: mount_rs_core::Result<usize>,
+    length: usize,
+    mut emit: impl FnMut(ReadFailureFields),
+) -> Result<usize, WireError> {
+    let count = result.map_err(|failure| {
+        emit(ReadFailureFields::from_parts(
+            failure.code.as_str(),
+            failure.syscall.as_deref(),
+            None,
+            length,
+        ));
+        fs_error(failure)
+    })?;
+    if let Some(fields) = ReadFailureFields::try_from_success(count, length) {
+        emit(fields);
+        return Err(error("EIO"));
+    }
+    Ok(count)
+}
+fn read_failure_diagnostic(
+    request_id: u64,
+    drive: &str,
+    position: Option<u64>,
+    fields: ReadFailureFields,
+) {
+    if std::env::var_os("MOUNT_RS_READ_FAILURE_DIAGNOSTICS").is_none() {
+        return;
+    }
+    // Drive identifiers were validated by dispatch; this event contains no path,
+    // raw FsError message, claims, provider URL, SQL or payload bytes.
+    let utc_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|time| time.as_millis());
+    eprintln!(
+        "{}",
+        serde_json::json!({"event":"remote_read_failure", "utc_unix_ms":utc_unix_ms,"request_id":request_id,"drive_id":drive,"position":position,"failure":fields})
+    );
 }
 
 fn fs_error(error_value: mount_rs_core::FsError) -> WireError {
@@ -908,9 +1276,79 @@ fn validate_guarded_mutation(request: &mount_rs_core::GuardedMutation) -> Result
 }
 
 #[cfg(test)]
+#[path = "lazy_handle_tests.rs"]
+mod lazy_handle_tests;
+
+#[cfg(test)]
+#[path = "grant_index_wait_tests.rs"]
+mod grant_index_wait_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    struct FaultReadHandle {
+        oversized: bool,
+        reads: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl FileHandle for FaultReadHandle {
+        async fn read(&self, buffer: &mut [u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.oversized {
+                Ok(buffer.len() + 1)
+            } else {
+                Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio)
+                    .with_syscall("mysql://user:secret SQL payload")
+                    .with_path("/private-secret"))
+            }
+        }
+        async fn write(&self, _: &[u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            Err(mount_rs_core::FsError::enosys("write"))
+        }
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            Err(mount_rs_core::FsError::enosys("stat"))
+        }
+        async fn truncate(&self, _: u64) -> mount_rs_core::Result<()> {
+            Err(mount_rs_core::FsError::enosys("truncate"))
+        }
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn checked_read_emits_safe_context_and_preserves_eio_without_retry() {
+        for oversized in [false, true] {
+            let mut emitted = Vec::new();
+            let mut data = [0u8; 4096];
+            let handle = FaultReadHandle {
+                oversized,
+                reads: AtomicUsize::new(0),
+            };
+            let result =
+                checked_handle_read(&handle, &mut data, Some(12), |fields| emitted.push(fields))
+                    .await;
+            assert_eq!(result.unwrap_err().code, "EIO");
+            assert_eq!(handle.reads.load(Ordering::SeqCst), 1);
+            assert_eq!(emitted.len(), 1);
+            let fields = &emitted[0];
+            assert_eq!(
+                fields.category,
+                if oversized {
+                    "driver_count_exceeds_buffer"
+                } else {
+                    "driver_error"
+                }
+            );
+            assert_eq!(fields.buffer_length, 4096);
+            assert_eq!(fields.returned_count, oversized.then_some(4097));
+            let encoded = serde_json::to_string(fields).unwrap();
+            for forbidden in ["secret", "SQL", "payload", "mysql", "private"] {
+                assert!(!encoded.contains(forbidden));
+            }
+        }
+    }
+
     struct CountedHandle(Arc<AtomicUsize>);
     #[async_trait::async_trait]
     impl FileHandle for CountedHandle {
@@ -930,6 +1368,107 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+    struct GatedHandle {
+        invocations: Arc<AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        closed: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl FileHandle for GatedHandle {
+        async fn read(&self, _: &mut [u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            Ok(0)
+        }
+        async fn write(&self, _: &[u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            Ok(0)
+        }
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            Err(mount_rs_core::FsError::enosys("stat"))
+        }
+        async fn truncate(&self, _: u64) -> mount_rs_core::Result<()> {
+            Ok(())
+        }
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.closed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_revision_cleanup_retains_every_pending_handle_for_shutdown() {
+        cancelled_cleanup(1).await;
+    }
+    #[tokio::test]
+    async fn cancelled_shutdown_retains_every_pending_handle_until_close_completes() {
+        cancelled_cleanup(0).await;
+    }
+    #[tokio::test]
+    async fn cancelled_explicit_close_retains_exact_future_for_shutdown() {
+        cancelled_cleanup(2).await;
+    }
+    async fn cancelled_cleanup(mode: u8) {
+        let handles = Arc::new(SessionHandles::default());
+        handles.refresh_revision(1).await;
+        let closed = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let id = handles
+            .insert(
+                "data",
+                1,
+                Arc::new(GatedHandle {
+                    invocations: invocations.clone(),
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    closed: closed.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        handles
+            .insert("data", 1, Arc::new(CountedHandle(closed.clone())))
+            .await
+            .unwrap();
+        let task = tokio::spawn({
+            let handles = handles.clone();
+            async move {
+                match mode {
+                    1 => {
+                        handles.refresh_revision(2).await;
+                    }
+                    2 => {
+                        handles.close_handle(id, "data", 1).await.unwrap();
+                    }
+                    _ => handles.close_all().await,
+                }
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let shutdown = tokio::spawn({
+            let handles = handles.clone();
+            async move {
+                handles.close_all().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must retain pending closes after caller cancellation"
+        );
+        release.notify_one();
+        shutdown.await.unwrap();
+        assert_eq!(closed.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            1,
+            "close must never be reinvoked after waiter cancellation"
+        );
     }
     #[tokio::test]
     async fn in_flight_open_cannot_reinsert_after_revision_change_or_shutdown() {

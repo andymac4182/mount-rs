@@ -1,0 +1,21 @@
+{
+  "schema": "mount-rs-fdb-inode-prefix-control-v1",
+  "source": "396b7471/storage0015437d",
+  "scope": "one-file public NAPI same-prefix versus split-prefix diagnostic; no marker modification",
+  "results": [
+    {
+      "samePrefix": true,
+      "opened": true,
+      "verified": true,
+      "cleanup": "passed"
+    },
+    {
+      "samePrefix": false,
+      "opened": false,
+      "verified": false,
+      "cleanup": "no-driver",
+      "errorCode": "ESTALE",
+      "errorMessage": "ESTALE: stale file handle, FoundationDB concurrent backing authority"
+    }
+  ]
+}

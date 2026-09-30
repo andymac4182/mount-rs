@@ -1,0 +1,39 @@
+{
+  "schema": "mount-rs.sqlite-wal-native-qualification.v1",
+  "source_base": "00da60103da3afb5111e244403ddf5a4edd6ea1d",
+  "tested_owned_paths": [
+    "bindings/mount-rs-napi/package.json",
+    "bindings/mount-rs-napi/test/types.test.ts",
+    "bindings/mount-rs-napi/test/sqlite-journal-mode.mjs"
+  ],
+  "platform": "macOS ARM64",
+  "node": "24.18.0",
+  "native_sha256": "cc73b80449675466cdf22386ccc9571743ba46825fe0c9234551629255c3793e",
+  "results": {
+    "native_case_passed": 1,
+    "journal_matrix_cells": 6,
+    "fresh_handle_reopens": 12,
+    "invalid_configurations_rejected_before_open": 40,
+    "normal_package_chain": "passed",
+    "source_inputs_stable": true,
+    "owned_process_containment": "reaped, group absent, output EOF, no overflow or unknown"
+  },
+  "red": {
+    "native_base": "45a9dcf81ac52eed8b1f215c59551484ab6b5f83",
+    "failure": "metadata header persisted DELETE [1,1] despite WAL selection; expected [2,2]",
+    "receipt_sha256": "01bf802298aea41cddddae79ece4a944a1356a1364b0373621418398391dfa52"
+  },
+  "green": {
+    "receipt_sha256": "3cfce398e51633eb1a56e41d8aee56bca3709af14d551c0b6d05db52e3208bf8",
+    "elapsed_seconds": 29.360595457954332,
+    "test_sha256": "a699ff7761e115e77762833f946e59b5b6068c725d985e815c96dcfa782dda15",
+    "reviewed_owned_uri_absence_oracle": true
+  },
+  "limits": [
+    "powerloss",
+    "otherplatformexecution",
+    "externalproviders",
+    "nativehostmounts",
+    "full10000clientcapacity"
+  ]
+}

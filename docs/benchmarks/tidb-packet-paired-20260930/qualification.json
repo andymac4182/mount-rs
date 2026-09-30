@@ -1,0 +1,149 @@
+{
+  "independent_verifier": {
+    "actual_output_sha256": "7e19242944fa26577d7e3aa3e952381913fef38e74a480dfa6cebfbd790ef33e",
+    "gate_receipt_sha256": "dbb87555a0598170601f20ed7a84714f72d54891ac64d9096c697454c193007e",
+    "result": {
+      "allocation_counters_per_process": 5,
+      "allocation_profiling": true,
+      "bytes": 19142292,
+      "cells": 32,
+      "distributed_cache_configured": false,
+      "guard_update_unit_attribution": "not_exported_as_guard_specific_SQL_unit",
+      "histogram_percentiles_checked": [
+        50,
+        95,
+        99
+      ],
+      "negative_controls_rejected": [
+        "missing_cell",
+        "table_allocation_tamper",
+        "allocation_profile_flag"
+      ],
+      "physical_io_coverage": "partial_whole_run_RustFS_guest_only",
+      "public_sha256": "d94225a9d87e15ca8ca61392e682086cbd8556606887e9a986fe5d6b4a4e320d",
+      "runs": 2,
+      "runtime_execution_performed": false,
+      "runtime_or_extractor_imported": false,
+      "schema": "mount-rs-paired-public-verification-v1",
+      "status": "PASS",
+      "unexpected_sql_profiles": [],
+      "worker_processes_per_cell": 10
+    },
+    "source_sha256": "3c26afb29171fbabd770d75812efaedae0a9e4f85a53bdbbe91e9f4424a83614"
+  },
+  "native_supervisors": [
+    {
+      "abort_requested": false,
+      "automatic_retry": false,
+      "cleanup_reserve_seconds": 120,
+      "direct_child_reaped": true,
+      "direct_owner_group_absent": true,
+      "elapsed_seconds": 387.4140429170802,
+      "exit_code": 0,
+      "failure_labels": [],
+      "final_settlement_within_cleanup_seconds": 5,
+      "forced_owner_stop": false,
+      "performance_eligible": true,
+      "pipes_eof": true,
+      "receipt_sha256": "3e087621a1280ce8b41da86b8ac0dbe1c8a2fc7835b1691df2f01c99427b8a04",
+      "resource_guard": {
+        "actual_max_gap_ms": 204.4374590041116,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 76784365568,
+        "requested_interval_ms": 100,
+        "samples": 3815,
+        "scope": "cooperative sampled host disk stop through owner execution and cleanup; no host RSS or Docker containment assertion"
+      },
+      "run": "paired_be510_d10",
+      "signals": [],
+      "source_pins_before_after_equal": true,
+      "status": "qualified",
+      "whole_limit_seconds": 3300
+    },
+    {
+      "abort_requested": false,
+      "automatic_retry": false,
+      "cleanup_reserve_seconds": 120,
+      "direct_child_reaped": true,
+      "direct_owner_group_absent": true,
+      "elapsed_seconds": 407.13361941603944,
+      "exit_code": 0,
+      "failure_labels": [],
+      "final_settlement_within_cleanup_seconds": 5,
+      "forced_owner_stop": false,
+      "performance_eligible": true,
+      "pipes_eof": true,
+      "receipt_sha256": "3286dd37f7c9a0615e5245cc8c5b4bca0a7b9eb79b2d04a99369f9b8dc3daf55",
+      "resource_guard": {
+        "actual_max_gap_ms": 169.36337505467236,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 75331112960,
+        "requested_interval_ms": 100,
+        "samples": 4014,
+        "scope": "cooperative sampled host disk stop through owner execution and cleanup; no host RSS or Docker containment assertion"
+      },
+      "run": "paired_9d_d10",
+      "signals": [],
+      "source_pins_before_after_equal": true,
+      "status": "qualified",
+      "whole_limit_seconds": 3300
+    }
+  ],
+  "not_qualified": [
+    "physical_host_or_TiKV_IOPS",
+    "causal_throughput_or_allocation_improvement",
+    "10000_clients_10000_drives_5000_partitions",
+    "composed_distributed_peer_cache",
+    "cross_host_and_external_OIDC",
+    "Linux_and_macOS_OS_mounts",
+    "final_PR_CI_and_merge"
+  ],
+  "offline_extraction": {
+    "actual_gate_receipt_sha256": "21c5bfb5f6d3f8490cfd06caa83808610d1e463bba9c1ea3b4d3e70a17ba246f",
+    "input_spec_sha256": "3e09b1d0481c01a5f8fabe876e7167f137615e9772076ff2d5e08b05b44534cc",
+    "source_sha256": "ff2eaee91ac008601a9a868f42a87d2e28d7a36401bbf7fdd4be7df046033524"
+  },
+  "original_backends": {
+    "containers": 8,
+    "fresh_health_receipt_sha256": [
+      "d15063014e88a94646768610fb3e7ec3af41f03b3677483bc46c08f080a0c0b5",
+      "2f072bdb6935b9a0cbc9515c340b08a455ecd82d45bc76f9ed44aea32273d968",
+      "23ddd1bd97c3909ef66f474353788eaf2bdd5e3adcdecea77adc011d9b6c7220"
+    ],
+    "preserved": true,
+    "volumes": 6
+  },
+  "privacy_marker_scan": {
+    "markers": [
+      "/Users/",
+      "/private/",
+      "postgres://",
+      "mysql://",
+      "http://",
+      "https://",
+      "BEGIN PRIVATE",
+      "Bearer ",
+      "access_key",
+      "secret_key",
+      "eyJ"
+    ],
+    "matches": 0
+  },
+  "public_observations": {
+    "compressed_bytes": 1372598,
+    "compressed_sha256": "165e3983a804772e0569d4e5409788caaf00e46cae4239399d3d4d3ffddc5da9",
+    "decompressed_bytes": 19142292,
+    "decompressed_sha256": "d94225a9d87e15ca8ca61392e682086cbd8556606887e9a986fe5d6b4a4e320d"
+  },
+  "schema": "mount-rs-packet-paired-qualification-v1",
+  "source_change_paths": [
+    "providers/mount-rs-tidb/src/compact.rs",
+    "providers/mount-rs-tidb/tests/support/indexed_write_query.rs"
+  ],
+  "source_hashes": {
+    "after_compact": "4877be93f85420cae4caaa558995e551ab23de8058c22834ba35dfba4d250464",
+    "after_query_control": "416feb72cd6b6ccaa524b0620922a7227067c85c35876dfc61b8c3dd0ec6c714",
+    "before_compact": "7eb20d9e55ef199acf86d328e35890f6436268573cd584d3b9962aa820a34966",
+    "before_query_control": "c3ff24fc8c3995de47b137548ddbc65f28d7d1ced4b94c8afec0c02404347da6"
+  }
+}

@@ -11,6 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
 use mount_rs_core::{FsError, Result};
+pub use mount_rs_object_store_blocks::RawBlockCacheBudget;
 use mount_rs_object_store_blocks::{
     ObjectStoreBlockStore, ObjectStoreBlockStoreStats, prepare_configured_backing_id,
     probe_configured_concurrent_prefix, verify_configured_backing_id,
@@ -106,6 +107,19 @@ impl AwsS3BlockStore {
         ))
     }
 
+    /// Wrap an existing client with an explicit raw-cache capacity owner.
+    pub fn new_with_cache_budget(
+        store: Arc<dyn ObjectStore>,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        Ok(Self(
+            ObjectStoreBlockStore::new_with_cache_budget(store, prefix, durable, budget)?,
+            None,
+        ))
+    }
+
     /// Build durable blocks using this provider's signed AWS S3 client.
     pub fn from_config(config: &AwsS3Config, prefix: impl Into<String>) -> Result<Self> {
         Self::from_config_with_durable(config, prefix, true)
@@ -118,6 +132,19 @@ impl AwsS3BlockStore {
         durable: bool,
     ) -> Result<Self> {
         let mut blocks = Self::new(config.build_store()?, prefix, durable)?;
+        blocks.1 = Some(config.build_probe_store()?);
+        Ok(blocks)
+    }
+
+    /// Build signed blocks with an explicit raw-cache capacity owner.
+    pub fn from_config_with_cache_budget(
+        config: &AwsS3Config,
+        prefix: impl Into<String>,
+        durable: bool,
+        budget: RawBlockCacheBudget,
+    ) -> Result<Self> {
+        let mut blocks =
+            Self::new_with_cache_budget(config.build_store()?, prefix, durable, budget)?;
         blocks.1 = Some(config.build_probe_store()?);
         Ok(blocks)
     }
@@ -135,6 +162,10 @@ impl AwsS3BlockStore {
 impl BlockStore for AwsS3BlockStore {
     fn durable(&self) -> bool {
         self.0.durable()
+    }
+
+    fn persistent(&self) -> bool {
+        self.0.persistent()
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
@@ -274,7 +305,276 @@ fn validate_aws_builder(builder: &AmazonS3Builder) -> Result<()> {
 mod tests {
     use super::*;
     use mount_rs_core::storage::{BlockStore, ConcurrentBackingId};
+    use object_store::PutPayload;
     use object_store::memory::InMemory;
+    use object_store::path::Path as ObjectPath;
+
+    fn block_path(prefix: &str, id: &BlockId) -> ObjectPath {
+        ObjectPath::from(format!("{prefix}/{}", id.0))
+    }
+
+    async fn assert_shared_budget_retains_one_facade(max_bytes: usize, max_entries: usize) {
+        let backing = Arc::new(InMemory::new());
+        let budget = RawBlockCacheBudget::new(max_bytes, max_entries);
+        let first = AwsS3BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "shared-budget/drive-a",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let second = AwsS3BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "shared-budget/drive-b",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let first_id = first.put(b"abcd").await.unwrap();
+        let second_id = second.put(b"wxyz").await.unwrap();
+        first.flush().await.unwrap();
+        second.flush().await.unwrap();
+        for (store, id, expected) in [(&first, &first_id, b"abcd"), (&second, &second_id, b"wxyz")]
+        {
+            assert_eq!(
+                backing
+                    .get(&block_path(store.prefix(), id))
+                    .await
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected
+            );
+        }
+        // Remove only the actual backing objects. Reads now reveal which
+        // independent facade retained a payload, without trusting counters.
+        backing
+            .delete(&block_path(first.prefix(), &first_id))
+            .await
+            .unwrap();
+        backing
+            .delete(&block_path(second.prefix(), &second_id))
+            .await
+            .unwrap();
+        assert_eq!(first.get(&first_id).await.unwrap(), b"abcd");
+        assert!(
+            second
+                .get(&second_id)
+                .await
+                .expect_err("second prefix must not retain an entry without shared credit")
+                .is(mount_rs_core::ErrorCode::Enoent)
+        );
+        let occupied = budget.snapshot().unwrap();
+        assert_eq!((occupied.entries, occupied.payload_bytes), (1, 4));
+        assert!(occupied.charged_bytes <= max_bytes);
+        drop(first);
+        drop(second);
+        assert_eq!(budget.snapshot().unwrap().entries, 0);
+    }
+
+    #[tokio::test]
+    async fn public_aws_shared_budget_bounds_bytes_across_prefixed_facades() {
+        assert_shared_budget_retains_one_facade(132, 8).await;
+    }
+
+    #[tokio::test]
+    async fn public_aws_shared_budget_bounds_entries_across_prefixed_facades() {
+        assert_shared_budget_retains_one_facade(64 * 1024, 1).await;
+    }
+
+    async fn assert_zero_budget_keeps_reads_authoritative(max_bytes: usize, max_entries: usize) {
+        let backing = Arc::new(InMemory::new());
+        let budget = RawBlockCacheBudget::new(max_bytes, max_entries);
+        let store = AwsS3BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "zero-budget/blocks",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let id = store.put(b"backing authority").await.unwrap();
+        store.flush().await.unwrap();
+        assert_eq!(store.get(&id).await.unwrap(), b"backing authority");
+        assert_eq!(
+            store.get_for_migration(&id).await.unwrap(),
+            b"backing authority"
+        );
+        backing
+            .delete(&block_path(store.prefix(), &id))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get(&id)
+                .await
+                .expect_err("zero in either limit must prevent a retained raw payload")
+                .is(mount_rs_core::ErrorCode::Enoent)
+        );
+        let occupied = budget.snapshot().unwrap();
+        assert_eq!((occupied.entries, occupied.charged_bytes), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn public_aws_shared_budget_zero_byte_limit_keeps_reads_authoritative() {
+        assert_zero_budget_keeps_reads_authoritative(0, 8).await;
+    }
+
+    #[tokio::test]
+    async fn public_aws_shared_budget_zero_entry_limit_keeps_reads_authoritative() {
+        assert_zero_budget_keeps_reads_authoritative(64 * 1024, 0).await;
+    }
+
+    #[tokio::test]
+    async fn public_aws_shared_budget_preserves_conditional_collision_and_migration_checks() {
+        let backing = Arc::new(InMemory::new());
+        let budget = RawBlockCacheBudget::new(0, 0);
+        let published = AwsS3BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "shared-budget/source",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        assert!(!published.durable());
+        let body = b"immutable publication";
+        let id = published.put(body).await.unwrap();
+        published.flush().await.unwrap();
+        assert_eq!(
+            backing
+                .get(&block_path(published.prefix(), &id))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            body
+        );
+        let collision_prefix = "shared-budget/collision";
+        let conflicting_body = b"another object at the content-addressed path";
+        backing
+            .put(
+                &block_path(collision_prefix, &id),
+                PutPayload::from(conflicting_body.to_vec()),
+            )
+            .await
+            .unwrap();
+        let conflicting = AwsS3BlockStore::new_with_cache_budget(
+            backing.clone(),
+            collision_prefix,
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        assert!(
+            conflicting
+                .put(body)
+                .await
+                .unwrap_err()
+                .is(mount_rs_core::ErrorCode::Eio)
+        );
+        assert!(
+            conflicting
+                .get(&id)
+                .await
+                .unwrap_err()
+                .is(mount_rs_core::ErrorCode::Eio)
+        );
+        assert_eq!(
+            backing
+                .get(&block_path(collision_prefix, &id))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            conflicting_body
+        );
+        backing
+            .put(
+                &block_path(published.prefix(), &id),
+                PutPayload::from(conflicting_body.to_vec()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            published
+                .get_for_migration(&id)
+                .await
+                .unwrap_err()
+                .is(mount_rs_core::ErrorCode::Eio)
+        );
+        assert!(
+            published
+                .prepare_concurrent_backing()
+                .await
+                .unwrap_err()
+                .is(mount_rs_core::ErrorCode::Enotsup)
+        );
+    }
+
+    #[tokio::test]
+    async fn public_aws_shared_budget_keeps_same_legacy_id_scoped_to_prefix_and_backing() {
+        let backing = Arc::new(InMemory::new());
+        let other_backing = Arc::new(InMemory::new());
+        let budget = RawBlockCacheBudget::new(64 * 1024, 8);
+        let first = AwsS3BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "scoped/drive-a",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let sibling = AwsS3BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "scoped/drive-b",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let other = AwsS3BlockStore::new_with_cache_budget(
+            other_backing.clone(),
+            "scoped/drive-a",
+            false,
+            budget.clone(),
+        )
+        .unwrap();
+        let missing = AwsS3BlockStore::new_with_cache_budget(
+            backing.clone(),
+            "scoped/missing",
+            false,
+            budget,
+        )
+        .unwrap();
+        let id = BlockId("b0123456789abcdef0123456789abcdef".to_owned());
+        for (remote, store, body) in [
+            (backing.as_ref(), &first, b"alpha".as_slice()),
+            (backing.as_ref(), &sibling, b"bravo".as_slice()),
+            (other_backing.as_ref(), &other, b"other".as_slice()),
+        ] {
+            remote
+                .put(
+                    &block_path(store.prefix(), &id),
+                    PutPayload::from(body.to_vec()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.get(&id).await.unwrap(), body);
+        }
+        assert_eq!(first.get(&id).await.unwrap(), b"alpha");
+        assert_eq!(sibling.get(&id).await.unwrap(), b"bravo");
+        assert_eq!(other.get(&id).await.unwrap(), b"other");
+        assert!(
+            missing
+                .get(&id)
+                .await
+                .unwrap_err()
+                .is(mount_rs_core::ErrorCode::Enoent)
+        );
+    }
 
     #[tokio::test]
     async fn configured_aws_wrapper_path_claims_a_stable_prefix_identity() {

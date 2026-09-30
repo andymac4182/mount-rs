@@ -10,6 +10,7 @@ readme = "README.md"
 
 [features]
 default = []
+io-profiling = ["mount-rs-filesystem-blocks/io-profiling"]
 observability = ["dep:mount-rs-observability"]
 foundationdb = ["dep:mount-rs-foundationdb", "mount-rs-foundationdb/foundationdb"]
 rustls = ["mount-rs-tidb/rustls"]
@@ -17,10 +18,12 @@ rustls = ["mount-rs-tidb/rustls"]
 [dependencies]
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "sync"] }
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-aws-s3 = { path = "../../providers/mount-rs-aws-s3" }
 mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
+mount-rs-filesystem-blocks = { path = "../../providers/mount-rs-filesystem-blocks" }
 mount-rs-host = { path = "../../filesystems/mount-rs-host" }
 mount-rs-memory = { path = "../../providers/mount-rs-memory" }
 mount-rs-observability = { path = "../mount-rs-observability", optional = true }
@@ -36,4 +39,6 @@ mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }
 mount-rs-foundationdb = { path = "../../providers/mount-rs-foundationdb", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
+rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

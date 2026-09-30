@@ -1,0 +1,956 @@
+{
+  "cases": {
+    "1000": {
+      "A": {
+        "allocation_calls": {
+          "max": 5091,
+          "mean": 5090.1875,
+          "median": 5090.0,
+          "min": 5090,
+          "p95_nearest_rank": 5091
+        },
+        "elapsed_ms": {
+          "max": 42.104125,
+          "mean": 17.4511930390625,
+          "median": 15.12325,
+          "min": 12.261958,
+          "p95_nearest_rank": 32.468125
+        },
+        "phases": {
+          "Close": {
+            "allocation_calls": {
+              "max": 1,
+              "mean": 1,
+              "median": 1.0,
+              "min": 1,
+              "p95_nearest_rank": 1
+            },
+            "elapsed_ms": {
+              "max": 0.0115,
+              "mean": 0.00216959375,
+              "median": 0.001958,
+              "min": 0.001417,
+              "p95_nearest_rank": 0.003208
+            },
+            "requested_bytes": {
+              "max": 2984,
+              "mean": 2984,
+              "median": 2984.0,
+              "min": 2984,
+              "p95_nearest_rank": 2984
+            }
+          },
+          "Open": {
+            "allocation_calls": {
+              "max": 300,
+              "mean": 299.15625,
+              "median": 299.0,
+              "min": 299,
+              "p95_nearest_rank": 300
+            },
+            "elapsed_ms": {
+              "max": 16.47225,
+              "mean": 3.072509078125,
+              "median": 2.6530835,
+              "min": 2.070208,
+              "p95_nearest_rank": 5.84625
+            },
+            "requested_bytes": {
+              "max": 31597,
+              "mean": 29337.484375,
+              "median": 29009.0,
+              "min": 29008,
+              "p95_nearest_rank": 31595
+            }
+          },
+          "Read": {
+            "allocation_calls": {
+              "max": 337,
+              "mean": 336.03125,
+              "median": 336.0,
+              "min": 336,
+              "p95_nearest_rank": 336
+            },
+            "elapsed_ms": {
+              "max": 14.259833,
+              "mean": 3.4995846640625,
+              "median": 2.9753119999999997,
+              "min": 2.1445,
+              "p95_nearest_rank": 6.281
+            },
+            "requested_bytes": {
+              "max": 34852,
+              "mean": 34571,
+              "median": 34562.0,
+              "min": 34560,
+              "p95_nearest_rank": 34564
+            }
+          },
+          "Stat": {
+            "allocation_calls": {
+              "max": 4454,
+              "mean": 4454,
+              "median": 4454.0,
+              "min": 4454,
+              "p95_nearest_rank": 4454
+            },
+            "elapsed_ms": {
+              "max": 34.953167,
+              "mean": 10.8762307578125,
+              "median": 9.389396,
+              "min": 7.532292,
+              "p95_nearest_rank": 20.901333
+            },
+            "requested_bytes": {
+              "max": 152071,
+              "mean": 152069,
+              "median": 152069.0,
+              "min": 152067,
+              "p95_nearest_rank": 152071
+            }
+          }
+        },
+        "requested_bytes": {
+          "max": 221215,
+          "mean": 218961.484375,
+          "median": 218624.0,
+          "min": 218619,
+          "p95_nearest_rank": 221210
+        },
+        "samples": 128,
+        "trials": [
+          {
+            "allocation_calls": {
+              "max": 5091,
+              "mean": 5090.1875,
+              "median": 5090.0,
+              "min": 5090,
+              "p95_nearest_rank": 5091
+            },
+            "elapsed_ms": {
+              "max": 32.468125,
+              "mean": 14.4514583125,
+              "median": 13.6085,
+              "min": 12.33075,
+              "p95_nearest_rank": 16.171083
+            },
+            "index": 0,
+            "requested_bytes": {
+              "max": 221215,
+              "mean": 218966.4375,
+              "median": 218629.0,
+              "min": 218629,
+              "p95_nearest_rank": 221215
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 5091,
+              "mean": 5090.1875,
+              "median": 5090.0,
+              "min": 5090,
+              "p95_nearest_rank": 5091
+            },
+            "elapsed_ms": {
+              "max": 42.104125,
+              "mean": 24.09456653125,
+              "median": 20.3440835,
+              "min": 15.463709,
+              "p95_nearest_rank": 39.224584
+            },
+            "index": 3,
+            "requested_bytes": {
+              "max": 221210,
+              "mean": 218961.4375,
+              "median": 218624.0,
+              "min": 218624,
+              "p95_nearest_rank": 221210
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 5091,
+              "mean": 5090.1875,
+              "median": 5090.0,
+              "min": 5090,
+              "p95_nearest_rank": 5091
+            },
+            "elapsed_ms": {
+              "max": 22.692333,
+              "mean": 15.89800134375,
+              "median": 15.123625,
+              "min": 13.859708,
+              "p95_nearest_rank": 19.331292
+            },
+            "index": 5,
+            "requested_bytes": {
+              "max": 221205,
+              "mean": 218956.4375,
+              "median": 218619.0,
+              "min": 218619,
+              "p95_nearest_rank": 221205
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 5091,
+              "mean": 5090.1875,
+              "median": 5090.0,
+              "min": 5090,
+              "p95_nearest_rank": 5091
+            },
+            "elapsed_ms": {
+              "max": 30.93575,
+              "mean": 15.36074596875,
+              "median": 14.4726245,
+              "min": 12.261958,
+              "p95_nearest_rank": 21.497917
+            },
+            "index": 6,
+            "requested_bytes": {
+              "max": 221212,
+              "mean": 218961.625,
+              "median": 218624.0,
+              "min": 218624,
+              "p95_nearest_rank": 221212
+            }
+          }
+        ]
+      },
+      "B": {
+        "allocation_calls": {
+          "max": 851,
+          "mean": 850.1875,
+          "median": 850.0,
+          "min": 850,
+          "p95_nearest_rank": 851
+        },
+        "elapsed_ms": {
+          "max": 64.7285,
+          "mean": 19.5916226875,
+          "median": 15.588521,
+          "min": 12.25975,
+          "p95_nearest_rank": 43.320833
+        },
+        "phases": {
+          "Close": {
+            "allocation_calls": {
+              "max": 1,
+              "mean": 1,
+              "median": 1.0,
+              "min": 1,
+              "p95_nearest_rank": 1
+            },
+            "elapsed_ms": {
+              "max": 0.011375,
+              "mean": 0.00270603125,
+              "median": 0.002333,
+              "min": 0.0015,
+              "p95_nearest_rank": 0.004042
+            },
+            "requested_bytes": {
+              "max": 2984,
+              "mean": 2984,
+              "median": 2984.0,
+              "min": 2984,
+              "p95_nearest_rank": 2984
+            }
+          },
+          "Open": {
+            "allocation_calls": {
+              "max": 238,
+              "mean": 237.15625,
+              "median": 237.0,
+              "min": 237,
+              "p95_nearest_rank": 238
+            },
+            "elapsed_ms": {
+              "max": 17.988375,
+              "mean": 3.5223489453125,
+              "median": 2.8092915,
+              "min": 2.02775,
+              "p95_nearest_rank": 7.494833
+            },
+            "requested_bytes": {
+              "max": 30076,
+              "mean": 27815.6875,
+              "median": 27488.0,
+              "min": 27486,
+              "p95_nearest_rank": 30072
+            }
+          },
+          "Read": {
+            "allocation_calls": {
+              "max": 261,
+              "mean": 260.03125,
+              "median": 260.0,
+              "min": 260,
+              "p95_nearest_rank": 260
+            },
+            "elapsed_ms": {
+              "max": 14.015459,
+              "mean": 3.8144345390625,
+              "median": 2.9168125,
+              "min": 1.998917,
+              "p95_nearest_rank": 9.188
+            },
+            "requested_bytes": {
+              "max": 32977,
+              "mean": 32696.5,
+              "median": 32689.0,
+              "min": 32685,
+              "p95_nearest_rank": 32689
+            }
+          },
+          "Stat": {
+            "allocation_calls": {
+              "max": 352,
+              "mean": 352,
+              "median": 352.0,
+              "min": 352,
+              "p95_nearest_rank": 352
+            },
+            "elapsed_ms": {
+              "max": 32.718958,
+              "mean": 12.2514183046875,
+              "median": 9.7840625,
+              "min": 7.718708,
+              "p95_nearest_rank": 27.048667
+            },
+            "requested_bytes": {
+              "max": 53521,
+              "mean": 53519.5,
+              "median": 53520.0,
+              "min": 53517,
+              "p95_nearest_rank": 53521
+            }
+          }
+        },
+        "requested_bytes": {
+          "max": 119270,
+          "mean": 117015.6875,
+          "median": 116682.0,
+          "min": 116672,
+          "p95_nearest_rank": 119261
+        },
+        "samples": 128,
+        "trials": [
+          {
+            "allocation_calls": {
+              "max": 851,
+              "mean": 850.1875,
+              "median": 850.0,
+              "min": 850,
+              "p95_nearest_rank": 851
+            },
+            "elapsed_ms": {
+              "max": 18.50925,
+              "mean": 14.40758325,
+              "median": 14.2966455,
+              "min": 12.25975,
+              "p95_nearest_rank": 16.447416
+            },
+            "index": 1,
+            "requested_bytes": {
+              "max": 119261,
+              "mean": 117014.25,
+              "median": 116677.0,
+              "min": 116677,
+              "p95_nearest_rank": 119261
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 851,
+              "mean": 850.1875,
+              "median": 850.0,
+              "min": 850,
+              "p95_nearest_rank": 851
+            },
+            "elapsed_ms": {
+              "max": 25.802959,
+              "mean": 15.77044534375,
+              "median": 15.1665625,
+              "min": 12.748041,
+              "p95_nearest_rank": 23.883875
+            },
+            "index": 2,
+            "requested_bytes": {
+              "max": 119258,
+              "mean": 117009.4375,
+              "median": 116672.0,
+              "min": 116672,
+              "p95_nearest_rank": 119258
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 851,
+              "mean": 850.1875,
+              "median": 850.0,
+              "min": 850,
+              "p95_nearest_rank": 851
+            },
+            "elapsed_ms": {
+              "max": 64.7285,
+              "mean": 31.045763,
+              "median": 26.0838125,
+              "min": 16.178125,
+              "p95_nearest_rank": 50.021333
+            },
+            "index": 4,
+            "requested_bytes": {
+              "max": 119268,
+              "mean": 117019.4375,
+              "median": 116682.0,
+              "min": 116682,
+              "p95_nearest_rank": 119268
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 851,
+              "mean": 850.1875,
+              "median": 850.0,
+              "min": 850,
+              "p95_nearest_rank": 851
+            },
+            "elapsed_ms": {
+              "max": 31.682333,
+              "mean": 17.14269915625,
+              "median": 15.6895415,
+              "min": 13.462958,
+              "p95_nearest_rank": 31.634375
+            },
+            "index": 7,
+            "requested_bytes": {
+              "max": 119270,
+              "mean": 117019.625,
+              "median": 116682.0,
+              "min": 116682,
+              "p95_nearest_rank": 119270
+            }
+          }
+        ]
+      },
+      "change_percent_B_vs_A": {
+        "allocation_calls": {
+          "mean": -83.29752096558329,
+          "median": -83.30058939096267,
+          "p95_nearest_rank": -83.28422706737379
+        },
+        "elapsed_ms": {
+          "mean": 12.265233922095709,
+          "median": 3.076527862727918,
+          "p95_nearest_rank": 33.42573062041618
+        },
+        "requested_bytes": {
+          "mean": -46.55878049328738,
+          "median": -46.628915398126466,
+          "p95_nearest_rank": -46.08697617648389
+        }
+      }
+    },
+    "128": {
+      "A": {
+        "allocation_calls": {
+          "max": 1605,
+          "mean": 1603,
+          "median": 1603.0,
+          "min": 1602,
+          "p95_nearest_rank": 1605
+        },
+        "elapsed_ms": {
+          "max": 34.036667,
+          "mean": 11.890644546875,
+          "median": 11.031500000000001,
+          "min": 9.08725,
+          "p95_nearest_rank": 15.664375
+        },
+        "phases": {
+          "Close": {
+            "allocation_calls": {
+              "max": 1,
+              "mean": 1,
+              "median": 1.0,
+              "min": 1,
+              "p95_nearest_rank": 1
+            },
+            "elapsed_ms": {
+              "max": 0.004458,
+              "mean": 0.0022428125,
+              "median": 0.002083,
+              "min": 0.00125,
+              "p95_nearest_rank": 0.0035
+            },
+            "requested_bytes": {
+              "max": 2984,
+              "mean": 2984,
+              "median": 2984.0,
+              "min": 2984,
+              "p95_nearest_rank": 2984
+            }
+          },
+          "Open": {
+            "allocation_calls": {
+              "max": 301,
+              "mean": 299.5,
+              "median": 299.0,
+              "min": 299,
+              "p95_nearest_rank": 301
+            },
+            "elapsed_ms": {
+              "max": 22.083916,
+              "mean": 2.6785530546875,
+              "median": 2.3669995,
+              "min": 1.82925,
+              "p95_nearest_rank": 3.457959
+            },
+            "requested_bytes": {
+              "max": 31411,
+              "mean": 29846.1875,
+              "median": 28999.0,
+              "min": 28998,
+              "p95_nearest_rank": 31078
+            }
+          },
+          "Read": {
+            "allocation_calls": {
+              "max": 337,
+              "mean": 336.0625,
+              "median": 336.0,
+              "min": 336,
+              "p95_nearest_rank": 337
+            },
+            "elapsed_ms": {
+              "max": 5.425125,
+              "mean": 2.74087925,
+              "median": 2.549125,
+              "min": 2.018792,
+              "p95_nearest_rank": 4.055625
+            },
+            "requested_bytes": {
+              "max": 34841,
+              "mean": 34568.375,
+              "median": 34551.0,
+              "min": 34551,
+              "p95_nearest_rank": 34803
+            }
+          },
+          "Stat": {
+            "allocation_calls": {
+              "max": 968,
+              "mean": 966.4375,
+              "median": 966.0,
+              "min": 966,
+              "p95_nearest_rank": 968
+            },
+            "elapsed_ms": {
+              "max": 13.096541,
+              "mean": 6.468217109375,
+              "median": 6.0551045000000006,
+              "min": 4.830625,
+              "p95_nearest_rank": 8.514542
+            },
+            "requested_bytes": {
+              "max": 70009,
+              "mean": 68785.671875,
+              "median": 68343.0,
+              "min": 68343,
+              "p95_nearest_rank": 69903
+            }
+          }
+        },
+        "requested_bytes": {
+          "max": 138957,
+          "mean": 136184.234375,
+          "median": 136082.0,
+          "min": 134876,
+          "p95_nearest_rank": 138372
+        },
+        "samples": 128,
+        "trials": [
+          {
+            "allocation_calls": {
+              "max": 1605,
+              "mean": 1603,
+              "median": 1603.0,
+              "min": 1602,
+              "p95_nearest_rank": 1605
+            },
+            "elapsed_ms": {
+              "max": 34.036667,
+              "mean": 11.9181993125,
+              "median": 10.9910415,
+              "min": 9.593875,
+              "p95_nearest_rank": 13.410458
+            },
+            "index": 0,
+            "requested_bytes": {
+              "max": 138946,
+              "mean": 136182.84375,
+              "median": 136079.0,
+              "min": 134876,
+              "p95_nearest_rank": 138372
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 1605,
+              "mean": 1603,
+              "median": 1603.0,
+              "min": 1602,
+              "p95_nearest_rank": 1605
+            },
+            "elapsed_ms": {
+              "max": 12.295583,
+              "mean": 10.51690884375,
+              "median": 10.3966665,
+              "min": 9.08725,
+              "p95_nearest_rank": 12.233542
+            },
+            "index": 3,
+            "requested_bytes": {
+              "max": 138946,
+              "mean": 136182.84375,
+              "median": 136079.0,
+              "min": 134876,
+              "p95_nearest_rank": 138372
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 1605,
+              "mean": 1603,
+              "median": 1603.0,
+              "min": 1602,
+              "p95_nearest_rank": 1605
+            },
+            "elapsed_ms": {
+              "max": 21.954542,
+              "mean": 14.16441403125,
+              "median": 13.009354,
+              "min": 11.562625,
+              "p95_nearest_rank": 21.716708
+            },
+            "index": 5,
+            "requested_bytes": {
+              "max": 138946,
+              "mean": 136182.84375,
+              "median": 136079.0,
+              "min": 134876,
+              "p95_nearest_rank": 138372
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 1605,
+              "mean": 1603,
+              "median": 1603.0,
+              "min": 1602,
+              "p95_nearest_rank": 1605
+            },
+            "elapsed_ms": {
+              "max": 14.492625,
+              "mean": 10.963056,
+              "median": 10.764375,
+              "min": 9.422958,
+              "p95_nearest_rank": 13.033708
+            },
+            "index": 6,
+            "requested_bytes": {
+              "max": 138957,
+              "mean": 136188.40625,
+              "median": 136084.5,
+              "min": 134881,
+              "p95_nearest_rank": 138377
+            }
+          }
+        ]
+      },
+      "B": {
+        "allocation_calls": {
+          "max": 853,
+          "mean": 851,
+          "median": 851.0,
+          "min": 850,
+          "p95_nearest_rank": 853
+        },
+        "elapsed_ms": {
+          "max": 33.273292,
+          "mean": 12.4355260546875,
+          "median": 11.415104,
+          "min": 9.14225,
+          "p95_nearest_rank": 17.589917
+        },
+        "phases": {
+          "Close": {
+            "allocation_calls": {
+              "max": 1,
+              "mean": 1,
+              "median": 1.0,
+              "min": 1,
+              "p95_nearest_rank": 1
+            },
+            "elapsed_ms": {
+              "max": 0.153416,
+              "mean": 0.0043896640625,
+              "median": 0.002375,
+              "min": 0.001458,
+              "p95_nearest_rank": 0.003875
+            },
+            "requested_bytes": {
+              "max": 2984,
+              "mean": 2984,
+              "median": 2984.0,
+              "min": 2984,
+              "p95_nearest_rank": 2984
+            }
+          },
+          "Open": {
+            "allocation_calls": {
+              "max": 239,
+              "mean": 237.5,
+              "median": 237.0,
+              "min": 237,
+              "p95_nearest_rank": 239
+            },
+            "elapsed_ms": {
+              "max": 7.801292,
+              "mean": 2.6277145390625,
+              "median": 2.475542,
+              "min": 1.855917,
+              "p95_nearest_rank": 3.796458
+            },
+            "requested_bytes": {
+              "max": 29889,
+              "mean": 28323.8125,
+              "median": 27477.0,
+              "min": 27475,
+              "p95_nearest_rank": 29556
+            }
+          },
+          "Read": {
+            "allocation_calls": {
+              "max": 261,
+              "mean": 260.0625,
+              "median": 260.0,
+              "min": 260,
+              "p95_nearest_rank": 261
+            },
+            "elapsed_ms": {
+              "max": 8.800667,
+              "mean": 2.962029328125,
+              "median": 2.6934579999999997,
+              "min": 1.927042,
+              "p95_nearest_rank": 4.608042
+            },
+            "requested_bytes": {
+              "max": 32966,
+              "mean": 32692.875,
+              "median": 32676.0,
+              "min": 32674,
+              "p95_nearest_rank": 32928
+            }
+          },
+          "Stat": {
+            "allocation_calls": {
+              "max": 354,
+              "mean": 352.4375,
+              "median": 352.0,
+              "min": 352,
+              "p95_nearest_rank": 354
+            },
+            "elapsed_ms": {
+              "max": 25.113084,
+              "mean": 6.8406256953125,
+              "median": 6.238396,
+              "min": 4.578791,
+              "p95_nearest_rank": 9.713667
+            },
+            "requested_bytes": {
+              "max": 55171,
+              "mean": 53947.15625,
+              "median": 53505.0,
+              "min": 53503,
+              "p95_nearest_rank": 55065
+            }
+          }
+        },
+        "requested_bytes": {
+          "max": 120722,
+          "mean": 117947.84375,
+          "median": 117844.5,
+          "min": 116636,
+          "p95_nearest_rank": 120137
+        },
+        "samples": 128,
+        "trials": [
+          {
+            "allocation_calls": {
+              "max": 853,
+              "mean": 851,
+              "median": 851.0,
+              "min": 850,
+              "p95_nearest_rank": 853
+            },
+            "elapsed_ms": {
+              "max": 13.649334,
+              "mean": 10.38035403125,
+              "median": 10.2226875,
+              "min": 9.14225,
+              "p95_nearest_rank": 13.291042
+            },
+            "index": 1,
+            "requested_bytes": {
+              "max": 120700,
+              "mean": 117942.28125,
+              "median": 117838.5,
+              "min": 116636,
+              "p95_nearest_rank": 120132
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 853,
+              "mean": 851,
+              "median": 851.0,
+              "min": 850,
+              "p95_nearest_rank": 853
+            },
+            "elapsed_ms": {
+              "max": 30.1465,
+              "mean": 13.19630734375,
+              "median": 12.3666255,
+              "min": 9.944833,
+              "p95_nearest_rank": 17.288709
+            },
+            "index": 2,
+            "requested_bytes": {
+              "max": 120711,
+              "mean": 117947.84375,
+              "median": 117844.0,
+              "min": 116641,
+              "p95_nearest_rank": 120137
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 853,
+              "mean": 851,
+              "median": 851.0,
+              "min": 850,
+              "p95_nearest_rank": 853
+            },
+            "elapsed_ms": {
+              "max": 20.422875,
+              "mean": 14.221718875,
+              "median": 13.094771,
+              "min": 10.652,
+              "p95_nearest_rank": 18.637792
+            },
+            "index": 4,
+            "requested_bytes": {
+              "max": 120711,
+              "mean": 117947.84375,
+              "median": 117844.0,
+              "min": 116641,
+              "p95_nearest_rank": 120137
+            }
+          },
+          {
+            "allocation_calls": {
+              "max": 853,
+              "mean": 851,
+              "median": 851.0,
+              "min": 850,
+              "p95_nearest_rank": 853
+            },
+            "elapsed_ms": {
+              "max": 33.273292,
+              "mean": 11.94372396875,
+              "median": 10.7280205,
+              "min": 9.269833,
+              "p95_nearest_rank": 16.649458
+            },
+            "index": 7,
+            "requested_bytes": {
+              "max": 120722,
+              "mean": 117953.40625,
+              "median": 117849.5,
+              "min": 116646,
+              "p95_nearest_rank": 120142
+            }
+          }
+        ]
+      },
+      "change_percent_B_vs_A": {
+        "allocation_calls": {
+          "mean": -46.912039925140355,
+          "median": -46.912039925140355,
+          "p95_nearest_rank": -46.85358255451714
+        },
+        "elapsed_ms": {
+          "mean": 4.5824387876072015,
+          "median": 3.4773512215020563,
+          "p95_nearest_rank": 12.292491720863419
+        },
+        "requested_bytes": {
+          "mean": -13.390970481049857,
+          "median": -13.401845945826786,
+          "p95_nearest_rank": -13.178244153441444
+        }
+      }
+    }
+  },
+  "order": "ABBABAAB",
+  "original_256_call_controls": [
+    {
+      "observations": [
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "driver_and_runtime_included": true,
+          "foreign_allocations_included": false,
+          "fresh_oracles_passed": true,
+          "rust_calls": 5094,
+          "rust_requested_bytes": 222345,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "driver_and_runtime_included": true,
+          "foreign_allocations_included": false,
+          "fresh_oracles_passed": true,
+          "rust_calls": 1604,
+          "rust_requested_bytes": 137910,
+          "siblings": 128
+        }
+      ],
+      "role": "A"
+    },
+    {
+      "observations": [
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "driver_and_runtime_included": true,
+          "foreign_allocations_included": false,
+          "fresh_oracles_passed": true,
+          "rust_calls": 854,
+          "rust_requested_bytes": 120398,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "driver_and_runtime_included": true,
+          "foreign_allocations_included": false,
+          "fresh_oracles_passed": true,
+          "rust_calls": 852,
+          "rust_requested_bytes": 119675,
+          "siblings": 128
+        }
+      ],
+      "role": "B"
+    }
+  ],
+  "schema": "mount-rs-tidb-packet-classification-summary-v1"
+}

@@ -1,0 +1,473 @@
+{
+  "anonymous_cgroup_sequential_sum_after_bytes": 10647543808,
+  "anonymous_cgroup_sequential_sum_before_bytes": 10647486464,
+  "completion_scope": "identity_checked_memory_cpu_network_interval",
+  "elapsed_seconds": 10.32729212497361,
+  "guest_after": {
+    "AnonPages": 11488894976,
+    "Cached": 1716584448,
+    "MemAvailable": 4364955648,
+    "MemTotal": 16745295872,
+    "SReclaimable": 1597636608,
+    "SwapFree": 944513024,
+    "SwapTotal": 1073737728
+  },
+  "guest_before": {
+    "AnonPages": 11488223232,
+    "Cached": 1716617216,
+    "MemAvailable": 4370292736,
+    "MemTotal": 16745295872,
+    "SReclaimable": 1598488576,
+    "SwapFree": 944513024,
+    "SwapTotal": 1073737728
+  },
+  "io_complete": {
+    "io_service_bytes_recursive": true,
+    "io_serviced_recursive": false
+  },
+  "original_configuration_and_lifecycle_unchanged": true,
+  "physical_iops_available": false,
+  "producer_sha256": "3e4ec0d8e67836b2e52f70ea8b37bf6daff683626d2ee2616fa169a5f127c4c4",
+  "receipt_sha256": "326f1f1d0f666c554e68984073c69cbc548a72f7616efc8047cdd7776627ea85",
+  "rows": [
+    {
+      "anonymous_bytes_after": 170680320,
+      "anonymous_bytes_before": 170680320,
+      "anonymous_delta_bytes": 0,
+      "cgroup_io_delta": {
+        "io_service_bytes_recursive": {
+          "available": true,
+          "available_after": true,
+          "available_before": true,
+          "interval_complete": true,
+          "rows": [
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "read"
+            },
+            {
+              "delta": 81920,
+              "major": 254,
+              "minor": 0,
+              "op": "write"
+            }
+          ],
+          "unavailable_reason": null,
+          "unavailable_reason_after": null,
+          "unavailable_reason_before": null
+        },
+        "io_serviced_recursive": {
+          "available": false,
+          "available_after": false,
+          "available_before": false,
+          "interval_complete": false,
+          "rows": null,
+          "unavailable_reason": "snapshot_unavailable",
+          "unavailable_reason_after": "metric_null",
+          "unavailable_reason_before": "metric_null"
+        }
+      },
+      "cpu_core_fraction": 0.009653277038775976,
+      "cpu_delta_ns": 96834000,
+      "engine_sample_interval_ns": 10031204907,
+      "file_bytes_after": 36319232,
+      "file_bytes_before": 36319232,
+      "memory_limit_bytes": 536870912,
+      "memory_usage_bytes_after": 211566592,
+      "network_delta_totals": {
+        "rx_bytes": 87227,
+        "tx_bytes": 76442
+      },
+      "role": "pd1",
+      "sample_gap_ns": 10023330917
+    },
+    {
+      "anonymous_bytes_after": 96960512,
+      "anonymous_bytes_before": 96960512,
+      "anonymous_delta_bytes": 0,
+      "cgroup_io_delta": {
+        "io_service_bytes_recursive": {
+          "available": true,
+          "available_after": true,
+          "available_before": true,
+          "interval_complete": true,
+          "rows": [
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "read"
+            },
+            {
+              "delta": 77824,
+              "major": 254,
+              "minor": 0,
+              "op": "write"
+            }
+          ],
+          "unavailable_reason": null,
+          "unavailable_reason_after": null,
+          "unavailable_reason_before": null
+        },
+        "io_serviced_recursive": {
+          "available": false,
+          "available_after": false,
+          "available_before": false,
+          "interval_complete": false,
+          "rows": null,
+          "unavailable_reason": "snapshot_unavailable",
+          "unavailable_reason_after": "metric_null",
+          "unavailable_reason_before": "metric_null"
+        }
+      },
+      "cpu_core_fraction": 0.010255045390391765,
+      "cpu_delta_ns": 102868000,
+      "engine_sample_interval_ns": 10030964865,
+      "file_bytes_after": 24719360,
+      "file_bytes_before": 24719360,
+      "memory_limit_bytes": 536870912,
+      "memory_usage_bytes_after": 126017536,
+      "network_delta_totals": {
+        "rx_bytes": 89488,
+        "tx_bytes": 73488
+      },
+      "role": "pd2",
+      "sample_gap_ns": 10023431834
+    },
+    {
+      "anonymous_bytes_after": 142778368,
+      "anonymous_bytes_before": 142774272,
+      "anonymous_delta_bytes": 4096,
+      "cgroup_io_delta": {
+        "io_service_bytes_recursive": {
+          "available": true,
+          "available_after": true,
+          "available_before": true,
+          "interval_complete": true,
+          "rows": [
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "read"
+            },
+            {
+              "delta": 81920,
+              "major": 254,
+              "minor": 0,
+              "op": "write"
+            }
+          ],
+          "unavailable_reason": null,
+          "unavailable_reason_after": null,
+          "unavailable_reason_before": null
+        },
+        "io_serviced_recursive": {
+          "available": false,
+          "available_after": false,
+          "available_before": false,
+          "interval_complete": false,
+          "rows": null,
+          "unavailable_reason": "snapshot_unavailable",
+          "unavailable_reason_after": "metric_null",
+          "unavailable_reason_before": "metric_null"
+        }
+      },
+      "cpu_core_fraction": 0.04026243040975903,
+      "cpu_delta_ns": 403880000,
+      "engine_sample_interval_ns": 10031187782,
+      "file_bytes_after": 16101376,
+      "file_bytes_before": 16097280,
+      "memory_limit_bytes": 536870912,
+      "memory_usage_bytes_after": 162926592,
+      "network_delta_totals": {
+        "rx_bytes": 161239,
+        "tx_bytes": 183201
+      },
+      "role": "pd3",
+      "sample_gap_ns": 10023698167
+    },
+    {
+      "anonymous_bytes_after": 2866257920,
+      "anonymous_bytes_before": 2866184192,
+      "anonymous_delta_bytes": 73728,
+      "cgroup_io_delta": {
+        "io_service_bytes_recursive": {
+          "available": true,
+          "available_after": true,
+          "available_before": true,
+          "interval_complete": true,
+          "rows": [
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "read"
+            },
+            {
+              "delta": 57344,
+              "major": 254,
+              "minor": 0,
+              "op": "write"
+            }
+          ],
+          "unavailable_reason": null,
+          "unavailable_reason_after": null,
+          "unavailable_reason_before": null
+        },
+        "io_serviced_recursive": {
+          "available": false,
+          "available_after": false,
+          "available_before": false,
+          "interval_complete": false,
+          "rows": null,
+          "unavailable_reason": "snapshot_unavailable",
+          "unavailable_reason_after": "metric_null",
+          "unavailable_reason_before": "metric_null"
+        }
+      },
+      "cpu_core_fraction": 0.02311246704694369,
+      "cpu_delta_ns": 231748000,
+      "engine_sample_interval_ns": 10026969407,
+      "file_bytes_after": 36302848,
+      "file_bytes_before": 36302848,
+      "memory_limit_bytes": 3221225472,
+      "memory_usage_bytes_after": 3041521664,
+      "network_delta_totals": {
+        "rx_bytes": 124519,
+        "tx_bytes": 104507
+      },
+      "role": "tikv1",
+      "sample_gap_ns": 10021974500
+    },
+    {
+      "anonymous_bytes_after": 2851045376,
+      "anonymous_bytes_before": 2851094528,
+      "anonymous_delta_bytes": -49152,
+      "cgroup_io_delta": {
+        "io_service_bytes_recursive": {
+          "available": true,
+          "available_after": true,
+          "available_before": true,
+          "interval_complete": true,
+          "rows": [
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "read"
+            },
+            {
+              "delta": 49152,
+              "major": 254,
+              "minor": 0,
+              "op": "write"
+            }
+          ],
+          "unavailable_reason": null,
+          "unavailable_reason_after": null,
+          "unavailable_reason_before": null
+        },
+        "io_serviced_recursive": {
+          "available": false,
+          "available_after": false,
+          "available_before": false,
+          "interval_complete": false,
+          "rows": null,
+          "unavailable_reason": "snapshot_unavailable",
+          "unavailable_reason_after": "metric_null",
+          "unavailable_reason_before": "metric_null"
+        }
+      },
+      "cpu_core_fraction": 0.023893016283987805,
+      "cpu_delta_ns": 239607000,
+      "engine_sample_interval_ns": 10028327824,
+      "file_bytes_after": 40206336,
+      "file_bytes_before": 40206336,
+      "memory_limit_bytes": 3221225472,
+      "memory_usage_bytes_after": 2975154176,
+      "network_delta_totals": {
+        "rx_bytes": 117680,
+        "tx_bytes": 96865
+      },
+      "role": "tikv2",
+      "sample_gap_ns": 10016587083
+    },
+    {
+      "anonymous_bytes_after": 2776408064,
+      "anonymous_bytes_before": 2776379392,
+      "anonymous_delta_bytes": 28672,
+      "cgroup_io_delta": {
+        "io_service_bytes_recursive": {
+          "available": true,
+          "available_after": true,
+          "available_before": true,
+          "interval_complete": true,
+          "rows": [
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "read"
+            },
+            {
+              "delta": 49152,
+              "major": 254,
+              "minor": 0,
+              "op": "write"
+            }
+          ],
+          "unavailable_reason": null,
+          "unavailable_reason_after": null,
+          "unavailable_reason_before": null
+        },
+        "io_serviced_recursive": {
+          "available": false,
+          "available_after": false,
+          "available_before": false,
+          "interval_complete": false,
+          "rows": null,
+          "unavailable_reason": "snapshot_unavailable",
+          "unavailable_reason_after": "metric_null",
+          "unavailable_reason_before": "metric_null"
+        }
+      },
+      "cpu_core_fraction": 0.022117642147639983,
+      "cpu_delta_ns": 221796000,
+      "engine_sample_interval_ns": 10028012865,
+      "file_bytes_after": 17731584,
+      "file_bytes_before": 17731584,
+      "memory_limit_bytes": 3221225472,
+      "memory_usage_bytes_after": 2827526144,
+      "network_delta_totals": {
+        "rx_bytes": 76580,
+        "tx_bytes": 81761
+      },
+      "role": "tikv3",
+      "sample_gap_ns": 10016992333
+    },
+    {
+      "anonymous_bytes_after": 643420160,
+      "anonymous_bytes_before": 643420160,
+      "anonymous_delta_bytes": 0,
+      "cgroup_io_delta": {
+        "io_service_bytes_recursive": {
+          "available": true,
+          "available_after": true,
+          "available_before": true,
+          "interval_complete": true,
+          "rows": [
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "read"
+            },
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "write"
+            }
+          ],
+          "unavailable_reason": null,
+          "unavailable_reason_after": null,
+          "unavailable_reason_before": null
+        },
+        "io_serviced_recursive": {
+          "available": false,
+          "available_after": false,
+          "available_before": false,
+          "interval_complete": false,
+          "rows": null,
+          "unavailable_reason": "snapshot_unavailable",
+          "unavailable_reason_after": "metric_null",
+          "unavailable_reason_before": "metric_null"
+        }
+      },
+      "cpu_core_fraction": 0.03277737598719777,
+      "cpu_delta_ns": 328659000,
+      "engine_sample_interval_ns": 10027007657,
+      "file_bytes_after": 136011776,
+      "file_bytes_before": 136011776,
+      "memory_limit_bytes": 1610612736,
+      "memory_usage_bytes_after": 786604032,
+      "network_delta_totals": {
+        "rx_bytes": 103501,
+        "tx_bytes": 143790
+      },
+      "role": "tidb",
+      "sample_gap_ns": 10018829708
+    },
+    {
+      "anonymous_bytes_after": 1099993088,
+      "anonymous_bytes_before": 1099993088,
+      "anonymous_delta_bytes": 0,
+      "cgroup_io_delta": {
+        "io_service_bytes_recursive": {
+          "available": true,
+          "available_after": true,
+          "available_before": true,
+          "interval_complete": true,
+          "rows": [
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "read"
+            },
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 0,
+              "op": "write"
+            },
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 16,
+              "op": "read"
+            },
+            {
+              "delta": 0,
+              "major": 254,
+              "minor": 16,
+              "op": "write"
+            }
+          ],
+          "unavailable_reason": null,
+          "unavailable_reason_after": null,
+          "unavailable_reason_before": null
+        },
+        "io_serviced_recursive": {
+          "available": false,
+          "available_after": false,
+          "available_before": false,
+          "interval_complete": false,
+          "rows": null,
+          "unavailable_reason": "snapshot_unavailable",
+          "unavailable_reason_after": "metric_null",
+          "unavailable_reason_before": "metric_null"
+        }
+      },
+      "cpu_core_fraction": 0.09069718640144991,
+      "cpu_delta_ns": 908862000,
+      "engine_sample_interval_ns": 10020840073,
+      "file_bytes_after": 466042880,
+      "file_bytes_before": 463929344,
+      "memory_limit_bytes": 2147483648,
+      "memory_usage_bytes_after": 2142851072,
+      "network_delta_totals": {
+        "rx_bytes": 0,
+        "tx_bytes": 0
+      },
+      "role": "rustfs",
+      "sample_gap_ns": 10015338583
+    }
+  ],
+  "schema": "mount-rs.original-eight-idle-public.v1",
+  "scope": "Read-only idle baseline for the exact original eight Docker cgroups; sequential observations and observer activity are included. Current anonymous/file memory ownership is not attribution of past growth. Container cgroup I/O is not physical host IOPS; device rows are not summed across layered devices. No benchmark workload is injected; background or external traffic remains possible. No production-capacity qualification.",
+  "summary_sha256": "3ba8b500c0976aae335a3252c6bdbf4002be004b151679b6ec82dad5a5e4f0dd"
+}

@@ -1,0 +1,352 @@
+//! Explicit warmed recording gate; ordinary suites retain this as ignored.
+//! It measures added Rust allocations in actual core Span lifecycles, excluding
+//! initial environment/global-bank setup and all native client futures.
+
+use mount_rs_core::diagnostics::storage::{self, Operation, Span};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::time::Duration;
+
+thread_local! {
+    static COUNT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATION_CALLS: Cell<u64> = const { Cell::new(0) };
+}
+
+struct CountingAllocator;
+fn allocation_call() {
+    let _ = COUNT_ALLOCATIONS.try_with(|enabled| {
+        if enabled.get() {
+            let _ = ALLOCATION_CALLS.try_with(|calls| calls.set(calls.get() + 1));
+        }
+    });
+}
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        allocation_call();
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        allocation_call();
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        allocation_call();
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn selected_bytes(operation: Operation) -> u64 {
+    if matches!(
+        operation,
+        Operation::FoundationDbReadGet
+            | Operation::FoundationDbReadGetKey
+            | Operation::FoundationDbReadGetRangePage
+            | Operation::BlobCacheRamLookup
+            | Operation::BlobCacheDiskLookup
+            | Operation::BlobCachePeerRequestSend
+            | Operation::BlobCachePeerResponseReceive
+            | Operation::BlobCachePeerGet
+            | Operation::ObjectStoreBackingMarkerProbeBodyRead
+            | Operation::ObjectStoreBackingMarkerDataBodyRead
+            | Operation::ObjectStoreBackingMarkerProbeCreate
+    ) {
+        3
+    } else {
+        0
+    }
+}
+
+#[test]
+fn warmed_filesystem_block_spans_and_fixed_snapshots_do_not_add_allocations() {
+    use mount_rs_core::diagnostics::filesystem_blocks::{Observer, Operation as Work, Path, Stage};
+    let observer = Observer::isolated();
+    let disabled = Observer::disabled();
+    const STAGES: [Stage; 14] = [
+        Stage::InputCopy,
+        Stage::InitialAuthority,
+        Stage::ContentId,
+        Stage::ShardOpen,
+        Stage::ExistingVerify,
+        Stage::StageCreateWrite,
+        Stage::FileSync,
+        Stage::FileDeviceSync,
+        Stage::BeforePublishAuthority,
+        Stage::PublishName,
+        Stage::ShardSync,
+        Stage::RootSync,
+        Stage::PostDirectoryDeviceSync,
+        Stage::FinalAuthority,
+    ];
+    observer.worker(Work::Put, 0).finish_success();
+    let before = observer.snapshot().unwrap();
+    let _ = disabled.snapshot();
+    // Positive allocator control is independent of the observer implementation.
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    let positive = std::hint::black_box(Box::new([7_u8; 1024]));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let positive_calls = ALLOCATION_CALLS.with(Cell::get);
+    drop(positive);
+    assert!(positive_calls > 0, "allocator positive control failed");
+
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    for _ in 0..64 {
+        for operation in [Work::Put, Work::Flush] {
+            observer.waiter(operation, 4).finish_success();
+            observer.waiter(operation, 8).finish_error();
+            drop(observer.waiter(operation, 16));
+            observer.queue(operation, 4).finish_success();
+            observer.queue(operation, 8).finish_error();
+            drop(observer.queue(operation, 16));
+            observer.worker(operation, 4).finish_success();
+            observer.worker(operation, 8).finish_error();
+            drop(observer.worker(operation, 16));
+            drop(disabled.queue(operation, 4));
+        }
+        for stage in STAGES {
+            observer.stage(stage, 4).finish_success();
+            observer.stage(stage, 8).finish_error();
+            drop(observer.stage(stage, 16));
+            disabled.stage(stage, 4).finish_success();
+        }
+        observer.put_path(Path::Created);
+        std::hint::black_box(observer.snapshot());
+        std::hint::black_box(disabled.snapshot());
+        drop(observer.clone());
+        drop(disabled.clone());
+    }
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let allocation_calls = ALLOCATION_CALLS.with(Cell::get);
+    assert_eq!(
+        allocation_calls, 0,
+        "warmed filesystem observer or fixed snapshot allocated"
+    );
+    let after = observer.snapshot().unwrap();
+    assert!(!after.saturated && !after.concurrent_activity);
+    for (old, new) in before.operations.iter().zip(after.operations.iter()) {
+        for (previous, current) in [
+            (old.waiter, new.waiter),
+            (old.queue, new.queue),
+            (old.worker, new.worker),
+        ] {
+            assert_eq!(current.started - previous.started, 192);
+            assert_eq!(current.inflight, 0);
+            assert_eq!(current.succeeded - previous.succeeded, 64);
+            assert_eq!(current.failed - previous.failed, 64);
+            assert_eq!(current.abandoned - previous.abandoned, 64);
+            assert_eq!(current.offered_bytes - previous.offered_bytes, 64 * 28);
+        }
+    }
+    for (old, new) in before.stages.iter().zip(after.stages.iter()) {
+        assert_eq!(new.started - old.started, 192);
+        assert_eq!(
+            (
+                new.succeeded - old.succeeded,
+                new.failed - old.failed,
+                new.abandoned - old.abandoned
+            ),
+            (64, 64, 64)
+        );
+        assert_eq!(new.inflight, 0);
+        assert_eq!(new.offered_bytes - old.offered_bytes, 64 * 28);
+    }
+    assert!(disabled.snapshot().is_none());
+    // Existing global rows and their allocation claims remain unchanged.
+    assert_eq!(storage::snapshot().entries.len(), 118);
+}
+
+#[test]
+#[ignore = "requires MOUNT_RS_PROFILE_IO=1 and MOUNT_RS_TRACE_STORAGE=0"]
+fn warmed_core_spans_record_without_added_allocations() {
+    assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+    assert_eq!(std::env::var("MOUNT_RS_TRACE_STORAGE").as_deref(), Ok("0"));
+    assert!(storage::enabled());
+    let mut warm = Span::new(Operation::BlockGet);
+    // The current core slow threshold is 100ms. Trigger its public completion
+    // path outside the window to warm the private trace flag as well as the
+    // global recorder, with tracing explicitly disabled by the gate.
+    std::thread::sleep(Duration::from_millis(110));
+    warm.finish_success(0);
+    let before = storage::snapshot();
+    let operations = [
+        Operation::FoundationDbTransactionCreate,
+        Operation::FoundationDbTransactionClosureAttempt,
+        Operation::FoundationDbReadGet,
+        Operation::FoundationDbReadGetKey,
+        Operation::FoundationDbReadGetRangePage,
+        Operation::FoundationDbTransactionCommit,
+        Operation::FoundationDbTransactionOnError,
+        Operation::BlobCacheMissAdmissionWait,
+        Operation::BlobCacheMissSingleflightWait,
+        Operation::BlobCacheRamLookup,
+        Operation::BlobCacheDiskLookup,
+        Operation::BlobCachePeerConnectionLockWait,
+        Operation::BlobCachePeerConnectionEstablish,
+        Operation::RemoteClientQuicOpenBi,
+        Operation::RemoteClientQuicRequestSend,
+        Operation::RemoteClientQuicResponseReceive,
+        Operation::BlobCachePeerRequestByteAdmissionWait,
+        Operation::BlobCachePeerOpenBi,
+        Operation::BlobCachePeerRequestSend,
+        Operation::BlobCachePeerResponseReceive,
+        Operation::BlobCachePeerGet,
+        Operation::BlobCachePeerGetMiss,
+        Operation::RemoteClientWebSocketTcpConnect,
+        Operation::RemoteClientWebSocketTlsHandshake,
+        Operation::RemoteClientWebSocketUpgrade,
+        Operation::RemoteClientWebSocketSocketLockWait,
+        Operation::RemoteClientWebSocketRequestEncode,
+        Operation::RemoteClientWebSocketRequestSend,
+        Operation::RemoteClientWebSocketResponseReceive,
+        Operation::RemoteClientWebSocketResponseDecode,
+        Operation::RemoteClientQuicConnectionSetup,
+        Operation::BlobCacheDiscoveryLocate,
+        Operation::ObjectStoreBackingMarkerProbeGet,
+        Operation::ObjectStoreBackingMarkerProbeBodyRead,
+        Operation::ObjectStoreBackingMarkerDataGet,
+        Operation::ObjectStoreBackingMarkerDataBodyRead,
+        Operation::ObjectStoreBackingMarkerProbeCreate,
+        Operation::ObjectStoreBackingMarkerRetryBackoff,
+    ];
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    for operation in operations {
+        let mut success = Span::new(operation);
+        success.finish_success(selected_bytes(operation));
+        let mut error = Span::new(operation);
+        error.finish_error();
+        drop(Span::new(operation));
+    }
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let allocation_calls = ALLOCATION_CALLS.with(Cell::get);
+    println!(
+        "MOUNT_RS_CACHE_RECORDER_ALLOCATION bank=storage selected_rows={} declared_rows={} allocation_calls={allocation_calls}",
+        operations.len(),
+        before.entries.len()
+    );
+    assert_eq!(
+        allocation_calls, 0,
+        "warmed actual core Span added an allocation"
+    );
+    let delta = storage::snapshot().delta(&before).unwrap();
+    assert_eq!(before.entries.len(), 118);
+    assert_eq!(delta.in_flight, 0);
+    for operation in operations {
+        let row = &delta.entries[operation as usize];
+        assert_eq!(
+            (
+                row.calls,
+                row.success,
+                row.error,
+                row.cancelled,
+                row.in_flight
+            ),
+            (3, 1, 1, 1, 0)
+        );
+        assert_eq!(row.latency_log2_us.iter().sum::<u64>(), 3);
+        assert_eq!(row.bytes, selected_bytes(operation));
+        assert_eq!((row.returned_rows, row.returned_row_observations), (0, 0));
+    }
+}
+
+#[test]
+fn warmed_object_store_guards_and_fixed_snapshots_do_not_add_allocations() {
+    use mount_rs_core::diagnostics::object_store::{ClientRole, HttpMethod, Observer};
+    // Isolated bank and owner token construction are deliberately outside the window.
+    let observer = Observer::isolated();
+    let disabled = Observer::disabled();
+    let cache = observer.cache_residency();
+    let bundle = observer.bundle_build().finish_success().unwrap();
+    let bundle_clone = std::sync::Arc::clone(&bundle);
+    let client = observer.client(ClientRole::PrimaryDataMixed);
+    let inert_client = disabled.client(ClientRole::StandaloneData);
+    observer
+        .client_build(ClientRole::StandaloneProbe)
+        .finish_success();
+    let before_build =
+        observer.snapshot().unwrap().clients[ClientRole::StandaloneProbe.index()].build;
+    let _ = observer.snapshot();
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    let positive = std::hint::black_box(Box::new([7u8; 1024]));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let positive_calls = ALLOCATION_CALLS.with(Cell::get);
+    drop(positive);
+    assert!(positive_calls > 0, "allocator positive control failed");
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    for _ in 0..64 {
+        observer
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_success();
+        observer
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_error();
+        drop(observer.client_build(ClientRole::StandaloneProbe));
+        disabled
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_success();
+        disabled
+            .client_build(ClientRole::StandaloneProbe)
+            .finish_error();
+        drop(disabled.client_build(ClientRole::StandaloneProbe));
+        observer.known_extra_future_box(ClientRole::PrimaryDataMixed, HttpMethod::Get);
+        observer.known_extra_response_body_box(ClientRole::PrimaryDataMixed, HttpMethod::Get);
+        let mut body = client.attempt(HttpMethod::Get, Some(3)).headers(200);
+        body.data(3);
+        body.eof();
+        client.attempt(HttpMethod::Get, None).transport_error();
+        drop(client.attempt(HttpMethod::Get, None));
+        drop(client.attempt(HttpMethod::Get, None).headers(404));
+        cache.publish(2, 3);
+        cache.publish(1, 2);
+        observer.bundle_build().finish_error();
+        drop(observer.bundle_build());
+        inert_client
+            .attempt(HttpMethod::Get, None)
+            .headers(200)
+            .eof();
+        drop(disabled.bundle_build().finish_success());
+        let _ = std::hint::black_box(observer.snapshot());
+    }
+    drop(bundle);
+    drop(bundle_clone);
+    drop(client);
+    drop(inert_client);
+    drop(cache);
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let recorded_calls = ALLOCATION_CALLS.with(Cell::get);
+    assert_eq!(
+        recorded_calls, 0,
+        "warmed bank-only guard updates added allocations"
+    );
+    let final_state = observer.snapshot().unwrap();
+    let build = final_state.clients[ClientRole::StandaloneProbe.index()].build;
+    assert_eq!(
+        (
+            build.started - before_build.started,
+            build.succeeded - before_build.succeeded,
+            build.failed - before_build.failed,
+            build.abandoned - before_build.abandoned,
+            build.inflight
+        ),
+        (192, 64, 64, 64, 0)
+    );
+    assert!(disabled.snapshot().is_none());
+    assert_eq!(final_state.cache.live, 0);
+    assert_eq!(final_state.bundles.live, 0);
+    assert_eq!(
+        final_state.clients[ClientRole::PrimaryDataMixed.index()].live,
+        0
+    );
+    assert!(!final_state.saturated);
+    assert_eq!(storage::snapshot().entries.len(), 118);
+    // Excludes serialization, startup Arc/token construction, wrapper Box sites,
+    // backing clients and the existing allocating storage::snapshot() above.
+}

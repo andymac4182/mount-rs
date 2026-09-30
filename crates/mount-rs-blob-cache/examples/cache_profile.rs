@@ -114,7 +114,11 @@ async fn main() {
     cache.prepare_concurrent_backing().await.unwrap();
     let id = BlockId("opaque".into());
     cache.get(&id).await.unwrap();
-    local.shutdown().await;
+    let mut permits = Vec::with_capacity(8);
+    for _ in 0..8 {
+        permits.push(local.io_permit().await.unwrap());
+    }
+    drop(permits);
     measure("uncached_memory_provider", backing.as_ref(), &id, 100_000).await;
     let before = backing.gets.load(Ordering::Relaxed);
     measure("warm_ram_cache", &cache, &id, 100_000).await;
@@ -123,4 +127,5 @@ async fn main() {
         backing.gets.load(Ordering::Relaxed) - before,
         cache.metrics().snapshot().local_hits
     );
+    local.shutdown().await.unwrap();
 }

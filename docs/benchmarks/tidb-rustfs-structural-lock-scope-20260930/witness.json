@@ -1,0 +1,78 @@
+{
+  "allocation_profile_instrumented": false,
+  "archive_manifest_sha256": "49534c5f96030ada49cf28ba99f9d45bd8ef46144cd425729cc251269544dfbf",
+  "baseline_revision": "6fdaabf3cf852e8d6d4853d6a54439884aab9a10",
+  "binary_sha256": "f429f19580af557a4641e6fa6bb7f05542566363a3d5cfafa5a5ab141e57fc74",
+  "cells": 16,
+  "collector_group_absent": true,
+  "correctness_gates": {
+    "actual_tidb_compact_failed": 0,
+    "actual_tidb_compact_passed": 53,
+    "provider_enabled_tests_passed": 47,
+    "strict_clippy_all_targets": [
+      "mount-rs-tidb"
+    ]
+  },
+  "crossnode_payload": {
+    "complete": true,
+    "completed_pairs": 100,
+    "scope": "one existing acknowledged 4096-byte block per Drive/server pair over rotated QUIC sessions; no payload writes; outside timed modes",
+    "verified_bytes": 409600,
+    "verified_reads": 100
+  },
+  "dataset_absence_proven": false,
+  "dataset_retained": true,
+  "derived_json_bytes": 5369851,
+  "derived_json_sha256": "c1a8d51e985c1d9f855543d555f92039b12bffbd56c21bc621f100aec4689ab6",
+  "extractor_sha256": "fe9d62baab425d7a132b374dfa9f5f6e38f0d6673d4cce982244d4c365aa51c1",
+  "fresh_container_stopped": true,
+  "fresh_oracles": {
+    "complete": true,
+    "completed_drives": 10,
+    "final_bytes": 62857216,
+    "final_files": 10000,
+    "final_receipt_sha256": "8588f8eb5ddf74bf417dd9c4cba5d2dfb4ec723bb6f37114601dc4517e4e4ecf",
+    "initial_bytes": 62832640,
+    "initial_files": 10000,
+    "initial_receipt_sha256": "9fe91b8ee3fd57ecfec4f1c14c5891bbfbf5d3cac2d136084493ec0e3a809e3b"
+  },
+  "geometry": {
+    "clients": 10,
+    "drives": 10,
+    "files_per_drive": 1000,
+    "partitions": 5,
+    "servers": 10
+  },
+  "historical_parallel_harness_counter_reset_resolved": false,
+  "lock_key_control_sha256": "a8018dea77e217169ff7acfad5401c200142ea947779cd626c57a34a99991eef",
+  "measured_checkout_clean": true,
+  "measurement_revision": "6a60518d5601f11e5923d725675772f941a5e18b",
+  "metrics_gzip_bytes": 134903,
+  "metrics_gzip_sha256": "e4d596da2ce31b54ceee191e37aaa719cbf36ce285ebb85201734e9d626d7fb3",
+  "namespace_sha256": "852cd87eb2641aee5ec6007c90283857eecbc067a9411dc2d5e6be2c7886e9e1",
+  "original_container_mutations": false,
+  "original_container_mutations_scope": "Docker control plane only; owned data written to original TiDB and retained",
+  "original_eight_identity_limits_lifecycle_preserved": true,
+  "original_health_after_sha256": "2589b86b19b3931337dedc0873c60d2701354df8eba1e8bf4a1010ce13583626",
+  "original_health_before_sha256": "374d9b813d70848d6dd882a4c936a48906aa2d65bbe43c0adfba2f4e2939b4c8",
+  "owner_elapsed_seconds": 367.8902596250409,
+  "owner_receipt_sha256": "e1fe7f4a86b600c160639394759619ab6b9b44f627933489024cdea53cf76e0b",
+  "owner_source_sha256": "cb3451f2adf0cb7ee04270100cee066d7cdfd0e0340b55a9e6303a6d33302692",
+  "owner_status": "benchmarked",
+  "partition_denials": 10,
+  "physical_iops_claim": false,
+  "production_capacity_claim": false,
+  "requested_seconds_per_cell": 5,
+  "revocation_denials": 10,
+  "schema": "mount-rs.structural-lock-scope-benchmark-witness.v1",
+  "serial_harness_gate": {
+    "failed": 0,
+    "ignored": 6,
+    "passed": 170
+  },
+  "sibling_denials": 10,
+  "source_pins_after_equal_before": true,
+  "source_rows": 565,
+  "terminal_sha256": "8f57f72e6b3eca8f1ecdc03902acf698bf2c4e97dd3be598e5bb3ff60d7daed8",
+  "workers_reaped_cleanly": true
+}

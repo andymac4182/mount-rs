@@ -1723,9 +1723,14 @@ dependencies = [
  "libc",
  "md-5 0.10.6",
  "mount-rs-core",
+ "mount-rs-sdk",
+ "mount-rs-sqlite",
  "quinn",
+ "quinn-proto",
  "rcgen",
+ "rusqlite",
  "rustls",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -1742,6 +1747,7 @@ dependencies = [
  "mount-rs-core",
  "mount-rs-memory",
  "mount-rs-sqlite",
+ "rusqlite",
  "serde_json",
  "tokio",
 ]
@@ -1751,6 +1757,7 @@ name = "mount-rs-cli"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "libc",
  "mount-rs-auto",
  "mount-rs-blob-cache",
@@ -1761,9 +1768,14 @@ dependencies = [
  "mount-rs-nfs",
  "mount-rs-observability",
  "mount-rs-remote-client",
+ "mount-rs-remote-protocol",
+ "mount-rs-rustfs",
  "mount-rs-sdk",
  "mount-rs-service",
  "mount-rs-sqlite",
+ "mount-rs-tidb",
+ "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-pemfile",
@@ -1821,12 +1833,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-filesystem-blocks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "mount-rs-core",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "mount-rs-foundationdb"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "foundationdb",
  "futures-util",
+ "mount-rs-chunked",
  "mount-rs-core",
  "serde_json",
  "sha2 0.10.9",
@@ -1908,6 +1934,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-mysql-async"
+version = "0.37.1"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "crossbeam-queue",
+ "crossbeam-utils",
+ "flate2",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "keyed_priority_queue",
+ "lru",
+ "mysql_common",
+ "percent-encoding",
+ "rand 0.10.2",
+ "rustls",
+ "serde",
+ "socket2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "twox-hash",
+ "url",
+ "webpki-roots",
+]
+
+[[package]]
 name = "mount-rs-napi"
 version = "0.1.0"
 dependencies = [
@@ -1937,6 +1992,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde_json",
  "tokio",
 ]
 
@@ -1998,6 +2054,7 @@ name = "mount-rs-pglite"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "md-5 0.10.6",
  "mount-rs-core",
  "mount-rs-memfs",
@@ -2050,12 +2107,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "futures-util",
+ "libc",
  "mount-rs-auto",
  "mount-rs-core",
  "mount-rs-memfs",
  "mount-rs-remote-protocol",
  "mount-rs-sdk",
  "mount-rs-service",
+ "mount-rs-sqlite",
  "quinn",
  "rcgen",
  "ring",
@@ -2064,6 +2124,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
  "webpki-roots",
 ]
 
@@ -2082,9 +2144,13 @@ name = "mount-rs-rustfs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "futures",
+ "http-body",
  "mount-rs-core",
  "mount-rs-object-store-blocks",
  "object_store 0.12.5",
+ "serde_json",
  "tokio",
 ]
 
@@ -2122,6 +2188,7 @@ dependencies = [
  "mount-rs-aws-s3",
  "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-filesystem-blocks",
  "mount-rs-foundationdb",
  "mount-rs-host",
  "mount-rs-memfs",
@@ -2134,6 +2201,8 @@ dependencies = [
  "mount-rs-sqlite",
  "mount-rs-sqlite-fs",
  "mount-rs-tidb",
+ "mysql_async",
+ "rusqlite",
  "tokio",
 ]
 
@@ -2144,11 +2213,15 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "flate2",
+ "futures-util",
  "libc",
  "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-filesystem-blocks",
  "mount-rs-memfs",
  "mount-rs-remote-protocol",
+ "mount-rs-rustfs",
  "mount-rs-sdk",
  "mount-rs-sqlite",
  "mount-rs-tidb",
@@ -2163,6 +2236,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
  "url",
 ]
 
@@ -2195,6 +2270,7 @@ dependencies = [
  "mount-rs-persist",
  "rusqlite",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2229,8 +2305,9 @@ dependencies = [
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-memfs",
+ "mount-rs-mysql-async",
  "mount-rs-r2",
- "mysql_async",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
@@ -2291,16 +2368,13 @@ dependencies = [
  "mysql_common",
  "percent-encoding",
  "rand 0.10.2",
- "rustls",
  "serde",
  "socket2",
  "thiserror 2.0.20",
  "tokio",
- "tokio-rustls",
  "tokio-util",
  "twox-hash",
  "url",
- "webpki-roots",
 ]
 
 [[package]]
@@ -2953,8 +3027,6 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -4023,6 +4095,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4219,6 +4303,22 @@ name = "try_map"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb1626d07cb5c1bb2cf17d94c0be4852e8a7c02b041acec9a8c5bdda99f9d580"
+
+[[package]]
+name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "sha1",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "twox-hash"

@@ -1,0 +1,688 @@
+{
+  "derivation_sha256": "273c4b161d27c1dd381e81c825609e2cf7468ab8fd573b99ecf79678d1810d8d",
+  "derived": {
+    "cpu_network_memory": [
+      {
+        "average_guest_cpu_cores": 0.2408947583193481,
+        "cpu_seconds": 42.703918,
+        "elapsed_seconds": 177.272093,
+        "memory_after_bytes": 2943385600,
+        "memory_before_bytes": 3068051456,
+        "network_bytes_per_second": {
+          "rx_bytes": 637317.7756749337,
+          "tx_bytes": 173681.71424477964
+        },
+        "network_delta": {
+          "rx_bytes": 112978656,
+          "rx_packets": 107159,
+          "tx_bytes": 30788921,
+          "tx_packets": 111663
+        },
+        "role": "tikv1"
+      },
+      {
+        "average_guest_cpu_cores": 0.6542220202740263,
+        "cpu_seconds": 115.973142,
+        "elapsed_seconds": 177.268784,
+        "memory_after_bytes": 2920288256,
+        "memory_before_bytes": 3162492928,
+        "network_bytes_per_second": {
+          "rx_bytes": 1683346.2906813868,
+          "tx_bytes": 2054505.631403214
+        },
+        "network_delta": {
+          "rx_bytes": 298404750,
+          "rx_packets": 512766,
+          "tx_bytes": 364199715,
+          "tx_packets": 577001
+        },
+        "role": "tikv2"
+      },
+      {
+        "average_guest_cpu_cores": 0.2668669370086314,
+        "cpu_seconds": 47.307515,
+        "elapsed_seconds": 177.270049,
+        "memory_after_bytes": 2756349952,
+        "memory_before_bytes": 2932166656,
+        "network_bytes_per_second": {
+          "rx_bytes": 545908.2882072199,
+          "tx_bytes": 132080.67652759547
+        },
+        "network_delta": {
+          "rx_bytes": 96773189,
+          "rx_packets": 151236,
+          "tx_bytes": 23413948,
+          "tx_packets": 153924
+        },
+        "role": "tikv3"
+      },
+      {
+        "average_guest_cpu_cores": 1.3395645421023181,
+        "cpu_seconds": 237.461587,
+        "elapsed_seconds": 177.267746,
+        "memory_after_bytes": 1511874560,
+        "memory_before_bytes": 1534124032,
+        "network_bytes_per_second": {
+          "rx_bytes": 2564493.0917099835,
+          "tx_bytes": 4811501.128919414
+        },
+        "network_delta": {
+          "rx_bytes": 454601910,
+          "rx_packets": 1517399,
+          "tx_bytes": 852923960,
+          "tx_packets": 1332249
+        },
+        "role": "tidb"
+      }
+    ],
+    "input_sha256": {
+      "d100-backend-observation-1.json": "f632e8ebfc234aaa81d52c098f995cbc940b43e0640461746c24116046ebaaf3",
+      "d100-backend-observation-2.json": "1dd37a9c247fdab9dd94ac217253faf582ed1fa2a14af7823b13aa8230c328de",
+      "d100-tikv-io-1.json": "750f172df190fddc90803da106640c9bc120fe4fe64506bbc81d56fc16d9c8c3",
+      "d100-tikv-io-2.json": "c3a0143e5bbe1ffdc8350331c6f943566b9eee7567b260e64de6f09a0200317b"
+    },
+    "schema": "mount-rs.d100-backend-partial-observation.v1",
+    "scope": "Mid online_payload only; separate sequential Docker/cgroup windows include background and observer work; clocks differ by role. No exact request or physical host attribution; rates never normalized as exact per-cycle amplification.",
+    "tikv_guest_block": [
+      {
+        "delta": {
+          "rbytes": 1691648,
+          "rios": 107,
+          "wbytes": 163512320,
+          "wios": 42530
+        },
+        "elapsed_seconds": 157.485782,
+        "guest_io_rates_per_second": {
+          "rbytes": 10741.591898118142,
+          "rios": 0.679426413236466,
+          "wbytes": 1038267.1878277875,
+          "wios": 270.0561248125878
+        },
+        "role": "tikv1"
+      },
+      {
+        "delta": {
+          "rbytes": 7684096,
+          "rios": 396,
+          "wbytes": 223559680,
+          "wios": 69637
+        },
+        "elapsed_seconds": 157.5313825,
+        "guest_io_rates_per_second": {
+          "rbytes": 48778.19186281819,
+          "rios": 2.5137848326824654,
+          "wbytes": 1419143.7696549129,
+          "wios": 442.0516020038102
+        },
+        "role": "tikv2"
+      },
+      {
+        "delta": {
+          "rbytes": 16384,
+          "rios": 4,
+          "wbytes": 163651584,
+          "wios": 42628
+        },
+        "elapsed_seconds": 157.580529,
+        "guest_io_rates_per_second": {
+          "rbytes": 103.9722363160743,
+          "rios": 0.025383846756854078,
+          "wbytes": 1038526.6824431081,
+          "wios": 270.5156548877939
+        },
+        "role": "tikv3"
+      }
+    ]
+  },
+  "inputs": {
+    "d100-backend-observation-1.json": {
+      "observation": {
+        "containers": [
+          {
+            "container_id_sha256": "df113a0f6543bf2a768aeafcad5bb69e0e5b5b9a73c56b11e4bf933d453a6332",
+            "cpu_usage_ns": 6985529890000,
+            "daemon_read": "2026-09-29T17:20:45.158413334Z",
+            "guest_block": {
+              "io_service_bytes_recursive": {
+                "available": true,
+                "empty_is_not_zero": true,
+                "entries": [
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "read",
+                    "value": 24306212864
+                  },
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "write",
+                    "value": 86504480768
+                  }
+                ]
+              },
+              "io_serviced_recursive": {
+                "available": false,
+                "empty_is_not_zero": true,
+                "entries": null
+              }
+            },
+            "memory_limit_bytes": 3221225472,
+            "memory_usage_bytes": 3068051456,
+            "network": {
+              "rx_bytes": 49465881185,
+              "rx_packets": 20449190,
+              "tx_bytes": 50500036615,
+              "tx_packets": 19239198
+            },
+            "observed_wall_ns": 1790702445163039000,
+            "role": "tikv1"
+          },
+          {
+            "container_id_sha256": "f2729fdb0c124435638f3ebb0f1c488aec104f7ac3fcef085e760c0984f8dc7b",
+            "cpu_usage_ns": 7866251096000,
+            "daemon_read": "2026-09-29T17:20:47.169072626Z",
+            "guest_block": {
+              "io_service_bytes_recursive": {
+                "available": true,
+                "empty_is_not_zero": true,
+                "entries": [
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "read",
+                    "value": 22897233920
+                  },
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "write",
+                    "value": 86409342976
+                  }
+                ]
+              },
+              "io_serviced_recursive": {
+                "available": false,
+                "empty_is_not_zero": true,
+                "entries": null
+              }
+            },
+            "memory_limit_bytes": 3221225472,
+            "memory_usage_bytes": 3162492928,
+            "network": {
+              "rx_bytes": 43940069823,
+              "rx_packets": 21161461,
+              "tx_bytes": 71340083770,
+              "tx_packets": 20133360
+            },
+            "observed_wall_ns": 1790702447172876000,
+            "role": "tikv2"
+          },
+          {
+            "container_id_sha256": "16388069205444f92e9372d46d555a6679140b81002528100cb0673789251df5",
+            "cpu_usage_ns": 7845371659000,
+            "daemon_read": "2026-09-29T17:20:49.177251169Z",
+            "guest_block": {
+              "io_service_bytes_recursive": {
+                "available": true,
+                "empty_is_not_zero": true,
+                "entries": [
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "read",
+                    "value": 21274112000
+                  },
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "write",
+                    "value": 86841110528
+                  }
+                ]
+              },
+              "io_serviced_recursive": {
+                "available": false,
+                "empty_is_not_zero": true,
+                "entries": null
+              }
+            },
+            "memory_limit_bytes": 3221225472,
+            "memory_usage_bytes": 2932166656,
+            "network": {
+              "rx_bytes": 48505251832,
+              "rx_packets": 23806493,
+              "tx_bytes": 73402426629,
+              "tx_packets": 22398490
+            },
+            "observed_wall_ns": 1790702449180924000,
+            "role": "tikv3"
+          },
+          {
+            "container_id_sha256": "953195fde84f9f4d76bb13bd1224bbd45feeefa72e38786439c6f1a568c423b8",
+            "cpu_usage_ns": 11613423111000,
+            "daemon_read": "2026-09-29T17:20:51.189619753Z",
+            "guest_block": {
+              "io_service_bytes_recursive": {
+                "available": true,
+                "empty_is_not_zero": true,
+                "entries": [
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "read",
+                    "value": 1183932416
+                  },
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "write",
+                    "value": 313311232
+                  }
+                ]
+              },
+              "io_serviced_recursive": {
+                "available": false,
+                "empty_is_not_zero": true,
+                "entries": null
+              }
+            },
+            "memory_limit_bytes": 1610612736,
+            "memory_usage_bytes": 1534124032,
+            "network": {
+              "rx_bytes": 111594584958,
+              "rx_packets": 69149833,
+              "tx_bytes": 139664906263,
+              "tx_packets": 73283756
+            },
+            "observed_wall_ns": 1790702451196178000,
+            "role": "tidb"
+          }
+        ],
+        "ended_wall_ns": 1790702451199857000,
+        "frontend_after": {
+          "acknowledged": 224324,
+          "controller_pid": 70386,
+          "failed": 0,
+          "phase": "online_payload",
+          "uncertain": 0,
+          "updated_unix_ms": 1790702450512
+        },
+        "frontend_before": {
+          "acknowledged": 216559,
+          "controller_pid": 70386,
+          "failed": 0,
+          "phase": "online_payload",
+          "uncertain": 0,
+          "updated_unix_ms": 1790702442512
+        },
+        "ready_sha256": "ca1f4833feb3cf54c75a1e13c4977645b52fa0add3f18b88af19396bde2d561a",
+        "schema": "mount-rs.backend-readonly-observation.v1",
+        "scope": "Original owned TiDB/TiKV guest CPU, container memory, network and Linux block accounting. Sequential partial interval includes background and observer work; no physical Mac SSD or exact request attribution.",
+        "started_wall_ns": 1790702443274034000
+      },
+      "sha256": "f632e8ebfc234aaa81d52c098f995cbc940b43e0640461746c24116046ebaaf3"
+    },
+    "d100-backend-observation-2.json": {
+      "observation": {
+        "containers": [
+          {
+            "container_id_sha256": "df113a0f6543bf2a768aeafcad5bb69e0e5b5b9a73c56b11e4bf933d453a6332",
+            "cpu_usage_ns": 7028233808000,
+            "daemon_read": "2026-09-29T17:23:42.431774972Z",
+            "guest_block": {
+              "io_service_bytes_recursive": {
+                "available": true,
+                "empty_is_not_zero": true,
+                "entries": [
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "read",
+                    "value": 24637165568
+                  },
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "write",
+                    "value": 86961180672
+                  }
+                ]
+              },
+              "io_serviced_recursive": {
+                "available": false,
+                "empty_is_not_zero": true,
+                "entries": null
+              }
+            },
+            "memory_limit_bytes": 3221225472,
+            "memory_usage_bytes": 2943385600,
+            "network": {
+              "rx_bytes": 49578859841,
+              "rx_packets": 20556349,
+              "tx_bytes": 50530825536,
+              "tx_packets": 19350861
+            },
+            "observed_wall_ns": 1790702622435132000,
+            "role": "tikv1"
+          },
+          {
+            "container_id_sha256": "f2729fdb0c124435638f3ebb0f1c488aec104f7ac3fcef085e760c0984f8dc7b",
+            "cpu_usage_ns": 7982224238000,
+            "daemon_read": "2026-09-29T17:23:44.439238Z",
+            "guest_block": {
+              "io_service_bytes_recursive": {
+                "available": true,
+                "empty_is_not_zero": true,
+                "entries": [
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "read",
+                    "value": 23227310080
+                  },
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "write",
+                    "value": 86931877888
+                  }
+                ]
+              },
+              "io_serviced_recursive": {
+                "available": false,
+                "empty_is_not_zero": true,
+                "entries": null
+              }
+            },
+            "memory_limit_bytes": 3221225472,
+            "memory_usage_bytes": 2920288256,
+            "network": {
+              "rx_bytes": 44238474573,
+              "rx_packets": 21674227,
+              "tx_bytes": 71704283485,
+              "tx_packets": 20710361
+            },
+            "observed_wall_ns": 1790702624441660000,
+            "role": "tikv2"
+          },
+          {
+            "container_id_sha256": "16388069205444f92e9372d46d555a6679140b81002528100cb0673789251df5",
+            "cpu_usage_ns": 7892679174000,
+            "daemon_read": "2026-09-29T17:23:46.448132751Z",
+            "guest_block": {
+              "io_service_bytes_recursive": {
+                "available": true,
+                "empty_is_not_zero": true,
+                "entries": [
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "read",
+                    "value": 21555855360
+                  },
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "write",
+                    "value": 87298273280
+                  }
+                ]
+              },
+              "io_serviced_recursive": {
+                "available": false,
+                "empty_is_not_zero": true,
+                "entries": null
+              }
+            },
+            "memory_limit_bytes": 3221225472,
+            "memory_usage_bytes": 2756349952,
+            "network": {
+              "rx_bytes": 48602025021,
+              "rx_packets": 23957729,
+              "tx_bytes": 73425840577,
+              "tx_packets": 22552414
+            },
+            "observed_wall_ns": 1790702626450973000,
+            "role": "tikv3"
+          },
+          {
+            "container_id_sha256": "953195fde84f9f4d76bb13bd1224bbd45feeefa72e38786439c6f1a568c423b8",
+            "cpu_usage_ns": 11850884698000,
+            "daemon_read": "2026-09-29T17:23:48.458113544Z",
+            "guest_block": {
+              "io_service_bytes_recursive": {
+                "available": true,
+                "empty_is_not_zero": true,
+                "entries": [
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "read",
+                    "value": 1203253248
+                  },
+                  {
+                    "major": 254,
+                    "minor": 0,
+                    "op": "write",
+                    "value": 317374464
+                  }
+                ]
+              },
+              "io_serviced_recursive": {
+                "available": false,
+                "empty_is_not_zero": true,
+                "entries": null
+              }
+            },
+            "memory_limit_bytes": 1610612736,
+            "memory_usage_bytes": 1511874560,
+            "network": {
+              "rx_bytes": 112049186868,
+              "rx_packets": 70667232,
+              "tx_bytes": 140517830223,
+              "tx_packets": 74616005
+            },
+            "observed_wall_ns": 1790702628463924000,
+            "role": "tidb"
+          }
+        ],
+        "ended_wall_ns": 1790702628466634000,
+        "frontend_after": {
+          "acknowledged": 403612,
+          "controller_pid": 70386,
+          "failed": 0,
+          "phase": "online_payload",
+          "uncertain": 0,
+          "updated_unix_ms": 1790702627514
+        },
+        "frontend_before": {
+          "acknowledged": 396933,
+          "controller_pid": 70386,
+          "failed": 0,
+          "phase": "online_payload",
+          "uncertain": 0,
+          "updated_unix_ms": 1790702620513
+        },
+        "ready_sha256": "ca1f4833feb3cf54c75a1e13c4977645b52fa0add3f18b88af19396bde2d561a",
+        "schema": "mount-rs.backend-readonly-observation.v1",
+        "scope": "Original owned TiDB/TiKV guest CPU, container memory, network and Linux block accounting. Sequential partial interval includes background and observer work; no physical Mac SSD or exact request attribution.",
+        "started_wall_ns": 1790702621107256000
+      },
+      "sha256": "1dd37a9c247fdab9dd94ac217253faf582ed1fa2a14af7823b13aa8230c328de"
+    },
+    "d100-tikv-io-1.json": {
+      "observation": {
+        "containers": [
+          {
+            "available": true,
+            "container_id_sha256": "df113a0f6543bf2a768aeafcad5bb69e0e5b5b9a73c56b11e4bf933d453a6332",
+            "devices": [
+              {
+                "major": 254,
+                "minor": 0,
+                "rbytes": 24636600320,
+                "rios": 241588,
+                "wbytes": 86842392576,
+                "wios": 2414439
+              }
+            ],
+            "ended_wall_ns": 1790702508438904000,
+            "raw_bytes": 85,
+            "raw_sha256": "fb2e1c6f6f5ac761b61821bea8fa1cd0bfb0a42b862993facf38cbbef4a02eb3",
+            "returncode": 0,
+            "role": "tikv1",
+            "started_wall_ns": 1790702508363791000
+          },
+          {
+            "available": true,
+            "container_id_sha256": "f2729fdb0c124435638f3ebb0f1c488aec104f7ac3fcef085e760c0984f8dc7b",
+            "devices": [
+              {
+                "major": 254,
+                "minor": 0,
+                "rbytes": 23226204160,
+                "rios": 220158,
+                "wbytes": 86766424064,
+                "wios": 2436083
+              }
+            ],
+            "ended_wall_ns": 1790702508490153000,
+            "raw_bytes": 85,
+            "raw_sha256": "8746c750c5ca7e33a9aa1dadb41739dea9874a82c1bd60b7563835e8ba0ceb8a",
+            "returncode": 0,
+            "role": "tikv2",
+            "started_wall_ns": 1790702508438954000
+          },
+          {
+            "available": true,
+            "container_id_sha256": "16388069205444f92e9372d46d555a6679140b81002528100cb0673789251df5",
+            "devices": [
+              {
+                "major": 254,
+                "minor": 0,
+                "rbytes": 21555838976,
+                "rios": 179164,
+                "wbytes": 87176011776,
+                "wios": 2612768
+              }
+            ],
+            "ended_wall_ns": 1790702508538865000,
+            "raw_bytes": 85,
+            "raw_sha256": "5551d0becf1682911f4425bbf9507c34974b7a5513eaca680a99292e4b82b760",
+            "returncode": 0,
+            "role": "tikv3",
+            "started_wall_ns": 1790702508490192000
+          }
+        ],
+        "ended_wall_ns": 1790702508541257000,
+        "frontend_after": {
+          "acknowledged": 280359,
+          "failed": 0,
+          "phase": "online_payload",
+          "uncertain": 0,
+          "updated_unix_ms": 1790702508513
+        },
+        "frontend_before": {
+          "acknowledged": 279669,
+          "failed": 0,
+          "phase": "online_payload",
+          "uncertain": 0,
+          "updated_unix_ms": 1790702507513
+        },
+        "schema": "mount-rs.tikv-guest-cgroup-io-observation.v1",
+        "scope": "Read-only Linux guest cgroup block bytes/operations; includes background and cat observer, no physical Mac SSD or exact request attribution. Sequential capture clocks; cannot treat empty/missing fields as zero.",
+        "started_wall_ns": 1790702508357998000
+      },
+      "sha256": "750f172df190fddc90803da106640c9bc120fe4fe64506bbc81d56fc16d9c8c3"
+    },
+    "d100-tikv-io-2.json": {
+      "observation": {
+        "containers": [
+          {
+            "available": true,
+            "container_id_sha256": "df113a0f6543bf2a768aeafcad5bb69e0e5b5b9a73c56b11e4bf933d453a6332",
+            "devices": [
+              {
+                "major": 254,
+                "minor": 0,
+                "rbytes": 24638291968,
+                "rios": 241695,
+                "wbytes": 87005904896,
+                "wios": 2456969
+              }
+            ],
+            "ended_wall_ns": 1790702665940958000,
+            "raw_bytes": 85,
+            "raw_sha256": "ff0677bb22623e473bff337d20c0698ec52459f6a260667eab4b9bfc495c9ef7",
+            "returncode": 0,
+            "role": "tikv1",
+            "started_wall_ns": 1790702665833301000
+          },
+          {
+            "available": true,
+            "container_id_sha256": "f2729fdb0c124435638f3ebb0f1c488aec104f7ac3fcef085e760c0984f8dc7b",
+            "devices": [
+              {
+                "major": 254,
+                "minor": 0,
+                "rbytes": 23233888256,
+                "rios": 220554,
+                "wbytes": 86989983744,
+                "wios": 2505720
+              }
+            ],
+            "ended_wall_ns": 1790702666050876000,
+            "raw_bytes": 85,
+            "raw_sha256": "f2f87df91312d9199a6bb7e4be9a7e8f3add84893dd379172b71a788020ea6bf",
+            "returncode": 0,
+            "role": "tikv2",
+            "started_wall_ns": 1790702665940996000
+          },
+          {
+            "available": true,
+            "container_id_sha256": "16388069205444f92e9372d46d555a6679140b81002528100cb0673789251df5",
+            "devices": [
+              {
+                "major": 254,
+                "minor": 0,
+                "rbytes": 21555855360,
+                "rios": 179168,
+                "wbytes": 87339663360,
+                "wios": 2655396
+              }
+            ],
+            "ended_wall_ns": 1790702666139195000,
+            "raw_bytes": 85,
+            "raw_sha256": "514d2a8f345a0457f96cc41a06db56c521a4b0cc2ab19130337ffbe060df7c4f",
+            "returncode": 0,
+            "role": "tikv3",
+            "started_wall_ns": 1790702666050920000
+          }
+        ],
+        "ended_wall_ns": 1790702666141793000,
+        "frontend_after": {
+          "acknowledged": 442404,
+          "failed": 0,
+          "phase": "online_payload",
+          "uncertain": 0,
+          "updated_unix_ms": 1790702665515
+        },
+        "frontend_before": {
+          "acknowledged": 442404,
+          "failed": 0,
+          "phase": "online_payload",
+          "uncertain": 0,
+          "updated_unix_ms": 1790702665515
+        },
+        "schema": "mount-rs.tikv-guest-cgroup-io-observation.v1",
+        "scope": "Read-only Linux guest cgroup block bytes/operations; includes background and cat observer, no physical Mac SSD or exact request attribution. Sequential capture clocks; cannot treat empty/missing fields as zero.",
+        "started_wall_ns": 1790702665830326000
+      },
+      "sha256": "c3a0143e5bbe1ffdc8350331c6f943566b9eee7567b260e64de6f09a0200317b"
+    }
+  },
+  "native_terminal_sha256": "0e9fadf8087ff48638f9e182b8fa273f842936e4a07b30fe3566a7355da0c207",
+  "qualified_for_throughput": false,
+  "schema": "mount-rs.production-target-backend-observations.v1"
+}

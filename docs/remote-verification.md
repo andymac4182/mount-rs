@@ -67,15 +67,55 @@ A symbolic decision proof does not prove the whole async service state machine.
 | `remote_grant_requires_exact_scope_and_all_claims` | Two literal scope identities; zero to two resolved conditions, each missing, matching, or different; unwind 5 | Exact Partition and policy, nonempty conditions, and conjunction required. Excludes JSON pointer resolution, arbitrary strings/condition counts, grant aggregation, and JWT signatures. |
 | `remote_read_grants_cannot_authorize_mutations` | All four grant/required Read/Write combinations | A Read grant cannot satisfy a Write requirement. Excludes the upstream operation classification and grant resolution. |
 | `remote_readonly_flags_require_explicit_nonmutating_values` | All 729 combinations of six absent/invalid, false, or true decoded flag values; unwind 7 | Read classification requires explicit read=true and all mutation flags=false. Excludes JSON parsing and string aliases. |
-| `remote_frame_lengths_are_bounded_before_io` | Unrestricted `usize` length | Exactly 1 through 8 MiB admitted, all admitted lengths fit the wire `u32`. Excludes serialization, allocation, full parser, and transport. |
+| `binary_io_lengths_bounded_before_allocation` | Unrestricted `usize` control, payload and count lengths and `u64` request ID, across all six frame kinds; unwind 7 | Accepted control is at most 8 MiB and payload/count at most 1 MiB; noncontrol IDs are nonzero. Read results have equal payload/count and no control; Read/Write control length is 19–82 bytes (18-byte prefix plus a 1–64-byte Drive ID allowance); Write count is zero. Three covers exercise maximum Write payload, oversized rejection and an empty Read result. Excludes allocation execution, payload parsing and transport. |
+| `generic_control_charge_cannot_wrap_or_exceed_default_admission` | Arbitrary `usize` length, assumed at most 8 MiB | The production charge equals `64 * length + 1 MiB + 32`, is at least the input length and at most the default 1 GiB admission budget without overflow. One cover reaches the maximum admitted input. Excludes actual JSON heap usage, permit lifetime and concurrent admission. |
 | `remote_handle_admission_is_fenced_and_bounded` | Arbitrary closed/present booleans, full-range `u64` revisions/counter, and `usize` count | Only live current-revision admission below 1024 handles with a nonoverflowing ID. Excludes locks, scheduler, and backend close effects. |
 | `remote_handles_require_exact_drive_and_revision` | Two literal Drive identities and unrestricted `u64` revisions; unwind 3 | A handle requires exact Drive and catalog revision. Session ownership is exercised by QUIC integration tests; arbitrary strings and table storage are outside this proof. |
+| `initial_auto_fallback_requires_uncontacted_unavailability` | Arbitrary response-received boolean and all four QUIC failure categories | Fallback requires no received response and deadline, timeout or refusal. A contacted peer or other failure cannot trigger fallback. Seven covers; excludes network observation and WebSocket execution. |
+| `acquired_transaction_cannot_reuse_an_incomplete_response` | Arbitrary response-completed boolean | An acquired exchange remains unusable until its complete response is recorded. Two covers; excludes stream ownership, response parsing and scheduling. |
+| `remote_io_completion_bounds_counts_and_closes_uncertainty` | Unrestricted `usize` count and limit; all five error variants plus a deadline | Counts exceeding the limit are protocol errors; local errors and deadline require closure, while a valid remote error preserves its payload and completed exchange. Five covers. The payload case uses an empty string; arbitrary payloads, allocation and cancellation scheduling are outside the proof. |
+
+The current runner selects these ten identities. Executed results below are
+scoped to their recorded commit and inventory.
 
 Hard expiry or a failed catalog read terminally invalidates the session. A later
 renewal requires a new connection; it cannot advertise a session whose old handle
 table was already shut down. Expiry coverage uses a synthetic expired identity
 and exercises request denial followed by renewal rejection, not a clock-transition
 or cancellation proof.
+
+## Executed CI results (2026-09-27 UTC, Linux)
+
+At commit `bdfc61f8591e4abb78f64eecdd3419636a640079`,
+[the full formal job](https://github.com/andymac4182/mount-rs/actions/runs/36286504292/job/108528173756)
+executed all ten current remote harnesses: 1,227 checks, zero failures and 39/39
+satisfied covers with Kani 0.68.0 / CBMC 6.11.0 on x86_64 Linux. The complete
+general/remote/cache inventory passed 55/55 proofs, with 9,641 checks and 261/261
+covers. The retained individual logs, source hashes, invocation inventory and
+archive digest were independently rechecked; see
+[the full evidence scope](formal-verification.md#full-hosted-result-2026-09-27-utc).
+
+`remote_io_completion_bounds_counts_and_closes_uncertainty` passed 158 checks
+and 5/5 covers after replacing aggregate result equality with scalar and
+exhaustive variant assertions. Its production helper and input domains are
+unchanged. These are decision proofs at the recorded commit; they do not qualify
+the complete async service, remote backends or production throughput.
+
+## Earlier executed CI results (2026-09-25 UTC, Linux)
+
+At commit `7eee4a3f2ded67fd01dbc8d388c37e8efd4a83eb`, the
+[remote formal job](https://github.com/andymac4182/mount-rs/actions/runs/36164387109/job/108168468016)
+executed all seven harnesses in that commit's runner with Kani 0.68.0 / CBMC
+6.11.0 on 64-bit x86_64 Linux. Each reported successful verification: 1,038
+checks, zero failed checks, 13 unreachable checks and 25/25 satisfied covers
+across the seven runner invocations. The job also ran handle admission
+separately; that duplicate is excluded from these totals.
+
+The retained CI log proves these bounded decisions. Verifier binary hashes,
+generated proof artifacts and peak RSS were not retained in this record. It
+does not prove compact metadata transactions, cache behavior or end-to-end
+capacity. The six-harness macOS result below records an earlier runner and is
+not a result for the current ten-harness inventory.
 
 ## Executed local results (2026-09-24, macOS)
 

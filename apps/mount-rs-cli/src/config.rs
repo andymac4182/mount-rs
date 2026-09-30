@@ -4,6 +4,8 @@
 //! support. That keeps the CLI's direct dependency surface small while still
 //! allowing every object in the public schema to reject unknown fields.
 
+use mount_rs_sdk::{SqliteJournalMode, SqliteStorageOptions};
+
 use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
@@ -61,8 +63,16 @@ pub struct EnvReference {
 #[derive(Clone, PartialEq, Eq)]
 pub enum StorageProvider {
     Memory,
+    Filesystem {
+        root: PathBuf,
+        persistent: bool,
+    },
     Sqlite {
         path: PathBuf,
+    },
+    SqliteWithOptions {
+        path: PathBuf,
+        options: SqliteStorageOptions,
     },
     Pglite {
         connection: EnvReference,
@@ -109,9 +119,19 @@ impl fmt::Debug for StorageProvider {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => formatter.write_str("Memory"),
+            Self::Filesystem { root, persistent } => formatter
+                .debug_struct("Filesystem")
+                .field("root", root)
+                .field("persistent", persistent)
+                .finish(),
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
                 .field("path", path)
+                .finish(),
+            Self::SqliteWithOptions { path, options } => formatter
+                .debug_struct("SqliteWithOptions")
+                .field("path", path)
+                .field("options", options)
                 .finish(),
             Self::Pglite {
                 connection,
@@ -203,6 +223,7 @@ pub struct SplitStorageConfig {
     pub lease_ttl_ms: Option<u64>,
     pub concurrent_writes: bool,
     pub inode_updates: bool,
+    pub compact_inode_updates: bool,
     pub writeback: bool,
     pub delegated: bool,
     pub checkout_path: Option<String>,
@@ -630,6 +651,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             "lease_ttl_ms",
             "concurrent_writes",
             "inode_updates",
+            "compact_inode_updates",
             "ownership_mode",
             "checkout_path",
             "owner",
@@ -665,15 +687,40 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         .get("concurrent_writes")
         .map(|value| required_value_bool(value, "config.driver.storage.concurrent_writes"))
         .transpose()?;
-    let inode_updates = object
+    let raw_inode_updates = object
         .get("inode_updates")
         .map(|value| required_value_bool(value, "config.driver.storage.inode_updates"))
-        .transpose()?
-        .unwrap_or(false);
+        .transpose()?;
+    let raw_compact_inode_updates = object
+        .get("compact_inode_updates")
+        .map(|value| required_value_bool(value, "config.driver.storage.compact_inode_updates"))
+        .transpose()?;
     let ownership = object
         .get("ownership_mode")
         .map(|value| required_value_string(value, "config.driver.storage.ownership_mode"))
         .transpose()?;
+    if raw_compact_inode_updates == Some(true) {
+        if legacy_concurrent == Some(false) {
+            return Err(ConfigError::at(
+                "config.driver.storage.concurrent_writes",
+                "must be true with compact_inode_updates",
+            ));
+        }
+        if raw_inode_updates == Some(false) {
+            return Err(ConfigError::at(
+                "config.driver.storage.inode_updates",
+                "must be true with compact_inode_updates",
+            ));
+        }
+        if ownership.is_some() {
+            return Err(ConfigError::at(
+                "config.driver.storage.compact_inode_updates",
+                "cannot be combined with ownership_mode",
+            ));
+        }
+    }
+    let compact_inode_updates = raw_compact_inode_updates.unwrap_or(false);
+    let inode_updates = raw_inode_updates.unwrap_or(compact_inode_updates);
     let (concurrent_writes, writeback) = match ownership.as_deref() {
         Some("exclusive") => (false, true),
         Some("shared") => (true, false),
@@ -760,8 +807,9 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             }
             | StorageProvider::Pglite { .. }
             | StorageProvider::Tidb { .. } => {}
-            StorageProvider::Sqlite { path } if sqlite_durable_path(path) => {}
-            StorageProvider::Sqlite { .. } => {
+            StorageProvider::Sqlite { path } | StorageProvider::SqliteWithOptions { path, .. }
+                if sqlite_durable_path(path) => {}
+            StorageProvider::Sqlite { .. } | StorageProvider::SqliteWithOptions { .. } => {
                 return Err(ConfigError::at(
                     "config.driver.storage.metadata.path",
                     "concurrent_writes SQLite metadata requires a durable local database path",
@@ -781,9 +829,11 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
                     "concurrent_writes requires a shared block provider; memory blocks cannot serve independent mounts",
                 ));
             }
-            StorageProvider::Sqlite { path }
-                if !matches!(&metadata, StorageProvider::Sqlite { .. })
-                    || !sqlite_durable_path(path) =>
+            StorageProvider::Sqlite { path } | StorageProvider::SqliteWithOptions { path, .. }
+                if !matches!(
+                    &metadata,
+                    StorageProvider::Sqlite { .. } | StorageProvider::SqliteWithOptions { .. }
+                ) || !sqlite_durable_path(path) =>
             {
                 return Err(ConfigError::at(
                     "config.driver.storage.blocks",
@@ -820,6 +870,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         lease_ttl_ms,
         concurrent_writes,
         inode_updates,
+        compact_inode_updates,
         writeback,
         delegated,
         checkout_path,
@@ -840,10 +891,54 @@ fn parse_provider(
             reject_unknown(object, &["kind"], path)?;
             StorageProvider::Memory
         }
+        "filesystem" => {
+            if !block_role {
+                return Err(ConfigError::at(
+                    path,
+                    "provider 'filesystem' is block-only; select an independent metadata provider",
+                ));
+            }
+            reject_unknown(object, &["kind", "root", "persistent"], path)?;
+            StorageProvider::Filesystem {
+                root: required_path(object, "root", path, base_dir)?,
+                persistent: object
+                    .get("persistent")
+                    .map(|value| required_value_bool(value, &format!("{path}.persistent")))
+                    .transpose()?
+                    .unwrap_or(true),
+            }
+        }
         "sqlite" => {
-            reject_unknown(object, &["kind", "path"], path)?;
-            StorageProvider::Sqlite {
-                path: required_path(object, "path", path, base_dir)?,
+            reject_unknown(object, &["kind", "path", "journal_mode"], path)?;
+            let options = object
+                .get("journal_mode")
+                .map(|value| {
+                    let journal_mode = match value.as_str() {
+                        Some("preserve") => SqliteJournalMode::Preserve,
+                        Some("wal") => SqliteJournalMode::Wal,
+                        _ => {
+                            return Err(ConfigError::at(
+                                &format!("{path}.journal_mode"),
+                                "must be 'preserve' or 'wal'",
+                            ));
+                        }
+                    };
+                    Ok(SqliteStorageOptions { journal_mode })
+                })
+                .transpose()?;
+            let raw_path = required_string(object, "path", path)?;
+            if options.is_some_and(|options| options.journal_mode == SqliteJournalMode::Wal)
+                && !sqlite_durable_path(Path::new(raw_path))
+            {
+                return Err(ConfigError::at(
+                    &format!("{path}.path"),
+                    "SQLite WAL requires a local file path; empty, :memory: and file: paths are unsupported",
+                ));
+            }
+            let path = required_path(object, "path", path, base_dir)?;
+            match options {
+                Some(options) => StorageProvider::SqliteWithOptions { path, options },
+                None => StorageProvider::Sqlite { path },
             }
         }
         "pglite" => {
@@ -1777,6 +1872,152 @@ mod tests {
     use super::*;
     use crate::parser::{Command, parse_args};
 
+    #[tokio::test]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    async fn sqlite_wal_runtime_refuses_unsupported_platform_without_claiming_wal() {
+        let directory = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({
+            "version": 1,
+            "driver": { "kind": "splitstore", "storage": {
+                "metadata": { "kind": "sqlite", "path": "metadata.db", "journal_mode": "wal" },
+                "blocks": { "kind": "sqlite", "path": "blocks.db", "journal_mode": "wal" }
+            }}
+        });
+        let config = parse_config_str(&value.to_string(), directory.path()).unwrap();
+        let error = match crate::runtime::DriverRuntime::open(&config.to_options(), 0, 0).await {
+            Ok(_) => panic!("unsupported platform opened a WAL runtime"),
+            Err(error) => error,
+        };
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            error
+                .to_string()
+                .contains("SQLite WAL requires a qualified local Linux or macOS file")
+        );
+        for name in ["metadata.db", "blocks.db"] {
+            let path = directory.path().join(name);
+            if path.exists() {
+                let connection = rusqlite::Connection::open(path).unwrap();
+                let mode: String = connection
+                    .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                    .unwrap();
+                assert_ne!(mode, "wal", "refused construction must not configure WAL");
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn sqlite_journal_mode_reaches_normal_split_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({
+            "version": 1,
+            "driver": { "kind": "splitstore", "storage": {
+                "metadata": { "kind": "sqlite", "path": "metadata.db", "journal_mode": "wal" },
+                "blocks": { "kind": "sqlite", "path": "blocks.db", "journal_mode": "wal" }
+            }}
+        });
+        let config = parse_config_str(&value.to_string(), directory.path()).unwrap();
+        let runtime = crate::runtime::DriverRuntime::open(&config.to_options(), 0, 0)
+            .await
+            .unwrap();
+        let payload: Vec<u8> = (0..131_079).map(|index| (index % 251) as u8).collect();
+        mount_rs_core::Loopback::from_arc(runtime.driver())
+            .write_file("/payload", &payload)
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+        drop(runtime);
+        for name in ["metadata.db", "blocks.db"] {
+            let connection = rusqlite::Connection::open(directory.path().join(name)).unwrap();
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "wal"
+            );
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        }
+        let runtime = crate::runtime::DriverRuntime::open(&config.to_options(), 0, 0)
+            .await
+            .unwrap();
+        let handle = mount_rs_core::Loopback::from_arc(runtime.driver())
+            .open("/payload", "r", 0)
+            .await
+            .unwrap();
+        let mut bytes = vec![0; payload.len()];
+        assert_eq!(
+            handle.read(&mut bytes, Some(0)).await.unwrap(),
+            payload.len()
+        );
+        assert_eq!(bytes, payload);
+        assert_eq!(
+            handle
+                .read(&mut bytes, Some(payload.len() as u64))
+                .await
+                .unwrap(),
+            0
+        );
+        handle.close().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn sqlite_journal_mode_is_closed_and_refuses_raw_special_paths() {
+        let value = serde_json::json!({"version":1, "driver":{"kind":"splitstore", "storage":{
+            "metadata":{"kind":"sqlite", "path":"meta.db"},
+            "blocks":{"kind":"sqlite", "path":"blocks.db"}
+        }}});
+        for role in ["metadata", "blocks"] {
+            for journal in [
+                serde_json::json!("delete"),
+                serde_json::json!("WAL"),
+                serde_json::json!(true),
+                Value::Null,
+                serde_json::json!(1),
+            ] {
+                let mut invalid = value.clone();
+                invalid["driver"]["storage"][role]["journal_mode"] = journal;
+                assert!(parse_config_str(&invalid.to_string(), Path::new("/tmp/config")).is_err());
+            }
+            for path in ["", ":memory:", "file:some.db"] {
+                let mut invalid = value.clone();
+                invalid["driver"]["storage"][role]["path"] = serde_json::json!(path);
+                invalid["driver"]["storage"][role]["journal_mode"] = serde_json::json!("wal");
+                assert!(parse_config_str(&invalid.to_string(), Path::new("/tmp/config")).is_err());
+            }
+            let mut invalid = value.clone();
+            invalid["driver"]["storage"][role] =
+                serde_json::json!({"kind":"memory", "journal_mode":"preserve"});
+            assert!(parse_config_str(&invalid.to_string(), Path::new("/tmp/config")).is_err());
+        }
+        let default = parse_config_str(&value.to_string(), Path::new("/tmp/config"))
+            .unwrap()
+            .storage
+            .unwrap();
+        assert!(matches!(default.metadata, StorageProvider::Sqlite { .. }));
+        let mut explicit = value;
+        explicit["driver"]["storage"]["metadata"]["journal_mode"] = serde_json::json!("preserve");
+        let explicit = parse_config_str(&explicit.to_string(), Path::new("/tmp/config"))
+            .unwrap()
+            .storage
+            .unwrap();
+        assert!(matches!(
+            explicit.metadata,
+            StorageProvider::SqliteWithOptions {
+                options: SqliteStorageOptions {
+                    journal_mode: SqliteJournalMode::Preserve
+                },
+                ..
+            }
+        ));
+    }
+
     const SPLIT_MEMORY: &str = r#"{
         "version": 1,
         "driver": {
@@ -1820,6 +2061,96 @@ mod tests {
                     .contains("inode_updates")
             );
         }
+    }
+
+    #[test]
+    fn compact_selection_infers_only_omitted_prerequisites_and_keeps_legacy_modes() {
+        let mut value = serde_json::json!({"version": 1, "driver": {
+            "kind": "splitstore", "storage": {
+                "metadata": {"kind": "sqlite", "path": "metadata.db"},
+                "blocks": {"kind": "sqlite", "path": "blocks.db"}
+            }
+        }});
+        let base = value.clone();
+        let parse = |value: &Value| parse_config_str(&value.to_string(), Path::new("/tmp"));
+        let default = parse(&value).unwrap().storage.unwrap();
+        assert!(!default.concurrent_writes && !default.inode_updates);
+        assert!(!default.compact_inode_updates);
+        value["driver"]["storage"]["inode_updates"] = Value::Bool(true);
+        let inode = parse(&value).unwrap().storage.unwrap();
+        assert!(inode.concurrent_writes && inode.inode_updates);
+        assert!(!inode.compact_inode_updates);
+        value["driver"]["storage"]["compact_inode_updates"] = Value::Bool(false);
+        let explicit_false = parse(&value).unwrap().storage.unwrap();
+        assert!(explicit_false.concurrent_writes && explicit_false.inode_updates);
+        assert!(!explicit_false.compact_inode_updates);
+        value["driver"]["storage"]["compact_inode_updates"] = Value::Bool(true);
+        let compact = parse(&value).unwrap().storage.unwrap();
+        assert!(compact.concurrent_writes && compact.inode_updates);
+        assert!(compact.compact_inode_updates);
+        value["driver"]["storage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("inode_updates");
+        let inferred = parse(&value).unwrap().storage.unwrap();
+        assert!(inferred.concurrent_writes && inferred.inode_updates);
+        assert!(inferred.compact_inode_updates);
+
+        let mut exclusive = base;
+        exclusive["driver"]["storage"]["compact_inode_updates"] = Value::Bool(false);
+        exclusive["driver"]["storage"]["ownership_mode"] = Value::String("exclusive".into());
+        let explicit_false = parse(&exclusive).unwrap().storage.unwrap();
+        assert!(explicit_false.writeback);
+        assert!(!explicit_false.compact_inode_updates);
+    }
+
+    #[test]
+    fn compact_selection_rejects_raw_contradictions_at_public_config_boundary() {
+        let base = serde_json::json!({"version": 1, "driver": {
+            "kind": "splitstore", "storage": {
+                "metadata": {"kind": "sqlite", "path": "metadata.db"},
+                "blocks": {"kind": "sqlite", "path": "blocks.db"},
+                "compact_inode_updates": true
+            }
+        }});
+        let parse = |value: &Value| parse_config_str(&value.to_string(), Path::new("/tmp"));
+        for field in ["concurrent_writes", "inode_updates"] {
+            let mut invalid = base.clone();
+            invalid["driver"]["storage"][field] = Value::Bool(false);
+            let error = parse(&invalid).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .contains(&format!("config.driver.storage.{field}")),
+                "{error}"
+            );
+            assert!(!error.message().contains("unknown field"), "{error}");
+        }
+        for mode in ["exclusive", "shared"] {
+            let mut invalid = base.clone();
+            invalid["driver"]["storage"]["ownership_mode"] = Value::String(mode.into());
+            if mode == "shared" {
+                invalid["driver"]["storage"]["checkout_path"] = Value::String("/".into());
+            }
+            let error = parse(&invalid).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .contains("config.driver.storage.compact_inode_updates"),
+                "{error}"
+            );
+            assert!(!error.message().contains("unknown field"), "{error}");
+        }
+        let mut invalid = base;
+        invalid["driver"]["storage"]["compact_inode_updates"] = Value::String("true".into());
+        let error = parse(&invalid).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("config.driver.storage.compact_inode_updates"),
+            "{error}"
+        );
+        assert!(error.message().contains("boolean"), "{error}");
     }
 
     #[test]
@@ -2559,6 +2890,74 @@ mod tests {
         legacy["driver"]["storage"]["metadata"]["path"] = serde_json::json!(":memory:");
         parse_config_str(&legacy.to_string(), Path::new("/tmp"))
             .expect("nonconcurrent SQLite path parsing remains compatible");
+    }
+
+    #[test]
+    fn filesystem_blocks_parse_tidb_split_storage_and_resolve_relative_roots() {
+        let mut value = serde_json::json!({
+            "version": 1,
+            "driver": {
+                "kind": "splitstore",
+                "storage": {
+                    "concurrent_writes": true,
+                    "inode_updates": true,
+                    "compact_inode_updates": true,
+                    "metadata": {"kind": "tidb", "connection": {"env": "TIDB_URL"}, "durable": true},
+                    "blocks": {"kind": "filesystem", "root": "drive-one/blocks"}
+                }
+            }
+        });
+        let parsed = parse_config_str(&value.to_string(), Path::new("/owned/config")).unwrap();
+        assert!(matches!(parsed.storage.unwrap().blocks,
+            StorageProvider::Filesystem { root, persistent: true } if root == Path::new("/owned/config/drive-one/blocks")));
+        value["driver"]["storage"]["blocks"]["persistent"] = serde_json::json!(false);
+        let parsed = parse_config_str(&value.to_string(), Path::new("/owned/config")).unwrap();
+        assert!(matches!(
+            parsed.storage.unwrap().blocks,
+            StorageProvider::Filesystem {
+                persistent: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn filesystem_config_is_block_only_strict_and_does_not_open_storage() {
+        let blocks =
+            serde_json::json!({"kind": "filesystem", "root": "/uncreated/filesystem-blocks"});
+        let config = |metadata: Value, blocks: Value| {
+            serde_json::json!({
+                "version": 1,
+                "driver": {"kind": "splitstore", "storage": {"metadata": metadata, "blocks": blocks}}
+            })
+        };
+        let error = parse_config_str(
+            &config(blocks.clone(), serde_json::json!({"kind":"memory"})).to_string(),
+            Path::new("/owned/config"),
+        )
+        .unwrap_err();
+        assert!(error.message().contains("block-only"));
+        for invalid in [
+            serde_json::json!({"kind":"filesystem"}),
+            serde_json::json!({"kind":"filesystem", "root":""}),
+            serde_json::json!({"kind":"filesystem", "root":9}),
+            serde_json::json!({"kind":"filesystem", "root":"blocks", "persistent":"yes"}),
+            serde_json::json!({"kind":"filesystem", "root":"blocks", "durable":true}),
+            serde_json::json!({"kind":"filesystem", "root":"blocks", "bucket":"ignored"}),
+        ] {
+            assert!(
+                parse_config_str(
+                    &config(serde_json::json!({"kind":"memory"}), invalid).to_string(),
+                    Path::new("/owned/config"),
+                )
+                .is_err()
+            );
+        }
+        parse_config_str(
+            &config(serde_json::json!({"kind":"memory"}), blocks).to_string(),
+            Path::new("/owned/config"),
+        )
+        .unwrap();
     }
 
     #[test]

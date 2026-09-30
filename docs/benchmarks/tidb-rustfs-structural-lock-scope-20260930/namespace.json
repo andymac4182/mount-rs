@@ -1,0 +1,749 @@
+{
+  "boundaries": [
+    {
+      "boundary": "before",
+      "complete": true,
+      "controller": {
+        "file": "metrics/g0-s2.json.gz",
+        "metrics_complete": true,
+        "sha256": "bbf75f1e1d49c3cdf88d28c20b872cefef15ceb1aee8fcd9a65a90bbbb6a29be"
+      },
+      "deadline_seconds": 30,
+      "effective_observer_seconds": 30.0,
+      "elapsed_seconds": 0.138646042,
+      "error": null,
+      "generation": 0,
+      "issued_workers": 10,
+      "metrics_complete": true,
+      "phase": "online_namespace",
+      "readiness_metrics": [],
+      "remaining_enclosing_seconds": 599.9989895,
+      "sequence": 2,
+      "workers": [
+        {
+          "file": "worker-0/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56334,
+          "server": 0,
+          "sha256": "80a8f831519e141cad7942fd59de954cfee1ec497ceb3f73a05ff81a2abaed3c"
+        },
+        {
+          "file": "worker-1/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56335,
+          "server": 1,
+          "sha256": "c145cefa59f335accdfa012053ce9f7f2a49a9642a9aa401fa27a9a581ef5540"
+        },
+        {
+          "file": "worker-2/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56336,
+          "server": 2,
+          "sha256": "411b980a0c93b5b0d4158162abf946ef3b281d240b25db218145ac700dc67cbf"
+        },
+        {
+          "file": "worker-3/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56337,
+          "server": 3,
+          "sha256": "adb6a4e44cbaaa3d3522fbd78c69c6a302da8a10c5e4895b03b1137430524abc"
+        },
+        {
+          "file": "worker-4/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56338,
+          "server": 4,
+          "sha256": "ed6f37744f515d8a848876c8d484b7ee331528fa1908b1720bec4d7147f0edc4"
+        },
+        {
+          "file": "worker-5/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56339,
+          "server": 5,
+          "sha256": "d91bce0b254d3ff3f40aaf1a9e19f0322af9a1327523fe2752a4bcad6611758d"
+        },
+        {
+          "file": "worker-6/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56340,
+          "server": 6,
+          "sha256": "13bc65e7fc60bdc943e79bf8f249f7d791911540abc03edacb9b94bd8e3828ff"
+        },
+        {
+          "file": "worker-7/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56341,
+          "server": 7,
+          "sha256": "143d21ee21f9f243923a24525057ad7f936f7eaa62fb6a6bec30294793d0ddc6"
+        },
+        {
+          "file": "worker-8/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56342,
+          "server": 8,
+          "sha256": "b81a37b45441ba83c423319933d11aee129a0465666b268637423b0429f976a1"
+        },
+        {
+          "file": "worker-9/metrics/g0-s2.json.gz",
+          "metrics_complete": true,
+          "pid": 56343,
+          "server": 9,
+          "sha256": "4caeeaa861bc1ab477ceeedc71e1621ffca958945e5867a499fa98233b08823d"
+        }
+      ]
+    },
+    {
+      "boundary": "after",
+      "complete": true,
+      "controller": {
+        "file": "metrics/g0-s3.json.gz",
+        "metrics_complete": true,
+        "sha256": "a0a64db3e2627c00b758ca61d22a5b44a2c424ca22172a926c6a2541b0901549"
+      },
+      "deadline_seconds": 30,
+      "effective_observer_seconds": 30.0,
+      "elapsed_seconds": 0.130277041,
+      "error": null,
+      "generation": 0,
+      "issued_workers": 10,
+      "metrics_complete": true,
+      "phase": "online_namespace",
+      "readiness_metrics": [],
+      "remaining_enclosing_seconds": 557.714723041,
+      "sequence": 3,
+      "workers": [
+        {
+          "file": "worker-0/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56334,
+          "server": 0,
+          "sha256": "060136eb1bbf7af4f239570336193a82c6635ccdf0f24f1f632755b17764fcc3"
+        },
+        {
+          "file": "worker-1/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56335,
+          "server": 1,
+          "sha256": "e0d3e1b159955dc5aa05ee3d7811e0fb70849d3da84d47c19cf60b7344744f02"
+        },
+        {
+          "file": "worker-2/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56336,
+          "server": 2,
+          "sha256": "dbf0efa17b503d46f4d498302f008c4d2de1f7eb27f17ae52d480e0462462348"
+        },
+        {
+          "file": "worker-3/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56337,
+          "server": 3,
+          "sha256": "0687a3d9f0d0fb26747debaff11c55e085895b15498417ea866d0b1b3500711d"
+        },
+        {
+          "file": "worker-4/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56338,
+          "server": 4,
+          "sha256": "a7f9d119996f6f61f7212b952c9e1b69d29b3252f351dbe2ad434f67c37e29c1"
+        },
+        {
+          "file": "worker-5/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56339,
+          "server": 5,
+          "sha256": "623a09a2f7d378e7520a5ae6f0e885861e2d61fd8e516db52ad8d09568aa8718"
+        },
+        {
+          "file": "worker-6/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56340,
+          "server": 6,
+          "sha256": "1702840e650f3e3a9edff9a9aab11cb32ad15c95eb61a247718035c304d392f8"
+        },
+        {
+          "file": "worker-7/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56341,
+          "server": 7,
+          "sha256": "e4ab5d875e8f7988681ec1e66337a1e419da0f7313016c6689278409d5696652"
+        },
+        {
+          "file": "worker-8/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56342,
+          "server": 8,
+          "sha256": "f54cf95aa15ad3b8b452a53ad73e7936893845e62a52379c5809b4b1f62dbabb"
+        },
+        {
+          "file": "worker-9/metrics/g0-s3.json.gz",
+          "metrics_complete": true,
+          "pid": 56343,
+          "server": 9,
+          "sha256": "5736fb92e61bef672a30e37746c4ba88f68d45f70879380051e4b76380926cb1"
+        }
+      ]
+    }
+  ],
+  "core": {
+    "filesystem.block_put.chunker_reprepare": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.chunker_reprepare.cancelled": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.chunker_reprepare.error": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.chunker_reprepare.success": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.fallback": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.fallback.cancelled": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.fallback.error": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.fallback.success": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.initial": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.initial.cancelled": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.initial.error": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.initial.success": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.retry_rewrite": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.retry_rewrite.cancelled": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.retry_rewrite.error": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.block_put.retry_rewrite.success": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_hold.maintenance": {
+      "calls": 10000,
+      "elapsed_ns": 12431427,
+      "units": 0
+    },
+    "filesystem.gate_hold.metadata": {
+      "calls": 10000,
+      "elapsed_ns": 396781599497,
+      "units": 0
+    },
+    "filesystem.gate_hold.mutation_batch": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_hold.read": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_hold.whole_file_replay": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_hold.write_commit": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_hold.write_fallback": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_hold.write_prepare": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_phase.block_rewrite": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_phase.cas_backoff": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_phase.publication": {
+      "calls": 10000,
+      "elapsed_ns": 395883674388,
+      "units": 0
+    },
+    "filesystem.gate_phase.recovery": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_phase.refresh": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_wait.maintenance": {
+      "calls": 10000,
+      "elapsed_ns": 1527981,
+      "units": 0
+    },
+    "filesystem.gate_wait.metadata": {
+      "calls": 10000,
+      "elapsed_ns": 1930891,
+      "units": 0
+    },
+    "filesystem.gate_wait.mutation_batch": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_wait.read": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_wait.whole_file_replay": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_wait.write_commit": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_wait.write_fallback": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "filesystem.gate_wait.write_prepare": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.compact_anchor_returned_bytes": {
+      "calls": 10020,
+      "elapsed_ns": 0,
+      "units": 3324372
+    },
+    "provider.compact_anchor_serialized_bytes": {
+      "calls": 10000,
+      "elapsed_ns": 0,
+      "units": 3317940
+    },
+    "provider.inode.cas_conflict": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.inode.load": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.inode.load_if_changed": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.inode.publish_cas": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.inode.snapshot_if_changed": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.inode.snapshot_returned_nodes": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.inode.snapshot_unchanged": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.inode_returned_bytes": {
+      "calls": 10010,
+      "elapsed_ns": 0,
+      "units": 3200960
+    },
+    "provider.inode_serialized_bytes": {
+      "calls": 20000,
+      "elapsed_ns": 0,
+      "units": 6486820
+    },
+    "provider.namespace_returned_bytes": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    },
+    "provider.namespace_serialized_bytes": {
+      "calls": 0,
+      "elapsed_ns": 0,
+      "units": 0
+    }
+  },
+  "counter_scope": "complete before/after closed deltas across controller and ten workers; inclusive spans overlap",
+  "elapsed_ms": 42428,
+  "extractor_functions_sha256": "fe9d62baab425d7a132b374dfa9f5f6e38f0d6673d4cce982244d4c365aa51c1",
+  "physical_iops": false,
+  "schema": "mount-rs.namespace-benchmark-exact.v1",
+  "source_revision": "6a60518d5601f11e5923d725675772f941a5e18b",
+  "storage": {
+    "object_store.backing_marker.data.body_read": {
+      "bytes": 200200,
+      "calls": 10010,
+      "cancelled": 0,
+      "elapsed_ns": 41525420,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10010
+    },
+    "object_store.backing_marker.data.get": {
+      "bytes": 0,
+      "calls": 10010,
+      "cancelled": 0,
+      "elapsed_ns": 12681855661,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10010
+    },
+    "object_store.backing_marker.probe.body_read": {
+      "bytes": 200200,
+      "calls": 10010,
+      "cancelled": 0,
+      "elapsed_ns": 53500929,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10010
+    },
+    "object_store.backing_marker.probe.create": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "object_store.backing_marker.probe.get": {
+      "bytes": 0,
+      "calls": 10010,
+      "cancelled": 0,
+      "elapsed_ns": 14302154177,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10010
+    },
+    "object_store.backing_marker.retry_backoff": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "sdk.blocks.flush": {
+      "bytes": 0,
+      "calls": 10000,
+      "cancelled": 0,
+      "elapsed_ns": 11443711,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10000
+    },
+    "sdk.blocks.get": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "sdk.blocks.put": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "sdk.blocks.verify_concurrent_backing": {
+      "bytes": 0,
+      "calls": 10010,
+      "cancelled": 0,
+      "elapsed_ns": 27217631870,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10010
+    },
+    "sdk.metadata.compact_root_file_capability": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "sdk.metadata.load_compact_inode": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "sdk.metadata.load_compact_root_file": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "sdk.metadata.publish_compact_inode": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "sdk.metadata.publish_compact_structure": {
+      "bytes": 0,
+      "calls": 10000,
+      "cancelled": 0,
+      "elapsed_ns": 368094677435,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10000
+    },
+    "tidb.pool.checkout": {
+      "bytes": 0,
+      "calls": 10040,
+      "cancelled": 0,
+      "elapsed_ns": 213299144,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10040
+    },
+    "tidb.sql.block_read": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "tidb.sql.block_write": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "tidb.sql.ddl": {
+      "bytes": 0,
+      "calls": 110,
+      "cancelled": 0,
+      "elapsed_ns": 124646501,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 110
+    },
+    "tidb.sql.flush_probe": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "tidb.sql.inode_read": {
+      "bytes": 0,
+      "calls": 30030,
+      "cancelled": 0,
+      "elapsed_ns": 102083812781,
+      "error": 0,
+      "returned_row_observations": 30030,
+      "returned_rows": 10010020,
+      "success": 30030
+    },
+    "tidb.sql.inode_write": {
+      "bytes": 0,
+      "calls": 40000,
+      "cancelled": 0,
+      "elapsed_ns": 77350732445,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 40000
+    },
+    "tidb.sql.metadata_read": {
+      "bytes": 0,
+      "calls": 20080,
+      "cancelled": 0,
+      "elapsed_ns": 46502095829,
+      "error": 0,
+      "returned_row_observations": 20080,
+      "returned_rows": 20260,
+      "success": 20080
+    },
+    "tidb.sql.metadata_write": {
+      "bytes": 0,
+      "calls": 10010,
+      "cancelled": 0,
+      "elapsed_ns": 16541501243,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10010
+    },
+    "tidb.sql.session": {
+      "bytes": 0,
+      "calls": 10120,
+      "cancelled": 0,
+      "elapsed_ns": 11660318253,
+      "error": 0,
+      "returned_row_observations": 10060,
+      "returned_rows": 10060,
+      "success": 10120
+    },
+    "tidb.tx.begin.compact_read": {
+      "bytes": 0,
+      "calls": 20,
+      "cancelled": 0,
+      "elapsed_ns": 38304165,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 20
+    },
+    "tidb.tx.begin.inode": {
+      "bytes": 0,
+      "calls": 10000,
+      "cancelled": 0,
+      "elapsed_ns": 26361365321,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10000
+    },
+    "tidb.tx.begin.metadata": {
+      "bytes": 0,
+      "calls": 0,
+      "cancelled": 0,
+      "elapsed_ns": 0,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 0
+    },
+    "tidb.tx.commit": {
+      "bytes": 0,
+      "calls": 10000,
+      "cancelled": 0,
+      "elapsed_ns": 83647659333,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 10000
+    },
+    "tidb.tx.rollback": {
+      "bytes": 0,
+      "calls": 20,
+      "cancelled": 0,
+      "elapsed_ns": 15090087,
+      "error": 0,
+      "returned_row_observations": 0,
+      "returned_rows": 0,
+      "success": 20
+    }
+  },
+  "terminal_sha256": "8f57f72e6b3eca8f1ecdc03902acf698bf2c4e97dd3be598e5bb3ff60d7daed8"
+}

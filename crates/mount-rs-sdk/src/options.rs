@@ -1,5 +1,7 @@
 //! Provider selection and split-store construction options.
 
+use mount_rs_sqlite::SqliteStorageOptions;
+
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,8 +15,23 @@ use std::time::Duration;
 #[derive(Clone, PartialEq, Eq)]
 pub enum StoreConfig {
     Memory,
+    /// Immutable blocks stored in an existing owned 0700 filesystem directory.
+    /// Every server using a Drive must see the same directory and backing identity.
+    /// This provider is block-only; metadata remains independent. Block operations
+    /// require an active Tokio runtime. Opening validates its identity marker
+    /// synchronously; callers must include that in startup timing. Writes use
+    /// normal OS writeback without forced synchronization. `persistent` asserts
+    /// process-restart persistence, not power-loss-safe acknowledgments.
+    Filesystem {
+        root: PathBuf,
+        persistent: bool,
+    },
     Sqlite {
         path: PathBuf,
+    },
+    SqliteWithOptions {
+        path: PathBuf,
+        options: SqliteStorageOptions,
     },
     Pglite {
         connection: String,
@@ -75,9 +92,19 @@ impl fmt::Debug for StoreConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => formatter.write_str("Memory"),
+            Self::Filesystem { root, persistent } => formatter
+                .debug_struct("Filesystem")
+                .field("root", root)
+                .field("persistent", persistent)
+                .finish(),
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
                 .field("path", path)
+                .finish(),
+            Self::SqliteWithOptions { path, options } => formatter
+                .debug_struct("SqliteWithOptions")
+                .field("path", path)
+                .field("options", options)
                 .finish(),
             Self::Pglite {
                 connection: _,
@@ -267,6 +294,9 @@ pub struct SplitOptions {
     pub concurrent_writes: bool,
     /// Explicitly enroll and use per-inode metadata publication (MRC4).
     pub inode_updates: bool,
+    /// Explicit compact MRC5 inode layout; default remains MRC4 when only
+    /// `inode_updates` is selected.
+    pub compact_inode_updates: bool,
     /// Defer exclusive namespace publication until synchronization.
     pub writeback: bool,
     /// Persisted directory checkout authority (MRC3), distinct from legacy CAS.
@@ -289,6 +319,7 @@ impl SplitOptions {
             lease_ttl: Duration::from_secs(30),
             concurrent_writes: false,
             inode_updates: false,
+            compact_inode_updates: false,
             writeback: false,
             delegated: false,
             checkout_path: None,
@@ -321,6 +352,15 @@ impl SplitOptions {
     pub fn with_inode_updates(mut self, inode_updates: bool) -> Self {
         self.inode_updates = inode_updates;
         if inode_updates {
+            self.concurrent_writes = true;
+        }
+        self
+    }
+
+    pub fn with_compact_inode_updates(mut self, enabled: bool) -> Self {
+        self.compact_inode_updates = enabled;
+        if enabled {
+            self.inode_updates = true;
             self.concurrent_writes = true;
         }
         self

@@ -1,0 +1,538 @@
+{
+  "schema": "mount-rs.tidb-directory-ownership-summary.v1",
+  "roles": {
+    "A": "copy_names",
+    "B": "move_names"
+  },
+  "p95_method": "nearest rank, ceil(0.95*N)-1 zero-based",
+  "experiments": {
+    "exploratory-wide-keys": {
+      "pooled_results": {
+        "4": {
+          "variants": {
+            "copy_names": {
+              "latency_ns": {
+                "n": 128,
+                "mean": 12573049.1484375,
+                "median": 12077750.5,
+                "p95_nearest_rank": 15525167,
+                "min": 9139459,
+                "max": 20676375
+              },
+              "allocation_calls": {
+                "n": 128,
+                "mean": 459,
+                "median": 459.0,
+                "p95_nearest_rank": 459,
+                "min": 459,
+                "max": 459
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 77656.96875,
+                "median": 77657.0,
+                "p95_nearest_rank": 77657,
+                "min": 77656,
+                "max": 77657
+              },
+              "inode_sql_inclusive_ns": {
+                "n": 128,
+                "mean": 2731886.3984375,
+                "median": 2632791.5,
+                "p95_nearest_rank": 3423666,
+                "min": 2016708,
+                "max": 6830042
+              },
+              "inode_sql_returned_rows": {
+                "n": 128,
+                "mean": 6,
+                "median": 6.0,
+                "p95_nearest_rank": 6,
+                "min": 6,
+                "max": 6
+              },
+              "trial_latency_medians_ns": {
+                "0": 13292250.0,
+                "3": 11078416.5,
+                "5": 11723145.5,
+                "6": 14038791.5
+              }
+            },
+            "move_names": {
+              "latency_ns": {
+                "n": 128,
+                "mean": 11279151.734375,
+                "median": 10853291.5,
+                "p95_nearest_rank": 14324041,
+                "min": 8923625,
+                "max": 24353625
+              },
+              "allocation_calls": {
+                "n": 128,
+                "mean": 455,
+                "median": 455.0,
+                "p95_nearest_rank": 455,
+                "min": 455,
+                "max": 455
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 78048.96875,
+                "median": 78049.0,
+                "p95_nearest_rank": 78049,
+                "min": 78048,
+                "max": 78049
+              },
+              "inode_sql_inclusive_ns": {
+                "n": 128,
+                "mean": 2418250.40625,
+                "median": 2344126.5,
+                "p95_nearest_rank": 2860958,
+                "min": 1910250,
+                "max": 4692292
+              },
+              "inode_sql_returned_rows": {
+                "n": 128,
+                "mean": 6,
+                "median": 6.0,
+                "p95_nearest_rank": 6,
+                "min": 6,
+                "max": 6
+              },
+              "trial_latency_medians_ns": {
+                "1": 10421208.5,
+                "2": 10841229.0,
+                "4": 11198479.5,
+                "7": 11447770.5
+              }
+            }
+          },
+          "observed_change_percent": {
+            "latency_ns": {
+              "mean": -10.291039180605587,
+              "median": -10.138137892482547,
+              "p95_nearest_rank": -7.736638195260637
+            },
+            "allocation_calls": {
+              "mean": -0.8714596949891074,
+              "median": -0.8714596949891074,
+              "p95_nearest_rank": -0.8714596949891074
+            },
+            "allocation_requested_bytes": {
+              "mean": 0.5047840603487286,
+              "median": 0.5047838572182828,
+              "p95_nearest_rank": 0.5047838572182828
+            },
+            "inode_sql_inclusive_ns": {
+              "mean": -11.480564944680127,
+              "median": -10.964218017264182,
+              "p95_nearest_rank": -16.43583223363494
+            },
+            "inode_sql_returned_rows": {
+              "mean": 0.0,
+              "median": 0.0,
+              "p95_nearest_rank": 0.0
+            }
+          }
+        },
+        "1000": {
+          "variants": {
+            "copy_names": {
+              "latency_ns": {
+                "n": 128,
+                "mean": 15696087.2734375,
+                "median": 15199041.5,
+                "p95_nearest_rank": 19485667,
+                "min": 13201458,
+                "max": 22416125
+              },
+              "allocation_calls": {
+                "n": 128,
+                "mean": 8111,
+                "median": 8111.0,
+                "p95_nearest_rank": 8111,
+                "min": 8111,
+                "max": 8111
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 804603,
+                "median": 804603.0,
+                "p95_nearest_rank": 804603,
+                "min": 804603,
+                "max": 804603
+              },
+              "inode_sql_inclusive_ns": {
+                "n": 128,
+                "mean": 4723603.1875,
+                "median": 4559625.0,
+                "p95_nearest_rank": 5716167,
+                "min": 3828542,
+                "max": 7382209
+              },
+              "inode_sql_returned_rows": {
+                "n": 128,
+                "mean": 1002,
+                "median": 1002.0,
+                "p95_nearest_rank": 1002,
+                "min": 1002,
+                "max": 1002
+              },
+              "trial_latency_medians_ns": {
+                "0": 15132021.0,
+                "3": 15241333.0,
+                "5": 15110313.0,
+                "6": 15507416.5
+              }
+            },
+            "move_names": {
+              "latency_ns": {
+                "n": 128,
+                "mean": 16202458.6875,
+                "median": 15258916.5,
+                "p95_nearest_rank": 22133458,
+                "min": 13210167,
+                "max": 47311166
+              },
+              "allocation_calls": {
+                "n": 128,
+                "mean": 7111,
+                "median": 7111.0,
+                "p95_nearest_rank": 7111,
+                "min": 7111,
+                "max": 7111
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 798739,
+                "median": 798739.0,
+                "p95_nearest_rank": 798739,
+                "min": 798739,
+                "max": 798739
+              },
+              "inode_sql_inclusive_ns": {
+                "n": 128,
+                "mean": 4809536.75,
+                "median": 4624708.0,
+                "p95_nearest_rank": 5599584,
+                "min": 3969708,
+                "max": 10040917
+              },
+              "inode_sql_returned_rows": {
+                "n": 128,
+                "mean": 1002,
+                "median": 1002.0,
+                "p95_nearest_rank": 1002,
+                "min": 1002,
+                "max": 1002
+              },
+              "trial_latency_medians_ns": {
+                "1": 15074875.0,
+                "2": 15060708.5,
+                "4": 15210291.5,
+                "7": 15728125.0
+              }
+            }
+          },
+          "observed_change_percent": {
+            "latency_ns": {
+              "mean": 3.2260996338841164,
+              "median": 0.3939393151864312,
+              "p95_nearest_rank": 13.588403209394894
+            },
+            "allocation_calls": {
+              "mean": -12.328936012822089,
+              "median": -12.328936012822089,
+              "p95_nearest_rank": -12.328936012822089
+            },
+            "allocation_requested_bytes": {
+              "mean": -0.7288066288592021,
+              "median": -0.7288066288592021,
+              "p95_nearest_rank": -0.7288066288592021
+            },
+            "inode_sql_inclusive_ns": {
+              "mean": 1.8192375415319484,
+              "median": 1.427376154837301,
+              "p95_nearest_rank": -2.0395310353948704
+            },
+            "inode_sql_returned_rows": {
+              "mean": 0.0,
+              "median": 0.0,
+              "p95_nearest_rank": 0.0
+            }
+          }
+        }
+      },
+      "sample_scope": "128 non-warmup samples per role and file count; exploratory and final experiments not pooled together",
+      "intermediate_oracles": 592,
+      "independent_final_oracles": 16,
+      "metadata_key_cleanups": 16,
+      "phase_diagnostics_scope": "one observation per role/case, separate from publication samples",
+      "phase_allocation_ceiling_passed": false
+    },
+    "final-thin-keys": {
+      "pooled_results": {
+        "4": {
+          "variants": {
+            "copy_names": {
+              "latency_ns": {
+                "n": 128,
+                "mean": 11451378.9609375,
+                "median": 11297396.0,
+                "p95_nearest_rank": 13118708,
+                "min": 9616708,
+                "max": 15297084
+              },
+              "allocation_calls": {
+                "n": 128,
+                "mean": 459,
+                "median": 459.0,
+                "p95_nearest_rank": 459,
+                "min": 459,
+                "max": 459
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 77656.96875,
+                "median": 77657.0,
+                "p95_nearest_rank": 77657,
+                "min": 77656,
+                "max": 77657
+              },
+              "inode_sql_inclusive_ns": {
+                "n": 128,
+                "mean": 2498162.3984375,
+                "median": 2490999.5,
+                "p95_nearest_rank": 2950792,
+                "min": 2022458,
+                "max": 3316959
+              },
+              "inode_sql_returned_rows": {
+                "n": 128,
+                "mean": 6,
+                "median": 6.0,
+                "p95_nearest_rank": 6,
+                "min": 6,
+                "max": 6
+              },
+              "trial_latency_medians_ns": {
+                "0": 11380333.0,
+                "3": 11238958.0,
+                "5": 11221396.0,
+                "6": 11481000.0
+              }
+            },
+            "move_names": {
+              "latency_ns": {
+                "n": 128,
+                "mean": 12436150.078125,
+                "median": 12135521.0,
+                "p95_nearest_rank": 15849667,
+                "min": 9986666,
+                "max": 18134833
+              },
+              "allocation_calls": {
+                "n": 128,
+                "mean": 455,
+                "median": 455.0,
+                "p95_nearest_rank": 455,
+                "min": 455,
+                "max": 455
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 77720.96875,
+                "median": 77721.0,
+                "p95_nearest_rank": 77721,
+                "min": 77720,
+                "max": 77721
+              },
+              "inode_sql_inclusive_ns": {
+                "n": 128,
+                "mean": 2669272.3515625,
+                "median": 2566479.0,
+                "p95_nearest_rank": 3528125,
+                "min": 2009000,
+                "max": 4906791
+              },
+              "inode_sql_returned_rows": {
+                "n": 128,
+                "mean": 6,
+                "median": 6.0,
+                "p95_nearest_rank": 6,
+                "min": 6,
+                "max": 6
+              },
+              "trial_latency_medians_ns": {
+                "1": 12263354.0,
+                "2": 12292583.5,
+                "4": 11748937.5,
+                "7": 11674625.0
+              }
+            }
+          },
+          "observed_change_percent": {
+            "latency_ns": {
+              "mean": 8.59958543461632,
+              "median": 7.4187449922088256,
+              "p95_nearest_rank": 20.817286275447255
+            },
+            "allocation_calls": {
+              "mean": -0.8714596949891074,
+              "median": -0.8714596949891074,
+              "p95_nearest_rank": -0.8714596949891074
+            },
+            "allocation_requested_bytes": {
+              "mean": 0.08241372413857473,
+              "median": 0.08241369097441442,
+              "p95_nearest_rank": 0.08241369097441442
+            },
+            "inode_sql_inclusive_ns": {
+              "mean": 6.849432736319394,
+              "median": 3.0300889261519304,
+              "p95_nearest_rank": 19.565357368462433
+            },
+            "inode_sql_returned_rows": {
+              "mean": 0.0,
+              "median": 0.0,
+              "p95_nearest_rank": 0.0
+            }
+          }
+        },
+        "1000": {
+          "variants": {
+            "copy_names": {
+              "latency_ns": {
+                "n": 128,
+                "mean": 16423340.765625,
+                "median": 15426895.5,
+                "p95_nearest_rank": 22414875,
+                "min": 13353167,
+                "max": 31382666
+              },
+              "allocation_calls": {
+                "n": 128,
+                "mean": 8111,
+                "median": 8111.0,
+                "p95_nearest_rank": 8111,
+                "min": 8111,
+                "max": 8111
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 804603,
+                "median": 804603.0,
+                "p95_nearest_rank": 804603,
+                "min": 804603,
+                "max": 804603
+              },
+              "inode_sql_inclusive_ns": {
+                "n": 128,
+                "mean": 4874894.84375,
+                "median": 4703417.0,
+                "p95_nearest_rank": 6242166,
+                "min": 4117542,
+                "max": 8502374
+              },
+              "inode_sql_returned_rows": {
+                "n": 128,
+                "mean": 1002,
+                "median": 1002.0,
+                "p95_nearest_rank": 1002,
+                "min": 1002,
+                "max": 1002
+              },
+              "trial_latency_medians_ns": {
+                "0": 16590667.0,
+                "3": 15751083.5,
+                "5": 15148792.0,
+                "6": 14833750.0
+              }
+            },
+            "move_names": {
+              "latency_ns": {
+                "n": 128,
+                "mean": 17114982.1328125,
+                "median": 16078166.5,
+                "p95_nearest_rank": 21498292,
+                "min": 13472833,
+                "max": 56157583
+              },
+              "allocation_calls": {
+                "n": 128,
+                "mean": 7111,
+                "median": 7111.0,
+                "p95_nearest_rank": 7111,
+                "min": 7111,
+                "max": 7111
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 738267,
+                "median": 738267.0,
+                "p95_nearest_rank": 738267,
+                "min": 738267,
+                "max": 738267
+              },
+              "inode_sql_inclusive_ns": {
+                "n": 128,
+                "mean": 5165358.7421875,
+                "median": 4801417.5,
+                "p95_nearest_rank": 5936416,
+                "min": 4046709,
+                "max": 31462542
+              },
+              "inode_sql_returned_rows": {
+                "n": 128,
+                "mean": 1002,
+                "median": 1002.0,
+                "p95_nearest_rank": 1002,
+                "min": 1002,
+                "max": 1002
+              },
+              "trial_latency_medians_ns": {
+                "1": 16192312.5,
+                "2": 16113000.0,
+                "4": 14918729.0,
+                "7": 16815583.5
+              }
+            }
+          },
+          "observed_change_percent": {
+            "latency_ns": {
+              "mean": 4.2113317689610685,
+              "median": 4.221659503689512,
+              "p95_nearest_rank": -4.089172926460661
+            },
+            "allocation_calls": {
+              "mean": -12.328936012822089,
+              "median": -12.328936012822089,
+              "p95_nearest_rank": -12.328936012822089
+            },
+            "allocation_requested_bytes": {
+              "mean": -8.24456284652183,
+              "median": -8.24456284652183,
+              "p95_nearest_rank": -8.24456284652183
+            },
+            "inode_sql_inclusive_ns": {
+              "mean": 5.958362339033796,
+              "median": 2.0836021981465835,
+              "p95_nearest_rank": -4.898139524004974
+            },
+            "inode_sql_returned_rows": {
+              "mean": 0.0,
+              "median": 0.0,
+              "p95_nearest_rank": 0.0
+            }
+          }
+        }
+      },
+      "sample_scope": "128 non-warmup samples per role and file count; exploratory and final experiments not pooled together",
+      "intermediate_oracles": 592,
+      "independent_final_oracles": 16,
+      "metadata_key_cleanups": 16,
+      "phase_diagnostics_scope": "one observation per role/case, separate from publication samples",
+      "phase_allocation_ceiling_passed": false
+    }
+  }
+}

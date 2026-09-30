@@ -385,6 +385,45 @@ async function checkFactories(): Promise<void> {
   const sharedChunkedOptions: JsChunkedOptions = { ...chunkedOptions, ownershipMode: "shared" }
   sharedChunkedOptions.checkoutPath = "/database"
   void sharedChunkedOptions
+  const compactChunkedOptions: JsChunkedOptions = {
+    ...chunkedOptions,
+    compactInodeUpdates: true,
+  }
+  void compactChunkedOptions
+  const sqliteJournalOptions: JsChunkedOptions = {
+    ...chunkedOptions,
+    metadata: { kind: "sqlite", uri: "/tmp/metadata.sqlite", journalMode: "preserve" },
+    blocks: { kind: "sqlite", uri: "/tmp/blocks.sqlite", journalMode: "wal" },
+  }
+  const reversedSqliteJournalOptions: JsChunkedOptions = {
+    ...sqliteJournalOptions,
+    metadata: { ...sqliteJournalOptions.metadata, journalMode: "wal" },
+    blocks: { ...sqliteJournalOptions.blocks, journalMode: "preserve" },
+  }
+  void sqliteJournalOptions
+  void reversedSqliteJournalOptions
+  const invalidSqliteJournalOptions: JsChunkedOptions = {
+    ...sqliteJournalOptions,
+    metadata: {
+      kind: "sqlite",
+      uri: "/tmp/metadata.sqlite",
+      // @ts-expect-error journalMode only accepts preserve or wal.
+      journalMode: "delete",
+    },
+    blocks: {
+      kind: "sqlite",
+      uri: "/tmp/blocks.sqlite",
+      // @ts-expect-error journalMode is an optional string union.
+      journalMode: true,
+    },
+  }
+  void invalidSqliteJournalOptions
+  const invalidCompactOption: JsChunkedOptions = {
+    ...chunkedOptions,
+    // @ts-expect-error compactInodeUpdates is a boolean.
+    compactInodeUpdates: "true",
+  }
+  void invalidCompactOption
   const invalidOwnership: JsChunkedOptions = {
     ...chunkedOptions,
     // @ts-expect-error ownershipMode only accepts exclusive or shared.

@@ -95,3 +95,76 @@ For mostly idle clients, set `MOUNT_RS_REMOTE_SATURATION_ACTIVE_CLIENTS=100` and
 ## Regression gates
 
 The full workspace suite passed 1,256 tests with zero failures and 104 ignored tests across 155 targets. Strict workspace Clippy, allocation-profiled service/CLI Clippy, formatting, shell syntax and six datastore counter-parser tests passed. Default and configured connection admission tests cover overload refusal and slot recovery. The final actual TiDB fixture also passed its two terminal ambiguous-commit tests. Exact commands and scope limits are recorded in [verification.json](benchmarks/remote-client-scaling-20260924/verification.json). No new formal proof or native Linux/FDB scaling result is claimed for this harness change.
+
+## Independent-process production target entrypoint
+
+`bench-remote-production-target.sh` invokes the separate
+`quic_production_target::production_target_controller` test. It launches ten
+copies of that executable using the exact ignored private worker entrypoint.
+Each worker registers **every** Drive and owns its listener, storage context and
+eager filesystem replicas. This runner uses explicit MRC5, TLS QUIC, locally
+signed ES256 fixture tokens and the public service dispatcher. It does not
+change production defaults or the older one-process saturation/checkpoint tests.
+
+An explicit SQLite diagnostic uses the actual online path:
+
+```sh
+MOUNT_RS_TARGET_MODE=control \
+MOUNT_RS_TARGET_PROVIDER=sqlite \
+MOUNT_RS_TARGET_DRIVES=10 \
+MOUNT_RS_TARGET_FILES=1000 \
+MOUNT_RS_TARGET_SECONDS=1 \
+MOUNT_RS_TARGET_OUTPUT=/private/tmp/production-target-new-run \
+MOUNT_RS_PROFILE_IO=1 \
+scripts/bench-remote-production-target.sh
+```
+
+Use a fresh output directory. The script preserves `CARGO_TARGET_DIR`; its
+fallback is the existing local qualification target at
+`/private/tmp/mount-rs-public-compact-selection-cargo-target`. Set an existing
+writable shared target explicitly on other hosts. Native process controls are
+compiled only on macOS and GNU Linux; other platform builds do not gain a live
+qualification claim from this entrypoint. The script rejects unsupported hosts
+and requires a newly produced successful terminal receipt after Cargo succeeds;
+a cfg-excluded or zero-test invocation cannot pass.
+
+Full mode requires exactly 10,000 Drives/clients, 5,000 Partitions, 1,000 files
+per Drive, ten server processes and 30 seconds per required workload stage.
+Every server registers all 10,000 definitions, giving 100,000 routes. Explicit
+smaller controls retain their real counts and `full_target=false`. The mixed
+profile is 990 × 4 KiB, nine × 128 KiB and one × 1 MiB per Drive. Namespace
+creation and payload writes happen over authenticated connections, followed by
+fresh-store byte/EOF/membership verification. Both activity modes run all eight
+patterns: sequential/random read, sequential/random overwrite, mixed read/write,
+hot-file skew, append/truncate, and create/rename/delete churn. The full mostly
+idle mode retains all 10,000 connections with 100 active; the ten-Drive control
+uses one active and nine idle clients. Idle connections receive liveness probes.
+
+For a preserved TiDB fixture, explicitly select `MOUNT_RS_TARGET_PROVIDER=tidb`,
+provide the existing `MOUNT_RS_TIDB_URL` privately, and set
+`MOUNT_RS_TARGET_TIDB_RUN` to its exact `mount-rs.tidb.run` label. The runner only
+observes that existing local Docker fixture using read-only commands. Remote
+Docker contexts/hosts are refused; the effective local Unix socket and shared
+owned bridge network are bound to the receipt. It requires three running PD,
+three running TiKV and one running TiDB container, matching published SQL port,
+measured Docker VM memory of at least 10 GiB, and at least four CPUs. It retains
+whitelisted raw identity/capacity receipts, never container environment or URL
+credentials. Once the VM floor passes, PD membership/health, all Up TiKV stores,
+and read-only SQL cluster identity must match the inspected addresses and roles.
+Unavailable or mismatched evidence refuses qualification. Container memory caps
+are retained as observations and are not summed as VM memory. Unknown topology
+or an unmet floor refuses execution before any
+provider open; no environment memory assertion or underprovisioned override is
+accepted. The runner never starts, resets or increases a fixture's resources.
+
+The independent-process runner initializes each empty MRC5 Drive sequentially
+within the same 600-second setup budget before launching workers. It records
+root-only membership, persistent nonzero backing identity, initialized count,
+progress, elapsed time and explicit filesystem/context close outcomes. Namespace
+files and payload bytes are still created online after all ten workers are
+ready. This is preprovisioned steady-state setup. A current MRC5 concurrent
+first-open `ESTALE` was observed in the unprovisioned fault control; sequential
+initialization isolates that startup failure and does not fix or qualify
+parallel virgin startup. A shared root cause with historical inode-transition
+`ESTALE` has not been established. Comparisons with the earlier control must
+retain this setup difference, and do not establish a storage throughput win.

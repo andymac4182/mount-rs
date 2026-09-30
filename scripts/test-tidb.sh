@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+backing_pilot=0
+if [ "${MOUNT_RS_BACKING_PILOT:-0}" = "1" ]; then
+  backing_pilot=1
+  umask 077
+fi
+
 # This harness deliberately uses the official PingCAP component images rather
 # than a MySQL-compatible substitute or TiDB's unistore/mocktikv test mode.
 # The default topology has three PD nodes and three TiKV nodes so the test's
@@ -71,6 +77,25 @@ case "$topology" in
     ;;
   *)
     echo "test-tidb.sh: MOUNT_RS_TIDB_TOPOLOGY must be durable or single" >&2
+    exit 2
+    ;;
+esac
+
+run_filesystem=${MOUNT_RS_TIDB_FILESYSTEM:-0}
+case "$run_filesystem" in
+  0) ;;
+  1)
+    if [ "$topology" != durable ]; then
+      echo "test-tidb.sh: MOUNT_RS_TIDB_FILESYSTEM=1 requires the owned durable topology" >&2
+      exit 2
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "test-tidb.sh: MOUNT_RS_TIDB_FILESYSTEM=1 requires python3 for bounded capture verification" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "test-tidb.sh: MOUNT_RS_TIDB_FILESYSTEM must be 0 or 1" >&2
     exit 2
     ;;
 esac
@@ -163,6 +188,15 @@ case "$allow_underprovisioned" in
     exit 2
     ;;
 esac
+if [ "$backing_pilot" -eq 1 ]; then
+  if [ "$topology" != durable ] || [ "$run_napi" -ne 1 ] || [ "$run_iops" -ne 1 ] ||
+     [ "$allow_underprovisioned" != 0 ] || [ -z "${MOUNT_RS_BACKING_RUSTFS_RECEIPT:-}" ] ||
+     [ -z "${MOUNT_RS_BACKING_RUSTFS_OWNER:-}" ] || [ -z "${MOUNT_RS_BACKING_ENGINE_CAPABILITY:-}" ] ||
+     [ -z "${MOUNT_RS_BACKING_PILOT_OUTPUT:-}" ]; then
+    echo "OWNED_BACKING_PILOT_FAILURE pilot_cell_rejected" >&2
+    exit 2
+  fi
+fi
 durable_min_memory_bytes=10737418240
 durable_min_cpu_count=4
 capacity_issue=0
@@ -191,6 +225,7 @@ if [ "$temp_root" != "/" ]; then
 fi
 run_dir=$(mktemp -d "$temp_root/mount-rs-tidb.XXXXXX")
 run_id=$(basename "$run_dir" | tr '.' '-')
+tidb_generation=1
 network_name="mount-rs-tidb-net-$run_id"
 resource_label="mount-rs.tidb.run=$run_id"
 resource_value="$run_id"
@@ -462,7 +497,11 @@ start_pd() {
   pd_container=$2
   pd_volume=$3
   pd_ip=$(pd_ip_for_number "$pd_number")
-  docker run --detach \
+  set --
+  if [ "$backing_pilot" = 1 ]; then
+    set -- --cidfile "$run_dir/pd-$pd_number-$tidb_generation.cid"
+  fi
+  docker run --detach "$@" \
     --platform "$docker_platform" \
     --name "$pd_container" \
     --label "$resource_label" \
@@ -488,7 +527,11 @@ start_tikv() {
   tikv_container=$2
   tikv_volume=$3
   tikv_ip=$(tikv_ip_for_number "$tikv_number")
-  docker run --detach \
+  set --
+  if [ "$backing_pilot" = 1 ]; then
+    set -- --cidfile "$run_dir/tikv-$tikv_number-$tidb_generation.cid"
+  fi
+  docker run --detach "$@" \
     --platform "$docker_platform" \
     --ulimit "nofile=$tikv_nofile_limit:$tikv_nofile_limit" \
     --name "$tikv_container" \
@@ -608,7 +651,11 @@ wait_for_tidb() {
 
 start_tidb() {
   tidb_container_name=$1
-  docker run --detach \
+  set --
+  if [ "$backing_pilot" = 1 ]; then
+    set -- --cidfile "$run_dir/tidb-$tidb_generation.cid"
+  fi
+  docker run --detach "$@" \
     --platform "$docker_platform" \
     --name "$tidb_container_name" \
     --label "$resource_label" \
@@ -655,13 +702,58 @@ run_direct_provider_test() {
   MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
   MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
   MOUNT_RS_TIDB_GLOBAL_AUTOCOMMIT_TEST=1 \
-    sh "$repo_dir/scripts/test-tidb-concurrent-consumers.sh"
+    sh "$repo_dir/scripts/test-tidb-concurrent-consumers.sh" \
+      || return "$?"
   if [ "${MOUNT_RS_REMOTE_SATURATION_INODE_UPDATES:-0}" = 1 ]; then
     MOUNT_RS_TIDB_URL="$tidb_url" \
       "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
         actual_tidb_inode_versions_preserve_unrelated_writes_and_fence_structure \
         -- --ignored --nocapture --test-threads=1
   fi
+}
+
+run_filesystem_provider_test() {
+  persistence_expectation=$1
+  # Keep direct filesystem blobs and the SDK witness in this harness's private
+  # directory across its existing TiDB/PD/TiKV restart, with no extra service.
+  filesystem_directory=$(CDPATH= cd -- "$run_dir" && pwd -P) || return "$?"
+  filesystem_root="$filesystem_directory/filesystem-blocks"
+  filesystem_witness="$filesystem_directory/filesystem.witness"
+  filesystem_cli_config="$filesystem_directory/filesystem-cli.json"
+  if [ "$persistence_expectation" = 0 ]; then
+    mkdir -m 700 "$filesystem_root" || return "$?"
+  fi
+  filesystem_sdk_capture="$filesystem_directory/filesystem-sdk-$persistence_expectation.stdout"
+  filesystem_sdk_status="$filesystem_directory/filesystem-sdk-$persistence_expectation.status"
+  (
+    umask 077
+    if MOUNT_RS_TIDB_FILESYSTEM=1 \
+      MOUNT_RS_TIDB_TOPOLOGY="$topology" \
+      MOUNT_RS_TIDB_URL="$tidb_url" \
+      MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
+      MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
+      MOUNT_RS_TIDB_RUN_ID="$run_id" \
+      MOUNT_RS_TIDB_FILESYSTEM_ROOT="$filesystem_root" \
+      MOUNT_RS_TIDB_FILESYSTEM_WITNESS="$filesystem_witness" \
+      MOUNT_RS_TIDB_FILESYSTEM_CLI_CONFIG="$filesystem_cli_config" \
+        "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-sdk --test tidb_filesystem \
+          -- --ignored --exact actual_tidb_filesystem_writeback_peer_writes_reopen_and_root_authority \
+          --nocapture --test-threads=1 --color never; then
+      filesystem_sdk_exit=0
+    else
+      filesystem_sdk_exit=$?
+    fi
+    # The pipeline's last status alone cannot establish Cargo's status. Publish
+    # its exact numeric exit into a create-new private status file before EOF.
+    (set -C; printf '%s\n' "$filesystem_sdk_exit" > "$filesystem_sdk_status")
+  ) | python3 -B "$repo_dir/scripts/tidb_filesystem_capture.py" \
+    "$persistence_expectation" "$filesystem_sdk_capture" "$filesystem_sdk_status" || return "$?"
+  # The public CLI uses the same TiDB volume and direct filesystem root. This
+  # mount-free SDK command still writes, syncs, shuts down, reopens and reads.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" run --locked -p mount-rs-cli -- \
+      sdk-self-test --config "$filesystem_cli_config" --reopen || return "$?"
+  echo "TIDB_FILESYSTEM_CLI_PASS phase=$persistence_expectation"
 }
 
 run_provider_test() {
@@ -675,6 +767,9 @@ run_provider_test() {
     direct_status=$?
     echo "test-tidb.sh: direct provider contract failed before composition" >&2
     return "$direct_status"
+  fi
+  if [ "$run_filesystem" -eq 1 ]; then
+    run_filesystem_provider_test "$persistence_expectation" || return "$?"
   fi
   if [ -n "${MOUNT_RS_TIDB_COMPOSITION_COMMAND:-}" ]; then
     # The caller owns the block service and supplies a complete, explicit
@@ -695,11 +790,50 @@ run_node_provider_test() {
   if [ "$run_napi" -ne 1 ]; then
     return 0
   fi
+  if [ "$backing_pilot" -eq 1 ]; then
+    # Preserve an inherited higher-precedence selection as evidence of a
+    # mismatch; do not conceal it with the fixture's child-only URI assignment.
+    inherited_tidb_url=${MOUNT_RS_TIDB_URL:-${TIDB_URL:-}}
+    if [ -n "$inherited_tidb_url" ] && [ "$inherited_tidb_url" != "$tidb_url" ]; then
+      echo "OWNED_BACKING_PILOT_FAILURE pilot_endpoint_binding_rejected" >&2
+      return 2
+    fi
+  fi
   node_prefix=${MOUNT_RS_TIDB_NODE_PREFIX:-${MOUNT_RS_TIDB_RUSTFS_PREFIX:-mount-rs-tidb/$run_id}/napi}
   MOUNT_RS_TIDB_NAPI=1 \
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_NODE_PREFIX="$node_prefix" \
     node "$repo_dir/bindings/mount-rs-napi/test/tidb.mjs"
+  if [ "$backing_pilot" -eq 1 ]; then
+    # One diagnostic generation before restart; this branch never emits the
+    # original Ozone qualification marker or substitutes its artifact.
+    if [ "$topology" != durable ] || [ "$run_iops" -ne 1 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_SIZE_MIB:-1}" != 1 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_PAYLOAD_BYTES:-4096}" != 4096 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_ITERATIONS:-400}" != 400 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_CONCURRENCY:-64}" != 64 ] ||
+       [ "${MOUNT_RS_TIDB_IOPS_MIN:-1000}" != 1000 ]; then
+      echo "OWNED_BACKING_PILOT_FAILURE pilot_cell_rejected" >&2
+      return 2
+    fi
+    MOUNT_RS_BACKING_CID_DIR="$run_dir" \
+    MOUNT_RS_BACKING_TIDB_OWNER="$run_id" \
+    MOUNT_RS_BACKING_GENERATION=1 \
+    MOUNT_RS_BACKING_EXPECT_TIDB_URL="$tidb_url" \
+    MOUNT_RS_BACKING_CID_RECEIPT="$run_dir/backing-cids.json" \
+    MOUNT_RS_TIDB_URL="$tidb_url" \
+      node "$repo_dir/benchmarks/storage/owned-backing-pilot.mjs" fixture-tidb
+    MOUNT_RS_BACKING_TIDB_OWNER="$run_id" \
+    MOUNT_RS_BACKING_GENERATION=1 \
+    MOUNT_RS_BACKING_EXPECT_TIDB_URL="$tidb_url" \
+    MOUNT_RS_BACKING_CID_RECEIPT="$run_dir/backing-cids.json" \
+    MOUNT_RS_TIDB_URL="$tidb_url" \
+    MOUNT_RS_TIDB_DURABLE=1 \
+    MOUNT_RS_PROFILE_IO=1 \
+    MOUNT_RS_TRACE_STORAGE=0 \
+      node "$repo_dir/benchmarks/storage/owned-backing-pilot.mjs" run
+    return "$?"
+  fi
   if [ "$run_iops" -eq 1 ]; then
     iops_output=${MOUNT_RS_TIDB_IOPS_OUTPUT:-$run_dir/tidb-ozone-iops.json}
     iops_size_mib=${MOUNT_RS_TIDB_IOPS_SIZE_MIB:-1}
@@ -729,8 +863,15 @@ run_node_provider_test() {
 }
 
 run_ambiguous_commit_test() {
+  # Compact query-count controls require the storage diagnostics bank.
+  MOUNT_RS_TIDB_URL="$tidb_url" MOUNT_RS_PROFILE_IO=1 \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb \
+      --test ambiguous_commit --test compact --test namespace_presence \
+      -- --ignored --nocapture --test-threads=1
   MOUNT_RS_TIDB_URL="$tidb_url" \
-    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
+      actual_compact_schema_rejects_incompatible_scoped_tables \
+      -- --ignored --nocapture --test-threads=1
 }
 
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2
@@ -821,6 +962,7 @@ if [ "$topology" = durable ]; then
   # in DDL/domain bootstrap after its graceful shutdown has completed.
   docker stop --time 30 "$tidb_container" >/dev/null
   docker rm "$tidb_container" >/dev/null
+  tidb_generation=2
   start_tidb "$tidb_container"
   tidb_url="mysql://root@127.0.0.1:$tidb_sql_port/test"
   wait_for_tidb

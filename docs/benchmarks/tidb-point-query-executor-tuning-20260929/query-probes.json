@@ -1,0 +1,728 @@
+{
+  "scope": "One warmed owned TiDB v8.5.7 connection; metadata-only selected FILE query; 30 alternating prepared executions per arm at 100 and 1000 empty files; no Drive IOPS or process allocation claims",
+  "variants": {
+    "correlated": {
+      "qualified": true,
+      "receipt_sha256": "8a173cc5291917ae2f6db2d94cf3e7e88c31fbfc5c66c2936115ee9eab389121",
+      "artifact_sha256": "776dcc2e26e2cc4adcc4267fdc357bff0762070e25390e6a4418db7d4fe80336",
+      "all_seven_families_cleaned": true,
+      "source": {
+        "build_rejects_provider_snapshot_drift": true,
+        "build_sha256": "5ca39064fbd60b053b719c03318dd595b14ee4536586b5161f681f755138af4c",
+        "captured_at_build": true,
+        "cargo_lock_sha256": "639c4c94c26659f61904f29e0350463480f278c2c048a5bf2095971d67324b5e",
+        "cargo_sha256": "aa75c678b1c76bbda8df1f7c8306d08f63381887014e829169877f4d5b2a2fb0",
+        "compact_sha256": "d1d6287261c9486126fb7b736f7fb66a01a8eddfba2b0efdb6ddcb0e7aa65ff5",
+        "guard_fixture_sha256": "3c225e22a01a12a32d417c77151057f95c2a03b1d2f2d266694985f73eb69446",
+        "indexed_sha256": "2bdbf1b33860f519776a47fe9341633ceddc41a26046632280c7831e41f53e30",
+        "main_sha256": "c7457685baced669e71ab928c01d1ac838b78379e9cafe6dd02b69bc42f78d33",
+        "provider_head": "801ef633d01d7ef1dc95e0dc5a65b57ddb34ebed",
+        "provider_tree": "572d1f17184a992c7d534076c7d72e1f2d51554f",
+        "queries_sha256": "1c93c72b2761e37d2f6b87eb6a4ac393d9f54ee8bf4060255b218ed52928467e",
+        "storage_sha256": "947c58184978de628fa46e50bbe147bda5f91ee06477ac314709ce4f735cc191"
+      },
+      "samples": [
+        {
+          "files": 100,
+          "current": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1245.791,
+            "mean_us": 972.3918000000001,
+            "min_us": 825.208,
+            "p50_us": 960.291,
+            "p95_us": 1148.083,
+            "p99_us": 1245.791,
+            "rounds": 30
+          },
+          "candidate": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1814.25,
+            "mean_us": 1407.2192999999995,
+            "min_us": 1163.1670000000001,
+            "p50_us": 1346.3329999999999,
+            "p95_us": 1703.541,
+            "p99_us": 1814.25,
+            "rounds": 30
+          },
+          "candidate_name": "correlated_volume",
+          "typed_hit_and_miss_oracles_equal": true,
+          "cache_observer_control": null,
+          "plans": [
+            {
+              "variant": "current",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:666.8\u00b5s, loops:2, build_hash_table:{total:528.5\u00b5s, fetch:505.5\u00b5s, build:23\u00b5s}, probe:{concurrency:5, total:2.29ms, max:541.5\u00b5s, probe:2.17\u00b5s, fetch and wait:2.29ms}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:522\u00b5s, loops:2, build_hash_table:{total:389.9\u00b5s, fetch:387.5\u00b5s, build:2.46\u00b5s}, probe:{concurrency:5, total:1.8ms, max:402.1\u00b5s, probe:23\u00b5s, fetch and wait:1.78ms}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            },
+            {
+              "variant": "correlated_volume",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500IndexJoin_23",
+                  "execution": "time:1.31ms, loops:2, inner:{total:492\u00b5s, concurrency:5, task:1, construct:39.5\u00b5s, fetch:445.9\u00b5s, build:6\u00b5s}, probe:2.13\u00b5s",
+                  "tracked_memory": "134.0 KB"
+                },
+                {
+                  "operator": "  \u251c\u2500MergeJoin_48(Build)",
+                  "execution": "time:720.7\u00b5s, loops:3",
+                  "tracked_memory": "7.07 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "files": 1000,
+          "current": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1293.958,
+            "mean_us": 946.9082666666667,
+            "min_us": 766.5830000000001,
+            "p50_us": 931.7909999999999,
+            "p95_us": 1256.667,
+            "p99_us": 1293.958,
+            "rounds": 30
+          },
+          "candidate": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1507.4170000000001,
+            "mean_us": 1264.9639666666667,
+            "min_us": 1001.6249999999999,
+            "p50_us": 1256.5829999999999,
+            "p95_us": 1453.7910000000002,
+            "p99_us": 1507.4170000000001,
+            "rounds": 30
+          },
+          "candidate_name": "correlated_volume",
+          "typed_hit_and_miss_oracles_equal": true,
+          "cache_observer_control": null,
+          "plans": [
+            {
+              "variant": "current",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:471.8\u00b5s, loops:2, build_hash_table:{total:416.5\u00b5s, fetch:414.6\u00b5s, build:1.92\u00b5s}, probe:{concurrency:5, total:1.71ms, max:361.7\u00b5s, probe:1.71\u00b5s, fetch and wait:1.71ms}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:350.1\u00b5s, loops:2, build_hash_table:{total:274.7\u00b5s, fetch:272.9\u00b5s, build:1.75\u00b5s}, probe:{concurrency:5, total:1.06ms, max:217.8\u00b5s, probe:3.58\u00b5s, fetch and wait:1.06ms}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            },
+            {
+              "variant": "correlated_volume",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500IndexJoin_23",
+                  "execution": "time:1.2ms, loops:2, inner:{total:512\u00b5s, concurrency:5, task:1, construct:10.2\u00b5s, fetch:498.8\u00b5s, build:2.42\u00b5s}, probe:2.17\u00b5s",
+                  "tracked_memory": "134.0 KB"
+                },
+                {
+                  "operator": "  \u251c\u2500MergeJoin_48(Build)",
+                  "execution": "time:608.8\u00b5s, loops:3",
+                  "tracked_memory": "7.07 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "one_worker": {
+      "qualified": true,
+      "receipt_sha256": "fddacc5a2824849e859e354781e32732d18136d42f071c4e1b261a047e949927",
+      "artifact_sha256": "a72a4b7d64b34021ef3dbb3c13bdf290a557335f6076109bae3ed2eeefff6feb",
+      "all_seven_families_cleaned": true,
+      "source": {
+        "build_rejects_provider_snapshot_drift": true,
+        "build_sha256": "5ca39064fbd60b053b719c03318dd595b14ee4536586b5161f681f755138af4c",
+        "captured_at_build": true,
+        "cargo_lock_sha256": "639c4c94c26659f61904f29e0350463480f278c2c048a5bf2095971d67324b5e",
+        "cargo_sha256": "1d9e8671e93c60f373f50d6489709ca0d7a0dcb935bfa8e35b08610f63f98063",
+        "compact_sha256": "d1d6287261c9486126fb7b736f7fb66a01a8eddfba2b0efdb6ddcb0e7aa65ff5",
+        "guard_fixture_sha256": "3c225e22a01a12a32d417c77151057f95c2a03b1d2f2d266694985f73eb69446",
+        "indexed_sha256": "2bdbf1b33860f519776a47fe9341633ceddc41a26046632280c7831e41f53e30",
+        "main_sha256": "900b46367d9205b3c3f08bee93dd0ea08e089adc81996cf8b6cbf6d94e1cc960",
+        "provider_head": "801ef633d01d7ef1dc95e0dc5a65b57ddb34ebed",
+        "provider_tree": "572d1f17184a992c7d534076c7d72e1f2d51554f",
+        "queries_sha256": "ee4c8a7f4f1120ccf74d9a794f6023f6a5f30ab6e573b14d898247e5060b4ff7",
+        "storage_sha256": "947c58184978de628fa46e50bbe147bda5f91ee06477ac314709ce4f735cc191"
+      },
+      "samples": [
+        {
+          "files": 100,
+          "current": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1170.375,
+            "mean_us": 928.2541666666667,
+            "min_us": 726.0,
+            "p50_us": 920.792,
+            "p95_us": 1090.125,
+            "p99_us": 1170.375,
+            "rounds": 30
+          },
+          "candidate": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1395.125,
+            "mean_us": 871.7486000000001,
+            "min_us": 671.625,
+            "p50_us": 851.792,
+            "p95_us": 996.6669999999999,
+            "p99_us": 1395.125,
+            "rounds": 30
+          },
+          "candidate_name": "one_worker",
+          "typed_hit_and_miss_oracles_equal": true,
+          "cache_observer_control": null,
+          "plans": [
+            {
+              "variant": "current",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:555.7\u00b5s, loops:2, build_hash_table:{total:435.5\u00b5s, fetch:432\u00b5s, build:3.5\u00b5s}, probe:{concurrency:5, total:2.01ms, max:428.5\u00b5s, probe:1.33\u00b5s, fetch and wait:2.01ms}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:408.2\u00b5s, loops:2, build_hash_table:{total:302.1\u00b5s, fetch:299.7\u00b5s, build:2.46\u00b5s}, probe:{concurrency:5, total:1.36ms, max:289.6\u00b5s, probe:8.92\u00b5s, fetch and wait:1.35ms}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            },
+            {
+              "variant": "one_worker",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:431.3\u00b5s, loops:2, build_hash_table:{total:374.9\u00b5s, fetch:372.2\u00b5s, build:2.71\u00b5s}, probe:{concurrency:1, total:325.3\u00b5s, max:325.3\u00b5s, probe:1.54\u00b5s, fetch and wait:323.8\u00b5s}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:332.7\u00b5s, loops:2, build_hash_table:{total:275.9\u00b5s, fetch:272.8\u00b5s, build:3.17\u00b5s}, probe:{concurrency:1, total:276.1\u00b5s, max:276.1\u00b5s, probe:5.21\u00b5s, fetch and wait:270.9\u00b5s}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "files": 1000,
+          "current": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1578.167,
+            "mean_us": 947.9069333333333,
+            "min_us": 771.3340000000001,
+            "p50_us": 911.125,
+            "p95_us": 1373.833,
+            "p99_us": 1578.167,
+            "rounds": 30
+          },
+          "candidate": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1072.7079999999999,
+            "mean_us": 851.3958333333335,
+            "min_us": 719.0,
+            "p50_us": 838.9590000000001,
+            "p95_us": 1035.291,
+            "p99_us": 1072.7079999999999,
+            "rounds": 30
+          },
+          "candidate_name": "one_worker",
+          "typed_hit_and_miss_oracles_equal": true,
+          "cache_observer_control": null,
+          "plans": [
+            {
+              "variant": "current",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:485.4\u00b5s, loops:2, build_hash_table:{total:399.2\u00b5s, fetch:397.1\u00b5s, build:2.04\u00b5s}, probe:{concurrency:5, total:1.72ms, max:374\u00b5s, probe:1.54\u00b5s, fetch and wait:1.72ms}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:359.5\u00b5s, loops:2, build_hash_table:{total:297.7\u00b5s, fetch:295.3\u00b5s, build:2.42\u00b5s}, probe:{concurrency:5, total:1.36ms, max:308.8\u00b5s, probe:4.04\u00b5s, fetch and wait:1.36ms}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            },
+            {
+              "variant": "one_worker",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:377.5\u00b5s, loops:2, build_hash_table:{total:278.1\u00b5s, fetch:276.8\u00b5s, build:1.25\u00b5s}, probe:{concurrency:1, total:297.7\u00b5s, max:297.7\u00b5s, probe:2.17\u00b5s, fetch and wait:295.5\u00b5s}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:328.5\u00b5s, loops:2, build_hash_table:{total:273\u00b5s, fetch:271.2\u00b5s, build:1.83\u00b5s}, probe:{concurrency:1, total:258.4\u00b5s, max:258.4\u00b5s, probe:12.7\u00b5s, fetch and wait:245.7\u00b5s}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "max_chunk_32": {
+      "qualified": true,
+      "receipt_sha256": "683a959e1e78f7063452ead3ccd1c0ed6d72855a599b499df83ff55d2e69cac0",
+      "artifact_sha256": "e91fc01287d38f76dcc4c41ea299b932b1a8d5a5c66b9df2d6b62cb5c9ed0012",
+      "all_seven_families_cleaned": true,
+      "source": {
+        "build_rejects_provider_snapshot_drift": true,
+        "build_sha256": "5ca39064fbd60b053b719c03318dd595b14ee4536586b5161f681f755138af4c",
+        "captured_at_build": true,
+        "cargo_lock_sha256": "639c4c94c26659f61904f29e0350463480f278c2c048a5bf2095971d67324b5e",
+        "cargo_sha256": "0c9b1a2968f80da7473649371838175444e0136438b4a4af4627490f053bae9c",
+        "compact_sha256": "d1d6287261c9486126fb7b736f7fb66a01a8eddfba2b0efdb6ddcb0e7aa65ff5",
+        "guard_fixture_sha256": "3c225e22a01a12a32d417c77151057f95c2a03b1d2f2d266694985f73eb69446",
+        "indexed_sha256": "2bdbf1b33860f519776a47fe9341633ceddc41a26046632280c7831e41f53e30",
+        "main_sha256": "ec81eca19ed0c035f97305339e4cd4821a62e17c4d12f55b9865d6e5c43d0853",
+        "provider_head": "801ef633d01d7ef1dc95e0dc5a65b57ddb34ebed",
+        "provider_tree": "572d1f17184a992c7d534076c7d72e1f2d51554f",
+        "queries_sha256": "cedfd1ab5467e1ae9ee1b3d99a90a6912e5d2736b1674661232a07e562b13da1",
+        "storage_sha256": "947c58184978de628fa46e50bbe147bda5f91ee06477ac314709ce4f735cc191"
+      },
+      "samples": [
+        {
+          "files": 100,
+          "current": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1472.792,
+            "mean_us": 990.4070333333335,
+            "min_us": 769.208,
+            "p50_us": 949.958,
+            "p95_us": 1173.375,
+            "p99_us": 1472.792,
+            "rounds": 30
+          },
+          "candidate": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1668.459,
+            "mean_us": 1001.1001333333332,
+            "min_us": 853.375,
+            "p50_us": 948.417,
+            "p95_us": 1293.2079999999999,
+            "p99_us": 1668.459,
+            "rounds": 30
+          },
+          "candidate_name": "max_chunk_32",
+          "typed_hit_and_miss_oracles_equal": true,
+          "cache_observer_control": {
+            "cached_positive": 1,
+            "same_complete_row": true,
+            "uncacheable_flags": [
+              0,
+              0
+            ]
+          },
+          "plans": [
+            {
+              "variant": "current",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:679.5\u00b5s, loops:2, build_hash_table:{total:561\u00b5s, fetch:548.6\u00b5s, build:12.5\u00b5s}, probe:{concurrency:5, total:2.3ms, max:545.3\u00b5s, probe:1.08\u00b5s, fetch and wait:2.3ms}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:520\u00b5s, loops:2, build_hash_table:{total:354.1\u00b5s, fetch:352.2\u00b5s, build:1.92\u00b5s}, probe:{concurrency:5, total:1.28ms, max:269.8\u00b5s, probe:12.5\u00b5s, fetch and wait:1.26ms}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            },
+            {
+              "variant": "max_chunk_32",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:417.3\u00b5s, loops:2, build_hash_table:{total:294.8\u00b5s, fetch:293\u00b5s, build:1.71\u00b5s}, probe:{concurrency:5, total:1.28ms, max:270.9\u00b5s, probe:7.83\u00b5s, fetch and wait:1.27ms}",
+                  "tracked_memory": "79.1 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:288.4\u00b5s, loops:2, build_hash_table:{total:199.2\u00b5s, fetch:197.9\u00b5s, build:1.33\u00b5s}, probe:{concurrency:5, total:1.14ms, max:236.5\u00b5s, probe:5.29\u00b5s, fetch and wait:1.14ms}",
+                  "tracked_memory": "77.1 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "files": 1000,
+          "current": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1280.125,
+            "mean_us": 954.8153666666668,
+            "min_us": 760.042,
+            "p50_us": 927.417,
+            "p95_us": 1161.0839999999998,
+            "p99_us": 1280.125,
+            "rounds": 30
+          },
+          "candidate": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1356.417,
+            "mean_us": 986.6208333333333,
+            "min_us": 802.375,
+            "p50_us": 950.2090000000001,
+            "p95_us": 1210.791,
+            "p99_us": 1356.417,
+            "rounds": 30
+          },
+          "candidate_name": "max_chunk_32",
+          "typed_hit_and_miss_oracles_equal": true,
+          "cache_observer_control": {
+            "cached_positive": 1,
+            "same_complete_row": true,
+            "uncacheable_flags": [
+              0,
+              0
+            ]
+          },
+          "plans": [
+            {
+              "variant": "current",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:524.1\u00b5s, loops:2, build_hash_table:{total:402.1\u00b5s, fetch:399.5\u00b5s, build:2.63\u00b5s}, probe:{concurrency:5, total:1.9ms, max:396\u00b5s, probe:2.17\u00b5s, fetch and wait:1.9ms}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:397.8\u00b5s, loops:2, build_hash_table:{total:330.8\u00b5s, fetch:328.8\u00b5s, build:1.96\u00b5s}, probe:{concurrency:5, total:1.7ms, max:356\u00b5s, probe:5.71\u00b5s, fetch and wait:1.7ms}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            },
+            {
+              "variant": "max_chunk_32",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:334.6\u00b5s, loops:2, build_hash_table:{total:265.1\u00b5s, fetch:263.7\u00b5s, build:1.42\u00b5s}, probe:{concurrency:5, total:1.07ms, max:221.4\u00b5s, probe:958ns, fetch and wait:1.07ms}",
+                  "tracked_memory": "79.1 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:257\u00b5s, loops:2, build_hash_table:{total:183.7\u00b5s, fetch:182.8\u00b5s, build:875ns}, probe:{concurrency:5, total:869.3\u00b5s, max:190.7\u00b5s, probe:2.5\u00b5s, fetch and wait:866.8\u00b5s}",
+                  "tracked_memory": "77.1 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "combined_max32_worker1": {
+      "qualified": true,
+      "receipt_sha256": "2a9e704939e568ddfc991e2008df815a985dab67b631842e196a52bbedf15b4d",
+      "artifact_sha256": "8f3d04a52b21f5003c9b8411f86d47b8995c271483c00d06a1f97c5376440491",
+      "all_seven_families_cleaned": true,
+      "source": {
+        "baseline_compact_sha256": "d1d6287261c9486126fb7b736f7fb66a01a8eddfba2b0efdb6ddcb0e7aa65ff5",
+        "baseline_provider_head": "801ef633d01d7ef1dc95e0dc5a65b57ddb34ebed",
+        "baseline_provider_tree": "572d1f17184a992c7d534076c7d72e1f2d51554f",
+        "build_rejects_provider_snapshot_drift": true,
+        "build_sha256": "100d8ae4de18cb8e5838f6ddd6eefbac8f7a0596aa0de9f83bb3a0f4a40bcef5",
+        "captured_at_build": true,
+        "cargo_lock_sha256": "639c4c94c26659f61904f29e0350463480f278c2c048a5bf2095971d67324b5e",
+        "cargo_sha256": "0f6d157fa7ee6d93fd59d0656c970ffa334db0c8a01cf384207b0212f0f74f59",
+        "compact_sha256": "416114dcf3da34a2d498cca85a56d63a7c5ea73d069f86d9851a5ef01d10ab54",
+        "guard_fixture_sha256": "3c225e22a01a12a32d417c77151057f95c2a03b1d2f2d266694985f73eb69446",
+        "indexed_sha256": "2bdbf1b33860f519776a47fe9341633ceddc41a26046632280c7831e41f53e30",
+        "main_sha256": "6aff6dba266e07c6248a8c55b1fba44b0f6f14d62845c9b07cc5703fe09b8151",
+        "provider_head": "2fef4cf7d5fe639fd3a446f9a78c87d881d54713",
+        "provider_tree": "fad4d3063da072ba8cab0e9dec48f0d2f0acaf1e",
+        "queries_sha256": "19c597bddfde545c00d0532735e78a18952a1fd01986ce7e616b8c7a7e167357",
+        "storage_sha256": "947c58184978de628fa46e50bbe147bda5f91ee06477ac314709ce4f735cc191"
+      },
+      "source_unchanged": true,
+      "docker_unchanged": true,
+      "session_before": {
+        "autocommit": 1,
+        "executor_concurrency": 5,
+        "max_chunk_size": 1024,
+        "tidb_txn_mode": "pessimistic",
+        "transaction_isolation": "REPEATABLE-READ"
+      },
+      "session_after": {
+        "autocommit": 1,
+        "executor_concurrency": 5,
+        "max_chunk_size": 1024,
+        "tidb_txn_mode": "pessimistic",
+        "transaction_isolation": "REPEATABLE-READ"
+      },
+      "samples": [
+        {
+          "files": 100,
+          "kind": "file",
+          "cache_observer_control": {
+            "cached_positive": 1,
+            "same_complete_row": true,
+            "uncacheable_flags": [
+              0,
+              0
+            ]
+          },
+          "current": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1025.6670000000001,
+            "mean_us": 874.9458000000002,
+            "min_us": 739.958,
+            "p50_us": 876.0830000000001,
+            "p95_us": 956.4159999999999,
+            "p99_us": 1025.6670000000001,
+            "rounds": 30
+          },
+          "candidate": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 930.25,
+            "mean_us": 803.0096666666667,
+            "min_us": 693.7090000000001,
+            "p50_us": 786.291,
+            "p95_us": 906.4169999999999,
+            "p99_us": 930.25,
+            "rounds": 30
+          },
+          "typed_hit_miss_equal": true,
+          "plans": [
+            {
+              "variant": "current",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:604.6\u00b5s, loops:2, build_hash_table:{total:409.7\u00b5s, fetch:395.2\u00b5s, build:14.5\u00b5s}, probe:{concurrency:5, total:2.24ms, max:454.9\u00b5s, probe:2.08\u00b5s, fetch and wait:2.23ms}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:438.1\u00b5s, loops:2, build_hash_table:{total:322.9\u00b5s, fetch:320.2\u00b5s, build:2.75\u00b5s}, probe:{concurrency:5, total:1.33ms, max:284.5\u00b5s, probe:13.8\u00b5s, fetch and wait:1.32ms}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            },
+            {
+              "variant": "combined_max32_worker1",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:340.5\u00b5s, loops:2, build_hash_table:{total:275.9\u00b5s, fetch:273.7\u00b5s, build:2.21\u00b5s}, probe:{concurrency:1, total:260.9\u00b5s, max:260.9\u00b5s, probe:1.46\u00b5s, fetch and wait:259.5\u00b5s}",
+                  "tracked_memory": "79.1 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:291\u00b5s, loops:2, build_hash_table:{total:244\u00b5s, fetch:241.5\u00b5s, build:2.5\u00b5s}, probe:{concurrency:1, total:183.7\u00b5s, max:183.7\u00b5s, probe:3.92\u00b5s, fetch and wait:179.8\u00b5s}",
+                  "tracked_memory": "77.1 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "files": 1000,
+          "kind": "file",
+          "cache_observer_control": {
+            "cached_positive": 1,
+            "same_complete_row": true,
+            "uncacheable_flags": [
+              0,
+              0
+            ]
+          },
+          "current": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 1436.9579999999999,
+            "mean_us": 933.5804999999999,
+            "min_us": 780.5,
+            "p50_us": 891.7909999999999,
+            "p95_us": 1137.5420000000001,
+            "p99_us": 1436.9579999999999,
+            "rounds": 30
+          },
+          "candidate": {
+            "last_plan_from_cache_hits": 30,
+            "max_us": 2442.208,
+            "mean_us": 946.9110999999997,
+            "min_us": 705.917,
+            "p50_us": 834.5419999999999,
+            "p95_us": 1530.25,
+            "p99_us": 2442.208,
+            "rounds": 30
+          },
+          "typed_hit_miss_equal": true,
+          "plans": [
+            {
+              "variant": "current",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:305.2\u00b5s, loops:2, build_hash_table:{total:235.5\u00b5s, fetch:234.3\u00b5s, build:1.29\u00b5s}, probe:{concurrency:5, total:1.11ms, max:257.7\u00b5s, probe:958ns, fetch and wait:1.11ms}",
+                  "tracked_memory": "141.5 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:242.7\u00b5s, loops:2, build_hash_table:{total:189.3\u00b5s, fetch:188.2\u00b5s, build:1.17\u00b5s}, probe:{concurrency:5, total:843.2\u00b5s, max:186.5\u00b5s, probe:1.83\u00b5s, fetch and wait:841.4\u00b5s}",
+                  "tracked_memory": "100.6 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            },
+            {
+              "variant": "combined_max32_worker1",
+              "joins": [
+                {
+                  "operator": "\u2514\u2500HashJoin_9",
+                  "execution": "time:228.5\u00b5s, loops:2, build_hash_table:{total:172.8\u00b5s, fetch:171.9\u00b5s, build:875ns}, probe:{concurrency:1, total:163.8\u00b5s, max:163.8\u00b5s, probe:667ns, fetch and wait:163.2\u00b5s}",
+                  "tracked_memory": "79.1 KB"
+                },
+                {
+                  "operator": "  \u2514\u2500HashJoin_11(Probe)",
+                  "execution": "time:188.6\u00b5s, loops:2, build_hash_table:{total:137.3\u00b5s, fetch:136.5\u00b5s, build:875ns}, probe:{concurrency:1, total:123.1\u00b5s, max:123.1\u00b5s, probe:1.71\u00b5s, fetch and wait:121.4\u00b5s}",
+                  "tracked_memory": "77.1 KB"
+                }
+              ],
+              "warnings": [
+                [
+                  "Warning",
+                  "1105",
+                  "skip prepared plan-cache: not a SELECT/UPDATE/INSERT/DELETE/SET statement"
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "limits": [
+    "Each variant is a separate short matched pair on one warmed connection, not pooled replications.",
+    "Empty-file row payloads are smaller than the 128KiB wire-workload file metadata.",
+    "EXPLAIN ANALYZE memory values belong to individual operators; their sum is not a measured request peak or allocation-byte count.",
+    "Actual prepared executions showed cache hits; the warning emitted by the EXPLAIN wrapper does not measure SELECT cache loss.",
+    "The combined1000-file sample has worse mean/tail latency despite a lower median.",
+    "Both session-variable witnesses execute after a successful context reset; restoration at result EOF is not established."
+  ]
+}

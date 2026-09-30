@@ -1,0 +1,756 @@
+{
+  "cases": {
+    "1000": {
+      "A": {
+        "allocation_calls": {
+          "max": 9293,
+          "mean": 9292.1875,
+          "median": 9292.0,
+          "min": 9292,
+          "p95_nearest_rank": 9293
+        },
+        "elapsed_ms": {
+          "max": 88.432208,
+          "mean": 16.0303411640625,
+          "median": 14.2161455,
+          "min": 11.509917,
+          "p95_nearest_rank": 22.546625
+        },
+        "phases": {
+          "Close": {
+            "allocation_calls": {
+              "max": 1,
+              "mean": 1,
+              "median": 1.0,
+              "min": 1,
+              "p95_nearest_rank": 1
+            },
+            "elapsed_ms": {
+              "max": 0.035375,
+              "mean": 0.0028170078125,
+              "median": 0.002583,
+              "min": 0.001333,
+              "p95_nearest_rank": 0.003417
+            },
+            "requested_bytes": {
+              "max": 2984,
+              "mean": 2984,
+              "median": 2984.0,
+              "min": 2984,
+              "p95_nearest_rank": 2984
+            }
+          },
+          "Open": {
+            "allocation_calls": {
+              "max": 300,
+              "mean": 299.15625,
+              "median": 299.0,
+              "min": 299,
+              "p95_nearest_rank": 300
+            },
+            "elapsed_ms": {
+              "max": 24.324333,
+              "mean": 2.797223984375,
+              "median": 2.3665209999999997,
+              "min": 1.889958,
+              "p95_nearest_rank": 3.763667
+            },
+            "requested_bytes": {
+              "max": 31596,
+              "mean": 29337.34375,
+              "median": 29009.0,
+              "min": 29008,
+              "p95_nearest_rank": 31594
+            }
+          },
+          "Read": {
+            "allocation_calls": {
+              "max": 337,
+              "mean": 336.03125,
+              "median": 336.0,
+              "min": 336,
+              "p95_nearest_rank": 336
+            },
+            "elapsed_ms": {
+              "max": 22.132417,
+              "mean": 3.0212249453125,
+              "median": 2.545896,
+              "min": 2.049375,
+              "p95_nearest_rank": 3.854208
+            },
+            "requested_bytes": {
+              "max": 34852,
+              "mean": 34571,
+              "median": 34562.0,
+              "min": 34560,
+              "p95_nearest_rank": 34564
+            }
+          },
+          "Stat": {
+            "allocation_calls": {
+              "max": 8656,
+              "mean": 8656,
+              "median": 8656.0,
+              "min": 8656,
+              "p95_nearest_rank": 8656
+            },
+            "elapsed_ms": {
+              "max": 59.057542,
+              "mean": 10.20818459375,
+              "median": 9.174104,
+              "min": 7.183292,
+              "p95_nearest_rank": 14.975709
+            },
+            "requested_bytes": {
+              "max": 607754,
+              "mean": 607752,
+              "median": 607752.0,
+              "min": 607750,
+              "p95_nearest_rank": 607754
+            }
+          }
+        },
+        "requested_bytes": {
+          "max": 676896,
+          "mean": 674644.34375,
+          "median": 674307.0,
+          "min": 674302,
+          "p95_nearest_rank": 676890
+        },
+        "samples": 128
+      },
+      "B": {
+        "allocation_calls": {
+          "max": 5091,
+          "mean": 5090.1875,
+          "median": 5090.0,
+          "min": 5090,
+          "p95_nearest_rank": 5091
+        },
+        "elapsed_ms": {
+          "max": 24.120083,
+          "mean": 14.4703971484375,
+          "median": 14.216666,
+          "min": 11.601292,
+          "p95_nearest_rank": 17.582208
+        },
+        "phases": {
+          "Close": {
+            "allocation_calls": {
+              "max": 1,
+              "mean": 1,
+              "median": 1.0,
+              "min": 1,
+              "p95_nearest_rank": 1
+            },
+            "elapsed_ms": {
+              "max": 0.007708,
+              "mean": 0.002427390625,
+              "median": 0.0022705,
+              "min": 0.001208,
+              "p95_nearest_rank": 0.003417
+            },
+            "requested_bytes": {
+              "max": 2984,
+              "mean": 2984,
+              "median": 2984.0,
+              "min": 2984,
+              "p95_nearest_rank": 2984
+            }
+          },
+          "Open": {
+            "allocation_calls": {
+              "max": 300,
+              "mean": 299.15625,
+              "median": 299.0,
+              "min": 299,
+              "p95_nearest_rank": 300
+            },
+            "elapsed_ms": {
+              "max": 6.862542,
+              "mean": 2.510612984375,
+              "median": 2.4229789999999998,
+              "min": 1.92125,
+              "p95_nearest_rank": 3.134916
+            },
+            "requested_bytes": {
+              "max": 31596,
+              "mean": 29336.890625,
+              "median": 29009.0,
+              "min": 29007,
+              "p95_nearest_rank": 31594
+            }
+          },
+          "Read": {
+            "allocation_calls": {
+              "max": 337,
+              "mean": 336.03125,
+              "median": 336.0,
+              "min": 336,
+              "p95_nearest_rank": 336
+            },
+            "elapsed_ms": {
+              "max": 3.835417,
+              "mean": 2.7098085625,
+              "median": 2.699021,
+              "min": 2.009833,
+              "p95_nearest_rank": 3.174375
+            },
+            "requested_bytes": {
+              "max": 34852,
+              "mean": 34570,
+              "median": 34562.0,
+              "min": 34558,
+              "p95_nearest_rank": 34564
+            }
+          },
+          "Stat": {
+            "allocation_calls": {
+              "max": 4454,
+              "mean": 4454,
+              "median": 4454.0,
+              "min": 4454,
+              "p95_nearest_rank": 4454
+            },
+            "elapsed_ms": {
+              "max": 14.812333,
+              "mean": 9.2466724375,
+              "median": 9.042207999999999,
+              "min": 7.253666,
+              "p95_nearest_rank": 12.364458
+            },
+            "requested_bytes": {
+              "max": 152071,
+              "mean": 152068,
+              "median": 152068.0,
+              "min": 152065,
+              "p95_nearest_rank": 152071
+            }
+          }
+        },
+        "requested_bytes": {
+          "max": 221213,
+          "mean": 218958.890625,
+          "median": 218624.0,
+          "min": 218614,
+          "p95_nearest_rank": 221207
+        },
+        "samples": 128
+      },
+      "percent_change_B_vs_A": {
+        "allocation_calls": {
+          "mean": -45.22078358836388,
+          "median": -45.22169608265174,
+          "p95_nearest_rank": -45.21682987194663
+        },
+        "elapsed_ms": {
+          "mean": -9.731196608105552,
+          "median": 0.003661329999760099,
+          "p95_nearest_rank": -22.018448437404704
+        },
+        "requested_bytes": {
+          "mean": -67.54454511425674,
+          "median": -67.57797264450762,
+          "p95_nearest_rank": -67.32009632288852
+        }
+      }
+    },
+    "128": {
+      "A": {
+        "allocation_calls": {
+          "max": 2165,
+          "mean": 2163,
+          "median": 2163.0,
+          "min": 2162,
+          "p95_nearest_rank": 2165
+        },
+        "elapsed_ms": {
+          "max": 19.21775,
+          "mean": 10.8278620078125,
+          "median": 10.7094375,
+          "min": 8.464792,
+          "p95_nearest_rank": 12.562667
+        },
+        "phases": {
+          "Close": {
+            "allocation_calls": {
+              "max": 1,
+              "mean": 1,
+              "median": 1.0,
+              "min": 1,
+              "p95_nearest_rank": 1
+            },
+            "elapsed_ms": {
+              "max": 0.003708,
+              "mean": 0.0025764609375,
+              "median": 0.002666,
+              "min": 0.001375,
+              "p95_nearest_rank": 0.003292
+            },
+            "requested_bytes": {
+              "max": 2984,
+              "mean": 2984,
+              "median": 2984.0,
+              "min": 2984,
+              "p95_nearest_rank": 2984
+            }
+          },
+          "Open": {
+            "allocation_calls": {
+              "max": 301,
+              "mean": 299.5,
+              "median": 299.0,
+              "min": 299,
+              "p95_nearest_rank": 301
+            },
+            "elapsed_ms": {
+              "max": 3.616583,
+              "mean": 2.2987070703125,
+              "median": 2.2936875,
+              "min": 1.773125,
+              "p95_nearest_rank": 2.656125
+            },
+            "requested_bytes": {
+              "max": 31411,
+              "mean": 29845.0625,
+              "median": 28999.0,
+              "min": 28996,
+              "p95_nearest_rank": 31077
+            }
+          },
+          "Read": {
+            "allocation_calls": {
+              "max": 337,
+              "mean": 336.0625,
+              "median": 336.0,
+              "min": 336,
+              "p95_nearest_rank": 337
+            },
+            "elapsed_ms": {
+              "max": 11.879458,
+              "mean": 2.5611796796875,
+              "median": 2.4802295,
+              "min": 1.921666,
+              "p95_nearest_rank": 2.969208
+            },
+            "requested_bytes": {
+              "max": 34841,
+              "mean": 34566.875,
+              "median": 34551.0,
+              "min": 34547,
+              "p95_nearest_rank": 34801
+            }
+          },
+          "Stat": {
+            "allocation_calls": {
+              "max": 1528,
+              "mean": 1526.4375,
+              "median": 1526.0,
+              "min": 1526,
+              "p95_nearest_rank": 1528
+            },
+            "elapsed_ms": {
+              "max": 10.481083,
+              "mean": 5.9645135937500005,
+              "median": 5.9276875,
+              "min": 4.490625,
+              "p95_nearest_rank": 6.900333
+            },
+            "requested_bytes": {
+              "max": 134180,
+              "mean": 132955.125,
+              "median": 132514.0,
+              "min": 132510,
+              "p95_nearest_rank": 134072
+            }
+          }
+        },
+        "requested_bytes": {
+          "max": 203128,
+          "mean": 200351.0625,
+          "median": 200248.0,
+          "min": 199037,
+          "p95_nearest_rank": 202542
+        },
+        "samples": 128
+      },
+      "B": {
+        "allocation_calls": {
+          "max": 1605,
+          "mean": 1603,
+          "median": 1603.0,
+          "min": 1602,
+          "p95_nearest_rank": 1605
+        },
+        "elapsed_ms": {
+          "max": 21.0835,
+          "mean": 10.98647721875,
+          "median": 10.7734165,
+          "min": 9.0415,
+          "p95_nearest_rank": 13.3565
+        },
+        "phases": {
+          "Close": {
+            "allocation_calls": {
+              "max": 1,
+              "mean": 1,
+              "median": 1.0,
+              "min": 1,
+              "p95_nearest_rank": 1
+            },
+            "elapsed_ms": {
+              "max": 0.00825,
+              "mean": 0.0026044921875,
+              "median": 0.002542,
+              "min": 0.001166,
+              "p95_nearest_rank": 0.003375
+            },
+            "requested_bytes": {
+              "max": 2984,
+              "mean": 2984,
+              "median": 2984.0,
+              "min": 2984,
+              "p95_nearest_rank": 2984
+            }
+          },
+          "Open": {
+            "allocation_calls": {
+              "max": 301,
+              "mean": 299.5,
+              "median": 299.0,
+              "min": 299,
+              "p95_nearest_rank": 301
+            },
+            "elapsed_ms": {
+              "max": 6.51625,
+              "mean": 2.4316259921875,
+              "median": 2.307396,
+              "min": 1.859625,
+              "p95_nearest_rank": 2.943917
+            },
+            "requested_bytes": {
+              "max": 31411,
+              "mean": 29845.4375,
+              "median": 28999.0,
+              "min": 28997,
+              "p95_nearest_rank": 31077
+            }
+          },
+          "Read": {
+            "allocation_calls": {
+              "max": 337,
+              "mean": 336.0625,
+              "median": 336.0,
+              "min": 336,
+              "p95_nearest_rank": 337
+            },
+            "elapsed_ms": {
+              "max": 6.025542,
+              "mean": 2.5499476015625,
+              "median": 2.4974165,
+              "min": 2.033166,
+              "p95_nearest_rank": 3.009459
+            },
+            "requested_bytes": {
+              "max": 34841,
+              "mean": 34567.375,
+              "median": 34551.0,
+              "min": 34549,
+              "p95_nearest_rank": 34801
+            }
+          },
+          "Stat": {
+            "allocation_calls": {
+              "max": 968,
+              "mean": 966.4375,
+              "median": 966.0,
+              "min": 966,
+              "p95_nearest_rank": 968
+            },
+            "elapsed_ms": {
+              "max": 11.905625,
+              "mean": 6.00140525,
+              "median": 5.839729500000001,
+              "min": 4.717084,
+              "p95_nearest_rank": 7.367666
+            },
+            "requested_bytes": {
+              "max": 70009,
+              "mean": 68784.640625,
+              "median": 68343.0,
+              "min": 68341,
+              "p95_nearest_rank": 69901
+            }
+          }
+        },
+        "requested_bytes": {
+          "max": 138957,
+          "mean": 136181.453125,
+          "median": 136079.5,
+          "min": 134871,
+          "p95_nearest_rank": 138371
+        },
+        "samples": 128
+      },
+      "percent_change_B_vs_A": {
+        "allocation_calls": {
+          "mean": -25.889967637540458,
+          "median": -25.889967637540458,
+          "p95_nearest_rank": -25.86605080831409
+        },
+        "elapsed_ms": {
+          "mean": 1.46488023972835,
+          "median": 0.5974076602996092,
+          "p95_nearest_rank": 6.318984655089577
+        },
+        "requested_bytes": {
+          "mean": -32.02858451274747,
+          "median": -32.04451480164596,
+          "p95_nearest_rank": -31.682811466263782
+        }
+      }
+    }
+  },
+  "order": "ABBABAAB",
+  "original_256_call_controls": [
+    {
+      "execution": {
+        "capture_cap_per_file_bytes": 67108864,
+        "captures": {
+          "stderr": {
+            "bytes": 842,
+            "sha256": "607b9221181c972bbf914ad3ed87f058605dcf1c8618f41c4c20faa406d23bfc"
+          },
+          "stdout": {
+            "bytes": 2368,
+            "sha256": "e96e5e9d786d5723e9f0b952fb6b39fa5c220cd26a8157017734308bf04a2e3b"
+          }
+        },
+        "command": [
+          "/private/tmp/mount-rs-borrowed-selected-pair-yjl1jjls/A",
+          "--ignored",
+          "siblings_has_bounded_rust_allocations",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "deadline_seconds": 300,
+        "direct_child_reaped": true,
+        "elapsed_seconds": 3.0578850409947336,
+        "exit_code": 101,
+        "expected_exit_code": 101,
+        "failure": null,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 78584537088,
+        "process_group_absent": true
+      },
+      "phases": [
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2310792,
+          "operation": "Open",
+          "rust_calls": 300,
+          "rust_requested_bytes": 30220,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 7947208,
+          "operation": "Stat",
+          "rust_calls": 8657,
+          "rust_requested_bytes": 608549,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2570833,
+          "operation": "Read",
+          "rust_calls": 338,
+          "rust_requested_bytes": 36266,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 1583,
+          "operation": "Close",
+          "rust_calls": 1,
+          "rust_requested_bytes": 2984,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2271083,
+          "operation": "Open",
+          "rust_calls": 300,
+          "rust_requested_bytes": 30584,
+          "siblings": 128
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 5318958,
+          "operation": "Stat",
+          "rust_calls": 1526,
+          "rust_requested_bytes": 132424,
+          "siblings": 128
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2297875,
+          "operation": "Read",
+          "rust_calls": 337,
+          "rust_requested_bytes": 36080,
+          "siblings": 128
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2666,
+          "operation": "Close",
+          "rust_calls": 1,
+          "rust_requested_bytes": 2984,
+          "siblings": 128
+        }
+      ],
+      "receipt_sha256": "8edfb66f73cc5b4e3ec63aaeea6ab284059de9af7884992c18868786b8cd09ac",
+      "results": [
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "driver_and_runtime_included": true,
+          "foreign_allocations_included": false,
+          "fresh_oracles_passed": true,
+          "rust_calls": 9296,
+          "rust_requested_bytes": 678019,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "driver_and_runtime_included": true,
+          "foreign_allocations_included": false,
+          "fresh_oracles_passed": true,
+          "rust_calls": 2164,
+          "rust_requested_bytes": 202072,
+          "siblings": 128
+        }
+      ],
+      "role": "A"
+    },
+    {
+      "execution": {
+        "capture_cap_per_file_bytes": 67108864,
+        "captures": {
+          "stderr": {
+            "bytes": 842,
+            "sha256": "c285a135f5805a05964e4cb11eeb827f9d62f7a7b1d587e9f3af056f4a4cdeba"
+          },
+          "stdout": {
+            "bytes": 2366,
+            "sha256": "8422ac72890a3a77129e289bb065e36e9d2cc11b1feecd9e5f3d99f080fbc61d"
+          }
+        },
+        "command": [
+          "/private/tmp/mount-rs-borrowed-selected-pair-yjl1jjls/B",
+          "--ignored",
+          "siblings_has_bounded_rust_allocations",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "deadline_seconds": 300,
+        "direct_child_reaped": true,
+        "elapsed_seconds": 3.0456489169737324,
+        "exit_code": 101,
+        "expected_exit_code": 101,
+        "failure": null,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 78566031360,
+        "process_group_absent": true
+      },
+      "phases": [
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2292750,
+          "operation": "Open",
+          "rust_calls": 300,
+          "rust_requested_bytes": 30222,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 8325375,
+          "operation": "Stat",
+          "rust_calls": 4455,
+          "rust_requested_bytes": 152869,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2515500,
+          "operation": "Read",
+          "rust_calls": 338,
+          "rust_requested_bytes": 36270,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 3000,
+          "operation": "Close",
+          "rust_calls": 1,
+          "rust_requested_bytes": 2984,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2112417,
+          "operation": "Open",
+          "rust_calls": 300,
+          "rust_requested_bytes": 30585,
+          "siblings": 128
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 5230833,
+          "operation": "Stat",
+          "rust_calls": 966,
+          "rust_requested_bytes": 68255,
+          "siblings": 128
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2439208,
+          "operation": "Read",
+          "rust_calls": 337,
+          "rust_requested_bytes": 36086,
+          "siblings": 128
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "elapsed_ns": 2750,
+          "operation": "Close",
+          "rust_calls": 1,
+          "rust_requested_bytes": 2984,
+          "siblings": 128
+        }
+      ],
+      "receipt_sha256": "b51706b4b062ec076ad2380b27076efa35cc77c99fdfd669593f9d6dcc86c5c2",
+      "results": [
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "driver_and_runtime_included": true,
+          "foreign_allocations_included": false,
+          "fresh_oracles_passed": true,
+          "rust_calls": 5094,
+          "rust_requested_bytes": 222345,
+          "siblings": 1000
+        },
+        {
+          "backend": "tidb-metadata-and-blocks",
+          "driver_and_runtime_included": true,
+          "foreign_allocations_included": false,
+          "fresh_oracles_passed": true,
+          "rust_calls": 1604,
+          "rust_requested_bytes": 137910,
+          "siblings": 128
+        }
+      ],
+      "role": "B"
+    }
+  ],
+  "schema": "mount-rs-borrowed-root-paired-summary-v1"
+}

@@ -1,0 +1,129 @@
+{
+  "scope": "TiDB packet-cap prerequisite only; no bulk implementation or throughput proof",
+  "source_head": "da38c0d9f2ace136c654ab06c646c8cc88cbd868",
+  "report": {
+    "path": "/private/tmp/mount-rs-structural-packet-cap-report.md",
+    "sha256": "6f864d29689e6f044655730d1446e5d2739568734887f73ae7ed13a77c68eaee"
+  },
+  "freeze": {
+    "head": "da38c0d9f2ace136c654ab06c646c8cc88cbd868",
+    "owned_source": [
+      "providers/mount-rs-tidb/tests/packet_cap.rs"
+    ],
+    "files": [
+      {
+        "path": "/Users/amcclenaghan/github/andymac4182/mount-rs-remote-drive-mounts/providers/mount-rs-tidb/tests/packet_cap.rs",
+        "sha256": "8ce442ac6238f796145dd773c5056bf20ad7e0a22a680dd14d8ae942258d7ba2",
+        "bytes": 18370
+      },
+      {
+        "path": "/Users/amcclenaghan/github/andymac4182/mount-rs-remote-drive-mounts/providers/mount-rs-tidb/src/storage.rs",
+        "sha256": "f738e2dc0ebc473aeacb8dae577ed4ee56732a0b2186d90839f5cc6bf4238540",
+        "bytes": 123986
+      },
+      {
+        "path": "/Users/amcclenaghan/github/andymac4182/mount-rs-remote-drive-mounts/Cargo.lock",
+        "sha256": "457f21db0e62a0e4ba26c25f90fc15fed0233107b5611ec56445bf456c6a0166",
+        "bytes": 95709
+      },
+      {
+        "path": "/Users/amcclenaghan/.cargo/registry/src/packages.atlassian.com-abebf21e25a19c58/mysql_async-0.37.1/src/conn/mod.rs",
+        "sha256": "9f99a4231693cd683f2ce15986ed774a26715e6d745396eaabf013a249d1bce2",
+        "bytes": 102954
+      },
+      {
+        "path": "/Users/amcclenaghan/.cargo/registry/src/packages.atlassian.com-abebf21e25a19c58/mysql_async-0.37.1/src/conn/pool/mod.rs",
+        "sha256": "71b3d79d917f831729173dfb947f408a1a819401edd49a6cb5d033627cc7d2fb",
+        "bytes": 41386
+      },
+      {
+        "path": "/Users/amcclenaghan/.cargo/registry/src/packages.atlassian.com-abebf21e25a19c58/mysql_async-0.37.1/src/conn/pool/recycler.rs",
+        "sha256": "794b5e939c4c200faf56343c2cb2b3690726d0e0f2af89498c46d82d2cda43c5",
+        "bytes": 11579
+      },
+      {
+        "path": "/Users/amcclenaghan/.cargo/registry/src/packages.atlassian.com-abebf21e25a19c58/mysql_async-0.37.1/src/error/mod.rs",
+        "sha256": "10dc4e7f008b6e531f7cd6330b58bf9ffd2809e060f98ba4b06a04f5d49dc123",
+        "bytes": 9806
+      },
+      {
+        "path": "/Users/amcclenaghan/.cargo/registry/src/packages.atlassian.com-abebf21e25a19c58/mysql_common-0.37.3/src/proto/codec/mod.rs",
+        "sha256": "4a1f73c7f1834e00f42b8b13a3cdd5fbc873fde1d67b04950e7beed38c045b32",
+        "bytes": 26698
+      },
+      {
+        "path": "/Users/amcclenaghan/.cargo/registry/src/packages.atlassian.com-abebf21e25a19c58/mysql_common-0.37.3/src/proto/codec/error.rs",
+        "sha256": "1b85138528783fc77a5115e0b345d0046e3daa91a0323c263360fc372e917e3a",
+        "bytes": 1496
+      },
+      {
+        "path": "/private/tmp/mount-rs-structural-packet-cap/prerequisite-green.log",
+        "sha256": "08299f705ce0ae26cbb224d5ce5cc7eb2f7dd3303a139af6972e7cdd7dd78356",
+        "bytes": 2389
+      },
+      {
+        "path": "/private/tmp/mount-rs-structural-packet-cap/fmt.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "/private/tmp/mount-rs-structural-packet-cap/prerequisite-first.log",
+        "sha256": "91e5dc0f691e109a1c1f30931150870472d20fb58f53a3a6ab4d073a1bc2cd0a",
+        "bytes": 2527
+      },
+      {
+        "path": "/private/tmp/mount-rs-structural-packet-cap/clippy.log",
+        "sha256": "7954359e79027bb2a0e254320a0966b1fa658c5594c7d6f64eab81a8b33b2a16",
+        "bytes": 990
+      },
+      {
+        "path": "/private/tmp/mount-rs-structural-packet-cap/prerequisite-final.log",
+        "sha256": "db715dd85bab729fb07952a92eb7410d164ca2a3651d475255486fcf6b686ed8",
+        "bytes": 2668
+      },
+      {
+        "path": "/private/tmp/mount-rs-structural-packet-cap/packet-negative-diagnosis.log",
+        "sha256": "dab9447daa4374c04d32f6e4b305831b8bc0bc68f47c87172a64a4813f13cfbd",
+        "bytes": 2081
+      },
+      {
+        "path": "/private/tmp/mount-rs-structural-packet-cap/tidb-v8.5.7-sysvar.go",
+        "sha256": "82163831324403ecfc8fb6e5b5ee94109b148a0a3f27afa9610ecf340fc675c9",
+        "bytes": 229619
+      },
+      {
+        "path": "/private/tmp/mount-rs-structural-packet-cap/pinned-server-source.json",
+        "sha256": "1c40c982c64962d16ba183a5b766e43e65bc3e8cea8d841fa16bbbe018c9c105",
+        "bytes": 202
+      }
+    ]
+  },
+  "results": {
+    "actual_tidb_version": "8.5.7",
+    "tests_passed": 2,
+    "fmt_passed": true,
+    "strict_test_target_clippy_passed": true,
+    "configured_client_cap_bytes": 65536,
+    "actual_session_cap_bytes": 67108864,
+    "outbound_parameter_bytes": 65537,
+    "default_outbound_control": "accepted",
+    "explicit_cap_outbound_control": "exact codec PacketTooLarge Io/Other rejection",
+    "singleton_provider_paths": [
+      "private",
+      "shared"
+    ],
+    "namespace_nodes_per_case": 131,
+    "utf8_key_bytes": 930,
+    "root_bytes": 41208,
+    "full_block_oracle_bytes_per_case": 4096,
+    "exact_namespace_revision_oracle": true,
+    "owned_key_cleanup_verified": true
+  },
+  "limits": [
+    "No GLOBAL setting changed",
+    "No low server/session cap experiment",
+    "No manual reset/change-user compatibility claim",
+    "No actual aggregate statement or captured wire proof",
+    "Initial wrong error-variant assertion failures retained; these are test expectation failures"
+  ]
+}

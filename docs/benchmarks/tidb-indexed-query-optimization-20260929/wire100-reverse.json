@@ -1,0 +1,1530 @@
+{
+  "definitions": {
+    "HTTP_body_dropped": "retained disposal count; admitted only for PrimaryDataMixed Put with exact acknowledged write/attempt/header/body/2xx counts and zero consumed bytes, chunks, EOF, transport/body errors or cancellations; every other method/role drop is rejected",
+    "TiKV_commands": "read family=get/batch_get/scan; write family=prewrite/commit/raw mutations; exact command types and lock/control/other retained; broader capture includes cluster/background work",
+    "inclusive": "named wall durations overlap across nested and parallel spans; never sum as exclusive CPU or SQL server lock wait",
+    "known_metadata_bytes": "core compact_anchor_returned_bytes.units + inode_returned_bytes.units per payload success; known encoded buffers, excludes SQL protocol bytes and allocator footprint",
+    "latency": "wire p95 is each run histogram upper-bound range, no pooled percentile; SDK nearest-rank cycle p95, one sample set per pattern",
+    "selected_sql": "declared inode_read+inode_write+metadata_read+metadata_write; session and transaction calls remain separate from TiDB process statement counters",
+    "wire": "preopened acknowledged 4KiB wire reads/writes; throughput=sum successes/sum drain-inclusive elapsed; fresh current100 then baseline100 matched followup pair, reported separately from the original suite"
+  },
+  "groups": {
+    "wire_100": {
+      "changes": {
+        "mixed": {
+          "known_metadata_return_bytes_per_success_percent_change": 0.0008381377056165817,
+          "logical_operations_per_second_percent_change": 0.9464800753422153,
+          "resources_per_success_percent_change": {
+            "cpu_system_us": -0.762692341503246,
+            "cpu_user_us": 0.9378223880457837,
+            "process_cpu_us": 0.0591773892014924,
+            "rust_allocated_bytes": -0.9610662353948252,
+            "rust_allocations": -0.9309565694180955,
+            "rust_deallocations": -0.979536037140305,
+            "rust_freed_bytes": -1.005710403166904,
+            "rust_reallocations": -1.686364652651462
+          },
+          "selected_sql_calls_per_success_percent_change": -14.26609703997559
+        },
+        "read": {
+          "known_metadata_return_bytes_per_success_percent_change": 0.0008117040343424975,
+          "logical_operations_per_second_percent_change": -10.490395983331558,
+          "resources_per_success_percent_change": {
+            "cpu_system_us": 1.8807686629684905,
+            "cpu_user_us": -0.11286006216838507,
+            "process_cpu_us": 1.0594256565519489,
+            "rust_allocated_bytes": 0.6691436344516521,
+            "rust_allocations": 1.2577363148895015,
+            "rust_deallocations": 1.234299049064691,
+            "rust_freed_bytes": 0.6508065383355577,
+            "rust_reallocations": 0.24829790776466076
+          },
+          "selected_sql_calls_per_success_percent_change": 0.0
+        },
+        "write": {
+          "known_metadata_return_bytes_per_success_percent_change": 0.0007617379354396547,
+          "logical_operations_per_second_percent_change": 17.288880044152965,
+          "resources_per_success_percent_change": {
+            "cpu_system_us": -6.7995395746084935,
+            "cpu_user_us": -3.6350262287744184,
+            "process_cpu_us": -5.292457641511239,
+            "rust_allocated_bytes": -1.570239427942255,
+            "rust_allocations": -1.9371317893805085,
+            "rust_deallocations": -1.845052173020445,
+            "rust_freed_bytes": -1.6704643180089795,
+            "rust_reallocations": -1.9983168625102188
+          },
+          "selected_sql_calls_per_success_percent_change": -19.999999999999996
+        }
+      },
+      "variants": {
+        "baseline": {
+          "mixed": {
+            "TiKV_command_families_per_success": {
+              "lock_control_other": 0.5002669514148425,
+              "read_get_batch_get_scan": 4.0731446876668445,
+              "write_prewrite_commit_and_raw_mutation": 0.5002669514148425
+            },
+            "TiKV_command_types_per_success": {
+              "acquire_pessimistic_lock": 0.5002669514148425,
+              "acquire_pessimistic_lock_resumed": 0.0,
+              "batch_get": 0.003203416978109984,
+              "batch_get_command": 0.013881473571809931,
+              "buffer_batch_get": 0.0,
+              "check_secondary_locks": 0.0,
+              "check_txn_status": 0.0,
+              "cleanup": 0.0,
+              "commit": 0.0,
+              "delete_range": 0.0,
+              "flashback_to_version_read_lock": 0.0,
+              "flashback_to_version_read_write": 0.0,
+              "flashback_to_version_rollback_lock": 0.0,
+              "flashback_to_version_write": 0.0,
+              "flush": 0.0,
+              "get": 4.056059797116925,
+              "key_mvcc": 0.0,
+              "pause": 0.0,
+              "pessimistic_rollback": 0.0,
+              "pessimistic_rollback_read_phase": 0.0,
+              "prewrite": 0.5002669514148425,
+              "raw_atomic_store": 0.0,
+              "raw_batch_delete": 0.0,
+              "raw_batch_get": 0.0,
+              "raw_batch_get_command": 0.0,
+              "raw_batch_put": 0.0,
+              "raw_batch_scan": 0.0,
+              "raw_checksum": 0.0,
+              "raw_compare_and_swap": 0.0,
+              "raw_delete": 0.0,
+              "raw_delete_range": 0.0,
+              "raw_get": 0.0,
+              "raw_get_key_ttl": 0.0,
+              "raw_put": 0.0,
+              "raw_scan": 0.0,
+              "resolve_lock": 0.0,
+              "resolve_lock_lite": 0.0,
+              "rollback": 0.0,
+              "scan": 0.0,
+              "scan_lock": 0.0,
+              "start_ts_mvcc": 0.0,
+              "txn_heart_beat": 0.0,
+              "update_txn_status_cache": 0.0
+            },
+            "VM_cgroup_per_success": {
+              "pd": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 32.802989855846235,
+                "wios": 0.012279765082754938
+              },
+              "tidb": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 15961.934863854778,
+                "wios": 2.036839295248265
+              }
+            },
+            "all_named_sql_calls_per_success": 3.99893219434063,
+            "contributing_runs": 1,
+            "core_inclusive_us_per_success": {
+              "catalog.load": 78.81411211959424,
+              "catalog.pool_wait": 0.21163053924185798,
+              "catalog.queue_wait": 22.703933796049117,
+              "filesystem.gate_hold.read": 5919.5100977042175,
+              "filesystem.gate_phase.refresh": 8674.81334169781,
+              "filesystem.gate_wait": 0.45654618259476776,
+              "filesystem.gate_wait.read": 0.21644847837693537,
+              "filesystem.refresh.read_after": 2910.3385290977044,
+              "filesystem.refresh.read_before": 3008.7648707955154,
+              "provider.inode.load": 8667.971335290978,
+              "service.authorization": 98.32454618259477,
+              "service.dispatch": 281796.13350347034,
+              "service.handle_lock_wait": 0.09199893219434062
+            },
+            "core_named_bytes_per_success": {
+              "provider.blocks.get_bytes": 2049.0934329951947,
+              "provider.blocks.put_bytes": 2046.906567004805,
+              "provider.compact_anchor_returned_bytes": 652.5093432995195,
+              "provider.inode_returned_bytes": 8924.0,
+              "provider.inode_serialized_bytes": 2229.808862786973
+            },
+            "datastore_counters_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.000822210357714755
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.002541377469300704,
+                "tidb_executor_statement_total": 5.498131340096102,
+                "tidb_server_query_statement_processed_keys_count": 1.5002669514148426,
+                "tidb_server_query_statement_rpc_count_count": 5.508809396689802,
+                "tidb_server_query_total": 5.508809396689802,
+                "tidb_tikvclient_request_retry_times_count": 0.0,
+                "tidb_tikvclient_request_seconds_count": 6.537640149492792
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.0026695141484249867,
+                "tikv_grpc_msg_duration_seconds_count": 6.867592098238121,
+                "tikv_storage_command_total": 5.07367859049653,
+                "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 3279.569674319274,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 580.4735718099306
+              }
+            },
+            "datastore_sample_seconds_range": [
+              6.555656625,
+              6.555656625
+            ],
+            "elapsed_seconds_including_drain": 5.448782125,
+            "known_metadata_return_bytes_per_4KiB_payload": 2.3380149763914844,
+            "known_metadata_return_bytes_per_success": 9576.50934329952,
+            "logical_operations_per_second": 343.74653950767026,
+            "logical_successes": 1873,
+            "named_calls_per_success": {
+              "object_store.backing_marker.data.get": 0.4997330485851575,
+              "object_store.backing_marker.probe.get": 0.4997330485851575,
+              "sdk.blocks.flush": 0.4997330485851575,
+              "sdk.blocks.get": 0.5002669514148425,
+              "sdk.blocks.put": 0.4997330485851575,
+              "sdk.blocks.verify_concurrent_backing": 0.4997330485851575,
+              "sdk.metadata.load_compact_inode": 1.5002669514148426,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.4997330485851575,
+              "sdk.metadata.publish_includes_flush_barrier": 0.4997330485851575,
+              "tidb.pool.checkout": 2.0,
+              "tidb.sql.inode_read": 2.4997330485851577,
+              "tidb.sql.inode_write": 0.4997330485851575,
+              "tidb.sql.metadata_read": 0.4997330485851575,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 0.4997330485851575,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.4997330485851575,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.4997330485851575,
+              "tidb.tx.rollback": 0.0
+            },
+            "named_returned_rows_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 0.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 0.0,
+              "tidb.sql.inode_read": 2.4997330485851577,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 0.4997330485851575,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 0.4997330485851575,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "p95_us_upper_range": {
+              "read": [
+                65536,
+                65536
+              ],
+              "write": [
+                1048576,
+                1048576
+              ]
+            },
+            "read_successes": 937,
+            "resources_per_success": {
+              "cpu_system_us": 525.145755472504,
+              "cpu_user_us": 491.21249332621466,
+              "process_cpu_us": 1016.3582487987186,
+              "rust_allocated_bytes": 149493.2642819007,
+              "rust_allocations": 627.2706887346503,
+              "rust_deallocations": 625.1313400961025,
+              "rust_freed_bytes": 146842.88147357182,
+              "rust_reallocations": 57.591564335290975
+            },
+            "rss_bytes": {
+              "lifetime_peak_rss_bytes_range": [
+                114212864,
+                114212864
+              ],
+              "rss_end_bytes_range": [
+                109379584,
+                109379584
+              ],
+              "rss_start_bytes_range": [
+                109248512,
+                109248512
+              ]
+            },
+            "run_throughput_range": [
+              343.74653950767026,
+              343.74653950767026
+            ],
+            "selected_inclusive_us_per_success": {
+              "object_store.backing_marker.data.get": 8781.041782167646,
+              "object_store.backing_marker.probe.get": 12959.157850507207,
+              "sdk.blocks.flush": 0.2252851041110518,
+              "sdk.blocks.get": 4.222663641217299,
+              "sdk.blocks.put": 237940.3900560598,
+              "sdk.blocks.verify_concurrent_backing": 21749.86763374266,
+              "sdk.metadata.load_compact_inode": 8668.178215696742,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 13275.101557928458,
+              "sdk.metadata.publish_includes_flush_barrier": 0.1377784303256807,
+              "tidb.pool.checkout": 2.486163908168713,
+              "tidb.sql.inode_read": 11484.659961025092,
+              "tidb.sql.inode_write": 1095.3348003203416,
+              "tidb.sql.metadata_read": 1355.2983374265884,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 745.6688382274426,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 1918.1428878804059,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 5289.442138280833,
+              "tidb.tx.rollback": 0.0
+            },
+            "selected_sql_calls_per_success": 3.4991991457554725,
+            "write_successes": 936
+          },
+          "read": {
+            "TiKV_command_families_per_success": {
+              "lock_control_other": 0.0,
+              "read_get_batch_get_scan": 3.4210338998131506,
+              "write_prewrite_commit_and_raw_mutation": 0.0
+            },
+            "TiKV_command_types_per_success": {
+              "acquire_pessimistic_lock": 0.0,
+              "acquire_pessimistic_lock_resumed": 0.0,
+              "batch_get": 0.0003559035501379126,
+              "batch_get_command": 0.09920811460094314,
+              "buffer_batch_get": 0.0,
+              "check_secondary_locks": 0.0,
+              "check_txn_status": 0.0,
+              "cleanup": 0.0,
+              "commit": 0.0,
+              "delete_range": 0.0,
+              "flashback_to_version_read_lock": 0.0,
+              "flashback_to_version_read_write": 0.0,
+              "flashback_to_version_rollback_lock": 0.0,
+              "flashback_to_version_write": 0.0,
+              "flush": 0.0,
+              "get": 3.3214698816620696,
+              "key_mvcc": 0.0,
+              "pause": 0.0,
+              "pessimistic_rollback": 0.0,
+              "pessimistic_rollback_read_phase": 0.0,
+              "prewrite": 0.0,
+              "raw_atomic_store": 0.0,
+              "raw_batch_delete": 0.0,
+              "raw_batch_get": 0.0,
+              "raw_batch_get_command": 0.0,
+              "raw_batch_put": 0.0,
+              "raw_batch_scan": 0.0,
+              "raw_checksum": 0.0,
+              "raw_compare_and_swap": 0.0,
+              "raw_delete": 0.0,
+              "raw_delete_range": 0.0,
+              "raw_get": 0.0,
+              "raw_get_key_ttl": 0.0,
+              "raw_put": 0.0,
+              "raw_scan": 0.0,
+              "resolve_lock": 0.0,
+              "resolve_lock_lite": 0.0,
+              "rollback": 0.0,
+              "scan": 0.0,
+              "scan_lock": 0.0,
+              "start_ts_mvcc": 0.0,
+              "txn_heart_beat": 0.0,
+              "update_txn_status_cache": 0.0
+            },
+            "VM_cgroup_per_success": {
+              "pd": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 12.026692766260343,
+                "wios": 0.004537770264258386
+              },
+              "tidb": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "rbytes": 133.75140137022868,
+                "rios": 0.006050360352344515,
+                "wbytes": 8.382240412848118,
+                "wios": 0.002313373075896432
+              }
+            },
+            "all_named_sql_calls_per_success": 2.0016015659756206,
+            "contributing_runs": 1,
+            "core_inclusive_us_per_success": {
+              "catalog.load": 62.540612598985675,
+              "catalog.pool_wait": 0.16571990390604147,
+              "catalog.queue_wait": 19.435275647299584,
+              "filesystem.gate_hold.read": 44224.53658110152,
+              "filesystem.gate_phase.refresh": 44223.57121523267,
+              "filesystem.gate_wait": 0.6868358394874989,
+              "filesystem.gate_wait.read": 0.29253937183023404,
+              "filesystem.refresh.read_after": 22211.09558065664,
+              "filesystem.refresh.read_before": 22012.79318569268,
+              "provider.inode.load": 44217.3566439185,
+              "service.authorization": 79.61467016638491,
+              "service.dispatch": 44351.29488326363,
+              "service.handle_lock_wait": 0.0793519886110864
+            },
+            "core_named_bytes_per_success": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 652.5265593024291,
+              "provider.inode_returned_bytes": 8924.0
+            },
+            "datastore_counters_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 9.609395853725016e-05
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.0008746329744639138,
+                "tidb_executor_statement_total": 2.0021354213008276,
+                "tidb_server_query_statement_processed_keys_count": 2.0,
+                "tidb_server_query_statement_rpc_count_count": 2.0021354213008276,
+                "tidb_server_query_total": 2.0021354213008276,
+                "tidb_tikvclient_request_retry_times_count": 0.0,
+                "tidb_tikvclient_request_seconds_count": 6.006673191565086
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.0007118071002758253,
+                "tikv_grpc_msg_duration_seconds_count": 6.0979624521754605,
+                "tikv_storage_command_total": 3.4210338998131506,
+                "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 683.2566064596494,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 405.1986831568645
+              }
+            },
+            "datastore_sample_seconds_range": [
+              6.454590291,
+              6.454590291
+            ],
+            "elapsed_seconds_including_drain": 5.022669333,
+            "known_metadata_return_bytes_per_4KiB_payload": 2.3380191795171945,
+            "known_metadata_return_bytes_per_success": 9576.526559302429,
+            "logical_operations_per_second": 2237.654771767951,
+            "logical_successes": 11239,
+            "named_calls_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 1.0,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 2.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 2.0,
+              "tidb.sql.inode_read": 2.0,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 0.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 0.0016015659756206068,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "named_returned_rows_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 0.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 0.0,
+              "tidb.sql.inode_read": 2.0,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 0.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 0.0008007829878103034,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "p95_us_upper_range": {
+              "read": [
+                131072,
+                131072
+              ],
+              "write": null
+            },
+            "read_successes": 11239,
+            "resources_per_success": {
+              "cpu_system_us": 318.8523000266928,
+              "cpu_user_us": 223.398700952042,
+              "process_cpu_us": 542.2510009787347,
+              "rust_allocated_bytes": 63225.30741169143,
+              "rust_allocations": 340.3404217457069,
+              "rust_deallocations": 339.7747130527627,
+              "rust_freed_bytes": 63020.30705578788,
+              "rust_reallocations": 9.007207046890294
+            },
+            "rss_bytes": {
+              "lifetime_peak_rss_bytes_range": [
+                92717056,
+                92717056
+              ],
+              "rss_end_bytes_range": [
+                92717056,
+                92717056
+              ],
+              "rss_start_bytes_range": [
+                88440832,
+                88440832
+              ]
+            },
+            "run_throughput_range": [
+              2237.654771767951,
+              2237.654771767951
+            ],
+            "selected_inclusive_us_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 6.341460717145654,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 44217.62536364445,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 10.417752380104991,
+              "tidb.sql.inode_read": 44180.530527715986,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 0.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 6.172046178485631,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "selected_sql_calls_per_success": 2.0,
+            "write_successes": 0
+          },
+          "write": {
+            "TiKV_command_families_per_success": {
+              "lock_control_other": 0.9848942598187311,
+              "read_get_batch_get_scan": 4.108761329305136,
+              "write_prewrite_commit_and_raw_mutation": 0.9889224572004028
+            },
+            "TiKV_command_types_per_success": {
+              "acquire_pessimistic_lock": 0.9798590130916415,
+              "acquire_pessimistic_lock_resumed": 0.0,
+              "batch_get": 0.006042296072507553,
+              "batch_get_command": 0.010070493454179255,
+              "buffer_batch_get": 0.0,
+              "check_secondary_locks": 0.0,
+              "check_txn_status": 0.004028197381671702,
+              "cleanup": 0.0,
+              "commit": 0.006042296072507553,
+              "delete_range": 0.0,
+              "flashback_to_version_read_lock": 0.0,
+              "flashback_to_version_read_write": 0.0,
+              "flashback_to_version_rollback_lock": 0.0,
+              "flashback_to_version_write": 0.0,
+              "flush": 0.0,
+              "get": 4.092648539778449,
+              "key_mvcc": 0.0010070493454179255,
+              "pause": 0.0,
+              "pessimistic_rollback": 0.0,
+              "pessimistic_rollback_read_phase": 0.0,
+              "prewrite": 0.9828801611278952,
+              "raw_atomic_store": 0.0,
+              "raw_batch_delete": 0.0,
+              "raw_batch_get": 0.0,
+              "raw_batch_get_command": 0.0,
+              "raw_batch_put": 0.0,
+              "raw_batch_scan": 0.0,
+              "raw_checksum": 0.0,
+              "raw_compare_and_swap": 0.0,
+              "raw_delete": 0.0,
+              "raw_delete_range": 0.0,
+              "raw_get": 0.0,
+              "raw_get_key_ttl": 0.0,
+              "raw_put": 0.0,
+              "raw_scan": 0.0,
+              "resolve_lock": 0.0,
+              "resolve_lock_lite": 0.0,
+              "rollback": 0.0,
+              "scan": 0.0,
+              "scan_lock": 0.0,
+              "start_ts_mvcc": 0.0,
+              "txn_heart_beat": 0.0,
+              "update_txn_status_cache": 0.0
+            },
+            "VM_cgroup_per_success": {
+              "pd": {
+                "rbytes": 606.3564954682779,
+                "rios": 0.010070493454179255,
+                "wbytes": 189.74420946626384,
+                "wios": 0.07150050352467271
+              },
+              "tidb": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 32838.12286002014,
+                "wios": 3.7482376636455186
+              }
+            },
+            "all_named_sql_calls_per_success": 6.0,
+            "contributing_runs": 1,
+            "core_inclusive_us_per_success": {
+              "catalog.load": 72.74769687814704,
+              "catalog.pool_wait": 0.2016012084592145,
+              "catalog.queue_wait": 18.365611278952667,
+              "filesystem.gate_phase.refresh": 7288.349471299093,
+              "provider.inode.load": 7281.7830916414905,
+              "service.authorization": 91.99378449144008,
+              "service.dispatch": 523815.4285579053,
+              "service.handle_lock_wait": 0.09101611278952669
+            },
+            "core_named_bytes_per_success": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 652.5256797583081,
+              "provider.inode_returned_bytes": 8924.0,
+              "provider.inode_serialized_bytes": 4462.0
+            },
+            "datastore_counters_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.0014602215508553507
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.0034743202416925756,
+                "tidb_executor_statement_total": 9.0,
+                "tidb_server_query_statement_processed_keys_count": 1.0,
+                "tidb_server_query_statement_rpc_count_count": 9.132930513595166,
+                "tidb_server_query_total": 9.132930513595166,
+                "tidb_tikvclient_request_retry_times_count": 0.0,
+                "tidb_tikvclient_request_seconds_count": 7.075528700906345
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.0030211480362537764,
+                "tikv_grpc_msg_duration_seconds_count": 7.6787512588116815,
+                "tikv_storage_command_total": 6.08257804632427,
+                "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 5364.704934541793,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 609.6283987915408
+              }
+            },
+            "datastore_sample_seconds_range": [
+              6.441704333,
+              6.441704333
+            ],
+            "elapsed_seconds_including_drain": 5.330349875,
+            "known_metadata_return_bytes_per_4KiB_payload": 2.338018964784743,
+            "known_metadata_return_bytes_per_success": 9576.525679758308,
+            "logical_operations_per_second": 186.2917112922161,
+            "logical_successes": 993,
+            "named_calls_per_success": {
+              "object_store.backing_marker.data.get": 1.0,
+              "object_store.backing_marker.probe.get": 1.0,
+              "sdk.blocks.flush": 1.0,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 1.0,
+              "sdk.blocks.verify_concurrent_backing": 1.0,
+              "sdk.metadata.load_compact_inode": 1.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 2.0,
+              "tidb.sql.inode_read": 3.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 1.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "named_returned_rows_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 0.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 0.0,
+              "tidb.sql.inode_read": 3.0,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "p95_us_upper_range": {
+              "read": null,
+              "write": [
+                1048576,
+                1048576
+              ]
+            },
+            "read_successes": 0,
+            "resources_per_success": {
+              "cpu_system_us": 785.436052366566,
+              "cpu_user_us": 714.1873111782477,
+              "process_cpu_us": 1499.6233635448136,
+              "rust_allocated_bytes": 235836.67472306144,
+              "rust_allocations": 922.1873111782477,
+              "rust_deallocations": 912.1329305135952,
+              "rust_freed_bytes": 230861.88217522658,
+              "rust_reallocations": 106.45317220543807
+            },
+            "rss_bytes": {
+              "lifetime_peak_rss_bytes_range": [
+                106594304,
+                106594304
+              ],
+              "rss_end_bytes_range": [
+                106594304,
+                106594304
+              ],
+              "rss_start_bytes_range": [
+                101335040,
+                101335040
+              ]
+            },
+            "run_throughput_range": [
+              186.2917112922161,
+              186.2917112922161
+            ],
+            "selected_inclusive_us_per_success": {
+              "object_store.backing_marker.data.get": 18004.61497885196,
+              "object_store.backing_marker.probe.get": 24814.728111782475,
+              "sdk.blocks.flush": 0.4967865055387714,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 449024.3551198389,
+              "sdk.blocks.verify_concurrent_backing": 42840.40394058409,
+              "sdk.metadata.load_compact_inode": 7282.027911379658,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 24496.57107250755,
+              "sdk.metadata.publish_includes_flush_barrier": 0.2709023162134945,
+              "tidb.pool.checkout": 2.81884390735146,
+              "tidb.sql.inode_read": 12620.166057401813,
+              "tidb.sql.inode_write": 1982.0223605236656,
+              "tidb.sql.metadata_read": 2519.8025337361532,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 1357.1511943605237,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 3716.955084592145,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 9500.733761329304,
+              "tidb.tx.rollback": 0.0
+            },
+            "selected_sql_calls_per_success": 5.0,
+            "write_successes": 993
+          }
+        },
+        "current": {
+          "mixed": {
+            "TiKV_command_families_per_success": {
+              "lock_control_other": 0.4957582184517497,
+              "read_get_batch_get_scan": 5.379109225874868,
+              "write_prewrite_commit_and_raw_mutation": 0.4941675503711559
+            },
+            "TiKV_command_types_per_success": {
+              "acquire_pessimistic_lock": 0.4957582184517497,
+              "acquire_pessimistic_lock_resumed": 0.0,
+              "batch_get": 0.0021208907741251328,
+              "batch_get_command": 0.025980911983032873,
+              "buffer_batch_get": 0.0,
+              "check_secondary_locks": 0.0,
+              "check_txn_status": 0.0,
+              "cleanup": 0.0,
+              "commit": 0.0,
+              "delete_range": 0.0,
+              "flashback_to_version_read_lock": 0.0,
+              "flashback_to_version_read_write": 0.0,
+              "flashback_to_version_rollback_lock": 0.0,
+              "flashback_to_version_write": 0.0,
+              "flush": 0.0,
+              "get": 5.35100742311771,
+              "key_mvcc": 0.0,
+              "pause": 0.0,
+              "pessimistic_rollback": 0.0,
+              "pessimistic_rollback_read_phase": 0.0,
+              "prewrite": 0.4941675503711559,
+              "raw_atomic_store": 0.0,
+              "raw_batch_delete": 0.0,
+              "raw_batch_get": 0.0,
+              "raw_batch_get_command": 0.0,
+              "raw_batch_put": 0.0,
+              "raw_batch_scan": 0.0,
+              "raw_checksum": 0.0,
+              "raw_compare_and_swap": 0.0,
+              "raw_delete": 0.0,
+              "raw_delete_range": 0.0,
+              "raw_get": 0.0,
+              "raw_get_key_ttl": 0.0,
+              "raw_put": 0.0,
+              "raw_scan": 0.0,
+              "resolve_lock": 0.0,
+              "resolve_lock_lite": 0.0,
+              "rollback": 0.0,
+              "scan": 0.0,
+              "scan_lock": 0.0,
+              "start_ts_mvcc": 0.0,
+              "txn_heart_beat": 0.0,
+              "update_txn_status_cache": 0.0
+            },
+            "VM_cgroup_per_success": {
+              "pd": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 78.18451749734889,
+                "wios": 0.031813361611876985
+              },
+              "tidb": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "rbytes": 375.7200424178155,
+                "rios": 0.03234358430540827,
+                "wbytes": 15311.134676564157,
+                "wios": 1.8048780487804879
+              }
+            },
+            "all_named_sql_calls_per_success": 3.5,
+            "contributing_runs": 1,
+            "core_inclusive_us_per_success": {
+              "catalog.load": 75.32912513255567,
+              "catalog.pool_wait": 0.21607211028632026,
+              "catalog.queue_wait": 18.684167550371157,
+              "filesystem.gate_hold.read": 6244.505014316013,
+              "filesystem.gate_phase.refresh": 9027.555156945918,
+              "filesystem.gate_wait": 0.4346081654294804,
+              "filesystem.gate_wait.read": 0.20391622481442206,
+              "filesystem.refresh.read_after": 3299.9116261930008,
+              "filesystem.refresh.read_before": 2944.161671792153,
+              "provider.inode.load": 9020.16928366914,
+              "service.authorization": 94.65871951219512,
+              "service.dispatch": 278906.9312757158,
+              "service.handle_lock_wait": 0.10469088016967126
+            },
+            "core_named_bytes_per_success": {
+              "provider.blocks.get_bytes": 2048.0,
+              "provider.blocks.put_bytes": 2048.0,
+              "provider.compact_anchor_returned_bytes": 652.5896076352068,
+              "provider.inode_returned_bytes": 8924.0,
+              "provider.inode_serialized_bytes": 2231.0
+            },
+            "datastore_counters_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.0008112407211029693
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.002619300106044809,
+                "tidb_executor_statement_total": 5.0,
+                "tidb_server_query_statement_processed_keys_count": 0.0,
+                "tidb_server_query_statement_rpc_count_count": 5.012725344644751,
+                "tidb_server_query_total": 5.012725344644751,
+                "tidb_tikvclient_request_retry_times_count": 0.0,
+                "tidb_tikvclient_request_seconds_count": 6.536585365853658
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.0021208907741251328,
+                "tikv_grpc_msg_duration_seconds_count": 6.497348886532343,
+                "tikv_storage_command_total": 6.369034994697773,
+                "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 10446.794803817604,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 751.3854718981972
+              }
+            },
+            "datastore_sample_seconds_range": [
+              6.302268625,
+              6.302268625
+            ],
+            "elapsed_seconds_including_drain": 5.435158,
+            "known_metadata_return_bytes_per_4KiB_payload": 2.3380345721765643,
+            "known_metadata_return_bytes_per_success": 9576.589607635207,
+            "logical_operations_per_second": 347.0000320137887,
+            "logical_successes": 1886,
+            "named_calls_per_success": {
+              "object_store.backing_marker.data.get": 0.5,
+              "object_store.backing_marker.probe.get": 0.5,
+              "sdk.blocks.flush": 0.5,
+              "sdk.blocks.get": 0.5,
+              "sdk.blocks.put": 0.5,
+              "sdk.blocks.verify_concurrent_backing": 0.5,
+              "sdk.metadata.load_compact_inode": 1.5,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.5,
+              "sdk.metadata.publish_includes_flush_barrier": 0.5,
+              "tidb.pool.checkout": 2.0,
+              "tidb.sql.inode_read": 2.0,
+              "tidb.sql.inode_write": 0.5,
+              "tidb.sql.metadata_read": 0.5,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 0.5,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.5,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.5,
+              "tidb.tx.rollback": 0.0
+            },
+            "named_returned_rows_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 0.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 0.0,
+              "tidb.sql.inode_read": 2.0,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 0.5,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 0.5,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "p95_us_upper_range": {
+              "read": [
+                65536,
+                65536
+              ],
+              "write": [
+                1048576,
+                1048576
+              ]
+            },
+            "read_successes": 943,
+            "resources_per_success": {
+              "cpu_system_us": 521.1405090137858,
+              "cpu_user_us": 495.8191940615058,
+              "process_cpu_us": 1016.9597030752916,
+              "rust_allocated_bytes": 148056.53499469778,
+              "rust_allocations": 621.431071049841,
+              "rust_deallocations": 619.007953340403,
+              "rust_freed_bytes": 145366.06733828207,
+              "rust_reallocations": 56.6203605514316
+            },
+            "rss_bytes": {
+              "lifetime_peak_rss_bytes_range": [
+                119767040,
+                119767040
+              ],
+              "rss_end_bytes_range": [
+                119767040,
+                119767040
+              ],
+              "rss_start_bytes_range": [
+                114212864,
+                114212864
+              ]
+            },
+            "run_throughput_range": [
+              347.0000320137887,
+              347.0000320137887
+            ],
+            "selected_inclusive_us_per_success": {
+              "object_store.backing_marker.data.get": 8898.67601590668,
+              "object_store.backing_marker.probe.get": 13641.732836161187,
+              "sdk.blocks.flush": 0.25442205726405087,
+              "sdk.blocks.get": 5.186217921527041,
+              "sdk.blocks.put": 233664.6170323436,
+              "sdk.blocks.verify_concurrent_backing": 22552.12948462354,
+              "sdk.metadata.load_compact_inode": 9020.390203075292,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 13489.811831919405,
+              "sdk.metadata.publish_includes_flush_barrier": 0.14779321314952282,
+              "tidb.pool.checkout": 2.3928626723223756,
+              "tidb.sql.inode_read": 10730.809033934253,
+              "tidb.sql.inode_write": 1210.6462470837753,
+              "tidb.sql.metadata_read": 1816.498432661718,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 836.8223780487805,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 2045.1669252386002,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 5814.730022799576,
+              "tidb.tx.rollback": 0.0
+            },
+            "selected_sql_calls_per_success": 3.0,
+            "write_successes": 943
+          },
+          "read": {
+            "TiKV_command_families_per_success": {
+              "lock_control_other": 0.0,
+              "read_get_batch_get_scan": 4.721887053703887,
+              "write_prewrite_commit_and_raw_mutation": 0.0
+            },
+            "TiKV_command_types_per_success": {
+              "acquire_pessimistic_lock": 0.0,
+              "acquire_pessimistic_lock_resumed": 0.0,
+              "batch_get": 0.0003956087429532193,
+              "batch_get_command": 0.2052220354069825,
+              "buffer_batch_get": 0.0,
+              "check_secondary_locks": 0.0,
+              "check_txn_status": 0.0,
+              "cleanup": 0.0,
+              "commit": 0.0,
+              "delete_range": 0.0,
+              "flashback_to_version_read_lock": 0.0,
+              "flashback_to_version_read_write": 0.0,
+              "flashback_to_version_rollback_lock": 0.0,
+              "flashback_to_version_write": 0.0,
+              "flush": 0.0,
+              "get": 4.516269409553951,
+              "key_mvcc": 0.0,
+              "pause": 0.0,
+              "pessimistic_rollback": 0.0,
+              "pessimistic_rollback_read_phase": 0.0,
+              "prewrite": 0.0,
+              "raw_atomic_store": 0.0,
+              "raw_batch_delete": 0.0,
+              "raw_batch_get": 0.0,
+              "raw_batch_get_command": 0.0,
+              "raw_batch_put": 0.0,
+              "raw_batch_scan": 0.0,
+              "raw_checksum": 0.0,
+              "raw_compare_and_swap": 0.0,
+              "raw_delete": 0.0,
+              "raw_delete_range": 0.0,
+              "raw_get": 0.0,
+              "raw_get_key_ttl": 0.0,
+              "raw_put": 0.0,
+              "raw_scan": 0.0,
+              "resolve_lock": 0.0,
+              "resolve_lock_lite": 0.0,
+              "rollback": 0.0,
+              "scan": 0.0,
+              "scan_lock": 0.0,
+              "start_ts_mvcc": 0.0,
+              "txn_heart_beat": 0.0,
+              "update_txn_status_cache": 0.0
+            },
+            "VM_cgroup_per_success": {
+              "pd": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 12.558203936306992,
+                "wios": 0.004747304915438631
+              },
+              "tidb": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 48.20729898130749,
+                "wios": 0.002769261200672535
+              }
+            },
+            "all_named_sql_calls_per_success": 2.007120957373158,
+            "contributing_runs": 1,
+            "core_inclusive_us_per_success": {
+              "catalog.load": 56.60503422015627,
+              "catalog.pool_wait": 0.16701641776283255,
+              "catalog.queue_wait": 17.366614677084364,
+              "filesystem.gate_hold.read": 49284.65122480467,
+              "filesystem.gate_phase.refresh": 49283.69282434972,
+              "filesystem.gate_wait": 0.6803642567500742,
+              "filesystem.gate_wait.read": 0.29313816635347645,
+              "filesystem.refresh.read_after": 24711.628656018198,
+              "filesystem.refresh.read_before": 24572.375705667095,
+              "provider.inode.load": 49277.577850657704,
+              "service.authorization": 73.0214161803976,
+              "service.dispatch": 49412.481934131145,
+              "service.handle_lock_wait": 0.07492582336069627
+            },
+            "core_named_bytes_per_success": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 652.6042923548611,
+              "provider.inode_returned_bytes": 8924.0
+            },
+            "datastore_counters_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 7.219859558889685e-05
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.0009900108792404527,
+                "tidb_executor_statement_total": 2.0094946098308775,
+                "tidb_server_query_statement_processed_keys_count": 0.0,
+                "tidb_server_query_statement_rpc_count_count": 2.0094946098308775,
+                "tidb_server_query_total": 2.0094946098308775,
+                "tidb_tikvclient_request_retry_times_count": 0.0,
+                "tidb_tikvclient_request_seconds_count": 6.006626446444466
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.0003956087429532193,
+                "tikv_grpc_msg_duration_seconds_count": 5.989318563940263,
+                "tikv_storage_command_total": 4.721887053703887,
+                "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 9346.471664523786,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 676.497379092078
+              }
+            },
+            "datastore_sample_seconds_range": [
+              6.142056041,
+              6.142056041
+            ],
+            "elapsed_seconds_including_drain": 5.04814,
+            "known_metadata_return_bytes_per_4KiB_payload": 2.3380381573131985,
+            "known_metadata_return_bytes_per_success": 9576.604292354861,
+            "logical_operations_per_second": 2002.915925469579,
+            "logical_successes": 10111,
+            "named_calls_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 1.0,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 2.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 2.0,
+              "tidb.sql.inode_read": 2.0,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 0.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 0.007120957373157947,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "named_returned_rows_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 0.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 0.0,
+              "tidb.sql.inode_read": 2.0,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 0.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 0.0035604786865789735,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "p95_us_upper_range": {
+              "read": [
+                131072,
+                131072
+              ],
+              "write": null
+            },
+            "read_successes": 10111,
+            "resources_per_success": {
+              "cpu_system_us": 324.8491741667491,
+              "cpu_user_us": 223.14657303926415,
+              "process_cpu_us": 547.9957472060132,
+              "rust_allocated_bytes": 63648.375531599246,
+              "rust_allocations": 344.6210068242508,
+              "rust_deallocations": 343.9685491049352,
+              "rust_freed_bytes": 63430.4473345861,
+              "rust_reallocations": 9.029571753535754
+            },
+            "rss_bytes": {
+              "lifetime_peak_rss_bytes_range": [
+                95436800,
+                95436800
+              ],
+              "rss_end_bytes_range": [
+                95436800,
+                95436800
+              ],
+              "rss_start_bytes_range": [
+                90832896,
+                90832896
+              ]
+            },
+            "run_throughput_range": [
+              2002.915925469579,
+              2002.915925469579
+            ],
+            "selected_inclusive_us_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 6.0447873603006625,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 49277.853266937,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 53.59881841558698,
+              "tidb.sql.inode_read": 49198.34808653941,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 0.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 37.37313747403818,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "selected_sql_calls_per_success": 2.0,
+            "write_successes": 0
+          },
+          "write": {
+            "TiKV_command_families_per_success": {
+              "lock_control_other": 0.9965694682675815,
+              "read_get_batch_get_scan": 5.036878216123499,
+              "write_prewrite_commit_and_raw_mutation": 0.9939965694682675
+            },
+            "TiKV_command_types_per_success": {
+              "acquire_pessimistic_lock": 0.9965694682675815,
+              "acquire_pessimistic_lock_resumed": 0.0,
+              "batch_get": 0.003430531732418525,
+              "batch_get_command": 0.009433962264150943,
+              "buffer_batch_get": 0.0,
+              "check_secondary_locks": 0.0,
+              "check_txn_status": 0.0,
+              "cleanup": 0.0,
+              "commit": 0.0,
+              "delete_range": 0.0,
+              "flashback_to_version_read_lock": 0.0,
+              "flashback_to_version_read_write": 0.0,
+              "flashback_to_version_rollback_lock": 0.0,
+              "flashback_to_version_write": 0.0,
+              "flush": 0.0,
+              "get": 5.02401372212693,
+              "key_mvcc": 0.0,
+              "pause": 0.0,
+              "pessimistic_rollback": 0.0,
+              "pessimistic_rollback_read_phase": 0.0,
+              "prewrite": 0.9939965694682675,
+              "raw_atomic_store": 0.0,
+              "raw_batch_delete": 0.0,
+              "raw_batch_get": 0.0,
+              "raw_batch_get_command": 0.0,
+              "raw_batch_put": 0.0,
+              "raw_batch_scan": 0.0,
+              "raw_checksum": 0.0,
+              "raw_compare_and_swap": 0.0,
+              "raw_delete": 0.0,
+              "raw_delete_range": 0.0,
+              "raw_get": 0.0,
+              "raw_get_key_ttl": 0.0,
+              "raw_put": 0.0,
+              "raw_scan": 0.0,
+              "resolve_lock": 0.0,
+              "resolve_lock_lite": 0.0,
+              "rollback": 0.0,
+              "scan": 0.0,
+              "scan_lock": 0.0,
+              "start_ts_mvcc": 0.0,
+              "txn_heart_beat": 0.0,
+              "update_txn_status_cache": 0.0
+            },
+            "VM_cgroup_per_success": {
+              "pd": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 105.38593481989709,
+                "wios": 0.0411663807890223
+              },
+              "tidb": {
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "rbytes": 175.64322469982847,
+                "rios": 0.0137221269296741,
+                "wbytes": 32820.69296740995,
+                "wios": 3.7469982847341337
+              }
+            },
+            "all_named_sql_calls_per_success": 5.0,
+            "contributing_runs": 1,
+            "core_inclusive_us_per_success": {
+              "catalog.load": 68.68116809605489,
+              "catalog.pool_wait": 0.259483704974271,
+              "catalog.queue_wait": 16.19909948542024,
+              "filesystem.gate_phase.refresh": 5059.166594339622,
+              "provider.inode.load": 5052.690644939966,
+              "service.authorization": 87.81156603773584,
+              "service.dispatch": 446263.2830943396,
+              "service.handle_lock_wait": 0.09744768439108062
+            },
+            "core_named_bytes_per_success": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 652.598627787307,
+              "provider.inode_returned_bytes": 8924.0,
+              "provider.inode_serialized_bytes": 4462.0
+            },
+            "datastore_counters_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.0012521440823331828
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.003327615780446843,
+                "tidb_executor_statement_total": 8.0,
+                "tidb_server_query_statement_processed_keys_count": 0.0,
+                "tidb_server_query_statement_rpc_count_count": 8.087478559176672,
+                "tidb_server_query_total": 8.087478559176672,
+                "tidb_tikvclient_request_retry_times_count": 0.0,
+                "tidb_tikvclient_request_seconds_count": 7.058319039451115
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.002572898799313894,
+                "tikv_grpc_msg_duration_seconds_count": 7.331903945111493,
+                "tikv_storage_command_total": 7.027444253859348,
+                "tikv_storage_rocksdb_perf[metric=block_read_byte]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=block_read_count]": 0.0,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 10050.174957118354,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 721.6835334476843
+              }
+            },
+            "datastore_sample_seconds_range": [
+              6.360162708,
+              6.360162708
+            ],
+            "elapsed_seconds_including_drain": 5.336397584,
+            "known_metadata_return_bytes_per_4KiB_payload": 2.3380367743621355,
+            "known_metadata_return_bytes_per_success": 9576.598627787307,
+            "logical_operations_per_second": 218.4994617897271,
+            "logical_successes": 1166,
+            "named_calls_per_success": {
+              "object_store.backing_marker.data.get": 1.0,
+              "object_store.backing_marker.probe.get": 1.0,
+              "sdk.blocks.flush": 1.0,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 1.0,
+              "sdk.blocks.verify_concurrent_backing": 1.0,
+              "sdk.metadata.load_compact_inode": 1.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 2.0,
+              "tidb.sql.inode_read": 2.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 1.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "named_returned_rows_per_success": {
+              "object_store.backing_marker.data.get": 0.0,
+              "object_store.backing_marker.probe.get": 0.0,
+              "sdk.blocks.flush": 0.0,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 0.0,
+              "sdk.blocks.verify_concurrent_backing": 0.0,
+              "sdk.metadata.load_compact_inode": 0.0,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 0.0,
+              "sdk.metadata.publish_includes_flush_barrier": 0.0,
+              "tidb.pool.checkout": 0.0,
+              "tidb.sql.inode_read": 2.0,
+              "tidb.sql.inode_write": 0.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 0.0,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 0.0,
+              "tidb.tx.rollback": 0.0
+            },
+            "p95_us_upper_range": {
+              "read": null,
+              "write": [
+                524288,
+                524288
+              ]
+            },
+            "read_successes": 0,
+            "resources_per_success": {
+              "cpu_system_us": 732.0300171526586,
+              "cpu_user_us": 688.2264150943396,
+              "process_cpu_us": 1420.2564322469982,
+              "rust_allocated_bytes": 232133.474271012,
+              "rust_allocations": 904.3233276157805,
+              "rust_deallocations": 895.303602058319,
+              "rust_freed_bytes": 227005.4168096055,
+              "rust_reallocations": 104.32590051457976
+            },
+            "rss_bytes": {
+              "lifetime_peak_rss_bytes_range": [
+                111247360,
+                111247360
+              ],
+              "rss_end_bytes_range": [
+                111247360,
+                111247360
+              ],
+              "rss_start_bytes_range": [
+                104873984,
+                104873984
+              ]
+            },
+            "run_throughput_range": [
+              218.4994617897271,
+              218.4994617897271
+            ],
+            "selected_inclusive_us_per_success": {
+              "object_store.backing_marker.data.get": 14058.493428816466,
+              "object_store.backing_marker.probe.get": 21238.01811406518,
+              "sdk.blocks.flush": 0.44924099485420244,
+              "sdk.blocks.get": 0.0,
+              "sdk.blocks.put": 384776.7045085763,
+              "sdk.blocks.verify_concurrent_backing": 35315.91530617495,
+              "sdk.metadata.load_compact_inode": 5052.843552315609,
+              "sdk.metadata.load_compact_root_file": 0.0,
+              "sdk.metadata.publish_compact_inode": 20943.630296740994,
+              "sdk.metadata.publish_includes_flush_barrier": 0.27820754716981133,
+              "tidb.pool.checkout": 2.562126929674099,
+              "tidb.sql.inode_read": 7563.144463979416,
+              "tidb.sql.inode_write": 1892.8747607204116,
+              "tidb.sql.metadata_read": 2782.2499982847344,
+              "tidb.sql.metadata_write": 0.0,
+              "tidb.sql.session": 1341.2037204116639,
+              "tidb.tx.begin.compact_read": 0.0,
+              "tidb.tx.begin.inode": 3161.6902521440825,
+              "tidb.tx.begin.metadata": 0.0,
+              "tidb.tx.commit": 9187.730425385935,
+              "tidb.tx.rollback": 0.0
+            },
+            "selected_sql_calls_per_success": 4.0,
+            "write_successes": 1166
+          }
+        }
+      }
+    }
+  },
+  "limitations": [
+    "Diagnostic retained TiDB/RustFS fixture; process stages and wider datastore capture windows are separate boundaries.",
+    "Rust System allocator counters exclude foreign allocator activity and measure process work inside each stage; profiling affects throughput.",
+    "RSS endpoints and lifetime peaks are gauges. They are not per-operation allocation or stage peak RSS measurements.",
+    "Linux VM cgroup and RocksDB counters are not cluster physical IOPS, physical SSD operations, or RustFS backend I/O.",
+    "This fresh 100 active-client followup does not establish 10,000-client capacity, production topology, or crash/power-loss durability.",
+    "Wire byte/EOF oracles and exact seven-family/blob cleanup qualify the owned fixtures only."
+  ],
+  "partial": false,
+  "pending_run_ids": [],
+  "provenance": [
+    {
+      "arm": "current",
+      "artifact_sha256": "820cc6542e0289c9bc82d1fa883f825cb87ed63b3f3a7a94d3ac2889bb61a133",
+      "binary_sha256": "ec48199a424691d364fe95e300102bdcb64b14e90033ff85a4ac08300eede1f5",
+      "build_receipt_sha256": "e70a040f373b877284f8dca28e65296f9e477488cd2f91d8484b943388690805",
+      "cleanup_artifact_sha256": "d1d1ecafd30069a04a05a5c5cd0eb07ccbbe3421c97980340b39e559b631d059",
+      "cleanup_owner_receipt_sha256": "79631e437e7f748e7f3c07932b63c7facc4f4f68b4107abf38b48c7b9d585a4f",
+      "clients": 100,
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "datastore_metrics_sha256": {
+        "mixed": "d8fad9ad06bcdbe1af0bbf0689e0a9dda2381fe9abccc29df4e39dec897df0aa",
+        "read": "fcd96b9ef768802dbf771128d255820e066a714d65c490a10face21e962144b2",
+        "write": "e628038b43efbdb42747b623a7bc82f27d8fcb3c7733dbb9c096a0580eeab243"
+      },
+      "files": null,
+      "id": "wire100-current-reverse",
+      "kind": "wire",
+      "owner_receipt_sha256": "9246c3ea5487d0594da3cf4cba1f9b686a9baf3027c6d2abdf67c4b9b2468d9e",
+      "qualified": true,
+      "source_revision": "548e7644d3677733576b775ccda8e450207723ee"
+    },
+    {
+      "arm": "baseline",
+      "artifact_sha256": "89b66d45855d0f7ff17e02519e4b73ac6893943b37eac3b58da90cd01438756f",
+      "binary_sha256": "0fbba33b205c74b5f81775e81bdd1a7e96c47978672107b338667ac299c6fd56",
+      "build_receipt_sha256": "36e85d70d8cf665933b9776598151f3442f868d79f0968c9e0f710fd7a2398c6",
+      "cleanup_artifact_sha256": "b9d3d7c1fb455f0411b7dc038ac5b361e6d70dde27c2d79b029049073b0d842d",
+      "cleanup_owner_receipt_sha256": "fe476b64e75f347091f67aa42ab5985fb6eb42457248d45326c9c6ffc4faae64",
+      "clients": 100,
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "datastore_metrics_sha256": {
+        "mixed": "62573a6c01059a03d176ce6df424518b25f61a4b39dc406d2b293afa098b6f46",
+        "read": "ed44a5dbe42c7f5b6ae9a3e006dfc16d7e20996fc90445bfbeef0a31fda90121",
+        "write": "dbf75cd728a401eb556645fd6c5aae240ab2fb0bc6f3103a19b52dec760500f6"
+      },
+      "files": null,
+      "id": "wire100-baseline-reverse",
+      "kind": "wire",
+      "owner_receipt_sha256": "a44455e0b42679f33a963287b2ca2bca40f4b2b8f5c89d377fd295faa8944211",
+      "qualified": true,
+      "source_revision": "2dae7d413c1b20bb694698b50387ef3909000766"
+    }
+  ],
+  "qualified": true,
+  "schema": "mount-rs.query-optimized-wire100-reverse-analysis.v1",
+  "source_binding": {
+    "main_analysis_source_sha256": "53d1c2b0000dacdcd1bb6b66871488f0f133edfded878466daba03fc96fc6f72",
+    "suite_script_sha256": "4fe8b5037963250b4d880c28a68fd46e5333d448fcb731a9bd9ef1203c3b1159"
+  },
+  "suite_sha256": "5d234fbf098c557fffceab22bcfeda6407840ca997995e542b85d941fab32244",
+  "wire100_reverse": true
+}

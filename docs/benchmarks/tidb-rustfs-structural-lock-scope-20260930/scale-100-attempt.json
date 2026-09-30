@@ -1,0 +1,280 @@
+{
+  "full_target": false,
+  "geometry": {
+    "clients": 100,
+    "drives": 100,
+    "files_per_drive": 1000,
+    "partitions": 50,
+    "planned_initial_bytes": 628326400,
+    "servers": 10
+  },
+  "native": {
+    "completed_phase_history": [
+      {
+        "elapsed_ms": 1440,
+        "ended_unix_ms": 1790702209147,
+        "phase": "preflight"
+      },
+      {
+        "elapsed_ms": 10030,
+        "ended_unix_ms": 1790702219177,
+        "phase": "empty_drive_initialization"
+      },
+      {
+        "elapsed_ms": 902,
+        "ended_unix_ms": 1790702220079,
+        "phase": "worker_setup"
+      },
+      {
+        "elapsed_ms": 84,
+        "ended_unix_ms": 1790702220163,
+        "phase": "signed_connections"
+      },
+      {
+        "elapsed_ms": 205224,
+        "ended_unix_ms": 1790702425387,
+        "phase": "online_namespace"
+      }
+    ],
+    "completed_timed_cells": 0,
+    "connected_clients": 100,
+    "counts_scope": "Cumulative startup and partial population RPC outcomes, not logical timed cycles.",
+    "crossnode_routes": 0,
+    "error": "host free disk below64GiB",
+    "fresh_oracle_complete": false,
+    "lane_counts": {
+      "acknowledged": 542825,
+      "attempts": 542925,
+      "failed": 0,
+      "uncertain": 100
+    },
+    "last_work_phase": "online_payload",
+    "metrics_complete": false,
+    "namespace_files": 100000,
+    "outcome": "incomplete",
+    "pending_lanes": 0,
+    "population_bytes": 0,
+    "population_bytes_note": "Completion counter stays zero until the complete population phase; this does not imply no data was written.",
+    "verified_passes": 0,
+    "work_elapsed_seconds": 655.432070916,
+    "workload_complete": false
+  },
+  "qualified_for_throughput": false,
+  "resources": {
+    "audit_events": 542825,
+    "audit_log_bytes": 89325172,
+    "budgets": {
+      "child_cleanup_seconds": 95,
+      "client_cleanup_seconds": 30,
+      "expected_receipt_seconds": 30,
+      "host_free_floor": 68719476736,
+      "oracle_cleanup_seconds": 30,
+      "phase_seconds": 600,
+      "population_seconds": 600,
+      "request_seconds": 30,
+      "rss_cap_per_owned_process": 25769803776,
+      "setup_seconds": 600,
+      "work_seconds": 1800
+    },
+    "controller_minimum_host_free_bytes": 68656340992,
+    "controller_peak_rss_bytes": 109477888,
+    "controller_resource_error": "host free disk below64GiB",
+    "host_free_floor_bytes": 68719476736,
+    "native_capture_bytes_max": 104656194,
+    "native_capture_files_max": 261,
+    "rss_scope": "sum of separately sampled process peaks; not a simultaneous aggregate peak; no host or Docker attribution",
+    "rust_allocator_instrumented": false,
+    "sum_individual_peak_rss_bytes": 985169920
+  },
+  "schema": "mount-rs.production-target-failed-attempt.v1",
+  "settlement": {
+    "collector_group_absent": true,
+    "dataset_scope": "Owned failed datasets retained; absence and clean filesystem context shutdown are not established.",
+    "native_cleanup_errors": [
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 0
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 1
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 2
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 3
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 4
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 5
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 6
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 7
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 8
+      },
+      {
+        "error": "child exit or cleanup not clean",
+        "server": 9
+      },
+      {
+        "error": "host free disk below64GiB",
+        "server": null
+      }
+    ],
+    "new_rustfs_pre_stop_state": {
+      "oom_killed": false,
+      "restart_count": 0,
+      "running": true,
+      "started_at": "2026-09-29T17:16:29.894817716Z"
+    },
+    "new_rustfs_stopped": true,
+    "original_container_mutations": false,
+    "original_container_mutations_scope": "Docker control plane only; owned metadata was written to original TiDB and retained.",
+    "original_fixture_observations": [
+      {
+        "all_eight_original_healthy": true,
+        "boundary": "before",
+        "mutation_executed": false,
+        "original_mounts_ports_six_volumes_match": true,
+        "provider_health_or_durability_qualified": false,
+        "ready_receipt_unchanged": true,
+        "receipt_sha256": "48702f7b4265b13850bff9626e03637f0bb1db4dfba5648d07318faf39102e0a",
+        "scope": "read_only_status_exact_original_ids"
+      },
+      {
+        "all_eight_original_healthy": true,
+        "boundary": "after",
+        "mutation_executed": false,
+        "original_mounts_ports_six_volumes_match": true,
+        "provider_health_or_durability_qualified": false,
+        "ready_receipt_unchanged": true,
+        "receipt_sha256": "9b8d1ec6f000ffd0893c35d9bffc3cad6b3aef9aaf3515029b9d7124a56ab0c9",
+        "scope": "read_only_status_exact_original_ids"
+      }
+    ],
+    "owner_finish_errors": [],
+    "workers": [
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 0
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 1
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 2
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 3
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 4
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 5
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 6
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 7
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 8
+      },
+      {
+        "clean": false,
+        "context_closed": false,
+        "exit_code": 101,
+        "exit_signal": null,
+        "forced": false,
+        "reap_confirmed": true,
+        "server": 9
+      }
+    ]
+  },
+  "source": {
+    "archive_manifest_sha256": "c893dad60507b51a91a710f5ee9c3f5f0df2dcfd7bb6fa59dd40628fe6b132f6",
+    "archive_source_count": 565,
+    "binary_provenance": "Reused release binary built at 6a60518d; all 565 compiled source rows match docs-only 9dcf0740. Fresh Cargo no-run reported fresh:true; no new compilation claimed.",
+    "binary_sha256": "f429f19580af557a4641e6fa6bb7f05542566363a3d5cfafa5a5ab141e57fc74",
+    "head": "9dcf0740d81142a96e22b9c41a6571c0f09fb2bb",
+    "owner_sha256": "cfd360713f2dadeb664962ca3cf686703a28c22eae919f39b5aed11f5ccb58a0",
+    "source_pins_after_equal_before": true
+  },
+  "witness": {
+    "owner_elapsed_seconds": 693.7085711669642,
+    "owner_failure": "benchmark_nonzero",
+    "owner_receipt_sha256": "9121fd8fd7b4fb2dd7849d63adc924399a202697b4826808ac8f49f47629d371",
+    "owner_status": "failed",
+    "terminal_receipt_sha256": "0e9fadf8087ff48638f9e182b8fa273f842936e4a07b30fe3566a7355da0c207"
+  }
+}

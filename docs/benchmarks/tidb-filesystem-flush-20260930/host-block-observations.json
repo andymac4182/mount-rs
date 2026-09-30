@@ -1,0 +1,214 @@
+{
+  "after": {
+    "available": true,
+    "begin_monotonic_ns": 633955801726500,
+    "begin_wall_ns": 1790745924174115000,
+    "boot_stable_during_sample": true,
+    "counter_deltas": [
+      {
+        "counters": {
+          "read_bytes": 0,
+          "read_errors": 0,
+          "read_operations": 0,
+          "read_total_time_ns": 0,
+          "write_bytes": 0,
+          "write_errors": 0,
+          "write_operations": 0,
+          "write_total_time_ns": 0
+        },
+        "driver": "driver-1"
+      },
+      {
+        "counters": {
+          "read_bytes": 0,
+          "read_errors": 0,
+          "read_operations": 0,
+          "read_total_time_ns": 0,
+          "write_bytes": 0,
+          "write_errors": 0,
+          "write_operations": 0,
+          "write_total_time_ns": 0
+        },
+        "driver": "driver-2"
+      },
+      {
+        "counters": {
+          "read_bytes": 24867209216,
+          "read_errors": 0,
+          "read_operations": 5592720,
+          "read_total_time_ns": 495856475351,
+          "write_bytes": 20315942912,
+          "write_errors": 0,
+          "write_operations": 2502981,
+          "write_total_time_ns": 91704405409
+        },
+        "driver": "driver-3"
+      },
+      {
+        "counters": {
+          "read_bytes": 0,
+          "read_errors": 0,
+          "read_operations": 0,
+          "read_total_time_ns": 0,
+          "write_bytes": 0,
+          "write_errors": 0,
+          "write_operations": 0,
+          "write_total_time_ns": 0
+        },
+        "driver": "driver-4"
+      }
+    ],
+    "counter_endpoints": [
+      {
+        "counters": {
+          "read_bytes": 0,
+          "read_errors": 0,
+          "read_operations": 0,
+          "read_total_time_ns": 0,
+          "write_bytes": 0,
+          "write_errors": 0,
+          "write_operations": 0,
+          "write_total_time_ns": 0
+        },
+        "driver": "driver-1"
+      },
+      {
+        "counters": {
+          "read_bytes": 0,
+          "read_errors": 0,
+          "read_operations": 0,
+          "read_total_time_ns": 0,
+          "write_bytes": 0,
+          "write_errors": 0,
+          "write_operations": 0,
+          "write_total_time_ns": 0
+        },
+        "driver": "driver-2"
+      },
+      {
+        "counters": {
+          "read_bytes": 40567841120256,
+          "read_errors": 0,
+          "read_operations": 8643666793,
+          "read_total_time_ns": 644852031800415,
+          "write_bytes": 5770932338688,
+          "write_errors": 0,
+          "write_operations": 259957713,
+          "write_total_time_ns": 22599058211706
+        },
+        "driver": "driver-3"
+      },
+      {
+        "counters": {
+          "read_bytes": 324430848,
+          "read_errors": 0,
+          "read_operations": 19491,
+          "read_total_time_ns": 122620173346,
+          "write_bytes": 12415373312,
+          "write_errors": 0,
+          "write_operations": 1878568,
+          "write_total_time_ns": 15414580918214
+        },
+        "driver": "driver-4"
+      }
+    ],
+    "device_aggregation": false,
+    "direct_children_reaped": true,
+    "end_monotonic_ns": 633955863005791,
+    "enrolled_roster_unchanged": true,
+    "per_cell_attribution_available": false,
+    "per_sql_attribution_available": false,
+    "phase": "after",
+    "physical_nvme_iops_available": false,
+    "process_groups_absent": true,
+    "same_boot_across_pair": true,
+    "sampling_deadline_seconds": 5,
+    "schema": "mount-rs.host-block.sample.draft.v1",
+    "scope": "per-driver whole-window host block-layer counters, including background work; sequential endpoints",
+    "source_sha256": "9eb33f5480f657f0c09c5c092cec713696c68828047e2d04ce8de51a9ff7f7f2"
+  },
+  "before": {
+    "available": true,
+    "begin_monotonic_ns": 633443897427916,
+    "begin_wall_ns": 1790745412261886000,
+    "boot_stable_during_sample": true,
+    "counter_deltas": null,
+    "counter_endpoints": [
+      {
+        "counters": {
+          "read_bytes": 0,
+          "read_errors": 0,
+          "read_operations": 0,
+          "read_total_time_ns": 0,
+          "write_bytes": 0,
+          "write_errors": 0,
+          "write_operations": 0,
+          "write_total_time_ns": 0
+        },
+        "driver": "driver-1"
+      },
+      {
+        "counters": {
+          "read_bytes": 0,
+          "read_errors": 0,
+          "read_operations": 0,
+          "read_total_time_ns": 0,
+          "write_bytes": 0,
+          "write_errors": 0,
+          "write_operations": 0,
+          "write_total_time_ns": 0
+        },
+        "driver": "driver-2"
+      },
+      {
+        "counters": {
+          "read_bytes": 40542973911040,
+          "read_errors": 0,
+          "read_operations": 8638074073,
+          "read_total_time_ns": 644356175325064,
+          "write_bytes": 5750616395776,
+          "write_errors": 0,
+          "write_operations": 257454732,
+          "write_total_time_ns": 22507353806297
+        },
+        "driver": "driver-3"
+      },
+      {
+        "counters": {
+          "read_bytes": 324430848,
+          "read_errors": 0,
+          "read_operations": 19491,
+          "read_total_time_ns": 122620173346,
+          "write_bytes": 12415373312,
+          "write_errors": 0,
+          "write_operations": 1878568,
+          "write_total_time_ns": 15414580918214
+        },
+        "driver": "driver-4"
+      }
+    ],
+    "device_aggregation": false,
+    "direct_children_reaped": true,
+    "end_monotonic_ns": 633443955420708,
+    "enrolled_roster_unchanged": true,
+    "per_cell_attribution_available": false,
+    "per_sql_attribution_available": false,
+    "phase": "before",
+    "physical_nvme_iops_available": false,
+    "process_groups_absent": true,
+    "same_boot_across_pair": null,
+    "sampling_deadline_seconds": 5,
+    "schema": "mount-rs.host-block.sample.draft.v1",
+    "scope": "per-driver whole-window host block-layer counters, including background work; sequential endpoints",
+    "source_sha256": "9eb33f5480f657f0c09c5c092cec713696c68828047e2d04ce8de51a9ff7f7f2"
+  },
+  "device_aggregation": false,
+  "private_projection_sha256": {
+    "after": "a2041f257c56c5e54bde96f66dcbe1ca1128f6f778b52302e07af0cd4c90e190",
+    "before": "a8c89f36b303373cd972cce47b179a6b0c796ff9cb5b7fbed3ba01e9d4873fe8"
+  },
+  "schema": "mount-rs.filesystem-whole-host-block-window.v1",
+  "scope": "whole-host per-driver reported block-layer events over setup/oracles/workload/background window; not filesystem-provider, TiDB/TiKV, physical NVMe IOPS or per-cell amplification",
+  "window_max_seconds": 511.965577875,
+  "window_min_seconds": 511.846305792
+}

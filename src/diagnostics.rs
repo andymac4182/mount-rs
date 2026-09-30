@@ -7,7 +7,13 @@
 //! records at instrumented error boundaries, without request phase tracing.
 
 #[doc(hidden)]
+pub mod filesystem_blocks;
+#[doc(hidden)]
+pub mod object_store;
+#[doc(hidden)]
 pub mod profile;
+#[doc(hidden)]
+pub mod storage;
 
 use std::fmt;
 use std::io::{self, Write};

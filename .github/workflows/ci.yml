@@ -162,7 +162,7 @@ jobs:
           napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
           mkdir -p "$napi_stage"
           pnpm --dir bindings/mount-rs-napi exec napi build \
-            --platform --release --no-js --output-dir "$napi_stage"
+            --platform --release --no-js --output-dir "$napi_stage" -- --locked
           native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
           test -n "$native_path"
           test "$(printf '%s\n' "$native_path" | wc -l | tr -d ' ')" = 1
@@ -175,6 +175,7 @@ jobs:
           echo "W26_NAPI_BUILD_SOURCE_CLEAN_PASS native_path=$native_path"
       - name: Verify Ozone with SQLite and PGlite metadata
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_COMPOSITIONS: '1'
           MOUNT_RS_OZONE_NODE_COMPOSITION: '1'
           MOUNT_RS_OZONE_IOPS: '1'
@@ -226,7 +227,7 @@ jobs:
           napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
           mkdir -p "$napi_stage"
           pnpm --dir bindings/mount-rs-napi exec napi build \
-            --platform --release --no-js --output-dir "$napi_stage"
+            --platform --release --no-js --output-dir "$napi_stage" -- --locked
           native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
           test -n "$native_path"
           test "$(printf '%s\n' "$native_path" | wc -l | tr -d ' ')" = 1
@@ -239,10 +240,11 @@ jobs:
           echo "W26_NAPI_BUILD_SOURCE_CLEAN_PASS native_path=$native_path"
       - name: Verify durable TiDB metadata over Apache Ozone chunks
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_TIDB_COMPOSITION: '1'
           MOUNT_RS_TIDB_NAPI: '1'
           MOUNT_RS_TIDB_IOPS: '1'
-          MOUNT_RS_TIDB_IOPS_OUTPUT: artifacts/ozone-tidb-iops.json
+          MOUNT_RS_TIDB_IOPS_OUTPUT: ${{ runner.temp }}/w26-ozone-tidb/ozone-tidb-iops.json
           MOUNT_RS_TIDB_IOPS_MIN: '1000'
           MOUNT_RS_TIDB_IOPS_ITERATIONS: '400'
           MOUNT_RS_TIDB_IOPS_CONCURRENCY: '64'
@@ -252,16 +254,17 @@ jobs:
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: |
           set -o pipefail
-          mkdir -p artifacts
-          sh scripts/test-ozone.sh 2>&1 | tee artifacts/ozone-tidb.log
+          mkdir -p "$RUNNER_TEMP/w26-ozone-tidb"
+          sh scripts/test-ozone.sh 2>&1 \
+            | tee "$RUNNER_TEMP/w26-ozone-tidb/ozone-tidb.log"
       - name: Preserve W26 Ozone TiDB evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: w26-ozone-tidb-evidence
           path: |
-            artifacts/ozone-tidb.log
-            artifacts/ozone-tidb-iops.json
+            ${{ runner.temp }}/w26-ozone-tidb/ozone-tidb.log
+            ${{ runner.temp }}/w26-ozone-tidb/ozone-tidb-iops.json
           if-no-files-found: error
 
   ozone-foundationdb:
@@ -281,11 +284,12 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Verify durable FoundationDB metadata over Apache Ozone chunks
         env:
+          MOUNT_RS_PROFILE_IO: '1'
           MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION: '1'
           MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
           MOUNT_RS_FOUNDATIONDB_IOPS: '1'
-          MOUNT_RS_FOUNDATIONDB_IOPS_OUTPUT: artifacts/ozone-foundationdb-iops.json
+          MOUNT_RS_FOUNDATIONDB_IOPS_OUTPUT: ${{ runner.temp }}/w26-ozone-foundationdb/ozone-foundationdb-iops.json
           MOUNT_RS_FOUNDATIONDB_IOPS_MIN: '1000'
           MOUNT_RS_FOUNDATIONDB_IOPS_ITERATIONS: '400'
           MOUNT_RS_FOUNDATIONDB_IOPS_CONCURRENCY: '64'
@@ -293,16 +297,17 @@ jobs:
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: |
           set -o pipefail
-          mkdir -p artifacts
-          sh scripts/test-ozone.sh 2>&1 | tee artifacts/ozone-foundationdb.log
+          mkdir -p "$RUNNER_TEMP/w26-ozone-foundationdb"
+          sh scripts/test-ozone.sh 2>&1 \
+            | tee "$RUNNER_TEMP/w26-ozone-foundationdb/ozone-foundationdb.log"
       - name: Preserve W26 Ozone FoundationDB evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: w26-ozone-foundationdb-evidence
           path: |
-            artifacts/ozone-foundationdb.log
-            artifacts/ozone-foundationdb-iops.json
+            ${{ runner.temp }}/w26-ozone-foundationdb/ozone-foundationdb.log
+            ${{ runner.temp }}/w26-ozone-foundationdb/ozone-foundationdb-iops.json
           if-no-files-found: error
 
   w26-ozone-evidence:
@@ -463,6 +468,7 @@ jobs:
       - name: Verify durable TiDB, PD, and TiKV restart acceptance
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-cargo-target
+          MOUNT_RS_TIDB_FILESYSTEM: '1'
         run: ./scripts/test-tidb.sh
 
   tidb-tls-compile:
@@ -792,6 +798,15 @@ jobs:
       # attempting to link libfdb_c while still checking every workspace target.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
+      # The scoped driver fork has a separate workspace so upstream live-DB
+      # tests remain opt-in. Exercise its borrowed API on every supported OS.
+      - name: Verify borrowed MySQL rows and lifetime contracts
+        shell: bash
+        run: |
+          ./scripts/cargo-shared fmt --manifest-path vendor/mount-rs-mysql-async/Cargo.toml -- --check
+          ./scripts/cargo-shared clippy --locked --manifest-path vendor/mount-rs-mysql-async/Cargo.toml --no-default-features --features minimal-rust --lib --tests -- -D warnings
+          ./scripts/cargo-shared test --locked --manifest-path vendor/mount-rs-mysql-async/Cargo.toml --no-default-features --features minimal-rust --lib borrowed_ -- --test-threads=1
+          ./scripts/cargo-shared test --locked --manifest-path vendor/mount-rs-mysql-async/Cargo.toml --no-default-features --features minimal-rust --doc next_binary_row_with
 
   kani-core:
     runs-on: ubuntu-24.04
@@ -806,6 +821,20 @@ jobs:
         with:
           kani-version: '0.68.0'
           args: '-p mount-rs-core --harness single_extent_validation'
+
+  kani-current-create-rebase:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Prove bounded current fresh create rebase helper
+        uses: model-checking/kani-github-action@69d357bade1eb7b32bc3fc3d5c3d173c5bfa5237 # v1
+        with:
+          kani-version: '0.68.0'
+          args: '-p mount-rs-chunked --harness current_fresh_create_rebinds_only_eligible_preparation'
 
   http-observability:
     runs-on: ubuntu-latest
@@ -851,6 +880,147 @@ jobs:
           ./scripts/cargo-shared test -p mount-rs-cli --features observability --locked
           ./scripts/cargo-shared check -p mount-rs-napi --features observability --locked
           ./scripts/cargo-shared clippy -p mount-rs-observability --all-features --all-targets --locked -- -D warnings
+      - name: Verify authentication stage accounting controls
+        timeout-minutes: 5
+        run: ./scripts/cargo-shared test --locked -p mount-rs-service --features io-profiling --lib server::diagnostics::tests::auth_stage_ -- --nocapture
+      - name: Verify isolated RustFS diagnostic export controls
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          MOUNT_RS_PROFILE_IO=1 ./scripts/cargo-shared test --locked -p mount-rs-napi --lib \
+            tests::live_rustfs_diagnostics_register_export_and_retire_without_backend_io -- --ignored --exact
+          MOUNT_RS_PROFILE_IO=0 ./scripts/cargo-shared test --locked -p mount-rs-napi --lib \
+            tests::disabled_rustfs_diagnostics_do_not_register_instances -- --ignored --exact
+      - name: Verify native split namespace presence controls
+        timeout-minutes: 5
+        run: ./scripts/cargo-shared test --locked -p mount-rs-napi --lib namespace_presence::tests
+      - name: Verify warmed storage diagnostic allocations
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test --locked -p mount-rs-core --test storage_diagnostics_allocations \
+            -- --ignored --exact warmed_core_spans_record_without_added_allocations --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/storage-diagnostic-allocations.log"
+      - name: Verify dedicated filesystem causal metrics
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --test filesystem_causal_metrics \
+            --locked --offline -- --ignored --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-causal-metrics.log"
+      - name: Verify compact SQLite stage metrics
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-sqlite --lib --locked --offline \
+            -- --ignored --exact storage::compact_tests::compact_profile_stages_account_for_selected_full_and_failed_decode \
+            --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/sqlite-compact-stage-metrics.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/sqlite-compact-stage-metrics.log"
+      - name: Verify own-process OS I/O boundary metrics
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset MOUNT_RS_PROFILE_BLOCK_DEVICE MOUNT_RS_PROFILE_IOREGISTRY_ENTRY_ID
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-service --features resource-profiling \
+            --test quic_tidb_saturation --locked --offline \
+            -- --ignored --exact resource_profile::device_io::own_process_os_io_boundary_retains_native_identity_and_observer_cost \
+            --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/process-os-io-boundary.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/process-os-io-boundary.log"
+      - name: Verify warmed causal profile allocations
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-core --test filesystem_causal_profile_allocations \
+            --locked --offline -- --ignored --exact warmed_causal_profile_rows_record_without_added_allocations --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-causal-profile-allocations.log"
+      - name: Verify compact snapshot revision regressions
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --test compact_snapshot_revision \
+            --locked --offline -- --ignored --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/compact-snapshot-revision.log"
+      - name: Verify current-path fresh create rebase controls
+        if: runner.os != 'Windows'
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --test current_path_create_rebase \
+            --locked --offline -- --ignored --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/current-path-create-rebase.log"
+      - name: Verify fresh create guard predicate accounting
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --lib --locked --offline \
+            -- --ignored --exact create_guard_metrics_tests::fresh_create_guard_records_overlapping_predicates --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-create-guard-metrics.log"
+      - name: Verify causal helper lifecycle accounting
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=0 \
+            ./scripts/cargo-shared test -p mount-rs-chunked --lib --locked --offline \
+            -- --ignored --exact causal_metrics::tests::helper_terminal_outcomes_and_drop_partition_once --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-causal-helpers.log"
+      - name: Verify causal profile slow records
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_REQUESTS=0 MOUNT_RS_TRACE_STORAGE=1 \
+            ./scripts/cargo-shared test -p mount-rs-core --test filesystem_causal_profile_allocations \
+            --locked --offline -- --ignored --exact causal_profile_slow_span_emits_fixed_stderr --quiet --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/filesystem-causal-profile-slow.log"
+          slow_record_found=0
+          slow_record_pattern='^MOUNT_RS_PROFILE_SLOW event=filesystem\.block_put\.initial elapsed_us=[1-9][0-9]{5,} units=4$'
+          while IFS= read -r line; do
+            if [[ "$line" =~ $slow_record_pattern ]]; then
+              slow_record_found=1
+            fi
+          done < "$RUNNER_TEMP/filesystem-causal-profile-slow.log"
+          test "$slow_record_found" -eq 1
+      - name: Retain storage allocation diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: storage-allocation-controls-${{ github.event_name }}-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/storage-diagnostic-allocations.log
+            ${{ runner.temp }}/filesystem-causal-metrics.log
+            ${{ runner.temp }}/sqlite-compact-stage-metrics.log
+            ${{ runner.temp }}/process-os-io-boundary.log
+            ${{ runner.temp }}/filesystem-causal-profile-allocations.log
+            ${{ runner.temp }}/compact-snapshot-revision.log
+            ${{ runner.temp }}/current-path-create-rebase.log
+            ${{ runner.temp }}/filesystem-create-guard-metrics.log
+            ${{ runner.temp }}/filesystem-causal-helpers.log
+            ${{ runner.temp }}/filesystem-causal-profile-slow.log
+          if-no-files-found: warn
+          retention-days: 14
 
   windows-node:
     runs-on: windows-latest
@@ -866,6 +1036,27 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
+      - name: Verify bounded network test progress
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 bindings/mount-rs-napi/test/network-progress.test.mjs
+      - name: Verify bounded HTTP fixture progress
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 scripts/http-fixture-progress.test.mjs scripts/http-fixture-launch.test.mjs
+      - name: Verify bounded PGlite startup checkpoints
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 tests/pglite/startup-progress.test.mjs
+      - name: Verify persisted layout evidence controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/compact-layout.test.mjs benchmarks/storage/compact-layout-runner.test.mjs bindings/mount-rs-napi/test/compact-layout-postlude.mjs
+      - name: Verify explicit RustFS benchmark configuration
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/rustfs-provider.test.mjs
+      - name: Verify split namespace presence receipt controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
+      - name: Verify owned layout comparison and bottleneck metrics controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11
@@ -889,6 +1080,7 @@ jobs:
           node bindings/mount-rs-napi/test/factories.mjs
           node bindings/mount-rs-napi/test/chunked.mjs
           node bindings/mount-rs-napi/test/shutdown-lifecycle.mjs
+          node bindings/mount-rs-napi/test/namespace-presence.mjs
       - name: Verify Windows virtual filesystem consumers and declarations
         run: |
           pnpm --dir bindings/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
@@ -921,6 +1113,77 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
+      - name: Verify bounded network test progress
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 bindings/mount-rs-napi/test/network-progress.test.mjs
+      - name: Verify bounded HTTP fixture progress
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 scripts/http-fixture-progress.test.mjs scripts/http-fixture-launch.test.mjs
+      - name: Verify bounded PGlite startup checkpoints
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 tests/pglite/startup-progress.test.mjs
+      - name: Verify persisted layout evidence controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/compact-layout.test.mjs benchmarks/storage/compact-layout-runner.test.mjs bindings/mount-rs-napi/test/compact-layout-postlude.mjs
+      - name: Verify explicit RustFS benchmark configuration
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/rustfs-provider.test.mjs
+      - name: Verify split namespace presence receipt controls
+        timeout-minutes: 1
+        run: node --test --test-timeout=10000 benchmarks/storage/namespace-presence.test.mjs bindings/mount-rs-napi/test/namespace-presence-postlude.test.mjs
+      - name: Verify owned layout comparison and bottleneck metrics controls
+        # Seven files include bounded child-process and filesystem controls.
+        # Keep the per-case deadline below and allow slower matrix hosts time
+        # to complete the full group.
+        timeout-minutes: 3
+        run: |
+          set -o pipefail
+          node --test --test-concurrency=1 --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
+      - name: Verify receipt producers and readonly handoff CLI
+        timeout-minutes: 1
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap --test-timeout=10000 scripts/owned-layout-handoff.test.mjs scripts/owned-layout-handoff-cli.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-handoff-controls.log"
+      - name: Verify FoundationDB diagnostic coverage controls
+        timeout-minutes: 1
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/foundationdb-diagnostics.test.mjs 2>&1 | tee "$RUNNER_TEMP/foundationdb-diagnostic-controls.log"
+      - name: Verify owned process receipt models
+        timeout-minutes: 1
+        run: |
+          set -o pipefail
+          python3 -B scripts/owned-layout-process.test.py 2>&1 | tee "$RUNNER_TEMP/owned-layout-process-controls.log"
+      - name: Verify private process receipt publication
+        timeout-minutes: 1
+        run: |
+          set -o pipefail
+          python3 -B scripts/owned-layout-process-writer.test.py 2>&1 | tee "$RUNNER_TEMP/owned-layout-process-writer-controls.log"
+      - name: Retain owned layout control diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: owned-layout-controls-${{ github.event_name }}-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/owned-layout-controls.log
+            ${{ runner.temp }}/owned-layout-handoff-controls.log
+            ${{ runner.temp }}/foundationdb-diagnostic-controls.log
+            ${{ runner.temp }}/owned-layout-process-controls.log
+            ${{ runner.temp }}/owned-layout-process-writer-controls.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Verify guarded backing observer and pilot controls
+        timeout-minutes: 2
+        run: |
+          env -u NAPI_RS_FORCE_WASI -u NAPI_RS_WASI_FLAVOR -u NODE_PATH \
+            -u MOUNT_RS_PROFILE_IO -u MOUNT_RS_TRACE_STORAGE \
+            NAPI_RS_NATIVE_LIBRARY_PATH="$GITHUB_WORKSPACE/benchmarks/storage/capture-native.cjs" \
+            node --test --test-concurrency=1 --test-timeout=10000 \
+            benchmarks/storage/backing-observer.test.mjs \
+            benchmarks/storage/backing-engine-transport.test.mjs \
+            benchmarks/storage/owned-backing-pilot.test.mjs \
+            benchmarks/storage/owned-backing-pilot-entry.test.mjs \
+            scripts/verify-owned-backing-pilot.test.mjs
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11
@@ -931,6 +1194,9 @@ jobs:
         env:
           CARGOFLAGS: --locked
         run: pnpm --dir bindings/mount-rs-napi build
+      - name: Verify native namespace presence configuration rejection
+        timeout-minutes: 1
+        run: node bindings/mount-rs-napi/test/namespace-presence.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir bindings/mount-rs-napi test
       - name: Verify real just-bash and Mastra consumers
         timeout-minutes: 5
@@ -981,10 +1247,14 @@ jobs:
           MOUNT_RS_NAPI_STRUCTURAL_NATIVE_MOUNT: '1'
         run: python3 -c 'import subprocess; subprocess.run(["node", "bindings/mount-rs-napi/test/structural-native.mjs"], check=True, timeout=180)'
       - run: pnpm --dir tests/upstream install --frozen-lockfile
+      - name: Precompile conformance and HTTP fixtures in the shared target
+        timeout-minutes: 15
+        run: |
+          ./scripts/cargo-shared build --locked --example http_oracle --example p9_oracle --example nfs_oracle
+          ./scripts/cargo-shared test --locked --example http_oracle -- http_fixture_progress_tests
       - name: Run the unmodified upstream driver conformance suite
-        # This suite builds its own locked Rust graph; a cold macOS Intel
-        # runner can spend the original five-minute limit compiling before
-        # the conformance assertions begin.
+        # Both fixture modules retain their 180-second build limits and use
+        # the locked default-profile artifacts precompiled above.
         timeout-minutes: 10
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir tests/upstream test
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-kv-parity.mjs
@@ -1002,6 +1272,18 @@ jobs:
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-init.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-session.mjs
       - run: pnpm --dir tests/pglite install --frozen-lockfile
+      - name: Verify provider matrix CLI process helper
+        env:
+          MOUNT_RS_TEST_POSIX_GROUP_SIGNALS: '1'
+        run: node --test tests/provider_matrix/cli-run.test.mjs
+      - name: Precompile PGlite provider matrix and Rust CLI
+        # The timed fixture runs the standalone matrix binary, the root CLI,
+        # and two filtered CLI lib tests with these graphs and shared target.
+        timeout-minutes: 15
+        run: |
+          ./scripts/cargo-shared build --locked --manifest-path tests/provider_matrix/Cargo.toml
+          ./scripts/cargo-shared build --locked -p mount-rs-cli
+          ./scripts/cargo-shared test --no-run --lib --locked -p mount-rs-cli
       - name: Verify PGlite integration and restart recovery
         timeout-minutes: 10
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh

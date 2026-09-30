@@ -4,6 +4,7 @@ pub mod fuse_session;
 pub mod js_driver;
 pub mod kv_binding;
 pub mod memory_factory;
+mod namespace_presence;
 pub mod nfs_codec;
 pub mod p9_codec;
 pub mod servers;
@@ -14,7 +15,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -23,10 +24,14 @@ use mount_rs_auto::{
     TransportProbe,
 };
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions, OwnershipMode};
+use mount_rs_core::diagnostics::{
+    profile,
+    storage::{self, Operation},
+};
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
-    DirectoryGrant, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    DirectoryGrant, InodeModeState, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{
@@ -44,8 +49,8 @@ use mount_rs_core::{
     )
 ))]
 use mount_rs_foundationdb::{
-    FoundationDbLimits, FoundationDbSharedLeaseOracle, FoundationDbStorage,
-    FoundationDbStorageOptions,
+    FoundationDbBlockAuthorityPolicy, FoundationDbLimits, FoundationDbSharedLeaseOracle,
+    FoundationDbStorage, FoundationDbStorageOptions,
 };
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memfs::MemoryFs;
@@ -57,12 +62,15 @@ use mount_rs_pglite_fs::connect_pglite_with_store;
 use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_r2_fs::open_r2;
 use mount_rs_rustfs::{RustFsBlockStore, RustFsConfig};
-use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+use mount_rs_sqlite::{
+    SqliteBlockStore, SqliteJournalMode, SqliteMetadataStore, SqliteStorageOptions,
+};
 use mount_rs_sqlite_fs::open_sqlite;
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 use napi::bindgen_prelude::{Buffer, Either, Env, PromiseRaw, Reference};
 use napi::{Error, Status};
 use napi_derive::napi;
+use serde_json::{Value, json};
 
 use crate::servers::{
     JsP9AssertionCallback, JsP9SessionErrorCallback, JsTransportErrorCallback, P9AssertionCallback,
@@ -73,6 +81,518 @@ use crate::servers::{
 const ERROR_MARKER: &str = "__mount_rs_error_v1__";
 const RANGE_ERROR_MARKER: &str = "__mount_rs_range_error_v1__";
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+struct R2DiagnosticEntry {
+    id: u64,
+    store: Weak<R2BlockStore>,
+}
+static R2_DIAGNOSTICS: OnceLock<Mutex<Vec<R2DiagnosticEntry>>> = OnceLock::new();
+static NEXT_R2_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
+
+struct RustFsDiagnosticEntry {
+    id: u64,
+    store: Weak<RustFsBlockStore>,
+}
+static RUSTFS_DIAGNOSTICS: OnceLock<Mutex<Vec<RustFsDiagnosticEntry>>> = OnceLock::new();
+static NEXT_RUSTFS_DIAGNOSTIC_ID: AtomicU64 = AtomicU64::new(1);
+
+// Both providers re-export the same immutable object-store block stats type.
+type ObjectStoreDiagnosticStats = mount_rs_r2::R2BlockStoreStats;
+
+fn r2_diagnostics() -> Value {
+    let Some(registry) = R2_DIAGNOSTICS.get() else {
+        return json!({"scope":"process_live_instances","instances":[],"internal_successful_retries":"unavailable"});
+    };
+    let Ok(mut entries) = registry.lock() else {
+        return json!({"scope":"process_live_instances","available":false,"reason":"registry_unavailable"});
+    };
+    let mut instances = Vec::new();
+    entries.retain(|entry| {
+        let Some(store) = entry.store.upgrade() else {
+            return false;
+        };
+        instances.push(object_store_instance_diagnostics(entry.id, store.stats()));
+        true
+    });
+    json!({"scope":"process_live_instances","instances":instances,"internal_successful_retries":"unavailable"})
+}
+
+fn rustfs_diagnostics() -> Value {
+    let Some(registry) = RUSTFS_DIAGNOSTICS.get() else {
+        return json!({"scope":"process_live_instances","instances":[],"internal_successful_retries":"unavailable"});
+    };
+    let Ok(mut entries) = registry.lock() else {
+        return json!({"scope":"process_live_instances","available":false,"reason":"registry_unavailable"});
+    };
+    let mut instances = Vec::new();
+    entries.retain(|entry| {
+        let Some(store) = entry.store.upgrade() else {
+            return false;
+        };
+        instances.push(object_store_instance_diagnostics(entry.id, store.stats()));
+        true
+    });
+    json!({"scope":"process_live_instances","instances":instances,"internal_successful_retries":"unavailable"})
+}
+
+fn object_store_instance_diagnostics(id: u64, stats: ObjectStoreDiagnosticStats) -> Value {
+    json!({"id":id,"puts":stats.puts,"gets":stats.gets,
+    "deletes":stats.deletes,"reconciles":stats.reconciles,
+    "successes":stats.successes,"errors":stats.errors,
+    "duration_ms_total":stats.duration_ms_total,"duration_ms_max":stats.duration_ms_max,
+    "bytes_read":stats.bytes_read,"bytes_written":stats.bytes_written,
+    "conditional_conflicts":stats.conditional_conflicts,
+    "id_collision_exhausted":stats.id_collision_exhausted,
+    "retry_exhausted":stats.retry_exhausted,"cache_hits":stats.cache_hits,
+    "raw_api":stats.raw_api.map(|raw| json!({
+        "schema":raw.schema,"scope":raw.scope,"saturated":raw.saturated,
+        "in_flight":raw.in_flight,"pending_claims":raw.pending_claims,
+        "claims":{"leader_claims":raw.claims.leader_claims,"leader_success":raw.claims.leader_success,
+            "leader_error":raw.claims.leader_error,"leader_cancelled":raw.claims.leader_cancelled,
+            "follower_claims":raw.claims.follower_claims,"follower_success":raw.claims.follower_success,
+            "follower_error":raw.claims.follower_error,"follower_cancelled":raw.claims.follower_cancelled},
+        "entries":raw.entries.iter().map(|entry| json!({"name":entry.name,
+            "calls":entry.calls,"success":entry.success,"error":entry.error,"cancelled":entry.cancelled,
+            "elapsed_ns":entry.elapsed_ns,"latency_max_ns":entry.latency_max_ns,
+            "attempted_bytes":entry.attempted_bytes,"confirmed_bytes":entry.confirmed_bytes,
+            "returned_bytes":entry.returned_bytes,"latency_log2_us":entry.latency_log2_us})).collect::<Vec<_>>()
+    })),
+    "local_work":stats.local_work.map(|local| json!({
+        "schema":local.schema,"scope":local.scope,"saturated":local.saturated,
+        "in_flight":local.in_flight,
+        "entries":local.entries.iter().map(|entry| json!({"name":entry.name,
+            "calls":entry.calls,"success":entry.success,"error":entry.error,"cancelled":entry.cancelled,
+            "elapsed_ns":entry.elapsed_ns,"latency_max_ns":entry.latency_max_ns,
+            "input_bytes":entry.input_bytes,"output_bytes":entry.output_bytes,
+            "latency_log2_us":entry.latency_log2_us})).collect::<Vec<_>>()
+    }))})
+}
+
+fn r2_local_measurement() -> Value {
+    json!({
+        "schema":"mount-rs.object-store-local.v1","scope":"live_registered_split_r2_block_store_instances",
+        "calls":"fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+        "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+        "input_bytes":"entered_digest_encoding_and_copy_input; waits_zero",
+        "output_bytes":"completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+        "cache_lock_scope":"mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+        "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+        "adapter_compression":"not_used",
+        "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+    })
+}
+
+fn rustfs_local_measurement() -> Value {
+    json!({
+        "schema":"mount-rs.object-store-local.v1","scope":"live_registered_split_rustfs_block_store_instances",
+        "calls":"fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+        "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+        "input_bytes":"entered_digest_encoding_and_copy_input; waits_zero",
+        "output_bytes":"completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+        "cache_lock_scope":"mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+        "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+        "adapter_compression":"not_used",
+        "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rustfs_factories","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+    })
+}
+
+fn rustfs_api_measurement() -> Value {
+    json!({
+        "schema":"mount-rs.object-store-api.v1","scope":"live_registered_split_rustfs_block_store_instances",
+        "calls":"object_store_adapter_method_invocations; not_http_attempts_or_internal_retries",
+        "duration":"inclusive_wall_nanoseconds_at_invoked_adapter_await; excludes_argument_preparation",
+        "upload_bytes":"attempted=submitted_payload; confirmed=put_opts_ok_only",
+        "returned_bytes":"successful_body_materialization_before_integrity_validation",
+        "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+        "reconcile_listing":"unavailable",
+        "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rustfs_factories","internal_client_retries"]
+    })
+}
+
+fn stringify_counters(value: &mut Value) {
+    match value {
+        Value::Number(number) => *value = Value::String(number.to_string()),
+        Value::Array(values) => values.iter_mut().for_each(stringify_counters),
+        Value::Object(fields) => fields.values_mut().for_each(stringify_counters),
+        _ => {}
+    }
+}
+
+fn storage_operation_families() -> Value {
+    let matching = |prefixes: &[&str]| {
+        storage::operation_names()
+            .iter()
+            .copied()
+            .filter(|name| prefixes.iter().any(|prefix| name.starts_with(*prefix)))
+            .collect::<Vec<_>>()
+    };
+    let duration = "inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap";
+    let block_bytes = "known_successful_block_put_input_and_get_or_migration_payload_bytes; metadata_bytes_unavailable";
+    json!({
+        "napi_provider":{"operations":matching(&["metadata.","blocks."]),
+            "calls":"napi_dynamic_provider_method_invocations","bytes":block_bytes,
+            "returned_rows":"unavailable","duration":duration},
+        "sdk_provider":{"operations":matching(&["sdk."]),
+            "calls":"direct_sdk_provider_method_invocations_including_synchronous_methods","bytes":block_bytes,
+            "returned_rows":"unavailable","duration":duration},
+        "pglite_client_lock":{"operations":["pglite.client_lock_wait"],
+            "calls":"client_lock_acquisition_invocations","bytes":"unavailable",
+            "returned_rows":"unavailable","duration":"inclusive_client_lock_await_nanoseconds"},
+        "tidb_pool_checkout":{"operations":["tidb.pool.checkout"],
+            "calls":"pool_checkout_invocations","bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_checkout_nanoseconds_including_lazy_connect_and_session_configuration; queue_only_wait_unavailable"},
+        "tidb_session":{"operations":["tidb.session.configure"],
+            "calls":"session_configuration_invocations","bytes":"unavailable",
+            "returned_rows":"unavailable","duration":duration},
+        "tidb_open":{"operations":matching(&["tidb.open."]),
+            "calls":"open_schema_and_metadata_initialization_invocations","bytes":"unavailable",
+            "returned_rows":"unavailable","duration":duration},
+        "tidb_transaction":{"operations":matching(&["tidb.tx."]),
+            "calls":"transaction_lifecycle_invocations","bytes":"unavailable",
+            "returned_rows":"unavailable","duration":duration},
+        "tidb_sql":{"operations":matching(&["tidb.sql."]),
+            "calls":"categorized_sql_adapter_invocations; not_internal_requests",
+            "bytes":"known_selected_successful_payload_bytes_only; other_sql_bytes_unavailable",
+            "returned_rows":"known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows",
+            "duration":duration},
+        "foundationdb_transaction":{"operations":[
+                "foundationdb.transaction.create","foundationdb.transaction.closure_attempt",
+                "foundationdb.transaction.commit","foundationdb.transaction.on_error"],
+            "calls":"provider_closure_attempts_and_native_create_commit_on_error_invocations; distinct_units_not_logical_transactions",
+            "bytes":"unavailable","returned_rows":"unavailable","duration":duration},
+        "foundationdb_read":{"operations":[
+                "foundationdb.read.get","foundationdb.read.get_key","foundationdb.read.get_range_page"],
+            "calls":"native_client_read_method_invocations; range_page_calls_not_key_value_count",
+            "bytes":"known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only",
+            "returned_rows":"unavailable","duration":duration},
+        "blob_cache":{"operations":[
+                "blob_cache.miss.admission_wait","blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup","blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait","blob_cache.peer.connection_establish"],
+            "calls":"cache_stage_invocations; lookups_include_hits_and_misses; waits_count_acquisitions_or_termination",
+            "bytes":"known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero",
+            "returned_rows":"unavailable","duration":duration},
+        "client_quic":{"operations":["client.quic.open_bi"],
+            "calls":"stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_open_bi_await_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "client_quic_request_send":{"operations":["client.quic.request_send"],
+            "calls":"request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_write_and_fin_submission_nanoseconds; not_acknowledgment_or_exclusive_cpu_time"},
+        "client_quic_response_receive":{"operations":["client.quic.response_receive"],
+            "calls":"response_receive_stage_invocations; includes_success_error_and_cancellation; not_server_operations",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_decode_and_eof_validation_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "blob_cache_peer_request_byte_admission_wait":{"operations":["blob_cache.peer.request_byte_admission_wait"],
+            "calls":"request_byte_permit_acquisition_invocations; includes_success_error_and_cancellation",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_request_byte_permit_await_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_open_bi":{"operations":["blob_cache.peer.open_bi"],
+            "calls":"stream_acquisition_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_open_bi_await_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_request_send":{"operations":["blob_cache.peer.request_send"],
+            "calls":"request_send_stage_invocations; includes_success_error_and_cancellation; not_acknowledgments",
+            "bytes":"known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments",
+            "returned_rows":"unavailable",
+            "duration":"inclusive_write_and_fin_submission_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_response_receive":{"operations":["blob_cache.peer.response_receive"],
+            "calls":"response_receive_stage_invocations; includes_success_error_and_cancellation; not_backing_reads",
+            "bytes":"known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes",
+            "returned_rows":"unavailable",
+            "duration":"inclusive_response_read_and_validation_nanoseconds; overlaps_get_duration"},
+        "blob_cache_peer_get":{"operations":["blob_cache.peer.get"],
+            "calls":"logical_peer_get_and_get_shared_invocations; includes_hits_misses_errors_and_cancellation",
+            "bytes":"known_successful_logical_get_payload_bytes; misses_zero","returned_rows":"unavailable",
+            "duration":"inclusive_get_method_nanoseconds; includes_request_and_existing_return_conversion; overlaps_transport_stages"},
+        "blob_cache_peer_get_miss":{"operations":["blob_cache.peer.get_miss"],
+            "calls":"successful_get_miss_classifications; not_peer_requests",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"classification_marker_nanoseconds; excludes_get_request_duration"},
+        "client_websocket":{"operations":["client.websocket.tcp_connect",
+            "client.websocket.tls_handshake","client.websocket.upgrade",
+            "client.websocket.socket_lock_wait","client.websocket.request_encode",
+            "client.websocket.request_send","client.websocket.response_receive",
+            "client.websocket.response_decode"],
+            "calls":"client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time"},
+        "client_quic_connection_setup":{"operations":["client.quic.connection_setup"],
+            "calls":"quic_transport_setup_attempts; excludes_credentials_hello_and_websocket_fallback",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_tls_config_endpoint_connect_and_alpn_validation_nanoseconds; not_exclusive_cpu_or_network_time"},
+        "blob_cache_discovery":{"operations":["blob_cache.discovery.locate"],
+            "calls":"discovery_locate_invocations; empty_and_fallback_peer_lists_are_success; not_peer_gets_or_directory_health",
+            "bytes":"unavailable","returned_rows":"unavailable",
+            "duration":"inclusive_locate_await_nanoseconds; excludes_peer_filtering_queries_and_hedging"},
+        "object_store_backing_marker":{"operations":matching(&["object_store.backing_marker."]),
+            "calls":"object_store_marker_get_body_create_and_backoff_invocations; includes_success_error_and_cancellation; not_http_attempts_or_application_iops",
+            "bytes":"known_successful_materialized_body_bytes_before_identity_validation_and_accepted_create_input_bytes; get_backoff_error_and_cancellation_bytes_unavailable",
+            "returned_rows":"unavailable","duration":duration}
+    })
+}
+
+// Audited pre-FoundationDB source coverage. A new core label is not
+// instrumented merely because the fixed bank includes it.
+const LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS: &[&str] = &[
+    "metadata.load",
+    "metadata.load_if_changed",
+    "metadata.snapshot",
+    "metadata.publish",
+    "metadata.flush",
+    "blocks.put",
+    "blocks.get",
+    "blocks.flush",
+    "blocks.verify_backing",
+    "blocks.prepare_backing",
+    "blocks.delete",
+    "blocks.reconcile",
+    "pglite.client_lock_wait",
+    "sdk.metadata.compact_inode_capability",
+    "sdk.metadata.compact_inode_mode_state",
+    "sdk.metadata.prepare_compact_inode_mode",
+    "sdk.metadata.load_compact_snapshot",
+    "sdk.metadata.load_compact_inode",
+    "sdk.metadata.publish_compact_inode",
+    "sdk.metadata.publish_compact_structure",
+    "sdk.metadata.inode_mode_state",
+    "sdk.metadata.prepare_inode_mode",
+    "sdk.metadata.load_inode_snapshot_if_changed",
+    "sdk.metadata.load_inode_snapshot",
+    "sdk.metadata.load_inode",
+    "sdk.metadata.load_inode_if_changed",
+    "sdk.metadata.publish_inode_if_version",
+    "sdk.metadata.publish_structure_if_versions",
+    "sdk.metadata.delegation_state",
+    "sdk.metadata.prepare_delegated_mode",
+    "sdk.metadata.checkout",
+    "sdk.metadata.publish_delegated",
+    "sdk.metadata.checkin",
+    "sdk.metadata.recover",
+    "sdk.metadata.durable",
+    "sdk.metadata.publish_includes_flush_barrier",
+    "sdk.metadata.load",
+    "sdk.metadata.load_if_changed",
+    "sdk.metadata.concurrent_mode_state",
+    "sdk.metadata.preflight_new_bound_mode",
+    "sdk.metadata.prepare_bound_concurrent_mode",
+    "sdk.metadata.acquire_writer",
+    "sdk.metadata.renew_writer",
+    "sdk.metadata.release_writer",
+    "sdk.metadata.publish",
+    "sdk.metadata.publish_bound_if_revision",
+    "sdk.metadata.migrate_mrc1_to_bound_mode",
+    "sdk.metadata.preflight_mrc1_to_bound_mode",
+    "sdk.metadata.preflight_trusted_unstamped_mrc1",
+    "sdk.metadata.migrate_trusted_unstamped_mrc1",
+    "sdk.metadata.flush",
+    "sdk.blocks.durable",
+    "sdk.blocks.prepare_concurrent_backing",
+    "sdk.blocks.verify_concurrent_backing",
+    "sdk.blocks.get_for_migration",
+    "sdk.blocks.put",
+    "sdk.blocks.get",
+    "sdk.blocks.flush",
+    "sdk.blocks.delete",
+    "sdk.blocks.reconcile",
+];
+
+// Independently audited actual marker producer sites, separate from registry declarations.
+const OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS: &[&str] = &[
+    "object_store.backing_marker.probe.get",
+    "object_store.backing_marker.probe.body_read",
+    "object_store.backing_marker.data.get",
+    "object_store.backing_marker.data.body_read",
+    "object_store.backing_marker.probe.create",
+    "object_store.backing_marker.retry_backoff",
+];
+
+fn storage_instrumented_operation_names() -> Vec<&'static str> {
+    // Keep the core order while consuming audited producer coverage explicitly.
+    storage::operation_names()
+        .iter()
+        .copied()
+        .filter(|name| {
+            LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS.contains(name)
+                || mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE
+                    .operations
+                    .contains(name)
+                || foundationdb_instrumented_operations().contains(name)
+                || OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS.contains(name)
+        })
+        .collect()
+}
+
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
+fn foundationdb_instrumented_operations() -> &'static [&'static str] {
+    mount_rs_foundationdb::FOUNDATIONDB_DIAGNOSTIC_COVERAGE.operations
+}
+
+#[cfg(not(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+)))]
+fn foundationdb_instrumented_operations() -> &'static [&'static str] {
+    &[]
+}
+
+fn foundationdb_diagnostic_coverage() -> Value {
+    #[cfg(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    ))]
+    {
+        let coverage = &mount_rs_foundationdb::FOUNDATIONDB_DIAGNOSTIC_COVERAGE;
+        json!({
+            "schema":coverage.schema,"status":coverage.status,
+            "transaction_runner_sites":coverage.transaction_runner_sites,
+            "point_get_sites":coverage.point_get_sites,
+            "get_key_sites":coverage.get_key_sites,
+            "range_consumer_sites":coverage.range_consumer_sites,
+            "operations":coverage.operations,
+            "attempt_scope":coverage.attempt_scope,
+            "payload_bytes_scope":coverage.payload_bytes_scope,
+            "returned_rows_scope":coverage.returned_rows_scope,
+            "unavailable":coverage.unavailable
+        })
+    }
+    #[cfg(not(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    )))]
+    {
+        json!({
+            "schema":"mount-rs-foundationdb-client-diagnostic-coverage-v1",
+            "status":"unavailable",
+            "reason":"feature_disabled_or_unsupported_target",
+            "operations":[]
+        })
+    }
+}
+
+fn tidb_diagnostic_coverage() -> Value {
+    let coverage = mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE;
+    json!({
+        "schema":coverage.schema,"status":coverage.status,
+        "pool_checkout_sites":coverage.pool_checkout_sites,
+        "session_configure_sites":coverage.session_configure_sites,
+        "schema_initialize_sites":coverage.schema_initialize_sites,
+        "metadata_open_sites":coverage.metadata_open_sites,
+        "transaction_begin_sites":coverage.transaction_begin_sites,
+        "transaction_commit_sites":coverage.transaction_commit_sites,
+        "transaction_rollback_sites":coverage.transaction_rollback_sites,
+        "sql_statement_sites":coverage.sql_statement_sites,
+        "operations":coverage.operations,
+        "sql_returned_rows_scope":coverage.sql_returned_rows_scope,
+        "sql_payload_bytes_scope":coverage.sql_payload_bytes_scope,
+        "pool_checkout_scope":coverage.pool_checkout_scope,
+        "unavailable":coverage.unavailable
+    })
+}
+
+/// Read-only, quiescent process snapshot. All integer counters are decimal
+/// strings so JavaScript cannot round u64 nanoseconds or byte totals.
+#[napi]
+pub fn storage_diagnostics() -> String {
+    let mut sqlite = mount_rs_sqlite::sqlite_io_diagnostics(false);
+    if let Some(connections) = sqlite.get_mut("connections").and_then(Value::as_array_mut) {
+        for connection in connections {
+            if connection.get("error").is_some() {
+                connection["error"] = json!("unavailable");
+            }
+        }
+    }
+    let mut value = json!({
+        "schema_version":"mount-rs.storage-diagnostics.v3",
+        "enabled":storage::enabled(),
+        "scope":"process",
+        "quiescent_snapshot_required":true,
+        "elapsed_semantics":"inclusive_wall_nanoseconds",
+        "storage":storage::snapshot(),
+        "profile":profile::snapshot(),
+        "sqlite":sqlite,
+        "r2":r2_diagnostics(),
+        "rustfs":rustfs_diagnostics(),
+        "backend_waits":{"pglite_client_lock":"instrumented","tidb_pool":"instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration"},
+        "http_attempts":"unavailable",
+        "physical_device_iops":"unavailable",
+        "measurement":{
+            "storage_calls":"fixed_label_provider_and_driver_operations; families_overlap_and_are_not_application_iops",
+            "storage_bytes":"known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload",
+            "storage_rows":"known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows",
+            "storage_operations":storage::operation_names(),
+            "storage_families":storage_operation_families(),
+            "storage_instrumented_operations":storage_instrumented_operation_names(),
+            "tidb_coverage":tidb_diagnostic_coverage(),
+            "foundationdb_coverage":foundationdb_diagnostic_coverage(),
+            "storage_duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+            "latency_histogram":{
+                "unit":"microseconds",
+                "intervals": (0..32).map(|index| {
+                    if index == 0 {
+                        json!({"lower_inclusive_us":"0","upper_exclusive_us":"1"})
+                    } else if index == 31 {
+                        json!({"lower_inclusive_us":(1_u64 << 30).to_string(),"upper_exclusive_us":null,"terminal_overflow":true})
+                    } else {
+                        json!({"lower_inclusive_us":(1_u64 << (index - 1)).to_string(),"upper_exclusive_us":(1_u64 << index).to_string()})
+                    }
+                }).collect::<Vec<_>>()
+            },
+            "forwarding_boxes":"enabled_napi_dynamic_provider_box_pin_site_calls_and_requested_future_object_bytes; excludes_allocator_overhead_and_other_allocations",
+            "profile":"existing_core_profile_counters",
+            "sqlite":"live_connection_pager_and_sql_category_counters; pager_bytes_are_page_size_estimates",
+            "r2":"live_store_logical_calls_and_cache_hits; not_http_attempts",
+            "r2_api":{
+                "schema":"mount-rs.object-store-api.v1","scope":"live_registered_split_r2_block_store_instances",
+                "calls":"object_store_adapter_method_invocations; not_http_attempts_or_internal_retries",
+                "duration":"inclusive_wall_nanoseconds_at_invoked_adapter_await; excludes_argument_preparation",
+                "upload_bytes":"attempted=submitted_payload; confirmed=put_opts_ok_only",
+                "returned_bytes":"successful_body_materialization_before_integrity_validation",
+                "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+                "reconcile_listing":"unavailable",
+                "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","internal_client_retries"]
+            },
+            "r2_local":r2_local_measurement(),
+            "rustfs":"live_store_logical_calls_and_cache_hits; not_http_attempts",
+            "rustfs_api":rustfs_api_measurement(),
+            "rustfs_local":rustfs_local_measurement(),
+            "unavailable":{
+                "http_attempts":"unavailable",
+                "internal_successful_retries":"unavailable",
+                "physical_device_iops":"unavailable",
+                "tidb_pool_wait":"isolated_queue_only_wait_unavailable",
+                "native_allocation_count":"unavailable",
+                "js_allocation_count":"unavailable"
+            }
+        },
+    });
+    stringify_counters(&mut value);
+    value.to_string()
+}
 
 /// Apply the optional Node application-boundary decorator at construction
 /// time. The feature is off by default; when enabled, an embedding Rust
@@ -1405,6 +1925,9 @@ pub struct JsMountFailure {
 /// backend never falls back to an in-memory store.
 #[napi(object)]
 pub struct JsChunkedStoreOptions {
+    /// SQLite only: preserve (default) or wal, retaining FULL synchronization.
+    #[napi(ts_type = "'preserve' | 'wal'")]
+    pub journal_mode: Option<String>,
     /// Supported values are memory, sqlite, pglite, tidb, foundationdb, r2,
     /// and rustfs (object stores are blocks only). FoundationDB requires the native feature and an
     /// explicit persisted-single-authority, shared-provider, or revision-cas authority.
@@ -1434,6 +1957,12 @@ pub struct JsChunkedOptions {
     /// Enable persisted multiwriter revision CAS for FoundationDB, PGlite, or
     /// local SQLite metadata. SQLite metadata and blocks are same-host only.
     pub concurrent_writes: Option<bool>,
+    /// Enable independent inode revisions. Requires concurrentWrites and no ownershipMode.
+    pub inode_updates: Option<bool>,
+    /// Opt in to compact MRC5 metadata. Enables inodeUpdates and
+    /// concurrentWrites; rejects either explicitly false, ownershipMode,
+    /// or checkoutPath.
+    pub compact_inode_updates: Option<bool>,
     /// Explicit exclusive ownership enables writeback until sync or shutdown.
     /// Shared ownership uses fenced directory delegation; same-host SQLite constraints remain.
     /// Must agree with concurrentWrites when both options are supplied.
@@ -1456,7 +1985,304 @@ pub struct JsChunkedOptions {
 #[derive(Clone)]
 struct DynMetadataStore(Arc<dyn MetadataStore>);
 
+/// Preserve the provider's original boxed future on the default disabled path.
+/// Enabled recording adds one forwarding future allocation per operation; the
+/// recorder itself uses only fixed atomic arrays until a phase snapshot.
+fn measured<'a, T, F>(
+    operation: Operation,
+    future: Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>,
+    bytes: F,
+) -> Pin<Box<dyn Future<Output = CoreResult<T>> + Send + 'a>>
+where
+    T: Send + 'a,
+    F: FnOnce(&T) -> u64 + Send + 'a,
+{
+    if !storage::enabled() {
+        return future;
+    }
+    let forwarding = async move {
+        let mut span = storage::Span::new(operation);
+        let result = future.await;
+        match &result {
+            Ok(value) => span.finish_success(bytes(value)),
+            Err(_) => span.finish_error(),
+        }
+        result
+    };
+    storage::record_forwarding_box(std::mem::size_of_val(&forwarding) as u64);
+    Box::pin(forwarding)
+}
+
 impl MetadataStore for DynMetadataStore {
+    fn compact_inode_capability(&self) -> mount_rs_core::storage::compact::CompactInodeCapability {
+        self.0.compact_inode_capability()
+    }
+    fn compact_inode_mode_state<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Option<InodeModeState>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.compact_inode_mode_state()
+    }
+    fn prepare_compact_inode_mode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0
+            .prepare_compact_inode_mode(backing, expected_revision)
+    }
+    fn load_compact_snapshot<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::compact::CompactSnapshot>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataSnapshot,
+            self.0.load_compact_snapshot(backing),
+            |_| 0,
+        )
+    }
+    fn load_compact_inode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::compact::LoadedCompactInode>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataLoad,
+            self.0.load_compact_inode(backing, inode),
+            |_| 0,
+        )
+    }
+    fn publish_compact_inode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        generation: u64,
+        expected: mount_rs_core::storage::compact::PhysicalInodeIdentity,
+        node: mount_rs_core::storage::NodeMetadata,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::compact::LoadedCompactInode>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataPublish,
+            self.0
+                .publish_compact_inode(backing, inode, generation, expected, node),
+            |_| 0,
+        )
+    }
+    fn publish_compact_structure<'a, 'b, 'async_trait>(
+        &'a self,
+        delta: &'b mount_rs_core::storage::compact::CompactStructuralDelta,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::compact::CompactPublication>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataPublish,
+            self.0.publish_compact_structure(delta),
+            |_| 0,
+        )
+    }
+    fn inode_mode_state<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<Option<mount_rs_core::storage::InodeModeState>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.inode_mode_state()
+    }
+    fn prepare_inode_mode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.prepare_inode_mode(backing, expected_revision)
+    }
+    fn load_inode_snapshot_if_changed<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<Option<mount_rs_core::storage::InodeMetadataSnapshot>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataConditionalLoad,
+            self.0.load_inode_snapshot_if_changed(backing, known),
+            |_| 0,
+        )
+    }
+    fn load_inode_snapshot<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::InodeMetadataSnapshot>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataSnapshot,
+            self.0.load_inode_snapshot(backing),
+            |_| 0,
+        )
+    }
+    fn load_inode<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::LoadedInode>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataLoad,
+            self.0.load_inode(backing, inode),
+            |_| 0,
+        )
+    }
+    fn load_inode_if_changed<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        known: Option<mount_rs_core::storage::InodeVersion>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<Option<mount_rs_core::storage::LoadedInode>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataConditionalLoad,
+            self.0.load_inode_if_changed(backing, inode, known),
+            |_| 0,
+        )
+    }
+    fn publish_inode_if_version<'a, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        expected: mount_rs_core::storage::InodeVersion,
+        node: mount_rs_core::storage::NodeMetadata,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<mount_rs_core::storage::InodeVersion>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataPublish,
+            self.0
+                .publish_inode_if_version(backing, inode, expected, node),
+            |_| 0,
+        )
+    }
+    fn publish_structure_if_versions<'a, 'b, 'async_trait>(
+        &'a self,
+        backing: ConcurrentBackingId,
+        expected_generation: u64,
+        expected_inode_revisions: &'b std::collections::BTreeMap<u64, u64>,
+        namespace: Namespace,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        measured(
+            Operation::MetadataPublish,
+            self.0.publish_structure_if_versions(
+                backing,
+                expected_generation,
+                expected_inode_revisions,
+                namespace,
+            ),
+            |_| 0,
+        )
+    }
+
     fn durable(&self) -> bool {
         self.0.durable()
     }
@@ -1472,7 +2298,7 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load()
+        measured(Operation::MetadataLoad, self.0.load(), |_| 0)
     }
 
     fn load_if_changed<'a, 'async_trait>(
@@ -1483,7 +2309,11 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.load_if_changed(known_revision)
+        measured(
+            Operation::MetadataConditionalLoad,
+            self.0.load_if_changed(known_revision),
+            |_| 0,
+        )
     }
 
     fn concurrent_mode_state<'a, 'async_trait>(
@@ -1637,7 +2467,11 @@ impl MetadataStore for DynMetadataStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.publish(expected_revision, lease, namespace)
+        measured(
+            Operation::MetadataPublish,
+            self.0.publish(expected_revision, lease, namespace),
+            |_| 0,
+        )
     }
 
     fn publish_bound_if_revision<'a, 'async_trait>(
@@ -1650,8 +2484,12 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0
-            .publish_bound_if_revision(backing, expected_revision, namespace)
+        measured(
+            Operation::MetadataPublish,
+            self.0
+                .publish_bound_if_revision(backing, expected_revision, namespace),
+            |_| 0,
+        )
     }
 
     fn migrate_mrc1_to_bound_mode<'a, 'async_trait>(
@@ -1712,7 +2550,7 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.flush()
+        measured(Operation::MetadataFlush, self.0.flush(), |_| 0)
     }
 }
 
@@ -1724,6 +2562,10 @@ impl BlockStore for DynBlockStore {
         self.0.durable()
     }
 
+    fn persistent(&self) -> bool {
+        self.0.persistent()
+    }
+
     fn prepare_concurrent_backing<'a, 'async_trait>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = CoreResult<ConcurrentBackingId>> + Send + 'async_trait>>
@@ -1731,7 +2573,11 @@ impl BlockStore for DynBlockStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.prepare_concurrent_backing()
+        measured(
+            Operation::BlockPrepareBacking,
+            self.0.prepare_concurrent_backing(),
+            |_| 0,
+        )
     }
 
     fn verify_concurrent_backing<'a, 'async_trait>(
@@ -1742,7 +2588,11 @@ impl BlockStore for DynBlockStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.verify_concurrent_backing(expected)
+        measured(
+            Operation::BlockVerifyBacking,
+            self.0.verify_concurrent_backing(expected),
+            |_| 0,
+        )
     }
 
     fn get_for_migration<'a, 'b, 'async_trait>(
@@ -1754,7 +2604,9 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.get_for_migration(id)
+        measured(Operation::BlockGet, self.0.get_for_migration(id), |bytes| {
+            bytes.len() as u64
+        })
     }
 
     fn put<'a, 'b, 'async_trait>(
@@ -1766,7 +2618,9 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.put(bytes)
+        measured(Operation::BlockPut, self.0.put(bytes), move |_| {
+            bytes.len() as u64
+        })
     }
 
     fn get<'a, 'b, 'async_trait>(
@@ -1778,7 +2632,9 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.get(id)
+        measured(Operation::BlockGet, self.0.get(id), |bytes| {
+            bytes.len() as u64
+        })
     }
 
     fn flush<'a, 'async_trait>(
@@ -1788,7 +2644,7 @@ impl BlockStore for DynBlockStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.flush()
+        measured(Operation::BlockFlush, self.0.flush(), |_| 0)
     }
 
     fn delete<'a, 'b, 'async_trait>(
@@ -1800,7 +2656,7 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.delete(id)
+        measured(Operation::BlockDelete, self.0.delete(id), |_| 0)
     }
 
     fn reconcile<'a, 'b, 'async_trait>(
@@ -1813,7 +2669,11 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        self.0.reconcile(live, grace)
+        measured(
+            Operation::BlockReconcile,
+            self.0.reconcile(live, grace),
+            |_| 0,
+        )
     }
 }
 
@@ -2221,9 +3081,30 @@ fn required_string(value: &Option<String>, field: &str) -> Result<String, Error>
         all(target_os = "macos", target_arch = "aarch64"),
     )
 ))]
+fn foundationdb_metadata_policy(
+    metadata: &JsChunkedStoreOptions,
+    blocks: &JsChunkedStoreOptions,
+) -> FoundationDbBlockAuthorityPolicy {
+    if blocks.kind == "foundationdb" && metadata.uri == blocks.uri && metadata.key == blocks.key {
+        FoundationDbBlockAuthorityPolicy::SameKeyspace
+    } else {
+        FoundationDbBlockAuthorityPolicy::ExternalBlockStore
+    }
+}
+
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
 fn open_foundationdb_storage(
     options: &JsChunkedStoreOptions,
     role: &str,
+    policy: FoundationDbBlockAuthorityPolicy,
 ) -> Result<FoundationDbStorage, Error> {
     let uri = required_string(&options.uri, &format!("{role}.uri"))?;
     let key = required_string(&options.key, &format!("{role}.key"))?;
@@ -2235,8 +3116,9 @@ fn open_foundationdb_storage(
         &options.secret_access_key,
         &format!("{role}.secretAccessKey"),
     )?;
-    let storage =
-        FoundationDbStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
+    let storage = FoundationDbStorageOptions::new(key)
+        .with_durable(options.durable.unwrap_or(false))
+        .with_block_authority_policy(policy);
     let storage = match authority.as_str() {
         "persisted-single-authority" => {
             reject_set(
@@ -2333,8 +3215,36 @@ fn optional_u32(name: &str, value: Option<f64>, default: u32) -> Result<u32, Err
         .unwrap_or(Ok(default))
 }
 
+fn sqlite_storage_options(
+    options: &JsChunkedStoreOptions,
+    role: &str,
+) -> Result<SqliteStorageOptions, Error> {
+    if options.kind != "sqlite" {
+        reject_set(&options.journal_mode, &format!("{role}.journalMode"))?;
+        return Ok(SqliteStorageOptions::default());
+    }
+    let journal_mode = match options.journal_mode.as_deref() {
+        None | Some("preserve") => SqliteJournalMode::Preserve,
+        Some("wal") => SqliteJournalMode::Wal,
+        _ => {
+            return Err(config_error(format!(
+                "{role}.journalMode must be 'preserve' or 'wal'"
+            )));
+        }
+    };
+    if journal_mode == SqliteJournalMode::Wal
+        && !options.uri.as_deref().is_some_and(sqlite_durable_uri)
+    {
+        return Err(config_error(format!(
+            "{role}.uri: SQLite WAL requires a local file path; empty, :memory: and file: paths are unsupported"
+        )));
+    }
+    Ok(SqliteStorageOptions { journal_mode })
+}
+
 async fn build_metadata_store(
     options: &JsChunkedStoreOptions,
+    _block_options: &JsChunkedStoreOptions,
 ) -> Result<(Arc<dyn MetadataStore>, Option<ChunkedProviderResource>), Error> {
     if options.kind != "foundationdb" {
         reject_set(&options.lease_authority, "metadata.leaseAuthority")?;
@@ -2361,7 +3271,13 @@ async fn build_metadata_store(
             reject_set(&options.access_key_id, "metadata.accessKeyId")?;
             reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
             Ok((
-                Arc::new(SqliteMetadataStore::open(uri).map_err(to_js_error)?),
+                Arc::new(
+                    SqliteMetadataStore::open_with_options(
+                        uri,
+                        sqlite_storage_options(options, "metadata")?,
+                    )
+                    .map_err(to_js_error)?,
+                ),
                 None,
             ))
         }
@@ -2410,7 +3326,11 @@ async fn build_metadata_store(
                 )
             ))]
             {
-                let storage = open_foundationdb_storage(options, "metadata")?;
+                let storage = open_foundationdb_storage(
+                    options,
+                    "metadata",
+                    foundationdb_metadata_policy(options, _block_options),
+                )?;
                 let store = storage.metadata();
                 Ok((
                     Arc::new(store),
@@ -2469,7 +3389,13 @@ async fn build_block_store(
             reject_set(&options.access_key_id, "blocks.accessKeyId")?;
             reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
             Ok((
-                Arc::new(SqliteBlockStore::open(uri).map_err(to_js_error)?),
+                Arc::new(
+                    SqliteBlockStore::open_with_options(
+                        uri,
+                        sqlite_storage_options(options, "blocks")?,
+                    )
+                    .map_err(to_js_error)?,
+                ),
                 None,
             ))
         }
@@ -2518,7 +3444,11 @@ async fn build_block_store(
                 )
             ))]
             {
-                let storage = open_foundationdb_storage(options, "blocks")?;
+                let storage = open_foundationdb_storage(
+                    options,
+                    "blocks",
+                    FoundationDbBlockAuthorityPolicy::SameKeyspace,
+                )?;
                 let store = storage.blocks();
                 Ok((
                     Arc::new(store),
@@ -2564,7 +3494,17 @@ async fn build_block_store(
                 options.durable.unwrap_or(true),
             )
             .map_err(to_js_error)?;
-            Ok((Arc::new(blocks), None))
+            let blocks = Arc::new(blocks);
+            if storage::enabled()
+                && let Ok(mut entries) = R2_DIAGNOSTICS.get_or_init(Mutex::default).lock()
+            {
+                entries.retain(|entry| entry.store.strong_count() != 0);
+                entries.push(R2DiagnosticEntry {
+                    id: NEXT_R2_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed),
+                    store: Arc::downgrade(&blocks),
+                });
+            }
+            Ok((blocks, None))
         }
         "rustfs" => {
             let prefix = required_string(&options.key, "blocks.key")?;
@@ -2585,7 +3525,17 @@ async fn build_block_store(
             let blocks =
                 RustFsBlockStore::from_config(&config, prefix, options.durable.unwrap_or(false))
                     .map_err(to_js_error)?;
-            Ok((Arc::new(blocks), None))
+            let blocks = Arc::new(blocks);
+            if storage::enabled()
+                && let Ok(mut entries) = RUSTFS_DIAGNOSTICS.get_or_init(Mutex::default).lock()
+            {
+                entries.retain(|entry| entry.store.strong_count() != 0);
+                entries.push(RustFsDiagnosticEntry {
+                    id: NEXT_RUSTFS_DIAGNOSTIC_ID.fetch_add(1, Ordering::Relaxed),
+                    store: Arc::downgrade(&blocks),
+                });
+            }
+            Ok((blocks, None))
         }
         other => Err(config_error(format!("unknown block backend: {other}"))),
     }
@@ -3455,6 +4405,22 @@ async fn run_shutdown(
     }
 }
 
+/// Sanitized receipt from the selected handles' persisted compact authority.
+#[derive(Debug, PartialEq, Eq)]
+#[napi(object)]
+pub struct JsCompactLayoutReceipt {
+    #[napi(ts_type = "'mount-rs.compact-layout-receipt.v1'")]
+    pub schema: String,
+    #[napi(ts_type = "'MRC5'")]
+    pub marker: String,
+    /// Opaque physical backing identity, encoded as 32 lowercase hex characters.
+    pub backing_id: String,
+    /// Decimal u64 string, preserving all 64 bits.
+    pub structural_generation: String,
+    #[napi(ts_type = "true")]
+    pub block_authority_verified: bool,
+}
+
 /// Integer authority identifiers are decimal strings to preserve all 64 bits.
 #[napi(object)]
 pub struct JsDirectoryGrant {
@@ -3659,6 +4625,48 @@ impl Filesystem {
             .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
             .clone()
             .ok_or_else(|| to_js_error(FsError::new(ErrorCode::Enotsup)))
+    }
+
+    /// Read persisted MRC5 authority through the selected chunked provider handles.
+    /// None means validated non-MRC5; it does not certify legacy or a default mode.
+    /// Unsupported providers, nonchunked facades, and closed wrappers reject ENOTSUP.
+    /// Call while unmounted, outside measured phases, after draining operations.
+    #[napi(js_name = "inspectCompactLayout")]
+    pub async fn inspect_compact_layout(&self) -> napi::Result<Option<JsCompactLayoutReceipt>> {
+        let _native_gate = self.unmounted_delegation_gate().await?;
+        let filesystem = self.delegated_filesystem()?;
+        let state = filesystem
+            .metadata_store()
+            .compact_inode_mode_state()
+            .await
+            .map_err(|error| {
+                to_js_error(
+                    FsError::new(error.code)
+                        .with_syscall("inspect compact layout")
+                        .with_message("compact metadata inspection failed"),
+                )
+            })?;
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        filesystem
+            .block_store()
+            .verify_concurrent_backing(state.backing)
+            .await
+            .map_err(|error| {
+                to_js_error(
+                    FsError::new(error.code)
+                        .with_syscall("inspect compact layout")
+                        .with_message("compact block authority verification failed"),
+                )
+            })?;
+        Ok(Some(JsCompactLayoutReceipt {
+            schema: "mount-rs.compact-layout-receipt.v1".into(),
+            marker: "MRC5".into(),
+            backing_id: state.backing.to_hex(),
+            structural_generation: state.structural_generation.to_string(),
+            block_authority_verified: true,
+        }))
     }
 
     /// Claim a directory for this direct driver session. Native handoff requires unmount/remount.
@@ -4120,10 +5128,64 @@ fn chunked_ownership_mode(
     Ok((mode, shared.or(concurrent_writes).unwrap_or(false)))
 }
 
+fn resolve_chunked_inode_selection(
+    compact: bool,
+    inode_updates: Option<bool>,
+    concurrent_writes: Option<bool>,
+    ownership_mode: Option<OwnershipMode>,
+    checkout: bool,
+) -> napi::Result<(bool, bool)> {
+    if compact
+        && (inode_updates == Some(false)
+            || concurrent_writes == Some(false)
+            || ownership_mode.is_some()
+            || checkout)
+    {
+        return Err(config_error(
+            "compactInodeUpdates requires shared write-through inodeUpdates and concurrentWrites without checkout",
+        ));
+    }
+    let concurrent = ownership_mode
+        .map(|mode| mode == OwnershipMode::Shared)
+        .or(concurrent_writes)
+        .unwrap_or(false)
+        || compact;
+    let inode = inode_updates.unwrap_or(false) || compact;
+    if inode && (!concurrent || ownership_mode.is_some()) {
+        return Err(config_error(
+            "inodeUpdates requires concurrentWrites and no ownershipMode",
+        ));
+    }
+    Ok((inode, concurrent))
+}
+
+#[napi]
+/// Observe a TiDB namespace and configured RustFS prefix before filesystem
+/// construction. Shared schema DDL/session setup is permitted; namespace
+/// rows and blob objects are not created. The JSON receipt is observational,
+/// with separate capture times and no reservation or atomic exclusion.
+pub async fn inspect_split_namespace_presence(
+    metadata: JsChunkedStoreOptions,
+    blocks: JsChunkedStoreOptions,
+) -> napi::Result<String> {
+    namespace_presence::inspect(metadata, blocks).await
+}
+
 #[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
-    let (ownership_mode, concurrent_writes) =
+    // Validate both journal selections before opening either provider.
+    sqlite_storage_options(&options.metadata, "metadata")?;
+    sqlite_storage_options(&options.blocks, "blocks")?;
+    let (ownership_mode, _) =
         chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
+    let compact_inode_updates = options.compact_inode_updates.unwrap_or(false);
+    let (inode_updates, concurrent_writes) = resolve_chunked_inode_selection(
+        compact_inode_updates,
+        options.inode_updates,
+        options.concurrent_writes,
+        ownership_mode,
+        options.checkout_path.is_some(),
+    )?;
     if concurrent_writes {
         match options.metadata.kind.as_str() {
             "foundationdb"
@@ -4185,6 +5247,8 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         .map_err(to_js_error)?
         .with_lease_ttl(ttl)
         .with_concurrent_writes(concurrent_writes)
+        .with_inode_updates(inode_updates)
+        .with_compact_inode_updates(compact_inode_updates)
         .with_identity(uid, gid, umask)
         .with_root_mode(root_mode);
     if let Some(mode) = ownership_mode {
@@ -4194,7 +5258,8 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         chunk_options = chunk_options.with_checkout_path(path);
     }
 
-    let (metadata_store, metadata_resource) = build_metadata_store(&options.metadata).await?;
+    let (metadata_store, metadata_resource) =
+        build_metadata_store(&options.metadata, &options.blocks).await?;
     let (block_store, block_resource) = match build_block_store(&options.blocks).await {
         Ok(opened) => opened,
         Err(error) => {
@@ -4453,6 +5518,936 @@ pub async fn unmount_all() -> Vec<JsMountFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn compact_layout_sqlite_options(
+        path: &std::path::Path,
+        compact: bool,
+        inode: bool,
+    ) -> JsChunkedOptions {
+        let store = |name: &str| JsChunkedStoreOptions {
+            journal_mode: None,
+            kind: "sqlite".into(),
+            uri: Some(path.join(name).to_string_lossy().into_owned()),
+            key: None,
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: None,
+            bucket: None,
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
+        };
+        JsChunkedOptions {
+            metadata: store("metadata.db"),
+            blocks: store("blocks.db"),
+            chunk_size: 16.0,
+            owner: Some("napi-layout-inspector".into()),
+            ttl_ms: None,
+            concurrent_writes: Some(inode),
+            inode_updates: Some(inode),
+            compact_inode_updates: Some(compact),
+            ownership_mode: None,
+            checkout_path: None,
+            uid: None,
+            gid: None,
+            umask: None,
+            root_mode: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn compact_layout_directory(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "mount-rs-napi-layout-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn compact_layout_inspector_reads_persisted_sqlite_and_fresh_reopen_bytes() {
+        block_on(async {
+            let path = compact_layout_directory("persisted");
+            let options = || compact_layout_sqlite_options(&path, true, true);
+            let first = create_chunked_driver(options()).await.unwrap();
+            let bytes = b"full persisted bytes spanning multiple chunks";
+            first
+                .write_file("/receipt-file".into(), Either::B(bytes.to_vec().into()))
+                .await
+                .unwrap();
+            let receipt = first.inspect_compact_layout().await.unwrap().unwrap();
+            assert_eq!(receipt.schema, "mount-rs.compact-layout-receipt.v1");
+            assert_eq!(receipt.marker, "MRC5");
+            assert_eq!(receipt.backing_id.len(), 32);
+            assert!(
+                receipt
+                    .backing_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            );
+            assert!(receipt.structural_generation.parse::<u64>().unwrap() > 0);
+            assert!(receipt.block_authority_verified);
+            eprintln!(
+                "COMPACT_LAYOUT_SQLITE_RECEIPT {}",
+                json!({
+                    "schema": receipt.schema,
+                    "marker": receipt.marker,
+                    "backingId": receipt.backing_id,
+                    "structuralGeneration": receipt.structural_generation,
+                    "blockAuthorityVerified": receipt.block_authority_verified,
+                })
+            );
+            first.shutdown().await.unwrap();
+            assert_eq!(
+                first.inspect_compact_layout().await.unwrap_err().reason,
+                to_js_error(FsError::new(ErrorCode::Enotsup)).reason
+            );
+            drop(first);
+
+            let second = create_chunked_driver(options()).await.unwrap();
+            assert_eq!(
+                second.inspect_compact_layout().await.unwrap().unwrap(),
+                receipt
+            );
+            let driver = second.driver().unwrap();
+            let handle = driver.open("/receipt-file", "r", 0).await.unwrap();
+            let mut actual = vec![0; bytes.len()];
+            assert_eq!(
+                handle.read(&mut actual, Some(0)).await.unwrap(),
+                bytes.len()
+            );
+            assert_eq!(&actual, bytes);
+            assert_eq!(
+                handle
+                    .read(&mut actual, Some(bytes.len() as u64))
+                    .await
+                    .unwrap(),
+                0
+            );
+            handle.close().await.unwrap();
+            driver.unlink("/receipt-file").await.unwrap();
+            drop(driver);
+            second.shutdown().await.unwrap();
+            drop(second);
+
+            let empty = create_chunked_driver(options()).await.unwrap();
+            assert!(
+                empty
+                    .driver()
+                    .unwrap()
+                    .readdir("/")
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                empty
+                    .inspect_compact_layout()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .backing_id,
+                receipt.backing_id
+            );
+            empty.shutdown().await.unwrap();
+            drop(empty);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn compact_layout_inspector_null_is_recognized_noncompact_only() {
+        block_on(async {
+            for inode in [false, true] {
+                let path = compact_layout_directory(if inode { "mrc4" } else { "legacy" });
+                let filesystem =
+                    create_chunked_driver(compact_layout_sqlite_options(&path, false, inode))
+                        .await
+                        .unwrap();
+                assert!(filesystem.inspect_compact_layout().await.unwrap().is_none());
+                filesystem.shutdown().await.unwrap();
+                drop(filesystem);
+                std::fs::remove_dir_all(path).unwrap();
+            }
+            let facade = Filesystem::memory();
+            assert_eq!(
+                facade.inspect_compact_layout().await.unwrap_err().reason,
+                to_js_error(FsError::new(ErrorCode::Enotsup)).reason
+            );
+            facade.shutdown().await.unwrap();
+        });
+    }
+
+    struct LayoutProbeMetadata {
+        inner: MemoryMetadataStore,
+        result: Mutex<CoreResult<Option<InodeModeState>>>,
+        ready: std::sync::atomic::AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MetadataStore for LayoutProbeMetadata {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+
+        fn compact_inode_mode_state<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<Option<InodeModeState>>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                std::future::poll_fn(|_| {
+                    if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                self.result.lock().unwrap().clone()
+            })
+        }
+
+        fn load<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<LoadedMetadata>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.load()
+        }
+
+        fn acquire_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            owner: &'b str,
+            ttl: Duration,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<WriterLease>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.acquire_writer(owner, ttl)
+        }
+
+        fn renew_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            lease: &'b WriterLease,
+            ttl: Duration,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<WriterLease>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.renew_writer(lease, ttl)
+        }
+
+        fn release_writer<'a, 'b, 'async_trait>(
+            &'a self,
+            lease: &'b WriterLease,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.release_writer(lease)
+        }
+
+        fn publish<'a, 'b, 'async_trait>(
+            &'a self,
+            revision: u64,
+            lease: &'b WriterLease,
+            namespace: Namespace,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.publish(revision, lease, namespace)
+        }
+
+        fn flush<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.flush()
+        }
+    }
+
+    struct LayoutProbeBlocks {
+        inner: MemoryBlockStore,
+        backing: ConcurrentBackingId,
+        error: Mutex<Option<FsError>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl BlockStore for LayoutProbeBlocks {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+
+        fn verify_concurrent_backing<'a, 'async_trait>(
+            &'a self,
+            expected: ConcurrentBackingId,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                if let Some(error) = self.error.lock().unwrap().clone() {
+                    return Err(error);
+                }
+                if expected != self.backing {
+                    return Err(layout_sensitive_error(ErrorCode::Estale));
+                }
+                Ok(())
+            })
+        }
+
+        fn put<'a, 'b, 'async_trait>(
+            &'a self,
+            bytes: &'b [u8],
+        ) -> Pin<Box<dyn Future<Output = CoreResult<BlockId>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.put(bytes)
+        }
+
+        fn get<'a, 'b, 'async_trait>(
+            &'a self,
+            id: &'b BlockId,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<u8>>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.get(id)
+        }
+
+        fn flush<'a, 'async_trait>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.flush()
+        }
+
+        fn delete<'a, 'b, 'async_trait>(
+            &'a self,
+            id: &'b BlockId,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            self.inner.delete(id)
+        }
+    }
+
+    fn layout_sensitive_error(code: ErrorCode) -> FsError {
+        FsError::new(code)
+            .with_syscall("SELECT secret FROM private_table")
+            .with_path("mysql://user:password@private.example/volume")
+            .with_dest("secret-object-prefix")
+            .with_message("provider error includes password and private SQL")
+    }
+
+    fn layout_probe() -> (Filesystem, Arc<LayoutProbeMetadata>, Arc<LayoutProbeBlocks>) {
+        let backing = ConcurrentBackingId::from_bytes([0xce; 16]).unwrap();
+        let metadata = Arc::new(LayoutProbeMetadata {
+            inner: MemoryMetadataStore::new(),
+            result: Mutex::new(Ok(Some(InodeModeState {
+                backing,
+                structural_generation: u64::MAX,
+            }))),
+            ready: std::sync::atomic::AtomicBool::new(true),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let blocks = Arc::new(LayoutProbeBlocks {
+            inner: MemoryBlockStore::new(),
+            backing,
+            error: Mutex::new(None),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        // A legacy driver intentionally has no compact constructor selection:
+        // the inspector must use the selected provider handles, not options.
+        let chunked = block_on(ChunkedFs::open(
+            DynMetadataStore(metadata.clone()),
+            DynBlockStore(blocks.clone()),
+            ChunkedOptions::fixed("layout-probe", 16).unwrap(),
+        ))
+        .unwrap();
+        let close = chunked.clone();
+        let shutdown: Arc<ShutdownCallback> = Arc::new(move || {
+            let close = close.clone();
+            Box::pin(async move { close.shutdown().await })
+        });
+        let mut filesystem =
+            Filesystem::from_driver(Arc::new(chunked.clone()), Some(shutdown), None);
+        filesystem.delegation = Mutex::new(Some(chunked));
+        (filesystem, metadata, blocks)
+    }
+
+    #[test]
+    fn compact_layout_inspector_uses_same_handles_and_redacts_provider_errors() {
+        use std::sync::atomic::Ordering;
+        let (filesystem, metadata, blocks) = layout_probe();
+        let receipt = block_on(filesystem.inspect_compact_layout())
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.backing_id, "cececececececececececececececece");
+        assert_eq!(receipt.structural_generation, u64::MAX.to_string());
+        assert_eq!(metadata.calls.load(Ordering::Acquire), 1);
+        assert_eq!(blocks.calls.load(Ordering::Acquire), 1);
+
+        *metadata.result.lock().unwrap() = Ok(None);
+        assert!(
+            block_on(filesystem.inspect_compact_layout())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(blocks.calls.load(Ordering::Acquire), 1);
+        for code in [ErrorCode::Eio, ErrorCode::Estale, ErrorCode::Enotsup] {
+            *metadata.result.lock().unwrap() = Err(layout_sensitive_error(code));
+            assert_eq!(
+                block_on(filesystem.inspect_compact_layout())
+                    .unwrap_err()
+                    .reason,
+                to_js_error(
+                    FsError::new(code)
+                        .with_syscall("inspect compact layout")
+                        .with_message("compact metadata inspection failed")
+                )
+                .reason
+            );
+            assert_eq!(blocks.calls.load(Ordering::Acquire), 1);
+        }
+        *metadata.result.lock().unwrap() = Ok(Some(InodeModeState {
+            backing: ConcurrentBackingId::from_bytes([0xcf; 16]).unwrap(),
+            structural_generation: 19,
+        }));
+        assert_eq!(
+            block_on(filesystem.inspect_compact_layout())
+                .unwrap_err()
+                .reason,
+            to_js_error(
+                FsError::new(ErrorCode::Estale)
+                    .with_syscall("inspect compact layout")
+                    .with_message("compact block authority verification failed")
+            )
+            .reason
+        );
+        *metadata.result.lock().unwrap() = Ok(Some(InodeModeState {
+            backing: blocks.backing,
+            structural_generation: 19,
+        }));
+        *blocks.error.lock().unwrap() = Some(layout_sensitive_error(ErrorCode::Eacces));
+        assert_eq!(
+            block_on(filesystem.inspect_compact_layout())
+                .unwrap_err()
+                .reason,
+            to_js_error(
+                FsError::new(ErrorCode::Eacces)
+                    .with_syscall("inspect compact layout")
+                    .with_message("compact block authority verification failed")
+            )
+            .reason
+        );
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn compact_layout_inspector_shutdown_waits_and_cancellation_releases_handles() {
+        use std::sync::atomic::Ordering;
+        for cancel in [false, true] {
+            let (filesystem, metadata, blocks) = layout_probe();
+            metadata.ready.store(false, Ordering::Release);
+            let mut inspect = Box::pin(filesystem.inspect_compact_layout());
+            let mut shutdown = Box::pin(filesystem.shutdown());
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(inspect.as_mut().poll(&mut context).is_pending());
+            assert!(shutdown.as_mut().poll(&mut context).is_pending());
+            assert_eq!(metadata.calls.load(Ordering::Acquire), 1);
+            assert_eq!(blocks.calls.load(Ordering::Acquire), 0);
+            if !cancel {
+                metadata.ready.store(true, Ordering::Release);
+                let Poll::Ready(Ok(Some(receipt))) = inspect.as_mut().poll(&mut context) else {
+                    panic!("released inspection must complete");
+                };
+                assert!(receipt.block_authority_verified);
+            }
+            drop(inspect);
+            block_on(shutdown.as_mut()).unwrap();
+            drop(shutdown);
+            let metadata_calls = metadata.calls.load(Ordering::Acquire);
+            let block_calls = blocks.calls.load(Ordering::Acquire);
+            assert_eq!(block_calls, usize::from(!cancel));
+            assert_eq!(
+                block_on(filesystem.inspect_compact_layout())
+                    .unwrap_err()
+                    .reason,
+                to_js_error(FsError::new(ErrorCode::Enotsup)).reason
+            );
+            assert_eq!(metadata.calls.load(Ordering::Acquire), metadata_calls);
+            assert_eq!(blocks.calls.load(Ordering::Acquire), block_calls);
+            let metadata_weak = Arc::downgrade(&metadata);
+            let blocks_weak = Arc::downgrade(&blocks);
+            drop(metadata);
+            drop(blocks);
+            assert!(
+                metadata_weak.upgrade().is_none(),
+                "closed wrapper must not retain metadata"
+            );
+            assert!(
+                blocks_weak.upgrade().is_none(),
+                "closed wrapper must not retain blocks"
+            );
+            drop(filesystem);
+        }
+    }
+
+    #[test]
+    fn compact_option_implies_inode_and_concurrency_but_rejects_explicit_false() {
+        assert_eq!(
+            resolve_chunked_inode_selection(true, None, None, None, false).unwrap(),
+            (true, true)
+        );
+        for (inode, concurrent, mode, checkout) in [
+            (Some(false), None, None, false),
+            (None, Some(false), None, false),
+            (None, None, Some(OwnershipMode::Shared), false),
+            (None, None, None, true),
+        ] {
+            assert!(
+                resolve_chunked_inode_selection(true, inode, concurrent, mode, checkout).is_err()
+            );
+        }
+        assert_eq!(
+            resolve_chunked_inode_selection(false, Some(true), Some(true), None, false).unwrap(),
+            (true, true)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sqlite_journal_options_reject_invalid_selections_before_first_open() {
+        let path = std::env::temp_dir().join(format!(
+            "mount-rs-napi-wal-rejection-{}",
+            std::process::id()
+        ));
+        assert!(!path.exists());
+        for role in ["metadata", "blocks"] {
+            for value in ["delete", "WAL", ""] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.journal_mode = Some(value.into());
+                assert_eq!(
+                    block_on(create_chunked_driver(options))
+                        .err()
+                        .unwrap()
+                        .reason,
+                    config_error(format!("{role}.journalMode must be 'preserve' or 'wal'")).reason
+                );
+                assert!(!path.exists());
+            }
+            for kind in ["memory", "pglite", "tidb", "foundationdb", "r2", "rustfs"] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.kind = kind.into();
+                store.journal_mode = Some("preserve".into());
+                assert_eq!(
+                    block_on(create_chunked_driver(options))
+                        .err()
+                        .unwrap()
+                        .reason,
+                    config_error(format!("{role}.journalMode is not valid for this backend"))
+                        .reason
+                );
+                assert!(!path.exists());
+            }
+            for uri in ["", ":memory:", "file:database.db"] {
+                let mut options = compact_layout_sqlite_options(&path, true, true);
+                let store = if role == "metadata" {
+                    &mut options.metadata
+                } else {
+                    &mut options.blocks
+                };
+                store.uri = Some(uri.into());
+                store.journal_mode = Some("wal".into());
+                assert!(block_on(create_chunked_driver(options)).is_err());
+                assert!(!path.exists());
+            }
+        }
+        let mut options = compact_layout_sqlite_options(&path, true, true);
+        options.metadata.journal_mode = Some("preserve".into());
+        assert_eq!(
+            sqlite_storage_options(&options.metadata, "metadata").unwrap(),
+            SqliteStorageOptions::default()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn create_chunked_driver_forwards_compact_runtime_through_dynamic_stores() {
+        block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-napi-compact-runtime-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let store = |name: &str| JsChunkedStoreOptions {
+                journal_mode: Some("wal".into()),
+                kind: "sqlite".into(),
+                uri: Some(path.join(name).to_string_lossy().into_owned()),
+                key: None,
+                durable: None,
+                lease_authority: None,
+                authority_prefix: None,
+                endpoint: None,
+                bucket: None,
+                region: None,
+                access_key_id: None,
+                secret_access_key: None,
+            };
+            let options = || JsChunkedOptions {
+                metadata: store("metadata.db"),
+                blocks: store("blocks.db"),
+                chunk_size: 16.0,
+                owner: Some("napi-compact".into()),
+                ttl_ms: None,
+                concurrent_writes: None,
+                inode_updates: None,
+                compact_inode_updates: Some(true),
+                ownership_mode: None,
+                checkout_path: None,
+                uid: None,
+                gid: None,
+                umask: None,
+                root_mode: None,
+            };
+            let first = create_chunked_driver(options()).await.unwrap();
+            let driver = first.driver().unwrap();
+            driver.write_file("/file", b"before").await.unwrap();
+            let handle = driver.open("/file", "r+", 0).await.unwrap();
+            handle.write(b"AFTER!", Some(0)).await.unwrap();
+            handle.close().await.unwrap();
+            driver.rename("/file", "/renamed").await.unwrap();
+            drop(driver);
+            first.shutdown().await.unwrap();
+            drop(first);
+            let second = create_chunked_driver(options()).await.unwrap();
+            let driver = second.driver().unwrap();
+            let handle = driver.open("/renamed", "r", 0).await.unwrap();
+            let mut bytes = [0; 6];
+            assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 6);
+            assert_eq!(&bytes, b"AFTER!");
+            assert_eq!(handle.read(&mut bytes, Some(6)).await.unwrap(), 0);
+            handle.close().await.unwrap();
+            drop(driver);
+            second.shutdown().await.unwrap();
+            drop(second);
+            for name in ["metadata.db", "blocks.db"] {
+                let bytes = std::fs::read(path.join(name)).unwrap();
+                assert_eq!(&bytes[..16], b"SQLite format 3\0");
+                // SQLite's persistent header read/write versions are both 2
+                // for WAL. This observes the actual files after clean close.
+                assert_eq!(&bytes[18..20], &[2, 2], "{name} must persist WAL");
+            }
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dynamic_metadata_forwards_compact_identity_and_borrowed_delta() {
+        use mount_rs_core::storage::compact::{
+            CompactInodeCapability, CompactStructuralDelta, StructuralScope,
+        };
+        block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-napi-compact-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let backing = ConcurrentBackingId::from_bytes([0xb7; 16]).unwrap();
+            let store = DynMetadataStore(Arc::new(
+                SqliteMetadataStore::open(path.join("metadata.db")).unwrap(),
+            ));
+            assert_eq!(store.compact_inode_capability(), CompactInodeCapability::V1);
+            store.prepare_bound_concurrent_mode(backing).await.unwrap();
+            let stats = mount_rs_memfs::MemoryFs::empty().stat("/").await.unwrap();
+            let namespace = Namespace {
+                format_version: 1,
+                root: stats.ino,
+                next_inode: stats.ino + 1,
+                default_uid: 3,
+                default_gid: 4,
+                umask: 0o027,
+                default_chunker: mount_rs_core::chunking::ChunkerConfig {
+                    algorithm: "fixed-size".into(),
+                    version: 1,
+                    parameters: std::collections::BTreeMap::from([("chunk_size".into(), 4096)]),
+                },
+                nodes: std::collections::BTreeMap::from([(
+                    stats.ino,
+                    mount_rs_core::storage::NodeMetadata {
+                        stats,
+                        data: mount_rs_core::storage::NodeData::Directory { entries: vec![] },
+                    },
+                )]),
+            };
+            assert_eq!(
+                store
+                    .publish_bound_if_revision(backing, 0, namespace)
+                    .await
+                    .unwrap(),
+                1
+            );
+            assert_eq!(store.compact_inode_mode_state().await.unwrap(), None);
+            store.prepare_compact_inode_mode(backing, 1).await.unwrap();
+            assert_eq!(
+                store.compact_inode_mode_state().await.unwrap(),
+                Some(InodeModeState {
+                    backing,
+                    structural_generation: 2
+                })
+            );
+            let snapshot = store.load_compact_snapshot(backing).await.unwrap();
+            let inode = snapshot.anchor.next_inode;
+            let mut candidate = snapshot.namespace().unwrap();
+            let mut file_stats = candidate.nodes[&candidate.root].stats.clone();
+            file_stats.ino = inode;
+            file_stats.mode = mount_rs_core::S_IFREG | 0o644;
+            file_stats.nlink = 1;
+            candidate.nodes.insert(
+                inode,
+                mount_rs_core::storage::NodeMetadata {
+                    stats: file_stats,
+                    data: mount_rs_core::storage::NodeData::File(
+                        mount_rs_core::storage::FileLayout {
+                            chunker: candidate.default_chunker.clone(),
+                            extents: vec![],
+                        },
+                    ),
+                },
+            );
+            let mount_rs_core::storage::NodeData::Directory { entries } =
+                &mut candidate.nodes.get_mut(&candidate.root).unwrap().data
+            else {
+                panic!()
+            };
+            entries.push(mount_rs_core::storage::DirectoryEntry {
+                name: "file".into(),
+                inode,
+            });
+            candidate.next_inode += 1;
+            let delta =
+                CompactStructuralDelta::capture(&snapshot, &candidate, StructuralScope::FileCreate)
+                    .unwrap();
+            let structural = store.publish_compact_structure(&delta).await.unwrap();
+            assert_eq!(structural.anchor, *delta.next_anchor());
+            assert_eq!(structural.upserts[&inode].node, candidate.nodes[&inode]);
+            let snapshot = store.load_compact_snapshot(backing).await.unwrap();
+            let loaded = store.load_compact_inode(backing, inode).await.unwrap();
+            assert_eq!(
+                loaded,
+                mount_rs_core::storage::compact::LoadedCompactInode::from_guard(
+                    &snapshot.anchor,
+                    inode,
+                    snapshot.guards[&inode].clone(),
+                )
+                .unwrap()
+            );
+            let mut updated = loaded.guard.node.clone();
+            updated.stats.mtime_ms += 1;
+            let receipt = store
+                .publish_compact_inode(
+                    backing,
+                    inode,
+                    loaded.generation,
+                    loaded.guard.identity,
+                    updated.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(receipt.guard.node, updated);
+            assert_eq!(
+                receipt.guard.identity.revision,
+                loaded.guard.identity.revision + 1
+            );
+            let incapable = DynMetadataStore(Arc::new(mount_rs_memory::MemoryMetadataStore::new()));
+            assert_eq!(
+                incapable.compact_inode_capability(),
+                CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                incapable.compact_inode_mode_state().await.unwrap_err().code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .prepare_compact_inode_mode(backing, 1)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .load_compact_snapshot(backing)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .load_compact_inode(backing, inode)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .publish_compact_inode(
+                        backing,
+                        inode,
+                        loaded.generation,
+                        loaded.guard.identity,
+                        updated
+                    )
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            assert_eq!(
+                incapable
+                    .publish_compact_structure(&delta)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Enotsup
+            );
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn dynamic_metadata_preserves_platform_unsupported_compact_capability() {
+        use mount_rs_core::storage::compact::CompactInodeCapability;
+        block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-napi-compact-unsupported-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let store = DynMetadataStore(Arc::new(
+                SqliteMetadataStore::open(path.join("metadata.db")).unwrap(),
+            ));
+            assert_eq!(
+                store.compact_inode_capability(),
+                CompactInodeCapability::Unsupported
+            );
+            assert_eq!(
+                store.compact_inode_mode_state().await.unwrap_err().code,
+                ErrorCode::Enotsup
+            );
+            drop(store);
+            std::fs::remove_dir_all(path).unwrap();
+        });
+    }
+    #[cfg(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    ))]
+    #[test]
+    fn foundationdb_policy_requires_exact_kind_uri_and_prefix_pair() {
+        use FoundationDbBlockAuthorityPolicy::{ExternalBlockStore, SameKeyspace};
+        let config = |kind: &str, uri: &str, key: &str| JsChunkedStoreOptions {
+            journal_mode: None,
+            kind: kind.into(),
+            uri: Some(uri.into()),
+            key: Some(key.into()),
+            durable: Some(true),
+            lease_authority: Some("revision-cas".into()),
+            authority_prefix: None,
+            endpoint: None,
+            bucket: None,
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
+        };
+        let metadata = config("foundationdb", "/cluster", "volume");
+        for (kind, uri, prefix, expected) in [
+            ("foundationdb", "/cluster", "volume", SameKeyspace),
+            ("foundationdb", "/other", "volume", ExternalBlockStore),
+            ("foundationdb", "/cluster", "other", ExternalBlockStore),
+            ("foundationdb", "/./cluster", "volume", ExternalBlockStore),
+            ("r2", "/cluster", "volume", ExternalBlockStore),
+        ] {
+            assert_eq!(
+                foundationdb_metadata_policy(&metadata, &config(kind, uri, prefix)),
+                expected
+            );
+        }
+    }
     use mount_rs_core::{PathGuard, PathIdentity};
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
@@ -4509,9 +6504,81 @@ mod tests {
         }
     }
 
-    struct ConditionalMetadata;
+    struct ConditionalMetadata(
+        Option<Arc<std::sync::atomic::AtomicBool>>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    );
+
+    #[test]
+    fn dynamic_compact_prepare_waits_for_one_delegate_and_preserves_its_error() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Waker};
+
+        let backing = ConcurrentBackingId::from_bytes([0xb8; 16]).unwrap();
+        let gate = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store = DynMetadataStore(Arc::new(ConditionalMetadata(
+            Some(gate.clone()),
+            calls.clone(),
+        )));
+        let mut call = store.prepare_compact_inode_mode(backing, 37);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(matches!(call.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        gate.store(true, Ordering::Release);
+        let Poll::Ready(Err(error)) = call.as_mut().poll(&mut context) else {
+            panic!("delegate error must be returned after release");
+        };
+        assert_eq!(error.code, ErrorCode::Eperm);
+        assert_eq!(error.syscall.as_deref(), Some("compact-probe:prepare"));
+        assert_eq!(error.to_string(), "delegate refused compact prepare");
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
 
     impl MetadataStore for ConditionalMetadata {
+        fn compact_inode_capability(
+            &self,
+        ) -> mount_rs_core::storage::compact::CompactInodeCapability {
+            if self.0.is_some() {
+                mount_rs_core::storage::compact::CompactInodeCapability::V1
+            } else {
+                mount_rs_core::storage::compact::CompactInodeCapability::Unsupported
+            }
+        }
+
+        fn prepare_compact_inode_mode<'a, 'async_trait>(
+            &'a self,
+            backing: ConcurrentBackingId,
+            revision: u64,
+        ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                assert_eq!(
+                    backing,
+                    ConcurrentBackingId::from_bytes([0xb8; 16]).unwrap()
+                );
+                assert_eq!(revision, 37);
+                let gate = self.0.as_ref().expect("compact probe gate");
+                self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                std::future::poll_fn(|_| {
+                    if gate.load(std::sync::atomic::Ordering::Acquire) {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+                Err(FsError::new(ErrorCode::Eperm)
+                    .with_syscall("compact-probe:prepare")
+                    .with_message("delegate refused compact prepare"))
+            })
+        }
+
         fn durable(&self) -> bool {
             true
         }
@@ -4610,8 +6677,87 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn dynamic_metadata_supports_inode_startup_structure_and_existing_writes() {
+        block_on(async {
+            let directory = std::env::temp_dir().join(format!(
+                "mount-rs-napi-inodes-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&directory).unwrap();
+            let metadata = DynMetadataStore(Arc::new(
+                SqliteMetadataStore::open(directory.join("metadata.db")).unwrap(),
+            ));
+            let blocks = DynBlockStore(Arc::new(
+                SqliteBlockStore::open(directory.join("blocks.db")).unwrap(),
+            ));
+            let fs = ChunkedFs::open(
+                metadata.clone(),
+                blocks,
+                ChunkedOptions::fixed("napi-inode", 16)
+                    .unwrap()
+                    .with_inode_updates(true),
+            )
+            .await
+            .unwrap();
+            fs.write_file("/file", b"initial").await.unwrap();
+            let backing = metadata.inode_mode_state().await.unwrap().unwrap().backing;
+            let snapshot = metadata.load_inode_snapshot(backing).await.unwrap();
+            assert!(
+                metadata
+                    .load_inode_snapshot_if_changed(backing, Some(snapshot.structural_generation))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                metadata
+                    .load_inode_snapshot_if_changed(backing, None)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+
+            let handle = fs.open("/file", "r+", 0).await.unwrap();
+            handle.write(b"updated", Some(0)).await.unwrap();
+            let mut bytes = [0; 7];
+            handle.read(&mut bytes, Some(0)).await.unwrap();
+            assert_eq!(&bytes, b"updated");
+            let inode = handle.stat().await.unwrap().ino;
+            let loaded = metadata.load_inode(backing, inode).await.unwrap();
+            assert!(
+                metadata
+                    .load_inode_if_changed(backing, inode, Some(loaded.version))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                metadata
+                    .load_inode_snapshot(backing)
+                    .await
+                    .unwrap()
+                    .structural_generation,
+                snapshot.structural_generation
+            );
+            handle.close().await.unwrap();
+            fs.shutdown().await.unwrap();
+            drop(fs);
+            drop(metadata);
+            std::fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
+    #[test]
     fn dynamic_metadata_forwards_conditional_load_and_provider_errors() {
-        let inner = Arc::new(ConditionalMetadata) as Arc<dyn MetadataStore>;
+        let inner = Arc::new(ConditionalMetadata(
+            None,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )) as Arc<dyn MetadataStore>;
         let metadata = DynMetadataStore(inner);
 
         assert!(block_on(metadata.load_if_changed(7)).unwrap().is_none());
@@ -4627,6 +6773,7 @@ mod tests {
     #[test]
     fn r2_block_durability_preserves_explicit_override() {
         let mut options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "r2".to_owned(),
             uri: None,
             key: Some("mount-rs/test".to_owned()),
@@ -4652,6 +6799,7 @@ mod tests {
     #[test]
     fn rustfs_block_durability_is_only_asserted_when_configured() {
         let mut options = JsChunkedStoreOptions {
+            journal_mode: None,
             kind: "rustfs".to_owned(),
             uri: None,
             key: Some("mount-rs/test".to_owned()),
@@ -4681,6 +6829,1138 @@ mod tests {
         let error = block_on(erased.prepare_concurrent_backing())
             .expect_err("volatile SQLite block preflight must reach the provider");
         assert_eq!(error.code, ErrorCode::Enotsup);
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO=1 and --ignored --exact"]
+    fn dynamic_provider_calls_report_positive_bytes_and_error_outcomes() {
+        assert!(
+            mount_rs_core::diagnostics::storage::enabled(),
+            "run with MOUNT_RS_PROFILE_IO=1"
+        );
+        let before = mount_rs_core::diagnostics::storage::snapshot();
+        let blocks = DynBlockStore(Arc::new(MemoryBlockStore::new()));
+        let id = block_on(blocks.put(b"actual provider bytes")).unwrap();
+        assert_eq!(block_on(blocks.get(&id)).unwrap(), b"actual provider bytes");
+        let missing = BlockId("missing".into());
+        assert!(block_on(blocks.get(&missing)).is_err());
+        let delta = mount_rs_core::diagnostics::storage::snapshot()
+            .delta(&before)
+            .unwrap();
+        let put = delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == "blocks.put")
+            .unwrap();
+        let get = delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == "blocks.get")
+            .unwrap();
+        assert_eq!(put.success, 1);
+        assert_eq!(put.bytes, 21);
+        assert_eq!(get.success, 1);
+        assert_eq!(get.error, 1);
+        assert_eq!(get.bytes, 21);
+        assert_eq!(delta.forwarding_boxes.calls, 3);
+        assert!(delta.forwarding_boxes.requested_object_bytes > 0);
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO=1 and --ignored --exact"]
+    fn live_r2_raw_diagnostics_require_exact_fields() {
+        assert!(storage::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
+        let options = JsChunkedStoreOptions {
+            journal_mode: None,
+            kind: "r2".to_owned(),
+            uri: None,
+            key: Some("private-test-prefix".to_owned()),
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: Some("http://127.0.0.1:9878".to_owned()),
+            bucket: Some("private-test-bucket".to_owned()),
+            region: None,
+            access_key_id: Some("private-test-key".to_owned()),
+            secret_access_key: Some("private-test-secret".to_owned()),
+        };
+        let (_blocks, _) = block_on(build_block_store(&options))
+            .expect("R2 construction and registration requires zero service calls");
+        let exported = storage_diagnostics();
+        let snapshot: Value = serde_json::from_str(&exported).unwrap();
+        let instance = &snapshot["r2"]["instances"][0];
+        assert!(
+            instance["local_work"].is_object(),
+            "enabled live R2 instance must export local_work"
+        );
+        assert_eq!(
+            instance["local_work"]["schema"],
+            "mount-rs.object-store-local.v1"
+        );
+        assert_eq!(
+            instance["local_work"]["scope"],
+            "one_object_store_block_store_instance"
+        );
+        assert_eq!(instance["local_work"]["in_flight"], "0");
+        assert_eq!(instance["local_work"]["saturated"], false);
+        let local_names = instance["local_work"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            local_names,
+            [
+                "sha256.digest",
+                "block_id.encode",
+                "copy.upload_payload",
+                "copy.cache_insert",
+                "copy.return_vec",
+                "cache.lock_acquire",
+                "put.follower_wait"
+            ]
+        );
+        for row in instance["local_work"]["entries"].as_array().unwrap() {
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "elapsed_ns",
+                "latency_max_ns",
+                "input_bytes",
+                "output_bytes",
+            ] {
+                assert_eq!(row[field], "0");
+            }
+            assert_eq!(
+                row["latency_log2_us"].as_array().unwrap(),
+                &vec![json!("0"); 32]
+            );
+        }
+        assert_eq!(
+            snapshot["measurement"]["r2_local"],
+            json!({
+                "schema":"mount-rs.object-store-local.v1","scope":"live_registered_split_r2_block_store_instances",
+                "calls":"fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+                "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+                "input_bytes":"entered_digest_encoding_and_copy_input; waits_zero",
+                "output_bytes":"completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+                "cache_lock_scope":"mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+                "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+                "adapter_compression":"not_used",
+                "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rust_factories_and_mount_r2","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+            })
+        );
+        assert!(
+            instance["raw_api"].is_object(),
+            "enabled live R2 instance must export raw_api"
+        );
+        assert_eq!(
+            snapshot["schema_version"],
+            "mount-rs.storage-diagnostics.v3"
+        );
+        assert!(instance["id"].is_string());
+        assert_eq!(instance["raw_api"]["entries"][0]["calls"], "0");
+        assert_eq!(
+            instance["raw_api"]["schema"],
+            "mount-rs.object-store-api.v1"
+        );
+        assert_eq!(
+            instance["raw_api"]["scope"],
+            "one_object_store_block_store_instance"
+        );
+        assert_eq!(instance["raw_api"]["saturated"], false);
+        assert_eq!(instance["raw_api"]["pending_claims"], "0");
+        assert_eq!(instance["raw_api"]["in_flight"], "0");
+        let names = instance["raw_api"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "put_opts.block_create",
+                "get.block_read",
+                "body_read.block_read",
+                "get.conflict_verify",
+                "body_read.conflict_verify",
+                "get.migration",
+                "body_read.migration",
+                "head.direct_delete",
+                "delete.direct",
+                "delete.reconcile"
+            ]
+        );
+        let claims = instance["raw_api"]["claims"].as_object().unwrap();
+        assert_eq!(claims.len(), 8);
+        for field in [
+            "leader_claims",
+            "leader_success",
+            "leader_error",
+            "leader_cancelled",
+            "follower_claims",
+            "follower_success",
+            "follower_error",
+            "follower_cancelled",
+        ] {
+            assert_eq!(claims[field], "0");
+        }
+        assert_eq!(snapshot["r2"]["scope"], "process_live_instances");
+        assert_eq!(
+            snapshot["measurement"]["r2_api"]["scope"],
+            "live_registered_split_r2_block_store_instances"
+        );
+        assert_eq!(
+            snapshot["measurement"]["r2_api"]["reconcile_listing"],
+            "unavailable"
+        );
+        assert_eq!(
+            snapshot["measurement"]["r2_api"]["latency_max"],
+            "cumulative_per_instance; exact_phase_max_unavailable"
+        );
+        for row in instance["raw_api"]["entries"].as_array().unwrap() {
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "elapsed_ns",
+                "latency_max_ns",
+                "attempted_bytes",
+                "confirmed_bytes",
+                "returned_bytes",
+            ] {
+                assert_eq!(row[field], "0");
+            }
+            assert_eq!(
+                row["latency_log2_us"].as_array().unwrap(),
+                &vec![json!("0"); 32]
+            );
+        }
+        let mut extremes = json!({"id":u64::MAX,"claims":{"leader_claims":9_007_199_254_740_993_u64},"latency_log2_us":[u64::MAX]});
+        stringify_counters(&mut extremes);
+        assert_eq!(extremes["id"], "18446744073709551615");
+        assert_eq!(extremes["claims"]["leader_claims"], "9007199254740993");
+        assert_eq!(extremes["latency_log2_us"][0], "18446744073709551615");
+        let store = R2_DIAGNOSTICS.get().unwrap().lock().unwrap()[0]
+            .store
+            .upgrade()
+            .unwrap();
+        let mut stats = store.stats();
+        let local = stats.local_work.as_mut().unwrap();
+        local.entries[0].input_bytes = u64::MAX;
+        local.entries[0].output_bytes = 9_007_199_254_740_993;
+        local.entries[0].latency_log2_us[31] = u64::MAX;
+        let mut actual_instance = object_store_instance_diagnostics(u64::MAX, stats);
+        stringify_counters(&mut actual_instance);
+        assert_eq!(actual_instance["id"], "18446744073709551615");
+        assert_eq!(
+            actual_instance["local_work"]["entries"][0]["input_bytes"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            actual_instance["local_work"]["entries"][0]["output_bytes"],
+            "9007199254740993"
+        );
+        assert_eq!(
+            actual_instance["local_work"]["entries"][0]["latency_log2_us"][31],
+            "18446744073709551615"
+        );
+        for private in [
+            "private-test-prefix",
+            "private-test-bucket",
+            "private-test-key",
+            "private-test-secret",
+            "127.0.0.1",
+        ] {
+            assert!(!exported.contains(private));
+        }
+        // Fixed counters/metadata only; retained to check the actual serializer
+        // contract against the Node consumer without any backing-store I/O.
+        eprintln!("NATIVE_R2_RAW_JSON {exported}");
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO unset and --ignored --exact"]
+    fn disabled_r2_local_diagnostics_do_not_register_instances() {
+        assert!(!storage::enabled(), "run with MOUNT_RS_PROFILE_IO unset");
+        let options = JsChunkedStoreOptions {
+            journal_mode: None,
+            kind: "r2".to_owned(),
+            uri: None,
+            key: Some("private-disabled-prefix".to_owned()),
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: Some("http://127.0.0.1:9878".to_owned()),
+            bucket: Some("private-disabled-bucket".to_owned()),
+            region: None,
+            access_key_id: Some("private-disabled-key".to_owned()),
+            secret_access_key: Some("private-disabled-secret".to_owned()),
+        };
+        let (_blocks, _) = block_on(build_block_store(&options)).unwrap();
+        let snapshot: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert_eq!(snapshot["r2"]["instances"], json!([]));
+        let unregistered = R2BlockStore::from_config_with_durable(
+            &R2Config {
+                endpoint: "http://127.0.0.1:9878".to_owned(),
+                bucket: "private-disabled-bucket".to_owned(),
+                access_key_id: "private-disabled-key".to_owned(),
+                secret_access_key: "private-disabled-secret".to_owned(),
+                state_key: "unused".to_owned(),
+            },
+            "private-disabled-prefix",
+            true,
+        )
+        .unwrap();
+        let actual_instance = object_store_instance_diagnostics(1, unregistered.stats());
+        assert_eq!(actual_instance["raw_api"], Value::Null);
+        assert_eq!(actual_instance["local_work"], Value::Null);
+        eprintln!(
+            "NATIVE_LOCAL_DISABLED_CONTROL registered_instances=0 raw_api=null local_work=null service_calls=0"
+        );
+    }
+
+    fn inert_diagnostic_store_options(kind: &str, prefix: &str) -> JsChunkedStoreOptions {
+        JsChunkedStoreOptions {
+            journal_mode: None,
+            kind: kind.to_owned(),
+            uri: None,
+            key: Some(prefix.to_owned()),
+            durable: None,
+            lease_authority: None,
+            authority_prefix: None,
+            endpoint: Some("http://127.0.0.1:9878".to_owned()),
+            bucket: Some("private-rustfs-diagnostic-bucket".to_owned()),
+            region: (kind == "rustfs").then(|| "private-diagnostic-region".to_owned()),
+            access_key_id: Some("private-rustfs-diagnostic-key".to_owned()),
+            secret_access_key: Some("private-rustfs-diagnostic-secret".to_owned()),
+        }
+    }
+
+    fn assert_zero_object_store_diagnostic_instance(instance: &Value) {
+        assert!(instance["id"].as_str().unwrap().parse::<u64>().unwrap() > 0);
+        for field in [
+            "puts",
+            "gets",
+            "deletes",
+            "reconciles",
+            "successes",
+            "errors",
+            "duration_ms_total",
+            "duration_ms_max",
+            "bytes_read",
+            "bytes_written",
+            "conditional_conflicts",
+            "id_collision_exhausted",
+            "retry_exhausted",
+            "cache_hits",
+        ] {
+            assert_eq!(instance[field], "0", "initial logical {field}");
+        }
+        let raw = &instance["raw_api"];
+        assert_eq!(raw["schema"], "mount-rs.object-store-api.v1");
+        assert_eq!(raw["scope"], "one_object_store_block_store_instance");
+        assert_eq!(raw["saturated"], false);
+        assert_eq!(raw["in_flight"], "0");
+        assert_eq!(raw["pending_claims"], "0");
+        let claims = raw["claims"].as_object().unwrap();
+        assert_eq!(claims.len(), 8);
+        for field in [
+            "leader_claims",
+            "leader_success",
+            "leader_error",
+            "leader_cancelled",
+            "follower_claims",
+            "follower_success",
+            "follower_error",
+            "follower_cancelled",
+        ] {
+            assert_eq!(claims[field], "0");
+        }
+        let rows = raw["entries"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "put_opts.block_create",
+                "get.block_read",
+                "body_read.block_read",
+                "get.conflict_verify",
+                "body_read.conflict_verify",
+                "get.migration",
+                "body_read.migration",
+                "head.direct_delete",
+                "delete.direct",
+                "delete.reconcile",
+            ]
+        );
+        for row in rows {
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "elapsed_ns",
+                "latency_max_ns",
+                "attempted_bytes",
+                "confirmed_bytes",
+                "returned_bytes",
+            ] {
+                assert_eq!(row[field], "0");
+            }
+            assert_eq!(row["latency_log2_us"], json!(vec!["0"; 32]));
+        }
+        let local = &instance["local_work"];
+        assert_eq!(local["schema"], "mount-rs.object-store-local.v1");
+        assert_eq!(local["scope"], "one_object_store_block_store_instance");
+        assert_eq!(local["saturated"], false);
+        assert_eq!(local["in_flight"], "0");
+        let rows = local["entries"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "sha256.digest",
+                "block_id.encode",
+                "copy.upload_payload",
+                "copy.cache_insert",
+                "copy.return_vec",
+                "cache.lock_acquire",
+                "put.follower_wait",
+            ]
+        );
+        for row in rows {
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "elapsed_ns",
+                "latency_max_ns",
+                "input_bytes",
+                "output_bytes",
+            ] {
+                assert_eq!(row[field], "0");
+            }
+            assert_eq!(row["latency_log2_us"], json!(vec!["0"; 32]));
+        }
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO=1 and --ignored --exact"]
+    fn live_rustfs_diagnostics_register_export_and_retire_without_backend_io() {
+        assert!(storage::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
+        let options = inert_diagnostic_store_options("rustfs", "private-rustfs-diagnostic-prefix");
+        let (blocks, _) = block_on(build_block_store(&options))
+            .expect("RustFS construction does not invoke a backend method");
+        let exported = storage_diagnostics();
+        let snapshot: Value = serde_json::from_str(&exported).unwrap();
+        assert!(
+            snapshot["rustfs"].is_object(),
+            "enabled split RustFS constructor must export its separate registry"
+        );
+        assert_eq!(
+            snapshot["schema_version"],
+            "mount-rs.storage-diagnostics.v3"
+        );
+        assert_eq!(snapshot["rustfs"]["scope"], "process_live_instances");
+        assert_eq!(
+            snapshot["rustfs"]["internal_successful_retries"],
+            "unavailable"
+        );
+        let instances = snapshot["rustfs"]["instances"].as_array().unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_zero_object_store_diagnostic_instance(&instances[0]);
+        assert_eq!(snapshot["r2"]["instances"], json!([]));
+        assert_eq!(
+            snapshot["measurement"]["rustfs"],
+            "live_store_logical_calls_and_cache_hits; not_http_attempts"
+        );
+        assert_eq!(
+            snapshot["measurement"]["rustfs_api"],
+            json!({
+                "schema":"mount-rs.object-store-api.v1","scope":"live_registered_split_rustfs_block_store_instances",
+                "calls":"object_store_adapter_method_invocations; not_http_attempts_or_internal_retries",
+                "duration":"inclusive_wall_nanoseconds_at_invoked_adapter_await; excludes_argument_preparation",
+                "upload_bytes":"attempted=submitted_payload; confirmed=put_opts_ok_only",
+                "returned_bytes":"successful_body_materialization_before_integrity_validation",
+                "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+                "reconcile_listing":"unavailable",
+                "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rustfs_factories","internal_client_retries"]
+            })
+        );
+        assert_eq!(
+            snapshot["measurement"]["rustfs_local"],
+            json!({
+                "schema":"mount-rs.object-store-local.v1","scope":"live_registered_split_rustfs_block_store_instances",
+                "calls":"fixed_local_adapter_work_invocations; not_backend_requests_or_allocations",
+                "duration":"inclusive_wall_nanoseconds; nested_and_parallel_spans_overlap",
+                "input_bytes":"entered_digest_encoding_and_copy_input; waits_zero",
+                "output_bytes":"completed_digest_32_id_65_and_actual_copy_bytes; waits_zero",
+                "cache_lock_scope":"mutex_acquisition_including_wait; excludes_lock_hold_and_lru_work",
+                "latency_max":"cumulative_per_instance; exact_phase_max_unavailable",
+                "adapter_compression":"not_used",
+                "excluded":["backing_marker_prepare_and_verify","concurrent_prefix_probes","qualification_and_preflight","unregistered_rustfs_factories","client_internal_work","cache_key_and_lru_work","upload_claim_setup"]
+            })
+        );
+        for private in [
+            "private-rustfs-diagnostic-prefix",
+            "private-rustfs-diagnostic-bucket",
+            "private-rustfs-diagnostic-key",
+            "private-rustfs-diagnostic-secret",
+            "private-diagnostic-region",
+            "127.0.0.1",
+        ] {
+            assert!(
+                !exported.contains(private),
+                "private constructor label leaked"
+            );
+        }
+
+        // Exercise the production projection with constructor stats and boundary
+        // values in a copied snapshot; the live counter bank is untouched.
+        let unregistered = RustFsBlockStore::from_config(
+            &RustFsConfig {
+                endpoint: options.endpoint.clone().unwrap(),
+                bucket: options.bucket.clone().unwrap(),
+                region: options.region.clone().unwrap(),
+                access_key_id: options.access_key_id.clone().unwrap(),
+                secret_access_key: options.secret_access_key.clone().unwrap(),
+            },
+            "private-unregistered-rustfs-prefix",
+            false,
+        )
+        .unwrap();
+        let mut stats = unregistered.stats();
+        stats.bytes_written = u64::MAX;
+        let raw = stats.raw_api.as_mut().unwrap();
+        raw.claims.leader_claims = 9_007_199_254_740_993;
+        raw.entries[0].attempted_bytes = u64::MAX;
+        let local = stats.local_work.as_mut().unwrap();
+        local.entries[0].input_bytes = u64::MAX;
+        local.entries[0].output_bytes = 9_007_199_254_740_993;
+        local.entries[0].latency_log2_us[31] = u64::MAX;
+        let mut projected = object_store_instance_diagnostics(u64::MAX, stats);
+        stringify_counters(&mut projected);
+        assert_eq!(projected["id"], "18446744073709551615");
+        assert_eq!(projected["bytes_written"], "18446744073709551615");
+        assert_eq!(
+            projected["raw_api"]["claims"]["leader_claims"],
+            "9007199254740993"
+        );
+        assert_eq!(
+            projected["raw_api"]["entries"][0]["attempted_bytes"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            projected["local_work"]["entries"][0]["input_bytes"],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            projected["local_work"]["entries"][0]["output_bytes"],
+            "9007199254740993"
+        );
+        assert_eq!(
+            projected["local_work"]["entries"][0]["latency_log2_us"][31],
+            "18446744073709551615"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&storage_diagnostics()).unwrap()["rustfs"]["instances"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "direct RustFS factories remain outside the registration scope"
+        );
+
+        let first_id = instances[0]["id"].clone();
+        let retained = blocks.clone();
+        drop(blocks);
+        assert_eq!(
+            serde_json::from_str::<Value>(&storage_diagnostics()).unwrap()["rustfs"],
+            snapshot["rustfs"],
+            "the exported identity survives while its constructor Arc is retained"
+        );
+        let (second, _) = block_on(build_block_store(&inert_diagnostic_store_options(
+            "rustfs",
+            "private-second-rustfs-prefix",
+        )))
+        .unwrap();
+        let with_second: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        let second_instances = with_second["rustfs"]["instances"].as_array().unwrap();
+        assert_eq!(second_instances.len(), 2);
+        let second_id = second_instances[1]["id"].clone();
+        assert_ne!(first_id, second_id);
+        let (r2, _) = block_on(build_block_store(&inert_diagnostic_store_options(
+            "r2",
+            "private-independent-r2-prefix",
+        )))
+        .unwrap();
+        let with_r2: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert_eq!(
+            with_r2["rustfs"], with_second["rustfs"],
+            "R2 construction cannot enter or change RustFS diagnostics"
+        );
+        assert_eq!(with_r2["r2"]["instances"].as_array().unwrap().len(), 1);
+        assert_zero_object_store_diagnostic_instance(&with_r2["r2"]["instances"][0]);
+        drop(retained);
+        let retired: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert_eq!(retired["rustfs"]["instances"].as_array().unwrap().len(), 1);
+        assert_eq!(retired["rustfs"]["instances"][0]["id"], second_id);
+        assert_eq!(retired["r2"], with_r2["r2"]);
+        drop(second);
+        let empty: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert_eq!(empty["rustfs"]["instances"], json!([]));
+        assert_eq!(empty["r2"], with_r2["r2"]);
+        drop(r2);
+        assert_eq!(
+            serde_json::from_str::<Value>(&storage_diagnostics()).unwrap()["r2"]["instances"],
+            json!([])
+        );
+        eprintln!("NATIVE_RUSTFS_CONSTRUCTOR_JSON {exported}");
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO unset and --ignored --exact"]
+    fn disabled_rustfs_diagnostics_do_not_register_instances() {
+        assert!(!storage::enabled(), "run with MOUNT_RS_PROFILE_IO unset");
+        let options = inert_diagnostic_store_options("rustfs", "private-disabled-rustfs-prefix");
+        let (_blocks, _) = block_on(build_block_store(&options)).unwrap();
+        let snapshot: Value = serde_json::from_str(&storage_diagnostics()).unwrap();
+        assert!(
+            snapshot["rustfs"].is_object(),
+            "disabled RustFS export must retain explicit family availability"
+        );
+        assert_eq!(snapshot["rustfs"]["instances"], json!([]));
+        assert_eq!(snapshot["r2"]["instances"], json!([]));
+        let unregistered = RustFsBlockStore::from_config(
+            &RustFsConfig {
+                endpoint: options.endpoint.unwrap(),
+                bucket: options.bucket.unwrap(),
+                region: options.region.unwrap(),
+                access_key_id: options.access_key_id.unwrap(),
+                secret_access_key: options.secret_access_key.unwrap(),
+            },
+            "private-disabled-unregistered-rustfs-prefix",
+            false,
+        )
+        .unwrap();
+        let stats = unregistered.stats();
+        assert!(stats.raw_api.is_none());
+        assert!(stats.local_work.is_none());
+        let projected = object_store_instance_diagnostics(1, stats);
+        assert_eq!(projected["raw_api"], Value::Null);
+        assert_eq!(projected["local_work"], Value::Null);
+        eprintln!(
+            "NATIVE_RUSTFS_DISABLED_CONTROL registered_instances=0 raw_api=null local_work=null constructor_only=true"
+        );
+    }
+
+    #[test]
+    fn native_storage_snapshot_serializes_exact_decimal_counters() {
+        let json = storage_diagnostics();
+        let snapshot: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            snapshot["schema_version"],
+            "mount-rs.storage-diagnostics.v3"
+        );
+        assert_eq!(
+            snapshot["measurement"]["storage_operations"],
+            json!(storage::operation_names())
+        );
+        let families = snapshot["measurement"]["storage_families"]
+            .as_object()
+            .unwrap();
+        assert_eq!(families.len(), 24);
+        let declared = families
+            .values()
+            .flat_map(|family| family["operations"].as_array().unwrap())
+            .map(|name| name.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(declared.len(), 118);
+        assert_eq!(
+            declared
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            storage::operation_names()
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(families["sdk_provider"]["returned_rows"], "unavailable");
+        assert_eq!(families["tidb_transaction"]["bytes"], "unavailable");
+        assert_eq!(
+            families["tidb_pool_checkout"]["duration"],
+            "inclusive_checkout_nanoseconds_including_lazy_connect_and_session_configuration; queue_only_wait_unavailable"
+        );
+        assert_eq!(
+            families["tidb_sql"]["returned_rows"],
+            "known_returned_sql_rows; observations_count_successes_with_known_rows; excludes_affected_rows"
+        );
+        assert_eq!(families["foundationdb_transaction"]["bytes"], "unavailable");
+        assert_eq!(
+            families["foundationdb_read"]["returned_rows"],
+            "unavailable"
+        );
+        assert_eq!(
+            families["foundationdb_read"]["bytes"],
+            "known_selected_successful_returned_value_key_and_range_page_key_value_payload_bytes_only"
+        );
+        let names = storage::operation_names();
+        assert_eq!(names.len(), 118);
+        assert_eq!(
+            &names[110..116],
+            OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS
+        );
+        assert_eq!(
+            families["object_store_backing_marker"]["operations"],
+            json!(OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS)
+        );
+        assert_eq!(
+            families["object_store_backing_marker"]["returned_rows"],
+            "unavailable"
+        );
+        for (index, name) in names[110..116].iter().enumerate() {
+            assert_eq!(snapshot["storage"]["entries"][110 + index]["name"], *name);
+        }
+        assert_eq!(
+            &names[116..118],
+            &[
+                "sdk.metadata.compact_root_file_capability",
+                "sdk.metadata.load_compact_root_file",
+            ]
+        );
+        for (index, name) in names[116..118].iter().enumerate() {
+            assert_eq!(snapshot["storage"]["entries"][116 + index]["name"], *name);
+        }
+        assert_eq!(
+            &names[78..85],
+            &[
+                "foundationdb.transaction.create",
+                "foundationdb.transaction.closure_attempt",
+                "foundationdb.read.get",
+                "foundationdb.read.get_key",
+                "foundationdb.read.get_range_page",
+                "foundationdb.transaction.commit",
+                "foundationdb.transaction.on_error",
+            ]
+        );
+        assert_eq!(
+            &names[85..91],
+            &[
+                "blob_cache.miss.admission_wait",
+                "blob_cache.miss.singleflight_wait",
+                "blob_cache.ram.lookup",
+                "blob_cache.disk.lookup",
+                "blob_cache.peer.connection_lock_wait",
+                "blob_cache.peer.connection_establish",
+            ]
+        );
+        assert_eq!(families["blob_cache"]["operations"], json!(&names[85..91]));
+        assert_eq!(families["blob_cache"]["returned_rows"], "unavailable");
+        assert_eq!(
+            families["blob_cache"]["bytes"],
+            "known_successful_ram_and_disk_lookup_returned_payload_bytes_only; waits_and_connection_stages_zero; misses_zero"
+        );
+        assert_eq!(&names[91..92], &["client.quic.open_bi"]);
+        assert_eq!(families["client_quic"]["operations"], json!(&names[91..92]));
+        assert_eq!(families["client_quic"]["bytes"], "unavailable");
+        assert_eq!(families["client_quic"]["returned_rows"], "unavailable");
+        assert!(!storage_instrumented_operation_names().contains(&"client.quic.open_bi"));
+        assert_eq!(
+            &names[92..100],
+            &[
+                "client.quic.request_send",
+                "client.quic.response_receive",
+                "blob_cache.peer.request_byte_admission_wait",
+                "blob_cache.peer.open_bi",
+                "blob_cache.peer.request_send",
+                "blob_cache.peer.response_receive",
+                "blob_cache.peer.get",
+                "blob_cache.peer.get_miss",
+            ]
+        );
+        assert_eq!(
+            &names[100..108],
+            &[
+                "client.websocket.tcp_connect",
+                "client.websocket.tls_handshake",
+                "client.websocket.upgrade",
+                "client.websocket.socket_lock_wait",
+                "client.websocket.request_encode",
+                "client.websocket.request_send",
+                "client.websocket.response_receive",
+                "client.websocket.response_decode",
+            ]
+        );
+        assert_eq!(
+            families["client_websocket"]["operations"],
+            json!(&names[100..108])
+        );
+        assert_eq!(
+            families["client_websocket"]["calls"],
+            "client_stage_invocations; includes_success_error_and_cancellation; not_requests_or_acknowledgments"
+        );
+        assert_eq!(families["client_websocket"]["bytes"], "unavailable");
+        assert_eq!(families["client_websocket"]["returned_rows"], "unavailable");
+        assert_eq!(
+            families["client_websocket"]["duration"],
+            "inclusive_stage_wall_nanoseconds; nested_and_parallel_spans_overlap; not_exclusive_cpu_or_network_time"
+        );
+        assert!(
+            storage_instrumented_operation_names()
+                .iter()
+                .all(|name| !name.starts_with("client."))
+        );
+        for (index, family) in [
+            "client_quic_request_send",
+            "client_quic_response_receive",
+            "blob_cache_peer_request_byte_admission_wait",
+            "blob_cache_peer_open_bi",
+            "blob_cache_peer_request_send",
+            "blob_cache_peer_response_receive",
+            "blob_cache_peer_get",
+            "blob_cache_peer_get_miss",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(families[*family]["operations"], json!([names[92 + index]]));
+            assert_eq!(families[*family]["returned_rows"], "unavailable");
+            assert!(!storage_instrumented_operation_names().contains(&names[92 + index]));
+        }
+        assert_eq!(
+            families["blob_cache_peer_request_send"]["bytes"],
+            "known_successfully_submitted_plaintext_request_header_and_payload_bytes; not_wire_bytes_or_acknowledgments"
+        );
+        assert_eq!(
+            families["blob_cache_peer_response_receive"]["bytes"],
+            "known_successfully_validated_plaintext_status_and_body_bytes; not_wire_bytes"
+        );
+        assert_eq!(
+            families["blob_cache_peer_get"]["bytes"],
+            "known_successful_logical_get_payload_bytes; misses_zero"
+        );
+        assert_eq!(
+            families["blob_cache_peer_get_miss"]["duration"],
+            "classification_marker_nanoseconds; excludes_get_request_duration"
+        );
+        for family in [
+            "client_quic_request_send",
+            "client_quic_response_receive",
+            "blob_cache_peer_request_byte_admission_wait",
+            "blob_cache_peer_open_bi",
+            "blob_cache_peer_get_miss",
+        ] {
+            assert_eq!(families[family]["bytes"], "unavailable");
+        }
+        assert_eq!(
+            snapshot["measurement"]["storage_bytes"],
+            "known_successful_stage_specific_bytes; payload_or_plaintext_envelope_as_declared_by_family; zero_does_not_establish_no_payload"
+        );
+        assert_eq!(LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS.len(), 60);
+        assert_eq!(&names[..60], LEGACY_NON_TIDB_INSTRUMENTED_OPERATIONS);
+        assert_eq!(
+            &names[60..78],
+            mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE.operations
+        );
+        assert_eq!(
+            snapshot["measurement"]["storage_instrumented_operations"],
+            json!(storage_instrumented_operation_names())
+        );
+        let coverage = &snapshot["measurement"]["tidb_coverage"];
+        assert_eq!(coverage["status"], "source_sites_instrumented");
+        assert_eq!(coverage["pool_checkout_sites"], "38");
+        assert_eq!(coverage["transaction_begin_sites"], "4");
+        assert_eq!(coverage["transaction_rollback_sites"], "11");
+        assert_eq!(coverage["sql_statement_sites"], "80");
+        assert_eq!(
+            coverage["operations"],
+            json!(mount_rs_tidb::TIDB_DIAGNOSTIC_COVERAGE.operations)
+        );
+        assert_eq!(coverage["operations"].as_array().unwrap().len(), 18);
+        for field in [
+            "session_configure_sites",
+            "schema_initialize_sites",
+            "metadata_open_sites",
+            "transaction_begin_sites",
+            "transaction_commit_sites",
+            "transaction_rollback_sites",
+        ] {
+            assert!(
+                coverage[field].is_string(),
+                "exact static site count {field}"
+            );
+        }
+        assert_eq!(
+            snapshot["storage"]["entries"].as_array().unwrap().len(),
+            118
+        );
+        for (index, name) in names[91..110].iter().enumerate() {
+            let transport_row = &snapshot["storage"]["entries"][91 + index];
+            assert_eq!(transport_row["name"], *name);
+            for field in [
+                "calls",
+                "success",
+                "error",
+                "cancelled",
+                "bytes",
+                "elapsed_ns",
+                "in_flight",
+                "returned_rows",
+                "returned_row_observations",
+            ] {
+                assert_eq!(transport_row[field], "0");
+            }
+            assert_eq!(transport_row["latency_log2_us"], json!(vec!["0"; 32]));
+        }
+        for (index, name) in names[78..85].iter().enumerate() {
+            let row = &snapshot["storage"]["entries"][78 + index];
+            assert_eq!(row["name"], *name);
+            assert_eq!(row["returned_rows"], "0");
+            assert_eq!(row["returned_row_observations"], "0");
+            assert_eq!(row["latency_log2_us"].as_array().unwrap().len(), 32);
+            assert_eq!(
+                row.as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                [
+                    "bytes",
+                    "calls",
+                    "cancelled",
+                    "elapsed_ns",
+                    "error",
+                    "in_flight",
+                    "latency_log2_us",
+                    "name",
+                    "returned_row_observations",
+                    "returned_rows",
+                    "success",
+                ]
+            );
+        }
+        for row in snapshot["storage"]["entries"].as_array().unwrap() {
+            for field in ["in_flight", "returned_rows", "returned_row_observations"] {
+                assert!(row[field].is_string(), "exact driver counter {field}");
+            }
+        }
+        assert!(snapshot["storage"]["entries"][0]["calls"].is_string());
+        assert!(snapshot["storage"]["forwarding_boxes"]["calls"].is_string());
+        assert!(snapshot["storage"]["forwarding_boxes"]["requested_object_bytes"].is_string());
+        let profile = snapshot["profile"]["entries"].as_array().unwrap();
+        assert_eq!(profile.len(), 136);
+        assert_eq!(profile[134]["name"], "blob_cache.ram.hit_bytes");
+        assert_eq!(profile[135]["name"], "blob_cache.disk.hit_bytes");
+        for row in &profile[134..] {
+            for field in ["calls", "elapsed_ns", "units"] {
+                assert!(row[field].is_string(), "exact cache hit counter {field}");
+            }
+        }
+        assert_eq!(
+            snapshot["measurement"]["latency_histogram"]["intervals"]
+                .as_array()
+                .unwrap()
+                .len(),
+            32
+        );
+        assert_eq!(
+            snapshot["measurement"]["latency_histogram"]["intervals"][31]["upper_exclusive_us"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            snapshot["measurement"]["unavailable"]["tidb_pool_wait"],
+            "isolated_queue_only_wait_unavailable"
+        );
+        assert_eq!(
+            snapshot["backend_waits"]["tidb_pool"],
+            "instrumented_inclusive_checkout_including_lazy_connect_and_session_configuration"
+        );
+        assert_eq!(snapshot["http_attempts"], "unavailable");
+        assert!(!json.contains("test-secret"));
+        eprintln!("NATIVE_STORAGE_DRIVER_JSON {json}");
+    }
+
+    #[test]
+    fn foundationdb_coverage_reports_feature_availability_without_backend() {
+        let json = storage_diagnostics();
+        let snapshot: Value = serde_json::from_str(&json).unwrap();
+        let coverage = &snapshot["measurement"]["foundationdb_coverage"];
+        let instrumented = snapshot["measurement"]["storage_instrumented_operations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS.len(), 6);
+        for name in OBJECT_STORE_BACKING_MARKER_INSTRUMENTED_OPERATIONS {
+            assert!(instrumented.contains(&json!(name)));
+        }
+        assert_eq!(
+            coverage["schema"],
+            "mount-rs-foundationdb-client-diagnostic-coverage-v1"
+        );
+        assert_eq!(
+            snapshot["measurement"]["storage_operations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            118
+        );
+        assert!(
+            instrumented
+                .iter()
+                .all(|name| !name.as_str().unwrap().starts_with("blob_cache.")),
+            "cache bank declarations do not establish addon source coverage"
+        );
+        assert!(
+            instrumented
+                .iter()
+                .all(|name| !name.as_str().unwrap().starts_with("client.")),
+            "client transport declarations do not establish addon source coverage"
+        );
+        #[cfg(all(
+            feature = "foundationdb",
+            any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "linux", target_arch = "aarch64"),
+                all(target_os = "macos", target_arch = "x86_64"),
+                all(target_os = "macos", target_arch = "aarch64"),
+            )
+        ))]
+        {
+            let source = &mount_rs_foundationdb::FOUNDATIONDB_DIAGNOSTIC_COVERAGE;
+            assert_eq!(coverage["status"], "source_sites_instrumented");
+            assert_eq!(coverage["transaction_runner_sites"], "6");
+            assert_eq!(coverage["point_get_sites"], "2");
+            assert_eq!(coverage["get_key_sites"], "1");
+            assert_eq!(coverage["range_consumer_sites"], "3");
+            assert_eq!(coverage["operations"], json!(source.operations));
+            assert_eq!(coverage["unavailable"], json!(source.unavailable));
+            assert_eq!(coverage["attempt_scope"], source.attempt_scope);
+            assert_eq!(coverage["payload_bytes_scope"], source.payload_bytes_scope);
+            assert_eq!(coverage["returned_rows_scope"], source.returned_rows_scope);
+            assert_eq!(coverage.as_object().unwrap().len(), 11);
+            for name in source.operations {
+                assert!(instrumented.contains(&json!(name)));
+            }
+            assert_eq!(instrumented.len(), 91);
+        }
+        #[cfg(not(all(
+            feature = "foundationdb",
+            any(
+                all(target_os = "linux", target_arch = "x86_64"),
+                all(target_os = "linux", target_arch = "aarch64"),
+                all(target_os = "macos", target_arch = "x86_64"),
+                all(target_os = "macos", target_arch = "aarch64"),
+            )
+        )))]
+        {
+            assert_eq!(
+                coverage,
+                &json!({
+                    "schema":"mount-rs-foundationdb-client-diagnostic-coverage-v1",
+                    "status":"unavailable",
+                    "reason":"feature_disabled_or_unsupported_target",
+                    "operations":[]
+                })
+            );
+            assert_eq!(instrumented.len(), 84);
+            assert!(
+                instrumented
+                    .iter()
+                    .all(|name| !name.as_str().unwrap().starts_with("foundationdb."))
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "run isolated with MOUNT_RS_PROFILE_IO=1 and --ignored --exact"]
+    fn polled_then_dropped_provider_future_counts_cancellation() {
+        struct PendingBlocks;
+        impl BlockStore for PendingBlocks {
+            fn durable(&self) -> bool {
+                false
+            }
+            fn put<'a, 'b, 'async_trait>(
+                &'a self,
+                _: &'b [u8],
+            ) -> Pin<Box<dyn Future<Output = CoreResult<BlockId>> + Send + 'async_trait>>
+            where
+                'a: 'async_trait,
+                'b: 'async_trait,
+                Self: 'async_trait,
+            {
+                Box::pin(std::future::pending())
+            }
+            fn get<'a, 'b, 'async_trait>(
+                &'a self,
+                _: &'b BlockId,
+            ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<u8>>> + Send + 'async_trait>>
+            where
+                'a: 'async_trait,
+                'b: 'async_trait,
+                Self: 'async_trait,
+            {
+                Box::pin(std::future::pending())
+            }
+            fn flush<'a, 'async_trait>(
+                &'a self,
+            ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+            where
+                'a: 'async_trait,
+                Self: 'async_trait,
+            {
+                Box::pin(std::future::pending())
+            }
+            fn delete<'a, 'b, 'async_trait>(
+                &'a self,
+                _: &'b BlockId,
+            ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+            where
+                'a: 'async_trait,
+                'b: 'async_trait,
+                Self: 'async_trait,
+            {
+                Box::pin(std::future::pending())
+            }
+        }
+        assert!(storage::enabled(), "run with MOUNT_RS_PROFILE_IO=1");
+        let before = storage::snapshot();
+        let blocks = DynBlockStore(Arc::new(PendingBlocks));
+        let id = BlockId("cancel-control".into());
+        let mut future = blocks.delete(&id);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(future.as_mut().poll(&mut context).is_pending());
+        drop(future);
+        let delta = storage::snapshot().delta(&before).unwrap();
+        let deleted = delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == "blocks.delete")
+            .unwrap();
+        assert_eq!(deleted.cancelled, 1);
+        assert_eq!(delta.forwarding_boxes.calls, 1);
+        assert!(delta.forwarding_boxes.requested_object_bytes > 0);
+    }
+
+    #[test]
+    fn profiling_disabled_leaves_dynamic_store_counters_unchanged() {
+        if storage::enabled() {
+            return;
+        }
+        let before = storage::snapshot();
+        let blocks = DynBlockStore(Arc::new(MemoryBlockStore::new()));
+        block_on(blocks.put(b"disabled control")).unwrap();
+        let delta = storage::snapshot().delta(&before).unwrap();
+        assert!(delta.entries.iter().all(|entry| entry.calls == 0));
+        assert_eq!(delta.forwarding_boxes.calls, 0);
+        assert_eq!(delta.forwarding_boxes.requested_object_bytes, 0);
     }
 
     #[test]

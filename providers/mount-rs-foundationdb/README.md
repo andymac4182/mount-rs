@@ -19,6 +19,46 @@ On unsupported targets, enabling all Cargo features intentionally leaves this
 package empty so client-free Windows and cross-platform workspace checks stay
 portable; no FoundationDB backend is advertised there.
 
+## Concurrent inode storage authority
+
+Direct `FoundationDbStorage` constructors default to `SameKeyspace`: inode
+operations check the actual `block-authority` marker transactionally with the
+metadata authority. SDK split assembly and N-API `createChunkedDriver` derive
+this policy from the exact metadata/block configuration pair. Equal FoundationDB
+cluster-file paths and prefixes use `SameKeyspace`; another prefix, connection
+identity, or block provider uses `ExternalBlockStore`. No JavaScript policy
+bypass option is exposed. Custom Rust assemblers use the typed
+`FoundationDbStorageOptions::with_block_authority_policy` builder and must retain
+the BlockStore verification contract.
+
+The first fresh MRC2 binding persists `meta/block-policy` atomically with mode,
+backing ID, and fence. Its versioned values are `MRBP1S` and `MRBP1E`. An absent
+record means `SameKeyspace`; malformed records and configuration mismatches fail
+closed. Ordinary opens cannot change an existing binding. Existing external
+MRC2 volumes without a policy record require a separately designed offline
+migration; they are not silently reinterpreted. Explicit MRC1 migration records
+the selected policy in its existing binding transaction.
+
+External mode does not create a substitute block marker in the metadata prefix.
+ChunkedFs verifies the actual external marker at open/reopen, namespace refresh,
+and before selected-inode or structural publication. Metadata authority and
+version checks still run on each inode operation. Ordinary selected-inode reads
+do not add a physical external-marker GET. Cross-store verification and metadata
+commit are not atomic against out-of-band marker replacement; immutable blocks
+and trusted storage lifecycle remain required. Same-keyspace mode retains its
+stronger FDB transaction conflict protection.
+
+The policy uses a logical, conflict-protected point read returning six bytes.
+For inode authority operations, SameKeyspace adds one net point read; External
+replaces the old irrelevant local-marker read, leaving the count unchanged from
+the former implementation (one fewer than new SameKeyspace). MRC2 authority
+operations gain one policy read in either mode. The value is decoded while borrowed from the native
+result, avoiding an additional Vec copy; key and FDB future/result costs remain.
+The read is issued alongside existing independent reads. This is not a claim of one
+physical disk I/O, zero allocation, or a throughput improvement. Metadata
+mutations retain fail-closed handling of maybe-committed results and are not
+replayed after an ambiguous acknowledgement.
+
 ## Supported native-client platforms
 
 The initial provider gate follows the platform support published by

@@ -1,0 +1,163 @@
+{
+  "archive_manifest_sha256": "3a514a501bd662a0beabe8aeee384777f6b2773be4d5ef2e2ef727bd1127596d",
+  "artifacts": {
+    "filesystem": {
+      "file": "filesystem-observations.json.gz",
+      "gzip_bytes": 311955,
+      "gzip_sha256": "d7e5b3564ccf6e10fad29936c80dd087c6db6489c17f8200aa374de713d5c320",
+      "public_bytes": 5761404,
+      "public_sha256": "5ccf53a6bdebeaa5c9a8e0322418e0e23eefcae8ff1376ecbf4e179c4bb8de62"
+    }
+  },
+  "binary_sha256": "697882b4b225ca293b228b800b60b758856d923cca032d0df0b3faa99b319ca6",
+  "native_inventory": {
+    "controller_filtered": 182,
+    "ignored": 6,
+    "source_files": 646,
+    "tests_passed": 177
+  },
+  "offline_projection_capture_receipt_sha256": "9d1acffb9d90b2577872bc2fee55dcd9b7f78c4ac9bdca15b7376e28134d025f",
+  "offline_verification_capture_receipt_sha256": "a040bcc51794cdde4a0d317a592df2f81f9a6c1a27b8dec9937aac78ab316283",
+  "runtime": {
+    "filesystem": {
+      "abort_requested": false,
+      "automatic_retry": false,
+      "cleanup_reserve_seconds": 120,
+      "direct_child_reaped": true,
+      "direct_owner_group_absent": true,
+      "elapsed_seconds": 476.45386275008786,
+      "exit_code": 0,
+      "failure_labels": [],
+      "forced_owner_stop": false,
+      "owner_receipt_sha256": "64eaab255b480d5cbaacc349a6baed9deb3087d83d09558acdaec07799f91309",
+      "owner_sha256": "a1a53eaf6335cc301011f36f7548184edf773b71401ec80687fbc1ace2831758",
+      "performance_eligible": true,
+      "pipes_eof": true,
+      "producer_sha256": "56d9c15fa6d6d2f63a1f72adcac9c499ca118a94d2229dc718e0df90d13a6bc0",
+      "resource_guard": {
+        "actual_max_gap_ms": 119.72754099406302,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 69474414592,
+        "requested_interval_ms": 100,
+        "samples": 4660,
+        "scope": "cooperative sampled host disk stop through owner execution and cleanup; no host RSS or Docker containment assertion"
+      },
+      "source_pins_before_after_equal": true,
+      "status": "qualified",
+      "supervisor_receipt_sha256": "9507ecfc9285f17fe5d2458df6df079d58716dfcefcb1a85f0d468435f9204b2",
+      "whole_limit_seconds": 3300
+    },
+    "rustfs_attempt_1": {
+      "abort_requested": true,
+      "automatic_retry": false,
+      "cleanup_reserve_seconds": 120,
+      "direct_child_reaped": true,
+      "direct_owner_group_absent": true,
+      "elapsed_seconds": 120.19409583404195,
+      "exit_code": 1,
+      "failure_labels": [
+        "host_free_disk_below_64GiB",
+        "owner_expected_exit_zero_missing"
+      ],
+      "forced_owner_stop": false,
+      "historical_child_reaping": "not established by failed owner; subsequent exact process/container reconciliation proves current absence/stopped state only",
+      "owner_receipt_sha256": "8cbe6c253d8c5161dea9b21f08e6ded412aa58ee76b0379df1951a3da5a3c4d8",
+      "owner_sha256": "280394a1cc9ae25120110b73e3142c6fcf69f406e7b0ce75f3f45bd5408e4111",
+      "performance_eligible": false,
+      "pipes_eof": true,
+      "producer_sha256": "806e9a5eabc3741c71b894247110c00942533594eec8809c57fc6903ee33fd4e",
+      "resource_guard": {
+        "actual_max_gap_ms": 116.5775420377031,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 68542513152,
+        "requested_interval_ms": 100,
+        "samples": 1180,
+        "scope": "cooperative sampled host disk stop through owner execution and cleanup; no host RSS or Docker containment assertion"
+      },
+      "source_pins_before_after_equal": true,
+      "status": "failed",
+      "supervisor_receipt_sha256": "ff3c19592533d7c28cf8425502f1f7a3489a7a47971d628e6b1c9e89f416d1eb",
+      "timed_cells_qualified": 0,
+      "whole_limit_seconds": 3300
+    },
+    "rustfs_attempt_2": {
+      "abort_requested": true,
+      "automatic_retry": false,
+      "cleanup_reserve_seconds": 120,
+      "direct_child_reaped": true,
+      "direct_owner_group_absent": true,
+      "elapsed_seconds": 40.79373775003478,
+      "exit_code": 1,
+      "failure_labels": [
+        "host_free_disk_below_64GiB",
+        "owner_expected_exit_zero_missing"
+      ],
+      "forced_owner_stop": false,
+      "historical_child_reaping": "not established by failed owner; subsequent exact process/container reconciliation proves current absence/stopped state only",
+      "owner_receipt_sha256": "332af66e23600d4a0c45c9e908136b4c24e03cc948fc2683b5c7978a87df0549",
+      "owner_sha256": "280394a1cc9ae25120110b73e3142c6fcf69f406e7b0ce75f3f45bd5408e4111",
+      "performance_eligible": false,
+      "pipes_eof": true,
+      "producer_sha256": "806e9a5eabc3741c71b894247110c00942533594eec8809c57fc6903ee33fd4e",
+      "resource_guard": {
+        "actual_max_gap_ms": 106.42445890698582,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 67585380352,
+        "requested_interval_ms": 100,
+        "samples": 399,
+        "scope": "cooperative sampled host disk stop through owner execution and cleanup; no host RSS or Docker containment assertion"
+      },
+      "source_pins_before_after_equal": true,
+      "status": "failed",
+      "supervisor_receipt_sha256": "ec032b34c708d77b937dc6b84382ea6fa9a3045c940a1e1b2accfc5fac886f01",
+      "timed_cells_qualified": 0,
+      "whole_limit_seconds": 3300
+    }
+  },
+  "schema": "mount-rs.tidb-filesystem-flush-qualification.v1",
+  "scope": "qualified local filesystem arm only; both fresh RustFS attempts stopped before timed cells at unchanged 64 GiB guard; no current matched backend comparison, production scale or physical device saturation proof",
+  "source_revision": "bf6062cb4fc0b3dcbfde4532bba1b8c46266ab2f",
+  "validation": {
+    "archive_pure_177": {
+      "passed": true,
+      "receipt_sha256": "c090ef35f5d441ff03160dff08ff32809bf0a00de272835713ab61f8dc8dbae3"
+    },
+    "filesystem_provider_31": {
+      "passed": true,
+      "receipt_sha256": "0a2cf59acf3749170929a841561bc2a0e658dc36e1cfe3d10293b5ddb8d0e5e8"
+    },
+    "format": {
+      "passed": true,
+      "receipt_sha256": "04ca6adf30d52e7516ff958baaf1bd5fe7827354db0b2573d158673e8d12477b"
+    },
+    "provider_sdk_cli_strict_clippy": {
+      "passed": true,
+      "receipt_sha256": "8cde7e005ef4fb8a43fbcddd5d2e050cb8f14d888ad07b42423981db8ceb1063"
+    },
+    "sdk_cli_filesystem_28": {
+      "passed": true,
+      "receipt_sha256": "6b68da910574a892214261d16148b93a2d52b019a0ea479debf91fb178b4da7e"
+    }
+  },
+  "verification": {
+    "arithmetic_verifier_sha256": "aac3f50339ece6b4d718bd94bdd54dc9cd39bfa5b3415c227062241b84572d17",
+    "current_cells_verified": 16,
+    "current_source": "bf6062cb4fc0b3dcbfde4532bba1b8c46266ab2f",
+    "filesystem_extractor_sha256": "27ef362db1c1778eb18cc51cd373258551276e42fad277cfe854c5f9ed41bf02",
+    "filesystem_public_sha256": "5ccf53a6bdebeaa5c9a8e0322418e0e23eefcae8ff1376ecbf4e179c4bb8de62",
+    "historical_cells_arithmetic_checked": 16,
+    "historical_rustfs_public_sha256": "e7eaac01587a56680aa223f06d216456cdfc627a10e4c0f7ed6c732ffc630c74",
+    "historical_source": "7f4da840b815b24cc65ab37c93d7146a43f72775",
+    "input_spec_sha256": "e444ed7b5b14c66a55f10062e06e8fdbbd7787625d088814825dbb4ed8d686c1",
+    "negative_controls_rejected": [
+      "allocation_delta_tamper",
+      "incomplete_full_oracle",
+      "historical_control_refused_as_current_pair"
+    ],
+    "qualified_current_filesystem": true,
+    "same_source_pair_available": false,
+    "schema": "mount-rs.filesystem-standalone-with-historical-verification.v1",
+    "scope": "offline current filesystem arithmetic/full-oracle consistency; historical RustFS reference explicitly rejected as a current matched control; no new workload or production/saturation/physical-IOPS proof",
+    "standalone_verifier_sha256": "f52de432ad0acf809932112e93eb47f57f2adc438d5b1a52bc2b5e281fe80200"
+  }
+}

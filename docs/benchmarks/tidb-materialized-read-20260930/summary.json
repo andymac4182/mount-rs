@@ -1,0 +1,2246 @@
+{
+  "schema": "mount-rs.materialized-guard-benchmark-summary.v1",
+  "base_head": "1a80576456378a81f74eb72922bba813f765c852",
+  "input_result_sha256": "64e8cc7120961b5fff6f02939acba8acd0ddfd13b2698439dd363fd924478ebe",
+  "allocation_ceiling_passed": false,
+  "rustfs_blob_workload": false,
+  "throughput_or_physical_iops_claim": false,
+  "cases": [
+    {
+      "siblings": 128,
+      "roles": {
+        "serialized": {
+          "allocation_calls": {
+            "n": 128,
+            "mean": 2200.0,
+            "median": 2200.0,
+            "p95_nearest_rank": 2202,
+            "minimum": 2199,
+            "maximum": 2202
+          },
+          "allocation_requested_bytes": {
+            "n": 128,
+            "mean": 220412.84375,
+            "median": 220309.5,
+            "p95_nearest_rank": 222602,
+            "minimum": 219101,
+            "maximum": 223187
+          },
+          "latency_ns": {
+            "n": 128,
+            "mean": 9850439.75,
+            "median": 9621062.5,
+            "p95_nearest_rank": 12508708,
+            "minimum": 7193083,
+            "maximum": 14381375
+          },
+          "phases": {
+            "Open": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 299.5,
+                "median": 299.0,
+                "p95_nearest_rank": 301,
+                "minimum": 299,
+                "maximum": 301
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 29565.8125,
+                "median": 28719.0,
+                "p95_nearest_rank": 30798,
+                "minimum": 28717,
+                "maximum": 31131
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2155026.6953125,
+                "median": 2107124.5,
+                "p95_nearest_rank": 2789333,
+                "minimum": 1559875,
+                "maximum": 3644625
+              }
+            },
+            "Stat": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 1563.4375,
+                "median": 1563.0,
+                "p95_nearest_rank": 1565,
+                "minimum": 1563,
+                "maximum": 1565
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 153735.15625,
+                "median": 153293.0,
+                "p95_nearest_rank": 154853,
+                "minimum": 153291,
+                "maximum": 154959
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 5384523.7265625,
+                "median": 5285958.5,
+                "p95_nearest_rank": 6892708,
+                "minimum": 3882375,
+                "maximum": 8401250
+              }
+            },
+            "Read": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 336.0625,
+                "median": 336.0,
+                "p95_nearest_rank": 337,
+                "minimum": 336,
+                "maximum": 337
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 34127.875,
+                "median": 34111.0,
+                "p95_nearest_rank": 34363,
+                "minimum": 34109,
+                "maximum": 34401
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2308220.046875,
+                "median": 2253604.0,
+                "p95_nearest_rank": 2835875,
+                "minimum": 1698958,
+                "maximum": 4131375
+              }
+            },
+            "Close": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 2984.0,
+                "median": 2984.0,
+                "p95_nearest_rank": 2984,
+                "minimum": 2984,
+                "maximum": 2984
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 1970.9921875,
+                "median": 1708.0,
+                "p95_nearest_rank": 2958,
+                "minimum": 791,
+                "maximum": 11459
+              }
+            }
+          },
+          "storage": {
+            "tidb_sql_inode_read": {
+              "calls": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "success": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 262.0,
+                "median": 262.0,
+                "p95_nearest_rank": 262,
+                "minimum": 262,
+                "maximum": 262
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 6347656.1953125,
+                "median": 6196936.5,
+                "p95_nearest_rank": 8105707,
+                "minimum": 4698583,
+                "maximum": 9362832
+              }
+            },
+            "tidb_sql_metadata_read": {
+              "calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "success": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 554410.40625,
+                "median": 543229.5,
+                "p95_nearest_rank": 705541,
+                "minimum": 393333,
+                "maximum": 965792
+              }
+            },
+            "tidb_sql_block_read": {
+              "calls": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "success": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 1573324.5234375,
+                "median": 1546458.5,
+                "p95_nearest_rank": 1978041,
+                "minimum": 1047416,
+                "maximum": 2575708
+              }
+            },
+            "tidb_tx_rollback": {
+              "calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "success": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 345825.53125,
+                "median": 337145.5,
+                "p95_nearest_rank": 451333,
+                "minimum": 209250,
+                "maximum": 664084
+              }
+            },
+            "tidb_pool_checkout": {
+              "calls": {
+                "n": 128,
+                "mean": 8.0,
+                "median": 8.0,
+                "p95_nearest_rank": 8,
+                "minimum": 8,
+                "maximum": 8
+              },
+              "success": {
+                "n": 128,
+                "mean": 8.0,
+                "median": 8.0,
+                "p95_nearest_rank": 8,
+                "minimum": 8,
+                "maximum": 8
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 4464.53125,
+                "median": 3895.0,
+                "p95_nearest_rank": 7833,
+                "minimum": 2041,
+                "maximum": 11833
+              }
+            },
+            "tidb_session_configure": {
+              "calls": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "success": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              }
+            }
+          },
+          "trial_median_latency_ns": [
+            {
+              "trial": 0,
+              "median": 10890125.0
+            },
+            {
+              "trial": 3,
+              "median": 9587791.5
+            },
+            {
+              "trial": 5,
+              "median": 9405500.0
+            },
+            {
+              "trial": 6,
+              "median": 8870000.5
+            }
+          ]
+        },
+        "materialized": {
+          "allocation_calls": {
+            "n": 128,
+            "mean": 2163.0,
+            "median": 2163.0,
+            "p95_nearest_rank": 2165,
+            "minimum": 2162,
+            "maximum": 2165
+          },
+          "allocation_requested_bytes": {
+            "n": 128,
+            "mean": 198319.0625,
+            "median": 198218.5,
+            "p95_nearest_rank": 200506,
+            "minimum": 197010,
+            "maximum": 201096
+          },
+          "latency_ns": {
+            "n": 128,
+            "mean": 11316101.796875,
+            "median": 10794500.0,
+            "p95_nearest_rank": 15618458,
+            "minimum": 9056542,
+            "maximum": 26048708
+          },
+          "phases": {
+            "Open": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 299.5,
+                "median": 299.0,
+                "p95_nearest_rank": 301,
+                "minimum": 299,
+                "maximum": 301
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 29565.0625,
+                "median": 28719.0,
+                "p95_nearest_rank": 30797,
+                "minimum": 28717,
+                "maximum": 31131
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2577925.4609375,
+                "median": 2431208.5,
+                "p95_nearest_rank": 3034250,
+                "minimum": 1879834,
+                "maximum": 14348167
+              }
+            },
+            "Stat": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 1526.4375,
+                "median": 1526.0,
+                "p95_nearest_rank": 1528,
+                "minimum": 1526,
+                "maximum": 1528
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 131643.125,
+                "median": 131200.0,
+                "p95_nearest_rank": 132760,
+                "minimum": 131200,
+                "maximum": 132868
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 6092307.921875,
+                "median": 5849729.0,
+                "p95_nearest_rank": 8803958,
+                "minimum": 4718250,
+                "maximum": 10079958
+              }
+            },
+            "Read": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 336.0625,
+                "median": 336.0,
+                "p95_nearest_rank": 337,
+                "minimum": 336,
+                "maximum": 337
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 34126.875,
+                "median": 34109.0,
+                "p95_nearest_rank": 34361,
+                "minimum": 34109,
+                "maximum": 34401
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2642863.5703125,
+                "median": 2556875.0,
+                "p95_nearest_rank": 3485208,
+                "minimum": 2058125,
+                "maximum": 4249417
+              }
+            },
+            "Close": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 2984.0,
+                "median": 2984.0,
+                "p95_nearest_rank": 2984,
+                "minimum": 2984,
+                "maximum": 2984
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2115.234375,
+                "median": 1791.5,
+                "p95_nearest_rank": 3458,
+                "minimum": 1000,
+                "maximum": 8708
+              }
+            }
+          },
+          "storage": {
+            "tidb_sql_inode_read": {
+              "calls": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "success": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 262.0,
+                "median": 262.0,
+                "p95_nearest_rank": 262,
+                "minimum": 262,
+                "maximum": 262
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 7420376.7421875,
+                "median": 7028478.0,
+                "p95_nearest_rank": 10064875,
+                "minimum": 5771960,
+                "maximum": 20455791
+              }
+            },
+            "tidb_sql_metadata_read": {
+              "calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "success": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 632273.7890625,
+                "median": 592208.5,
+                "p95_nearest_rank": 872542,
+                "minimum": 429458,
+                "maximum": 1791250
+              }
+            },
+            "tidb_sql_block_read": {
+              "calls": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "success": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 1764323.53125,
+                "median": 1722020.5,
+                "p95_nearest_rank": 2311791,
+                "minimum": 1276291,
+                "maximum": 2959249
+              }
+            },
+            "tidb_tx_rollback": {
+              "calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "success": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 381537.125,
+                "median": 362833.5,
+                "p95_nearest_rank": 527916,
+                "minimum": 266625,
+                "maximum": 758834
+              }
+            },
+            "tidb_pool_checkout": {
+              "calls": {
+                "n": 128,
+                "mean": 8.0,
+                "median": 8.0,
+                "p95_nearest_rank": 8,
+                "minimum": 8,
+                "maximum": 8
+              },
+              "success": {
+                "n": 128,
+                "mean": 8.0,
+                "median": 8.0,
+                "p95_nearest_rank": 8,
+                "minimum": 8,
+                "maximum": 8
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 5296.9921875,
+                "median": 4834.0,
+                "p95_nearest_rank": 10000,
+                "minimum": 2417,
+                "maximum": 13165
+              }
+            },
+            "tidb_session_configure": {
+              "calls": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "success": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              }
+            }
+          },
+          "trial_median_latency_ns": [
+            {
+              "trial": 1,
+              "median": 10617354.0
+            },
+            {
+              "trial": 2,
+              "median": 10100645.5
+            },
+            {
+              "trial": 4,
+              "median": 11761666.5
+            },
+            {
+              "trial": 7,
+              "median": 11390417.0
+            }
+          ]
+        }
+      },
+      "change_percent": {
+        "allocation_calls": {
+          "mean": -1.6818181818181843,
+          "median": -1.6818181818181843,
+          "p95_nearest_rank": -1.6802906448682986
+        },
+        "allocation_requested_bytes": {
+          "mean": -10.023817520842638,
+          "median": -10.027257108749277,
+          "p95_nearest_rank": -9.926236062569071
+        },
+        "latency_ns": {
+          "mean": 14.879153459874717,
+          "median": 12.19654793844236,
+          "p95_nearest_rank": 24.860681055149737
+        }
+      }
+    },
+    {
+      "siblings": 1000,
+      "roles": {
+        "serialized": {
+          "allocation_calls": {
+            "n": 128,
+            "mean": 9481.1875,
+            "median": 9481.0,
+            "p95_nearest_rank": 9482,
+            "minimum": 9481,
+            "maximum": 9482
+          },
+          "allocation_requested_bytes": {
+            "n": 128,
+            "mean": 847903.4375,
+            "median": 847571.0,
+            "p95_nearest_rank": 850149,
+            "minimum": 847561,
+            "maximum": 850157
+          },
+          "latency_ns": {
+            "n": 128,
+            "mean": 14663986.3515625,
+            "median": 13162083.0,
+            "p95_nearest_rank": 22096334,
+            "minimum": 11382625,
+            "maximum": 49016458
+          },
+          "phases": {
+            "Open": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 299.15625,
+                "median": 299.0,
+                "p95_nearest_rank": 300,
+                "minimum": 299,
+                "maximum": 300
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 29057.4375,
+                "median": 28730.0,
+                "p95_nearest_rank": 31316,
+                "minimum": 28728,
+                "maximum": 31316
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2532373.359375,
+                "median": 2299750.0,
+                "p95_nearest_rank": 3731458,
+                "minimum": 1842291,
+                "maximum": 7711625
+              }
+            },
+            "Stat": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 8845.0,
+                "median": 8845.0,
+                "p95_nearest_rank": 8845,
+                "minimum": 8845,
+                "maximum": 8845
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 781731.0,
+                "median": 781731.0,
+                "p95_nearest_rank": 781733,
+                "minimum": 781729,
+                "maximum": 781733
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 9471485.2890625,
+                "median": 8544062.5,
+                "p95_nearest_rank": 14140666,
+                "minimum": 6860792,
+                "maximum": 37949750
+              }
+            },
+            "Read": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 336.03125,
+                "median": 336.0,
+                "p95_nearest_rank": 336,
+                "minimum": 336,
+                "maximum": 337
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 34131.0,
+                "median": 34124.0,
+                "p95_nearest_rank": 34124,
+                "minimum": 34120,
+                "maximum": 34412
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2657104.484375,
+                "median": 2413125.0,
+                "p95_nearest_rank": 3773584,
+                "minimum": 1927833,
+                "maximum": 12100916
+              }
+            },
+            "Close": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 2984.0,
+                "median": 2984.0,
+                "p95_nearest_rank": 2984,
+                "minimum": 2984,
+                "maximum": 2984
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2275.7265625,
+                "median": 2250.5,
+                "p95_nearest_rank": 3167,
+                "minimum": 1167,
+                "maximum": 4541
+              }
+            }
+          },
+          "storage": {
+            "tidb_sql_inode_read": {
+              "calls": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "success": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 2006.0,
+                "median": 2006.0,
+                "p95_nearest_rank": 2006,
+                "minimum": 2006,
+                "maximum": 2006
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 10031231.8984375,
+                "median": 9040855.0,
+                "p95_nearest_rank": 12780877,
+                "minimum": 7598875,
+                "maximum": 37207083
+              }
+            },
+            "tidb_sql_metadata_read": {
+              "calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "success": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 639683.2421875,
+                "median": 571729.0,
+                "p95_nearest_rank": 1001792,
+                "minimum": 452000,
+                "maximum": 2216750
+              }
+            },
+            "tidb_sql_block_read": {
+              "calls": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "success": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 1798536.078125,
+                "median": 1631354.0,
+                "p95_nearest_rank": 2621376,
+                "minimum": 1372750,
+                "maximum": 6148376
+              }
+            },
+            "tidb_tx_rollback": {
+              "calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "success": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 455909.21875,
+                "median": 386125.5,
+                "p95_nearest_rank": 625541,
+                "minimum": 286958,
+                "maximum": 3137416
+              }
+            },
+            "tidb_pool_checkout": {
+              "calls": {
+                "n": 128,
+                "mean": 8.0,
+                "median": 8.0,
+                "p95_nearest_rank": 8,
+                "minimum": 8,
+                "maximum": 8
+              },
+              "success": {
+                "n": 128,
+                "mean": 8.0,
+                "median": 8.0,
+                "p95_nearest_rank": 8,
+                "minimum": 8,
+                "maximum": 8
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 6028.65625,
+                "median": 5666.5,
+                "p95_nearest_rank": 9335,
+                "minimum": 3292,
+                "maximum": 17918
+              }
+            },
+            "tidb_session_configure": {
+              "calls": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "success": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              }
+            }
+          },
+          "trial_median_latency_ns": [
+            {
+              "trial": 0,
+              "median": 12212000.5
+            },
+            {
+              "trial": 3,
+              "median": 15816229.0
+            },
+            {
+              "trial": 5,
+              "median": 12538875.5
+            },
+            {
+              "trial": 6,
+              "median": 13162083.0
+            }
+          ]
+        },
+        "materialized": {
+          "allocation_calls": {
+            "n": 128,
+            "mean": 9292.1875,
+            "median": 9292.0,
+            "p95_nearest_rank": 9293,
+            "minimum": 9292,
+            "maximum": 9293
+          },
+          "allocation_requested_bytes": {
+            "n": 128,
+            "mean": 672613.59375,
+            "median": 672280.0,
+            "p95_nearest_rank": 674859,
+            "minimum": 672270,
+            "maximum": 674864
+          },
+          "latency_ns": {
+            "n": 128,
+            "mean": 14763633.1328125,
+            "median": 13600917.0,
+            "p95_nearest_rank": 21025125,
+            "minimum": 10712042,
+            "maximum": 34515209
+          },
+          "phases": {
+            "Open": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 299.15625,
+                "median": 299.0,
+                "p95_nearest_rank": 300,
+                "minimum": 299,
+                "maximum": 300
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 29057.59375,
+                "median": 28730.0,
+                "p95_nearest_rank": 31314,
+                "minimum": 28728,
+                "maximum": 31316
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2550375.6875,
+                "median": 2318250.0,
+                "p95_nearest_rank": 3607917,
+                "minimum": 1843417,
+                "maximum": 6442166
+              }
+            },
+            "Stat": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 8656.0,
+                "median": 8656.0,
+                "p95_nearest_rank": 8656,
+                "minimum": 8656,
+                "maximum": 8656
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 606440.5,
+                "median": 606441.0,
+                "p95_nearest_rank": 606442,
+                "minimum": 606438,
+                "maximum": 606442
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 9494907.84375,
+                "median": 8735229.0,
+                "p95_nearest_rank": 13839542,
+                "minimum": 6449708,
+                "maximum": 26159875
+              }
+            },
+            "Read": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 336.03125,
+                "median": 336.0,
+                "p95_nearest_rank": 336,
+                "minimum": 336,
+                "maximum": 337
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 34131.5,
+                "median": 34124.0,
+                "p95_nearest_rank": 34124,
+                "minimum": 34120,
+                "maximum": 34412
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2715414.0703125,
+                "median": 2467895.5,
+                "p95_nearest_rank": 4182083,
+                "minimum": 1934458,
+                "maximum": 7345750
+              }
+            },
+            "Close": {
+              "allocation_calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "allocation_requested_bytes": {
+                "n": 128,
+                "mean": 2984.0,
+                "median": 2984.0,
+                "p95_nearest_rank": 2984,
+                "minimum": 2984,
+                "maximum": 2984
+              },
+              "latency_ns": {
+                "n": 128,
+                "mean": 2218.3671875,
+                "median": 1916.5,
+                "p95_nearest_rank": 3417,
+                "minimum": 1042,
+                "maximum": 10917
+              }
+            }
+          },
+          "storage": {
+            "tidb_sql_inode_read": {
+              "calls": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "success": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 2006.0,
+                "median": 2006.0,
+                "p95_nearest_rank": 2006,
+                "minimum": 2006,
+                "maximum": 2006
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 7.0,
+                "median": 7.0,
+                "p95_nearest_rank": 7,
+                "minimum": 7,
+                "maximum": 7
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 10433009.71875,
+                "median": 9433833.5,
+                "p95_nearest_rank": 14997291,
+                "minimum": 7525414,
+                "maximum": 27562791
+              }
+            },
+            "tidb_sql_metadata_read": {
+              "calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "success": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 669754.921875,
+                "median": 594937.5,
+                "p95_nearest_rank": 1056000,
+                "minimum": 430209,
+                "maximum": 1564792
+              }
+            },
+            "tidb_sql_block_read": {
+              "calls": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "success": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 3.0,
+                "median": 3.0,
+                "p95_nearest_rank": 3,
+                "minimum": 3,
+                "maximum": 3
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 1818617.8046875,
+                "median": 1729875.5,
+                "p95_nearest_rank": 2571875,
+                "minimum": 1313459,
+                "maximum": 3403917
+              }
+            },
+            "tidb_tx_rollback": {
+              "calls": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "success": {
+                "n": 128,
+                "mean": 1.0,
+                "median": 1.0,
+                "p95_nearest_rank": 1,
+                "minimum": 1,
+                "maximum": 1
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 457784.453125,
+                "median": 401292.0,
+                "p95_nearest_rank": 711458,
+                "minimum": 249959,
+                "maximum": 2479500
+              }
+            },
+            "tidb_pool_checkout": {
+              "calls": {
+                "n": 128,
+                "mean": 8.0,
+                "median": 8.0,
+                "p95_nearest_rank": 8,
+                "minimum": 8,
+                "maximum": 8
+              },
+              "success": {
+                "n": 128,
+                "mean": 8.0,
+                "median": 8.0,
+                "p95_nearest_rank": 8,
+                "minimum": 8,
+                "maximum": 8
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 5984.8828125,
+                "median": 5396.0,
+                "p95_nearest_rank": 9957,
+                "minimum": 2874,
+                "maximum": 17500
+              }
+            },
+            "tidb_session_configure": {
+              "calls": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "success": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "error": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "cancelled": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "in_flight": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_rows": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "returned_row_observations": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              },
+              "elapsed_ns": {
+                "n": 128,
+                "mean": 0.0,
+                "median": 0.0,
+                "p95_nearest_rank": 0,
+                "minimum": 0,
+                "maximum": 0
+              }
+            }
+          },
+          "trial_median_latency_ns": [
+            {
+              "trial": 1,
+              "median": 17020646.0
+            },
+            {
+              "trial": 2,
+              "median": 13554354.0
+            },
+            {
+              "trial": 4,
+              "median": 12656249.5
+            },
+            {
+              "trial": 7,
+              "median": 13083312.5
+            }
+          ]
+        }
+      },
+      "change_percent": {
+        "allocation_calls": {
+          "mean": -1.9934211827368653,
+          "median": -1.993460605421371,
+          "p95_nearest_rank": -1.9932503691204362
+        },
+        "allocation_requested_bytes": {
+          "mean": -20.6733262300284,
+          "median": -20.681571219402272,
+          "p95_nearest_rank": -20.618738597587015
+        },
+        "latency_ns": {
+          "mean": 0.6795340561632557,
+          "median": 3.334077136574809,
+          "p95_nearest_rank": -4.84790372918874
+        }
+      }
+    }
+  ]
+}

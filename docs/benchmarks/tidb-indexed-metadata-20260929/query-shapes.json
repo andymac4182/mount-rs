@@ -1,0 +1,2460 @@
+{
+  "date": "2026-09-29",
+  "limitations": [
+    "Diagnostic EXPLAIN ANALYZE executions establish their own access paths; they are not traces from the earlier end-to-end benchmark windows.",
+    "EXPLAIN wrappers report they are not eligible for prepared plan caching; timed SELECT cache observations are recorded separately.",
+    "Warm small samples have outliers and no statistical confidence interval. Reduced scanned keys do not establish fewer physical SSD IOPS or better concurrent Drive throughput.",
+    "Name index remains nonunique and complete binary-name equality is retained; tested wellformed SQL hits/misses do not replace provider corruption, duplicate-cardinality, cross-volume, cancellation, or write transaction qualification.",
+    "RustFS actual memory limit was 2GiB during these metadata-only runs versus 1GiB recorded in retained ready receipt; RustFS was unused. TiDB/TiKV/PD identities and resource limits were pinned unchanged."
+  ],
+  "provider_head": "380e7fcebb7ffbd175879982606ccf788cf96b18",
+  "runs": [
+    {
+      "artifact_bytes": 637244,
+      "artifact_sha256": "269b03e0c836763bbb5f2e27eec7321c90995bc28f2f40da60c8a1a4e8ab60e8",
+      "binary_sha256": "bdff7711f43cc2a7067817632e37e5ddba1f1f9facc22a9c19b242332c255236",
+      "cleanup_all_seven_families_absent": true,
+      "elapsed_seconds": 5.015222,
+      "name": "explicit_volume",
+      "owner_receipt_sha256": "ae6d8de402946597e051a9c1b228ba1786a75d62045186c8ea5876d1e5269394",
+      "probes": [
+        {
+          "all_column_equivalence": true,
+          "columns": 14,
+          "files": 100,
+          "kind": "file",
+          "oracle_cases": [
+            "hit",
+            "missing_file"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:g",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    3
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 2394.875,
+              "mean_us": 1473.3514,
+              "min_us": 1073.0,
+              "p50_us": 1448.7079999999999,
+              "p95_us": 2010.834,
+              "p99_us": 2394.875,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1999.5,
+              "mean_us": 1135.7153,
+              "min_us": 905.541,
+              "p50_us": 1045.4170000000001,
+              "p95_us": 1917.5,
+              "p99_us": 1999.5,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 24,
+          "files": 100,
+          "kind": "root",
+          "oracle_cases": [
+            "hit",
+            "missing_dentry",
+            "wrong_candidate",
+            "missing_root",
+            "binary_name_mismatch_with_existing_hash"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    3
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    100
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 100,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:f",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:r",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    5
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    100
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 100,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 2875.7909999999997,
+              "mean_us": 2465.4124666666667,
+              "min_us": 1958.9999999999998,
+              "p50_us": 2432.875,
+              "p95_us": 2765.75,
+              "p99_us": 2875.7909999999997,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 3212.6659999999997,
+              "mean_us": 1578.995633333333,
+              "min_us": 1209.75,
+              "p50_us": 1519.083,
+              "p95_us": 1786.9579999999999,
+              "p99_us": 3212.6659999999997,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 9,
+          "files": 100,
+          "kind": "authority_membership",
+          "oracle_cases": [
+            "hit",
+            "missing_file"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1504.042,
+              "mean_us": 989.9723333333334,
+              "min_us": 815.292,
+              "p50_us": 973.708,
+              "p95_us": 1406.375,
+              "p99_us": 1504.042,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1131.4579999999999,
+              "mean_us": 879.4179666666668,
+              "min_us": 695.167,
+              "p50_us": 869.958,
+              "p95_us": 1099.292,
+              "p99_us": 1131.4579999999999,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 14,
+          "files": 1000,
+          "kind": "file",
+          "oracle_cases": [
+            "hit",
+            "missing_file"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:g",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    3
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1682.4170000000001,
+              "mean_us": 1255.8249333333333,
+              "min_us": 1113.75,
+              "p50_us": 1231.25,
+              "p95_us": 1425.125,
+              "p99_us": 1682.4170000000001,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1197.958,
+              "mean_us": 915.6486,
+              "min_us": 794.8340000000001,
+              "p50_us": 895.083,
+              "p95_us": 1010.0840000000001,
+              "p99_us": 1197.958,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 24,
+          "files": 1000,
+          "kind": "root",
+          "oracle_cases": [
+            "hit",
+            "missing_dentry",
+            "wrong_candidate",
+            "missing_root",
+            "binary_name_mismatch_with_existing_hash"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    3
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1000
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 1000,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:f",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:r",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    5
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1000
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 1000,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 2824.708,
+              "mean_us": 2387.3152333333337,
+              "min_us": 1955.1249999999998,
+              "p50_us": 2374.959,
+              "p95_us": 2736.9590000000003,
+              "p99_us": 2824.708,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 2024.5829999999999,
+              "mean_us": 1602.5319666666664,
+              "min_us": 1441.8339999999998,
+              "p50_us": 1583.7920000000001,
+              "p95_us": 1714.25,
+              "p99_us": 2024.5829999999999,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 9,
+          "files": 1000,
+          "kind": "authority_membership",
+          "oracle_cases": [
+            "hit",
+            "missing_file"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 2561.375,
+              "mean_us": 957.9069666666667,
+              "min_us": 736.5419999999999,
+              "p50_us": 851.25,
+              "p95_us": 2174.167,
+              "p99_us": 2561.375,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 8535.0,
+              "mean_us": 1110.4139666666665,
+              "min_us": 678.5419999999999,
+              "p50_us": 777.792,
+              "p95_us": 1952.8329999999999,
+              "p99_us": 8535.0,
+              "rounds": 30
+            }
+          }
+        }
+      ],
+      "qualified": true,
+      "session": {
+        "autocommit": 1,
+        "tidb_txn_mode": "pessimistic",
+        "transaction_isolation": "REPEATABLE-READ"
+      },
+      "source": {
+        "build_rejects_provider_snapshot_drift": true,
+        "build_sha256": "5ca39064fbd60b053b719c03318dd595b14ee4536586b5161f681f755138af4c",
+        "captured_at_build": true,
+        "cargo_lock_sha256": "639c4c94c26659f61904f29e0350463480f278c2c048a5bf2095971d67324b5e",
+        "cargo_sha256": "aa75c678b1c76bbda8df1f7c8306d08f63381887014e829169877f4d5b2a2fb0",
+        "compact_sha256": "f2372f35fd1b6526386ae28e2bd42ed1202da2b939afc243b0714911ed027fd7",
+        "guard_fixture_sha256": "3c225e22a01a12a32d417c77151057f95c2a03b1d2f2d266694985f73eb69446",
+        "indexed_sha256": "2bdbf1b33860f519776a47fe9341633ceddc41a26046632280c7831e41f53e30",
+        "main_sha256": "450d6e39c98f3270d65b9f2bb4cb89d5e189be72b3ed559d5ea3fbc746850da3",
+        "provider_head": "380e7fcebb7ffbd175879982606ccf788cf96b18",
+        "provider_tree": "68c227cd04a46ed180354a300662a9c9614504b0",
+        "queries_sha256": "6be81bb79ee48d5f6ac770d5064a1f2631c401c4a866cdd53d7f0142a43500e1",
+        "storage_sha256": "947c58184978de628fa46e50bbe147bda5f91ee06477ac314709ce4f735cc191"
+      }
+    },
+    {
+      "artifact_bytes": 953118,
+      "artifact_sha256": "9aeb6b53e70f1e566f2a64079868b15bb52770ebab8b7fc14d138e02a7f054e0",
+      "binary_sha256": "4cff8461338d109ffb661b49d7bf889da57f6b2a8deea07d122a278712620c42",
+      "cleanup_all_seven_families_absent": true,
+      "elapsed_seconds": 6.021313,
+      "name": "name_index",
+      "owner_receipt_sha256": "452f7c7f720c63d2dd48accb9847b379c5a1e7978a11055a466ad014edac91ff",
+      "probes": [
+        {
+          "all_column_equivalence": true,
+          "columns": 14,
+          "files": 100,
+          "kind": "file",
+          "oracle_cases": [
+            "hit",
+            "missing_file"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:g",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    3
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1960.958,
+              "mean_us": 1525.3846999999998,
+              "min_us": 1168.417,
+              "p50_us": 1503.9579999999999,
+              "p95_us": 1934.333,
+              "p99_us": 1960.958,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1810.5829999999999,
+              "mean_us": 1159.1791,
+              "min_us": 881.75,
+              "p50_us": 1106.291,
+              "p95_us": 1592.209,
+              "p99_us": 1810.5829999999999,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 24,
+          "files": 100,
+          "kind": "root",
+          "oracle_cases": [
+            "hit",
+            "missing_dentry",
+            "wrong_candidate",
+            "missing_root",
+            "binary_name_mismatch_with_existing_hash"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    3
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    100
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 100,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:f",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:r",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    5
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    100
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 100,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 6830.417,
+              "mean_us": 2908.7929666666664,
+              "min_us": 2161.708,
+              "p50_us": 2759.5409999999997,
+              "p95_us": 3693.458,
+              "p99_us": 6830.417,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 2705.625,
+              "mean_us": 1764.2431333333334,
+              "min_us": 1344.8329999999999,
+              "p50_us": 1695.6670000000001,
+              "p95_us": 2367.875,
+              "p99_us": 2705.625,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 9,
+          "files": 100,
+          "kind": "authority_membership",
+          "oracle_cases": [
+            "hit",
+            "missing_file"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1716.709,
+              "mean_us": 1300.6263666666669,
+              "min_us": 984.2500000000001,
+              "p50_us": 1294.3329999999999,
+              "p95_us": 1688.625,
+              "p99_us": 1716.709,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1759.375,
+              "mean_us": 1178.0862,
+              "min_us": 869.4580000000001,
+              "p50_us": 1192.7089999999998,
+              "p95_us": 1672.0,
+              "p99_us": 1759.375,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 24,
+          "files": 100,
+          "kind": "root_index",
+          "oracle_cases": [
+            "hit",
+            "missing_dentry",
+            "wrong_candidate",
+            "missing_root",
+            "binary_name_mismatch_with_existing_hash"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    5
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    100
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 100,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    5
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "IndexLookUp(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:d, index:name_lookup(volume_key, parent, name_hash)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexRangeScan(Build)",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection(Probe)",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRowIDScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "force_name_index"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 45379.208999999995,
+              "mean_us": 4665.8597,
+              "min_us": 1369.0410000000002,
+              "p50_us": 1925.6670000000001,
+              "p95_us": 23383.542,
+              "p99_us": 45379.208999999995,
+              "rounds": 30
+            },
+            "force_name_index": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 14200.417,
+              "mean_us": 2908.741633333333,
+              "min_us": 1419.834,
+              "p50_us": 2212.292,
+              "p95_us": 7493.375,
+              "p99_us": 14200.417,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 14,
+          "files": 1000,
+          "kind": "file",
+          "oracle_cases": [
+            "hit",
+            "missing_file"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:g",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    3
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 32561.958000000002,
+              "mean_us": 3095.493066666667,
+              "min_us": 1226.167,
+              "p50_us": 1829.7910000000002,
+              "p95_us": 7559.5419999999995,
+              "p99_us": 32561.958000000002,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 11751.125,
+              "mean_us": 1734.8472666666669,
+              "min_us": 876.375,
+              "p50_us": 1153.834,
+              "p95_us": 5303.0,
+              "p99_us": 11751.125,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 24,
+          "files": 1000,
+          "kind": "root",
+          "oracle_cases": [
+            "hit",
+            "missing_dentry",
+            "wrong_candidate",
+            "missing_root",
+            "binary_name_mismatch_with_existing_hash"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    3
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1000
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 1000,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:f",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:r",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    5
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1000
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 1000,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 3657.5420000000004,
+              "mean_us": 2945.6401333333333,
+              "min_us": 2280.458,
+              "p50_us": 2886.625,
+              "p95_us": 3464.625,
+              "p99_us": 3657.5420000000004,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 2193.333,
+              "mean_us": 1762.6708666666668,
+              "min_us": 1568.292,
+              "p50_us": 1726.75,
+              "p95_us": 1987.7079999999999,
+              "p99_us": 2193.333,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 9,
+          "files": 1000,
+          "kind": "authority_membership",
+          "oracle_cases": [
+            "hit",
+            "missing_file"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "MergeJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "current"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    2
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "current": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 3274.0,
+              "mean_us": 1460.4554999999998,
+              "min_us": 865.5,
+              "p50_us": 1293.917,
+              "p95_us": 2366.916,
+              "p99_us": 3274.0,
+              "rounds": 30
+            },
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 1874.4160000000002,
+              "mean_us": 1213.8916666666667,
+              "min_us": 806.958,
+              "p50_us": 1163.834,
+              "p95_us": 1555.75,
+              "p99_us": 1874.4160000000002,
+              "rounds": 30
+            }
+          }
+        },
+        {
+          "all_column_equivalence": true,
+          "columns": 24,
+          "files": 1000,
+          "kind": "root_index",
+          "oracle_cases": [
+            "hit",
+            "missing_dentry",
+            "wrong_candidate",
+            "missing_root",
+            "binary_name_mismatch_with_existing_hash"
+          ],
+          "plan_operators": [
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    5
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection",
+                  "processed_keys": [
+                    1000
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 1000,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRangeScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "explicit_volume"
+            },
+            {
+              "operators": [
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "processed_keys": [
+                    5
+                  ],
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "IndexLookUp(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:d, index:name_lookup(volume_key, parent, name_hash)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "IndexRangeScan(Build)",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 0.0,
+                  "operator": "Selection(Probe)",
+                  "processed_keys": [
+                    1
+                  ],
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "table:d",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "TableRowIDScan",
+                  "task": "cop[tikv]"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_guards, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "HashJoin(Probe)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_compact_members, clustered index:PRIMARY(volume_key, inode)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Build)",
+                  "task": "root"
+                },
+                {
+                  "access": "table:mount_rs_tidb_metadata, clustered index:PRIMARY(volume_key)",
+                  "actual_rows": 1,
+                  "estimated_rows": 1.0,
+                  "operator": "Point_Get(Probe)",
+                  "task": "root"
+                }
+              ],
+              "variant": "force_name_index"
+            }
+          ],
+          "rows": 1,
+          "summary": {
+            "explicit_volume": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 3086.75,
+              "mean_us": 1890.9125333333334,
+              "min_us": 1524.0,
+              "p50_us": 1794.875,
+              "p95_us": 2337.25,
+              "p99_us": 3086.75,
+              "rounds": 30
+            },
+            "force_name_index": {
+              "last_plan_from_cache_hits": 30,
+              "max_us": 3159.083,
+              "mean_us": 1865.2999333333332,
+              "min_us": 1495.708,
+              "p50_us": 1742.541,
+              "p95_us": 2459.959,
+              "p99_us": 3159.083,
+              "rounds": 30
+            }
+          }
+        }
+      ],
+      "qualified": true,
+      "session": {
+        "autocommit": 1,
+        "tidb_txn_mode": "pessimistic",
+        "transaction_isolation": "REPEATABLE-READ"
+      },
+      "source": {
+        "build_rejects_provider_snapshot_drift": true,
+        "build_sha256": "07133cc72745e83604519c5426498ed16cf2525e1f3832f7d704375996ddef90",
+        "captured_at_build": true,
+        "cargo_lock_sha256": "639c4c94c26659f61904f29e0350463480f278c2c048a5bf2095971d67324b5e",
+        "cargo_sha256": "aa75c678b1c76bbda8df1f7c8306d08f63381887014e829169877f4d5b2a2fb0",
+        "compact_sha256": "f2372f35fd1b6526386ae28e2bd42ed1202da2b939afc243b0714911ed027fd7",
+        "guard_fixture_sha256": "3c225e22a01a12a32d417c77151057f95c2a03b1d2f2d266694985f73eb69446",
+        "indexed_sha256": "2bdbf1b33860f519776a47fe9341633ceddc41a26046632280c7831e41f53e30",
+        "main_sha256": "4697d8fab3f043ad97c6ba7a750beb4e3978c14b068ffb2b50195f304546595d",
+        "parent_main_sha256": "450d6e39c98f3270d65b9f2bb4cb89d5e189be72b3ed559d5ea3fbc746850da3",
+        "parent_queries_sha256": "6be81bb79ee48d5f6ac770d5064a1f2631c401c4a866cdd53d7f0142a43500e1",
+        "provider_head": "380e7fcebb7ffbd175879982606ccf788cf96b18",
+        "provider_tree": "68c227cd04a46ed180354a300662a9c9614504b0",
+        "queries_sha256": "f1eb83e2e38555c825b8f3c02dd133e1d10759d84cf21e276d97600010ed10d1",
+        "storage_sha256": "947c58184978de628fa46e50bbe147bda5f91ee06477ac314709ce4f735cc191"
+      }
+    }
+  ],
+  "schema": "mount-rs-indexed-prepared-query-diagnostic-v1",
+  "scope": "isolated metadata-only prepared SQL; two fresh volumes with 100/1000 empty regular files; one warmed connection per run; no RustFS traffic or logical Drive IOPS/capacity/durability/allocation claims",
+  "timing": "30 alternating pairs per variant after four warm pairs; exec including network/server/row decode; excludes preparation, parameter cloning, immediate cache-flag observation, row witnesses and artifact writes"
+}

@@ -1,0 +1,120 @@
+{
+  "archive_manifest_sha256": "2f76dca6d322577d91704389c9cb6e43de7ebd2321ae0aec41408f1fbb1a45ea",
+  "artifacts": {
+    "filesystem": {
+      "file": "filesystem-observations.json.gz",
+      "gzip_bytes": 325690,
+      "gzip_sha256": "877c70e24dfe43cbc154e03056c0ac32cf4ce0f8f504c34452226f3375c6f87f",
+      "public_bytes": 5891203,
+      "public_sha256": "c3244e32ffea3c3efd3f733d8a703bd7eb99f7b4ded4f70984f2e6a0be8f9ae2"
+    },
+    "rustfs": {
+      "file": "rustfs-observations.json.gz",
+      "gzip_bytes": 686100,
+      "gzip_sha256": "c2b9b0d17d00bc87879e0ca862cf5bbb8899f3221c1835f60ae2315387005917",
+      "public_bytes": 9573170,
+      "public_sha256": "e7eaac01587a56680aa223f06d216456cdfc627a10e4c0f7ed6c732ffc630c74"
+    }
+  },
+  "binary_sha256": "9f30c0b68e6a7e41b71e806b0efa3a74823830ebff7a70f67bee5f01dbe0cd27",
+  "independent_verification": {
+    "cells_passed": 32,
+    "filesystem_extractor_sha256": "27ef362db1c1778eb18cc51cd373258551276e42fad277cfe854c5f9ed41bf02",
+    "gate_receipt_sha256": "6837091f5977dfb3d7da15dac5258722d2d650cfabf4148e74ce7b7ac6f2bdd2",
+    "gzip_roundtrips_passed": 2,
+    "negative_controls_rejected": [
+      "allocation_delta_tamper",
+      "incomplete_full_oracle",
+      "mismatched_source_pair"
+    ],
+    "public_privacy_forbidden_markers": 0,
+    "public_receipt_sha256": "a71b01d9c0162c930a01aa27a291ac9e35b30b56081af4365e7836f63353da00",
+    "rustfs_extractor_sha256": "25f57ed4e05092587be6398fc3f6987bd6a43ecc0b5544fd259a83e41ce06531",
+    "verifier_sha256": "aac3f50339ece6b4d718bd94bdd54dc9cd39bfa5b3415c227062241b84572d17"
+  },
+  "native_inventory": {
+    "controller_filtered": 182,
+    "ignored": 6,
+    "source_files": 646,
+    "tests_passed": 177
+  },
+  "runtime": {
+    "filesystem": {
+      "automatic_retry": false,
+      "direct_child_reaped": true,
+      "direct_owner_group_absent": true,
+      "elapsed_seconds": 455.0047728329664,
+      "exact_identity_reconciliation_required": false,
+      "failure_labels": [],
+      "owner_sha256": "643467e6d3466cb53535180f4fbf78b081514a88f48fb7e902bf5037bb057151",
+      "performance_eligible": true,
+      "pipes_eof": true,
+      "producer_sha256": "d63bcdf07158511a78195ff9be4b7484896f2d1a2080fffcc0d85029ac5e47a5",
+      "resource_guard": {
+        "actual_max_gap_ms": 125.38845802191645,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 69560885248,
+        "requested_interval_ms": 100,
+        "samples": 4445,
+        "scope": "cooperative sampled host disk stop through owner execution and cleanup; no host RSS or Docker containment assertion"
+      },
+      "signals": [],
+      "source_pins_before_after_equal": true,
+      "status": "qualified",
+      "supervisor_receipt_sha256": "a7f205e9b2a4ca74cfa03a2c4bcd2cfb956f9de8ca8dac1b92a400ef675b8cf4"
+    },
+    "rustfs": {
+      "automatic_retry": false,
+      "direct_child_reaped": true,
+      "direct_owner_group_absent": true,
+      "elapsed_seconds": 401.0941962910583,
+      "exact_identity_reconciliation_required": false,
+      "failure_labels": [],
+      "owner_sha256": "e6412a4f692800d1776f181e2fc81c60e403aeff4ef5ddb08cbada22a8b05d6c",
+      "performance_eligible": true,
+      "pipes_eof": true,
+      "producer_sha256": "da5fbde03104bb17b2fb23669cb0e46d2f694126fc395fe5395bcd4e8c6cda93",
+      "resource_guard": {
+        "actual_max_gap_ms": 123.77579102758318,
+        "host_free_floor_bytes": 68719476736,
+        "minimum_host_free_bytes": 72155750400,
+        "requested_interval_ms": 100,
+        "samples": 3928,
+        "scope": "cooperative sampled host disk stop through owner execution and cleanup; no host RSS or Docker containment assertion"
+      },
+      "signals": [],
+      "source_pins_before_after_equal": true,
+      "status": "qualified",
+      "supervisor_receipt_sha256": "fc9ab7105d7f9cea09bab459ef1b414cff2e6b584781ba3dbef73ac42a1e0391"
+    }
+  },
+  "schema": "mount-rs-tidb-filesystem-pair-qualification-v1",
+  "scope": "one sequential local pair; filesystem first, RustFS second; ten native servers and ten depth-one clients, ten Drives/five Partitions/F1000; not a production saturation or physical IOPS result",
+  "source_revision": "7f4da840b815b24cc65ab37c93d7146a43f72775",
+  "validation": {
+    "archive_serial_pure_177": {
+      "passed": true,
+      "receipt_sha256": "fec4d7e38a31f12f56bc961bc12552136d0793fb93c55c2923101dd84658977e"
+    },
+    "filesystem_provider_25": {
+      "passed": true,
+      "receipt_sha256": "8883421df9ff99cb7aa7209ea01af8957433b7149203fedfb5183477f0039e18"
+    },
+    "format": {
+      "passed": true,
+      "receipt_sha256": "18159b170750679df65683c49f333851cf55a465b77a078b44f3d5b71a471997"
+    },
+    "native_release_strict_clippy": {
+      "passed": true,
+      "receipt_sha256": "83bee2f8d9497b7f57499833f493f041b9c8ca00e5c3d9bf2f2467aed2c39026"
+    },
+    "sdk_cli_filesystem_28": {
+      "passed": true,
+      "receipt_sha256": "45d144371f8bb2baed5b1052c9734a74aa373baf219c09f5fc4d64f9269a5d34"
+    },
+    "sdk_cli_provider_strict_clippy": {
+      "passed": true,
+      "receipt_sha256": "ccb73b2b35568e407cb59141ee59698a036731882556f3791317041fd484e31e"
+    }
+  }
+}

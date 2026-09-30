@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { Filesystem, createNodeFsDriver, createS3Server } from "../index.js"
+import { createNetworkProgress } from "./network-progress.mjs"
 
 const root = await mkdtemp(join(tmpdir(), "mount-rs-napi-s3-provider-network-"))
 const nodeDirectory = await mkdtemp(join(root, "node-fs-"))
@@ -14,11 +15,15 @@ const objects = Array.from({ length: concurrency }, (_, index) =>
   Buffer.alloc(8 * 1024 + index, index % 256),
 )
 
-async function withRequestStage(label, stage, index, action) {
+async function withRequestStage(progress, label, stage, index, action) {
   const started = performance.now()
+  progress.begin(stage)
   try {
-    return await action()
+    const result = await action()
+    progress.settle(stage, "fulfilled", index)
+    return result
   } catch (error) {
+    progress.settle(stage, "rejected", index, error)
     throw new Error(
       `${label} ${stage} ${index} failed after ${Math.round(performance.now() - started)} ms`,
       { cause: error },
@@ -26,127 +31,141 @@ async function withRequestStage(label, stage, index, action) {
   }
 }
 
-async function runCase({ label, open }) {
-  const filesystem = await open()
+async function runCase({ label, provider, open }) {
+  const progress = createNetworkProgress({
+    provider,
+    concurrency,
+    enabled: process.env.MOUNT_RS_S3_NETWORK_PROGRESS !== "0",
+  })
+  let filesystem
   let server
+  let outcome = "failed"
   try {
-    server = createS3Server({ buckets: { photos: filesystem } }, {
-      host: "127.0.0.1",
-      port: 0,
-      readChunkBytes: 4 * 1024,
-      debug: true,
-    })
-    await server.listen()
+    try {
+      filesystem = await open()
+      server = createS3Server({ buckets: { photos: filesystem } }, {
+        host: "127.0.0.1",
+        port: 0,
+        readChunkBytes: 4 * 1024,
+        debug: true,
+      })
+      await server.listen()
 
-    const putReplies = await Promise.all(
-      objects.map((body, index) =>
-        withRequestStage(label, "concurrent PUT fetch", index, () =>
-          fetch(`${server.url}/photos/provider-network/${index}.bin`, {
-            method: "PUT",
-            body,
-            signal: AbortSignal.timeout(15_000),
-          }),
-        ),
-      ),
-    )
-    for (const [index, reply] of putReplies.entries()) {
-      assert.equal(reply.status, 200, `${label} PUT ${index} status ${reply.status}`)
-      await withRequestStage(label, "concurrent PUT response body", index, () =>
-        reply.arrayBuffer(),
-      )
-    }
-
-    const getReplies = await Promise.all(
-      objects.map(async (expected, index) => {
-        const reply = await withRequestStage(label, "concurrent GET fetch", index, () =>
-          fetch(`${server.url}/photos/provider-network/${index}.bin`, {
-            signal: AbortSignal.timeout(15_000),
-          }),
-        )
-        return {
-          body: Buffer.from(
-            await withRequestStage(label, "concurrent GET response body", index, () =>
-              reply.arrayBuffer(),
-            ),
+      const putReplies = await Promise.all(
+        objects.map((body, index) =>
+          withRequestStage(progress, label, "concurrent PUT fetch", index, () =>
+            fetch(`${server.url}/photos/provider-network/${index}.bin`, {
+              method: "PUT",
+              body,
+              signal: AbortSignal.timeout(15_000),
+            }),
           ),
-          expected,
-          index,
-          status: reply.status,
-        }
-      }),
-    )
-    for (const { body, expected, index, status } of getReplies) {
-      assert.equal(status, 200, `${label} GET ${index} status`)
-      assert.deepEqual(body, expected, `${label} GET ${index} body`)
-    }
-
-    const streamedObject = Buffer.concat([
-      Buffer.alloc(3 * 1024, 0x41),
-      Buffer.alloc(5 * 1024, 0x42),
-      Buffer.alloc(7 * 1024, 0x43),
-    ])
-    const streamedChunks = [
-      streamedObject.subarray(0, 3 * 1024),
-      streamedObject.subarray(3 * 1024, 8 * 1024),
-      streamedObject.subarray(8 * 1024),
-    ]
-    const streamedPut = await withRequestStage(label, "streamed PUT fetch", "streamed.bin", () =>
-      fetch(`${server.url}/photos/provider-network/streamed.bin`, {
-        method: "PUT",
-        body: new ReadableStream({
-          async pull(controller) {
-            const chunk = streamedChunks.shift()
-            if (chunk === undefined) {
-              controller.close()
-              return
-            }
-            await new Promise((resolve) => setImmediate(resolve))
-            controller.enqueue(chunk)
-          },
-        }),
-        duplex: "half",
-        headers: { "content-length": String(streamedObject.length) },
-        signal: AbortSignal.timeout(15_000),
-      }),
-    )
-    assert.equal(streamedPut.status, 200, `${label} streamed PUT status`)
-    await withRequestStage(label, "streamed PUT response body", "streamed.bin", () =>
-      streamedPut.arrayBuffer(),
-    )
-
-    const streamedGet = await withRequestStage(label, "streamed GET fetch", "streamed.bin", () =>
-      fetch(`${server.url}/photos/provider-network/streamed.bin`, {
-        signal: AbortSignal.timeout(15_000),
-      }),
-    )
-    assert.equal(streamedGet.status, 200, `${label} streamed GET status`)
-    assert.deepEqual(
-      Buffer.from(
-        await withRequestStage(label, "streamed GET response body", "streamed.bin", () =>
-          streamedGet.arrayBuffer(),
         ),
-      ),
-      streamedObject,
-      `${label} streamed body`,
-    )
+      )
+      for (const [index, reply] of putReplies.entries()) {
+        assert.equal(reply.status, 200, `${label} PUT ${index} status ${reply.status}`)
+        await withRequestStage(progress, label, "concurrent PUT response body", index, () =>
+          reply.arrayBuffer(),
+        )
+      }
 
-    const stats = await server.session.stats()
-    assert.equal(stats.errors, 0, `${label} request errors`)
-    assert.equal(stats.operations.PutObject, concurrency + 1, `${label} PUT count`)
-    assert.equal(stats.operations.GetObject, concurrency + 1, `${label} GET count`)
+      const getReplies = await Promise.all(
+        objects.map(async (expected, index) => {
+          const reply = await withRequestStage(progress, label, "concurrent GET fetch", index, () =>
+            fetch(`${server.url}/photos/provider-network/${index}.bin`, {
+              signal: AbortSignal.timeout(15_000),
+            }),
+          )
+          return {
+            body: Buffer.from(
+              await withRequestStage(progress, label, "concurrent GET response body", index, () =>
+                reply.arrayBuffer(),
+              ),
+            ),
+            expected,
+            index,
+            status: reply.status,
+          }
+        }),
+      )
+      for (const { body, expected, index, status } of getReplies) {
+        assert.equal(status, 200, `${label} GET ${index} status`)
+        assert.deepEqual(body, expected, `${label} GET ${index} body`)
+      }
+
+      const streamedObject = Buffer.concat([
+        Buffer.alloc(3 * 1024, 0x41),
+        Buffer.alloc(5 * 1024, 0x42),
+        Buffer.alloc(7 * 1024, 0x43),
+      ])
+      const streamedChunks = [
+        streamedObject.subarray(0, 3 * 1024),
+        streamedObject.subarray(3 * 1024, 8 * 1024),
+        streamedObject.subarray(8 * 1024),
+      ]
+      const streamedPut = await withRequestStage(progress, label, "streamed PUT fetch", "streamed.bin", () =>
+        fetch(`${server.url}/photos/provider-network/streamed.bin`, {
+          method: "PUT",
+          body: new ReadableStream({
+            async pull(controller) {
+              const chunk = streamedChunks.shift()
+              if (chunk === undefined) {
+                controller.close()
+                return
+              }
+              await new Promise((resolve) => setImmediate(resolve))
+              controller.enqueue(chunk)
+            },
+          }),
+          duplex: "half",
+          headers: { "content-length": String(streamedObject.length) },
+          signal: AbortSignal.timeout(15_000),
+        }),
+      )
+      assert.equal(streamedPut.status, 200, `${label} streamed PUT status`)
+      await withRequestStage(progress, label, "streamed PUT response body", "streamed.bin", () =>
+        streamedPut.arrayBuffer(),
+      )
+
+      const streamedGet = await withRequestStage(progress, label, "streamed GET fetch", "streamed.bin", () =>
+        fetch(`${server.url}/photos/provider-network/streamed.bin`, {
+          signal: AbortSignal.timeout(15_000),
+        }),
+      )
+      assert.equal(streamedGet.status, 200, `${label} streamed GET status`)
+      assert.deepEqual(
+        Buffer.from(
+          await withRequestStage(progress, label, "streamed GET response body", "streamed.bin", () =>
+            streamedGet.arrayBuffer(),
+          ),
+        ),
+        streamedObject,
+        `${label} streamed body`,
+      )
+
+      const stats = await server.session.stats()
+      assert.equal(stats.errors, 0, `${label} request errors`)
+      assert.equal(stats.operations.PutObject, concurrency + 1, `${label} PUT count`)
+      assert.equal(stats.operations.GetObject, concurrency + 1, `${label} GET count`)
+    } finally {
+      await server?.close().catch(() => {})
+      await filesystem?.shutdown()
+    }
+    outcome = "passed"
   } finally {
-    await server?.close().catch(() => {})
-    await filesystem.shutdown()
+    progress.finish(outcome)
   }
 }
 
 try {
   await runCase({
     label: "S3 NodeFs provider network",
+    provider: "node-fs",
     open: async () => createNodeFsDriver(nodeDirectory),
   })
   await runCase({
     label: "S3 SQLite provider network",
+    provider: "sqlite",
     open: async () => Filesystem.sqlite(join(sqliteDirectory, "s3.sqlite")),
   })
 } finally {

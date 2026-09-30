@@ -6,6 +6,7 @@ set -eu
 # endpoint is passed through to a separate Rust client container.
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/foundationdb-napi-fixture-env.sh"
 fdb_image_override=${MOUNT_RS_FOUNDATIONDB_IMAGE:-}
 fdb_image=""
 rust_image=${MOUNT_RS_FOUNDATIONDB_RUST_IMAGE:-rust:1.95-bookworm}
@@ -13,6 +14,12 @@ node_image=${MOUNT_RS_FOUNDATIONDB_NODE_IMAGE:-node:24-bookworm}
 run_napi=0
 if [ "${MOUNT_RS_FOUNDATIONDB_NAPI:-0}" = "1" ]; then
   run_napi=1
+  sh "$repo_dir/scripts/test-foundationdb-napi-fixture-env.sh"
+  if [ -n "${RUSTFS_ENDPOINT:-}" ]; then
+    configure_foundationdb_napi_fixture rustfs
+  else
+    configure_foundationdb_napi_fixture generic
+  fi
 fi
 run_iops=0
 workload_profile=""
@@ -507,6 +514,11 @@ if [ "$run_service_benchmark" -eq 1 ]; then
   fi
 fi
 
+# These exact diagnostic controls use the existing client-equipped environment.
+# They exercise the shared retry/pager model and static native exports without
+# constructing a FoundationDB store or starting its native network.
+test_command="${test_command} && cargo test --locked -p mount-rs-foundationdb --features foundationdb --lib transaction_metrics::tests:: -- --test-threads=1 && cargo test --locked -p mount-rs-foundationdb --features foundationdb --lib tests::production_transaction_options_preserve_retry_policy_flags -- --exact --nocapture && MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_STORAGE=0 cargo test --locked -p mount-rs-napi --features foundationdb --lib tests::native_storage_snapshot_serializes_exact_decimal_counters -- --exact --nocapture && MOUNT_RS_PROFILE_IO=1 MOUNT_RS_TRACE_STORAGE=0 cargo test --locked -p mount-rs-napi --features foundationdb --lib tests::foundationdb_coverage_reports_feature_availability_without_backend -- --exact --nocapture"
+
 # The terminal network test runs in its own process after the ordinary
 # provider contract, so stopping the one-shot native client cannot affect
 # subsequent authority or application tests.
@@ -815,7 +827,7 @@ if [ "$run_napi" -eq 1 ]; then
   fi
   napi_status=0
   if [ -n "$rustfs_endpoint" ]; then
-    if docker run --rm \
+    if foundationdb_napi_run_client "$rustfs_endpoint" \
       --platform "$docker_platform" \
       --network "$network" \
       --add-host host.docker.internal:host-gateway \
@@ -825,26 +837,22 @@ if [ "$run_napi" -eq 1 ]; then
       --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
       --env LD_LIBRARY_PATH=/fdb \
       --env NAPI_RS_NATIVE_LIBRARY_PATH=/fdb/mount-rs.linux-x64-gnu.node \
+      --env MOUNT_RS_PROFILE_IO \
       --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
       --env "MOUNT_RS_FOUNDATIONDB_NODE_PREFIX=$test_prefix/napi" \
-      --env "R2_ENDPOINT=$rustfs_endpoint" \
-      --env R2_BUCKET \
-      --env R2_ACCESS_KEY_ID \
-      --env R2_SECRET_ACCESS_KEY \
       --env "RUSTFS_ENDPOINT=$rustfs_endpoint" \
       --env RUSTFS_BUCKET \
       --env RUSTFS_ACCESS_KEY_ID \
       --env RUSTFS_SECRET_ACCESS_KEY \
-      --env RUSTFS_REGION \
       "$node_image" sh -c "$node_command"; then
       :
     else
       napi_status=$?
     fi
   else
-    if docker run --rm \
+    if foundationdb_napi_run_client "$node_r2_endpoint" \
       --platform "$docker_platform" \
       --network "$network" \
       --add-host host.docker.internal:host-gateway \
@@ -854,14 +862,11 @@ if [ "$run_napi" -eq 1 ]; then
       --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
       --env LD_LIBRARY_PATH=/fdb \
       --env NAPI_RS_NATIVE_LIBRARY_PATH=/fdb/mount-rs.linux-x64-gnu.node \
+      --env MOUNT_RS_PROFILE_IO \
       --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
       --env "MOUNT_RS_FOUNDATIONDB_NODE_PREFIX=$test_prefix/napi" \
-      --env "R2_ENDPOINT=$node_r2_endpoint" \
-      --env R2_BUCKET \
-      --env R2_ACCESS_KEY_ID \
-      --env R2_SECRET_ACCESS_KEY \
       "$node_image" sh -c "$node_command"; then
       :
     else

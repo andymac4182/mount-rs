@@ -5,7 +5,6 @@
 // database, resolving credentials, or contacting PGlite/R2. The opt-in
 // PGlite/R2 row below is the separate configured SDK read/write/reopen exercise.
 
-import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -16,6 +15,7 @@ import {
   r2ConfigFromEnv,
   rustfsConfigFromEnv,
 } from "./r2-cleanup.mjs";
+import { run } from "./cli-run.mjs";
 
 const matrixDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(matrixDirectory, "../..");
@@ -30,32 +30,6 @@ const failures = [];
 let passes = 0;
 let skips = 0;
 const providerRunId = process.env.MOUNT_RS_PROVIDER_MATRIX_RUN_ID || `pid-${process.pid}`;
-
-function run(command, args, timeoutMs = 120_000) {
-  return new Promise((resolveResult) => {
-    const child = spawn(command, args, {
-      cwd: repositoryRoot,
-      env: { ...process.env },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-    }, timeoutMs);
-    child.on("error", () => {
-      clearTimeout(timer);
-      resolveResult({ ok: false, reason: "spawn" });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolveResult({
-        ok: !timedOut && code === 0,
-        reason: timedOut ? "timeout" : "exit-" + String(code),
-      });
-    });
-  });
-}
 
 async function commandCase(label, command, args) {
   const result = await run(command, args);
@@ -347,6 +321,7 @@ await commandCase(
   cargoShared,
   [
     "test",
+    "--lib",
     "--quiet",
     "--offline",
     "--locked",
@@ -362,6 +337,7 @@ await commandCase(
   cargoShared,
   [
     "test",
+    "--lib",
     "--quiet",
     "--offline",
     "--locked",

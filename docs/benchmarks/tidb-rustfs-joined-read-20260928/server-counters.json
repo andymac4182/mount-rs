@@ -1,0 +1,279 @@
+{
+  "backoff": {
+    "covered_finite_type_groups": 13,
+    "interpretation": "no recorded backoffer observations in exported covered groups; does not measure pure lock wait",
+    "mean_seconds": null,
+    "observed_seconds": null,
+    "recorded_observation_delta": 0,
+    "status": "no_interval_observations"
+  },
+  "clock_enclosure": {
+    "latest_before_to_native_created_seconds": 27.734906,
+    "native_terminal_inside_metric_window": true,
+    "native_updated_to_first_after_request_seconds": 16.625189
+  },
+  "configuration": {
+    "blobs": "rustfs",
+    "clients": 10,
+    "drives": 10,
+    "files_per_drive": 100,
+    "frontend_workers": 10,
+    "full_target": false,
+    "initial_files": 1000,
+    "metadata": "tidb",
+    "partitions": 5
+  },
+  "control": {
+    "cleanup_errors": 0,
+    "fresh_verified_files": 1000,
+    "fresh_verified_passes": 2,
+    "metric_accounting_complete": true,
+    "returncode": 0,
+    "root_elapsed_seconds": 171.32936341699678,
+    "terminal_success": true,
+    "workload_complete": true
+  },
+  "identity_coverage": {
+    "eight_original_roles_match_native_preflight": true,
+    "four_metric_role_before_after_continuity": true,
+    "pd_rustfs_post_capture_identity_witness_in_packet": false
+  },
+  "logical_amplification_ratio_available": false,
+  "physical_NVMe_IOPS_available": false,
+  "production_capacity_qualified": false,
+  "proof_hashes": {
+    "after_receipt_sha256": "094839e64607fdd186265d68377eab3247d99520f7fa681f9454822875c466b2",
+    "before_receipt_sha256": "d86078ac51fb368bfdf6d5ccefe9c809b1f3b627e1489f44771bebf8ac3e4f5b",
+    "candidate_sha256": "2c3fc4fb507ead472906c9310a90d192fdb2a0cbbbfbc31d2ac03a32d6864301",
+    "clean_control_receipt_sha256": "1f4caadaaeebbec78e4264c88e4c58972f9cd27bc9e626a6cd8c8a156021994d",
+    "clean_terminal_sha256": "cc49389b493b9f6f156c8c5b06123495b4186b52bfcea5869a8c0e72a934f0d6",
+    "comparison_sha256": "425a882f40e1ef3b6959569ae5421b8d370e1bf4cc5c05f3c30ea8e75f1ede08",
+    "source_before_after_sha256": "9d56cf7a01e50ff0a379de95c9bc3052717766c023ae518f8f7193e9dee9ea3d",
+    "whitelist_sha256": "7973a3692df5c7e92a11aa2c3b6258419d6565246545dfc4fc823a20dc880ad0"
+  },
+  "query_histogram": {
+    "coverage_complete": true,
+    "groups": [
+      {
+        "inclusive_seconds": 9.423851943000628,
+        "mean_ms": 0.2698852151612529,
+        "observations": 34918,
+        "sql_type": "Begin",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": 12.147684146999836,
+        "mean_ms": 4.1417266099556205,
+        "observations": 2933,
+        "sql_type": "Commit",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": null,
+        "mean_ms": null,
+        "observations": 0,
+        "sql_type": "Delete",
+        "status": "unavailable_no_interval_observations"
+      },
+      {
+        "inclusive_seconds": 0.8637243250000055,
+        "mean_ms": 0.5590448705501654,
+        "observations": 1545,
+        "sql_type": "Insert",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": 1.7320239589999922,
+        "mean_ms": 0.054046368115579994,
+        "observations": 32047,
+        "sql_type": "Rollback",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": 39.27605001400184,
+        "mean_ms": 0.8952010305420486,
+        "observations": 43874,
+        "sql_type": "Select",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": 2.587595356999792,
+        "mean_ms": 0.07371226518344895,
+        "observations": 35104,
+        "sql_type": "Set",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": 3.004632083999974,
+        "mean_ms": 0.6960000194579509,
+        "observations": 4317,
+        "sql_type": "Update",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": 0.00021533399999999997,
+        "mean_ms": 0.10766699999999998,
+        "observations": 2,
+        "sql_type": "Use",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": 0.06566288400000053,
+        "mean_ms": 0.17843175000000144,
+        "observations": 368,
+        "sql_type": "general",
+        "status": "observed"
+      },
+      {
+        "inclusive_seconds": 1.0783542139999724,
+        "mean_ms": 1.4282837271522812,
+        "observations": 755,
+        "sql_type": "internal",
+        "status": "observed"
+      }
+    ],
+    "inclusive_seconds_sum": 70.17979426100204,
+    "sum_scope": "inclusive concurrent query observations; not elapsed time or filesystem operation count",
+    "total_observations": 155863
+  },
+  "request_histogram": {
+    "coverage_complete": false,
+    "interpretation": "matched subset only; no full-family totals, rates or means; no-observation matched groups cannot establish absence across new raw identities",
+    "matched_subset_observations": 72221,
+    "matched_subset_seconds": 24.883573651000127,
+    "missing_raw_samples": 0,
+    "new_histogram_pairs": 2,
+    "new_pairs_end_cumulative_only": [
+      {
+        "end_cumulative_observations": 5232.0,
+        "end_cumulative_seconds": 2.725257073999994,
+        "interval_delta_available": false,
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "PessimisticLock"
+        }
+      },
+      {
+        "end_cumulative_observations": 2952.0,
+        "end_cumulative_seconds": 10.703156179999995,
+        "interval_delta_available": false,
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "Prewrite"
+        }
+      }
+    ],
+    "new_raw_samples": 4,
+    "positive_matched_groups": [
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "BatchGet"
+        },
+        "matched_duration_seconds": 0.1770227380000009,
+        "matched_mean_ms": 0.27659802812500145,
+        "matched_observation_count": 640
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "Cop"
+        },
+        "matched_duration_seconds": 13.5354930120001,
+        "matched_mean_ms": 0.38617669078459627,
+        "matched_observation_count": 35050
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "Get"
+        },
+        "matched_duration_seconds": 11.025277029000026,
+        "matched_mean_ms": 0.3027840888968233,
+        "matched_observation_count": 36413
+      },
+      {
+        "labels": {
+          "scope": "false",
+          "stale_read": "false",
+          "type": "MvccGetByKey"
+        },
+        "matched_duration_seconds": 0.004491998999999969,
+        "matched_mean_ms": 0.49911099999999653,
+        "matched_observation_count": 9
+      },
+      {
+        "labels": {
+          "scope": "true",
+          "stale_read": "false",
+          "type": "Commit"
+        },
+        "matched_duration_seconds": 0.04273721099999993,
+        "matched_mean_ms": 2.5139535882352897,
+        "matched_observation_count": 17
+      },
+      {
+        "labels": {
+          "scope": "true",
+          "stale_read": "false",
+          "type": "PessimisticLock"
+        },
+        "matched_duration_seconds": 0.013359871000000002,
+        "matched_mean_ms": 0.18555376388888892,
+        "matched_observation_count": 72
+      },
+      {
+        "labels": {
+          "scope": "true",
+          "stale_read": "false",
+          "type": "Prewrite"
+        },
+        "matched_duration_seconds": 0.08519179099999996,
+        "matched_mean_ms": 4.259589549999998,
+        "matched_observation_count": 20
+      }
+    ],
+    "reset_raw_samples": 0
+  },
+  "retry": {
+    "interpretation": "no recorded retried-statement observations; does not measure lock wait",
+    "mean_retry_values": null,
+    "recorded_retried_statement_observation_delta": 0,
+    "retry_value_sum": null,
+    "status": "no_interval_observations"
+  },
+  "schema": "mount-rs.remote10-prom-clean-report.v1",
+  "scope": "whole matched control enclosure with preflight/startup/work/oracles/cleanup and background; sequential endpoint sampling; not stage-only or physical IOPS",
+  "server_contention_proven": false,
+  "source_intervals": [
+    {
+      "role": "tidb",
+      "seconds": 213.040393834
+    },
+    {
+      "role": "tikv1",
+      "seconds": 213.04507525
+    },
+    {
+      "role": "tikv2",
+      "seconds": 213.046930125
+    },
+    {
+      "role": "tikv3",
+      "seconds": 213.048293833
+    }
+  ],
+  "source_revision": "083c82919bdeac7c7182563bbbdaa0e91810b200",
+  "status": "offline_verified_observed_partial",
+  "tikv_lock_stage": {
+    "candidate_zero_deltas": 6,
+    "coverage_verified": false,
+    "interpretation": "declaration-only candidate counter; zero does not establish no contention",
+    "pure_lock_wait_seconds": null
+  }
+}

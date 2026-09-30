@@ -1,0 +1,3476 @@
+{
+  "SDK": {
+    "arms": {
+      "baseline-f100": {
+        "cleanup": {
+          "owned_scopes": 2,
+          "passed": true,
+          "post_cleanup_metadata_absent": true,
+          "post_cleanup_prefixes_absent": true,
+          "removed_blob_objects": 2704
+        },
+        "files_per_drive": 100,
+        "full_run_elapsed_seconds": 69.835222,
+        "oracle": {
+          "bytes": 819200,
+          "eof": true,
+          "exact_root_membership": true,
+          "files": 200,
+          "full_bytes": true,
+          "passed": true
+        },
+        "setup_elapsed_seconds": 11.35414,
+        "stages": {
+          "mixed": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 3.5,
+              "body_bytes": 60.0,
+              "body_elapsed_ns": 22521.765,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 18277130.601,
+              "offered_bytes": 2048.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 294.36834,
+            "all_named_sql_calls_per_payload_operation": 6.5,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 12080640,
+                "contention_rejections": 0,
+                "entries": 2860,
+                "payload_bytes": 11714560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 9968640,
+                "contention_rejections": 0,
+                "entries": 2360,
+                "payload_bytes": 9666560,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 2048.0,
+              "provider.blocks.put_bytes": 2048.0,
+              "provider.compact_anchor_returned_bytes": 3055.0,
+              "provider.inode_returned_bytes": 5055.76,
+              "provider.inode_serialized_bytes": 227.47
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 500,
+              "opens": 1000,
+              "payload_reads": 500,
+              "payload_writes": 500,
+              "read_bytes": 2048000,
+              "verified_reads": 500,
+              "written_bytes": 2048000
+            },
+            "cycle_latency": {
+              "p50_us": 31576,
+              "p95_us": 57755,
+              "p99_us": 65196,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 3.397104,
+            "known_metadata_return_bytes_per_4KiB_payload": 1.980166,
+            "known_metadata_return_bytes_per_payload_operation": 8110.76,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 4.5,
+              "sdk.metadata.publish_compact_inode": 0.5,
+              "sdk.metadata.publish_includes_flush_barrier": 0.5,
+              "tidb.pool.checkout": 5.0,
+              "tidb.sql.inode_read": 5.0,
+              "tidb.sql.inode_write": 0.5,
+              "tidb.sql.metadata_read": 0.5,
+              "tidb.sql.session": 0.5,
+              "tidb.tx.begin.inode": 0.5,
+              "tidb.tx.commit": 0.5
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 973.027,
+              "rust_allocated_bytes": 224251.21,
+              "rust_allocations": 1172.009,
+              "rust_reallocations": 119.554
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 1778.382086,
+              "object_store.backing_marker.probe.get": 2261.532162,
+              "sdk.blocks.get": 4.674119,
+              "sdk.blocks.put": 14330.074314,
+              "sdk.blocks.verify_concurrent_backing": 4065.584451,
+              "sdk.metadata.load_compact_inode": 9834.497117,
+              "tidb.sql.inode_read": 10591.414597
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "random_overwrite": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 5.0,
+              "body_bytes": 80.0,
+              "body_elapsed_ns": 40488.269,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 37798122.209,
+              "offered_bytes": 4096.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 178.360829,
+            "all_named_sql_calls_per_payload_operation": 7.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 9968640,
+                "contention_rejections": 0,
+                "entries": 2360,
+                "payload_bytes": 9666560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 5744640,
+                "contention_rejections": 0,
+                "entries": 1360,
+                "payload_bytes": 5570560,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 2444.0,
+              "provider.inode_returned_bytes": 4600.82,
+              "provider.inode_serialized_bytes": 454.94
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 0,
+              "opens": 1000,
+              "payload_reads": 0,
+              "payload_writes": 1000,
+              "read_bytes": 0,
+              "verified_reads": 0,
+              "written_bytes": 4096000
+            },
+            "cycle_latency": {
+              "p50_us": 54273,
+              "p95_us": 68276,
+              "p99_us": 78214,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 5.606612,
+            "known_metadata_return_bytes_per_4KiB_payload": 1.719927,
+            "known_metadata_return_bytes_per_payload_operation": 7044.82,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 3.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 4.0,
+              "tidb.sql.inode_read": 4.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.commit": 1.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1373.74,
+              "rust_allocated_bytes": 280321.968,
+              "rust_allocations": 1264.105,
+              "rust_reallocations": 164.012
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2732.215766,
+              "object_store.backing_marker.probe.get": 3890.493427,
+              "sdk.blocks.put": 31345.319505,
+              "sdk.blocks.verify_concurrent_backing": 6663.649735,
+              "sdk.metadata.load_compact_inode": 6818.558011,
+              "tidb.sql.inode_read": 8366.688015
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "random_read": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 2.0,
+              "body_bytes": 40.0,
+              "body_elapsed_ns": 11555.17,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 1492233.258,
+              "offered_bytes": 0.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 734.052525,
+            "all_named_sql_calls_per_payload_operation": 6.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 1520640,
+                "contention_rejections": 0,
+                "entries": 360,
+                "payload_bytes": 1474560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 1520640,
+                "contention_rejections": 0,
+                "entries": 360,
+                "payload_bytes": 1474560,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 3666.0,
+              "provider.inode_returned_bytes": 5510.7
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 1000,
+              "opens": 1000,
+              "payload_reads": 1000,
+              "payload_writes": 0,
+              "read_bytes": 4096000,
+              "verified_reads": 1000,
+              "written_bytes": 0
+            },
+            "cycle_latency": {
+              "p50_us": 13067,
+              "p95_us": 17767,
+              "p99_us": 20561,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 1.3623,
+            "known_metadata_return_bytes_per_4KiB_payload": 2.240405,
+            "known_metadata_return_bytes_per_payload_operation": 9176.7,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 6.0,
+              "tidb.pool.checkout": 6.0,
+              "tidb.sql.inode_read": 6.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 627.116,
+              "rust_allocated_bytes": 167339.8,
+              "rust_allocations": 1077.107,
+              "rust_reallocations": 75.002
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 744.729867,
+              "object_store.backing_marker.probe.get": 782.934776,
+              "sdk.blocks.get": 4.823635,
+              "sdk.blocks.verify_concurrent_backing": 1542.78501,
+              "sdk.metadata.load_compact_inode": 11937.386034,
+              "tidb.sql.inode_read": 11885.178455
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "sequential_overwrite": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 5.0,
+              "body_bytes": 80.0,
+              "body_elapsed_ns": 32203.922,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 36876397.926,
+              "offered_bytes": 4096.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 182.942363,
+            "all_named_sql_calls_per_payload_operation": 7.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 5744640,
+                "contention_rejections": 0,
+                "entries": 1360,
+                "payload_bytes": 5570560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 1520640,
+                "contention_rejections": 0,
+                "entries": 360,
+                "payload_bytes": 1474560,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 2444.0,
+              "provider.inode_returned_bytes": 4600.82,
+              "provider.inode_serialized_bytes": 454.94
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 0,
+              "opens": 1000,
+              "payload_reads": 0,
+              "payload_writes": 1000,
+              "read_bytes": 0,
+              "verified_reads": 0,
+              "written_bytes": 4096000
+            },
+            "cycle_latency": {
+              "p50_us": 54036,
+              "p95_us": 62308,
+              "p99_us": 68925,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 5.466202,
+            "known_metadata_return_bytes_per_4KiB_payload": 1.719927,
+            "known_metadata_return_bytes_per_payload_operation": 7044.82,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 3.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 4.0,
+              "tidb.sql.inode_read": 4.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.commit": 1.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1240.785,
+              "rust_allocated_bytes": 280585.966,
+              "rust_allocations": 1264.928,
+              "rust_reallocations": 164.048
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2605.702097,
+              "object_store.backing_marker.probe.get": 3679.17135,
+              "sdk.blocks.put": 30731.467829,
+              "sdk.blocks.verify_concurrent_backing": 6315.952184,
+              "sdk.metadata.load_compact_inode": 6697.462726,
+              "tidb.sql.inode_read": 8225.588607
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "sequential_read": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 2.16,
+              "body_bytes": 695.36,
+              "body_elapsed_ns": 12919.092,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 1942966.561,
+              "offered_bytes": 0.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 685.66531,
+            "all_named_sql_calls_per_payload_operation": 6.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 1520640,
+                "contention_rejections": 0,
+                "entries": 360,
+                "payload_bytes": 1474560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 844800,
+                "contention_rejections": 0,
+                "entries": 200,
+                "payload_bytes": 819200,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 3666.0,
+              "provider.inode_returned_bytes": 5510.7
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 1000,
+              "opens": 1000,
+              "payload_reads": 1000,
+              "payload_writes": 0,
+              "read_bytes": 4096000,
+              "verified_reads": 1000,
+              "written_bytes": 0
+            },
+            "cycle_latency": {
+              "p50_us": 13758,
+              "p95_us": 19630,
+              "p99_us": 27879,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 1.458438,
+            "known_metadata_return_bytes_per_4KiB_payload": 2.240405,
+            "known_metadata_return_bytes_per_payload_operation": 9176.7,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 6.0,
+              "tidb.pool.checkout": 6.0,
+              "tidb.sql.inode_read": 6.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 647.323,
+              "rust_allocated_bytes": 174317.454,
+              "rust_allocations": 1103.648,
+              "rust_reallocations": 79.488
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 784.211353,
+              "object_store.backing_marker.probe.get": 848.576652,
+              "sdk.blocks.get": 355.843038,
+              "sdk.blocks.verify_concurrent_backing": 1648.566792,
+              "sdk.metadata.load_compact_inode": 12389.524696,
+              "tidb.sql.inode_read": 12336.103309
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          }
+        },
+        "timed_stage_seconds_total": 17.290657
+      },
+      "baseline-f1000": {
+        "cleanup": {
+          "owned_scopes": 2,
+          "passed": true,
+          "post_cleanup_metadata_absent": true,
+          "post_cleanup_prefixes_absent": true,
+          "removed_blob_objects": 4504
+        },
+        "files_per_drive": 1000,
+        "full_run_elapsed_seconds": 222.117966,
+        "oracle": {
+          "bytes": 8192000,
+          "eof": true,
+          "exact_root_membership": true,
+          "files": 2000,
+          "full_bytes": true,
+          "passed": true
+        },
+        "setup_elapsed_seconds": 118.984388,
+        "stages": {
+          "mixed": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 3.5,
+              "body_bytes": 60.0,
+              "body_elapsed_ns": 29206.35,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 21456652.191,
+              "offered_bytes": 2048.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 240.751373,
+            "all_named_sql_calls_per_payload_operation": 6.5,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 24026112,
+                "contention_rejections": 0,
+                "entries": 5688,
+                "payload_bytes": 23298048,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 21914112,
+                "contention_rejections": 0,
+                "entries": 5188,
+                "payload_bytes": 21250048,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 2048.0,
+              "provider.blocks.put_bytes": 2048.0,
+              "provider.compact_anchor_returned_bytes": 21067.5,
+              "provider.inode_returned_bytes": 33861.521,
+              "provider.inode_serialized_bytes": 227.937
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 500,
+              "opens": 1000,
+              "payload_reads": 500,
+              "payload_writes": 500,
+              "read_bytes": 2048000,
+              "verified_reads": 500,
+              "written_bytes": 2048000
+            },
+            "cycle_latency": {
+              "p50_us": 37021,
+              "p95_us": 71063,
+              "p99_us": 95270,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 4.153663,
+            "known_metadata_return_bytes_per_4KiB_payload": 13.410406,
+            "known_metadata_return_bytes_per_payload_operation": 54929.021,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 4.5,
+              "sdk.metadata.publish_compact_inode": 0.5,
+              "sdk.metadata.publish_includes_flush_barrier": 0.5,
+              "tidb.pool.checkout": 5.0,
+              "tidb.sql.inode_read": 5.0,
+              "tidb.sql.inode_write": 0.5,
+              "tidb.sql.metadata_read": 0.5,
+              "tidb.sql.session": 0.5,
+              "tidb.tx.begin.inode": 0.5,
+              "tidb.tx.commit": 0.5
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1308.463,
+              "rust_allocated_bytes": 277820.305,
+              "rust_allocations": 1171.691,
+              "rust_reallocations": 121.038
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2164.924586,
+              "object_store.backing_marker.probe.get": 2688.172028,
+              "sdk.blocks.get": 9.096965,
+              "sdk.blocks.put": 16710.922665,
+              "sdk.blocks.verify_concurrent_backing": 4881.984292,
+              "sdk.metadata.load_compact_inode": 12970.610168,
+              "tidb.sql.inode_read": 13773.124737
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "random_overwrite": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 5.0,
+              "body_bytes": 80.0,
+              "body_elapsed_ns": 40648.172,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 42626053.497,
+              "offered_bytes": 4096.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 153.845683,
+            "all_named_sql_calls_per_payload_operation": 7.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 21914112,
+                "contention_rejections": 0,
+                "entries": 5188,
+                "payload_bytes": 21250048,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 17690112,
+                "contention_rejections": 0,
+                "entries": 4188,
+                "payload_bytes": 17154048,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 16854.0,
+              "provider.inode_returned_bytes": 33405.637,
+              "provider.inode_serialized_bytes": 455.879
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 0,
+              "opens": 1000,
+              "payload_reads": 0,
+              "payload_writes": 1000,
+              "read_bytes": 0,
+              "verified_reads": 0,
+              "written_bytes": 4096000
+            },
+            "cycle_latency": {
+              "p50_us": 63169,
+              "p95_us": 81310,
+              "p99_us": 89398,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 6.50002,
+            "known_metadata_return_bytes_per_4KiB_payload": 12.270419,
+            "known_metadata_return_bytes_per_payload_operation": 50259.637,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 3.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 4.0,
+              "tidb.sql.inode_read": 4.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.commit": 1.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1689.198,
+              "rust_allocated_bytes": 337757.515,
+              "rust_allocations": 1264.107,
+              "rust_reallocations": 167.01
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2960.925007,
+              "object_store.backing_marker.probe.get": 4220.861655,
+              "sdk.blocks.put": 35620.879328,
+              "sdk.blocks.verify_concurrent_backing": 7220.162952,
+              "sdk.metadata.load_compact_inode": 8931.446683,
+              "tidb.sql.inode_read": 10680.275308
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "random_read": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 2.388,
+              "body_bytes": 1629.248,
+              "body_elapsed_ns": 18203.657,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 3212606.226,
+              "offered_bytes": 0.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 474.651992,
+            "all_named_sql_calls_per_payload_operation": 6.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 13466112,
+                "contention_rejections": 0,
+                "entries": 3188,
+                "payload_bytes": 13058048,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 11827200,
+                "contention_rejections": 0,
+                "entries": 2800,
+                "payload_bytes": 11468800,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 25281.0,
+              "provider.inode_returned_bytes": 34317.395
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 1000,
+              "opens": 1000,
+              "payload_reads": 1000,
+              "payload_writes": 0,
+              "read_bytes": 4096000,
+              "verified_reads": 1000,
+              "written_bytes": 0
+            },
+            "cycle_latency": {
+              "p50_us": 18892,
+              "p95_us": 28256,
+              "p99_us": 58160,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 2.106807,
+            "known_metadata_return_bytes_per_4KiB_payload": 14.550389,
+            "known_metadata_return_bytes_per_payload_operation": 59598.395,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 6.0,
+              "tidb.pool.checkout": 6.0,
+              "tidb.sql.inode_read": 6.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 955.399,
+              "rust_allocated_bytes": 236547.896,
+              "rust_allocations": 1136.368,
+              "rust_reallocations": 85.544
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 1056.830119,
+              "object_store.backing_marker.probe.get": 1091.465744,
+              "sdk.blocks.get": 1134.008988,
+              "sdk.blocks.verify_concurrent_backing": 2166.53356,
+              "sdk.metadata.load_compact_inode": 17078.496571,
+              "tidb.sql.inode_read": 16875.980877
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "sequential_overwrite": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 5.0,
+              "body_bytes": 80.0,
+              "body_elapsed_ns": 38710.299,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 42506491.381,
+              "offered_bytes": 4096.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 155.294131,
+            "all_named_sql_calls_per_payload_operation": 7.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 17690112,
+                "contention_rejections": 0,
+                "entries": 4188,
+                "payload_bytes": 17154048,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 13466112,
+                "contention_rejections": 0,
+                "entries": 3188,
+                "payload_bytes": 13058048,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 16854.0,
+              "provider.inode_returned_bytes": 33405.364,
+              "provider.inode_serialized_bytes": 455.788
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 0,
+              "opens": 1000,
+              "payload_reads": 0,
+              "payload_writes": 1000,
+              "read_bytes": 0,
+              "verified_reads": 0,
+              "written_bytes": 4096000
+            },
+            "cycle_latency": {
+              "p50_us": 62689,
+              "p95_us": 80097,
+              "p99_us": 87535,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 6.439393,
+            "known_metadata_return_bytes_per_4KiB_payload": 12.270353,
+            "known_metadata_return_bytes_per_payload_operation": 50259.364,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 3.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 4.0,
+              "tidb.sql.inode_read": 4.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.commit": 1.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1603.43,
+              "rust_allocated_bytes": 338138.358,
+              "rust_allocations": 1265.222,
+              "rust_reallocations": 167.04
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2973.758731,
+              "object_store.backing_marker.probe.get": 4145.946845,
+              "sdk.blocks.put": 35548.252957,
+              "sdk.blocks.verify_concurrent_backing": 7157.662214,
+              "sdk.metadata.load_compact_inode": 8803.994488,
+              "tidb.sql.inode_read": 10546.797557
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "sequential_read": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 2.8,
+              "body_bytes": 3316.8,
+              "body_elapsed_ns": 17869.7,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 3745584.825,
+              "offered_bytes": 0.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 515.609431,
+            "all_named_sql_calls_per_payload_operation": 6.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 11827200,
+                "contention_rejections": 0,
+                "entries": 2800,
+                "payload_bytes": 11468800,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 8448000,
+                "contention_rejections": 0,
+                "entries": 2000,
+                "payload_bytes": 8192000,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 25281.0,
+              "provider.inode_returned_bytes": 34316.94
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 1000,
+              "opens": 1000,
+              "payload_reads": 1000,
+              "payload_writes": 0,
+              "read_bytes": 4096000,
+              "verified_reads": 1000,
+              "written_bytes": 0
+            },
+            "cycle_latency": {
+              "p50_us": 18280,
+              "p95_us": 24461,
+              "p99_us": 27207,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 1.939453,
+            "known_metadata_return_bytes_per_4KiB_payload": 14.550278,
+            "known_metadata_return_bytes_per_payload_operation": 59597.94,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.load_compact_inode": 6.0,
+              "tidb.pool.checkout": 6.0,
+              "tidb.sql.inode_read": 6.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 920.436,
+              "rust_allocated_bytes": 253195.924,
+              "rust_allocations": 1201.406,
+              "rust_reallocations": 96.779
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 936.160627,
+              "object_store.backing_marker.probe.get": 966.76981,
+              "sdk.blocks.get": 1916.718594,
+              "sdk.blocks.verify_concurrent_backing": 1919.046724,
+              "sdk.metadata.load_compact_inode": 15030.082337,
+              "tidb.sql.inode_read": 14843.477959
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          }
+        },
+        "timed_stage_seconds_total": 21.139335
+      },
+      "current-f100": {
+        "cleanup": {
+          "owned_scopes": 2,
+          "passed": true,
+          "post_cleanup_metadata_absent": true,
+          "post_cleanup_prefixes_absent": true,
+          "removed_blob_objects": 2704
+        },
+        "files_per_drive": 100,
+        "full_run_elapsed_seconds": 72.803975,
+        "oracle": {
+          "bytes": 819200,
+          "eof": true,
+          "exact_root_membership": true,
+          "files": 200,
+          "full_bytes": true,
+          "passed": true
+        },
+        "setup_elapsed_seconds": 14.314626,
+        "stages": {
+          "mixed": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 3.5,
+              "body_bytes": 60.0,
+              "body_elapsed_ns": 29239.999,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 18685047.314,
+              "offered_bytes": 2048.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 270.923382,
+            "all_named_sql_calls_per_payload_operation": 6.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 12080640,
+                "contention_rejections": 0,
+                "entries": 2860,
+                "payload_bytes": 11714560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 9968640,
+                "contention_rejections": 0,
+                "entries": 2360,
+                "payload_bytes": 9666560,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 2048.0,
+              "provider.blocks.put_bytes": 2048.0,
+              "provider.compact_anchor_returned_bytes": 1316.0,
+              "provider.inode_returned_bytes": 2139.76,
+              "provider.inode_serialized_bytes": 227.47
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 500,
+              "opens": 1000,
+              "payload_reads": 500,
+              "payload_writes": 500,
+              "read_bytes": 2048000,
+              "verified_reads": 500,
+              "written_bytes": 2048000
+            },
+            "cycle_latency": {
+              "p50_us": 31072,
+              "p95_us": 61949,
+              "p99_us": 67768,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 3.69108,
+            "known_metadata_return_bytes_per_4KiB_payload": 0.843691,
+            "known_metadata_return_bytes_per_payload_operation": 3455.76,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 3.5,
+              "sdk.metadata.load_compact_inode": 2.5,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "sdk.metadata.publish_compact_inode": 0.5,
+              "sdk.metadata.publish_includes_flush_barrier": 0.5,
+              "tidb.pool.checkout": 4.0,
+              "tidb.sql.inode_read": 4.5,
+              "tidb.sql.inode_write": 0.5,
+              "tidb.sql.metadata_read": 0.5,
+              "tidb.sql.session": 0.5,
+              "tidb.tx.begin.inode": 0.5,
+              "tidb.tx.commit": 0.5
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1070.867,
+              "rust_allocated_bytes": 215235.888,
+              "rust_allocations": 1168.111,
+              "rust_reallocations": 115.51
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 1987.412002,
+              "object_store.backing_marker.probe.get": 2343.278688,
+              "sdk.blocks.get": 5.836116,
+              "sdk.blocks.put": 14465.116749,
+              "sdk.blocks.verify_concurrent_backing": 4360.349347,
+              "sdk.metadata.load_compact_inode": 6686.399324,
+              "sdk.metadata.load_compact_root_file": 4804.540078,
+              "tidb.sql.inode_read": 13022.784313
+            },
+            "selected_sql_calls_per_payload_operation": 5.5
+          },
+          "random_overwrite": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 5.0,
+              "body_bytes": 80.0,
+              "body_elapsed_ns": 42413.561,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 36807660.04,
+              "offered_bytes": 4096.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 175.707161,
+            "all_named_sql_calls_per_payload_operation": 7.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 9968640,
+                "contention_rejections": 0,
+                "entries": 2360,
+                "payload_bytes": 9666560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 5744640,
+                "contention_rejections": 0,
+                "entries": 1360,
+                "payload_bytes": 5570560,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 987.0,
+              "provider.inode_returned_bytes": 1684.82,
+              "provider.inode_serialized_bytes": 454.94
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 0,
+              "opens": 1000,
+              "payload_reads": 0,
+              "payload_writes": 1000,
+              "read_bytes": 0,
+              "verified_reads": 0,
+              "written_bytes": 4096000
+            },
+            "cycle_latency": {
+              "p50_us": 55733,
+              "p95_us": 67903,
+              "p99_us": 79863,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 5.691288,
+            "known_metadata_return_bytes_per_4KiB_payload": 0.6523,
+            "known_metadata_return_bytes_per_payload_operation": 2671.82,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 2.0,
+              "sdk.metadata.load_compact_inode": 1.0,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 3.0,
+              "tidb.sql.inode_read": 4.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.commit": 1.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1492.492,
+              "rust_allocated_bytes": 272373.656,
+              "rust_allocations": 1265.105,
+              "rust_reallocations": 159.013
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2681.207314,
+              "object_store.backing_marker.probe.get": 3648.471428,
+              "sdk.blocks.put": 30669.319502,
+              "sdk.blocks.verify_concurrent_backing": 6372.24239,
+              "sdk.metadata.load_compact_inode": 2640.411454,
+              "sdk.metadata.load_compact_root_file": 4575.366157,
+              "tidb.sql.inode_read": 10201.16374
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "random_read": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 2.0,
+              "body_bytes": 40.0,
+              "body_elapsed_ns": 10650.018,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 1501538.155,
+              "offered_bytes": 0.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 644.873905,
+            "all_named_sql_calls_per_payload_operation": 5.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 1520640,
+                "contention_rejections": 0,
+                "entries": 360,
+                "payload_bytes": 1474560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 1520640,
+                "contention_rejections": 0,
+                "entries": 360,
+                "payload_bytes": 1474560,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 1645.0,
+              "provider.inode_returned_bytes": 2594.7
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 1000,
+              "opens": 1000,
+              "payload_reads": 1000,
+              "payload_writes": 0,
+              "read_bytes": 4096000,
+              "verified_reads": 1000,
+              "written_bytes": 0
+            },
+            "cycle_latency": {
+              "p50_us": 14853,
+              "p95_us": 21060,
+              "p99_us": 24697,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 1.550691,
+            "known_metadata_return_bytes_per_4KiB_payload": 1.035083,
+            "known_metadata_return_bytes_per_payload_operation": 4239.7,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 5.0,
+              "sdk.metadata.load_compact_inode": 4.0,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "tidb.pool.checkout": 5.0,
+              "tidb.sql.inode_read": 5.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 544.667,
+              "rust_allocated_bytes": 157473.857,
+              "rust_allocations": 1071.111,
+              "rust_reallocations": 72.016
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 740.170494,
+              "object_store.backing_marker.probe.get": 795.165541,
+              "sdk.blocks.get": 4.478015,
+              "sdk.blocks.verify_concurrent_backing": 1549.49851,
+              "sdk.metadata.load_compact_inode": 9456.41107,
+              "sdk.metadata.load_compact_root_file": 4374.393083,
+              "tidb.sql.inode_read": 13794.420968
+            },
+            "selected_sql_calls_per_payload_operation": 5.0
+          },
+          "sequential_overwrite": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 5.0,
+              "body_bytes": 80.0,
+              "body_elapsed_ns": 34733.909,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 37177639.238,
+              "offered_bytes": 4096.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 172.543395,
+            "all_named_sql_calls_per_payload_operation": 7.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 5744640,
+                "contention_rejections": 0,
+                "entries": 1360,
+                "payload_bytes": 5570560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 1520640,
+                "contention_rejections": 0,
+                "entries": 360,
+                "payload_bytes": 1474560,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 987.0,
+              "provider.inode_returned_bytes": 1684.82,
+              "provider.inode_serialized_bytes": 454.94
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 0,
+              "opens": 1000,
+              "payload_reads": 0,
+              "payload_writes": 1000,
+              "read_bytes": 0,
+              "verified_reads": 0,
+              "written_bytes": 4096000
+            },
+            "cycle_latency": {
+              "p50_us": 55859,
+              "p95_us": 66754,
+              "p99_us": 86967,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 5.795643,
+            "known_metadata_return_bytes_per_4KiB_payload": 0.6523,
+            "known_metadata_return_bytes_per_payload_operation": 2671.82,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 2.0,
+              "sdk.metadata.load_compact_inode": 1.0,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 3.0,
+              "tidb.sql.inode_read": 4.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.commit": 1.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1320.354,
+              "rust_allocated_bytes": 272813.212,
+              "rust_allocations": 1268.26,
+              "rust_reallocations": 159.14
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2509.151438,
+              "object_store.backing_marker.probe.get": 3552.052422,
+              "sdk.blocks.put": 31275.270743,
+              "sdk.blocks.verify_concurrent_backing": 6096.188609,
+              "sdk.metadata.load_compact_inode": 2743.722601,
+              "sdk.metadata.load_compact_root_file": 4809.257557,
+              "tidb.sql.inode_read": 10761.749378
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "sequential_read": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 2.16,
+              "body_bytes": 695.36,
+              "body_elapsed_ns": 12091.597,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 1912448.454,
+              "offered_bytes": 0.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 610.56126,
+            "all_named_sql_calls_per_payload_operation": 5.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 1520640,
+                "contention_rejections": 0,
+                "entries": 360,
+                "payload_bytes": 1474560,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 844800,
+                "contention_rejections": 0,
+                "entries": 200,
+                "payload_bytes": 819200,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 1645.0,
+              "provider.inode_returned_bytes": 2594.7
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 1000,
+              "opens": 1000,
+              "payload_reads": 1000,
+              "payload_writes": 0,
+              "read_bytes": 4096000,
+              "verified_reads": 1000,
+              "written_bytes": 0
+            },
+            "cycle_latency": {
+              "p50_us": 15186,
+              "p95_us": 22900,
+              "p99_us": 28154,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 1.637837,
+            "known_metadata_return_bytes_per_4KiB_payload": 1.035083,
+            "known_metadata_return_bytes_per_payload_operation": 4239.7,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 5.0,
+              "sdk.metadata.load_compact_inode": 4.0,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "tidb.pool.checkout": 5.0,
+              "tidb.sql.inode_read": 5.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 580.788,
+              "rust_allocated_bytes": 164425.981,
+              "rust_allocations": 1101.264,
+              "rust_reallocations": 76.584
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 743.339794,
+              "object_store.backing_marker.probe.get": 828.897291,
+              "sdk.blocks.get": 386.005408,
+              "sdk.blocks.verify_concurrent_backing": 1587.134384,
+              "sdk.metadata.load_compact_inode": 9668.280735,
+              "sdk.metadata.load_compact_root_file": 4550.015166,
+              "tidb.sql.inode_read": 14178.841603
+            },
+            "selected_sql_calls_per_payload_operation": 5.0
+          }
+        },
+        "timed_stage_seconds_total": 18.36654
+      },
+      "current-f1000": {
+        "cleanup": {
+          "owned_scopes": 2,
+          "passed": true,
+          "post_cleanup_metadata_absent": true,
+          "post_cleanup_prefixes_absent": true,
+          "removed_blob_objects": 4504
+        },
+        "files_per_drive": 1000,
+        "full_run_elapsed_seconds": 340.669292,
+        "oracle": {
+          "bytes": 8192000,
+          "eof": true,
+          "exact_root_membership": true,
+          "files": 2000,
+          "full_bytes": true,
+          "passed": true
+        },
+        "setup_elapsed_seconds": 197.54685,
+        "stages": {
+          "mixed": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 3.5,
+              "body_bytes": 60.0,
+              "body_elapsed_ns": 29988.335,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 22084067.354,
+              "offered_bytes": 2048.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 228.637119,
+            "all_named_sql_calls_per_payload_operation": 6.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 24026112,
+                "contention_rejections": 0,
+                "entries": 5688,
+                "payload_bytes": 23298048,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 21914112,
+                "contention_rejections": 0,
+                "entries": 5188,
+                "payload_bytes": 21250048,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 2048.0,
+              "provider.blocks.put_bytes": 2048.0,
+              "provider.compact_anchor_returned_bytes": 1334.0,
+              "provider.inode_returned_bytes": 2145.521,
+              "provider.inode_serialized_bytes": 227.937
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 500,
+              "opens": 1000,
+              "payload_reads": 500,
+              "payload_writes": 500,
+              "read_bytes": 2048000,
+              "verified_reads": 500,
+              "written_bytes": 2048000
+            },
+            "cycle_latency": {
+              "p50_us": 46801,
+              "p95_us": 82474,
+              "p99_us": 118932,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 4.373743,
+            "known_metadata_return_bytes_per_4KiB_payload": 0.849492,
+            "known_metadata_return_bytes_per_payload_operation": 3479.521,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 3.5,
+              "sdk.metadata.load_compact_inode": 2.5,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "sdk.metadata.publish_compact_inode": 0.5,
+              "sdk.metadata.publish_includes_flush_barrier": 0.5,
+              "tidb.pool.checkout": 4.0,
+              "tidb.sql.inode_read": 4.5,
+              "tidb.sql.inode_write": 0.5,
+              "tidb.sql.metadata_read": 0.5,
+              "tidb.sql.session": 0.5,
+              "tidb.tx.begin.inode": 0.5,
+              "tidb.tx.commit": 0.5
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1100.931,
+              "rust_allocated_bytes": 215054.258,
+              "rust_allocations": 1168.103,
+              "rust_reallocations": 115.502
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2307.007597,
+              "object_store.backing_marker.probe.get": 2579.081949,
+              "sdk.blocks.get": 7.303118,
+              "sdk.blocks.put": 17307.150871,
+              "sdk.blocks.verify_concurrent_backing": 4914.785649,
+              "sdk.metadata.load_compact_inode": 8174.46005,
+              "sdk.metadata.load_compact_root_file": 5630.502575,
+              "tidb.sql.inode_read": 15578.89743
+            },
+            "selected_sql_calls_per_payload_operation": 5.5
+          },
+          "random_overwrite": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 5.0,
+              "body_bytes": 80.0,
+              "body_elapsed_ns": 48438.509,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 39857785.523,
+              "offered_bytes": 4096.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 143.698442,
+            "all_named_sql_calls_per_payload_operation": 7.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 21914112,
+                "contention_rejections": 0,
+                "entries": 5188,
+                "payload_bytes": 21250048,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 17690112,
+                "contention_rejections": 0,
+                "entries": 4188,
+                "payload_bytes": 17154048,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 1000.5,
+              "provider.inode_returned_bytes": 1689.637,
+              "provider.inode_serialized_bytes": 455.879
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 0,
+              "opens": 1000,
+              "payload_reads": 0,
+              "payload_writes": 1000,
+              "read_bytes": 0,
+              "verified_reads": 0,
+              "written_bytes": 4096000
+            },
+            "cycle_latency": {
+              "p50_us": 64659,
+              "p95_us": 109096,
+              "p99_us": 124829,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 6.959018,
+            "known_metadata_return_bytes_per_4KiB_payload": 0.656772,
+            "known_metadata_return_bytes_per_payload_operation": 2690.137,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 2.0,
+              "sdk.metadata.load_compact_inode": 1.0,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 3.0,
+              "tidb.sql.inode_read": 4.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.commit": 1.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1638.146,
+              "rust_allocated_bytes": 272531.178,
+              "rust_allocations": 1265.103,
+              "rust_reallocations": 159.01
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 3117.648446,
+              "object_store.backing_marker.probe.get": 3890.80421,
+              "sdk.blocks.put": 33052.006023,
+              "sdk.blocks.verify_concurrent_backing": 7058.113376,
+              "sdk.metadata.load_compact_inode": 3397.068579,
+              "sdk.metadata.load_compact_root_file": 11368.473198,
+              "tidb.sql.inode_read": 18068.227523
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "random_read": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 2.388,
+              "body_bytes": 1629.248,
+              "body_elapsed_ns": 20114.972,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 3031402.284,
+              "offered_bytes": 0.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 208.359704,
+            "all_named_sql_calls_per_payload_operation": 5.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 13466112,
+                "contention_rejections": 0,
+                "entries": 3188,
+                "payload_bytes": 13058048,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 11827200,
+                "contention_rejections": 0,
+                "entries": 2800,
+                "payload_bytes": 11468800,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 1667.5,
+              "provider.inode_returned_bytes": 2601.395
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 1000,
+              "opens": 1000,
+              "payload_reads": 1000,
+              "payload_writes": 0,
+              "read_bytes": 4096000,
+              "verified_reads": 1000,
+              "written_bytes": 0
+            },
+            "cycle_latency": {
+              "p50_us": 49632,
+              "p95_us": 59042,
+              "p99_us": 66023,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 4.799392,
+            "known_metadata_return_bytes_per_4KiB_payload": 1.042211,
+            "known_metadata_return_bytes_per_payload_operation": 4268.895,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 5.0,
+              "sdk.metadata.load_compact_inode": 4.0,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "tidb.pool.checkout": 5.0,
+              "tidb.sql.inode_read": 5.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 876.747,
+              "rust_allocated_bytes": 172984.909,
+              "rust_allocations": 1127.456,
+              "rust_reallocations": 82.497
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 892.073119,
+              "object_store.backing_marker.probe.get": 1053.346788,
+              "sdk.blocks.get": 1177.202386,
+              "sdk.blocks.verify_concurrent_backing": 1965.919483,
+              "sdk.metadata.load_compact_inode": 12360.634971,
+              "sdk.metadata.load_compact_root_file": 31955.106829,
+              "tidb.sql.inode_read": 44246.461267
+            },
+            "selected_sql_calls_per_payload_operation": 5.0
+          },
+          "sequential_overwrite": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 5.0,
+              "body_bytes": 80.0,
+              "body_elapsed_ns": 47520.678,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 36059392.249,
+              "offered_bytes": 4096.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 125.99468,
+            "all_named_sql_calls_per_payload_operation": 7.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 17690112,
+                "contention_rejections": 0,
+                "entries": 4188,
+                "payload_bytes": 17154048,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 13466112,
+                "contention_rejections": 0,
+                "entries": 3188,
+                "payload_bytes": 13058048,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.put_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 1000.5,
+              "provider.inode_returned_bytes": 1689.364,
+              "provider.inode_serialized_bytes": 455.788
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 0,
+              "opens": 1000,
+              "payload_reads": 0,
+              "payload_writes": 1000,
+              "read_bytes": 0,
+              "verified_reads": 0,
+              "written_bytes": 4096000
+            },
+            "cycle_latency": {
+              "p50_us": 75328,
+              "p95_us": 105639,
+              "p99_us": 154163,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 7.936843,
+            "known_metadata_return_bytes_per_4KiB_payload": 0.656705,
+            "known_metadata_return_bytes_per_payload_operation": 2689.864,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 2.0,
+              "sdk.metadata.load_compact_inode": 1.0,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "sdk.metadata.publish_compact_inode": 1.0,
+              "sdk.metadata.publish_includes_flush_barrier": 1.0,
+              "tidb.pool.checkout": 3.0,
+              "tidb.sql.inode_read": 4.0,
+              "tidb.sql.inode_write": 1.0,
+              "tidb.sql.metadata_read": 1.0,
+              "tidb.sql.session": 1.0,
+              "tidb.tx.begin.inode": 1.0,
+              "tidb.tx.commit": 1.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 1645.438,
+              "rust_allocated_bytes": 273068.824,
+              "rust_allocations": 1268.24,
+              "rust_reallocations": 159.121
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 2715.059329,
+              "object_store.backing_marker.probe.get": 3423.391543,
+              "sdk.blocks.put": 30126.538318,
+              "sdk.blocks.verify_concurrent_backing": 6185.359344,
+              "sdk.metadata.load_compact_inode": 4134.963079,
+              "sdk.metadata.load_compact_root_file": 23532.563595,
+              "tidb.sql.inode_read": 31108.548507
+            },
+            "selected_sql_calls_per_payload_operation": 6.0
+          },
+          "sequential_read": {
+            "HTTP_connector_per_payload_operation": {
+              "attempts_started": 2.8,
+              "body_bytes": 3316.8,
+              "body_elapsed_ns": 24051.794,
+              "body_errors": 0.0,
+              "dispatch_elapsed_ns": 4132246.48,
+              "offered_bytes": 0.0,
+              "transport_errors": 0.0
+            },
+            "acknowledged_cycles_per_second": 192.048593,
+            "all_named_sql_calls_per_payload_operation": 5.0,
+            "cache_capacity_and_admission_gauges": {
+              "after": {
+                "admission_skips": 0,
+                "charged_bytes": 11827200,
+                "contention_rejections": 0,
+                "entries": 2800,
+                "payload_bytes": 11468800,
+                "rejected_reservations": 0
+              },
+              "before": {
+                "admission_skips": 0,
+                "charged_bytes": 8448000,
+                "contention_rejections": 0,
+                "entries": 2000,
+                "payload_bytes": 8192000,
+                "rejected_reservations": 0
+              }
+            },
+            "core_named_bytes_per_payload_operation": {
+              "provider.blocks.get_bytes": 4096.0,
+              "provider.compact_anchor_returned_bytes": 1667.5,
+              "provider.inode_returned_bytes": 2600.94
+            },
+            "counts": {
+              "closes": 1000,
+              "cycles": 1000,
+              "eof_checks": 1000,
+              "opens": 1000,
+              "payload_reads": 1000,
+              "payload_writes": 0,
+              "read_bytes": 4096000,
+              "verified_reads": 1000,
+              "written_bytes": 0
+            },
+            "cycle_latency": {
+              "p50_us": 51072,
+              "p95_us": 59784,
+              "p99_us": 80171,
+              "samples": 1000,
+              "scope": "open, one acknowledged payload operation, read byte and EOF verification where applicable, close; payload generation excluded"
+            },
+            "elapsed_seconds_including_drain": 5.207015,
+            "known_metadata_return_bytes_per_4KiB_payload": 1.0421,
+            "known_metadata_return_bytes_per_payload_operation": 4268.44,
+            "named_calls_per_payload_operation": {
+              "sdk.metadata.compact_inode_capability": 5.0,
+              "sdk.metadata.load_compact_inode": 4.0,
+              "sdk.metadata.load_compact_root_file": 1.0,
+              "tidb.pool.checkout": 5.0,
+              "tidb.sql.inode_read": 5.0
+            },
+            "resources_per_payload_operation": {
+              "process_cpu_us": 995.222,
+              "rust_allocated_bytes": 190080.753,
+              "rust_allocations": 1194.475,
+              "rust_reallocations": 93.919
+            },
+            "selected_inclusive_us_per_payload_operation": {
+              "object_store.backing_marker.data.get": 803.102172,
+              "object_store.backing_marker.probe.get": 889.961602,
+              "sdk.blocks.get": 2558.104366,
+              "sdk.blocks.verify_concurrent_backing": 1715.657846,
+              "sdk.metadata.load_compact_inode": 12516.591912,
+              "sdk.metadata.load_compact_root_file": 33779.640834,
+              "tidb.sql.inode_read": 46224.259166
+            },
+            "selected_sql_calls_per_payload_operation": 5.0
+          }
+        },
+        "timed_stage_seconds_total": 29.276012
+      }
+    },
+    "f1000_comparison": {
+      "mixed": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -5.031852,
+        "known_metadata_return_bytes_change_pct": -93.665423,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": -15.860747,
+          "rust_allocated_bytes": -22.592318,
+          "rust_allocations": -0.306224,
+          "rust_reallocations": -4.57377
+        }
+      },
+      "random_overwrite": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -6.595727,
+        "known_metadata_return_bytes_change_pct": -94.64752,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": -3.022263,
+          "rust_allocated_bytes": -19.311587,
+          "rust_allocations": 0.078791,
+          "rust_reallocations": -4.790132
+        }
+      },
+      "random_read": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -56.102638,
+        "known_metadata_return_bytes_change_pct": -92.837232,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": -8.232372,
+          "rust_allocated_bytes": -26.871085,
+          "rust_allocations": -0.784253,
+          "rust_reallocations": -3.56191
+        }
+      },
+      "sequential_overwrite": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -18.867069,
+        "known_metadata_return_bytes_change_pct": -94.648034,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": 2.619884,
+          "rust_allocated_bytes": -19.243464,
+          "rust_allocations": 0.238535,
+          "rust_reallocations": -4.740781
+        }
+      },
+      "sequential_read": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -62.753088,
+        "known_metadata_return_bytes_change_pct": -92.83794,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": 8.125062,
+          "rust_allocated_bytes": -24.927404,
+          "rust_allocations": -0.576907,
+          "rust_reallocations": -2.955187
+        }
+      }
+    },
+    "f100_comparison": {
+      "mixed": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -7.964497,
+        "known_metadata_return_bytes_change_pct": -57.392895,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": 10.055219,
+          "rust_allocated_bytes": -4.020189,
+          "rust_allocations": -0.332591,
+          "rust_reallocations": -3.382572
+        }
+      },
+      "random_overwrite": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -1.487808,
+        "known_metadata_return_bytes_change_pct": -62.073978,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": 8.644431,
+          "rust_allocated_bytes": -2.835422,
+          "rust_allocations": 0.079107,
+          "rust_reallocations": -3.047948
+        }
+      },
+      "random_read": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -12.148806,
+        "known_metadata_return_bytes_change_pct": -53.799296,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": -13.147328,
+          "rust_allocated_bytes": -5.895754,
+          "rust_allocations": -0.556676,
+          "rust_reallocations": -3.981227
+        }
+      },
+      "sequential_overwrite": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -5.684286,
+        "known_metadata_return_bytes_change_pct": -62.073978,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": 6.412795,
+          "rust_allocated_bytes": -2.770186,
+          "rust_allocations": 0.263414,
+          "rust_reallocations": -2.991807
+        }
+      },
+      "sequential_read": {
+        "HTTP_connector_count_and_byte_totals_equal": true,
+        "counts_equal": true,
+        "cycles_per_second_change_pct": -10.953456,
+        "known_metadata_return_bytes_change_pct": -53.799296,
+        "observed_cache_gauges_equal": true,
+        "resource_change_pct": {
+          "process_cpu_us": -10.278485,
+          "rust_allocated_bytes": -5.674402,
+          "rust_allocations": -0.216011,
+          "rust_reallocations": -3.653382
+        }
+      }
+    }
+  },
+  "date": "2026-09-29",
+  "limitations": [
+    "Wire runs host clients and all ten service instances in one process; their ten or 100 drives share one Partition. SDK runs invoke stores directly. This is not ten independent deployed service processes.",
+    "Retained diagnostic TiDB/PD/TiKV cluster counters include background traffic. Datastore capture windows are broader than workload windows, so normalized backend costs are observed fixture amplification rather than exclusive request attribution.",
+    "VM cgroup and proc counters do not measure physical Mac SSD operations, flash writes, or production capacity; no host block device was selected. RustFS physical/backend I/O is not captured by these TiDB observer metrics.",
+    "System Rust allocation totals cover the whole clients/server pipeline and background; foreign C allocators, including SQLite heap activity, are excluded. Atomic allocator instrumentation affects throughput. Nonzero values cannot support zero-allocation claims.",
+    "Direct SDK storage instrumentation is available. Production remote client, service diagnostics observer, OIDC validation, peer cache, and NAPI forwarding-box sites are unavailable or not configured.",
+    "Zero storage-profile SQL byte fields do not establish zero metadata payload. Metadata return and serialization bytes here come from core named provider counters.",
+    "Method and stage wall durations are inclusive, nested and parallel, and must not be summed as exclusive CPU time. Endpoint gauges and relaxed snapshots do not prove all provider/background work quiesced.",
+    "All qualified wire arms have zero logical failures, zero counter resets, complete metric series, and successful stored/fresh file verification. Durability settings are not crash or power-loss validation.",
+    "The ten-client wire comparison has two samples per variant; per-run throughput and latency bounds vary. No statistical confidence interval, exact query-plan cause, capacity, or large-namespace scaling claim follows from this small namespace result.",
+    "Single run per arm at each file count; no statistical confidence interval.",
+    "Cache occupancy and admission gauges are available, while cache hit/miss counts and all-file warmness are unavailable. No peer cache is configured.",
+    "Process allocations cover the full measured SDK pipeline and background, exclude foreign C allocators, and profiling atomics affect throughput.",
+    "Named SQL counts and HTTP connector attempts are method accounting, not physical SSD IOPS. SQL byte fields are unavailable; core provider counters give known returned/serialized bytes.",
+    "Successful whole-file byte, EOF, exact root membership and cleanup checks do not test crash durability.",
+    "Compact root-file capability is initialized outside the timed windows. The SDK records read_compact_root_entry under the shared load_compact_root_file label: timed calls are ordinary root-entry lookups, not complete root-file snapshot reads. Timed root-file-capability calls are zero."
+  ],
+  "method": {
+    "SDK": "two drives and five independent filesystem/pool clients per drive; 100 or 1000 files/drive; 100 iterations/lane/pattern; 1000 cycles/pattern; cycle includes Open, one 4KiB Read plus byte/EOF checks or Overwrite, and Close; SDK cycles are not preopened wire IOPS; default SDK cache, hit/miss counts unavailable, no peer cache",
+    "SDK_order": [
+      "baseline-f100",
+      "current-f100",
+      "current-f1000",
+      "baseline-f1000"
+    ],
+    "allocations": "whole measured process pipeline and background, System Rust allocator only; foreign C allocators excluded; profiling atomics affect throughput",
+    "backend": "TiDB/PD/TiKV counters include cluster/background work and capture windows broader than workload; Linux VM cgroup/proc I/O is not physical Mac SSD I/O; RustFS physical I/O not covered",
+    "datastore": "retained diagnostic TiDB v8.5.7: one TiDB, three PD, three TiKV; loopback RustFS 1.0.0 with durable blocks and persistent bind mount; Docker VM 14 CPUs and 16745295872 bytes memory; not production capacity or crash durability validation",
+    "selected_SQL_definition": "inode_read + inode_write + metadata_read + metadata_write; session and transaction method calls reported separately; these counts differ from TiDB process statement counters",
+    "wire": "4KiB binary v2 reads/writes on preopened handles; one process, ten service instances, one Partition, separate Drive per active client; depth one/client; 32 hot blocks/file; warm SDK/catalog caches, no peer cache; synthetic authentication, request audit included; release with allocation/resource profiling and 16 Tokio workers",
+    "wire_10": "ten active clients and ten drives; two runs/variant in baseline-current-current-baseline order; IOPS = sum(completed)/sum(elapsed including drain); resource costs weighted by successes; p95 values are ranges of per-run power-of-two microsecond histogram upper bounds",
+    "wire_100": "100 active clients, 100 drives, ten service instances, one process and one Partition; one measured run per variant; maximum measured client count is 100, with no production 10000-client qualification"
+  },
+  "provenance": {
+    "baseline-100": {
+      "artifact_sha256": "d5cf1465b641011567563ebc5678021516fec3d7c0863077477e179944fe0052",
+      "binary_sha256": "45e22fb213f35886d324659829ea81d1cb58b7cec79b59f2239f545f78c77d0e",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "observer_sha256": "059127ef2a38bc23b5b5ac9abdf43b01e59b5f1b73fa55e3260f7937b485472e",
+      "qualified": true,
+      "receipt_sha256": "b1f5639ff074c7d0761e1df31001cc5dca4b441b1f822f6402359a10094c7b6b",
+      "source_revision": "93ad96accc1a8bb12a85c048b28f3350e3a11873"
+    },
+    "baseline-a": {
+      "artifact_sha256": "c69594eaf593c6378515b0882d4e4c5065476335e6a6f96871cc35e6ea519509",
+      "binary_sha256": "45e22fb213f35886d324659829ea81d1cb58b7cec79b59f2239f545f78c77d0e",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "observer_sha256": "059127ef2a38bc23b5b5ac9abdf43b01e59b5f1b73fa55e3260f7937b485472e",
+      "qualified": true,
+      "receipt_sha256": "002bd3fdca1b09e7b4cb6f348b6ae92f6235943bf028e32778aef84b63acdeb4",
+      "source_revision": "93ad96accc1a8bb12a85c048b28f3350e3a11873"
+    },
+    "baseline-b": {
+      "artifact_sha256": "ace80d0b359fd10a0fa14f7df2f0cdce4a4cecfd18353d3221af00e0cc5e5f06",
+      "binary_sha256": "45e22fb213f35886d324659829ea81d1cb58b7cec79b59f2239f545f78c77d0e",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "observer_sha256": "059127ef2a38bc23b5b5ac9abdf43b01e59b5f1b73fa55e3260f7937b485472e",
+      "qualified": true,
+      "receipt_sha256": "bcc81b1900e5d7c740e00a3353d17d457541acaa8a08ccf7a27982990cd729f4",
+      "source_revision": "93ad96accc1a8bb12a85c048b28f3350e3a11873"
+    },
+    "baseline-f100": {
+      "artifact_sha256": "763caee4a353d588beb32b3b3841061c004fc7040c07d80b62225bb67e4135da",
+      "binary_sha256": "0b87477007f68c136301564ee5fed957290b613d5c23dd9eee7eee478a344df3",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "qualified": true,
+      "receipt_sha256": "b1654f8c0055a0d2f875ae1b648ba43a65513044fe0dbaffcbb8aad814727a1d",
+      "runner_sha256": "c7b7e2c0c513f3ffdeb1773cdc4815dcd00c14721b4f836ec76cd4c5758a285f",
+      "source_revision": "93ad96accc1a8bb12a85c048b28f3350e3a11873"
+    },
+    "baseline-f1000": {
+      "artifact_sha256": "5cc87fb24a8719797d74ce0325af2d7b0ed12e74332b027fdbdc313c20fdb7ac",
+      "binary_sha256": "0b87477007f68c136301564ee5fed957290b613d5c23dd9eee7eee478a344df3",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "qualified": true,
+      "receipt_sha256": "aa0b31e133827b23e1e72f8fd98555c8fd61658dcee389b99f8bffc32ebcec7c",
+      "runner_sha256": "c7b7e2c0c513f3ffdeb1773cdc4815dcd00c14721b4f836ec76cd4c5758a285f",
+      "source_revision": "93ad96accc1a8bb12a85c048b28f3350e3a11873"
+    },
+    "current-100": {
+      "artifact_sha256": "d33ee13152dde812368f6944a1b39c44fc45a7c8cd1f4b78553afde78abcdad1",
+      "binary_sha256": "473690b22fd3bebb542fab7318d3d175b375f3d1dde46bcc7728546ae046b2f0",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "observer_sha256": "059127ef2a38bc23b5b5ac9abdf43b01e59b5f1b73fa55e3260f7937b485472e",
+      "qualified": true,
+      "receipt_sha256": "54e7a6cfd66cdbbc29653f79d3746925055dee49c3980128f04a9df18055af5b",
+      "source_revision": "7d193450abde724e8df3485536bc9196d5a7278c"
+    },
+    "current-a": {
+      "artifact_sha256": "87470d0f8f3ee306bcf1e90cd30b4b9c71e1daae694279edd30fbf9013d54a22",
+      "binary_sha256": "473690b22fd3bebb542fab7318d3d175b375f3d1dde46bcc7728546ae046b2f0",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "observer_sha256": "059127ef2a38bc23b5b5ac9abdf43b01e59b5f1b73fa55e3260f7937b485472e",
+      "qualified": true,
+      "receipt_sha256": "6ec62270bac5f0fc11e5e8c6536d771da2d0c2dde6456e0d201c5a536e1e0477",
+      "source_revision": "7d193450abde724e8df3485536bc9196d5a7278c"
+    },
+    "current-b": {
+      "artifact_sha256": "49c14d27eca73bff71d51a625e715d450c50d6f8b4653a787a58eea17e89c8f5",
+      "binary_sha256": "473690b22fd3bebb542fab7318d3d175b375f3d1dde46bcc7728546ae046b2f0",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "observer_sha256": "059127ef2a38bc23b5b5ac9abdf43b01e59b5f1b73fa55e3260f7937b485472e",
+      "qualified": true,
+      "receipt_sha256": "10a5d548deb8160223ae75445920c330604dcdc7b52c13b7f1ea1bfcd9426239",
+      "source_revision": "7d193450abde724e8df3485536bc9196d5a7278c"
+    },
+    "current-f100": {
+      "artifact_sha256": "97e126d73039531920b5c830afa09d3dde7d2e77074476861f176b8317abed04",
+      "binary_sha256": "bbcc8ebc435564a7a3aac6f3e0768e2b0f234340c643f623ca794cef46592199",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "qualified": true,
+      "receipt_sha256": "f821ddbc466d087072e2f6b37d16521006dc372f4a250a2f85e33593504352eb",
+      "runner_sha256": "c7b7e2c0c513f3ffdeb1773cdc4815dcd00c14721b4f836ec76cd4c5758a285f",
+      "source_revision": "7d193450abde724e8df3485536bc9196d5a7278c"
+    },
+    "current-f1000": {
+      "artifact_sha256": "7db198ba0862b59cd9e1ba6cba6fad394e698b8521c3f6dc68df2d8a0739179c",
+      "binary_sha256": "bbcc8ebc435564a7a3aac6f3e0768e2b0f234340c643f623ca794cef46592199",
+      "config_sha256": "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d",
+      "qualified": true,
+      "receipt_sha256": "03c9882ffd8692c9ae45816e81da78bd81ce10fad22bff9c1d4e84e0abb381fb",
+      "runner_sha256": "c7b7e2c0c513f3ffdeb1773cdc4815dcd00c14721b4f836ec76cd4c5758a285f",
+      "source_revision": "7d193450abde724e8df3485536bc9196d5a7278c"
+    }
+  },
+  "qualification_notes": {
+    "baseline_a": "Original supervisor required inline test ok; child observer prints between test prefix and bare ok. Exact one named case plus running1 plus bareok plus final1pass validated without replay.",
+    "baseline_a_original_receipt_sha256": "74af984a4392155e6417252719dbe45c06c25aa55730d509d07cb2d57180abeb",
+    "measured_SDK_harness": {
+      "bytes": 57943,
+      "later_cleanup_hardening": "Streams bounded inventories across all owned scopes before any mutation. This post-measurement cleanup change does not change workload, setup, oracle or metrics code; no measurement replay.",
+      "sha256": "c7b7e2c0c513f3ffdeb1773cdc4815dcd00c14721b4f836ec76cd4c5758a285f"
+    },
+    "raw_artifacts": "Private raw artifacts and inventories are not committed. Content hashes bind the derived report to qualified inputs. No raw connection config, endpoints or credentials are included."
+  },
+  "reproduction": {
+    "build": "release, locked, allocation-profiling (enables resource/io profiling), jobs=1, distinct CARGO_TARGET_DIR per checkout",
+    "compile_and_runtime_source_revision_env": "MOUNT_RS_INDEXED_BENCH_SOURCE_REVISION = actual checkout HEAD",
+    "exact_ignored_case": "actual_sdk_tidb_rustfs_metadata_benchmark",
+    "fixture_env_names": [
+      "MOUNT_RS_TIDB_URL",
+      "MOUNT_RS_RUSTFS_ENDPOINT",
+      "MOUNT_RS_RUSTFS_BUCKET",
+      "MOUNT_RS_RUSTFS_REGION",
+      "MOUNT_RS_RUSTFS_ACCESS_KEY_ID",
+      "MOUNT_RS_RUSTFS_SECRET_ACCESS_KEY",
+      "MOUNT_RS_REMOTE_RUSTFS_CID",
+      "MOUNT_RS_BACKING_RUSTFS_OWNER"
+    ],
+    "harness": "Use identical harness bytes in both checkouts. Original measured harness hash is retained; later cleanup-only source changes do not alter old binary qualification.",
+    "rust_toolchain": "1.95.0",
+    "shape_env": {
+      "MOUNT_RS_INDEXED_BENCH_DRIVES": 2,
+      "MOUNT_RS_INDEXED_BENCH_FILES": [
+        100,
+        1000
+      ],
+      "MOUNT_RS_INDEXED_BENCH_ITERATIONS": 100,
+      "MOUNT_RS_INDEXED_BENCH_LANES_PER_DRIVE": 5,
+      "MOUNT_RS_INDEXED_BENCH_OUTPUT": "new absolute private path",
+      "MOUNT_RS_PROFILE_IO": 1,
+      "MOUNT_RS_RUSTFS_DURABLE": 1
+    },
+    "test_target": "sdk_tidb_metadata_benchmark",
+    "timing": "Build first; run emitted executable directly and serially; no Cargo/build activity during timing"
+  },
+  "schema": "mount-rs.tidb-indexed-metadata-report.v1",
+  "source_variants": {
+    "baseline": {
+      "format": "MRC5",
+      "layout": "prior monolithic MRC5",
+      "revision": "93ad96accc1a8bb12a85c048b28f3350e3a11873"
+    },
+    "current": {
+      "format": "MRC5",
+      "layout": "indexed MRC5",
+      "revision": "7d193450abde724e8df3485536bc9196d5a7278c"
+    },
+    "metric_labels_in_each_bank": 118
+  },
+  "status": "measurements complete; all ten measured arms qualified",
+  "wire_10": {
+    "current_change_pct": {
+      "mixed": {
+        "logical_iops_pct": -6.850714,
+        "resources_pct": {
+          "process_cpu_us": 7.331423,
+          "quic_udp_bytes": 0.045556,
+          "rust_allocated_bytes": 1.799814,
+          "rust_allocations": 4.543132,
+          "rust_reallocations": 2.563439
+        }
+      },
+      "read": {
+        "logical_iops_pct": -23.597826,
+        "resources_pct": {
+          "process_cpu_us": 3.028871,
+          "quic_udp_bytes": 0.00423,
+          "rust_allocated_bytes": 1.335875,
+          "rust_allocations": 4.98345,
+          "rust_reallocations": 0.043011
+        }
+      },
+      "write": {
+        "logical_iops_pct": -26.863027,
+        "resources_pct": {
+          "process_cpu_us": 6.141014,
+          "quic_udp_bytes": 0.068226,
+          "rust_allocated_bytes": 2.229606,
+          "rust_allocations": 4.463827,
+          "rust_reallocations": 2.92501
+        }
+      }
+    },
+    "variants": {
+      "baseline": {
+        "mixed": {
+          "any_incomplete_series": false,
+          "core_named_bytes_per_success": {
+            "provider.blocks.get_bytes": 2049.130243,
+            "provider.blocks.put_bytes": 2046.869757,
+            "provider.compact_anchor_returned_bytes": 630.424393,
+            "provider.inode_returned_bytes": 8924.0,
+            "provider.inode_serialized_bytes": 2229.768764
+          },
+          "counter_reset_count": 0,
+          "datastore": {
+            "VM_cgroup_per_success": {
+              "pd": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 61.033113,
+                "wios": 0.020695
+              },
+              "tidb": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 1.130243,
+                "rios": 0.000276,
+                "wbytes": 17549.280353,
+                "wios": 3.016832
+              }
+            },
+            "VM_proc_bytes_per_success": {
+              "pd": {
+                "read_bytes": 0.0,
+                "write_bytes": 61.033113
+              },
+              "tidb": {
+                "read_bytes": 0.0,
+                "write_bytes": 0.0
+              },
+              "tikv": {
+                "read_bytes": 1.130243,
+                "write_bytes": 17717.686534
+              }
+            },
+            "selected_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.000866
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.002216,
+                "tidb_server_query_total": 4.998344,
+                "tidb_tikvclient_request_seconds_count": 4.53532
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.001656,
+                "tikv_storage_command_total": 2.650938,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 3094.834713,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 284.536976
+              }
+            }
+          },
+          "datastore_sample_seconds_range": [
+            5.886979,
+            5.936383
+          ],
+          "elapsed_seconds_including_drain": 10.066975,
+          "inode_serialized_bytes_per_successful_write": 4462.0,
+          "known_metadata_return_bytes_per_4KiB_payload": 2.332623,
+          "known_metadata_return_bytes_per_logical_success": 9554.424393,
+          "logical_failures": 0,
+          "logical_iops": 359.988962,
+          "logical_iops_range": [
+            352.732259,
+            367.249971
+          ],
+          "logical_successes": 3624,
+          "named_calls_per_success": {
+            "sdk.metadata.load_compact_inode": 1.500276,
+            "sdk.metadata.publish_compact_inode": 0.499724,
+            "sdk.metadata.publish_includes_flush_barrier": 0.499724,
+            "tidb.pool.checkout": 2.0,
+            "tidb.sql.inode_read": 2.0,
+            "tidb.sql.inode_write": 0.499724,
+            "tidb.sql.metadata_read": 0.499724,
+            "tidb.sql.session": 0.499724,
+            "tidb.tx.begin.inode": 0.499724,
+            "tidb.tx.commit": 0.499724
+          },
+          "p95_us_upper_range": {
+            "read": [
+              8192,
+              8192
+            ],
+            "write": [
+              65536,
+              65536
+            ]
+          },
+          "read_successes": 1813,
+          "resources_per_logical_success": {
+            "process_cpu_us": 926.265728,
+            "quic_udp_bytes": 4372.823951,
+            "rust_allocated_bytes": 145921.68074,
+            "rust_allocations": 599.693985,
+            "rust_reallocations": 55.998344
+          },
+          "selected_inclusive_us_per_success": {
+            "sdk.blocks.get": 4.985895,
+            "sdk.blocks.put": 15600.765518,
+            "sdk.metadata.load_compact_inode": 3604.900659,
+            "sdk.metadata.publish_compact_inode": 6316.067079,
+            "tidb.sql.inode_read": 4427.449638
+          },
+          "write_successes": 1811
+        },
+        "read": {
+          "any_incomplete_series": false,
+          "core_named_bytes_per_success": {
+            "provider.blocks.get_bytes": 4096.0,
+            "provider.compact_anchor_returned_bytes": 630.373885,
+            "provider.inode_returned_bytes": 8924.0
+          },
+          "counter_reset_count": 0,
+          "datastore": {
+            "VM_cgroup_per_success": {
+              "pd": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 17.320446,
+                "wios": 0.006041
+              },
+              "tidb": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 7.042379,
+                "wios": 0.001812
+              }
+            },
+            "VM_proc_bytes_per_success": {
+              "pd": {
+                "read_bytes": 0.0,
+                "write_bytes": 17.320446
+              },
+              "tidb": {
+                "read_bytes": 0.0,
+                "write_bytes": 0.0
+              },
+              "tikv": {
+                "read_bytes": 0.0,
+                "write_bytes": 7.613383
+              }
+            },
+            "selected_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.00021
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.000799,
+                "tidb_server_query_total": 2.0,
+                "tidb_tikvclient_request_seconds_count": 4.006273
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.000604,
+                "tikv_storage_command_total": 1.697677,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 804.852974,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 227.890799
+              }
+            }
+          },
+          "datastore_sample_seconds_range": [
+            5.796427,
+            5.831607
+          ],
+          "elapsed_seconds_including_drain": 10.007069,
+          "inode_serialized_bytes_per_successful_write": null,
+          "known_metadata_return_bytes_per_4KiB_payload": 2.332611,
+          "known_metadata_return_bytes_per_logical_success": 9554.373885,
+          "logical_failures": 0,
+          "logical_iops": 2150.479915,
+          "logical_iops_range": [
+            2105.464378,
+            2195.506024
+          ],
+          "logical_successes": 21520,
+          "named_calls_per_success": {
+            "sdk.metadata.load_compact_inode": 2.0,
+            "tidb.pool.checkout": 2.0,
+            "tidb.sql.inode_read": 2.0
+          },
+          "p95_us_upper_range": {
+            "read": [
+              8192,
+              8192
+            ]
+          },
+          "read_successes": 21520,
+          "resources_per_logical_success": {
+            "process_cpu_us": 442.401115,
+            "quic_udp_bytes": 4365.110316,
+            "rust_allocated_bytes": 61937.646143,
+            "rust_allocations": 321.573095,
+            "rust_reallocations": 9.000139
+          },
+          "selected_inclusive_us_per_success": {
+            "sdk.blocks.get": 4.707046,
+            "sdk.metadata.load_compact_inode": 4375.130738,
+            "tidb.sql.inode_read": 4350.68325
+          },
+          "write_successes": 0
+        },
+        "write": {
+          "any_incomplete_series": false,
+          "core_named_bytes_per_success": {
+            "provider.blocks.put_bytes": 4096.0,
+            "provider.compact_anchor_returned_bytes": 630.431197,
+            "provider.inode_returned_bytes": 8924.0,
+            "provider.inode_serialized_bytes": 4462.0
+          },
+          "counter_reset_count": 0,
+          "datastore": {
+            "VM_cgroup_per_success": {
+              "pd": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 211.616493,
+                "wios": 0.065077
+              },
+              "tidb": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 34513.836066,
+                "wios": 5.790363
+              }
+            },
+            "VM_proc_bytes_per_success": {
+              "pd": {
+                "read_bytes": 0.0,
+                "write_bytes": 191.268753
+              },
+              "tidb": {
+                "read_bytes": 0.0,
+                "write_bytes": 0.0
+              },
+              "tikv": {
+                "read_bytes": 0.0,
+                "write_bytes": 34845.504223
+              }
+            },
+            "selected_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.001386
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.003125,
+                "tidb_server_query_total": 8.0,
+                "tidb_tikvclient_request_seconds_count": 5.073025
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.00149,
+                "tikv_storage_command_total": 3.54148,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 5507.9846,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 351.868852
+              }
+            }
+          },
+          "datastore_sample_seconds_range": [
+            5.8282,
+            5.951105
+          ],
+          "elapsed_seconds_including_drain": 10.075225,
+          "inode_serialized_bytes_per_successful_write": 4462.0,
+          "known_metadata_return_bytes_per_4KiB_payload": 2.332625,
+          "known_metadata_return_bytes_per_logical_success": 9554.431197,
+          "logical_failures": 0,
+          "logical_iops": 199.797037,
+          "logical_iops_range": [
+            195.741007,
+            203.844296
+          ],
+          "logical_successes": 2013,
+          "named_calls_per_success": {
+            "sdk.metadata.load_compact_inode": 1.0,
+            "sdk.metadata.publish_compact_inode": 1.0,
+            "sdk.metadata.publish_includes_flush_barrier": 1.0,
+            "tidb.pool.checkout": 2.0,
+            "tidb.sql.inode_read": 2.0,
+            "tidb.sql.inode_write": 1.0,
+            "tidb.sql.metadata_read": 1.0,
+            "tidb.sql.session": 1.0,
+            "tidb.tx.begin.inode": 1.0,
+            "tidb.tx.commit": 1.0
+          },
+          "p95_us_upper_range": {
+            "write": [
+              65536,
+              65536
+            ]
+          },
+          "read_successes": 0,
+          "resources_per_logical_success": {
+            "process_cpu_us": 1460.434178,
+            "quic_udp_bytes": 4380.689021,
+            "rust_allocated_bytes": 229812.434675,
+            "rust_allocations": 878.073522,
+            "rust_reallocations": 103.053651
+          },
+          "selected_inclusive_us_per_success": {
+            "sdk.blocks.put": 31147.998774,
+            "sdk.metadata.load_compact_inode": 2444.388975,
+            "sdk.metadata.publish_compact_inode": 12270.122802,
+            "tidb.sql.inode_read": 4104.422354
+          },
+          "write_successes": 2013
+        }
+      },
+      "current": {
+        "mixed": {
+          "any_incomplete_series": false,
+          "core_named_bytes_per_success": {
+            "provider.blocks.get_bytes": 2051.646291,
+            "provider.blocks.put_bytes": 2044.353709,
+            "provider.compact_anchor_returned_bytes": 652.705045,
+            "provider.inode_returned_bytes": 8924.0,
+            "provider.inode_serialized_bytes": 2227.027893
+          },
+          "counter_reset_count": 0,
+          "datastore": {
+            "VM_cgroup_per_success": {
+              "pd": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 65.633234,
+                "wios": 0.024036
+              },
+              "tidb": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 16937.020772,
+                "wios": 3.149258
+              }
+            },
+            "VM_proc_bytes_per_success": {
+              "pd": {
+                "read_bytes": 0.0,
+                "write_bytes": 52.263501
+              },
+              "tidb": {
+                "read_bytes": 0.0,
+                "write_bytes": 0.0
+              },
+              "tikv": {
+                "read_bytes": 0.0,
+                "write_bytes": 18001.737685
+              }
+            },
+            "selected_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.000923
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.002504,
+                "tidb_server_query_total": 5.493769,
+                "tidb_tikvclient_request_seconds_count": 6.539169
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.002374,
+                "tikv_storage_command_total": 4.538872,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 3030.232641,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 529.962315
+              }
+            }
+          },
+          "datastore_sample_seconds_range": [
+            5.869732,
+            5.928229
+          ],
+          "elapsed_seconds_including_drain": 10.049887,
+          "inode_serialized_bytes_per_successful_write": 4462.0,
+          "known_metadata_return_bytes_per_4KiB_payload": 2.338063,
+          "known_metadata_return_bytes_per_logical_success": 9576.705045,
+          "logical_failures": 0,
+          "logical_iops": 335.327149,
+          "logical_iops_range": [
+            314.478,
+            356.222946
+          ],
+          "logical_successes": 3370,
+          "named_calls_per_success": {
+            "sdk.metadata.compact_inode_capability": 1.50089,
+            "sdk.metadata.load_compact_inode": 1.50089,
+            "sdk.metadata.publish_compact_inode": 0.49911,
+            "sdk.metadata.publish_includes_flush_barrier": 0.49911,
+            "tidb.pool.checkout": 2.0,
+            "tidb.sql.inode_read": 2.49911,
+            "tidb.sql.inode_write": 0.49911,
+            "tidb.sql.metadata_read": 0.49911,
+            "tidb.sql.session": 0.49911,
+            "tidb.tx.begin.inode": 0.49911,
+            "tidb.tx.commit": 0.49911
+          },
+          "p95_us_upper_range": {
+            "read": [
+              8192,
+              16384
+            ],
+            "write": [
+              65536,
+              131072
+            ]
+          },
+          "read_successes": 1688,
+          "resources_per_logical_success": {
+            "process_cpu_us": 994.174184,
+            "quic_udp_bytes": 4374.816024,
+            "rust_allocated_bytes": 148547.999407,
+            "rust_allocations": 626.938872,
+            "rust_reallocations": 57.433828
+          },
+          "selected_inclusive_us_per_success": {
+            "sdk.blocks.get": 4.941525,
+            "sdk.blocks.put": 16192.823918,
+            "sdk.metadata.load_compact_inode": 4181.162441,
+            "sdk.metadata.publish_compact_inode": 7115.221171,
+            "tidb.sql.inode_read": 5723.693012
+          },
+          "write_successes": 1682
+        },
+        "read": {
+          "any_incomplete_series": false,
+          "core_named_bytes_per_success": {
+            "provider.blocks.get_bytes": 4096.0,
+            "provider.compact_anchor_returned_bytes": 652.839764,
+            "provider.inode_returned_bytes": 8924.0
+          },
+          "counter_reset_count": 0,
+          "datastore": {
+            "VM_cgroup_per_success": {
+              "pd": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 18.169047,
+                "wios": 0.00638
+              },
+              "tidb": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 19.164611,
+                "wios": 0.002431
+              }
+            },
+            "VM_proc_bytes_per_success": {
+              "pd": {
+                "read_bytes": 0.0,
+                "write_bytes": 18.169047
+              },
+              "tidb": {
+                "read_bytes": 0.0,
+                "write_bytes": 0.0
+              },
+              "tikv": {
+                "read_bytes": 0.0,
+                "write_bytes": 9.955642
+              }
+            },
+            "selected_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.000249
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.001012,
+                "tidb_server_query_total": 2.0,
+                "tidb_tikvclient_request_seconds_count": 6.008082
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.000911,
+                "tikv_storage_command_total": 4.030018,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 795.776265,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 415.64945
+              }
+            }
+          },
+          "datastore_sample_seconds_range": [
+            5.915277,
+            6.050977
+          ],
+          "elapsed_seconds_including_drain": 10.016352,
+          "inode_serialized_bytes_per_successful_write": null,
+          "known_metadata_return_bytes_per_4KiB_payload": 2.338096,
+          "known_metadata_return_bytes_per_logical_success": 9576.839764,
+          "logical_failures": 0,
+          "logical_iops": 1643.013413,
+          "logical_iops_range": [
+            1389.040516,
+            1897.530204
+          ],
+          "logical_successes": 16457,
+          "named_calls_per_success": {
+            "sdk.metadata.compact_inode_capability": 2.0,
+            "sdk.metadata.load_compact_inode": 2.0,
+            "tidb.pool.checkout": 2.0,
+            "tidb.sql.inode_read": 2.0
+          },
+          "p95_us_upper_range": {
+            "read": [
+              8192,
+              16384
+            ]
+          },
+          "read_successes": 16457,
+          "resources_per_logical_success": {
+            "process_cpu_us": 455.800875,
+            "quic_udp_bytes": 4365.29495,
+            "rust_allocated_bytes": 62765.055417,
+            "rust_allocations": 337.59853,
+            "rust_reallocations": 9.00401
+          },
+          "selected_inclusive_us_per_success": {
+            "sdk.blocks.get": 4.966551,
+            "sdk.metadata.load_compact_inode": 5726.672348,
+            "tidb.sql.inode_read": 5703.286226
+          },
+          "write_successes": 0
+        },
+        "write": {
+          "any_incomplete_series": false,
+          "core_named_bytes_per_success": {
+            "provider.blocks.put_bytes": 4096.0,
+            "provider.compact_anchor_returned_bytes": 652.451394,
+            "provider.inode_returned_bytes": 8924.0,
+            "provider.inode_serialized_bytes": 4462.0
+          },
+          "counter_reset_count": 0,
+          "datastore": {
+            "VM_cgroup_per_success": {
+              "pd": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 325.78654,
+                "wios": 0.110809
+              },
+              "tidb": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 0.0,
+                "wios": 0.0
+              },
+              "tikv": {
+                "dbytes": 0.0,
+                "dios": 0.0,
+                "rbytes": 0.0,
+                "rios": 0.0,
+                "wbytes": 34463.760707,
+                "wios": 5.841604
+              }
+            },
+            "VM_proc_bytes_per_success": {
+              "pd": {
+                "read_bytes": 0.0,
+                "write_bytes": 328.57104
+              },
+              "tidb": {
+                "read_bytes": 0.0,
+                "write_bytes": 0.0
+              },
+              "tikv": {
+                "read_bytes": 0.0,
+                "write_bytes": 35048.505778
+              }
+            },
+            "selected_per_success": {
+              "pd": {
+                "process_cpu_seconds_total": 0.001774
+              },
+              "tidb": {
+                "process_cpu_seconds_total": 0.004011,
+                "tidb_server_query_total": 9.0,
+                "tidb_tikvclient_request_seconds_count": 7.090415
+              },
+              "tikv": {
+                "process_cpu_seconds_total": 0.005438,
+                "tikv_storage_command_total": 5.057104,
+                "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 5690.994562,
+                "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 630.60843
+              }
+            }
+          },
+          "datastore_sample_seconds_range": [
+            5.787534,
+            5.825291
+          ],
+          "elapsed_seconds_including_drain": 10.066689,
+          "inode_serialized_bytes_per_successful_write": 4462.0,
+          "known_metadata_return_bytes_per_4KiB_payload": 2.338001,
+          "known_metadata_return_bytes_per_logical_success": 9576.451394,
+          "logical_failures": 0,
+          "logical_iops": 146.125504,
+          "logical_iops_range": [
+            132.126673,
+            160.164848
+          ],
+          "logical_successes": 1471,
+          "named_calls_per_success": {
+            "sdk.metadata.compact_inode_capability": 1.0,
+            "sdk.metadata.load_compact_inode": 1.0,
+            "sdk.metadata.publish_compact_inode": 1.0,
+            "sdk.metadata.publish_includes_flush_barrier": 1.0,
+            "tidb.pool.checkout": 2.0,
+            "tidb.sql.inode_read": 3.0,
+            "tidb.sql.inode_write": 1.0,
+            "tidb.sql.metadata_read": 1.0,
+            "tidb.sql.session": 1.0,
+            "tidb.tx.begin.inode": 1.0,
+            "tidb.tx.commit": 1.0
+          },
+          "p95_us_upper_range": {
+            "write": [
+              131072,
+              262144
+            ]
+          },
+          "read_successes": 0,
+          "resources_per_logical_success": {
+            "process_cpu_us": 1550.119646,
+            "quic_udp_bytes": 4383.67777,
+            "rust_allocated_bytes": 234936.346023,
+            "rust_allocations": 917.269205,
+            "rust_reallocations": 106.067981
+          },
+          "selected_inclusive_us_per_success": {
+            "sdk.blocks.put": 40800.37586,
+            "sdk.metadata.load_compact_inode": 4020.517035,
+            "sdk.metadata.publish_compact_inode": 17933.464622,
+            "tidb.sql.inode_read": 8113.930611
+          },
+          "write_successes": 1471
+        }
+      }
+    }
+  },
+  "wire_100": {
+    "baseline": {
+      "mixed": {
+        "datastore": {
+          "VM_cgroup_per_success": {
+            "pd": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 57.739428,
+              "wios": 0.023067
+            },
+            "tidb": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 0.0,
+              "wios": 0.0
+            },
+            "tikv": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 14784.792824,
+              "wios": 1.988466
+            }
+          },
+          "VM_proc_bytes_per_success": {
+            "pd": {
+              "read_bytes": 0.0,
+              "write_bytes": 57.739428
+            },
+            "tidb": {
+              "read_bytes": 0.0,
+              "write_bytes": 0.0
+            },
+            "tikv": {
+              "read_bytes": 0.0,
+              "write_bytes": 15295.699274
+            }
+          },
+          "counter_resets": [],
+          "sample_elapsed_seconds": 6.246266,
+          "selected_per_success": {
+            "pd": {
+              "process_cpu_seconds_total": 0.000636
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.001875,
+              "tidb_server_query_total": 5.015378,
+              "tidb_tikvclient_request_seconds_count": 4.53097
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.001709,
+              "tikv_storage_command_total": 3.023494,
+              "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 3080.355831,
+              "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 289.245622
+            }
+          },
+          "series_coverage_incomplete": false
+        },
+        "elapsed_seconds_including_drain": 5.289304,
+        "known_metadata_return_bytes_per_success": 9554.433148,
+        "latency_upper_bounds_us": {
+          "read": {
+            "p50": 8192,
+            "p95": 32768,
+            "p99": 65536
+          },
+          "write": {
+            "p50": 524288,
+            "p95": 524288,
+            "p99": 1048576
+          }
+        },
+        "logical_failures": 0,
+        "logical_iops": 442.591326,
+        "logical_successes": 2341,
+        "named_calls_per_success": {
+          "tidb.pool.checkout": 2.0,
+          "tidb.sql.inode_read": 2.0,
+          "tidb.sql.inode_write": 0.499359,
+          "tidb.sql.metadata_read": 0.499359,
+          "tidb.sql.session": 0.499359,
+          "tidb.tx.begin.inode": 0.499359,
+          "tidb.tx.commit": 0.499359
+        },
+        "read_successes": 1172,
+        "resources_per_logical_success": {
+          "process_cpu_us": 1080.966681,
+          "quic_udp_bytes": 4385.827424,
+          "rust_allocated_bytes": 146298.796241,
+          "rust_allocations": 600.325929,
+          "rust_reallocations": 56.078172
+        },
+        "selected_inclusive_us_per_success": {
+          "sdk.blocks.get": 5.052934,
+          "sdk.blocks.put": 187484.471018,
+          "sdk.metadata.load_compact_inode": 6455.886489,
+          "sdk.metadata.publish_compact_inode": 9380.501214,
+          "tidb.sql.inode_read": 7656.388428
+        },
+        "write_successes": 1169
+      },
+      "read": {
+        "datastore": {
+          "VM_cgroup_per_success": {
+            "pd": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 28.717889,
+              "wios": 0.006216
+            },
+            "tidb": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 0.0,
+              "wios": 0.0
+            },
+            "tikv": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 34.639104,
+              "wios": 0.002024
+            }
+          },
+          "VM_proc_bytes_per_success": {
+            "pd": {
+              "read_bytes": 0.0,
+              "write_bytes": 28.717889
+            },
+            "tidb": {
+              "read_bytes": 0.0,
+              "write_bytes": 0.0
+            },
+            "tikv": {
+              "read_bytes": 0.0,
+              "write_bytes": 7.105457
+            }
+          },
+          "counter_resets": [],
+          "sample_elapsed_seconds": 6.077594,
+          "selected_per_success": {
+            "pd": {
+              "process_cpu_seconds_total": 7.3e-05
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.00069,
+              "tidb_server_query_total": 2.003469,
+              "tidb_tikvclient_request_seconds_count": 4.00506
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.000506,
+              "tikv_storage_command_total": 1.632815,
+              "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 756.744055,
+              "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 214.247777
+            }
+          },
+          "series_coverage_incomplete": false
+        },
+        "elapsed_seconds_including_drain": 5.033381,
+        "known_metadata_return_bytes_per_success": 9554.451175,
+        "latency_upper_bounds_us": {
+          "read": {
+            "p50": 32768,
+            "p95": 65536,
+            "p99": 131072
+          }
+        },
+        "logical_failures": 0,
+        "logical_iops": 2748.649535,
+        "logical_successes": 13835,
+        "named_calls_per_success": {
+          "tidb.pool.checkout": 2.0,
+          "tidb.session.configure": 0.000434,
+          "tidb.sql.inode_read": 2.0,
+          "tidb.sql.session": 0.002602
+        },
+        "read_successes": 13835,
+        "resources_per_logical_success": {
+          "process_cpu_us": 510.042573,
+          "quic_udp_bytes": 4392.808095,
+          "rust_allocated_bytes": 62245.397109,
+          "rust_allocations": 323.680304,
+          "rust_reallocations": 9.009975
+        },
+        "selected_inclusive_us_per_success": {
+          "sdk.blocks.get": 5.852516,
+          "sdk.metadata.load_compact_inode": 35915.341136,
+          "tidb.sql.inode_read": 35866.90363
+        },
+        "write_successes": 0
+      },
+      "write": {
+        "datastore": {
+          "VM_cgroup_per_success": {
+            "pd": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 47.627907,
+              "wios": 0.018605
+            },
+            "tidb": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 0.0,
+              "wios": 0.0
+            },
+            "tikv": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 30177.04186,
+              "wios": 3.945736
+            }
+          },
+          "VM_proc_bytes_per_success": {
+            "pd": {
+              "read_bytes": 0.0,
+              "write_bytes": 47.627907
+            },
+            "tidb": {
+              "read_bytes": 0.0,
+              "write_bytes": 0.0
+            },
+            "tikv": {
+              "read_bytes": 0.0,
+              "write_bytes": 30539.013953
+            }
+          },
+          "counter_resets": [],
+          "sample_elapsed_seconds": 6.142715,
+          "selected_per_success": {
+            "pd": {
+              "process_cpu_seconds_total": 0.001078
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.002628,
+              "tidb_server_query_total": 8.060465,
+              "tidb_tikvclient_request_seconds_count": 5.05969
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.00155,
+              "tikv_storage_command_total": 3.882946,
+              "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 5275.24031,
+              "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 336.068217
+            }
+          },
+          "series_coverage_incomplete": false
+        },
+        "elapsed_seconds_including_drain": 5.293296,
+        "known_metadata_return_bytes_per_success": 9554.426357,
+        "latency_upper_bounds_us": {
+          "write": {
+            "p50": 524288,
+            "p95": 524288,
+            "p99": 524288
+          }
+        },
+        "logical_failures": 0,
+        "logical_iops": 243.704501,
+        "logical_successes": 1290,
+        "named_calls_per_success": {
+          "tidb.pool.checkout": 2.0,
+          "tidb.sql.inode_read": 2.0,
+          "tidb.sql.inode_write": 1.0,
+          "tidb.sql.metadata_read": 1.0,
+          "tidb.sql.session": 1.0,
+          "tidb.tx.begin.inode": 1.0,
+          "tidb.tx.commit": 1.0
+        },
+        "read_successes": 0,
+        "resources_per_logical_success": {
+          "process_cpu_us": 1711.496899,
+          "quic_udp_bytes": 4392.657364,
+          "rust_allocated_bytes": 230469.493023,
+          "rust_allocations": 880.190698,
+          "rust_reallocations": 103.30155
+        },
+        "selected_inclusive_us_per_success": {
+          "sdk.blocks.put": 348884.912802,
+          "sdk.metadata.load_compact_inode": 4326.613297,
+          "sdk.metadata.publish_compact_inode": 17600.617328,
+          "tidb.sql.inode_read": 6658.682876
+        },
+        "write_successes": 1290
+      }
+    },
+    "comparison": {
+      "mixed": {
+        "baseline_logical_iops": 442.591326,
+        "current_logical_iops": 375.018592,
+        "logical_iops_change_pct": -15.267523,
+        "resource_change_pct": {
+          "process_cpu_us": 6.463326,
+          "quic_udp_bytes": -0.049369,
+          "rust_allocated_bytes": 2.201902,
+          "rust_allocations": 4.539581,
+          "rust_reallocations": 2.741745
+        }
+      },
+      "read": {
+        "baseline_logical_iops": 2748.649535,
+        "current_logical_iops": 2480.978382,
+        "logical_iops_change_pct": -9.738279,
+        "resource_change_pct": {
+          "process_cpu_us": 4.721776,
+          "quic_udp_bytes": 0.120098,
+          "rust_allocated_bytes": 1.325766,
+          "rust_allocations": 5.045956,
+          "rust_reallocations": -0.064433
+        }
+      },
+      "write": {
+        "baseline_logical_iops": 243.704501,
+        "current_logical_iops": 205.337601,
+        "logical_iops_change_pct": -15.743206,
+        "resource_change_pct": {
+          "process_cpu_us": 8.466677,
+          "quic_udp_bytes": 0.048166,
+          "rust_allocated_bytes": 2.231264,
+          "rust_allocations": 4.857041,
+          "rust_reallocations": 3.084806
+        }
+      }
+    },
+    "current": {
+      "mixed": {
+        "datastore": {
+          "VM_cgroup_per_success": {
+            "pd": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 63.456272,
+              "wios": 0.022989
+            },
+            "tidb": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 0.0,
+              "wios": 0.0
+            },
+            "tikv": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 13970.614693,
+              "wios": 1.837081
+            }
+          },
+          "VM_proc_bytes_per_success": {
+            "pd": {
+              "read_bytes": 0.0,
+              "write_bytes": 63.456272
+            },
+            "tidb": {
+              "read_bytes": 0.0,
+              "write_bytes": 0.0
+            },
+            "tikv": {
+              "read_bytes": 0.0,
+              "write_bytes": 14996.149925
+            }
+          },
+          "counter_resets": [],
+          "sample_elapsed_seconds": 6.204754,
+          "selected_per_success": {
+            "pd": {
+              "process_cpu_seconds_total": 0.00073
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.002314,
+              "tidb_server_query_total": 5.512244,
+              "tidb_tikvclient_request_seconds_count": 6.532234
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.001999,
+              "tikv_storage_command_total": 5.081459,
+              "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 3095.812094,
+              "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 544.636682
+            }
+          },
+          "series_coverage_incomplete": false
+        },
+        "elapsed_seconds_including_drain": 5.335735,
+        "known_metadata_return_bytes_per_success": 9576.607696,
+        "latency_upper_bounds_us": {
+          "read": {
+            "p50": 16384,
+            "p95": 65536,
+            "p99": 65536
+          },
+          "write": {
+            "p50": 524288,
+            "p95": 1048576,
+            "p99": 1048576
+          }
+        },
+        "logical_failures": 0,
+        "logical_iops": 375.018592,
+        "logical_successes": 2001,
+        "named_calls_per_success": {
+          "tidb.pool.checkout": 2.0,
+          "tidb.sql.inode_read": 2.49975,
+          "tidb.sql.inode_write": 0.49975,
+          "tidb.sql.metadata_read": 0.49975,
+          "tidb.sql.session": 0.49975,
+          "tidb.tx.begin.inode": 0.49975,
+          "tidb.tx.commit": 0.49975
+        },
+        "read_successes": 1001,
+        "resources_per_logical_success": {
+          "process_cpu_us": 1150.833083,
+          "quic_udp_bytes": 4383.662169,
+          "rust_allocated_bytes": 149520.151924,
+          "rust_allocations": 627.578211,
+          "rust_reallocations": 57.615692
+        },
+        "selected_inclusive_us_per_success": {
+          "sdk.blocks.get": 4.822719,
+          "sdk.blocks.put": 219465.439279,
+          "sdk.metadata.load_compact_inode": 8994.223538,
+          "sdk.metadata.publish_compact_inode": 12722.628864,
+          "tidb.sql.inode_read": 11755.177413
+        },
+        "write_successes": 1000
+      },
+      "read": {
+        "datastore": {
+          "VM_cgroup_per_success": {
+            "pd": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 4.926235,
+              "wios": 0.001924
+            },
+            "tidb": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 0.0,
+              "wios": 0.0
+            },
+            "tikv": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 32.513149,
+              "wios": 0.002405
+            }
+          },
+          "VM_proc_bytes_per_success": {
+            "pd": {
+              "read_bytes": 0.0,
+              "write_bytes": 6.239897
+            },
+            "tidb": {
+              "read_bytes": 0.0,
+              "write_bytes": 0.0
+            },
+            "tikv": {
+              "read_bytes": 0.0,
+              "write_bytes": 6.896729
+            }
+          },
+          "counter_resets": [],
+          "sample_elapsed_seconds": 5.994342,
+          "selected_per_success": {
+            "pd": {
+              "process_cpu_seconds_total": 7.3e-05
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.000778,
+              "tidb_server_query_total": 2.001283,
+              "tidb_tikvclient_request_seconds_count": 6.005372
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.000561,
+              "tikv_storage_command_total": 3.665651,
+              "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 784.711995,
+              "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 465.495269
+            }
+          },
+          "series_coverage_incomplete": false
+        },
+        "elapsed_seconds_including_drain": 5.027049,
+        "known_metadata_return_bytes_per_success": 9576.623156,
+        "latency_upper_bounds_us": {
+          "read": {
+            "p50": 65536,
+            "p95": 65536,
+            "p99": 131072
+          }
+        },
+        "logical_failures": 0,
+        "logical_iops": 2480.978382,
+        "logical_successes": 12472,
+        "named_calls_per_success": {
+          "tidb.pool.checkout": 2.0,
+          "tidb.session.configure": 0.00016,
+          "tidb.sql.inode_read": 2.0,
+          "tidb.sql.session": 0.000962
+        },
+        "read_successes": 12472,
+        "resources_per_logical_success": {
+          "process_cpu_us": 534.125641,
+          "quic_udp_bytes": 4398.083788,
+          "rust_allocated_bytes": 63070.62516,
+          "rust_allocations": 340.013069,
+          "rust_reallocations": 9.004169
+        },
+        "selected_inclusive_us_per_success": {
+          "sdk.blocks.get": 6.153671,
+          "sdk.metadata.load_compact_inode": 39805.31127,
+          "tidb.sql.inode_read": 39773.129036
+        },
+        "write_successes": 0
+      },
+      "write": {
+        "datastore": {
+          "VM_cgroup_per_success": {
+            "pd": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 189.560799,
+              "wios": 0.071688
+            },
+            "tidb": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 0.0,
+              "wios": 0.0
+            },
+            "tikv": {
+              "dbytes": 0.0,
+              "dios": 0.0,
+              "rbytes": 0.0,
+              "rios": 0.0,
+              "wbytes": 30552.740472,
+              "wios": 3.73049
+            }
+          },
+          "VM_proc_bytes_per_success": {
+            "pd": {
+              "read_bytes": 0.0,
+              "write_bytes": 163.54265
+            },
+            "tidb": {
+              "read_bytes": 0.0,
+              "write_bytes": 0.0
+            },
+            "tikv": {
+              "read_bytes": 0.0,
+              "write_bytes": 30043.528131
+            }
+          },
+          "counter_resets": [],
+          "sample_elapsed_seconds": 6.387137,
+          "selected_per_success": {
+            "pd": {
+              "process_cpu_seconds_total": 0.001334
+            },
+            "tidb": {
+              "process_cpu_seconds_total": 0.003285,
+              "tidb_server_query_total": 9.14882,
+              "tidb_tikvclient_request_seconds_count": 7.068966
+            },
+            "tikv": {
+              "process_cpu_seconds_total": 0.00363,
+              "tikv_storage_command_total": 5.842105,
+              "tikv_storage_rocksdb_perf[metric=get_read_bytes]": 6086.364791,
+              "tikv_storage_rocksdb_perf[metric=iter_read_bytes]": 799.460073
+            }
+          },
+          "series_coverage_incomplete": false
+        },
+        "elapsed_seconds_including_drain": 5.366772,
+        "known_metadata_return_bytes_per_success": 9576.627949,
+        "latency_upper_bounds_us": {
+          "write": {
+            "p50": 524288,
+            "p95": 1048576,
+            "p99": 1048576
+          }
+        },
+        "logical_failures": 0,
+        "logical_iops": 205.337601,
+        "logical_successes": 1102,
+        "named_calls_per_success": {
+          "tidb.pool.checkout": 2.0,
+          "tidb.sql.inode_read": 3.0,
+          "tidb.sql.inode_write": 1.0,
+          "tidb.sql.metadata_read": 1.0,
+          "tidb.sql.session": 1.0,
+          "tidb.tx.begin.inode": 1.0,
+          "tidb.tx.commit": 1.0
+        },
+        "read_successes": 0,
+        "resources_per_logical_success": {
+          "process_cpu_us": 1856.403811,
+          "quic_udp_bytes": 4394.77314,
+          "rust_allocated_bytes": 235611.875681,
+          "rust_allocations": 922.941924,
+          "rust_reallocations": 106.488203
+        },
+        "selected_inclusive_us_per_success": {
+          "sdk.blocks.put": 408560.646364,
+          "sdk.metadata.load_compact_inode": 5223.712444,
+          "sdk.metadata.publish_compact_inode": 23640.946768,
+          "tidb.sql.inode_read": 9959.92574
+        },
+        "write_successes": 1102
+      }
+    },
+    "full_run_elapsed_seconds_baseline": 241.935273,
+    "full_run_elapsed_seconds_current": 252.299565,
+    "setup_timing_baseline": {
+      "driver_setup_seconds": 58.846444,
+      "provisioning_seconds": 55.601882,
+      "setup_seconds": 13.731246
+    },
+    "setup_timing_current": {
+      "driver_setup_seconds": 64.41016,
+      "provisioning_seconds": 60.661643,
+      "setup_seconds": 12.666854
+    },
+    "status": "both arms qualified; one measured run per variant"
+  }
+}

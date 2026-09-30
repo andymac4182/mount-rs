@@ -2,12 +2,27 @@
 //! Each database contains one namespace. Metadata and blocks may reside in
 //! different databases, or either provider may be paired with another backend.
 
+#[cfg(all(test, unix))]
+#[path = "compact_tests.rs"]
+mod compact_tests;
+
 #[cfg(test)]
 #[path = "direct_io_benchmark.rs"]
 mod direct_io_benchmark;
 
+#[path = "compact.rs"]
+mod compact;
+
+#[path = "journal_options.rs"]
+mod journal_options;
+
+use super::{SqliteJournalMode, SqliteStorageOptions};
 use async_trait::async_trait;
 use mount_rs_core::diagnostics::profile::{self, Event};
+use mount_rs_core::storage::compact::{
+    CompactInodeCapability, CompactPublication, CompactSnapshot, CompactStructuralDelta,
+    LoadedCompactInode, PhysicalInodeIdentity,
+};
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
@@ -44,6 +59,7 @@ const CONCURRENT_WRITE_MODE: &str = "MRC1";
 const BOUND_WRITE_MODE: &str = "MRC2";
 const DELEGATED_WRITE_MODE: &str = "MRC3";
 const INODE_WRITE_MODE: &str = "MRC4";
+const COMPACT_WRITE_MODE: &str = "MRC5";
 #[cfg(unix)]
 const INODE_CONDITIONAL_SQL: &str = "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,
                     m.physical_dev,m.physical_ino,m.physical_path,
@@ -283,6 +299,31 @@ struct Database {
     local_file_qualified: Arc<AtomicBool>,
 }
 
+struct ObservedConnectionGuard<'a> {
+    inner: MutexGuard<'a, Connection>,
+    started: Option<Instant>,
+    counts: Option<&'a super::io_diagnostics::Counts>,
+}
+impl std::ops::Deref for ObservedConnectionGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+impl std::ops::DerefMut for ObservedConnectionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+impl Drop for ObservedConnectionGuard<'_> {
+    fn drop(&mut self) {
+        if let (Some(counts), Some(started)) = (self.counts, self.started) {
+            counts
+                .lock_hold_finished(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
+        }
+    }
+}
+
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileStamp {
@@ -334,6 +375,43 @@ fn require_matching_metadata_stamp(
             .with_message("SQLite metadata authority belongs to another physical file"));
     }
     require_matching_auxiliary_path(database, stored_path)?;
+    Ok(actual)
+}
+
+#[cfg(unix)]
+fn require_matching_selected_metadata_stamp(
+    database: &Database,
+    stored_dev: Option<&str>,
+    stored_ino: Option<&str>,
+    stored_path: Option<&str>,
+) -> Result<FileStamp> {
+    // Keep the owned verifier's check order and fresh filesystem operations.
+    // Only the selected read's auxiliary-path comparison borrows its buffer.
+    let stored = FileStamp::from_text(stored_dev, stored_ino)?
+        .ok_or_else(|| incompatible_schema("SQLite metadata has no trusted file stamp for MRC2"))?;
+    let actual = database.require_concurrent_local_file("metadata")?;
+    if stored != actual {
+        return Err(FsError::new(ErrorCode::Estale)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message("SQLite metadata authority belongs to another physical file"));
+    }
+    let stored_path = stored_path
+        .filter(|path| {
+            !path.is_empty()
+                && path.len().is_multiple_of(2)
+                && path
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| {
+            incompatible_schema("SQLite MRC2 authority has no trusted auxiliary path")
+        })?;
+    let actual_path = database.current_auxiliary_path_borrowed()?;
+    if stored_path != actual_path {
+        return Err(FsError::new(ErrorCode::Estale)
+            .with_syscall("inspect concurrent SQLite backing")
+            .with_message("SQLite auxiliary file authority belongs to another pathname"));
+    }
     Ok(actual)
 }
 
@@ -464,15 +542,19 @@ impl Database {
                 Ok((requested, canonical, expected, created_by_open))
             })
             .transpose()?;
-        let connection = match path {
+        // Prepare the nondefault observed VFS before SQLite opens any native
+        // file. This local must outlive Connection even on an early error.
+        let diagnostics = super::io_diagnostics::prepare()?;
+        let selected_path = match path {
             #[cfg(unix)]
             Some(_) if path_info.is_some() => {
-                Connection::open(&path_info.as_ref().expect("checked").1)
+                Some(path_info.as_ref().expect("checked").1.as_path())
             }
-            Some(path) => Connection::open(path),
-            None => Connection::open_in_memory(),
-        }
-        .map_err(backend_error)?;
+            path => path,
+        };
+        let connection =
+            super::io_diagnostics::open_connection(selected_path, diagnostics.as_deref())
+                .map_err(backend_error)?;
         #[cfg(unix)]
         let opened_file = if let Some((requested, canonical, expected, created_by_open)) = path_info
         {
@@ -502,10 +584,13 @@ impl Database {
         // Empty paths and :memory: are not durable even when passed to open().
         let durable = connection.path().is_some_and(|path| !path.is_empty());
         let connection = Arc::new(Mutex::new(connection));
-        let diagnostics = super::io_diagnostics::register(&connection)?;
+        // Retain the original pre-open owner through a registration error;
+        // register_prepared may drop its argument before this connection.
+        let registered =
+            super::io_diagnostics::register_prepared(&connection, diagnostics.clone())?;
         Ok(Self {
             connection,
-            _io_diagnostics: diagnostics,
+            _io_diagnostics: registered,
             durable,
             #[cfg(unix)]
             opened_file,
@@ -536,6 +621,15 @@ impl Database {
             FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent SQLite backing")
         })?;
         Ok(opened.auxiliary_path.clone())
+    }
+
+    #[cfg(unix)]
+    fn current_auxiliary_path_borrowed(&self) -> Result<&str> {
+        self.current_file_stamp()?;
+        let opened = self.opened_file.as_ref().ok_or_else(|| {
+            FsError::new(ErrorCode::Enotsup).with_syscall("inspect concurrent SQLite backing")
+        })?;
+        Ok(&opened.auxiliary_path)
     }
 
     #[cfg(unix)]
@@ -597,10 +691,55 @@ impl Database {
         Ok(())
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.connection
-            .lock()
+    fn lock(&self) -> Result<ObservedConnectionGuard<'_>> {
+        let started = self._io_diagnostics.as_ref().map(|_| Instant::now());
+        let result = self.connection.lock();
+        let acquired = self._io_diagnostics.as_ref().map(|_| Instant::now());
+        if let (Some(counts), Some(started), Some(acquired)) =
+            (&self._io_diagnostics, started, acquired)
+        {
+            counts.lock_finished(
+                acquired
+                    .duration_since(started)
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64,
+                result.is_ok(),
+            );
+        }
+        result
+            .map(|inner| ObservedConnectionGuard {
+                inner,
+                started: acquired,
+                counts: self._io_diagnostics.as_deref(),
+            })
             .map_err(|_| backend_error("SQLite storage lock poisoned"))
+    }
+
+    fn observed_immediate_transaction<'a>(
+        &self,
+        connection: &'a mut Connection,
+    ) -> rusqlite::Result<rusqlite::Transaction<'a>> {
+        let started = self._io_diagnostics.as_ref().map(|_| Instant::now());
+        let result = connection.transaction_with_behavior(TransactionBehavior::Immediate);
+        if let (Some(counts), Some(started)) = (&self._io_diagnostics, started) {
+            counts.begin_finished(
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                result.is_ok(),
+            );
+        }
+        result
+    }
+
+    fn observed_commit(&self, transaction: rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+        let started = self._io_diagnostics.as_ref().map(|_| Instant::now());
+        let result = transaction.commit();
+        if let (Some(counts), Some(started)) = (&self._io_diagnostics, started) {
+            counts.commit_finished(
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                result.is_ok(),
+            );
+        }
+        result
     }
 
     #[cfg(unix)]
@@ -1033,7 +1172,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
                 && owner.is_none()
                 && fence == CONCURRENT_FENCE_SENTINEL
                 && expires == 0 => {}
-        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+        Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
             if backing
                 .as_deref()
                 .is_some_and(|id| ConcurrentBackingId::from_hex(id).is_ok())
@@ -1051,7 +1190,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         let stamp = FileStamp::from_text(physical_dev.as_deref(), physical_ino.as_deref())?;
         if matches!(
             mode.as_deref(),
-            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
         ) {
             require_matching_metadata_stamp(
                 database,
@@ -1084,7 +1223,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
         let _ = (&physical_dev, &physical_ino, &physical_path);
         if matches!(
             mode.as_deref(),
-            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
+            Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE | COMPACT_WRITE_MODE)
         ) {
             return Err(incompatible_schema(
                 "this platform cannot bind MRC2 SQLite metadata to a physical file",
@@ -1108,6 +1247,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
             revision, physical_dev, physical_ino, physical_path)",
     )
     .map_err(backend_error)?;
+    compact::initialize_schema(&tx)?;
     let guard_columns = table_columns(&tx, "mount_rs_inode_guards")?
         .ok_or_else(|| incompatible_schema("MRC4 inode guard table missing"))?;
     require_columns(
@@ -1123,28 +1263,12 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(backend_error)?;
-    if mode.as_deref() == Some(DELEGATED_WRITE_MODE) {
-        let state: DelegationState = serde_json::from_str(
-            delegation_json
-                .as_deref()
-                .ok_or_else(|| incompatible_schema("MRC3 grant state is missing"))?,
-        )
-        .map_err(backend_error)?;
-        let namespace: Namespace = serde_json::from_str(
-            namespace_json
-                .as_deref()
-                .ok_or_else(|| incompatible_schema("MRC3 namespace is missing"))?,
-        )
-        .map_err(backend_error)?;
-        if Some(state.backing.to_hex()).as_deref() != backing.as_deref() {
-            return Err(incompatible_schema("MRC3 backing and grants disagree"));
-        }
-        state.validate(&namespace)?;
-    } else if delegation_json.is_some() {
-        return Err(incompatible_schema(
-            "nondelegated SQLite metadata contains grants",
-        ));
-    }
+    validate_delegation_authority(
+        mode.as_deref(),
+        backing.as_deref(),
+        delegation_json.as_deref(),
+        namespace_json.as_deref(),
+    )?;
     tx.execute(
         "UPDATE mount_rs_metadata
          SET volume_id = 'sqlite-' || lower(hex(randomblob(16)))
@@ -1322,6 +1446,35 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
     tx.commit().map_err(backend_error)
 }
 
+// Read-only authority validation shared by ordinary metadata construction and
+// explicit journal selection through a block provider of the same file.
+fn validate_delegation_authority(
+    mode: Option<&str>,
+    backing: Option<&str>,
+    delegation_json: Option<&str>,
+    namespace_json: Option<&str>,
+) -> Result<()> {
+    if mode == Some(DELEGATED_WRITE_MODE) {
+        let state: DelegationState = serde_json::from_str(
+            delegation_json.ok_or_else(|| incompatible_schema("MRC3 grant state is missing"))?,
+        )
+        .map_err(backend_error)?;
+        let namespace: Namespace = serde_json::from_str(
+            namespace_json.ok_or_else(|| incompatible_schema("MRC3 namespace is missing"))?,
+        )
+        .map_err(backend_error)?;
+        if Some(state.backing.to_hex()).as_deref() != backing {
+            return Err(incompatible_schema("MRC3 backing and grants disagree"));
+        }
+        state.validate(&namespace)?;
+    } else if delegation_json.is_some() {
+        return Err(incompatible_schema(
+            "nondelegated SQLite metadata contains grants",
+        ));
+    }
+    Ok(())
+}
+
 fn table_columns(connection: &Connection, table: &str) -> Result<Option<BTreeSet<String>>> {
     let exists: bool = connection
         .query_row(
@@ -1450,8 +1603,17 @@ pub struct SqliteMetadataStore(Database, VolumeId);
 
 impl SqliteMetadataStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_options(path, SqliteStorageOptions::default())
+    }
+
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: SqliteStorageOptions,
+    ) -> Result<Self> {
+        journal_options::validate_path(path.as_ref(), options)?;
         let database = Database::open(Some(path.as_ref()), METADATA_SCHEMA)?;
         let store = Self::from_database(database)?;
+        journal_options::apply(&store.0, options)?;
         Ok(store)
     }
     pub fn in_memory() -> Result<Self> {
@@ -1471,7 +1633,17 @@ pub struct SqliteBlockStore(Database);
 
 impl SqliteBlockStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_database(Database::open(Some(path.as_ref()), BLOCK_SCHEMA)?)
+        Self::open_with_options(path, SqliteStorageOptions::default())
+    }
+
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: SqliteStorageOptions,
+    ) -> Result<Self> {
+        journal_options::validate_path(path.as_ref(), options)?;
+        let store = Self::from_database(Database::open(Some(path.as_ref()), BLOCK_SCHEMA)?)?;
+        journal_options::apply(&store.0, options)?;
+        Ok(store)
     }
     pub fn in_memory() -> Result<Self> {
         Self::from_database(Database::open(None, BLOCK_SCHEMA)?)
@@ -1490,8 +1662,7 @@ impl SqliteBlockStore {
             .query_row("SELECT lower(hex(randomblob(32)))", [], |row| row.get(0))
             .map_err(backend_error)?;
         let was_autocommit = connection.is_autocommit();
-        let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
-        {
+        let transaction = match self.0.observed_immediate_transaction(&mut connection) {
             Ok(transaction) => transaction,
             Err(error) => {
                 return Err(
@@ -1511,7 +1682,7 @@ impl SqliteBlockStore {
                 .with_syscall("put block")
                 .with_message("SQLite block insert was not applied"));
         }
-        if let Err(error) = transaction.commit() {
+        if let Err(error) = self.0.observed_commit(transaction) {
             return Err(sqlite_busy_known_noncommit(
                 &error,
                 connection.is_autocommit(),
@@ -1954,6 +2125,117 @@ fn rebuild_inode_guards(
 
 #[async_trait]
 impl MetadataStore for SqliteMetadataStore {
+    fn compact_inode_capability(&self) -> CompactInodeCapability {
+        if self.0.durable
+            && cfg!(any(
+                target_os = "macos",
+                all(target_os = "linux", target_env = "gnu")
+            ))
+        {
+            CompactInodeCapability::V1
+        } else {
+            CompactInodeCapability::Unsupported
+        }
+    }
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        #[cfg(unix)]
+        {
+            self.compact_inspect()
+        }
+        #[cfg(not(unix))]
+        {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn prepare_compact_inode_mode(
+        &self,
+        backing: ConcurrentBackingId,
+        expected_revision: u64,
+    ) -> Result<()> {
+        #[cfg(unix)]
+        {
+            self.compact_prepare(backing, expected_revision)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, expected_revision);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn load_compact_snapshot(&self, backing: ConcurrentBackingId) -> Result<CompactSnapshot> {
+        #[cfg(unix)]
+        {
+            self.compact_snapshot(backing)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = backing;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn load_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+    ) -> Result<LoadedCompactInode> {
+        #[cfg(unix)]
+        {
+            self.compact_load(backing, inode)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        expected: mount_rs_core::storage::compact::CompactInodeExpectation<'_>,
+    ) -> Result<mount_rs_core::storage::compact::CompactInodeRead> {
+        #[cfg(unix)]
+        {
+            self.compact_read(backing, inode, expected)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode, expected);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn publish_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: u64,
+        generation: u64,
+        expected: PhysicalInodeIdentity,
+        node: NodeMetadata,
+    ) -> Result<LoadedCompactInode> {
+        #[cfg(unix)]
+        {
+            self.compact_publish_inode(backing, inode, generation, expected, node)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (backing, inode, generation, expected, node);
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
+    async fn publish_compact_structure(
+        &self,
+        delta: &CompactStructuralDelta,
+    ) -> Result<CompactPublication> {
+        #[cfg(unix)]
+        {
+            self.compact_publish_structure(delta)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = delta;
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+    }
     fn durable(&self) -> bool {
         self.0.durable
     }
@@ -1973,7 +2255,7 @@ impl MetadataStore for SqliteMetadataStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(backend_error)?;
-        if mode.as_deref() == Some(INODE_WRITE_MODE) {
+        if matches!(mode.as_deref(), Some(INODE_WRITE_MODE | COMPACT_WRITE_MODE)) {
             return Err(stale());
         }
         if let Some(json) = &namespace {
@@ -2199,7 +2481,7 @@ impl MetadataStore for SqliteMetadataStore {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(backend_error)?;
-        if mode.as_deref() == Some(INODE_WRITE_MODE) {
+        if matches!(mode.as_deref(), Some(INODE_WRITE_MODE | COMPACT_WRITE_MODE)) {
             return Err(stale());
         }
         if revision != 0 && revision == known_revision {
@@ -2282,6 +2564,29 @@ impl MetadataStore for SqliteMetadataStore {
                 Ok(())
             })
         }
+    }
+
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        // The compact probe validates authority atomically. A changed response
+        // comes from a separately coherent, fully validated snapshot.
+        let state = self
+            .inode_mode_state()
+            .await?
+            .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+        if state.backing != backing
+            || state.structural_generation == 0
+            || known.is_some_and(|generation| generation > state.structural_generation)
+        {
+            return Err(FsError::new(ErrorCode::Estale));
+        }
+        if known == Some(state.structural_generation) {
+            return Ok(None);
+        }
+        Ok(Some(self.load_inode_snapshot(backing).await?))
     }
 
     async fn load_inode_snapshot(
@@ -2653,6 +2958,30 @@ impl MetadataStore for SqliteMetadataStore {
             if mode.as_deref() == Some(CONCURRENT_WRITE_MODE) {
                 return Err(mrc1_migration_required());
             }
+            if mode.as_deref() == Some(COMPACT_WRITE_MODE)
+                && stored.as_deref() == Some(backing.to_hex().as_str())
+            {
+                // A peer reached MRC5 on the same backing before this
+                // transaction performed any DML. This attempt definitely
+                // did not commit; the caller may re-read MRC5 authority.
+                require_matching_metadata_stamp(
+                    &self.0,
+                    physical_dev.as_deref(),
+                    physical_ino.as_deref(),
+                    physical_path.as_deref(),
+                )?;
+                if revision > 0
+                    && namespace.is_some()
+                    && owner.is_none()
+                    && fence == CONCURRENT_FENCE_SENTINEL
+                    && expires == 0
+                {
+                    return Err(FsError::new(ErrorCode::Eagain)
+                        .with_syscall("prepare bound concurrent SQLite volume")
+                        .with_message("same-backing peer completed compact mode before claim"));
+                }
+                return Err(incompatible_schema("compact marker and fence disagree"));
+            }
             if mode.is_some() || stored.is_some() {
                 return Err(incompatible_schema(
                     "unsupported SQLite concurrent write mode",
@@ -2912,6 +3241,36 @@ impl MetadataStore for SqliteMetadataStore {
                     [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))
                 ).map_err(backend_error)?;
             if mode.as_deref() == Some(CONCURRENT_WRITE_MODE) { return Err(mrc1_migration_required()); }
+            if expected == 0
+                && actual_revision > 0
+                && mode.as_deref() == Some(COMPACT_WRITE_MODE)
+                && stored.as_deref() == Some(&backing_text)
+            {
+                // The initial root lost to a same-backing peer before this
+                // transaction wrote anything. Only this revision conflict is
+                // a definite noncommit; later bound publications stay fenced.
+                require_matching_metadata_stamp(
+                    &self.0,
+                    physical_dev.as_deref(),
+                    physical_ino.as_deref(),
+                    physical_path.as_deref(),
+                )?;
+                let has_namespace: i64 = tx.query_row(
+                    "SELECT namespace IS NOT NULL FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                ).map_err(backend_error)?;
+                if has_namespace == 1
+                    && owner.is_none()
+                    && fence == CONCURRENT_FENCE_SENTINEL
+                    && expires == 0
+                {
+                    return Err(FsError::new(ErrorCode::Eagain)
+                        .with_syscall("publish bound concurrent SQLite metadata")
+                        .with_message("same-backing peer completed initial root before publication"));
+                }
+                return Err(incompatible_schema("compact marker and fence disagree"));
+            }
             if mode.as_deref() != Some(BOUND_WRITE_MODE) || stored.as_deref() != Some(&backing_text) {
                 return Err(stale());
             }
@@ -4291,6 +4650,400 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires MOUNT_RS_PROFILE_IO=1 and exclusive VFS phase ownership"]
+    fn provider_vfs_roles_checkpoint_and_close_preserve_payloads() {
+        use crate::sqlite_io_diagnostics;
+        use rusqlite::ffi;
+
+        assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+        let native_default = unsafe { ffi::sqlite3_vfs_find(std::ptr::null()) };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private-vfs-oracle.sqlite");
+        let payload: Vec<u8> = (0..16384).map(|index| (index % 251) as u8).collect();
+        // A schema failure closes files before returning from Database::open.
+        // The pre-open context must survive those callbacks on the error path.
+        let failed_path = directory.path().join("private-vfs-error.sqlite");
+        assert!(Database::open(Some(&failed_path), "CREATE TABLE invalid(").is_err());
+        let failed_open = sqlite_io_diagnostics(false);
+        // Assert the contract only after successful real provider payloads
+        // below; this fixture is meaningful even before VFS metrics exist.
+        let store = SqliteBlockStore::open(&path).unwrap();
+        sqlite_io_diagnostics(true);
+        let first = store.put_once(&payload).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA shrink_memory")
+            .unwrap();
+        futures_lite::future::block_on(async {
+            assert_eq!(store.get(&first).await.unwrap(), payload);
+        });
+        let delete = sqlite_io_diagnostics(false);
+        // Real provider I/O and full payloads above must precede the feature
+        // assertion, so the intended RED cannot hide a storage fixture error.
+        assert_eq!(
+            delete["vfs"]["schema"], "mount-rs.sqlite-vfs.v1",
+            "native VFS attribution missing"
+        );
+        assert_eq!(failed_open["vfs"]["registered_vfs"], 1);
+        assert_eq!(failed_open["vfs"]["live_contexts"], 0);
+        assert_eq!(failed_open["vfs"]["live_files"], 0);
+        assert!(failed_open["vfs"]["close_calls"].as_u64().unwrap() > 0);
+        let entry = |bank: &serde_json::Value, name: &str| {
+            bank["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        for name in [
+            "main_database.read",
+            "main_database.write",
+            "main_database.sync",
+            "main_journal.write",
+            "main_journal.sync",
+        ] {
+            assert!(
+                entry(&delete["vfs"], name)["completed"].as_u64().unwrap() > 0,
+                "missing {name}"
+            );
+        }
+        for row in delete["vfs"]["entries"].as_array().unwrap() {
+            assert!(!row["overflow"].as_bool().unwrap());
+            assert_eq!(row["invalid_elapsed"], 0);
+            assert!(
+                row["confirmed_bytes"].as_u64().unwrap()
+                    <= row["requested_bytes"].as_u64().unwrap()
+            );
+        }
+        assert_eq!(delete["vfs"]["in_flight"], 0);
+        assert_eq!(delete["connections"][0]["vfs_observed"], true);
+        assert_eq!(
+            delete["vfs"],
+            sqlite_io_diagnostics(false)["vfs"],
+            "observer must not add workload VFS calls"
+        );
+
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+            .unwrap();
+        sqlite_io_diagnostics(true);
+        let second = store.put_once(b"wal-payload-after-reset").unwrap();
+        let queued = sqlite_io_diagnostics(false);
+        assert!(
+            entry(&queued["vfs"], "wal.write")["confirmed_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            entry(&queued["vfs"], "wal.sync")["completed"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(queued["vfs"]["checkpoint"]["starts"], 0);
+        let (busy, _, _): (i64, i64, i64) = store
+            .0
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(busy, 0);
+        let copied = sqlite_io_diagnostics(false);
+        let checkpoint = &copied["vfs"]["checkpoint"];
+        assert!(checkpoint["paired"]["completed"].as_u64().unwrap() > 0);
+        assert_eq!(checkpoint["starts"], checkpoint["dones"]);
+        assert_eq!(checkpoint["starts"], checkpoint["paired"]["completed"]);
+        assert_eq!(checkpoint["unmatched_starts"], 0);
+        assert_eq!(checkpoint["unmatched_dones"], 0);
+        assert_eq!(checkpoint["aborted_windows"], 0);
+        assert_eq!(checkpoint["active_windows"], 0);
+        assert!(
+            entry(&copied["vfs"], "main_database.write")["confirmed_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+
+        let third = store.put_once(b"close-time-checkpoint-payload").unwrap();
+        let before_close = sqlite_io_diagnostics(false);
+        drop(store);
+        let terminal = sqlite_io_diagnostics(false);
+        assert!(terminal["connections"].as_array().unwrap().is_empty());
+        assert_eq!(terminal["vfs"]["registered_vfs"], 1);
+        assert_eq!(terminal["vfs"]["live_contexts"], 0);
+        assert_eq!(terminal["vfs"]["live_files"], 0);
+        assert_eq!(terminal["vfs"]["in_flight"], 0);
+        assert!(
+            terminal["vfs"]["close_calls"].as_u64().unwrap()
+                > before_close["vfs"]["close_calls"].as_u64().unwrap()
+        );
+        assert!(
+            entry(&terminal["vfs"], "main_database.write")["confirmed_bytes"]
+                .as_u64()
+                .unwrap()
+                > entry(&before_close["vfs"], "main_database.write")["confirmed_bytes"]
+                    .as_u64()
+                    .unwrap(),
+            "last-close backfill must remain visible after connection retirement"
+        );
+        assert!(!terminal.to_string().contains("private-vfs-oracle"));
+        assert_eq!(
+            unsafe { ffi::sqlite3_vfs_find(std::ptr::null()) },
+            native_default,
+            "diagnostics must preserve native default VFS"
+        );
+
+        let fresh = SqliteBlockStore::open(&path).unwrap();
+        futures_lite::future::block_on(async {
+            assert_eq!(fresh.get(&first).await.unwrap(), payload);
+            assert_eq!(
+                fresh.get(&second).await.unwrap(),
+                b"wal-payload-after-reset"
+            );
+            assert_eq!(
+                fresh.get(&third).await.unwrap(),
+                b"close-time-checkpoint-payload"
+            );
+        });
+        let raw = Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row
+                .get::<_, u64>(0))
+                .unwrap(),
+            3
+        );
+        drop(raw);
+        drop(fresh);
+        // URI vfs= overrides sqlite3_open_v2's VFS name. Attribute only the
+        // actual selected main pager, without changing that existing behavior.
+        let override_path = directory.path().join("private-vfs-override.sqlite");
+        let native_name = unsafe { std::ffi::CStr::from_ptr((*native_default).zName) };
+        let uri = format!(
+            "file:{}?vfs={}",
+            override_path.display(),
+            native_name.to_str().unwrap()
+        );
+        let prepared = super::super::io_diagnostics::prepare().unwrap();
+        let override_connection = Arc::new(Mutex::new(
+            super::super::io_diagnostics::open_connection(
+                Some(Path::new(&uri)),
+                prepared.as_deref(),
+            )
+            .unwrap(),
+        ));
+        let override_counts =
+            super::super::io_diagnostics::register_prepared(&override_connection, prepared.clone())
+                .unwrap();
+        let override_sample = sqlite_io_diagnostics(false);
+        assert_eq!(override_sample["connections"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            override_sample["connections"][0]["vfs_observed"], false,
+            "URI native-VFS selection must not fabricate wrapper coverage"
+        );
+        drop(override_connection);
+        drop(override_counts);
+        drop(prepared);
+
+        // The registered VFS name is process-global. Safe external file and
+        // memory connections can select it and outlive every provider marker.
+        // Neither their VFS context nor their file callbacks may borrow Counts.
+        let marker = super::super::io_diagnostics::prepare().unwrap();
+        let owned = super::super::io_diagnostics::open_connection(None, marker.as_deref()).unwrap();
+        let mut selected_vfs = std::ptr::null_mut::<ffi::sqlite3_vfs>();
+        assert_eq!(
+            unsafe {
+                ffi::sqlite3_file_control(
+                    owned.handle(),
+                    c"main".as_ptr(),
+                    ffi::SQLITE_FCNTL_VFS_POINTER,
+                    std::ptr::from_mut(&mut selected_vfs).cast(),
+                )
+            },
+            ffi::SQLITE_OK
+        );
+        assert!(!selected_vfs.is_null());
+        let selected_name = unsafe { std::ffi::CStr::from_ptr((*selected_vfs).zName) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let external_path = directory.path().join("private-vfs-external.sqlite");
+        let external_file = Connection::open_with_flags_and_vfs(
+            &external_path,
+            rusqlite::OpenFlags::default(),
+            selected_name.as_str(),
+        )
+        .unwrap();
+        let external_memory = Connection::open_in_memory_with_flags_and_vfs(
+            rusqlite::OpenFlags::default(),
+            selected_name.as_str(),
+        )
+        .unwrap();
+        drop(owned);
+        drop(marker);
+        assert_eq!(sqlite_io_diagnostics(false)["vfs"]["live_contexts"], 0);
+        external_file.execute_batch("CREATE TABLE external_payload(value BLOB); INSERT INTO external_payload VALUES(X'616263')").unwrap();
+        external_memory.execute_batch("CREATE TABLE external_payload(value BLOB); INSERT INTO external_payload VALUES(X'646566')").unwrap();
+        assert_eq!(
+            external_file
+                .query_row("SELECT value FROM external_payload", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            external_memory
+                .query_row("SELECT value FROM external_payload", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            b"def"
+        );
+        assert!(
+            external_memory
+                .query_row("SELECT unixepoch('subsec')", [], |row| row.get::<_, f64>(0))
+                .unwrap()
+                > 0.0
+        );
+        drop(external_file);
+        drop(external_memory);
+        let reopened_external = Connection::open(&external_path).unwrap();
+        assert_eq!(
+            reopened_external
+                .query_row("SELECT value FROM external_payload", [], |row| row
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            b"abc"
+        );
+        drop(reopened_external);
+        sqlite_io_diagnostics(true);
+        let reset = sqlite_io_diagnostics(false);
+        assert_eq!(reset["vfs"]["close_calls"], 0);
+        assert_eq!(reset["vfs"]["live_files"], 0);
+        assert_eq!(reset["vfs"]["checkpoint"]["paired"]["completed"], 0);
+    }
+
+    #[test]
+    #[ignore = "requires MOUNT_RS_PROFILE_IO=1 and exclusive registry phase ownership"]
+    fn provider_begin_wait_hold_and_wal_backlog_preserve_blocks() {
+        use crate::sqlite_io_diagnostics;
+        assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private-begin-backlog.sqlite");
+        let store = SqliteBlockStore::open(&path).unwrap();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(40))
+            .unwrap();
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        sqlite_io_diagnostics(true);
+        let error = store.put_once(b"must-not-commit").unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain);
+        let blocked = sqlite_io_diagnostics(false);
+        let row = &blocked["connections"][0];
+        assert_eq!(
+            row["provider_begin"]["completed"], 1,
+            "BEGIN wait metric missing"
+        );
+        assert_eq!(row["provider_begin"]["errors"], 1);
+        let begin_ns = row["provider_begin"]["elapsed_ns"].as_u64().unwrap();
+        assert!(
+            begin_ns >= 20_000_000,
+            "real writer contention must be observed"
+        );
+        assert_eq!(row["connection_lock_hold"]["completed"], 1);
+        assert!(row["connection_lock_hold"]["elapsed_ns"].as_u64().unwrap() >= begin_ns);
+        assert_eq!(row["provider_commit"]["completed"], 0);
+        assert_eq!(row["wal_state"]["status"], "not_wal");
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0")
+                .unwrap();
+        }
+        sqlite_io_diagnostics(true);
+        // This known held interval must not become mutex acquisition time.
+        {
+            let _guard = store.0.lock().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let first = store.put_once(b"first-acknowledged-payload").unwrap();
+        let second = store.put_once(b"second-acknowledged-payload").unwrap();
+        let queued = sqlite_io_diagnostics(false);
+        let row = &queued["connections"][0];
+        assert_eq!(row["provider_begin"]["completed"], 2);
+        assert_eq!(row["provider_begin"]["errors"], 0);
+        assert_eq!(row["provider_commit"]["completed"], 2);
+        assert!(row["connection_lock_hold"]["elapsed_ns"].as_u64().unwrap() >= 20_000_000);
+        assert_eq!(row["wal_state"]["status"], "available");
+        assert!(row["wal_state"]["log_frames"].as_u64().unwrap() > 0);
+        assert_eq!(row["wal_state"]["checkpointed_frames"], 0);
+        assert_eq!(
+            row["wal_state"]["uncheckpointed_frames"],
+            row["wal_state"]["log_frames"]
+        );
+        let repeated = sqlite_io_diagnostics(false);
+        for field in [
+            "provider_begin",
+            "connection_lock_hold",
+            "wal_state",
+            "sql_categories",
+            "sql_profile",
+        ] {
+            assert_eq!(
+                row[field], repeated["connections"][0][field],
+                "observer changed {field}"
+            );
+        }
+        assert!(!queued.to_string().contains("private-begin-backlog"));
+        sqlite_io_diagnostics(true);
+        let reset = sqlite_io_diagnostics(false);
+        assert_eq!(reset["connections"][0]["provider_begin"]["completed"], 0);
+        assert_eq!(
+            reset["connections"][0]["connection_lock_hold"]["completed"],
+            0
+        );
+        drop(store);
+        let fresh = SqliteBlockStore::open(&path).unwrap();
+        futures_lite::future::block_on(async {
+            assert_eq!(
+                fresh.get(&first).await.unwrap(),
+                b"first-acknowledged-payload"
+            );
+            assert_eq!(
+                fresh.get(&second).await.unwrap(),
+                b"second-acknowledged-payload"
+            );
+        });
+        let raw = Connection::open(&path).unwrap();
+        let count: u64 = raw
+            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "failed BEGIN must not insert a block");
+        drop(raw);
+        drop(fresh);
+        assert!(
+            sqlite_io_diagnostics(false)["connections"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn wal_checkpoint_contention_preserves_acknowledged_blocks() {
         struct OwnedDirectory(std::path::PathBuf);
         impl Drop for OwnedDirectory {
@@ -4690,11 +5443,114 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn conditional_inode_snapshot_checks_authority_but_defers_equal_token_body_audit() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let backing = prepare_inode_metadata(&store);
+        let snapshot = run(store.load_inode_snapshot(backing)).unwrap();
+        let known = Some(snapshot.structural_generation);
+        for assignment in [
+            "write_mode='MRC2'",
+            "owner='unexpected'",
+            "fence=1",
+            "expires=1",
+            "revision=0",
+            "backing_id=NULL",
+        ] {
+            let connection = store.0.lock().unwrap();
+            connection
+                .execute(
+                    &format!("UPDATE mount_rs_metadata SET {assignment} WHERE id=1"),
+                    [],
+                )
+                .unwrap();
+            drop(connection);
+            assert!(
+                run(store.load_inode_snapshot_if_changed(backing, known)).is_err(),
+                "{assignment}"
+            );
+            store.0.lock().unwrap().execute(
+                "UPDATE mount_rs_metadata SET write_mode='MRC4',owner=NULL,fence=?1,expires=0,revision=?2,backing_id=?3 WHERE id=1",
+                params![CONCURRENT_FENCE_SENTINEL, snapshot.structural_generation, backing.to_hex()],
+            ).unwrap();
+            assert!(
+                run(store.load_inode_snapshot_if_changed(backing, known))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // Deliberately violate the trusted versioned-storage contract: no token
+        // advances. A conditional hit isn't a whole-Drive payload audit.
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_inode_guards SET node='{}' WHERE inode=?",
+                [snapshot.namespace.root.to_string()],
+            )
+            .unwrap();
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, known))
+                .unwrap()
+                .is_none()
+        );
+        assert!(run(store.load_inode_snapshot(backing)).is_err());
+        assert!(run(store.load_inode_snapshot_if_changed(backing, None)).is_err());
+        store
+            .0
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM mount_rs_inode_guards WHERE inode=?",
+                [snapshot.namespace.root.to_string()],
+            )
+            .unwrap();
+        let token = InodeVersion {
+            structural_generation: snapshot.structural_generation,
+            inode_revision: snapshot.inode_revisions[&snapshot.namespace.root],
+        };
+        assert!(
+            run(store.load_inode_if_changed(backing, snapshot.namespace.root, Some(token)))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn inode_structure_fences_content_and_reopen_preserves_guard_payload() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
         let backing = prepare_inode_metadata(&store);
         let before = run(store.load_inode_snapshot(backing)).unwrap();
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, Some(before.structural_generation)))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, None))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            run(store.load_inode_snapshot_if_changed(backing, Some(0)))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            run(store
+                .load_inode_snapshot_if_changed(backing, Some(before.structural_generation + 1)))
+            .is_err()
+        );
+        let wrong_backing =
+            mount_rs_core::storage::ConcurrentBackingId::from_bytes([0xe7; 16]).unwrap();
+        assert!(
+            run(store
+                .load_inode_snapshot_if_changed(wrong_backing, Some(before.structural_generation)))
+            .is_err()
+        );
+
         let inode = before.namespace.root + 1;
         let loaded = run(store.load_inode(backing, inode)).unwrap();
         let mut node = loaded.node.clone();
@@ -5613,6 +6469,76 @@ mod tests {
         );
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_peer_prewrite_claim_is_known_noncommit_only_for_exact_valid_backing() {
+        for case in ["same", "foreign", "bad-fence", "bad-stamp"] {
+            let path = super::super::tests::unique_database_path();
+            let store = SqliteMetadataStore::open(&path).unwrap();
+            let backing = ConcurrentBackingId::from_bytes([1; 16]).unwrap();
+            let foreign = ConcurrentBackingId::from_bytes([2; 16]).unwrap();
+            run(store.prepare_bound_concurrent_mode(backing)).unwrap();
+            assert_eq!(
+                run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap(),
+                1
+            );
+            run(store.prepare_compact_inode_mode(backing, 1)).unwrap();
+            match case {
+                "bad-fence" => {
+                    store
+                        .0
+                        .lock()
+                        .unwrap()
+                        .execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
+                        .unwrap();
+                }
+                "bad-stamp" => {
+                    store
+                        .0
+                        .lock()
+                        .unwrap()
+                        .execute(
+                            "UPDATE mount_rs_metadata SET physical_dev='-1' WHERE id=1",
+                            [],
+                        )
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let raw = || -> (Option<String>, Option<String>, i64, Option<String>, i64, Option<String>) {
+                store.0.lock().unwrap().query_row(
+                    "SELECT write_mode, backing_id, revision, namespace, fence, physical_dev FROM mount_rs_metadata WHERE id=1",
+                    [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                ).unwrap()
+            };
+            let before = raw();
+            let requested = if case == "foreign" { foreign } else { backing };
+            let error = run(store.prepare_bound_concurrent_mode(requested)).unwrap_err();
+            if case == "same" {
+                assert_eq!(error.code, ErrorCode::Eagain);
+            } else {
+                assert_ne!(error.code, ErrorCode::Eagain, "{case}");
+            }
+            let root_error =
+                run(store.publish_bound_if_revision(requested, 0, namespace())).unwrap_err();
+            if case == "same" {
+                assert_eq!(root_error.code, ErrorCode::Eagain);
+                assert_eq!(
+                    run(store.publish_bound_if_revision(backing, 1, namespace()))
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::Estale,
+                    "positive revisions must retain mode-change fencing",
+                );
+            } else {
+                assert_ne!(root_error.code, ErrorCode::Eagain, "{case}");
+            }
+            assert_eq!(raw(), before, "{case}");
+            drop(store);
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]

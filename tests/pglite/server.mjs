@@ -1,12 +1,14 @@
-import { PGlite } from "@electric-sql/pglite";
-import {
-  PGLiteSocketHandler,
-  PGLiteSocketServer,
-} from "@electric-sql/pglite-socket";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createPgliteStartupProgress, loadPgliteStartupImports } from "./startup-progress.mjs";
+
+const directEntry = process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+const startupProgress = createPgliteStartupProgress({ enabled: Boolean(directEntry) });
+// These checkpoints start at this module body; earlier Node startup is unobserved.
+startupProgress.observe("module_body_entered");
+const { PGlite, PGLiteSocketHandler, PGLiteSocketServer } = await loadPgliteStartupImports(startupProgress);
 
 const require = createRequire(import.meta.url);
 const EXPECTED_PGLITE_SOCKET_VERSION = "0.2.11";
@@ -326,14 +328,22 @@ export async function startPgliteServer({
   path,
   port,
 } = {}) {
+  startupProgress.observe("cleanup_install_started");
   installPgliteSocketCleanup();
+  startupProgress.observe("cleanup_install_completed");
+  startupProgress.observe("engine_create_started");
   const database = dataDir ? await PGlite.create(dataDir) : await PGlite.create();
+  startupProgress.observe("engine_create_completed");
+  startupProgress.observe("socket_construct_started");
   const server = new PGLiteSocketServer(
     typeof port === "number"
       ? { db: database, port, host: "127.0.0.1", maxConnections }
       : { db: database, path, maxConnections },
   );
+  startupProgress.observe("socket_construct_completed");
+  startupProgress.observe("socket_start_started");
   await server.start();
+  startupProgress.observe("socket_start_completed");
   return { database, server };
 }
 
@@ -347,6 +357,7 @@ async function runServer() {
   if (!socketPath && port === undefined) {
     throw new Error("usage: node server.mjs /tmp/mount-rs-pglite.sock");
   }
+  startupProgress.observe("configuration_ready");
 
   let database;
   let server;
@@ -359,6 +370,7 @@ async function runServer() {
     }));
     console.log(`PGLITE_READY ${typeof port === "number" ? `127.0.0.1:${server.port}` : socketPath}`);
     process.stdout.flush?.();
+    startupProgress.observe("ready_published");
 
     await Promise.race([
       new Promise((resolve) => {
@@ -387,6 +399,6 @@ async function runServer() {
   if (fatalError) throw fatalError;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (directEntry) {
   await runServer();
 }

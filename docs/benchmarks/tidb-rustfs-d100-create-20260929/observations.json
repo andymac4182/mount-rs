@@ -1,0 +1,281 @@
+{
+  "schema": "mount-rs.sanitized-d100-namespace-diagnostic.v1",
+  "status": "namespace_subset_observed_whole_run_incomplete",
+  "source": {
+    "revision": "f94c1918d36bf47cf6f6e1ba63b41665c5338436",
+    "checkout_clean_at_launch": true,
+    "watched_source_unchanged": true,
+    "build_profile": "debug",
+    "debug_assertions": true,
+    "allocation_profiling": false,
+    "resource_profiling": true,
+    "sdk_runtime": true,
+    "binary_sha256": "3ca5ba5ed3ed62895ee9453f46c749a3760b9a474164bfde21aa5273e98b6ebd"
+  },
+  "geometry": {
+    "servers": 10,
+    "clients": 100,
+    "drives": 100,
+    "partitions": 50,
+    "files_per_drive": 1000
+  },
+  "deployment_scope": "local loopback with signed local ES256 fixture authentication",
+  "metadata_backend": "tidb",
+  "blob_backend": "rustfs_s3",
+  "empty_drive_initialization": {
+    "complete": true,
+    "drives": 100,
+    "journal_phase_elapsed_ms": 98159,
+    "initializer_elapsed_seconds": "98.146289417"
+  },
+  "namespace_phase": {
+    "phase_elapsed_ms": 242625,
+    "matched_worker_counter_subset_complete": true,
+    "workers": 10,
+    "acknowledged_file_creates": 100000,
+    "acknowledged_create_close_rpc": 200000,
+    "includes_first_lazy_runtime_activation": true,
+    "metadata_json": {
+      "anchor_returned_bytes": 442702504,
+      "anchor_serialized_bytes": 221710200,
+      "inode_returned_bytes": 3305924100,
+      "inode_serialized_bytes": 1689117500,
+      "sum_bytes": 5659454304,
+      "scope": "application JSON returned and serialized; wire, Raft, blob and device bytes unavailable"
+    },
+    "core_events": {
+      "compact_structure_delta_capture": {
+        "calls": 100000,
+        "node_visits": 50150000,
+        "elapsed_ns": 248799648852
+      },
+      "compact_structure_expected_guard": {
+        "calls": 100000,
+        "nodes": 100000
+      },
+      "candidate_clone_event_covers_this_create_path": false,
+      "allocation_count_available": false
+    },
+    "storage_events": {
+      "inode_reads": {
+        "calls": 200100,
+        "returned_rows": 200100,
+        "elapsed_ns": 4234692124248
+      },
+      "metadata_reads": {
+        "calls": 200220,
+        "returned_rows": 200280,
+        "elapsed_ns": 2951852426875
+      },
+      "inode_writes": {
+        "calls": 200000,
+        "elapsed_ns": 2233089347841
+      },
+      "metadata_writes": {
+        "calls": 100100,
+        "elapsed_ns": 1055750345820
+      },
+      "transaction_commits": {
+        "calls": 100000,
+        "elapsed_ns": 4166770834920
+      },
+      "pool_checkouts": {
+        "calls": 200310,
+        "elapsed_ns": 6888861994
+      },
+      "compact_structure_publications": {
+        "calls": 100000,
+        "success": 100000,
+        "elapsed_ns": 14739702502164
+      },
+      "scope": "adapter events; joined anchor and inode reads can represent one SQL statement; spans are inclusive and overlap"
+    },
+    "worker_process_counters": {
+      "cpu_user_us": 1018127568,
+      "cpu_system_us": 122226861,
+      "cpu_sum_us": 1140354429,
+      "cpu_sum_seconds": "1140.354429",
+      "involuntary_context_switches": 8188338,
+      "voluntary_context_switches": 2791,
+      "minor_faults": 42018,
+      "major_faults": 0,
+      "scope": "ten worker processes during the namespace phase; excludes controller and Docker backend CPU"
+    }
+  },
+  "whole_run": {
+    "parent_limit_seconds": 600,
+    "owned_run_elapsed_seconds": "597.2238326249644",
+    "deadline_exceeded": true,
+    "returncode": -15,
+    "last_journal_phase": "online_payload",
+    "namespace_files": 100000,
+    "steady_workload_stages": 0,
+    "fresh_backend_byte_oracle_passes": 0,
+    "original_child_reaped": true,
+    "observed_process_group_absent": true,
+    "pipes_eof": true,
+    "whole_run_passed": false,
+    "graceful_shutdown_qualified": false,
+    "backing_test_data_cleanup_qualified": false,
+    "unresolved_receipt_conditions": [
+      "postterminal_kill_signal_error_EPERM",
+      "exact_named_case_not_observed_passed"
+    ],
+    "sampled_resources": {
+      "maximum_process_group_rss_bytes": 2020704256,
+      "unavailable_member_observations": 21,
+      "actual_max_interval_ms": "151.0376250371337",
+      "scope": "sum of available live process-group members; excludes Docker backend processes; OS lifetime peak unavailable"
+    }
+  },
+  "backing_metric_coverage": {
+    "numeric_scope": "exact arithmetic on served tokens; exporter rounding cannot be recovered",
+    "capture_scope": "whole enclosure includes initialization, namespace, partial payload, observers, background activity and forced stop",
+    "atomic_scrape": false,
+    "captured_metric_role_identity_unchanged": {
+      "tidb": true,
+      "tikv1": true,
+      "tikv2": true,
+      "tikv3": true
+    },
+    "tidb": [
+      {
+        "family": "tidb_server_handle_query_duration_seconds",
+        "matched_histogram_pairs": 15,
+        "matched_samples": 30,
+        "observed_value_unit": "seconds"
+      },
+      {
+        "family": "tidb_tikvclient_request_seconds",
+        "matched_histogram_pairs": 56,
+        "matched_samples": 112,
+        "observed_value_unit": "seconds"
+      },
+      {
+        "family": "tidb_tikvclient_backoff_seconds",
+        "matched_histogram_pairs": 13,
+        "matched_samples": 26,
+        "observed_value_unit": "seconds"
+      },
+      {
+        "family": "tidb_session_statement_pessimistic_retry_count",
+        "matched_histogram_pairs": 1,
+        "matched_samples": 2,
+        "observed_value_unit": "retry_values"
+      }
+    ],
+    "each_tikv_member": {
+      "members": ["tikv1", "tikv2", "tikv3"],
+      "families": [
+        {
+          "family": "tikv_scheduler_stage_total",
+          "matched_counter_samples": 860,
+          "observed_value_unit": "unverified_candidate_events",
+          "increment_path_coverage_verified": false
+        },
+        {
+          "family": "tikv_storage_command_total",
+          "matched_counter_samples": 43,
+          "observed_value_unit": "commands"
+        },
+        {
+          "family": "tikv_scheduler_kv_command_key_read",
+          "matched_histogram_pairs": 43,
+          "matched_samples": 86,
+          "observed_value_unit": "keys"
+        },
+        {
+          "family": "tikv_scheduler_kv_command_key_write",
+          "matched_histogram_pairs": 43,
+          "matched_samples": 86,
+          "observed_value_unit": "keys"
+        }
+      ]
+    },
+    "all_selected_family_conditions": {
+      "available_before": true,
+      "available_after": true,
+      "selected_endpoint_label_set_coverage_complete": true,
+      "new_endpoint_only_samples": 0,
+      "dropped_endpoint_only_samples": 0
+    },
+    "all_backing_metric_coverage_complete": false,
+    "aggregation_supplied": false,
+    "metric_rates_supplied": false,
+    "per_phase_amplification_available": false,
+    "pure_lock_wait_duration_available": false,
+    "physical_disk_iops_available": false,
+    "rustfs_io_or_cpu_measurement_available": false
+  },
+  "exporter_process_cpu": {
+    "counter_family": "process_cpu_seconds_total",
+    "process_start_guard_family": "process_start_time_seconds",
+    "numeric_scope": "exact counter increments as served; exporter rounding cannot be recovered",
+    "capture_scope": "whole exporter process windows enclose initialization, namespace, partial payload, observers and background work",
+    "offline_cpu_controls_passed": 22,
+    "bounded_role_derivations_passed": 4,
+    "roles": {
+      "tidb": {
+        "cpu_seconds_delta_exact_as_served": "519.14",
+        "finite_selected_counter_series": 1
+      },
+      "tikv1": {
+        "cpu_seconds_delta_exact_as_served": "327",
+        "finite_selected_counter_series": 1
+      },
+      "tikv2": {
+        "cpu_seconds_delta_exact_as_served": "156",
+        "finite_selected_counter_series": 1
+      },
+      "tikv3": {
+        "cpu_seconds_delta_exact_as_served": "161",
+        "finite_selected_counter_series": 1
+      }
+    },
+    "all_selected_role_conditions": {
+      "selected_coverage_complete": true,
+      "mandatory_process_start_full_label_set_and_served_value_match": true,
+      "external_captured_role_identity_unchanged": true
+    },
+    "namespace_worker_cpu_has_different_window": true,
+    "causal_cpu_comparison_supplied": false,
+    "cpu_utilization_available": false,
+    "aggregate_cpu_total_supplied": false,
+    "exclusive_workload_cpu_available": false,
+    "per_phase_amplification_available": false,
+    "metric_rates_supplied": false,
+    "physical_iops_available": false,
+    "rustfs_process_cpu_measurement_available": false
+  },
+  "provenance_sha256": {
+    "native_receipt": "d7dc5f463d68db44719f27cebad157eb034b516ea28e0815677759d7c38b0ced",
+    "native_terminal_journal": "78b6f2de2fe9ed85bb9445d3001fbfc5e39021f1a976beec5579264de1df0af9",
+    "independently_checked_namespace_counter_subset": "5fcdb5d9ba36c70f3a42e09ba79fdd856e0e76fa649f59ffc746b88817a19d81",
+    "before_backing_metric_capture": "c39ba9080e5d962c2e8c091755c0e9cb527136f9b19cdfa6bbfa1f397d9b8807",
+    "after_backing_metric_capture": "d85190c54e05b2eba0cfa5cb62e63de7ef139949551be5afdfb221ab5e5829fb",
+    "exact_prom_parser_v2": "41a28d4dbcd52747192f54a14fab115c7cb2ffcc984d64c1659546e2127787db",
+    "exact_tidb_derivation": "5067d979924c6cc21af23b411b30dac35fb6132035584f6f7d5e4f39418d952c",
+    "exact_tikv1_derivation": "7cffac5f5ea49ebaefd40f715a258fefd9d211bcd4a51a8e8123a4b69b6d63f6",
+    "exact_tikv2_derivation": "404b039681fc79115ad62a6f63aa0fe946e9cad7bf45677d88897a354ff9fcbd",
+    "exact_tikv3_derivation": "6dcce3fcaf6260a63207c923b23a4c49ff449d0eb9098406872b5702cbf5d18f",
+    "exporter_cpu_observations": "a6fcdc50bb2eb884192af2eeaf78213c673312e599624eb2ae78d6886e41d2c1",
+    "exporter_cpu_unit_receipt": "d8a19c052f77fc4936f5e2c2dc07ed18e2cac503610998a2e7b14bc1fef405cb",
+    "exact_tidb_cpu_derivation": "3f73dddbbca1c6dbad77e53c1e77f0bb5d4a3528c789637541ce5bc36c9431cd",
+    "exact_tikv1_cpu_derivation": "6e1c23aa991aa0a0813cdf8e0f52bf1af2cce0e9e3ca3a405e094b844c97d291",
+    "exact_tikv2_cpu_derivation": "5346a77b2eaedfecdda68618e3ecc65096184225059c90d33c757466687c47d6",
+    "exact_tikv3_cpu_derivation": "c55091f5068b5ea494bc538f350549b633a25d02c1002672536aa73d6dfefce8",
+    "tidb_cpu_execution_receipt": "0d2b43f2907e293e1b9db3d940c9d810f3fad2ef4d6a27bbb590777ef1b6055f",
+    "tikv1_cpu_execution_receipt": "2a2ff167494c7abebd0efa67331a4c2ec611705aeb74d6a25f8bb4003b287ae3",
+    "tikv2_cpu_execution_receipt": "ac10bded6b0bd70d33d02b91cc4361d0b6132e9c1c83181c9a37d8372929b5da",
+    "tikv3_cpu_execution_receipt": "c8ca986aeef573e4967bebf41dfafff76698b1c022e186e94757f6c80902c1fe"
+  },
+  "unqualified": [
+    "steady I/O throughput at 100 Drives",
+    "10000-client production capacity",
+    "cross-host capacity",
+    "allocation count",
+    "physical NVMe IOPS",
+    "native mounted CLI end-to-end qualification",
+    "power-loss durability"
+  ]
+}

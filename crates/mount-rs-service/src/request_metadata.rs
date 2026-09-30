@@ -1,9 +1,14 @@
 //! Borrowed request policy and bounded streaming audit metadata.
-use crate::{catalog::CatalogSnapshot, dispatch::SessionIdentity};
+use crate::dispatch::SessionIdentity;
 use mount_rs_remote_protocol::OperationName;
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 use serde_json::Value;
 use std::io::Write;
+
+mod prepared_catalog;
+#[cfg(test)]
+pub(crate) use prepared_catalog::{PreparationTestPoint, set_preparation_hook};
+pub(crate) use prepared_catalog::{PreparedCatalog, PreparedCatalogCache};
 
 /// Resolve a bounded catalog claim pointer without String unescaping allocations.
 /// Matches serde_json pointer semantics, including literal unknown tilde escapes.
@@ -94,15 +99,23 @@ pub(crate) fn policy_matches(policy: &Value, identity: &SessionIdentity) -> bool
     audience_ok && algorithm_ok
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static AUDIT_CANDIDATE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 pub(crate) struct MatchingGrants<'a> {
-    pub catalog: &'a CatalogSnapshot,
+    pub catalog: &'a PreparedCatalog,
     pub identity: &'a SessionIdentity,
     pub drive_id: &'a str,
 }
 impl Serialize for MatchingGrants<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut sequence = serializer.serialize_seq(None)?;
-        for (id, grant) in &self.catalog.grants {
+        for (id, grant) in self
+            .catalog
+            .candidates(&self.identity.partition_id, &self.identity.policy_id)
+        {
+            #[cfg(test)]
+            AUDIT_CANDIDATE_VISITS.with(|visits| visits.set(visits.get() + 1));
             if grant.partition_id == self.identity.partition_id
                 && grant.policy_id == self.identity.policy_id
                 && grant.drives.contains_key(self.drive_id)

@@ -260,3 +260,30 @@ MOUNT_RS_NAPI_FEATURES=rustls pnpm --dir bindings/mount-rs-napi build
 This is a build capability, not live TLS/provider acceptance. The deployment
 still owns the TiDB URL, CA/certificate policy, secret injection, rotation and
 the credentialed handshake test.
+
+### SQLite journal configuration
+
+`createChunkedDriver` accepts `journalMode: 'preserve' | 'wal'` on each SQLite
+metadata or block provider, for example:
+
+```js
+const filesystem = await createChunkedDriver({
+  metadata: { kind: 'sqlite', uri: './state/metadata.sqlite', journalMode: 'wal' },
+  blocks: { kind: 'sqlite', uri: './state/blocks.sqlite', journalMode: 'wal' },
+  chunkSize: 65536,
+});
+```
+
+Omission or `'preserve'` leaves the journal mode unchanged: fresh files use
+DELETE and an existing WAL file retains WAL. Both options are checked before
+either provider opens; other providers reject `journalMode`. Explicit WAL
+requires qualified local Linux/macOS files on the same host. Empty,
+`:memory:` and `file:` URI paths are rejected. Physical identity, single hard
+link and auxiliary-path authority checks remain in force, while canonical
+symlinks work.
+
+WAL mode persists across reopen and creates `-wal`/`-shm` sidecars. Preserve
+the complete live SQLite file set and use SQLite-aware backup procedures.
+`synchronous=FULL` (`2`), existing checkpoint policy, and the durable block
+commit before separate metadata publication are unchanged. This option does
+not establish production-capacity or power-loss recovery qualification.

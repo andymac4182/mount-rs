@@ -15,6 +15,8 @@ use crate::Result;
 use crate::types::{S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats};
 use crate::versioning::VolumeId;
 
+pub mod compact;
+
 pub use crate::delegation::{
     CheckoutRequest, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant, GrantToken,
@@ -421,8 +423,30 @@ pub fn validate_node_kind(node: &NodeMetadata) -> Result<()> {
 fn validate_file_layout(layout: &FileLayout, file_size: u64) -> Result<()> {
     // An empty list represents an empty or entirely sparse/zero-filled file.
     // Every stored extent, however, must be a nonempty bounded range.
-    from_config(&layout.chunker)?;
+    validate_chunker_config(&layout.chunker)?;
     validate_file_extents(&layout.extents, file_size)
+}
+
+// Validation must not construct a boxed Chunker just to inspect a persisted
+// layout. Keep these rules aligned with chunking::from_config.
+fn validate_chunker_config(config: &ChunkerConfig) -> Result<usize> {
+    if config.algorithm != "fixed-size" || config.version != 1 {
+        return Err(
+            FsError::new(ErrorCode::Enotsup).with_message("unsupported chunker algorithm/version")
+        );
+    }
+    if config.parameters.len() != 1 {
+        return Err(FsError::new(ErrorCode::Einval).with_message("invalid fixed-size parameters"));
+    }
+    let size = config
+        .parameters
+        .get("chunk_size")
+        .and_then(|size| usize::try_from(*size).ok())
+        .ok_or_else(|| FsError::new(ErrorCode::Einval).with_message("invalid chunk_size"))?;
+    if size == 0 {
+        return Err(FsError::new(ErrorCode::Einval).with_message("chunk size must be positive"));
+    }
+    Ok(size)
 }
 
 fn validate_file_extents(extents: &[BlockExtent], file_size: u64) -> Result<()> {
@@ -982,6 +1006,134 @@ pub struct WriterLease {
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
+    /// Explicit optional compact-layout support. This advertisement neither
+    /// enrolls a volume nor changes any MRC4 method's contract. Resolve it before
+    /// mutation; unsupported providers must not be used for compact publication.
+    /// Never change publication methods after an uncertain commit outcome.
+    fn compact_inode_capability(&self) -> compact::CompactInodeCapability {
+        compact::CompactInodeCapability::Unsupported
+    }
+    /// Indexed selected-file and root-entry reads from one coherent statement.
+    /// Capability does not enroll or migrate any stored representation.
+    fn compact_point_read_capability(&self) -> compact::CompactPointReadCapability {
+        compact::CompactPointReadCapability::Unsupported
+    }
+    /// Opt-in root-child create proposals from an audited cache. The provider
+    /// must retain complete fresh structural validation under publication locks;
+    /// this capability never replaces it with selected points or cached rows.
+    fn compact_optimistic_create_capability(&self) -> compact::CompactOptimisticCreateCapability {
+        compact::CompactOptimisticCreateCapability::Unsupported
+    }
+    /// Read fresh authority, selected membership and the complete file guard in
+    /// one provider statement snapshot. Never substitute cached membership or
+    /// split reads across statements; check generation before selected errors.
+    async fn read_compact_file(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+        _expected: compact::CompactFileExpectation<'_>,
+    ) -> Result<compact::CompactFileRead> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read authority, actual root/file memberships, directory header, exact
+    /// requested dentry and file guard in one provider statement snapshot.
+    /// Providers retain missing/malformed selected groups behind the receipt's
+    /// generation. This scope does not assert a complete fresh directory body.
+    async fn read_compact_root_entry(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_root: InodeId,
+        _candidate_file: InodeId,
+        _name: &str,
+        _expected: compact::CompactFileExpectation<'_>,
+    ) -> Result<compact::CompactRootEntryRead> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Support for fixed coherent root/file captures and both sealed structural
+    /// transitions. Resolve before choosing a targeted publication strategy.
+    fn compact_root_file_capability(&self) -> compact::CompactRootFileCapability {
+        compact::CompactRootFileCapability::Unsupported
+    }
+    /// Read authority, the complete anchor and two optional complete guards in
+    /// one coherent view. Missing guards are retained for generation recovery;
+    /// malformed guard groups remain errors. Normalized providers reconstruct
+    /// actual complete membership and the affected directory from indexed rows
+    /// within that view. Use read_compact_root_entry for a scoped point read.
+    async fn load_compact_root_file(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_root: InodeId,
+        _candidate_file: InodeId,
+    ) -> Result<compact::CompactRootFileRead> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Inspect exact persisted MRC5 authority without enrollment or repair.
+    /// `None` denotes a coherently recognized noncompact mode, not a fresh volume.
+    async fn compact_inode_mode_state(&self) -> Result<Option<InodeModeState>> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Enroll only fresh root-only, initialized, same-backing MRC2 metadata.
+    /// Atomically advance the generation and fence old namespace readers/writers.
+    async fn prepare_compact_inode_mode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _expected_revision: u64,
+    ) -> Result<()> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read anchor and exact complete guard keyspace in ONE coherent transaction.
+    async fn load_compact_snapshot(
+        &self,
+        _backing: ConcurrentBackingId,
+    ) -> Result<compact::CompactSnapshot> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Fresh selected body with generation and exact physical identity. A logical
+    /// reset token alone never establishes freshness of a retained body.
+    async fn load_compact_inode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+    ) -> Result<compact::LoadedCompactInode> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Read current anchor and guard at one provider view and either certify
+    /// exact equality to the borrowed body or return the ordinary owned result.
+    /// The default preserves the fresh read contract for other providers.
+    async fn read_compact_inode(
+        &self,
+        backing: ConcurrentBackingId,
+        inode: InodeId,
+        _expected: compact::CompactInodeExpectation<'_>,
+    ) -> Result<compact::CompactInodeRead> {
+        self.load_compact_inode(backing, inode)
+            .await
+            .map(compact::CompactInodeRead::Loaded)
+    }
+    /// Atomically validate anchor generation and physical identity, then update
+    /// only the selected guard. Referenced immutable blocks must complete their
+    /// provider's acknowledgment/flush contract before this call. Stable-storage
+    /// guarantees require the block provider to advertise `durable()`.
+    /// EAGAIN is a proven noncommit; uncertain outcomes must never be replayed.
+    async fn publish_compact_inode(
+        &self,
+        _backing: ConcurrentBackingId,
+        _inode: InodeId,
+        _generation: u64,
+        _expected: compact::PhysicalInodeIdentity,
+        _node: NodeMetadata,
+    ) -> Result<compact::LoadedCompactInode> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Publish an immutable captured delta under anchor and guard protection.
+    /// Full scope enumerates the entire guarded range; FileCreate fetches only
+    /// its expected affected parent. Return only the acknowledged write set.
+    async fn publish_compact_structure(
+        &self,
+        _delta: &compact::CompactStructuralDelta,
+    ) -> Result<compact::CompactPublication> {
+        Err(FsError::new(ErrorCode::Enotsup))
+    }
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;
@@ -1006,6 +1158,23 @@ pub trait MetadataStore: Send + Sync {
         _backing: ConcurrentBackingId,
     ) -> Result<InodeMetadataSnapshot> {
         Err(FsError::new(ErrorCode::Enotsup))
+    }
+    /// Reuse a coherent MRC4 structural snapshot only after a fresh authority
+    /// check against `backing` and an exact positive generation match. `None`
+    /// means unchanged structure, not unchanged file contents: selected inode
+    /// revisions must still be checked. Missing or invalid authority is an error.
+    /// `known=None` forces a full, independently validated snapshot.
+    ///
+    /// Like selected conditional reads, a hit does not audit body edits that
+    /// preserve generation/version tokens, or corruption in untouched guards.
+    /// Unconditional snapshots and reopen retain the full validation path.
+    /// The default deliberately loads everything for custom providers.
+    async fn load_inode_snapshot_if_changed(
+        &self,
+        backing: ConcurrentBackingId,
+        _known: Option<u64>,
+    ) -> Result<Option<InodeMetadataSnapshot>> {
+        Ok(Some(self.load_inode_snapshot(backing).await?))
     }
     /// Read authority, structural generation and complete inode guard atomically.
     /// Missing guards and malformed records must never fall back to stale base nodes.
@@ -1197,7 +1366,17 @@ pub trait MetadataStore: Send + Sync {
 
 #[async_trait]
 pub trait BlockStore: Send + Sync {
+    /// Advertise stable-storage acknowledgments only when the provider's
+    /// barriers and the caller's deployment assertion support that guarantee.
     fn durable(&self) -> bool;
+    /// The configured backing remains available to independent contexts and
+    /// after owned shutdown and process reopen while the OS and backing survive.
+    /// This does not qualify machine failure, promise power-loss-safe
+    /// acknowledgments or show that independent hosts share the same authority.
+    /// Durable providers preserve their existing behavior by default.
+    fn persistent(&self) -> bool {
+        self.durable()
+    }
     /// Establish and return the stable identity of this shared block authority.
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare concurrent backing"))
@@ -1214,7 +1393,9 @@ pub trait BlockStore: Send + Sync {
     /// bytes. No caller can overwrite data referenced by an older layout.
     async fn put(&self, bytes: &[u8]) -> Result<BlockId>;
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>>;
-    /// Barrier covering prior successful puts before metadata publication.
+    /// Complete the provider's acknowledgment barrier covering prior successful
+    /// puts before metadata publication. Stable-storage guarantees require
+    /// `durable()`; process-persistent OS writeback need not force a device sync.
     async fn flush(&self) -> Result<()>;
     /// Only the coordinator may reclaim blocks proven unreachable from every
     /// live/persisted layout and in-flight write. This is not implicit on close.

@@ -8,6 +8,8 @@ license = "Apache-2.0"
 
 [features]
 default = []
+local-oidc-fixture = []
+io-profiling = ["mount-rs-service/io-profiling", "mount-rs-sdk/io-profiling"]
 observability = [
     "dep:mount-rs-observability",
     "mount-rs-http/observability",
@@ -34,7 +36,7 @@ mount-rs-http = { path = "../../transports/mount-rs-http" }
 mount-rs-observability = { path = "../../crates/mount-rs-observability", optional = true }
 mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }
 mount-rs-sdk = { path = "../../crates/mount-rs-sdk" }
-mount-rs-service = { path = "../../crates/mount-rs-service" }
+mount-rs-service = { path = "../../crates/mount-rs-service", features = ["sdk-runtime"] }
 mount-rs-remote-client = { path = "../../crates/mount-rs-remote-client" }
 serde = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
@@ -47,7 +49,13 @@ tokio = { version = "1", default-features = false, features = ["macros", "proces
 libc = "0.2"
 
 [dev-dependencies]
+base64 = "0.22"
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
+mount-rs-remote-protocol = { path = "../../crates/mount-rs-remote-protocol" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
+mount-rs-tidb = { path = "../../providers/mount-rs-tidb" }
+mount-rs-rustfs = { path = "../../providers/mount-rs-rustfs" }
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "ring"] }
+ring = "0.17"
 rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
 tempfile = "3"

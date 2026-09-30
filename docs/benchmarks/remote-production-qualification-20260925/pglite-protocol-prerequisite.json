@@ -1,0 +1,363 @@
+{
+  "schema": "mount-rs-pglite-protocol-prerequisite-v1",
+  "verdict": "FAIL: premature ReadyForQuery on failing Flush without Sync; adapter-only remedy rejected",
+  "source_head": "805c35c7f29252092661e70590a04be83949beb5",
+  "manifest": {
+    "schema": "pglite-prerequisite-freeze-v1",
+    "head": "805c35c7f29252092661e70590a04be83949beb5",
+    "source": {
+      "tests/pglite/server.mjs": "fae9a34595bc78c635a0cf8a2d9a2505142777b96b75d105131a27586aa8a082",
+      "tests/pglite/package.json": "018e9dbf9ad59681091e535980726eecf66cd2a28d6eb1ae2f089d62d07aeec8",
+      "tests/pglite/pnpm-lock.yaml": "a4c0a1c912e2053425ca84ced87373258f1c8d6ee83c1122fec21ba2671d9606",
+      "tests/pglite/node_modules/@electric-sql/pglite/package.json": "65dff2c93c707e526902eebfab246bcbf2df2eba1c6984a5b5e9a44177532b1c",
+      "tests/pglite/node_modules/@electric-sql/pglite/dist/index.cjs": "aa6b681c119cb131287e26db74024f3dcd16149dcea7b7146939fa658e105963",
+      "tests/pglite/node_modules/@electric-sql/pglite/dist/index.js.map": "924307dcdda38b37c47b5651b14ff0a8293aaa4bc5ecf914fe6e386d94c6a100",
+      "tests/pglite/node_modules/@electric-sql/pglite-socket/package.json": "b9c6722ce692a064944b79b9f1c55a632eb96850ea39f012ccf72b9d792ce389",
+      "tests/pglite/node_modules/@electric-sql/pglite-socket/dist/index.cjs": "b71283db74058217a204ab7abdce3eac5e4605ee0340731292e2ab53b0ad4064",
+      "tests/pglite/node_modules/@electric-sql/pglite-socket/src/index.ts": "de23b27f5b021cd8caadd0b0993c9f51160a6dc9f5069ac26d9fa7f1fad2a34f",
+      "tests/pglite/node_modules/@electric-sql/pglite/dist/index.cjs.map": "8cf890481e9cb1f6759d611423aa2d418d28bc73c8342343c15a03ea0b73951b",
+      "tests/pglite/node_modules/@electric-sql/pglite-socket/dist/index.cjs.map": "f88c7442e31e1f7e078567f300679292a65e39f65e557a6ae1dbe3bbbeddb6ca"
+    },
+    "artifacts": {
+      "cleanup.json": "1bcdb1f404ba6b8b08211289a2c9bee45febbc4a22adb94d5abbce1b0ad4d9ca",
+      "cleanup.py": "cce1f83c15363b1fff982294412a4074275777c7da1000ed263f248013c4cfbc",
+      "initial-harness-syntax.log": "5f432f335a84dc09eca8759858397f7f68d4272b53e58cc02acd25a53d6ddd20",
+      "pristine-results.json": "c268216dfdda80a05ff31649f6adf6c9388f9c52fc15bf241a2ae785737b2f56",
+      "pristine-run.log": "d346e551f0abad1097bf986b6ea01b2b99b28be064ffb9fe416d7f54f8bd5a97",
+      "probe.mjs": "a39255961f2eea65582aaf1eed1138149a0877b4a5da21f560359f022b1b29da",
+      "raw-run.log": "3fba83dbb8533af8c3ca1ccf911f3b730dd9a01f5b9cf03001cbcc89cd372816",
+      "results.json": "c187038c4cc1467abd9822829a9ce5b10eba21f292354cb308f594d089f695ff",
+      "run.log": "d346e551f0abad1097bf986b6ea01b2b99b28be064ffb9fe416d7f54f8bd5a97"
+    },
+    "runtimeSourceMapPgliteTsMatchesInspectedJsMap": true
+  },
+  "manifest_sha256": "db737630eb3aff65628984ec5609b45a7464cd3770c2989ce7f812c71a4fd099",
+  "report": "/private/tmp/mount-rs-pglite-protocol-prerequisite-report.md",
+  "report_sha256": "d4d8e5e3176b04ce514e10e1986c5515ffc9c2b75866ea43c5771b53974b71b2",
+  "pristine_results": {
+    "schema": "mount-rs-pglite-protocol-prerequisite-v1",
+    "node": "v24.18.0",
+    "versions": {
+      "pglite": "0.5.8",
+      "socket": "0.2.11"
+    },
+    "cases": [
+      {
+        "name": "pristine-upstream-old-typed-singleton",
+        "expected": "same-client recovery",
+        "passed": false,
+        "duplicate": [
+          {
+            "tag": "1"
+          },
+          {
+            "tag": "2"
+          },
+          {
+            "tag": "t"
+          },
+          {
+            "tag": "n"
+          },
+          {
+            "tag": "E",
+            "code": "23505"
+          },
+          {
+            "tag": "Z",
+            "status": "E"
+          }
+        ],
+        "rollback": [
+          {
+            "tag": "Z",
+            "status": "E"
+          }
+        ]
+      },
+      {
+        "name": "pristine-fresh-full-byte-oracle",
+        "passed": true,
+        "verifiedBytes": 4096,
+        "sha256": "c01ccdf6915318a2e899803a03cb4dab5f31d36802ffac845cbd050e8259c12e"
+      }
+    ],
+    "noAdapterImplemented": true,
+    "ownedDirectories": [
+      "/private/tmp/mount-rs-pglite-protocol-prerequisite/pristine-0w5RkV"
+    ],
+    "cleanup": [],
+    "harnessFailure": {
+      "name": "Error",
+      "message": "pristine stop failed"
+    }
+  },
+  "raw_results": {
+    "schema": "mount-rs-pglite-protocol-prerequisite-v1",
+    "node": "v24.18.0",
+    "versions": {
+      "pglite": "0.5.8",
+      "socket": "0.2.11"
+    },
+    "cases": [
+      {
+        "name": "borrowed-buffer-control",
+        "passed": true,
+        "fragments": 2,
+        "ownedBytes": 6,
+        "borrowedAliasesCorrupted": true
+      },
+      {
+        "name": "owned-buffer-budget-5-success",
+        "passed": true,
+        "cap": 5,
+        "peak": 3,
+        "residualBytes": 0
+      },
+      {
+        "name": "owned-buffer-budget-5-sync-failure",
+        "passed": true,
+        "cap": 5,
+        "peak": 3,
+        "residualBytes": 0
+      },
+      {
+        "name": "owned-buffer-budget-5-disconnect",
+        "passed": true,
+        "cap": 5,
+        "peak": 3,
+        "residualBytes": 0
+      },
+      {
+        "name": "owned-buffer-budget-6-success",
+        "passed": true,
+        "cap": 6,
+        "peak": 6,
+        "residualBytes": 0
+      },
+      {
+        "name": "owned-buffer-budget-6-sync-failure",
+        "passed": true,
+        "cap": 6,
+        "peak": 6,
+        "residualBytes": 0
+      },
+      {
+        "name": "owned-buffer-budget-6-disconnect",
+        "passed": true,
+        "cap": 6,
+        "peak": 6,
+        "residualBytes": 0
+      },
+      {
+        "name": "owned-buffer-budget-7-success",
+        "passed": true,
+        "cap": 7,
+        "peak": 6,
+        "residualBytes": 0
+      },
+      {
+        "name": "owned-buffer-budget-7-sync-failure",
+        "passed": true,
+        "cap": 7,
+        "peak": 6,
+        "residualBytes": 0
+      },
+      {
+        "name": "owned-buffer-budget-7-disconnect",
+        "passed": true,
+        "cap": 7,
+        "peak": 6,
+        "residualBytes": 0
+      },
+      {
+        "name": "raw-complete-PBDES",
+        "passed": false,
+        "readyCount": 2,
+        "wire": [
+          {
+            "tag": "1"
+          },
+          {
+            "tag": "2"
+          },
+          {
+            "tag": "t"
+          },
+          {
+            "tag": "n"
+          },
+          {
+            "tag": "E",
+            "code": "23505"
+          },
+          {
+            "tag": "Z",
+            "status": "E"
+          },
+          {
+            "tag": "Z",
+            "status": "E"
+          }
+        ],
+        "verifiedBytes": 4096,
+        "sha256": "c01ccdf6915318a2e899803a03cb4dab5f31d36802ffac845cbd050e8259c12e"
+      },
+      {
+        "name": "raw-separate-frontend-messages",
+        "passed": false,
+        "readyCount": 2,
+        "wire": [
+          {
+            "tag": "1"
+          },
+          {
+            "tag": "2"
+          },
+          {
+            "tag": "t"
+          },
+          {
+            "tag": "n"
+          },
+          {
+            "tag": "E",
+            "code": "23505"
+          },
+          {
+            "tag": "Z",
+            "status": "E"
+          },
+          {
+            "tag": "Z",
+            "status": "E"
+          }
+        ],
+        "verifiedBytes": 4096,
+        "sha256": "c01ccdf6915318a2e899803a03cb4dab5f31d36802ffac845cbd050e8259c12e"
+      },
+      {
+        "name": "raw-success-Flush-then-Sync",
+        "passed": true,
+        "flush": [
+          {
+            "tag": "1"
+          },
+          {
+            "tag": "2"
+          },
+          {
+            "tag": "t"
+          },
+          {
+            "tag": "T"
+          },
+          {
+            "tag": "D",
+            "rowBytes": 8200
+          },
+          {
+            "tag": "C"
+          }
+        ],
+        "sync": [
+          {
+            "tag": "Z",
+            "status": "T"
+          }
+        ]
+      },
+      {
+        "name": "raw-error-Flush-before-Sync",
+        "passed": false,
+        "wire": [
+          {
+            "tag": "1"
+          },
+          {
+            "tag": "2"
+          },
+          {
+            "tag": "t"
+          },
+          {
+            "tag": "n"
+          },
+          {
+            "tag": "E",
+            "code": "23505"
+          },
+          {
+            "tag": "Z",
+            "status": "E"
+          }
+        ],
+        "stopGate": true
+      }
+    ],
+    "noAdapterImplemented": true,
+    "ownedDirectories": [
+      "/private/tmp/mount-rs-pglite-protocol-prerequisite/raw-complete-Odm2h0",
+      "/private/tmp/mount-rs-pglite-protocol-prerequisite/raw-segmented-ekEGT3",
+      "/private/tmp/mount-rs-pglite-protocol-prerequisite/raw-flush-xdaSXf"
+    ],
+    "cleanup": [
+      {
+        "name": "raw-complete-Odm2h0",
+        "databaseClosed": true
+      },
+      {
+        "name": "raw-segmented-ekEGT3",
+        "databaseClosed": true
+      },
+      {
+        "name": "raw-flush-xdaSXf",
+        "databaseClosed": true
+      }
+    ],
+    "stopped": "raw Flush produced Ready before Sync; adapter-only continuation not qualified"
+  },
+  "cleanup": {
+    "ownedEntrypointsExited": true,
+    "pristineChildExitObserved": true,
+    "systemProcessInventory": "ps denied by sandbox; no independent systemwide inventory",
+    "directories": [
+      {
+        "ownedDirectory": "pristine-0w5RkV",
+        "removed": true
+      },
+      {
+        "ownedDirectory": "raw-complete-Odm2h0",
+        "removed": true
+      },
+      {
+        "ownedDirectory": "raw-segmented-ekEGT3",
+        "removed": true
+      },
+      {
+        "ownedDirectory": "raw-flush-xdaSXf",
+        "removed": true
+      }
+    ],
+    "existingSharedFixtureTouched": false
+  },
+  "limits": [
+    "Pristine socket is a one-table/one4096-byte strict-client fixture, not SDK filesystem qualification",
+    "Three4096-byte comparisons establish data coherence, not correct earlier protocol replies",
+    "Nine fake executor ownership/barrier assertions do not qualify a production adapter memory ledger",
+    "Post-error skipped-command oracle unexecuted after decisive earlier stop",
+    "Pristine upstream shutdown exited nonzero; detailed child error unavailable; no lifecycle RCA",
+    "Pinned JS finally call candidate mechanism; C source/flags must be inspected before remedy",
+    "No installed package/provider/server/adapter source change; no wire response filtering or replay",
+    "No performance/physical IO/capacity/durability improvement acceptance"
+  ],
+  "upstream_context": {
+    "url": "https://github.com/electric-sql/pglite/issues/958",
+    "scope": "Related official premature ReadyForQuery report; local raw0.5.8 controls supply independent current evidence"
+  },
+  "independent_review": {
+    "path": "/private/tmp/mount-rs-pglite-protocol-prerequisite-review.md",
+    "sha256": "0c8611e7fefe170908cf61db664a7fd617f41aab197ee70680a0c48fa2895582",
+    "verdict": "Evidence/stop decision PASS; protocol prerequisite FAIL; no adapter/recovery acceptance"
+  }
+}

@@ -154,7 +154,7 @@ point. It constructs the selected filesystem through the public
 `mount-rs-sdk::Filesystem` facade, writes and reads a binary file through the
 shared `FsDriver` contract, synchronizes it, and cleans it up. With
 `--config PATH --reopen`, it shuts down the first SDK filesystem, opens the
-configured durable provider again, verifies the persisted bytes, and then
+configured persistent provider again, verifies the retained bytes, and then
 removes the test file. The default command uses memfs; a structured SQLite
 split-store config is a portable durable example:
 
@@ -246,6 +246,29 @@ RustFS endpoint URLs must contain only the HTTP(S) authority and may have one
 trailing slash; provider paths and buckets go in their separate fields.
 Omitting RustFS `durable` defaults to false. Set it to true only when the
 configured RustFS service is expected to retain completed block writes.
+
+TiDB metadata can also use direct filesystem blocks:
+
+```json
+"metadata": {"kind": "tidb", "connection": {"env": "MOUNT_RS_TIDB_URL"}, "volume_key": "drive-one", "durable": true},
+"blocks": {"kind": "filesystem", "root": "/owned/drive-one/blocks", "persistent": true}
+```
+
+Start from `examples/config-tidb-filesystem.json`. The block root must already
+exist, belong to the process user and have mode `0700`; every path component
+must be a real directory rather than a symlink. Relative `root` paths resolve
+against the config file. Filesystem `persistent` defaults to true and asserts
+availability after owned shutdown and process reopen while the OS/backing
+survive. All filesystem writes use normal OS writeback with no forced syncs.
+The provider reports `durable_writes: false`; OS crashes or power loss can lose
+acknowledged blobs referenced by committed TiDB metadata. The old filesystem
+`durable` configuration field is rejected. Independent servers sharing a Drive
+must access the same block directory and persisted backing marker. Separate
+server-local disks require a shared storage design before they can hold one
+Drive's authority. The configured RustFS cold-holder admission remains
+restricted to its existing provider; filesystem blocks are not admitted by it.
+Opening the filesystem provider performs marker I/O synchronously during
+construction, so benchmark startup separately from steady state I/O.
 
 Explicit command-line flags override only the config fields they name.
 Unspecified flags retain config values. Relative config paths are resolved
@@ -526,3 +549,24 @@ MRC3 shared configurations.
 ## Remote Drive provider
 
 `mount-rs mount --config <path>` accepts a remote provider that selects one Partition and mounts several granted Drives through the existing native adapters. `serve-remote --config <path>` starts the authenticated QUIC service; `catalog-apply --config <path>` updates its persistent metadata definitions and grants using a revision check. Tokens come from a file or an argv command. See [Remote Drives](../../docs/remote-drives.md) for setup, examples and qualification boundaries.
+
+### SQLite journal configuration
+
+Normal split-store SQLite provider objects accept optional `journal_mode`:
+`"preserve"` (the default) or `"wal"`. See
+[`examples/config-sqlite-wal.json`](examples/config-sqlite-wal.json).
+The same objects work in remote Drive catalog JSON. The legacy whole-snapshot
+`driver.kind: "sqlite"` does not accept this option.
+
+Preserve executes no journal-mode assignment: fresh files use DELETE and
+existing WAL files stay in WAL. Explicit WAL requires qualified local Linux
+or macOS files on one host; empty, `:memory:` and `file:` URI paths are rejected
+before path resolution. Physical identity, single-hard-link, local filesystem
+and auxiliary-path authority checks still apply. Canonical symlinks work.
+WAL persists across reopen and creates `-wal`/`-shm` sidecars. Keep the complete
+live SQLite file set together and use SQLite-aware backup procedures.
+
+Both modes retain `synchronous=FULL` (`2`), the existing checkpoint policy, and
+a durable block commit before the separate metadata publication commit.
+The measured small fixture does not qualify production capacity or power-loss
+recovery.

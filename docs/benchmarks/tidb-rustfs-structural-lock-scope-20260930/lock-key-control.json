@@ -1,0 +1,123 @@
+{
+  "after": {
+    "diagnostic_source_sha256": "4e212d5279e41df33adc493927fed2f5636f1fbeaa20818e664ab514fbc18fc5",
+    "measurement": {
+      "dataset_absence_proven": false,
+      "dataset_retained_for_owned_cleanup": true,
+      "failures": [],
+      "keys_meaning": "assembled transaction mutation keys, including lock-only keys, before commit ACK",
+      "metric_count": "tidb_tikvclient_txn_write_kv_num_count{scope=\"general\"}",
+      "metric_scope": "shared TiDB process; exactly one general observation required per window",
+      "metric_sum": "tidb_tikvclient_txn_write_kv_num_sum{scope=\"general\"}",
+      "nonce_unix_nanoseconds": "1790700179339042000",
+      "observations": [
+        {
+          "after": {
+            "count": 1305618,
+            "sum": 60305203
+          },
+          "before": {
+            "count": 1305617,
+            "sum": 60305191
+          },
+          "existing_files": 4,
+          "fresh_complete_namespace_equal": true,
+          "fresh_context_closed": true,
+          "measurement_unavailable": null,
+          "observed_mutation_keys": 12,
+          "owned_key_sha256": "22e4dfc0742f50fc7e64de7816416ab4a61eb3559f1b6a8728106feedcf073f9",
+          "provider_context_closed": true,
+          "publication_acknowledged": true
+        },
+        {
+          "after": {
+            "count": 1305624,
+            "sum": 60309248
+          },
+          "before": {
+            "count": 1305623,
+            "sum": 60309236
+          },
+          "existing_files": 1000,
+          "fresh_complete_namespace_equal": true,
+          "fresh_context_closed": true,
+          "measurement_unavailable": null,
+          "observed_mutation_keys": 12,
+          "owned_key_sha256": "c477306d742e0e370af87a267c481a4d432e0849c452d20fbf5f14a7c025d450",
+          "provider_context_closed": true,
+          "publication_acknowledged": true
+        }
+      ],
+      "owned_key_derivation": "explicit-prefix + '-commit-f' + files + '-' + pid + '-' + nonce",
+      "pid": 51283,
+      "schema": "mount-rs.compact-create-mutation-key-diagnostic.v1",
+      "transaction_identity_proven": false
+    },
+    "production_source_sha256": "a7ff79704e762197b54924688b13257305abccb7fd9d124277f25cf97adaa0ba",
+    "receipt_sha256": "a1ecf51c3ea3700b7960f03782e45c2354c9102e3e47595ec0e233fa0a608e0d",
+    "returncode": 0,
+    "terminal_sha256": "728afa740dd4ba1d9dc9fde6a0465e55afe9d427e62454756d75a7a2f822bf00"
+  },
+  "before": {
+    "diagnostic_source_sha256": "4e212d5279e41df33adc493927fed2f5636f1fbeaa20818e664ab514fbc18fc5",
+    "measurement": {
+      "dataset_absence_proven": false,
+      "dataset_retained_for_owned_cleanup": true,
+      "failures": [],
+      "keys_meaning": "assembled transaction mutation keys, including lock-only keys, before commit ACK",
+      "metric_count": "tidb_tikvclient_txn_write_kv_num_count{scope=\"general\"}",
+      "metric_scope": "shared TiDB process; exactly one general observation required per window",
+      "metric_sum": "tidb_tikvclient_txn_write_kv_num_sum{scope=\"general\"}",
+      "nonce_unix_nanoseconds": "1790700084268300000",
+      "observations": [
+        {
+          "after": {
+            "count": 1305606,
+            "sum": 60300097
+          },
+          "before": {
+            "count": 1305605,
+            "sum": 60300081
+          },
+          "existing_files": 4,
+          "fresh_complete_namespace_equal": true,
+          "fresh_context_closed": true,
+          "measurement_unavailable": null,
+          "observed_mutation_keys": 16,
+          "owned_key_sha256": "64a8f0ecbde892f9092a22bd420b526e2bbc8e79f640c536c23b70f0daf3b26a",
+          "provider_context_closed": true,
+          "publication_acknowledged": true
+        },
+        {
+          "after": {
+            "count": 1305612,
+            "sum": 60305142
+          },
+          "before": {
+            "count": 1305611,
+            "sum": 60304130
+          },
+          "existing_files": 1000,
+          "fresh_complete_namespace_equal": true,
+          "fresh_context_closed": true,
+          "measurement_unavailable": null,
+          "observed_mutation_keys": 1012,
+          "owned_key_sha256": "a8fe07d5beebccaaa957da5e9afb7bdd4d5d5512dc910ae989849e6fbdfa349b",
+          "provider_context_closed": true,
+          "publication_acknowledged": true
+        }
+      ],
+      "owned_key_derivation": "explicit-prefix + '-commit-f' + files + '-' + pid + '-' + nonce",
+      "pid": 50431,
+      "schema": "mount-rs.compact-create-mutation-key-diagnostic.v1",
+      "transaction_identity_proven": false
+    },
+    "production_source_sha256": "416114dcf3da34a2d498cca85a56d63a7c5ea73d069f86d9851a5ef01d10ab54",
+    "receipt_sha256": "a39947e047139230d1dd7a8bd4b85823d852eaf6b8ff1e7de6b090ab421caa4d",
+    "returncode": 101,
+    "terminal_sha256": "8846b0bb9d6479f306b832920ba89fd86fd6ce2c9342c2c303e14e425c91a720"
+  },
+  "f1000_key_reduction_percent": 98.81422924901186,
+  "schema": "mount-rs.structural-lock-key-control.v1",
+  "scope": "Actual owned TiDB8.5.7, metadata-only one-create control; shared general histogram count exactlyone, acknowledged publication and fresh complete namespace oracle. No physicalIOPS, latency or productioncapacity qualification."
+}
