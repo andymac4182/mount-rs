@@ -39,6 +39,7 @@ jobs:
       - name: Verify formatting
         run: ./scripts/cargo-shared fmt --all -- --check
       - name: Verify all metric evidence controls and bounded publication
-        run: ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target target::metrics::tests:: -- --nocapture
+        run: |
+          ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target target::metrics::tests:: -- --nocapture
       - name: Verify strict metric fixture Clippy
         run: ./scripts/cargo-shared clippy --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target -- -D warnings
