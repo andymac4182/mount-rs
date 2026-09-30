@@ -486,17 +486,32 @@ jobs:
                   record = json.loads(data, object_pairs_hook=closed_object)
               except (ValueError, UnicodeError, RecursionError):
                   raise SystemExit('RSS first-failure artifact malformed')
-              fields = {'schema', 'producer', 'controller_pid', 'worker_pid', 'group', 'observed_ns', 'resource_sequence', 'candidate_role', 'candidate_pid', 'candidate_generation', 'candidate_node', 'site', 'category', 'retirement_poll', 'candidate_bytes'}
+              fields = {'schema', 'producer', 'controller_pid', 'worker_pid', 'group', 'observed_ns', 'resource_sequence', 'candidate_role', 'candidate_pid', 'candidate_generation', 'candidate_node', 'site', 'category', 'retirement_poll', 'candidate_bytes', 'diagnostic'}
               roles = {'controller', 'worker', 'server', 'catalog-apply'}
               worker_sites = {'worker_frame_controller', 'worker_frame_worker', 'worker_frame_child', 'worker_frame_stop_requested_child', 'readiness_child', 'active_child', 'apply_target', 'apply_sibling', 'stop_target', 'stop_sibling', 'cleanup_child'}
               categories = {'proc_status_read_failed', 'vmrss_field_missing', 'vmrss_value_missing', 'vmrss_value_invalid', 'rss_bytes_overflow', 'taskinfo_unavailable', 'parent_changed_before_sample', 'parent_changed_after_sample', 'sample_clock_before_failed', 'sample_clock_after_failed', 'retirement_poll_failed', 'unexpected_retirement', 'sample_timestamp_overflow', 'pid_rss_cap_exceeded', 'other_rss_error'}
               polls = {'not_applicable', 'not_attempted', 'running', 'reaped_success', 'reaped_failure', 'poll_error'}
               def integer(value, minimum=0, maximum=2**64-1):
                   return type(value) is int and minimum <= value <= maximum
+              def rss_diagnostic(value):
+                  if type(value) is not dict or set(value) != {'taskinfo', 'successful_sigint_observed_ns'}:
+                      return False
+                  if value['successful_sigint_observed_ns'] is not None and not integer(value['successful_sigint_observed_ns']):
+                      return False
+                  facts = value['taskinfo']
+                  if facts is None:
+                      return True
+                  if type(facts) is not dict or set(facts) != {'sample_started_ns', 'sample_finished_ns', 'proc_pidinfo_return_bytes', 'proc_pidinfo_expected_bytes', 'proc_pidinfo_errno_after_call'}:
+                      return False
+                  return (all(facts[key] is None or integer(facts[key]) for key in ['sample_started_ns', 'sample_finished_ns'])
+                          and integer(facts['proc_pidinfo_return_bytes'], -(2**31), 2**31-1)
+                          and integer(facts['proc_pidinfo_expected_bytes'], 0, 2**32-1)
+                          and integer(facts['proc_pidinfo_errno_after_call'], -(2**31), 2**31-1))
               valid = type(record) is dict and set(record) == fields
               if valid:
                   valid = all(type(record[key]) is str for key in ['schema', 'producer', 'candidate_role', 'site', 'category', 'retirement_poll'])
-                  valid = valid and record['schema'] == 'mount-rs.cache-rss-failure.v1' and record['candidate_role'] in roles and record['category'] in categories and record['retirement_poll'] in polls
+                  valid = valid and record['schema'] == 'mount-rs.cache-rss-failure.v2' and record['candidate_role'] in roles and record['category'] in categories and record['retirement_poll'] in polls
+                  valid = valid and rss_diagnostic(record['diagnostic'])
                   valid = valid and record['producer'] == 'worker' and record['site'] in worker_sites
                   valid = valid and all(integer(record[key], 1, 2**32-1) for key in ['controller_pid', 'worker_pid', 'group', 'candidate_pid'])
                   valid = valid and integer(record['resource_sequence']) and integer(record['candidate_generation'])

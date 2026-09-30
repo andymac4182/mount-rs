@@ -195,7 +195,17 @@ EXPECTED_PACKAGE_CASES['tidbcoldunit'] = tuple('ten_process_cache_support::cold_
     'frame_validation_malformed_json_has_no_numeric_evidence_or_rss_queries',
     'frame_validation_other_contract_failure_has_categorical_evidence',
     'frame_validation_final_rss_error_does_not_fabricate_frame_failure',
+    'rss_diagnostic_direct_failure_keeps_fatal_result_and_links_actual_owned_reap',
+    'rss_diagnostic_frame_capture_preserves_owned_failure_facts',
+    'rss_diagnostic_outer_capture_preserves_syscall_facts',
+    'rss_diagnostic_error_paths_preserve_null_clocks_and_original_refusal',
+    'rss_diagnostic_reap_link_requires_the_exact_retained_child_identity',
+    'rss_diagnostic_maximum_compact_and_pretty_payloads_keep_two_kibibyte_cap',
 ))
+if sys.platform == 'darwin':
+    EXPECTED_PACKAGE_CASES['tidbcoldunit'] += (
+        'ten_process_cache_support::process::tests::rss_diagnostic_macos_invalid_pid_failure_has_actual_call_scalars',
+    )
 EXPECTED_PACKAGE_CASES.update({
     'rustfsownedprefix': tuple('owned_prefix_tests::' + name for name in (
         'empty_observation_uses_one_exact_bounded_signed_list_seam',

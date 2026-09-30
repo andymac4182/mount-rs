@@ -3,7 +3,11 @@
 import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
+import sys
+import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -146,6 +150,16 @@ class NativeMonitorCoverageControls(unittest.TestCase):
     ))
 
     required += ('ten_process_cache_support::object_store_projection::tests::worker_client_build_windows_preserve_deltas_gauges_maxima_and_reject_resets',)
+    rss_required = tuple('ten_process_cache_support::process::tests::' + name for name in (
+        'rss_diagnostic_direct_failure_keeps_fatal_result_and_links_actual_owned_reap',
+        'rss_diagnostic_frame_capture_preserves_owned_failure_facts',
+        'rss_diagnostic_outer_capture_preserves_syscall_facts',
+        'rss_diagnostic_error_paths_preserve_null_clocks_and_original_refusal',
+        'rss_diagnostic_reap_link_requires_the_exact_retained_child_identity',
+        'rss_diagnostic_maximum_compact_and_pretty_payloads_keep_two_kibibyte_cap',
+    ))
+    if sys.platform == 'darwin':
+        rss_required += ('ten_process_cache_support::process::tests::rss_diagnostic_macos_invalid_pid_failure_has_actual_call_scalars',)
 
     def fixture(self, names, ignored=None):
         output = f'running {len(names)} tests\n'
@@ -155,33 +169,167 @@ class NativeMonitorCoverageControls(unittest.TestCase):
 
     def complete_names(self):
         old = parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']
-        return old + tuple(name for name in self.required if name not in old)
+        return old + tuple(name for name in self.required + self.rss_required if name not in old)
 
-    def test_native_monitor_inventory_requires_all_twelve_controls(self):
+    def test_native_monitor_inventory_requires_all_monitor_and_rss_controls(self):
         names = parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']
-        self.assertEqual(len(names), 33)
-        self.assertEqual(len(set(names)), 33)
-        self.assertTrue(set(self.required).issubset(names))
+        expected_count = 40 if sys.platform == 'darwin' else 39
+        self.assertEqual(len(names), expected_count)
+        self.assertEqual(len(set(names)), expected_count)
+        self.assertTrue(set(self.required + self.rss_required).issubset(names))
 
     def test_native_monitor_complete_package_can_qualify(self):
         self.assertTrue(parent.package_harness_passed(
             self.fixture(self.complete_names()), parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
 
     def test_native_monitor_old_package_without_new_controls_cannot_qualify(self):
-        old = tuple(name for name in self.complete_names() if name not in self.required)
+        old = tuple(name for name in self.complete_names() if name not in self.required + self.rss_required)
         self.assertEqual(len(old), 21)
         self.assertFalse(parent.package_harness_passed(
             self.fixture(old), parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
 
     def test_native_monitor_missing_or_ignored_control_cannot_qualify(self):
         names = self.complete_names()
-        for name in self.required:
+        for name in self.required + self.rss_required:
             with self.subTest(name=name):
                 self.assertFalse(parent.package_harness_passed(
                     self.fixture(tuple(item for item in names if item != name)),
                     parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
                 self.assertFalse(parent.package_harness_passed(
                     self.fixture(names, ignored=name), parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
+
+    def test_native_rss_old_thirty_three_case_package_cannot_qualify(self):
+        old = tuple(name for name in self.complete_names() if name not in self.rss_required)
+        self.assertEqual(len(old), 33)
+        self.assertFalse(parent.package_harness_passed(
+            self.fixture(old), parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
+
+    def test_native_rss_duplicate_named_result_cannot_qualify(self):
+        names = self.complete_names()
+        for name in self.rss_required:
+            with self.subTest(name=name):
+                self.assertFalse(parent.package_harness_passed(
+                    self.fixture(names + (name,)), parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
+
+    def test_native_rss_inventory_keeps_macos_probe_platform_specific(self):
+        probe = 'ten_process_cache_support::process::tests::rss_diagnostic_macos_invalid_pid_failure_has_actual_call_scalars'
+        portable = set(self.rss_required) - {probe}
+        baseline = set(self.complete_names()) - set(self.rss_required)
+        for platform in ['linux', 'darwin']:
+            with self.subTest(platform=platform):
+                module = importlib.util.module_from_spec(spec)
+                with patch.object(sys, 'platform', platform):
+                    spec.loader.exec_module(module)
+                names = module.EXPECTED_PACKAGE_CASES['tidbcoldunit']
+                self.assertEqual(set(names), baseline | portable | ({probe} if platform == 'darwin' else set()))
+                self.assertEqual(len(names), 40 if platform == 'darwin' else 39)
+
+
+class NativeRssFailureArtifactControls(unittest.TestCase):
+    """Exercise the actual CI artifact-copy program with private temporary files."""
+
+    @classmethod
+    def setUpClass(cls):
+        workflow = path.parent.parent / '.github/workflows/remote-drives.yml'
+        source = workflow.read_text()
+        marker = '          import json, os, pathlib, shutil, stat\n'
+        if source.count(marker) != 1:
+            raise AssertionError('expected one native RSS artifact-copy program')
+        program = source.split(marker, 1)[1].split('          PY\n', 1)[0]
+        cls.program = compile(textwrap.dedent(marker + program), str(workflow), 'exec')
+
+    def fixture(self):
+        return {
+            'schema': 'mount-rs.cache-rss-failure.v2', 'producer': 'worker',
+            'controller_pid': 1, 'worker_pid': 2, 'group': 2,
+            'observed_ns': None, 'resource_sequence': 0,
+            'candidate_role': 'server', 'candidate_pid': 3,
+            'candidate_generation': 1, 'candidate_node': 0,
+            'site': 'cleanup_child', 'category': 'taskinfo_unavailable',
+            'retirement_poll': 'running', 'candidate_bytes': None,
+            'diagnostic': {'taskinfo': None, 'successful_sigint_observed_ns': None},
+        }
+
+    def retained(self, payload):
+        with tempfile.TemporaryDirectory(prefix='mount-rs-rss-copy-controls-') as temporary:
+            root = Path(temporary)
+            source, destination = root / 'source', root / 'destination'
+            source.mkdir(mode=0o700)
+            destination.mkdir(mode=0o700)
+            (source / 'rss-first-failure.json').write_bytes(payload)
+            with patch.dict(os.environ, {'MOUNT_RS_TEN_PROCESS_OUTPUT': str(source), 'EVIDENCE_DIR': str(destination)}):
+                try:
+                    exec(self.program, {})
+                except SystemExit:
+                    self.assertFalse((destination / 'rss-first-failure.json').exists())
+                    return False
+            self.assertEqual((destination / 'rss-first-failure.json').read_bytes(), payload)
+            self.assertEqual((destination / 'rss-first-failure.json').stat().st_mode & 0o777, 0o600)
+            return True
+
+    def passed(self, record):
+        return self.retained(json.dumps(record, separators=(',', ':')).encode())
+
+    def test_v2_null_and_maximum_typed_diagnostics_are_retained(self):
+        record = self.fixture()
+        self.assertTrue(self.passed(record))
+        record['diagnostic'] = {
+            'taskinfo': {
+                'sample_started_ns': 2**64-1, 'sample_finished_ns': None,
+                'proc_pidinfo_return_bytes': -(2**31),
+                'proc_pidinfo_expected_bytes': 2**32-1,
+                'proc_pidinfo_errno_after_call': 2**31-1,
+            },
+            'successful_sigint_observed_ns': 2**64-1,
+        }
+        self.assertTrue(self.passed(record))
+        record['diagnostic']['taskinfo']['proc_pidinfo_errno_after_call'] = 0
+        self.assertTrue(self.passed(record))
+
+    def test_v1_and_missing_extra_or_untyped_nested_diagnostics_are_rejected(self):
+        record = self.fixture()
+        record['schema'] = 'mount-rs.cache-rss-failure.v1'
+        del record['diagnostic']
+        self.assertFalse(self.passed(record))
+        for bad in [None, 'private text', {}, {'taskinfo': None},
+                    {'taskinfo': None, 'successful_sigint_observed_ns': None, 'extra': 1}]:
+            with self.subTest(bad=bad):
+                record = self.fixture()
+                record['diagnostic'] = bad
+                self.assertFalse(self.passed(record))
+
+    def test_nested_clock_types_and_integer_bounds_are_rejected(self):
+        facts = {
+            'sample_started_ns': None, 'sample_finished_ns': None,
+            'proc_pidinfo_return_bytes': 0, 'proc_pidinfo_expected_bytes': 96,
+            'proc_pidinfo_errno_after_call': 0,
+        }
+        bad_values = {
+            'sample_started_ns': [True, -1, 2**64, 'clock'],
+            'sample_finished_ns': [False, -1, 2**64, 'clock'],
+            'proc_pidinfo_return_bytes': [None, True, -(2**31)-1, 2**31, 'bytes'],
+            'proc_pidinfo_expected_bytes': [None, False, -1, 2**32, 'bytes'],
+            'proc_pidinfo_errno_after_call': [None, True, -(2**31)-1, 2**31, 'errno'],
+        }
+        for key, values in bad_values.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    record = self.fixture()
+                    record['diagnostic']['taskinfo'] = dict(facts, **{key: value})
+                    self.assertFalse(self.passed(record))
+        for value in [True, -1, 2**64, 'clock']:
+            record = self.fixture()
+            record['diagnostic']['successful_sigint_observed_ns'] = value
+            self.assertFalse(self.passed(record))
+        for changed in [dict(facts, extra=1), {key: value for key, value in facts.items() if key != 'sample_started_ns'}]:
+            record = self.fixture()
+            record['diagnostic']['taskinfo'] = changed
+            self.assertFalse(self.passed(record))
+
+    def test_nested_duplicate_fields_and_oversize_artifacts_are_rejected(self):
+        payload = json.dumps(self.fixture(), separators=(',', ':')).encode()
+        self.assertFalse(self.retained(payload.replace(b'"taskinfo":null', b'"taskinfo":null,"taskinfo":null')))
+        self.assertFalse(self.retained(payload + b' ' * 2049))
 
 
 class PackageHarnessControls(unittest.TestCase):

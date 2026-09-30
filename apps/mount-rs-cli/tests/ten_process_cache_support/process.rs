@@ -326,6 +326,38 @@ enum RssRetention {
     Written,
     WriteFailed,
 }
+#[derive(Clone, Copy, Debug, Serialize)]
+struct TaskinfoFailure {
+    sample_started_ns: Option<u64>,
+    sample_finished_ns: Option<u64>,
+    proc_pidinfo_return_bytes: i32,
+    proc_pidinfo_expected_bytes: u32,
+    proc_pidinfo_errno_after_call: i32,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct RssDiagnostic {
+    taskinfo: Option<TaskinfoFailure>,
+    successful_sigint_observed_ns: Option<u64>,
+}
+impl RssDiagnostic {
+    fn with_owned_stop(mut self, stamp: Option<u64>) -> Self {
+        self.successful_sigint_observed_ns = stamp;
+        self
+    }
+}
+#[derive(Clone, Copy, Serialize)]
+struct FirstRssReap {
+    schema: &'static str,
+    first_resource_sequence: u64,
+    candidate_role: RssRole,
+    candidate_pid: u32,
+    candidate_generation: u64,
+    candidate_node: Option<u8>,
+    successful_sigint_observed_ns: Option<u64>,
+    actual_reap_observed_ns: Option<u64>,
+    reaped_success: bool,
+    forced: bool,
+}
 #[derive(Clone, Copy)]
 struct RssCandidate {
     role: RssRole,
@@ -337,6 +369,7 @@ struct RssCandidate {
     poll: RssPoll,
     observed_ns: Option<u64>,
     bytes: Option<u64>,
+    diagnostic: RssDiagnostic,
 }
 impl RssCandidate {
     fn from_identity(
@@ -379,7 +412,12 @@ impl RssCandidate {
             poll,
             observed_ns,
             bytes,
+            diagnostic: RssDiagnostic::default(),
         })
+    }
+    fn with_diagnostic(mut self, diagnostic: RssDiagnostic) -> Self {
+        self.diagnostic = diagnostic;
+        self
     }
 }
 #[derive(Clone, Copy, Serialize)]
@@ -399,6 +437,7 @@ struct FirstRssFailure {
     category: RssCategory,
     retirement_poll: RssPoll,
     candidate_bytes: Option<u64>,
+    diagnostic: RssDiagnostic,
 }
 impl FirstRssFailure {
     fn new(
@@ -408,7 +447,7 @@ impl FirstRssFailure {
         candidate: RssCandidate,
     ) -> Self {
         Self {
-            schema: "mount-rs.cache-rss-failure.v1",
+            schema: "mount-rs.cache-rss-failure.v2",
             producer,
             controller_pid: run.controller_pid,
             worker_pid: run.worker_pid,
@@ -423,6 +462,7 @@ impl FirstRssFailure {
             category: candidate.category,
             retirement_poll: candidate.poll,
             candidate_bytes: candidate.bytes,
+            diagnostic: candidate.diagnostic,
         }
     }
 }
@@ -432,6 +472,7 @@ struct RssReadError {
     message: String,
     observed_ns: Option<u64>,
     bytes: Option<u64>,
+    taskinfo: Option<TaskinfoFailure>,
 }
 impl RssReadError {
     fn new(category: RssCategory, message: impl Into<String>) -> Self {
@@ -440,6 +481,14 @@ impl RssReadError {
             message: message.into(),
             observed_ns: None,
             bytes: None,
+            taskinfo: None,
+        }
+    }
+    fn diagnostic(&self) -> RssDiagnostic {
+        // Owned stop observations are attached later from the retained Child's owner.
+        RssDiagnostic {
+            taskinfo: self.taskinfo,
+            successful_sigint_observed_ns: None,
         }
     }
     fn unavailable() -> Self {
@@ -465,12 +514,14 @@ type RssReadResult<T> = std::result::Result<T, RssReadError>;
 struct RssAcquisition {
     observation: RssObservation,
     category: Option<RssCategory>,
+    diagnostic: RssDiagnostic,
 }
 impl From<RssObservation> for RssAcquisition {
     fn from(observation: RssObservation) -> Self {
         Self {
             observation,
             category: None,
+            diagnostic: RssDiagnostic::default(),
         }
     }
 }
@@ -519,10 +570,14 @@ fn measured(identity: RssIdentity, verify_parent: bool) -> RssReadResult<RssAcqu
         message,
         observed_ns: Some(started_ns),
         bytes: sample.as_ref().ok().copied(),
+        taskinfo: sample.as_ref().err().and_then(|error| error.taskinfo),
     })?;
-    let (bytes, missing, category) = match sample {
-        Ok(value) => (Some(value), None, None),
-        Err(error) => (None, Some(error.message), Some(error.category)),
+    let (bytes, missing, category, diagnostic) = match sample {
+        Ok(value) => (Some(value), None, None, RssDiagnostic::default()),
+        Err(error) => {
+            let diagnostic = error.diagnostic();
+            (None, Some(error.message), Some(error.category), diagnostic)
+        }
     };
     Ok(RssAcquisition {
         observation: RssObservation {
@@ -533,6 +588,7 @@ fn measured(identity: RssIdentity, verify_parent: bool) -> RssReadResult<RssAcqu
             missing,
         },
         category,
+        diagnostic,
     })
 }
 struct ResourceMonitor {
@@ -547,6 +603,7 @@ struct ResourceMonitor {
     published_sequence: u64,
     first_rss_failure: Option<FirstRssFailure>,
     first_rss_failure_retention: RssRetention,
+    first_rss_reap: Option<FirstRssReap>,
 }
 impl ResourceMonitor {
     fn stop_requested(&mut self) -> Result<()> {
@@ -584,6 +641,52 @@ impl ResourceMonitor {
             RssRetention::WriteFailed
         };
     }
+    fn remember_reap(&mut self, process: &OwnedProcess) {
+        if self.first_rss_reap.is_some()
+            || !process.terminal
+            || !process.receipt.reaped
+            || process.receipt.pid != process.child.id()
+        {
+            return;
+        }
+        let Some(first) = self.first_rss_failure else {
+            return;
+        };
+        let Some(candidate) = RssCandidate::from_identity(
+            &process.identity(),
+            first.site,
+            first.category,
+            first.retirement_poll,
+            first.observed_ns,
+            first.candidate_bytes,
+        ) else {
+            return;
+        };
+        if candidate.role != first.candidate_role
+            || candidate.pid != first.candidate_pid
+            || candidate.generation != first.candidate_generation
+            || candidate.node != first.candidate_node
+        {
+            return;
+        }
+        let record = FirstRssReap {
+            schema: "mount-rs.cache-rss-reap-link.v1",
+            first_resource_sequence: first.resource_sequence,
+            candidate_role: candidate.role,
+            candidate_pid: candidate.pid,
+            candidate_generation: candidate.generation,
+            candidate_node: candidate.node,
+            successful_sigint_observed_ns: process.successful_sigint_observed_ns,
+            actual_reap_observed_ns: process.actual_reap_observed_ns,
+            reaped_success: process.receipt.success,
+            forced: process.receipt.forced,
+        };
+        // This later scalar observation never revises the retained first failure,
+        // qualifies launch attestation, or replaces the original fatal error.
+        if serde_json::to_vec_pretty(&record).is_ok_and(|bytes| bytes.len() <= FIRST_RSS_CAP) {
+            self.first_rss_reap = Some(record);
+        }
+    }
     fn remember(&mut self, error: String) {
         self.failure.get_or_insert(error);
         // The first failure starts one bounded cleanup allowance, never reset by later samples.
@@ -613,7 +716,13 @@ const RSS_UNAVAILABLE: &str = "owned child RSS snapshot unavailable";
 fn rss(pid: u32) -> RssReadResult<u64> {
     let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_taskinfo>();
+    let sample_started_ns = monotonic_ns().ok();
     // Caller binds this PID to self, a verified parent, or a retained unreaped Child.
+    // Reset this thread's errno before the single native call and capture it
+    // immediately afterward, before clocks, formatting, allocation, or other I/O.
+    unsafe {
+        *libc::__error() = 0;
+    }
     let got = unsafe {
         libc::proc_pidinfo(
             pid as libc::c_int,
@@ -623,8 +732,18 @@ fn rss(pid: u32) -> RssReadResult<u64> {
             size as libc::c_int,
         )
     };
+    let errno_after_call = unsafe { *libc::__error() };
+    let sample_finished_ns = monotonic_ns().ok();
     if got != size as libc::c_int {
-        return Err(RssReadError::unavailable());
+        let mut error = RssReadError::unavailable();
+        error.taskinfo = Some(TaskinfoFailure {
+            sample_started_ns,
+            sample_finished_ns,
+            proc_pidinfo_return_bytes: got,
+            proc_pidinfo_expected_bytes: size as u32,
+            proc_pidinfo_errno_after_call: errno_after_call,
+        });
+        return Err(error);
     }
     Ok(unsafe { info.assume_init() }.pti_resident_size)
 }
@@ -789,6 +908,8 @@ pub struct OwnedProcess {
     pub cache: Option<PathBuf>,
     terminal: bool,
     stop_requested: bool,
+    successful_sigint_observed_ns: Option<u64>,
+    actual_reap_observed_ns: Option<u64>,
     started: Instant,
     first_rss_failure: Option<RssCandidate>,
 }
@@ -863,6 +984,8 @@ impl OwnedProcess {
             cache,
             terminal: false,
             stop_requested: false,
+            successful_sigint_observed_ns: None,
+            actual_reap_observed_ns: None,
             started: Instant::now(),
             first_rss_failure: None,
         })
@@ -881,6 +1004,7 @@ impl OwnedProcess {
             self.terminal = true;
             self.receipt.reaped = true;
             self.receipt.success = status.success();
+            self.actual_reap_observed_ns = monotonic_ns().ok();
         }
         Ok(())
     }
@@ -893,6 +1017,9 @@ impl OwnedProcess {
             return Err(std::io::Error::last_os_error().to_string());
         }
         if value == libc::SIGINT {
+            if !self.stop_requested {
+                self.successful_sigint_observed_ns = monotonic_ns().ok();
+            }
             self.stop_requested = true;
         }
         Ok(())
@@ -912,6 +1039,7 @@ impl OwnedProcess {
         poll: RssPoll,
         observed_ns: Option<u64>,
         bytes: Option<u64>,
+        diagnostic: RssDiagnostic,
     ) {
         if self.first_rss_failure.is_none() {
             self.first_rss_failure = RssCandidate::from_identity(
@@ -921,7 +1049,11 @@ impl OwnedProcess {
                 poll,
                 observed_ns,
                 bytes,
-            );
+            )
+            .map(|candidate| {
+                candidate
+                    .with_diagnostic(diagnostic.with_owned_stop(self.successful_sigint_observed_ns))
+            });
         }
     }
     fn sample_rss_at_with(
@@ -942,6 +1074,7 @@ impl OwnedProcess {
                     RssPoll::NotAttempted,
                     None,
                     Some(value),
+                    error.diagnostic(),
                 );
                 error.message
             }),
@@ -955,6 +1088,7 @@ impl OwnedProcess {
                             RssPoll::PollError,
                             error.observed_ns,
                             None,
+                            error.diagnostic(),
                         );
                         return Err(poll_error);
                     }
@@ -973,6 +1107,7 @@ impl OwnedProcess {
                             retirement,
                             error.observed_ns,
                             None,
+                            error.diagnostic(),
                         );
                         return Err(format!(
                             "{} exited before requested stop",
@@ -987,6 +1122,7 @@ impl OwnedProcess {
                     retirement,
                     error.observed_ns,
                     error.bytes,
+                    error.diagnostic(),
                 );
                 Err(error.message)
             }
@@ -1172,6 +1308,7 @@ impl Fleet {
                 published_sequence: 0,
                 first_rss_failure: None,
                 first_rss_failure_retention: RssRetention::NotAttempted,
+                first_rss_reap: None,
             },
         };
         // The first report is sampled with zero children before runtime or fixture construction.
@@ -1209,7 +1346,8 @@ impl Fleet {
             "max_observed_total_bytes":self.resources.max_total,"sequence":self.resources.sequence,
             "failure":self.resources.failure,"last":self.resources.last,
             "first_rss_failure":self.resources.first_rss_failure,
-            "first_rss_failure_retention":self.resources.first_rss_failure_retention})
+            "first_rss_failure_retention":self.resources.first_rss_failure_retention,
+            "first_rss_reap":self.resources.first_rss_reap})
     }
     pub fn owned_cleanup_closed(&self) -> bool {
         self.processes.is_empty()
@@ -1271,28 +1409,38 @@ impl Fleet {
         let result = measure(identity.clone(), verify_parent);
         match result {
             Err(error) => {
-                self.resources.remember_rss(RssCandidate::from_identity(
-                    identity,
-                    site,
-                    error.category,
-                    RssPoll::NotAttempted,
-                    error.observed_ns,
-                    error.bytes,
-                ));
+                self.resources.remember_rss(
+                    RssCandidate::from_identity(
+                        identity,
+                        site,
+                        error.category,
+                        RssPoll::NotAttempted,
+                        error.observed_ns,
+                        error.bytes,
+                    )
+                    .map(|candidate| {
+                        candidate.with_diagnostic(error.diagnostic().with_owned_stop(None))
+                    }),
+                );
                 Err(error.message)
             }
             Ok(value) => {
                 if !matches!(site, RssSite::WorkerFrameChild)
                     && let Some(category) = value.category()
                 {
-                    self.resources.remember_rss(RssCandidate::from_identity(
-                        identity,
-                        site,
-                        category,
-                        RssPoll::NotApplicable,
-                        Some(value.observation.finished_ns),
-                        value.observation.bytes,
-                    ));
+                    self.resources.remember_rss(
+                        RssCandidate::from_identity(
+                            identity,
+                            site,
+                            category,
+                            RssPoll::NotApplicable,
+                            Some(value.observation.finished_ns),
+                            value.observation.bytes,
+                        )
+                        .map(|candidate| {
+                            candidate.with_diagnostic(value.diagnostic.with_owned_stop(None))
+                        }),
+                    );
                 }
                 Ok(value)
             }
@@ -1354,32 +1502,47 @@ impl Fleet {
                 let acquisition = match measure(identity.clone(), false) {
                     Ok(value) => value,
                     Err(error) => {
-                        self.resources.remember_rss(RssCandidate::from_identity(
-                            &identity,
-                            site,
-                            error.category,
-                            RssPoll::NotAttempted,
-                            error.observed_ns,
-                            error.bytes,
-                        ));
+                        self.resources.remember_rss(
+                            RssCandidate::from_identity(
+                                &identity,
+                                site,
+                                error.category,
+                                RssPoll::NotAttempted,
+                                error.observed_ns,
+                                error.bytes,
+                            )
+                            .map(|candidate| {
+                                candidate.with_diagnostic(
+                                    error
+                                        .diagnostic()
+                                        .with_owned_stop(process.successful_sigint_observed_ns),
+                                )
+                            }),
+                        );
                         return Err(error.message);
                     }
                 };
                 let category = acquisition.category();
+                let diagnostic = acquisition
+                    .diagnostic
+                    .with_owned_stop(process.successful_sigint_observed_ns);
                 let observation = acquisition.observation;
                 let mut retirement = RssPoll::NotAttempted;
                 if observation.bytes.is_none()
                     && category.is_some_and(RssCategory::permits_retirement)
                 {
                     if let Err(error) = process.poll_exit() {
-                        self.resources.remember_rss(RssCandidate::from_identity(
-                            &identity,
-                            site,
-                            RssCategory::RetirementPollFailed,
-                            RssPoll::PollError,
-                            Some(observation.finished_ns),
-                            None,
-                        ));
+                        self.resources.remember_rss(
+                            RssCandidate::from_identity(
+                                &identity,
+                                site,
+                                RssCategory::RetirementPollFailed,
+                                RssPoll::PollError,
+                                Some(observation.finished_ns),
+                                None,
+                            )
+                            .map(|candidate| candidate.with_diagnostic(diagnostic)),
+                        );
                         return Err(error);
                     }
                     if process.terminal {
@@ -1396,26 +1559,32 @@ impl Fleet {
                     retirement = RssPoll::Running;
                 }
                 if let Some(category) = category {
-                    self.resources.remember_rss(RssCandidate::from_identity(
-                        &identity,
-                        site,
-                        category,
-                        retirement,
-                        Some(observation.finished_ns),
-                        observation.bytes,
-                    ));
+                    self.resources.remember_rss(
+                        RssCandidate::from_identity(
+                            &identity,
+                            site,
+                            category,
+                            retirement,
+                            Some(observation.finished_ns),
+                            observation.bytes,
+                        )
+                        .map(|candidate| candidate.with_diagnostic(diagnostic)),
+                    );
                 }
                 if let Some(bytes) = observation.bytes
                     && let Err(error) = process.record_rss(bytes)
                 {
-                    self.resources.remember_rss(RssCandidate::from_identity(
-                        &identity,
-                        site,
-                        error.category,
-                        retirement,
-                        Some(observation.finished_ns),
-                        Some(bytes),
-                    ));
+                    self.resources.remember_rss(
+                        RssCandidate::from_identity(
+                            &identity,
+                            site,
+                            error.category,
+                            retirement,
+                            Some(observation.finished_ns),
+                            Some(bytes),
+                        )
+                        .map(|candidate| candidate.with_diagnostic(diagnostic)),
+                    );
                     self.resources.remember(error.message);
                 }
                 observations.push(observation);
@@ -1553,6 +1722,7 @@ impl Fleet {
         }
         // The process is physically reaped, so remove its numeric identity before sampling.
         let mut process = self.processes.remove(index);
+        self.resources.remember_reap(&process);
         let evidence = process.finish(deadline, &mut || self.attestation_progress(deadline));
         if let Ok(Some(rows)) = &evidence {
             self.banks.push(json!({"node":process.receipt.node,"generation":process.receipt.generation,
@@ -1894,13 +2064,19 @@ fn outer_acquire(
     measure: &mut impl FnMut(RssIdentity, bool) -> RssReadResult<RssAcquisition>,
 ) -> Result<RssObservation> {
     let capture = measure(identity.clone(), false);
-    let (category, observed_ns, bytes) = match &capture {
+    let (category, observed_ns, bytes, diagnostic) = match &capture {
         Ok(value) => (
             value.category(),
             Some(value.observation.finished_ns),
             value.observation.bytes,
+            value.diagnostic,
         ),
-        Err(error) => (Some(error.category), error.observed_ns, error.bytes),
+        Err(error) => (
+            Some(error.category),
+            error.observed_ns,
+            error.bytes,
+            error.diagnostic(),
+        ),
     };
     if first.is_none()
         && let Some(category) = category
@@ -1912,6 +2088,7 @@ fn outer_acquire(
             observed_ns,
             bytes,
         )
+        .map(|candidate| candidate.with_diagnostic(diagnostic.with_owned_stop(None)))
     {
         *first = Some(FirstRssFailure::new(
             run,
@@ -1941,13 +2118,19 @@ fn outer_worker_acquire(
     }
     let identity = supervisor_identity("worker", run.worker_pid);
     let capture = measure(identity.clone(), false);
-    let (mut category, observed_ns, bytes) = match &capture {
+    let (mut category, observed_ns, bytes, diagnostic) = match &capture {
         Ok(value) => (
             value.category(),
             Some(value.observation.finished_ns),
             value.observation.bytes,
+            value.diagnostic,
         ),
-        Err(error) => (Some(error.category), error.observed_ns, error.bytes),
+        Err(error) => (
+            Some(error.category),
+            error.observed_ns,
+            error.bytes,
+            error.diagnostic(),
+        ),
     };
     let mut retirement = RssPoll::NotApplicable;
     let mut poll_error = None;
@@ -1974,6 +2157,7 @@ fn outer_worker_acquire(
             observed_ns,
             bytes,
         )
+        .map(|candidate| candidate.with_diagnostic(diagnostic.with_owned_stop(None)))
     {
         *first = Some(FirstRssFailure::new(
             run,
@@ -2495,6 +2679,8 @@ mod tests {
                 cache: None,
                 terminal: false,
                 stop_requested: false,
+                successful_sigint_observed_ns: None,
+                actual_reap_observed_ns: None,
                 started: Instant::now(),
                 first_rss_failure: None,
             },
@@ -2643,6 +2829,7 @@ mod tests {
                 category: bytes
                     .is_none()
                     .then(|| RssReadError::unavailable().category),
+                diagnostic: RssDiagnostic::default(),
             })
         });
         let terminal = fleet.processes[0].terminal;
@@ -2689,6 +2876,7 @@ mod tests {
                 published_sequence: previous.sequence,
                 first_rss_failure: None,
                 first_rss_failure_retention: RssRetention::NotAttempted,
+                first_rss_reap: None,
                 last: Some(previous),
                 failure: None,
                 stop_deadline_ns: None,
@@ -2710,7 +2898,497 @@ mod tests {
                 missing: unavailable.then(|| RSS_UNAVAILABLE.into()),
             },
             category: unavailable.then(|| RssReadError::unavailable().category),
+            diagnostic: RssDiagnostic::default(),
         })
+    }
+
+    fn diagnostic_unavailable(started_ns: u64, finished_ns: u64) -> RssReadError {
+        let mut error = RssReadError::new(RssCategory::TaskinfoUnavailable, RSS_UNAVAILABLE);
+        error.taskinfo = Some(TaskinfoFailure {
+            sample_started_ns: Some(started_ns),
+            sample_finished_ns: Some(finished_ns),
+            proc_pidinfo_return_bytes: 0,
+            // Fixture scalar, not an asserted native struct size.
+            proc_pidinfo_expected_bytes: 96,
+            proc_pidinfo_errno_after_call: libc::ESRCH,
+        });
+        error
+    }
+
+    fn diagnostic_clock_failure_without_clocks() -> RssReadError {
+        let mut error = diagnostic_unavailable(0, 0);
+        error.category = RssCategory::SampleClockAfterFailed;
+        error.message = "PRIVATE_SAMPLE_CLOCK_FAILURE".into();
+        let facts = error.taskinfo.as_mut().unwrap();
+        facts.sample_started_ns = None;
+        facts.sample_finished_ns = None;
+        error
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rss_diagnostic_macos_invalid_pid_failure_has_actual_call_scalars() {
+        // c_int -1 cannot name a live positive PID. This native failure probe
+        // supplies neither authority nor a resource observation to any frame.
+        let error = rss(u32::MAX).unwrap_err();
+        assert_eq!(error.category, RssCategory::TaskinfoUnavailable);
+        assert_eq!(error.message, RSS_UNAVAILABLE);
+        assert!(error.bytes.is_none());
+        let facts = error.taskinfo.unwrap();
+        assert_eq!(
+            facts.proc_pidinfo_expected_bytes,
+            std::mem::size_of::<libc::proc_taskinfo>() as u32,
+        );
+        assert_ne!(
+            facts.proc_pidinfo_return_bytes,
+            facts.proc_pidinfo_expected_bytes as i32,
+        );
+        let started = facts.sample_started_ns.unwrap();
+        let finished = facts.sample_finished_ns.unwrap();
+        assert!(started <= finished);
+        // Keep raw errno evidence; do not require an invented kernel cause.
+        let value = serde_json::to_value(facts).unwrap();
+        assert_eq!(
+            value["proc_pidinfo_errno_after_call"].as_i64(),
+            Some(i64::from(facts.proc_pidinfo_errno_after_call)),
+        );
+        assert!(error.diagnostic().successful_sigint_observed_ns.is_none());
+    }
+
+    #[test]
+    fn rss_diagnostic_direct_failure_keeps_fatal_result_and_links_actual_owned_reap() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process_ignoring_sigint(directory.path());
+        process.receipt.node = "node-7".into();
+        let owned_pid = process.child.id();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        with_reaped_inert_children(&mut fleet, |fleet| {
+            assert!(fleet.processes[0].successful_sigint_observed_ns.is_none());
+            fleet.processes[0].signal(0).unwrap();
+            assert!(fleet.processes[0].successful_sigint_observed_ns.is_none());
+            assert!(fleet.processes[0].signal(libc::c_int::MAX).is_err());
+            assert!(fleet.processes[0].successful_sigint_observed_ns.is_none());
+            fleet.processes[0].signal(libc::SIGINT).unwrap();
+            let stop = fleet.processes[0].successful_sigint_observed_ns;
+            fleet.processes[0].signal(0).unwrap();
+            fleet.processes[0].signal(libc::SIGINT).unwrap();
+            assert_eq!(fleet.processes[0].successful_sigint_observed_ns, stop);
+
+            let started = monotonic_ns().unwrap();
+            let finished = monotonic_ns().unwrap();
+            let mut reads = 0;
+            let mut polls = 0;
+            let samples_before = fleet.processes[0].receipt.rss_samples;
+            let result = fleet.sample_process_with(
+                0,
+                RssSite::CleanupChild,
+                true,
+                &mut |pid| {
+                    assert_eq!(pid, owned_pid);
+                    reads += 1;
+                    Err(diagnostic_unavailable(started, finished))
+                },
+                &mut |child| {
+                    assert_eq!(child.id(), owned_pid);
+                    polls += 1;
+                    Child::try_wait(child)
+                },
+            );
+            assert_eq!(result, Err(RSS_UNAVAILABLE.into()));
+            assert_eq!((reads, polls), (1, 1));
+            assert!(!fleet.processes[0].terminal);
+            assert_eq!(fleet.processes[0].receipt.rss_samples, samples_before);
+            let first = fleet.resource_evidence()["first_rss_failure"].clone();
+            assert_eq!(first["category"], "taskinfo_unavailable");
+            assert_eq!(first["retirement_poll"], "running");
+            assert!(first["candidate_bytes"].is_null());
+            assert_eq!(
+                first["diagnostic"]["taskinfo"]["sample_started_ns"],
+                started
+            );
+            assert_eq!(
+                first["diagnostic"]["taskinfo"]["sample_finished_ns"],
+                finished
+            );
+            assert_eq!(
+                first["diagnostic"]["taskinfo"]["proc_pidinfo_return_bytes"],
+                0
+            );
+            assert_eq!(
+                first["diagnostic"]["taskinfo"]["proc_pidinfo_expected_bytes"],
+                96
+            );
+            assert_eq!(
+                first["diagnostic"]["taskinfo"]["proc_pidinfo_errno_after_call"],
+                libc::ESRCH
+            );
+            let stop = stop.expect("successful owned SIGINT observation missing");
+            assert_eq!(first["diagnostic"]["successful_sigint_observed_ns"], stop);
+            assert!(stop <= started && started <= finished);
+            let retained = fs::read(directory.path().join("rss-first-failure.json")).unwrap();
+            assert!(retained.len() <= FIRST_RSS_CAP);
+            assert!(fleet.resource_evidence()["first_rss_reap"].is_null());
+
+            // Only the retained actual Child establishes a reap; no invented status.
+            release_inert_child(&mut input, owned_pid).unwrap();
+            fleet.processes[0].poll_exit().unwrap();
+            assert!(fleet.processes[0].terminal && fleet.processes[0].receipt.reaped);
+            assert!(fleet.processes[0].receipt.success);
+            let reaped = fleet.processes[0].actual_reap_observed_ns.unwrap();
+            let (resources, processes) = (&mut fleet.resources, &fleet.processes);
+            resources.remember_reap(&processes[0]);
+            let link = fleet.resource_evidence()["first_rss_reap"].clone();
+            assert_eq!(link["schema"], "mount-rs.cache-rss-reap-link.v1");
+            assert_eq!(link["candidate_pid"], first["candidate_pid"]);
+            assert_eq!(link["candidate_generation"], first["candidate_generation"]);
+            assert_eq!(link["candidate_node"], first["candidate_node"]);
+            assert_eq!(link["candidate_role"], first["candidate_role"]);
+            assert_eq!(link["first_resource_sequence"], first["resource_sequence"]);
+            assert_eq!(link["successful_sigint_observed_ns"], stop);
+            assert_eq!(link["actual_reap_observed_ns"], reaped);
+            assert!(finished <= reaped);
+            assert_eq!(link["reaped_success"], true);
+            assert_eq!(link["forced"], false);
+            assert!(serde_json::to_vec_pretty(&link).unwrap().len() <= FIRST_RSS_CAP);
+            assert_eq!(fleet.resource_evidence()["first_rss_failure"], first);
+            assert_eq!(
+                fs::read(directory.path().join("rss-first-failure.json")).unwrap(),
+                retained
+            );
+            assert_eq!(result, Err(RSS_UNAVAILABLE.into()));
+        });
+    }
+
+    #[test]
+    fn rss_diagnostic_frame_capture_preserves_owned_failure_facts() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, _input) = inert_process_ignoring_sigint(directory.path());
+        process.receipt.node = "node-7".into();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        with_reaped_inert_children(&mut fleet, |fleet| {
+            fleet.processes[0].signal(libc::SIGINT).unwrap();
+            let stop = fleet.processes[0].successful_sigint_observed_ns;
+            let mut reads = 0;
+            let result = fleet.sample_resources_with(true, false, &mut |identity, _| {
+                let server = identity.role == "server";
+                let mut acquisition = fixture_observation(identity, server)?;
+                if server {
+                    reads += 1;
+                    let stamp = acquisition.observation.finished_ns;
+                    let error = diagnostic_unavailable(stamp, stamp);
+                    acquisition.category = Some(error.category);
+                    acquisition.diagnostic = error.diagnostic();
+                }
+                Ok(acquisition)
+            });
+            assert!(result.is_err());
+            assert_eq!(reads, 1);
+            let first = fleet.resource_evidence()["first_rss_failure"].clone();
+            assert_eq!(first["site"], "worker_frame_stop_requested_child");
+            assert_eq!(first["retirement_poll"], "running");
+            assert_eq!(
+                first["diagnostic"]["taskinfo"]["proc_pidinfo_errno_after_call"],
+                libc::ESRCH
+            );
+            let stop = stop.expect("successful owned SIGINT observation missing");
+            assert_eq!(first["diagnostic"]["successful_sigint_observed_ns"], stop);
+            assert!(first["candidate_bytes"].is_null());
+        });
+    }
+
+    #[test]
+    fn rss_diagnostic_outer_capture_preserves_syscall_facts() {
+        let run = ResourceRun {
+            root: "PRIVATE_DIAGNOSTIC_ROOT".into(),
+            controller_pid: 10,
+            worker_pid: 20,
+            group: 20,
+        };
+        let identity = supervisor_identity("controller", run.controller_pid);
+        let mut outer_first = None;
+        let result = outer_acquire(
+            &run,
+            123,
+            identity,
+            RssSite::OuterController,
+            &mut outer_first,
+            &mut |identity, _| {
+                let mut acquisition = fixture_observation(identity, true)?;
+                let stamp = acquisition.observation.finished_ns;
+                let error = diagnostic_unavailable(stamp, stamp);
+                acquisition.category = Some(error.category);
+                acquisition.diagnostic = error.diagnostic();
+                Ok(acquisition)
+            },
+        );
+        assert!(result.unwrap().bytes.is_none());
+        // The existing caller's totals/frame checks refuse the missing observation.
+        let first = serde_json::to_value(outer_first.unwrap()).unwrap();
+        assert_eq!(first["candidate_role"], "controller");
+        assert_eq!(first["category"], "taskinfo_unavailable");
+        assert!(first["diagnostic"]["successful_sigint_observed_ns"].is_null());
+        assert_eq!(
+            first["diagnostic"]["taskinfo"]["proc_pidinfo_errno_after_call"],
+            libc::ESRCH
+        );
+        assert!(
+            !serde_json::to_string(&first)
+                .unwrap()
+                .contains("PRIVATE_DIAGNOSTIC_ROOT")
+        );
+    }
+
+    #[test]
+    fn rss_diagnostic_error_paths_preserve_null_clocks_and_original_refusal() {
+        for site in ["acquire", "child_frame", "outer", "outer_worker"] {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut process, _input) = inert_process(directory.path());
+            process.receipt.node = "node-7".into();
+            let mut fleet = inert_resource_fleet(directory.path(), process);
+            with_reaped_inert_children(&mut fleet, |fleet| {
+                let mut outer_first = None;
+                let mut polls = 0;
+                let result = match site {
+                    "acquire" => {
+                        let identity =
+                            supervisor_identity("controller", fleet.resources.run.controller_pid);
+                        fleet
+                            .acquire_resource(
+                                &identity,
+                                RssSite::WorkerFrameController,
+                                true,
+                                &mut |_, _| Err(diagnostic_clock_failure_without_clocks()),
+                            )
+                            .map(|_| ())
+                    }
+                    "child_frame" => {
+                        fleet.sample_resources_with(true, false, &mut |identity, _| {
+                            if identity.role == "server" {
+                                Err(diagnostic_clock_failure_without_clocks())
+                            } else {
+                                fixture_observation(identity, false)
+                            }
+                        })
+                    }
+                    "outer" => {
+                        let run = &fleet.resources.run;
+                        outer_acquire(
+                            run,
+                            123,
+                            supervisor_identity("controller", run.controller_pid),
+                            RssSite::OuterController,
+                            &mut outer_first,
+                            &mut |_, _| Err(diagnostic_clock_failure_without_clocks()),
+                        )
+                        .map(|_| ())
+                    }
+                    _ => {
+                        let child = &fleet.processes[0].child;
+                        let run = ResourceRun {
+                            root: fleet.resources.run.root.clone(),
+                            controller_pid: fleet.resources.run.controller_pid,
+                            worker_pid: child.id(),
+                            group: child.id(),
+                        };
+                        outer_worker_acquire(
+                            &run,
+                            123,
+                            child,
+                            &mut outer_first,
+                            &mut |_, _| Err(diagnostic_clock_failure_without_clocks()),
+                            &mut |child| {
+                                polls += 1;
+                                exited_without_reap(child)
+                            },
+                        )
+                        .map(|_| ())
+                    }
+                };
+                assert_eq!(result, Err("PRIVATE_SAMPLE_CLOCK_FAILURE".into()), "{site}");
+                assert_eq!(polls, 0, "clock failure must not permit retirement");
+                let first = if site.starts_with("outer") {
+                    serde_json::to_value(outer_first.unwrap()).unwrap()
+                } else {
+                    fleet.resource_evidence()["first_rss_failure"].clone()
+                };
+                assert_eq!(first["category"], "sample_clock_after_failed");
+                assert!(first["candidate_bytes"].is_null());
+                assert!(first["diagnostic"]["taskinfo"].is_object(), "{site}");
+                assert!(first["diagnostic"]["taskinfo"]["sample_started_ns"].is_null());
+                assert!(first["diagnostic"]["taskinfo"]["sample_finished_ns"].is_null());
+                assert_eq!(
+                    first["diagnostic"]["taskinfo"]["proc_pidinfo_errno_after_call"],
+                    libc::ESRCH
+                );
+                let bytes = serde_json::to_vec_pretty(&first).unwrap();
+                assert!(bytes.len() <= FIRST_RSS_CAP);
+                assert!(
+                    !String::from_utf8(bytes)
+                        .unwrap()
+                        .contains("PRIVATE_SAMPLE_CLOCK_FAILURE")
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn rss_diagnostic_reap_link_requires_the_exact_retained_child_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut process, mut input) = inert_process_ignoring_sigint(directory.path());
+        process.receipt.node = "node-7".into();
+        let owned_pid = process.child.id();
+        let (mut sibling, mut sibling_input) = inert_process_ignoring_sigint(directory.path());
+        sibling.receipt.node = "node-8".into();
+        let sibling_pid = sibling.child.id();
+        let mut fleet = inert_resource_fleet(directory.path(), process);
+        fleet.processes.push(sibling);
+        with_reaped_inert_children(&mut fleet, |fleet| {
+            fleet.processes[0].signal(libc::SIGINT).unwrap();
+            let candidate = RssCandidate::from_identity(
+                &fleet.processes[0].identity(),
+                RssSite::CleanupChild,
+                RssCategory::TaskinfoUnavailable,
+                RssPoll::Running,
+                None,
+                None,
+            );
+            fleet.resources.remember_rss(candidate);
+            let first = fleet.resource_evidence()["first_rss_failure"].clone();
+            let retained = fs::read(directory.path().join("rss-first-failure.json")).unwrap();
+            {
+                let (resources, processes) = (&mut fleet.resources, &fleet.processes);
+                resources.remember_reap(&processes[0]);
+            }
+            assert!(fleet.resource_evidence()["first_rss_reap"].is_null());
+            release_inert_child(&mut sibling_input, sibling_pid).unwrap();
+            fleet.processes[1].poll_exit().unwrap();
+            {
+                let (resources, processes) = (&mut fleet.resources, &fleet.processes);
+                resources.remember_reap(&processes[1]);
+            }
+            assert!(fleet.resource_evidence()["first_rss_reap"].is_null());
+            release_inert_child(&mut input, owned_pid).unwrap();
+            fleet.processes[0].poll_exit().unwrap();
+            assert!(fleet.processes[0].terminal && fleet.processes[0].receipt.reaped);
+            let original = fleet.processes[0].receipt.clone();
+            for mismatch in ["role", "pid", "generation", "node", "canonical_node"] {
+                match mismatch {
+                    "role" => fleet.processes[0].receipt.role = "catalog-apply".into(),
+                    "pid" => fleet.processes[0].receipt.pid = sibling_pid,
+                    "generation" => fleet.processes[0].receipt.generation = original.generation + 1,
+                    "node" => fleet.processes[0].receipt.node = "node-8".into(),
+                    _ => fleet.processes[0].receipt.node = "node-07".into(),
+                }
+                {
+                    let (resources, processes) = (&mut fleet.resources, &fleet.processes);
+                    resources.remember_reap(&processes[0]);
+                }
+                assert!(
+                    fleet.resource_evidence()["first_rss_reap"].is_null(),
+                    "{mismatch}"
+                );
+                fleet.processes[0].receipt = original.clone();
+            }
+            {
+                let (resources, processes) = (&mut fleet.resources, &fleet.processes);
+                resources.remember_reap(&processes[0]);
+            }
+            let link = fleet.resource_evidence()["first_rss_reap"].clone();
+            assert!(link.is_object(), "exact actual Child reap must be linked");
+            assert_eq!(link["candidate_pid"], owned_pid);
+            assert_eq!(link["candidate_role"], first["candidate_role"]);
+            assert_eq!(link["candidate_generation"], first["candidate_generation"]);
+            assert_eq!(link["candidate_node"], first["candidate_node"]);
+            assert_eq!(link["first_resource_sequence"], first["resource_sequence"]);
+            assert_eq!(link["reaped_success"], true);
+            assert_eq!(link["forced"], false);
+            assert_eq!(fleet.resource_evidence()["first_rss_failure"], first);
+            assert_eq!(
+                fs::read(directory.path().join("rss-first-failure.json")).unwrap(),
+                retained
+            );
+        });
+    }
+
+    #[test]
+    fn rss_diagnostic_maximum_compact_and_pretty_payloads_keep_two_kibibyte_cap() {
+        let run = ResourceRun {
+            root: "PRIVATE_MAX_DIAGNOSTIC_ROOT".into(),
+            controller_pid: u32::MAX - 2,
+            worker_pid: u32::MAX - 1,
+            group: u32::MAX - 1,
+        };
+        let candidate = RssCandidate {
+            role: RssRole::Server,
+            pid: u32::MAX,
+            generation: u64::MAX,
+            node: Some(9),
+            site: RssSite::WorkerFrameStopRequestedChild,
+            category: RssCategory::ParentChangedBeforeSample,
+            poll: RssPoll::NotAttempted,
+            observed_ns: Some(u64::MAX),
+            bytes: Some(u64::MAX),
+            diagnostic: RssDiagnostic {
+                taskinfo: Some(TaskinfoFailure {
+                    sample_started_ns: Some(u64::MAX),
+                    sample_finished_ns: Some(u64::MAX),
+                    proc_pidinfo_return_bytes: i32::MIN,
+                    proc_pidinfo_expected_bytes: u32::MAX,
+                    proc_pidinfo_errno_after_call: i32::MAX,
+                }),
+                successful_sigint_observed_ns: Some(u64::MAX),
+            },
+        };
+        let first = FirstRssFailure::new(&run, RssProducer::Worker, u64::MAX, candidate);
+        let reap = FirstRssReap {
+            schema: "mount-rs.cache-rss-reap-link.v1",
+            first_resource_sequence: u64::MAX,
+            candidate_role: candidate.role,
+            candidate_pid: candidate.pid,
+            candidate_generation: candidate.generation,
+            candidate_node: candidate.node,
+            successful_sigint_observed_ns: Some(u64::MAX),
+            actual_reap_observed_ns: Some(u64::MAX),
+            reaped_success: false,
+            forced: false,
+        };
+        for bytes in [
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec_pretty(&first).unwrap(),
+        ] {
+            assert!(bytes.len() <= FIRST_RSS_CAP, "{} bytes", bytes.len());
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["schema"], "mount-rs.cache-rss-failure.v2");
+            assert_eq!(value.as_object().unwrap().len(), 16);
+            assert_eq!(
+                value["diagnostic"]["taskinfo"]["proc_pidinfo_return_bytes"],
+                i32::MIN
+            );
+            assert_eq!(
+                value["diagnostic"]["taskinfo"]["proc_pidinfo_errno_after_call"],
+                i32::MAX
+            );
+            assert!(
+                !String::from_utf8(bytes)
+                    .unwrap()
+                    .contains("PRIVATE_MAX_DIAGNOSTIC_ROOT")
+            );
+        }
+        for bytes in [
+            serde_json::to_vec(&reap).unwrap(),
+            serde_json::to_vec_pretty(&reap).unwrap(),
+        ] {
+            assert!(bytes.len() <= FIRST_RSS_CAP, "{} bytes", bytes.len());
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["candidate_pid"], u32::MAX);
+            assert_eq!(value["candidate_generation"], u64::MAX);
+            assert_eq!(value["actual_reap_observed_ns"], u64::MAX);
+            assert!(
+                !String::from_utf8(bytes)
+                    .unwrap()
+                    .contains("PRIVATE_MAX_DIAGNOSTIC_ROOT")
+            );
+        }
     }
 
     #[test]
@@ -2727,7 +3405,7 @@ mod tests {
         let first = fleet.resource_evidence()["first_rss_failure"].clone();
         cleanup_inert_child(&mut fleet.processes[0]);
         assert!(result.is_err());
-        assert_eq!(first["schema"], "mount-rs.cache-rss-failure.v1");
+        assert_eq!(first["schema"], "mount-rs.cache-rss-failure.v2");
         assert_eq!(first["candidate_pid"], owned_pid);
         assert_eq!(first["candidate_role"], "server");
         assert_eq!(first["candidate_node"], 7);
@@ -2785,7 +3463,7 @@ mod tests {
                     }
                     assert!(result.is_err());
                     assert_eq!(child_reads, 1);
-                    assert_eq!(first.as_object().unwrap().len(), 15);
+                    assert_eq!(first.as_object().unwrap().len(), 16);
                     assert_eq!(first["candidate_pid"], owned_pid);
                     assert_eq!(first["candidate_node"], 7);
                     assert_eq!(first["candidate_generation"], 1);
@@ -3162,6 +3840,7 @@ mod tests {
                 missing: None,
             },
             category: None,
+            diagnostic: RssDiagnostic::default(),
         }
     }
 
@@ -4015,12 +4694,13 @@ mod tests {
             poll: RssPoll::NotAttempted,
             observed_ns: Some(u64::MAX),
             bytes: Some(u64::MAX),
+            diagnostic: RssDiagnostic::default(),
         };
         let record = FirstRssFailure::new(&run, RssProducer::Worker, u64::MAX, candidate);
         let bytes = serde_json::to_vec(&record).unwrap();
         assert!(bytes.len() <= FIRST_RSS_CAP);
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 15);
+        assert_eq!(value.as_object().unwrap().len(), 16);
         assert_eq!(value["candidate_bytes"].as_u64(), Some(u64::MAX));
         let requested = FirstRssFailure {
             site: RssSite::WorkerFrameStopRequestedChild,
@@ -4029,7 +4709,7 @@ mod tests {
         let requested_bytes = serde_json::to_vec(&requested).unwrap();
         assert!(requested_bytes.len() <= FIRST_RSS_CAP);
         let requested_value: serde_json::Value = serde_json::from_slice(&requested_bytes).unwrap();
-        assert_eq!(requested_value.as_object().unwrap().len(), 15);
+        assert_eq!(requested_value.as_object().unwrap().len(), 16);
         assert_eq!(requested_value["site"], "worker_frame_stop_requested_child");
         assert!(
             !String::from_utf8(bytes.clone())
