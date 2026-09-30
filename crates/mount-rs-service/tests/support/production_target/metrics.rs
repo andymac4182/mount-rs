@@ -279,6 +279,43 @@ fn validate_fleet(receipts: &[Value], expected: &[Value]) -> Result<(), String> 
     }
     Ok(())
 }
+struct BoundedWriter<W> {
+    inner: W,
+    bytes: u64,
+    limit: u64,
+    exceeded: bool,
+}
+impl<W> BoundedWriter<W> {
+    fn new(inner: W, limit: u64) -> Self {
+        Self {
+            inner,
+            bytes: 0,
+            limit,
+            exceeded: false,
+        }
+    }
+}
+impl<W: Write> Write for BoundedWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let fits = u64::try_from(buffer.len())
+            .ok()
+            .and_then(|bytes| self.bytes.checked_add(bytes))
+            .is_some_and(|bytes| bytes <= self.limit);
+        if !fits {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "metric write limit exceeded",
+            ));
+        }
+        let written = self.inner.write(buffer)?;
+        self.bytes += written as u64;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 pub fn publish_immutable(path: &Path, value: &Value) -> Result<(), String> {
     let span = observer().begin("metric_publication");
     let result = publish_immutable_inner(path, value);
@@ -293,11 +330,32 @@ fn publish_immutable_inner(path: &Path, value: &Value) -> Result<u64, String> {
         .open(&pending)
         .map_err(|_| "metric pending file already exists or unavailable")?;
     let result: Result<u64, String> = (|| {
-        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
-        serde_json::to_writer(&mut encoder, value).map_err(|_| "metric encoding failed")?;
+        let encoder = flate2::write::GzEncoder::new(
+            BoundedWriter::new(file, ENCODED_METRIC_LIMIT),
+            flate2::Compression::fast(),
+        );
+        let mut decoded = BoundedWriter::new(encoder, DECODED_METRIC_LIMIT);
+        serde_json::to_writer(&mut decoded, value).map_err(|_| {
+            if decoded.exceeded {
+                "decoded metric limit exceeded"
+            } else if decoded.inner.get_ref().exceeded {
+                "encoded metric limit exceeded"
+            } else {
+                "metric encoding failed"
+            }
+        })?;
+        let mut encoder = decoded.inner;
+        encoder.try_finish().map_err(|_| {
+            if encoder.get_ref().exceeded {
+                "encoded metric limit exceeded"
+            } else {
+                "metric compression finish failed"
+            }
+        })?;
         let mut file = encoder
             .finish()
-            .map_err(|_| "metric compression finish failed")?;
+            .map_err(|_| "metric compression finish failed")?
+            .inner;
         file.flush().map_err(|_| "metric flush failed")?;
         let bytes = file.metadata().map_err(|_| "metric metadata failed")?.len();
         if bytes > ENCODED_METRIC_LIMIT {
@@ -2165,6 +2223,47 @@ mod tests {
         encoder.finish().unwrap()
     }
     #[test]
+    fn bounded_metric_writer_counts_partial_writes_and_rejects_before_delegating() {
+        struct PartialWriter(Vec<u8>);
+        impl Write for PartialWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let written = bytes.len().min(3);
+                self.0.extend_from_slice(&bytes[..written]);
+                Ok(written)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = BoundedWriter::new(PartialWriter(Vec::new()), 6);
+        writer.write_all(b"abcdef").unwrap();
+        assert_eq!(writer.bytes, 6);
+        assert!(writer.write_all(b"g").is_err());
+        assert!(writer.exceeded);
+        assert_eq!(writer.inner.0, b"abcdef");
+
+        let mut overflow = BoundedWriter::new(Vec::new(), u64::MAX);
+        overflow.bytes = u64::MAX;
+        assert!(overflow.write_all(b"x").is_err());
+        assert!(overflow.inner.is_empty());
+    }
+    #[test]
+    fn bounded_metric_writer_caps_gzip_finalization_before_writing_it() {
+        let payload = vec![b'a'; 64 * 1024];
+        let complete = gzip_test_bytes(&payload);
+        let cap = (complete.len() - 1) as u64;
+        let mut encoder = flate2::write::GzEncoder::new(
+            BoundedWriter::new(Vec::new(), cap),
+            flate2::Compression::fast(),
+        );
+        encoder.write_all(&payload).unwrap();
+        assert!(encoder.try_finish().is_err());
+        let writer = encoder.get_ref();
+        assert!(writer.exceeded);
+        assert!(writer.bytes <= cap);
+        assert_eq!(writer.bytes, writer.inner.len() as u64);
+    }
+    #[test]
     fn metric_publisher_rejects_decoded_size_bomb_and_cleans_pending() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("oversized.json.gz");
@@ -2176,6 +2275,7 @@ mod tests {
             result.is_err(),
             "METRIC_PUBLISHER_DECODED_LIMIT_REGRESSION: oversized decoded frame published"
         );
+        assert_eq!(result.unwrap_err(), "decoded metric limit exceeded");
         assert!(
             !path.exists(),
             "oversized decoded frame must not have an immutable receipt"
