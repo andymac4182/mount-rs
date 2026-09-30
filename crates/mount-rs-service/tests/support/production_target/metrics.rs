@@ -284,6 +284,7 @@ struct BoundedWriter<W> {
     bytes: u64,
     limit: u64,
     exceeded: bool,
+    aborted: bool,
 }
 impl<W> BoundedWriter<W> {
     fn new(inner: W, limit: u64) -> Self {
@@ -292,11 +293,18 @@ impl<W> BoundedWriter<W> {
             bytes: 0,
             limit,
             exceeded: false,
+            aborted: false,
         }
     }
 }
 impl<W: Write> Write for BoundedWriter<W> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self.aborted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "metric encoding aborted",
+            ));
+        }
         let fits = u64::try_from(buffer.len())
             .ok()
             .and_then(|bytes| self.bytes.checked_add(bytes))
@@ -313,16 +321,127 @@ impl<W: Write> Write for BoundedWriter<W> {
         Ok(written)
     }
     fn flush(&mut self) -> std::io::Result<()> {
+        if self.aborted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "metric encoding aborted",
+            ));
+        }
         self.inner.flush()
     }
 }
-pub fn publish_immutable(path: &Path, value: &Value) -> Result<(), String> {
+const METRIC_JSON_BUFFER_BYTES: usize = 64 * 1024;
+type MetricEncoder<W> = flate2::write::GzEncoder<BoundedWriter<W>>;
+type BufferedMetricWriter<W> = BoundedWriter<std::io::BufWriter<MetricEncoder<W>>>;
+
+// BufWriter and flate2 both attempt writes from Drop. Every unfinished path,
+// including a serializer panic, discards buffered JSON and prevents encoder
+// finalization from performing further writes to the owned pending sink.
+struct MetricEncoding<W: Write> {
+    writer: Option<BufferedMetricWriter<W>>,
+}
+impl<W: Write> Drop for MetricEncoding<W> {
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            let (mut encoder, _) = writer.inner.into_parts();
+            encoder.get_mut().aborted = true;
+        }
+    }
+}
+
+struct MetricFinalization<W: Write> {
+    encoder: Option<MetricEncoder<W>>,
+}
+impl<W: Write> Drop for MetricFinalization<W> {
+    fn drop(&mut self) {
+        if let Some(encoder) = &mut self.encoder {
+            encoder.get_mut().aborted = true;
+        }
+    }
+}
+
+fn encode_metric<W: Write, T: serde::Serialize + ?Sized>(
+    output: W,
+    value: &T,
+    decoded_limit: u64,
+    encoded_limit: u64,
+) -> Result<W, String> {
+    let encoder = flate2::write::GzEncoder::new(
+        BoundedWriter::new(output, encoded_limit),
+        flate2::Compression::fast(),
+    );
+    let mut encoding = MetricEncoding {
+        writer: Some(BoundedWriter::new(
+            std::io::BufWriter::with_capacity(METRIC_JSON_BUFFER_BYTES, encoder),
+            decoded_limit,
+        )),
+    };
+    let serialization = {
+        let decoded = encoding.writer.as_mut().expect("encoding owns its writer");
+        serde_json::to_writer(&mut *decoded, value).map_err(|_| {
+            if decoded.exceeded {
+                "decoded metric limit exceeded"
+            } else if decoded.inner.get_ref().get_ref().exceeded {
+                "encoded metric limit exceeded"
+            } else {
+                "metric encoding failed"
+            }
+        })
+    };
+    // into_parts never flushes. Drain the successful final tail explicitly,
+    // without adding a gzip sync-flush point or relying on a fallible Drop.
+    let writer = encoding.writer.take().expect("encoding owns its writer");
+    let (encoder, tail) = writer.inner.into_parts();
+    let mut finalization = MetricFinalization {
+        encoder: Some(encoder),
+    };
+    let encoder = finalization
+        .encoder
+        .as_mut()
+        .expect("finalization owns its encoder");
+    serialization?;
+    let tail = tail.map_err(|_| "metric buffer writer panicked")?;
+    if encoder.write_all(&tail).is_err() {
+        let error = if encoder.get_ref().exceeded {
+            "encoded metric limit exceeded"
+        } else {
+            "metric buffer drain failed"
+        };
+        return Err(error.into());
+    }
+    if encoder.try_finish().is_err() {
+        let error = if encoder.get_ref().exceeded {
+            "encoded metric limit exceeded"
+        } else {
+            "metric compression finish failed"
+        };
+        return Err(error.into());
+    }
+    // Successful try_finish has completed header, compressed body and footer.
+    let mut output = finalization
+        .encoder
+        .take()
+        .expect("finished encoder remains owned")
+        .finish()
+        .map_err(|_| "metric compression finish failed")?
+        .inner;
+    output.flush().map_err(|_| "metric flush failed")?;
+    Ok(output)
+}
+
+pub fn publish_immutable<T: serde::Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<(), String> {
     let span = observer().begin("metric_publication");
     let result = publish_immutable_inner(path, value);
     span.finish(result.is_ok(), result.as_ref().copied().unwrap_or(0));
     result.map(|_| ())
 }
-fn publish_immutable_inner(path: &Path, value: &Value) -> Result<u64, String> {
+fn publish_immutable_inner<T: serde::Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<u64, String> {
     let pending = path.with_extension(format!("pending-{}", std::process::id()));
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -330,33 +449,7 @@ fn publish_immutable_inner(path: &Path, value: &Value) -> Result<u64, String> {
         .open(&pending)
         .map_err(|_| "metric pending file already exists or unavailable")?;
     let result: Result<u64, String> = (|| {
-        let encoder = flate2::write::GzEncoder::new(
-            BoundedWriter::new(file, ENCODED_METRIC_LIMIT),
-            flate2::Compression::fast(),
-        );
-        let mut decoded = BoundedWriter::new(encoder, DECODED_METRIC_LIMIT);
-        serde_json::to_writer(&mut decoded, value).map_err(|_| {
-            if decoded.exceeded {
-                "decoded metric limit exceeded"
-            } else if decoded.inner.get_ref().exceeded {
-                "encoded metric limit exceeded"
-            } else {
-                "metric encoding failed"
-            }
-        })?;
-        let mut encoder = decoded.inner;
-        encoder.try_finish().map_err(|_| {
-            if encoder.get_ref().exceeded {
-                "encoded metric limit exceeded"
-            } else {
-                "metric compression finish failed"
-            }
-        })?;
-        let mut file = encoder
-            .finish()
-            .map_err(|_| "metric compression finish failed")?
-            .inner;
-        file.flush().map_err(|_| "metric flush failed")?;
+        let file = encode_metric(file, value, DECODED_METRIC_LIMIT, ENCODED_METRIC_LIMIT)?;
         let bytes = file.metadata().map_err(|_| "metric metadata failed")?.len();
         if bytes > ENCODED_METRIC_LIMIT {
             return Err("encoded metric limit exceeded".into());
@@ -399,7 +492,75 @@ pub(crate) fn read_compressed(path: &Path) -> Result<Value, String> {
     {
         return Err("compressed metric trailing input".into());
     }
-    serde_json::from_slice(&bytes).map_err(|_| "metric receipt invalid".into())
+    let mut decoder = serde_json::Deserializer::from_slice(&bytes);
+    let value = <UniqueValue as serde::Deserialize>::deserialize(&mut decoder)
+        .map_err(|_| "metric receipt invalid")?;
+    decoder.end().map_err(|_| "metric receipt invalid")?;
+    Ok(value.0)
+}
+
+// Retained evidence must have one interpretation, including nested identities
+// and counters. Value's ordinary map decoder would silently keep the last key.
+struct UniqueValue(Value);
+impl<'de> serde::Deserialize<'de> for UniqueValue {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = UniqueValue;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("JSON with unique object keys")
+            }
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::Bool(value)))
+            }
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::Number(value.into())))
+            }
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::Number(value.into())))
+            }
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                serde_json::Number::from_f64(value)
+                    .map(|value| UniqueValue(Value::Number(value)))
+                    .ok_or_else(|| E::custom("nonfinite JSON number"))
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::String(value.into())))
+            }
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::String(value)))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::Null))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut input: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::new();
+                while let Some(UniqueValue(value)) = input.next_element()? {
+                    values.push(value);
+                }
+                Ok(UniqueValue(Value::Array(values)))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut input: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let mut values = Map::new();
+                while let Some((key, UniqueValue(value))) =
+                    input.next_entry::<String, UniqueValue>()?
+                {
+                    if values.insert(key, value).is_some() {
+                        return Err(A::Error::custom("duplicate JSON object key"));
+                    }
+                }
+                Ok(UniqueValue(Value::Object(values)))
+            }
+        }
+        decoder.deserialize_any(Visitor)
+    }
 }
 const CATEGORIES: [&str; 21] = [
     "context_open",
@@ -2222,6 +2383,185 @@ mod tests {
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
     }
+    #[derive(Default)]
+    struct EncodingSinkState {
+        bytes: Vec<u8>,
+        writes: usize,
+        flushes: usize,
+    }
+    #[derive(Clone)]
+    struct EncodingSink {
+        state: Arc<Mutex<EncodingSinkState>>,
+        max_write: usize,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+    impl EncodingSink {
+        fn new(max_write: usize) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(EncodingSinkState::default())),
+                max_write,
+                fail_write: false,
+                fail_flush: false,
+            }
+        }
+    }
+    impl Write for EncodingSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut state = self.state.lock().unwrap();
+            state.writes += 1;
+            if self.fail_write {
+                return Err(std::io::Error::other("controlled sink write failure"));
+            }
+            let count = bytes.len().min(self.max_write);
+            state.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.state.lock().unwrap().flushes += 1;
+            if self.fail_flush {
+                return Err(std::io::Error::other("controlled sink flush failure"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn buffered_metric_encoder_preserves_exact_json_with_partial_sink_writes() {
+        use std::io::Read;
+        let sink = EncodingSink::new(3);
+        let state = sink.state.clone();
+        let value = json!({
+            "u64":u64::MAX,"escaped":"quote\" newline\n é",
+            "values":(0..16_384_u64).map(|value| value | (1_u64 << 63)).collect::<Vec<_>>()
+        });
+        let expected = serde_json::to_vec(&value).unwrap();
+        assert!(expected.len() > METRIC_JSON_BUFFER_BYTES);
+        assert!(encode_metric(sink, &value, DECODED_METRIC_LIMIT, ENCODED_METRIC_LIMIT).is_ok());
+        let state = state.lock().unwrap();
+        assert_eq!(state.flushes, 1);
+        assert!(state.writes > 1);
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(state.bytes.as_slice())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn buffered_metric_serializer_error_discards_tail_without_drop_writes() {
+        struct Failing<'a> {
+            text: &'a str,
+            state: Arc<Mutex<EncodingSinkState>>,
+            at_error: &'a std::cell::Cell<(usize, usize)>,
+        }
+        impl serde::Serialize for Failing<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeMap};
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("partial", self.text)?;
+                let state = self.state.lock().unwrap();
+                self.at_error.set((state.writes, state.bytes.len()));
+                Err(S::Error::custom("controlled serialization failure"))
+            }
+        }
+        for length in [32, METRIC_JSON_BUFFER_BYTES * 2] {
+            let text = "x".repeat(length);
+            let sink = EncodingSink::new(usize::MAX);
+            let state = sink.state.clone();
+            let at_error = std::cell::Cell::new((0, 0));
+            let value = Failing {
+                text: &text,
+                state: state.clone(),
+                at_error: &at_error,
+            };
+            let error = encode_metric(sink, &value, DECODED_METRIC_LIMIT, ENCODED_METRIC_LIMIT)
+                .err()
+                .unwrap();
+            assert_eq!(error, "metric encoding failed");
+            let state = state.lock().unwrap();
+            assert_eq!((state.writes, state.bytes.len()), at_error.get());
+            assert_eq!(state.flushes, 0);
+            if length < METRIC_JSON_BUFFER_BYTES {
+                assert_eq!(state.writes, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn unfinished_metric_encoding_discards_buffer_without_finalizing_sink() {
+        let sink = EncodingSink::new(usize::MAX);
+        let state = sink.state.clone();
+        let encoder = flate2::write::GzEncoder::new(
+            BoundedWriter::new(sink, ENCODED_METRIC_LIMIT),
+            flate2::Compression::fast(),
+        );
+        let mut encoding = MetricEncoding {
+            writer: Some(BoundedWriter::new(
+                std::io::BufWriter::with_capacity(METRIC_JSON_BUFFER_BYTES, encoder),
+                DECODED_METRIC_LIMIT,
+            )),
+        };
+        encoding
+            .writer
+            .as_mut()
+            .unwrap()
+            .write_all(b"unfinished JSON")
+            .unwrap();
+        // Exercise the same guard Drop used when serialization unwinds.
+        drop(encoding);
+        let state = state.lock().unwrap();
+        assert!(state.bytes.is_empty());
+        assert_eq!((state.writes, state.flushes), (0, 0));
+    }
+
+    #[test]
+    fn buffered_metric_decoded_limit_refuses_buffered_tail_before_delegation() {
+        let sink = EncodingSink::new(usize::MAX);
+        let state = sink.state.clone();
+        let error = encode_metric(sink, &"aa", 3, ENCODED_METRIC_LIMIT)
+            .err()
+            .unwrap();
+        assert_eq!(error, "decoded metric limit exceeded");
+        let state = state.lock().unwrap();
+        assert_eq!((state.writes, state.flushes, state.bytes.len()), (0, 0, 0));
+    }
+
+    #[test]
+    fn buffered_metric_tail_footer_and_flush_errors_cannot_succeed_or_retry_on_drop() {
+        let value = json!({"maximum":u64::MAX,"text":"bounded tail"});
+        let decoded = serde_json::to_vec(&value).unwrap();
+        let cap = gzip_test_bytes(&decoded).len() as u64 - 1;
+        let sink = EncodingSink::new(usize::MAX);
+        let state = sink.state.clone();
+        let error = encode_metric(sink, &value, DECODED_METRIC_LIMIT, cap)
+            .err()
+            .unwrap();
+        assert_eq!(error, "encoded metric limit exceeded");
+        assert!(state.lock().unwrap().bytes.len() as u64 <= cap);
+        assert_eq!(state.lock().unwrap().flushes, 0);
+
+        let mut sink = EncodingSink::new(usize::MAX);
+        sink.fail_write = true;
+        let state = sink.state.clone();
+        let error = encode_metric(sink, &value, DECODED_METRIC_LIMIT, ENCODED_METRIC_LIMIT)
+            .err()
+            .unwrap();
+        assert_eq!(error, "metric buffer drain failed");
+        let state = state.lock().unwrap();
+        assert_eq!((state.writes, state.flushes, state.bytes.len()), (1, 0, 0));
+        drop(state);
+
+        let mut sink = EncodingSink::new(usize::MAX);
+        sink.fail_flush = true;
+        let state = sink.state.clone();
+        let error = encode_metric(sink, &value, DECODED_METRIC_LIMIT, ENCODED_METRIC_LIMIT)
+            .err()
+            .unwrap();
+        assert_eq!(error, "metric flush failed");
+        assert_eq!(state.lock().unwrap().flushes, 1);
+    }
+
     #[test]
     fn bounded_metric_writer_counts_partial_writes_and_rejects_before_delegating() {
         struct PartialWriter(Vec<u8>);
@@ -2285,6 +2625,63 @@ mod tests {
             0,
             "rejected oversized frame must remove its pending file"
         );
+    }
+    #[test]
+    fn borrowed_metric_serialization_error_cleans_only_owned_pending_and_allows_retry() {
+        struct Failing<'a>(&'a str);
+        impl serde::Serialize for Failing<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeMap};
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("partial", self.0)?;
+                Err(S::Error::custom("borrowed serialization control"))
+            }
+        }
+        #[derive(serde::Serialize)]
+        struct Borrowed<'a> {
+            text: &'a str,
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("borrowed.json.gz");
+        let foreign = directory.path().join("foreign.pending");
+        std::fs::write(&foreign, b"foreign evidence").unwrap();
+        let text = "borrowed".repeat(1024);
+        assert_eq!(
+            publish_immutable(&path, &Failing(&text)).unwrap_err(),
+            "metric encoding failed"
+        );
+        assert!(!path.exists());
+        assert!(
+            !path
+                .with_extension(format!("pending-{}", std::process::id()))
+                .exists()
+        );
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign evidence");
+        publish_immutable(&path, &Borrowed { text: &text }).unwrap();
+        assert_eq!(read_compressed(&path).unwrap(), json!({"text":text}));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+    #[test]
+    fn metric_reader_rejects_duplicate_object_keys_without_losing_u64_precision() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unique.json.gz");
+        for bytes in [
+            br#"{"sequence":0,"sequence":1}"#.as_slice(),
+            br#"{"identity":{"sequence":0,"sequence":1}}"#.as_slice(),
+            br#"{"connections":[{"lane":1,"lane":0}]}"#.as_slice(),
+        ] {
+            std::fs::write(&path, gzip_test_bytes(bytes)).unwrap();
+            assert_eq!(
+                read_compressed(&path).unwrap_err(),
+                "metric receipt invalid"
+            );
+        }
+        let valid = br#"{"above53":9007199254740993,"maximum":18446744073709551615,"negative":-1,"float":1.5,"bool":true,"null":null,"text":"text","array":[0]}"#;
+        std::fs::write(&path, gzip_test_bytes(valid)).unwrap();
+        let value = read_compressed(&path).unwrap();
+        assert_eq!(value["above53"].as_u64(), Some(9_007_199_254_740_993));
+        assert_eq!(value["maximum"].as_u64(), Some(u64::MAX));
+        assert_eq!(value, serde_json::from_slice::<Value>(valid).unwrap());
     }
     #[test]
     fn metric_reader_accepts_one_complete_gzip_member_and_ordinary_json() {
