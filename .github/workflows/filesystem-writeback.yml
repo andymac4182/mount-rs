@@ -48,10 +48,13 @@ jobs:
       - name: Verify complete filesystem provider contracts and profiling
         timeout-minutes: 5
         run: ./scripts/cargo-shared test --locked -p mount-rs-filesystem-blocks --features io-profiling --all-targets
-      - name: Verify SDK filesystem capabilities and CLI configuration
+      - name: Verify SDK filesystem capabilities
         timeout-minutes: 10
         run: |
           ./scripts/cargo-shared test --locked -p mount-rs-sdk --lib filesystem_provider_tests
+      - name: Verify CLI filesystem configuration
+        timeout-minutes: 10
+        run: |
           ./scripts/cargo-shared test --locked -p mount-rs-cli filesystem
       - name: Verify actual runtime eviction and reopen with filesystem writeback
         timeout-minutes: 5
