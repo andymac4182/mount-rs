@@ -14,15 +14,15 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Bind unchanged verifier and tests
+      - name: Bind current lossless verifier and tests
         run: |
           test ! -e scripts/verify-production-target-evidence.py
           python3 -B - <<'PY'
           import hashlib
           from pathlib import Path
           expected = {
-              'scripts/bench-remote-production-target.sh': 'c56b9ad37e2004c910c2d09969d93a197e5f5cbfb23f993bc4c07938315779ca',
-              'scripts/test-production-target-evidence.py': '46965047133a1c5c4751559f360a540c5a0c6fb0b08108f826732172a7bb288d',
+              'scripts/bench-remote-production-target.sh': '0efdb61e418cfea266b742859d7a573dcef901e74098771cd3330415d5f96a9b',
+              'scripts/test-production-target-evidence.py': '0e9c4badb97667f6926889abe8d1977d9f95601b04dde23ac331a13102b0b9ff',
           }
           for path, digest in expected.items():
               if hashlib.sha256(Path(path).read_bytes()).hexdigest() != digest:

@@ -16,6 +16,13 @@ pub struct FileState {
     pub length: usize,
     pub changed: BTreeMap<usize, u64>,
 }
+#[derive(Serialize)]
+pub struct LedgerView<'a> {
+    drive: usize,
+    files: &'a BTreeMap<String, FileState>,
+    generations: &'a [u64],
+    oracle: &'static str,
+}
 impl Expected {
     pub fn empty(drive: usize, files: usize) -> Self {
         Self {
@@ -26,6 +33,14 @@ impl Expected {
     }
     pub fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({"drive":self.drive,"files":self.files,"generations":self.ledger.generations,"oracle":"tuple-seeded4096-byte blocks; initial generation0"})
+    }
+    pub fn borrowed_snapshot(&self) -> LedgerView<'_> {
+        LedgerView {
+            drive: self.drive,
+            files: &self.files,
+            generations: &self.ledger.generations,
+            oracle: "tuple-seeded4096-byte blocks; initial generation0",
+        }
     }
     pub fn create(&mut self, name: String, identity: usize) {
         self.files.insert(

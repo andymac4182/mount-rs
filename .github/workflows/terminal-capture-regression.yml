@@ -1,4 +1,4 @@
-name: Terminal Capture Regression
+name: Lossless Artifact Layout Probe
 
 on:
   push:
@@ -7,7 +7,10 @@ on:
     paths:
       - .github/workflows/terminal-capture-regression.yml
       - crates/mount-rs-service/tests/support/production_target/artifact_size_tests.rs
-      - crates/mount-rs-service/tests/support/production_target/mod.rs
+      - crates/mount-rs-service/tests/support/production_target/**
+      - crates/mount-rs-service/tests/quic_production_target.rs
+      - scripts/bench-remote-production-target.sh
+      - scripts/test-production-target-evidence.py
       - crates/mount-rs-service/tests/support/resource_profile.rs
       - crates/mount-rs-service/tests/support/device_io.rs
 
@@ -15,20 +18,22 @@ permissions:
   contents: read
 
 concurrency:
-  group: terminal-capture-red-${{ github.sha }}
+  group: artifact-layout-green-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
   terminal-capture:
-    name: Synthetic settled terminal regular-file bound (expected RED)
+    name: Synthetic complete retained artifact bounds
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
+      CORPUS_CASE: target::artifact_size_tests::settled_combined_full_corpus_obeys_all_capture_bounds
+      LEDGER_CASE: target::artifacts::tests::ledger_packs_full_corpus_visits_all_records_with_one_original_30s_deadline
       CASE: target::artifact_size_tests::settled_full_geometry_terminal_obeys_capture_regular_file_limit
       DEVICE_CASE: target::resource_profile::device_io::tests::darwin_device_record_wire_identity_and_counters_preserve_u64_precision
       BASELINE_COMMIT: 25f8d6f30714cc1a937aa0fe029fe967529cf566
       BASELINE_TREE: e56798c27402ead2ca4bc450c2ae7334143e8a4a
-      METRICS_SHA256: 46e39eea032f706e03af08ec146335dc2883a6c1fe280ae6a1b16b11ff3a738b
+      METRICS_SHA256: f6d864c26904fda0d38f7f5e55526f607faebf5174c0a784c90ed4f877a7b2a9
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -75,25 +80,23 @@ jobs:
             rustfmt -V
             cargo clippy -V
           } > "$proof/identity.txt"
-      - name: Check scoped fixture and helper formatting
+      - name: Check all affected fixture formatting and Python syntax
         shell: bash
         run: |
           set -euo pipefail
           proof="$RUNNER_TEMP/terminal-capture-proof"
-          python3 -B - "$proof/scoped-helper.rs" <<'PY'
-          import pathlib, sys
-          source = pathlib.Path("crates/mount-rs-service/tests/support/resource_profile.rs").read_text()
-          function = source.index("pub(super) fn artifact_fixture_connection_deltas(")
-          start = source.rfind("#[cfg(test)]", 0, function)
-          if start < 0:
-              raise SystemExit("synthetic helper lacks its test-only guard")
-          end = source.index("\npub struct Snapshot {", function)
-          pathlib.Path(sys.argv[1]).write_text(source[start:end].rstrip() + "\n")
-          PY
-          rustfmt --check --edition 2024 \
-            crates/mount-rs-service/tests/support/production_target/artifact_size_tests.rs \
-            crates/mount-rs-service/tests/support/device_io.rs \
-            "$proof/scoped-helper.rs" 2>&1 | tee "$proof/fmt.log"
+          ./scripts/cargo-shared fmt -p mount-rs-service -- --check 2>&1 | tee "$proof/fmt.log"
+          bash -n scripts/bench-remote-production-target.sh
+          python3 -B - <<'PY_AST'
+          import ast, pathlib
+          source=pathlib.Path('scripts/bench-remote-production-target.sh').read_text()
+          marker="python3 - <<'PY'\n"
+          assert source.count(marker)==1
+          program,end,suffix=source.split(marker,1)[1].partition("\nPY\n")
+          assert end and not suffix.strip()
+          ast.parse(program)
+          ast.parse(pathlib.Path('scripts/test-production-target-evidence.py').read_text())
+          PY_AST
       - name: Check shared fixture consumers with strict Clippy
         shell: bash
         run: |
@@ -109,7 +112,7 @@ jobs:
           proof="$RUNNER_TEMP/terminal-capture-proof"
           ./scripts/cargo-shared test --locked -p mount-rs-service \
             --features sdk-runtime,resource-profiling --test quic_production_target \
-            --no-run --message-format=json > "$proof/build.jsonl" 2> "$proof/build.log"
+            --release --no-run --message-format=json > "$proof/build.jsonl" 2> "$proof/build.log"
           python3 -B - "$proof/build.jsonl" "$proof/test-executable.txt" <<'PY'
           import json, pathlib, sys
           artifacts = []
@@ -129,6 +132,121 @@ jobs:
           test "$(grep -c ': test$' "$proof/selection.log")" -eq 1
           grep -Fx "$CASE: test" "$proof/selection.log"
           grep -Fx '1 test, 0 benchmarks' "$proof/selection.log"
+      - name: Execute all bounded publisher and layout controls
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
+          cat > "$proof/controls.py" <<'PY_CONTROLS'
+          import hashlib, json, os, pathlib, re, selectors, signal, subprocess, sys, time
+          proof=pathlib.Path(sys.argv[1]);binary=(proof/'test-executable.txt').read_text().strip()
+          critical={
+           'target::metrics::tests::': [
+            'bounded_metric_writer_counts_partial_writes_and_rejects_before_delegating',
+            'bounded_metric_writer_caps_gzip_finalization_before_writing_it',
+            'metric_publisher_rejects_decoded_size_bomb_and_cleans_pending',
+            'borrowed_metric_serialization_error_cleans_only_owned_pending_and_allows_retry',
+            'metric_reader_rejects_duplicate_object_keys_without_losing_u64_precision'],
+           'target::artifacts::tests::':[
+            'borrowed_ledger_packs_round_trip_original_dense_sparse_and_mutated_state',
+            'ledger_pack_rejects_bad_roster_and_expired_original_deadline'],
+           'target::artifact_size_tests::':[
+            'combined_capture_census_rejects_each_original_bound_and_special_entries',
+            'combined_settled_census_rejects_actual_symlink_and_nonregular_entries'],
+           'target::quic_artifacts::tests::':[
+            'controller_quic_shard_preserves_exact_u64_rows_and_immutable_publication',
+            'controller_quic_shard_rejects_missing_hash_relabel_and_inline_rosters',
+            'controller_quic_shard_rejects_hash_valid_shape_and_integer_corruption',
+            'controller_quic_shard_inherits_expired_phase_deadline',
+            'controller_quic_shard_rejects_hash_valid_duplicate_json_key'],
+          }
+          def bounded(name,args,budget=180):
+           child=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
+           start=time.monotonic();selector=selectors.DefaultSelector();os.set_blocking(child.stdout.fileno(),False);selector.register(child.stdout,selectors.EVENT_READ)
+           count=0;violation=None
+           try:
+            with (proof/name).open('xb') as output:
+             while selector.get_map():
+              left=budget-(time.monotonic()-start)
+              if left<=0:violation='deadline';break
+              for key,_ in selector.select(min(left,.2)):
+               chunk=os.read(key.fileobj.fileno(),65536)
+               if not chunk:selector.unregister(key.fileobj);continue
+               if count+len(chunk)>4*1024*1024:violation='log cap';break
+               output.write(chunk);count+=len(chunk)
+              if violation:break
+            if violation:
+             try:os.killpg(child.pid,signal.SIGTERM)
+             except ProcessLookupError:pass
+             try:child.wait(timeout=2)
+             except subprocess.TimeoutExpired:
+              try:os.killpg(child.pid,signal.SIGKILL)
+              except ProcessLookupError:pass
+            status=child.wait(timeout=2)
+           finally:
+            selector.close();child.stdout.close()
+            if child.poll() is None:
+             try:os.killpg(child.pid,signal.SIGKILL)
+             except ProcessLookupError:pass
+             child.wait(timeout=2)
+           try:os.killpg(child.pid,0);absent=False
+           except ProcessLookupError:absent=True
+           (proof/(name+'.capture.json')).write_text(json.dumps({'argv':args,'budget_seconds':budget,'elapsed_seconds':time.monotonic()-start,'bytes':count,'byte_limit':4*1024*1024,'exit':status,'violation':violation,'reaped':child.poll() is not None,'group_absent':absent,'log_sha256':hashlib.sha256((proof/name).read_bytes()).hexdigest()},sort_keys=True)+'\n')
+           if violation or status or not absent:raise RuntimeError(f'{name}: status={status} violation={violation} group_absent={absent}')
+           return (proof/name).read_text()
+          def admit(log,names,count):
+           summaries=re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;',log,re.M)
+           runs=re.findall(r'^running (\d+) tests?$',log,re.M)
+           if summaries!=[str(count)] or runs!=summaries or 'panicked at' in log:raise RuntimeError('empty, skipped or ambiguous test execution')
+           for name in names:
+            if len(re.findall(r'^test '+re.escape(name)+r' \.\.\. ok$',log,re.M))!=1:raise RuntimeError('critical test absent: '+name)
+          def ordinary():
+           for group,count in [('target::metrics::tests::',42),('target::quic_artifacts::tests::',5)]:
+            name=group.split('::')[1]
+            log=bounded(name+'-controls.log',[binary,group,'--nocapture','--test-threads=1'])
+            admit(log,[group+name for name in critical[group]],count)
+            print(log,end='')
+            print('ARTIFACT_CONTROLS_EXECUTED group='+group+' tests='+str(count)+' ignored=0')
+           for group in ['target::artifacts::tests::','target::artifact_size_tests::']:
+            for name in critical[group]:
+             case=group+name
+             log=bounded(name+'-control.log',[binary,'--exact',case,'--nocapture','--test-threads=1'])
+             admit(log,[case],1)
+             print(log,end='')
+             print('ARTIFACT_CONTROLS_EXACT_EXECUTED '+case+' ignored=0')
+
+          def ignored():
+           cases={
+            'CASE':'target::artifact_size_tests::settled_full_geometry_terminal_obeys_capture_regular_file_limit',
+            'LEDGER_CASE':'target::artifacts::tests::ledger_packs_full_corpus_visits_all_records_with_one_original_30s_deadline',
+            'CORPUS_CASE':'target::artifact_size_tests::settled_combined_full_corpus_obeys_all_capture_bounds'}
+           for key,case in cases.items():
+            if os.environ[key]!=case:raise RuntimeError('exact ignored case identity changed')
+            name=case.rsplit('::',1)[1]
+            selected=bounded(name+'-selection.log',[binary,'--ignored','--exact',case,'--list'],30)
+            if selected.splitlines().count(case+': test')!=1 or selected.splitlines().count('1 test, 0 benchmarks')!=1:raise RuntimeError('ignored exact selection mismatch')
+            log=bounded(name+'.log',[binary,'--ignored','--exact',case,'--nocapture','--test-threads=1'],120)
+            runs=re.findall(r'^running (\d+) tests?$',log,re.M)
+            summaries=re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;',log,re.M)
+            if runs!=['1'] or summaries!=['1'] or len(re.findall(r'^test '+re.escape(case)+r' \.\.\. ',log,re.M))!=1 or 'panicked at' in log:raise RuntimeError('ignored case did not execute once successfully')
+            print(log,end='');print('ARTIFACT_EXACT_EXECUTED '+case)
+          def readers():
+           for name,args,count,budget in [
+            ('python-controls.log',['python3','-B','scripts/test-production-target-evidence.py'],38,120),
+            ('python-full-corpus.log',['python3','-B','scripts/test-production-target-evidence.py','--full-ledger-corpus'],1,180)]:
+            log=bounded(name,args,budget)
+            summary=re.findall(r'^Ran (\d+) tests? in [0-9.]+s$',log,re.M)
+            if summary!=[str(count)] or log.splitlines().count('OK')!=1:raise RuntimeError('reader selection failed, skipped or ambiguous')
+            print(log,end='');print('ARTIFACT_READER_EXECUTED tests='+str(count)+' skipped=0')
+          mode=sys.argv[2]
+          if mode=='ordinary':ordinary()
+          elif mode=='ignored':ignored()
+          elif mode=='readers':readers()
+          else:raise RuntimeError('closed control mode unavailable')
+          PY_CONTROLS
+          sha256sum "$proof/controls.py" > "$proof/controls.sha256"
+          python3 -B "$proof/controls.py" "$proof" ordinary
       - name: Run the exact cross-platform device serialization control
         shell: bash
         run: |
@@ -156,91 +274,70 @@ jobs:
           print("DARWIN_WIRE_CONTROL_EXECUTED tests=1 ignored=0")
           PY
           cat "$proof/darwin-wire.log"
-      - name: Run exact regression and retain only the intended RED
+      - name: Run actual settled terminal bound and full retained corpus
         timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
           proof="$RUNNER_TEMP/terminal-capture-proof"
-          test_binary="$(cat "$proof/test-executable.txt")"
           sha256sum -c "$proof/binary.sha256"
-          # No provider env, native mount, floor reduction, or benchmark runner.
-          set +e
-          "$test_binary" --ignored --exact "$CASE" --nocapture --test-threads=1 \
-            > "$proof/regression.log" 2>&1
-          test_status=$?
-          set -e
-          printf '%s\n' "$test_status" > "$proof/test-status.txt"
+          sha256sum -c "$proof/controls.sha256"
+          python3 -B "$proof/controls.py" "$proof" ignored
+      - name: Execute current inline reader corruption and full-corpus controls
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
+          sha256sum -c "$proof/controls.sha256"
+          python3 -B "$proof/controls.py" "$proof" readers
+      - name: Qualify complete source-bound producer and reader evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
           sha256sum -c "$proof/binary.sha256"
+          sha256sum -c "$proof/controls.sha256"
           sha256sum -c "$proof/source.sha256" > "$proof/source-after-check.log"
           test -z "$(git status --porcelain)"
-          python3 -B - "$proof" "$CASE" "$test_status" <<'PY'
-          import json, os, pathlib, re, sys
-          proof, case, status = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
-          log = (proof / "regression.log").read_text()
-          records = re.findall(r"ARTIFACT_LAYOUT_MEASUREMENT (\{[^\n]*\})", log)
-          if status != 101 or len(records) != 1:
-              raise SystemExit("unqualified regression result: expected one measured RED")
-          value = json.loads(records[0])
-          panics = re.findall(
-              r"^thread '([^'\n]+)'(?: \(\d+\))? panicked at "
-              r"[^\n]*artifact_size_tests\.rs:\d+:\d+:\n"
-              r"TERMINAL_CAPTURE_REGULAR_FILE_LIMIT bytes=(\d+) limit=(\d+)\n",
-              log, re.M)
-          if len(panics) != 1:
-              raise SystemExit("unqualified regression result: missing selected-test panic binding")
-          panic_case, panic_bytes, panic_limit = panics[0]
-          checks = [
-              "running 1 test" in log,
-              f"\nfailures:\n    {case}\n" in log,
-              len(re.findall(r"panicked at", log)) == 1,
-              len(re.findall(r"^TERMINAL_CAPTURE_REGULAR_FILE_LIMIT bytes=\d+ limit=16777216$", log, re.M)) == 1,
-              panic_case == case,
-              int(panic_bytes) == value["terminal_bytes"],
-              int(panic_limit) == value["regular_file_limit_bytes"],
-              value["baseline_commit"] == os.environ["BASELINE_COMMIT"],
-              value["baseline_tree"] == os.environ["BASELINE_TREE"],
-              re.search(r"test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured;", log) is not None,
-              value["cells"] == 16,
-              value["connections_per_cell"] == 10000,
-              value["counter_fields_per_connection"] == 10,
-              value["regular_file_limit_bytes"] == 16777216,
-              value["terminal_bytes"] > 16777216,
-              value["compiled_sources_sha256"]["metrics.rs"] == "46e39eea032f706e03af08ec146335dc2883a6c1fe280ae6a1b16b11ff3a738b",
-          ]
-          if not all(checks):
-              raise SystemExit("unqualified regression result: unexpected failure or geometry")
-          (proof / "measurement.json").write_text(json.dumps(value, indent=2) + "\n")
-          (proof / "expected-red.json").write_text(json.dumps({
-              "qualified_expected_red": True,
-              "source_sha": os.environ["GITHUB_SHA"],
-              "test": case,
-              "test_exit_code": status,
-              "scope": "synthetic artifact serialization only; no native/provider capacity result"
-          }, indent=2) + "\n")
-          print("QUALIFIED_EXPECTED_RED settled terminal exceeds original 16 MiB regular-file capture bound")
-          PY
-          cat "$proof/regression.log"
-          # Preserve the failed regression status; qualification is not a fix.
-          exit "$test_status"
-      - name: Retain source-bound regression proof
+          python3 -B - "$proof" <<'PY_MEASURE'
+          import json,os,pathlib,re
+          proof=pathlib.Path(os.sys.argv[1])
+          def one(name,tag):
+              source=(proof/(name+'.log')).read_text()
+              records=re.findall(tag+r' (\{[^\n]*\})',source)
+              if len(records)!=1:raise SystemExit('missing or ambiguous artifact measurement '+tag)
+              return json.loads(records[0])
+          terminal=one('settled_full_geometry_terminal_obeys_capture_regular_file_limit','ARTIFACT_LAYOUT_MEASUREMENT')
+          checks=[terminal['cells']==16,terminal['connections_per_cell']==10000,terminal['counter_fields_per_connection']==10,
+                  terminal['shards']==16,terminal['regular_file_limit_bytes']==16777216,
+                  0<terminal['terminal_bytes']<=16777216,0<terminal['largest_shard_bytes']<=16777216,
+                  terminal['baseline_commit']==os.environ['BASELINE_COMMIT'],terminal['baseline_tree']==os.environ['BASELINE_TREE'],
+                  terminal['compiled_sources_sha256']['metrics.rs']==os.environ['METRICS_SHA256']]
+          full=one('settled_combined_full_corpus_obeys_all_capture_bounds','COMBINED_ARTIFACT_CORPUS_MEASUREMENT')
+          expected={'drives':10000,'partitions':5000,'files':10000000,'dense_generation_slots':15340000,
+                    'sparse_generation_entries':10000,'ledger_packs':313,'quic_cells':16,'quic_rows':160000,
+                    'synthetic_metric_boundaries':86,'synthetic_metric_receipts':946,'regular_files':1279,
+                    'regular_file_limit_bytes':16777216,'aggregate_limit_bytes':134217728,
+                    'regular_file_count_limit':4096,'entry_limit':8192,'expected_state_deadline_seconds':30}
+          checks.extend(full.get(key)==value for key,value in expected.items())
+          checks.extend([0<full['stored_bytes']<=134217728,0<full['largest_regular_file_bytes']<=16777216,
+                         1279<full['entries_including_root']<=8192])
+          if not all(checks):raise SystemExit('artifact measurement geometry/source/bounds mismatch')
+          (proof/'qualified-layout.json').write_text(json.dumps({'source_sha':os.environ['GITHUB_SHA'],
+              'terminal':terminal,'combined':full,'scope':'synthetic retained artifact corpus only; no native/provider capacity result'},indent=2)+'\n')
+          print('QUALIFIED_ARTIFACT_LAYOUT_GREEN drives=10000 files=10000000 quic_rows=160000 source='+os.environ['GITHUB_SHA'])
+          PY_MEASURE
+      - name: Retain source-bound complete layout proof
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: terminal-capture-red-${{ github.sha }}
+          name: artifact-layout-green-${{ github.sha }}
           if-no-files-found: error
           retention-days: 7
           path: |
-            ${{ runner.temp }}/terminal-capture-proof/identity.txt
-            ${{ runner.temp }}/terminal-capture-proof/source.sha256
-            ${{ runner.temp }}/terminal-capture-proof/binary.sha256
-            ${{ runner.temp }}/terminal-capture-proof/fmt.log
-            ${{ runner.temp }}/terminal-capture-proof/clippy.log
-            ${{ runner.temp }}/terminal-capture-proof/build.log
-            ${{ runner.temp }}/terminal-capture-proof/selection.log
-            ${{ runner.temp }}/terminal-capture-proof/darwin-wire-selection.log
-            ${{ runner.temp }}/terminal-capture-proof/darwin-wire.log
-            ${{ runner.temp }}/terminal-capture-proof/test-status.txt
-            ${{ runner.temp }}/terminal-capture-proof/regression.log
-            ${{ runner.temp }}/terminal-capture-proof/measurement.json
-            ${{ runner.temp }}/terminal-capture-proof/expected-red.json
+            ${{ runner.temp }}/terminal-capture-proof/*.txt
+            ${{ runner.temp }}/terminal-capture-proof/*.sha256
+            ${{ runner.temp }}/terminal-capture-proof/*.log
+            ${{ runner.temp }}/terminal-capture-proof/*.json
+            ${{ runner.temp }}/terminal-capture-proof/controls.py

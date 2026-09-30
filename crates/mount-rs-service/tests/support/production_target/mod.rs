@@ -1,6 +1,7 @@
 //! Fixture-only independent-process controller. No production runtime policy changes.
 #[cfg(test)]
 mod artifact_size_tests;
+pub(crate) mod artifacts;
 mod backend;
 mod checkpoints;
 mod command;
@@ -15,6 +16,7 @@ mod oracle;
 mod preflight;
 mod process;
 mod progress;
+mod quic_artifacts;
 #[allow(dead_code)]
 #[path = "../remote_blocks.rs"]
 mod remote_blocks;
@@ -42,6 +44,8 @@ type Client = Lane;
 pub use checkpoints::retained_checkpoint;
 use fixture::{FileProfile, SignedTokens, target_catalog};
 pub use process::worker;
+#[cfg(test)]
+pub use quic_artifacts::verify_stages as verify_controller_quic_artifacts;
 pub fn utc_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -91,6 +95,11 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
         ("command.rs", include_bytes!("command.rs").as_slice()),
         ("timing.rs", include_bytes!("timing.rs").as_slice()),
         ("metrics.rs", include_bytes!("metrics.rs").as_slice()),
+        (
+            "quic_artifacts.rs",
+            include_bytes!("quic_artifacts.rs").as_slice(),
+        ),
+        ("artifacts.rs", include_bytes!("artifacts.rs").as_slice()),
         ("progress.rs", include_bytes!("progress.rs").as_slice()),
         (
             "../../../src/startup.rs",
@@ -303,6 +312,24 @@ fn project_resource_progress(
     progress.resources_done();
 }
 impl Journal {
+    fn publish_quic_boundary(
+        &self,
+        base: &Value,
+        mode: &str,
+        pattern: &str,
+        network: &Value,
+        lanes: usize,
+    ) -> Result<Value, String> {
+        quic_artifacts::publish_boundary(
+            &self.output,
+            base,
+            mode,
+            pattern,
+            network,
+            lanes,
+            self.phase_deadline.min(self.enclosing_deadline),
+        )
+    }
     fn flush(&mut self) -> Result<(), String> {
         let span = metrics::observer().begin("journal_publication");
         if let Some(oracle) = &self.oracle_progress {
@@ -1210,13 +1237,32 @@ pub async fn controller() -> Result<(), String> {
                     let observer_start=tokio::time::Instant::now();
                     metric_boundary(phase_metrics.as_mut().unwrap(),&mut fleet,&private,resource,&mut journal,(&format!("{mode}/{pattern}"),"after_idle"),&oracle_owner).await?;
                     clock.add_observer_elapsed(observer_start.elapsed());
-                    let timing = clock.finish(cycles.iter().sum());
+                    let observer_start=tokio::time::Instant::now();
                     let network_after =
                         resource_profile::Snapshot::capture_connections(&connections)
                             .map_err(|_| "boundary network terminal unavailable")?;
                     let network = network_after
                         .connection_deltas(&network_before)
                         .map_err(|_| "boundary network delta unavailable")?;
+                    let last_boundary = phase_metrics.as_ref().unwrap().records.last()
+                        .ok_or("QUIC after-idle metric boundary unavailable")?;
+                    let generation = last_boundary["generation"].as_u64()
+                        .ok_or("QUIC after-idle metric generation unavailable")?;
+                    if last_boundary["phase"] != format!("{mode}/{pattern}")
+                        || last_boundary["boundary"] != "after_idle"
+                        || last_boundary["sequence"].as_u64() != Some(metrics_first_sequence+2)
+                    {
+                        return Err("QUIC after-idle metric binding changed".into());
+                    }
+                    let identity = metrics::identity(
+                        &private, std::process::id(), None, generation,
+                        metrics_first_sequence+2, &format!("{mode}/{pattern}"), "after_idle",
+                    );
+                    let quic_boundary = journal.publish_quic_boundary(
+                        &identity, mode, pattern, &network, config.drives,
+                    )?;
+                    clock.add_observer_elapsed(observer_start.elapsed());
+                    let timing = clock.finish(cycles.iter().sum());
                     let after: Vec<_> = journal
                         .counts
                         .iter()
@@ -1242,7 +1288,7 @@ pub async fn controller() -> Result<(), String> {
                                 "pattern":pattern,
                                 "metric_sequences":[metrics_first_sequence,metrics_first_sequence+1,metrics_first_sequence+2],
                                 "rpc_latency_histogram_log2_microseconds":latency_histogram,
-                                "timing":timing,"controller_quic_boundary":{"scope":"actual retained client connections; active workload plus idle liveness; snapshot observer outside active throughput interval; server transport retained separately in worker phase receipts","connections":network},
+                                "timing":timing,"controller_quic_boundary":quic_boundary,
                                 "configured_active_clients":active,
                                 "clients_with_completed_cycles":cycles.iter().filter(|n|**n>0).count(),
                                 "connected_clients":lanes.len(),
@@ -1465,33 +1511,46 @@ pub async fn controller() -> Result<(), String> {
         ));
     }
     let mut expected_receipts = Vec::new();
-    for lane in &lanes {
+    let mut expected_drives = 0usize;
+    let declared_drives = journal.value["configuration"]["drives"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let expected_deadline = expected_start + Duration::from_secs(30);
+    for (pack, group) in lanes.chunks(artifacts::PACK_DRIVES).enumerate() {
         if expected_start.elapsed() > Duration::from_secs(30) {
             cleanup.push(json!({
                     "error":"expected-state terminal receipt deadline"}
             ));
             break;
         }
-        let name = format!("drive-{}.json", lane.expected.drive);
-        let value = lane.expected.snapshot();
-        let recorded = write_json(&expected_dir.join(&name), &value)
-            .and_then(|()| file_digest(&expected_dir.join(&name)));
-        match recorded {
-            Ok(hash) => expected_receipts.push(json!({"drive":lane.expected.drive,"file":format!("expected/{name}"),"sha256":hash})),
-            Err(error) => cleanup.push(json!({"error":error})),
+        let borrowed = group.iter().map(|lane| &lane.expected).collect::<Vec<_>>();
+        match artifacts::publish_pack(&output, pack, &borrowed, expected_deadline) {
+            Ok(receipt) => {
+                expected_drives += receipt.count;
+                expected_receipts.push(receipt);
+            }
+            Err(error) => {
+                cleanup.push(json!({"error":error}));
+                break;
+            }
         }
         if expected_start.elapsed() > Duration::from_secs(30) {
             cleanup.push(json!({"error":"expected-state receipt exceeded30s after write/hash"}));
             break;
         }
     }
-    let expected_complete = expected_receipts.len() == lanes.len()
+    let expected_complete = declared_drives > 0
+        && expected_drives == declared_drives
+        && expected_drives == lanes.len()
         && expected_start.elapsed() <= Duration::from_secs(30);
     if !expected_complete {
         cleanup.push(json!({"error":"expected-state observation incomplete"}));
     }
     journal.value["expected_state_observation"] = json!({"complete":expected_complete,"elapsed_seconds":expected_start.elapsed().as_secs_f64(),"deadline_seconds":30,"bound":"cooperative post-write/hash checks; blocked OS I/O cannot be interrupted"});
-    journal.value["expected_state_receipts"] = json!(expected_receipts);
+    journal.value["expected_state_receipts"] = json!({
+        "schema":artifacts::INVENTORY_SCHEMA,"drive_count":declared_drives,
+        "pack_size":artifacts::PACK_DRIVES,"packs":expected_receipts});
     expected_span.finish(expected_complete, 0);
     let audit_span = metrics::observer().begin("audit_observation");
     let audit_start = Instant::now();

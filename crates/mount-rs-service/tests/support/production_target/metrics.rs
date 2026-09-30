@@ -316,13 +316,19 @@ impl<W: Write> Write for BoundedWriter<W> {
         self.inner.flush()
     }
 }
-pub fn publish_immutable(path: &Path, value: &Value) -> Result<(), String> {
+pub fn publish_immutable<T: serde::Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<(), String> {
     let span = observer().begin("metric_publication");
     let result = publish_immutable_inner(path, value);
     span.finish(result.is_ok(), result.as_ref().copied().unwrap_or(0));
     result.map(|_| ())
 }
-fn publish_immutable_inner(path: &Path, value: &Value) -> Result<u64, String> {
+fn publish_immutable_inner<T: serde::Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<u64, String> {
     let pending = path.with_extension(format!("pending-{}", std::process::id()));
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -399,7 +405,75 @@ pub(crate) fn read_compressed(path: &Path) -> Result<Value, String> {
     {
         return Err("compressed metric trailing input".into());
     }
-    serde_json::from_slice(&bytes).map_err(|_| "metric receipt invalid".into())
+    let mut decoder = serde_json::Deserializer::from_slice(&bytes);
+    let value = <UniqueValue as serde::Deserialize>::deserialize(&mut decoder)
+        .map_err(|_| "metric receipt invalid")?;
+    decoder.end().map_err(|_| "metric receipt invalid")?;
+    Ok(value.0)
+}
+
+// Retained evidence must have one interpretation, including nested identities
+// and counters. Value's ordinary map decoder would silently keep the last key.
+struct UniqueValue(Value);
+impl<'de> serde::Deserialize<'de> for UniqueValue {
+    fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = UniqueValue;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("JSON with unique object keys")
+            }
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::Bool(value)))
+            }
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::Number(value.into())))
+            }
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::Number(value.into())))
+            }
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                serde_json::Number::from_f64(value)
+                    .map(|value| UniqueValue(Value::Number(value)))
+                    .ok_or_else(|| E::custom("nonfinite JSON number"))
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::String(value.into())))
+            }
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::String(value)))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(UniqueValue(Value::Null))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut input: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::new();
+                while let Some(UniqueValue(value)) = input.next_element()? {
+                    values.push(value);
+                }
+                Ok(UniqueValue(Value::Array(values)))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut input: A,
+            ) -> Result<Self::Value, A::Error> {
+                use serde::de::Error;
+                let mut values = Map::new();
+                while let Some((key, UniqueValue(value))) =
+                    input.next_entry::<String, UniqueValue>()?
+                {
+                    if values.insert(key, value).is_some() {
+                        return Err(A::Error::custom("duplicate JSON object key"));
+                    }
+                }
+                Ok(UniqueValue(Value::Object(values)))
+            }
+        }
+        decoder.deserialize_any(Visitor)
+    }
 }
 const CATEGORIES: [&str; 21] = [
     "context_open",
@@ -2285,6 +2359,63 @@ mod tests {
             0,
             "rejected oversized frame must remove its pending file"
         );
+    }
+    #[test]
+    fn borrowed_metric_serialization_error_cleans_only_owned_pending_and_allows_retry() {
+        struct Failing<'a>(&'a str);
+        impl serde::Serialize for Failing<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeMap};
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("partial", self.0)?;
+                Err(S::Error::custom("borrowed serialization control"))
+            }
+        }
+        #[derive(serde::Serialize)]
+        struct Borrowed<'a> {
+            text: &'a str,
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("borrowed.json.gz");
+        let foreign = directory.path().join("foreign.pending");
+        std::fs::write(&foreign, b"foreign evidence").unwrap();
+        let text = "borrowed".repeat(1024);
+        assert_eq!(
+            publish_immutable(&path, &Failing(&text)).unwrap_err(),
+            "metric encoding failed"
+        );
+        assert!(!path.exists());
+        assert!(
+            !path
+                .with_extension(format!("pending-{}", std::process::id()))
+                .exists()
+        );
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign evidence");
+        publish_immutable(&path, &Borrowed { text: &text }).unwrap();
+        assert_eq!(read_compressed(&path).unwrap(), json!({"text":text}));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+    #[test]
+    fn metric_reader_rejects_duplicate_object_keys_without_losing_u64_precision() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unique.json.gz");
+        for bytes in [
+            br#"{"sequence":0,"sequence":1}"#.as_slice(),
+            br#"{"identity":{"sequence":0,"sequence":1}}"#.as_slice(),
+            br#"{"connections":[{"lane":1,"lane":0}]}"#.as_slice(),
+        ] {
+            std::fs::write(&path, gzip_test_bytes(bytes)).unwrap();
+            assert_eq!(
+                read_compressed(&path).unwrap_err(),
+                "metric receipt invalid"
+            );
+        }
+        let valid = br#"{"above53":9007199254740993,"maximum":18446744073709551615,"negative":-1,"float":1.5,"bool":true,"null":null,"text":"text","array":[0]}"#;
+        std::fs::write(&path, gzip_test_bytes(valid)).unwrap();
+        let value = read_compressed(&path).unwrap();
+        assert_eq!(value["above53"].as_u64(), Some(9_007_199_254_740_993));
+        assert_eq!(value["maximum"].as_u64(), Some(u64::MAX));
+        assert_eq!(value, serde_json::from_slice::<Value>(valid).unwrap());
     }
     #[test]
     fn metric_reader_accepts_one_complete_gzip_member_and_ordinary_json() {

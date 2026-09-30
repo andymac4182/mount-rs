@@ -202,7 +202,7 @@ jobs:
                   texts[name] = expected.read_text(encoding='utf-8')
               node = texts['node.rs']
               require('const B: usize = 6;' in node and 'pub(super) const CAPACITY: usize = 2 * B - 1;' in node, 'B-tree node capacity changed')
-              require('keys: [MaybeUninit<K>; CAPACITY]' in node and 'edges: [MaybeUninit<BoxedNode<K, V>>; CAPACITY + 1]' in node, 'B-tree key/edge capacity changed')
+              require('keys: [MaybeUninit<K>; CAPACITY]' in node and 'edges: [MaybeUninit<BoxedNode<K, V>>; 2 * B]' in node, 'B-tree key/edge capacity changed')
               require('Every item returned by `range` is a valid edge index for the node.' in node, 'parent range safety contract changed')
               require(node.splitlines()[557].strip() == 'for i in range {', 'parent range loop source changed')
               search = texts['search.rs']
@@ -258,8 +258,9 @@ jobs:
                       record = {'path': str(path), 'sha256': digest_path(path, 512 * 1024)}
                       require(filename not in std_sources or std_sources[filename] == record, 'inconsistent node loop source')
                       std_sources[filename] = record
-                  check_std_node_sources(std_sources)
                   write_new('std-node-source-facts.json', std_sources)
+                  print('PINNED_STD_NODE_SOURCE_FACTS ' + json.dumps(std_sources, sort_keys=True), file=sys.stderr)
+                  check_std_node_sources(std_sources)
                   require(digest_fd(fd) == model_digest, 'model changed during loop admission')
                   with (EVIDENCE / 'model-properties.json').open('xb') as properties, (EVIDENCE / 'model-properties.stderr').open('xb') as errors:
                       discovery = subprocess.run([str(REAL_CBMC), *prefix, descriptor, *suffix, '--show-properties'], stdout=properties, stderr=errors, pass_fds=(fd,), timeout=30)

@@ -99,26 +99,42 @@ fn assert_fresh_oracle_corpus(directory: &std::path::Path, journal: &serde_json:
     assert_eq!(journal["fresh_oracle_settled"], true);
     assert_eq!(journal["expected_state_observation"]["complete"], true);
     let drives = journal["configuration"]["drives"].as_u64().unwrap();
-    let ledger_receipts = journal["expected_state_receipts"].as_array().unwrap();
-    assert_eq!(ledger_receipts.len() as u64, drives);
+    let inventory = &journal["expected_state_receipts"];
+    assert_eq!(inventory["schema"], target::artifacts::INVENTORY_SCHEMA);
+    assert_eq!(inventory["drive_count"], drives);
+    assert_eq!(inventory["pack_size"], 32);
+    let ledger_receipts = inventory["packs"].as_array().unwrap();
+    assert_eq!(ledger_receipts.len() as u64, drives.div_ceil(32));
     let mut ids = std::collections::BTreeSet::new();
     let mut final_files = 0u64;
     let mut final_bytes = 0u64;
-    for receipt in ledger_receipts {
-        let drive = receipt["drive"].as_u64().unwrap();
-        assert!(drive < drives && ids.insert(drive));
-        let name = format!("expected/drive-{drive}.json");
+    for (pack, receipt) in ledger_receipts.iter().enumerate() {
+        let first = pack as u64 * 32;
+        let count = (drives - first).min(32);
+        assert_eq!(receipt["pack"], pack);
+        assert_eq!(receipt["first_drive"], first);
+        assert_eq!(receipt["count"], count);
+        let name = format!("expected/pack-{pack:05}.json.gz");
         assert_eq!(receipt["file"], name);
         let path = directory.join(name);
         assert_eq!(target::file_digest(&path).unwrap(), receipt["sha256"]);
-        let ledger = target::read_json(&path).unwrap();
-        assert_eq!(ledger["drive"], drive);
-        let files = ledger["files"].as_object().unwrap();
-        final_files = final_files.checked_add(files.len() as u64).unwrap();
-        for file in files.values() {
-            let length = file["length"].as_u64().unwrap();
-            assert_eq!(length % 4096, 0);
-            final_bytes = final_bytes.checked_add(length).unwrap();
+        let decoded = target::read_json(&path).unwrap();
+        assert_eq!(decoded["schema"], target::artifacts::PACK_SCHEMA);
+        assert_eq!(decoded["pack"], pack);
+        assert_eq!(decoded["first_drive"], first);
+        let ledgers = decoded["ledgers"].as_array().unwrap();
+        assert_eq!(ledgers.len() as u64, count);
+        for (offset, ledger) in ledgers.iter().enumerate() {
+            let drive = first + offset as u64;
+            assert!(drive < drives && ids.insert(drive));
+            assert_eq!(ledger["drive"], drive);
+            let files = ledger["files"].as_object().unwrap();
+            final_files = final_files.checked_add(files.len() as u64).unwrap();
+            for file in files.values() {
+                let length = file["length"].as_u64().unwrap();
+                assert_eq!(length % 4096, 0);
+                final_bytes = final_bytes.checked_add(length).unwrap();
+            }
         }
     }
     let ids: Vec<_> = ids.into_iter().collect();
@@ -275,6 +291,7 @@ fn ten_process_online_smoke() {
     assert_eq!(journal["routes"], 100);
     assert_balanced_timed_runtime(directory.as_path(), &journal);
     assert_fresh_oracle_corpus(directory.as_path(), &journal);
+    target::verify_controller_quic_artifacts(directory.as_path(), &journal).unwrap();
 }
 
 #[test]
@@ -437,6 +454,7 @@ fn ten_process_lazy_startup_preserves_exact_backing_and_workload() {
     assert_eq!(journal["scope_denials"]["sibling"], 10);
     assert_eq!(journal["scope_denials"]["partition"], 10);
     assert_fresh_oracle_corpus(directory.as_path(), &journal);
+    target::verify_controller_quic_artifacts(directory.as_path(), &journal).unwrap();
     let workers = journal["workers"].as_array().unwrap();
     assert_eq!(workers.len(), 10);
     assert!(
