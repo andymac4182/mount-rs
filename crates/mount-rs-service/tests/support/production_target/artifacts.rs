@@ -165,23 +165,90 @@ mod tests {
         );
     }
 
+    struct FullLedgerCosts {
+        started: Instant,
+        stage_started: Instant,
+        stage: usize,
+        totals: [Duration; 4],
+        pack: usize,
+        completed_packs: usize,
+        completed_drives: usize,
+    }
+    impl FullLedgerCosts {
+        fn new(started: Instant) -> Self {
+            Self {
+                started,
+                stage_started: started,
+                stage: 4,
+                totals: [Duration::ZERO; 4],
+                pack: 0,
+                completed_packs: 0,
+                completed_drives: 0,
+            }
+        }
+        fn enter(&mut self, stage: usize) {
+            let now = Instant::now();
+            if self.stage < self.totals.len() {
+                self.totals[self.stage] += now.duration_since(self.stage_started);
+            }
+            self.stage = stage;
+            self.stage_started = now;
+        }
+        fn report(&mut self, outcome: &str) {
+            let stage = [
+                "construct",
+                "write_hash",
+                "decode",
+                "equality",
+                "between_packs",
+            ][self.stage];
+            self.enter(4);
+            use std::io::Write as _;
+            let report = serde_json::json!({
+                "outcome":outcome,"active_stage":stage,"pack_index":self.pack,
+                "completed_packs":self.completed_packs,"completed_drives":self.completed_drives,
+                "elapsed_seconds":self.started.elapsed().as_secs_f64(),
+                "construct_seconds":self.totals[0].as_secs_f64(),
+                "write_hash_seconds":self.totals[1].as_secs_f64(),
+                "decode_seconds":self.totals[2].as_secs_f64(),
+                "equality_seconds":self.totals[3].as_secs_f64(),
+                "deadline_seconds":30,"scope":"cumulative nonoverlapping fixture wall costs; includes failing active stage; no isolated CPU or storage attribution"
+            });
+            let _ = writeln!(std::io::stderr().lock(), "FULL_LEDGER_PHASE_COSTS {report}");
+        }
+    }
+    impl Drop for FullLedgerCosts {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.report("panicking");
+            }
+        }
+    }
+
     #[test]
     #[ignore = "explicit complete artifact corpus: 10000 Drives x 1000 files; not native capacity evidence"]
     fn ledger_packs_full_corpus_visits_all_records_with_one_original_30s_deadline() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("expected")).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(30);
+        let mut costs = FullLedgerCosts::new(started);
         let mut files = 0u64;
         let mut bytes = 0u64;
         let mut drives = 0usize;
         for pack in 0..10_000usize.div_ceil(PACK_DRIVES) {
+            costs.pack = pack;
+            costs.enter(0);
             let first = pack * PACK_DRIVES;
             let expected = (first..(first + PACK_DRIVES).min(10_000))
                 .map(|drive| ledger(drive, false))
                 .collect::<Vec<_>>();
             let references = expected.iter().collect::<Vec<_>>();
+            costs.enter(1);
             let receipt = publish_pack(directory.path(), pack, &references, deadline).unwrap();
+            costs.enter(2);
             let decoded = metrics::read_compressed(&directory.path().join(&receipt.file)).unwrap();
+            costs.enter(3);
             for (value, expected) in decoded["ledgers"].as_array().unwrap().iter().zip(&expected) {
                 assert_eq!(value, &expected.snapshot());
                 assert_eq!(value["drive"], drives);
@@ -193,8 +260,11 @@ mod tests {
                     .map(|file| file["length"].as_u64().unwrap())
                     .sum::<u64>();
                 drives += 1;
+                costs.completed_drives = drives;
             }
             assert!(Instant::now() <= deadline);
+            costs.completed_packs += 1;
+            costs.enter(4);
         }
         assert_eq!((drives, files, bytes), (10_000, 10_000_000, 62_832_640_000));
         assert_eq!(
@@ -202,6 +272,11 @@ mod tests {
                 .unwrap()
                 .count(),
             313
+        );
+        costs.report("complete");
+        assert!(
+            Instant::now() <= deadline,
+            "single original expected-state deadline after complete reporting"
         );
     }
 }

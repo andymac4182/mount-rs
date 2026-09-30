@@ -33,7 +33,7 @@ jobs:
       DEVICE_CASE: target::resource_profile::device_io::tests::darwin_device_record_wire_identity_and_counters_preserve_u64_precision
       BASELINE_COMMIT: 25f8d6f30714cc1a937aa0fe029fe967529cf566
       BASELINE_TREE: e56798c27402ead2ca4bc450c2ae7334143e8a4a
-      METRICS_SHA256: f6d864c26904fda0d38f7f5e55526f607faebf5174c0a784c90ed4f877a7b2a9
+      METRICS_SHA256: 56feec698c9ce019404de8c99900516e5bf3cf27dca7ae4173f3df42696ff61f
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -147,7 +147,12 @@ jobs:
             'bounded_metric_writer_caps_gzip_finalization_before_writing_it',
             'metric_publisher_rejects_decoded_size_bomb_and_cleans_pending',
             'borrowed_metric_serialization_error_cleans_only_owned_pending_and_allows_retry',
-            'metric_reader_rejects_duplicate_object_keys_without_losing_u64_precision'],
+            'metric_reader_rejects_duplicate_object_keys_without_losing_u64_precision',
+            'buffered_metric_encoder_preserves_exact_json_with_partial_sink_writes',
+            'buffered_metric_serializer_error_discards_tail_without_drop_writes',
+            'unfinished_metric_encoding_discards_buffer_without_finalizing_sink',
+            'buffered_metric_decoded_limit_refuses_buffered_tail_before_delegation',
+            'buffered_metric_tail_footer_and_flush_errors_cannot_succeed_or_retry_on_drop'],
            'target::artifacts::tests::':[
             'borrowed_ledger_packs_round_trip_original_dense_sparse_and_mutated_state',
             'ledger_pack_rejects_bad_roster_and_expired_original_deadline'],
@@ -193,7 +198,11 @@ jobs:
            try:os.killpg(child.pid,0);absent=False
            except ProcessLookupError:absent=True
            (proof/(name+'.capture.json')).write_text(json.dumps({'argv':args,'budget_seconds':budget,'elapsed_seconds':time.monotonic()-start,'bytes':count,'byte_limit':4*1024*1024,'exit':status,'violation':violation,'reaped':child.poll() is not None,'group_absent':absent,'log_sha256':hashlib.sha256((proof/name).read_bytes()).hexdigest()},sort_keys=True)+'\n')
-           if violation or status or not absent:raise RuntimeError(f'{name}: status={status} violation={violation} group_absent={absent}')
+           if violation or status or not absent:
+            # Keep the original bounded file and expose its final diagnostic
+            # lines when a test fails, before qualification rejects the run.
+            print((proof/name).read_bytes()[-16384:].decode('utf-8',errors='replace'),end='')
+            raise RuntimeError(f'{name}: status={status} violation={violation} group_absent={absent}')
            return (proof/name).read_text()
           def admit(log,names,count):
            summaries=re.findall(r'^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out;',log,re.M)
@@ -202,7 +211,7 @@ jobs:
            for name in names:
             if len(re.findall(r'^test '+re.escape(name)+r' \.\.\. ok$',log,re.M))!=1:raise RuntimeError('critical test absent: '+name)
           def ordinary():
-           for group,count in [('target::metrics::tests::',42),('target::quic_artifacts::tests::',5)]:
+           for group,count in [('target::metrics::tests::',47),('target::quic_artifacts::tests::',5)]:
             name=group.split('::')[1]
             log=bounded(name+'-controls.log',[binary,group,'--nocapture','--test-threads=1'])
             admit(log,[group+name for name in critical[group]],count)
@@ -314,6 +323,12 @@ jobs:
                   0<terminal['terminal_bytes']<=16777216,0<terminal['largest_shard_bytes']<=16777216,
                   terminal['baseline_commit']==os.environ['BASELINE_COMMIT'],terminal['baseline_tree']==os.environ['BASELINE_TREE'],
                   terminal['compiled_sources_sha256']['metrics.rs']==os.environ['METRICS_SHA256']]
+          costs=one('ledger_packs_full_corpus_visits_all_records_with_one_original_30s_deadline','FULL_LEDGER_PHASE_COSTS')
+          checks.extend([costs['outcome']=='complete',costs['completed_packs']==313,costs['completed_drives']==10000,
+                         costs['deadline_seconds']==30,0<costs['elapsed_seconds']<=30])
+          stages=[costs[name] for name in ('construct_seconds','write_hash_seconds','decode_seconds','equality_seconds')]
+          checks.extend(0<=value<=costs['elapsed_seconds'] for value in stages)
+          checks.append(sum(stages)<=costs['elapsed_seconds'])
           full=one('settled_combined_full_corpus_obeys_all_capture_bounds','COMBINED_ARTIFACT_CORPUS_MEASUREMENT')
           expected={'drives':10000,'partitions':5000,'files':10000000,'dense_generation_slots':15340000,
                     'sparse_generation_entries':10000,'ledger_packs':313,'quic_cells':16,'quic_rows':160000,
@@ -325,7 +340,7 @@ jobs:
                          1279<full['entries_including_root']<=8192])
           if not all(checks):raise SystemExit('artifact measurement geometry/source/bounds mismatch')
           (proof/'qualified-layout.json').write_text(json.dumps({'source_sha':os.environ['GITHUB_SHA'],
-              'terminal':terminal,'combined':full,'scope':'synthetic retained artifact corpus only; no native/provider capacity result'},indent=2)+'\n')
+              'terminal':terminal,'combined':full,'ledger_phase_costs':costs,'scope':'synthetic retained artifact corpus only; no native/provider capacity result'},indent=2)+'\n')
           print('QUALIFIED_ARTIFACT_LAYOUT_GREEN drives=10000 files=10000000 quic_rows=160000 source='+os.environ['GITHUB_SHA'])
           PY_MEASURE
       - name: Retain source-bound complete layout proof

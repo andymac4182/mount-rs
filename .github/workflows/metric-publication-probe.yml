@@ -39,7 +39,7 @@ jobs:
           source = Path(path).read_bytes()
           blob = subprocess.check_output(['git', 'show', 'HEAD:' + path])
           print('Metric checkout SHA256:', hashlib.sha256(source).hexdigest())
-          if hashlib.sha256(blob).hexdigest() != 'f6d864c26904fda0d38f7f5e55526f607faebf5174c0a784c90ed4f877a7b2a9':
+          if hashlib.sha256(blob).hexdigest() != '56feec698c9ce019404de8c99900516e5bf3cf27dca7ae4173f3df42696ff61f':
               raise SystemExit('Metric publisher Git blob differs from the GREEN fixture')
           if source == blob:
               print('Metric checkout matches the pinned LF blob')
@@ -68,6 +68,11 @@ jobs:
               'metric_publisher_rejects_decoded_size_bomb_and_cleans_pending',
               'borrowed_metric_serialization_error_cleans_only_owned_pending_and_allows_retry',
               'metric_reader_rejects_duplicate_object_keys_without_losing_u64_precision',
+              'buffered_metric_encoder_preserves_exact_json_with_partial_sink_writes',
+              'buffered_metric_serializer_error_discards_tail_without_drop_writes',
+              'unfinished_metric_encoding_discards_buffer_without_finalizing_sink',
+              'buffered_metric_decoded_limit_refuses_buffered_tail_before_delegation',
+              'buffered_metric_tail_footer_and_flush_errors_cannot_succeed_or_retry_on_drop',
           )
           for name in names:
               test = 'target::metrics::tests::' + name
@@ -75,9 +80,9 @@ jobs:
                   raise SystemExit('Required metric regression did not execute successfully: ' + test)
           summaries = re.findall(r'(?m)^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; \d+ filtered out; finished in .+$', text)
           runs = re.findall(r'(?m)^running (\d+) tests?$', text)
-          if len(summaries) != 1 or runs != summaries or int(summaries[0]) != 42:
+          if len(summaries) != 1 or runs != summaries or int(summaries[0]) != 47:
               raise SystemExit('Metric test run is empty, incomplete or ambiguous')
-          print('METRIC_EVIDENCE_EXECUTED tests=' + summaries[0] + ' critical=5 ignored=0')
+          print('METRIC_EVIDENCE_EXECUTED tests=' + summaries[0] + ' critical=10 ignored=0')
           PY_CHECK
       - name: Verify strict metric fixture Clippy
         run: ./scripts/cargo-shared clippy --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target -- -D warnings

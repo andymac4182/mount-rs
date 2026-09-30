@@ -13,7 +13,7 @@ const BASELINE_TREE: &str = "e56798c27402ead2ca4bc450c2ae7334143e8a4a";
 // GREEN binds the combined writer/reader source after formatting. Historical
 // RED receipts retain their original publisher source identity.
 const GENERIC_METRICS_SHA256: &str =
-    "f6d864c26904fda0d38f7f5e55526f607faebf5174c0a784c90ed4f877a7b2a9";
+    "56feec698c9ce019404de8c99900516e5bf3cf27dca7ae4173f3df42696ff61f";
 
 fn compiled_source_pins() -> Value {
     let sources: &[(&str, &[u8])] = &[
