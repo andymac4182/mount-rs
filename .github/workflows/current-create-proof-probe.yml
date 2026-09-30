@@ -1,0 +1,383 @@
+# Unexecuted, isolated qualification candidate. This does not replace ci.yml.
+name: Current create proof probe
+
+on:
+  push:
+    branches:
+      - codex/full-target-evidence-probe-20260930-1106
+
+permissions:
+  contents: read
+
+jobs:
+  current-create-proof-probe:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/full-target-evidence-probe-20260930-1106'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Admit the unchanged proof source and prepare its forwarding guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/codex/full-target-evidence-probe-20260930-1106
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          export KANI_HOME="$RUNNER_TEMP/current-create-kani-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/current-create-target-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          export PROBE_EVIDENCE="$RUNNER_TEMP/current-create-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$PROBE_EVIDENCE"
+          test ! -e "$KANI_HOME"
+          test ! -e "$CARGO_TARGET_DIR"
+          printf 'KANI_HOME=%s\nCARGO_TARGET_DIR=%s\nPROBE_EVIDENCE=%s\n' "$KANI_HOME" "$CARGO_TARGET_DIR" "$PROBE_EVIDENCE" >> "$GITHUB_ENV"
+          cat > "$PROBE_EVIDENCE/probe.py" <<'PY'
+          #!/usr/bin/python3
+          import collections
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import shutil
+          import stat
+          import subprocess
+          import sys
+          import time
+
+          HARNESS = 'create_rebase::verification::current_fresh_create_rebinds_only_eligible_preparation'
+          REF = 'refs/heads/codex/full-target-evidence-probe-20260930-1106'
+          SOURCES = {
+              'filesystems/mount-rs-chunked/src/create_rebase.rs': '1297d57284a94e33e7f8a10e213ae391864b76bae45e443975a650e0e1d59af1',
+              'filesystems/mount-rs-chunked/src/lib.rs': 'bb03103555564854b17c8e59235a2d2c4f590edd24430fe3e57d2c31e2235dee',
+              'src/chunking.rs': 'fd1833fa0882a4f57dcd316122caf94b6b1fffff2f3da157839810c55172435a',
+              'Cargo.lock': '7e492520ac5fdb132182779ec0c70f1285f321709c451e3efa5755a39e3ea5a5',
+          }
+          LOOPS = {
+              '_RNvMsn_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB7_4node7NodeRefNtNtB10_6marker5DyingNtNtBb_6string6StringyNtB1k_14LeafOrInternalE15first_leaf_edgeCsls6Niw6mIAT_13mount_rs_core.0': ('first_leaf_edge', 634),
+              '_RINvMsj_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB8_4node6HandleINtB11_7NodeRefNtNtB11_6marker5DyingNtNtBc_6string6StringyNtB1z_4LeafENtB1z_4EdgeE16deallocating_endNtNtBc_5alloc6GlobalECsls6Niw6mIAT_13mount_rs_core.0': ('deallocating_end', 518),
+              '_RINvMsj_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB8_4node6HandleINtB11_7NodeRefNtNtB11_6marker5DyingNtNtBc_6string6StringyNtB1z_4LeafENtB1z_4EdgeE17deallocating_nextNtNtBc_5alloc6GlobalECsls6Niw6mIAT_13mount_rs_core.0': ('deallocating_next', 465),
+          }
+          UNWINDSET = ','.join(loop + ':4' for loop in LOOPS)
+          EVIDENCE = pathlib.Path(os.environ['PROBE_EVIDENCE'])
+          BUNDLE = pathlib.Path(os.environ['KANI_HOME']) / 'kani-0.68.0'
+          REAL_CBMC = BUNDLE / 'bin' / 'cbmc.unmodified'
+          MODEL_CAP = 64 * 1024 * 1024
+          JSON_CAP = 16 * 1024 * 1024
+          # The executable has a separate cap; its actual size is captured at admission.
+          BINARY_CAP = 256 * 1024 * 1024
+
+          def require(condition, message):
+              if not condition:
+                  raise RuntimeError(message)
+
+          def write_new(name, value):
+              with (EVIDENCE / name).open('x', encoding='utf-8') as output:
+                  json.dump(value, output, sort_keys=True, allow_nan=False)
+                  output.write('\n')
+
+          def digest_fd(fd, cap=MODEL_CAP):
+              before = os.fstat(fd)
+              require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1, 'not an owned regular file')
+              require(0 < before.st_size <= cap, 'file size outside probe cap')
+              os.lseek(fd, 0, os.SEEK_SET)
+              digest = hashlib.sha256()
+              count = 0
+              while True:
+                  part = os.read(fd, 65536)
+                  if not part:
+                      break
+                  count += len(part)
+                  require(count <= cap, 'file grew beyond probe cap')
+                  digest.update(part)
+              after = os.fstat(fd)
+              fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_nlink')
+              require(all(getattr(before, key) == getattr(after, key) for key in fields), 'file changed while reading')
+              require(count == before.st_size, 'file byte count changed')
+              os.lseek(fd, 0, os.SEEK_SET)
+              return digest.hexdigest()
+
+          def digest_path(path, cap=MODEL_CAP):
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+              try:
+                  return digest_fd(fd, cap)
+              finally:
+                  os.close(fd)
+
+          def retain_model(fd, expected):
+              os.lseek(fd, 0, os.SEEK_SET)
+              target = EVIDENCE / 'proof-model.out'
+              copy_fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+              try:
+                  count = 0
+                  while True:
+                      part = os.read(fd, 65536)
+                      if not part:
+                          break
+                      count += len(part)
+                      require(count <= MODEL_CAP, 'retained model exceeds cap')
+                      view = memoryview(part)
+                      while view:
+                          written = os.write(copy_fd, view)
+                          require(written > 0, 'retained model write made no progress')
+                          view = view[written:]
+              finally:
+                  os.close(copy_fd)
+              require(digest_fd(fd) == expected and digest_path(target) == expected, 'retained model differs from admitted descriptor')
+
+          def run_actual_proof(argv, fd):
+              # Preserve CBMC's real JSON bytes for Kani and independent property admission.
+              child = subprocess.Popen([str(REAL_CBMC), *argv], stdout=subprocess.PIPE, pass_fds=(fd,))
+              try:
+                  with (EVIDENCE / 'cbmc-proof.json').open('xb') as capture:
+                      count = 0
+                      while True:
+                          part = child.stdout.read(65536)
+                          if not part:
+                              break
+                          count += len(part)
+                          require(count <= JSON_CAP, 'actual CBMC JSON exceeds cap')
+                          capture.write(part)
+                          sys.stdout.buffer.write(part)
+                          sys.stdout.buffer.flush()
+                  return child.wait()
+              finally:
+                  if child.poll() is None:
+                      child.kill()
+                      child.wait()
+                  child.stdout.close()
+
+          def source_gate():
+              require(os.environ['GITHUB_EVENT_NAME'] == 'push', 'wrong event')
+              require(os.environ['GITHUB_REF'] == REF, 'wrong ref')
+              for path, expected in SOURCES.items():
+                  require(digest_path(path) == expected, 'source pin mismatch: ' + path)
+              source = pathlib.Path(next(iter(SOURCES))).read_text(encoding='utf-8')
+              body = source.split('    fn current_fresh_create_rebinds_only_eligible_preparation() {', 1)[1]
+              require(len(re.findall(r'\bassert(?:_eq|_ne)?!\s*\(', body)) == 12, 'assertion-site inventory changed')
+              require(len(re.findall(r'kani::any\s*\(', body)) == 7, 'symbolic-input inventory changed')
+              require(len(re.findall(r'kani::cover!\s*\(', body)) == 5, 'cover inventory changed')
+              require('#[kani::unwind(64)]' in source, 'global unwind annotation changed')
+
+          def install_guard():
+              source_gate()
+              binary = BUNDLE / 'bin' / 'cbmc'
+              require(not REAL_CBMC.exists(), 'unmodified binary already exists')
+              version = subprocess.check_output([str(binary), '--version'], text=True).strip()
+              require(version.split()[0] == '6.11.0', 'wrong CBMC version')
+              require((BUNDLE / 'rust-toolchain-version').read_text().strip() == 'nightly-2026-08-21', 'wrong Kani toolchain')
+              binary_digest = digest_path(binary, BINARY_CAP)
+              binary_bytes = binary.stat().st_size
+              binary.rename(REAL_CBMC)
+              shutil.copyfile(EVIDENCE / 'probe.py', binary)
+              binary.chmod(0o755)
+              write_new('tools.json', {'cbmc_sha256': binary_digest, 'cbmc_bytes': binary_bytes, 'cbmc_byte_cap': BINARY_CAP, 'cbmc_version': version, 'kani_version': '0.68.0', 'source_sha256': SOURCES, 'push_sha': os.environ['GITHUB_SHA']})
+
+          def cbmc_guard():
+              tools = read_json('tools.json')
+              require(digest_path(REAL_CBMC, BINARY_CAP) == tools['cbmc_sha256'], 'CBMC binary identity changed')
+              argv = sys.argv[1:]
+              # Kani probes this version before and after its real verification.
+              if argv == ['--version']:
+                  os.execv(str(REAL_CBMC), [str(REAL_CBMC), *argv])
+              prefix = ['--no-malloc-may-fail', '--no-undefined-shift-check', '--no-signed-overflow-check', '--nan-check', '--no-self-loops-to-assumptions', '--no-pointer-primitive-check', '--object-bits', '16', '--unwind', '64', '--sat-solver', 'cadical', '--slice-formula', '--unwindset', UNWINDSET, '--unwinding-assertions']
+              suffix = ['--verbosity', '9', '--json-ui']
+              require(len(argv) == len(prefix) + 1 + len(suffix), 'unexpected CBMC argument count')
+              require(argv[:len(prefix)] == prefix and argv[-len(suffix):] == suffix, 'proof flags changed or checks suppressed')
+              source_gate()
+              model = pathlib.Path(argv[len(prefix)])
+              require(model.is_absolute(), 'model path is not absolute')
+              require(model.resolve().is_relative_to(pathlib.Path(os.environ['CARGO_TARGET_DIR']).resolve()), 'model outside isolated target')
+              require(model.name.endswith('54current_fresh_create_rebinds_only_eligible_preparation.out'), 'wrong generated harness model')
+              fd = os.open(model, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+              try:
+                  model_digest = digest_fd(fd)
+                  descriptor = '/proc/self/fd/' + str(fd)
+                  with (EVIDENCE / 'loops.txt').open('xb') as inventory:
+                      discovery = subprocess.run([str(REAL_CBMC), *prefix, descriptor, '--verbosity', '9', '--show-loops'], stdout=inventory, stderr=subprocess.STDOUT, pass_fds=(fd,), timeout=30)
+                  require(discovery.returncode == 0, 'loop discovery failed')
+                  inventory = EVIDENCE / 'loops.txt'
+                  require(inventory.stat().st_size <= JSON_CAP, 'loop inventory exceeds cap')
+                  text = inventory.read_text(encoding='utf-8')
+                  blocks = re.findall(r'(?m)^Loop ([^\n]+):\n([^\n]+)', text)
+                  require(len(blocks) == len({loop for loop, _ in blocks}), 'duplicate loop labels')
+                  for loop, (method, line) in LOOPS.items():
+                      matches = [location for label, location in blocks if label == loop]
+                      require(len(matches) == 1, 'exact loop label absent or repeated: ' + loop)
+                      location = matches[0]
+                      require('nightly-2026-08-21' in location and '/alloc/src/collections/btree/navigate.rs' in location, 'wrong loop source')
+                      require(' line ' + str(line) + ' ' in location, 'wrong loop line')
+                      require(method in location and 'Dying' in location and 'String' in location and 'u64' in location, 'wrong loop monomorphization')
+                  require(digest_fd(fd) == model_digest, 'model changed during loop admission')
+                  with (EVIDENCE / 'model-properties.json').open('xb') as properties, (EVIDENCE / 'model-properties.stderr').open('xb') as errors:
+                      discovery = subprocess.run([str(REAL_CBMC), *prefix, descriptor, *suffix, '--show-properties'], stdout=properties, stderr=errors, pass_fds=(fd,), timeout=30)
+                  require(discovery.returncode == 0, 'property discovery failed')
+                  inventory = read_json('model-properties.json')
+                  properties = inventory_items(inventory, 'properties')
+                  require(properties and len({prop['name'] for prop in properties}) == len(properties), 'missing or duplicate model properties')
+                  require(any(prop['class'] == 'assertion' and prop['sourceLocation'].get('file', '').endswith('/mount-rs-chunked/src/create_rebase.rs') and str(prop['sourceLocation'].get('line', '')) in ('617', '618', '619', '620') for prop in properties), 'model lacks the symbolic eligibility assertion')
+                  require(digest_fd(fd) == model_digest, 'model changed during property admission')
+                  retain_model(fd, model_digest)
+                  write_new('binding.json', {'model_path': str(model), 'model_sha256': model_digest, 'model_properties_sha256': digest_path(EVIDENCE / 'model-properties.json'), 'model_property_count': len(properties), 'loop_ids': list(LOOPS), 'global_unwind': 64, 'per_loop_unwind': 4, 'strict_unwinding_assertions': True, 'argv': argv, 'started_unix_ns': time.time_ns()})
+                  actual_argv = [*prefix, descriptor, *suffix]
+                  actual_exit = run_actual_proof(actual_argv, fd)
+                  require(digest_fd(fd) == model_digest, 'model changed during proof')
+                  source_gate()
+                  write_new('completion.json', {'model_sha256': model_digest, 'cbmc_exit': actual_exit, 'finished_unix_ns': time.time_ns()})
+              finally:
+                  os.close(fd)
+              if actual_exit < 0:
+                  os.kill(os.getpid(), -actual_exit)
+              raise SystemExit(actual_exit)
+
+          def read_json(name):
+              def unique(pairs):
+                  result = {}
+                  for key, value in pairs:
+                      require(key not in result, 'duplicate JSON key')
+                      result[key] = value
+                  return result
+              def finite(value):
+                  raise RuntimeError('nonfinite JSON value: ' + value)
+              path = EVIDENCE / name
+              require(path.is_file() and path.stat().st_size <= JSON_CAP, 'missing or oversized JSON evidence: ' + name)
+              return json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique, parse_constant=finite)
+
+          def inventory_items(document, key):
+              require(type(document) is list, 'CBMC JSON is not an item array')
+              groups = [item[key] for item in document if type(item) is dict and key in item]
+              require(len(groups) == 1 and type(groups[0]) is list, 'missing or repeated CBMC item: ' + key)
+              return groups[0]
+
+          def property_class(identifier):
+              # Match Kani 0.68 PropertyId's class projection; export IDs are indices.
+              if identifier.endswith('.recursion'):
+                  return 'recursion'
+              fields = identifier.rsplit('.', 2)
+              require(len(fields) in (2, 3) and fields[-1].isdigit(), 'unexpected CBMC property ID')
+              candidate = fields[-2]
+              return candidate if re.fullmatch(r'[a-z_-]+|NaN', candidate) else 'missing_definition'
+
+          def location_key(location):
+              return tuple(location.get(key, 'unknown') for key in ('file', 'line', 'column'))
+
+          def export_census_key(prop):
+              category = property_class(prop['property'])
+              # Pinned Kani postprocess_result deliberately removes these rows.
+              if category == 'reachability_check' or (category == 'sanity_check' and prop['status'] == 'SUCCESS') or 'pointer_arithmetic' in category or 'pointer_primitives' in category:
+                  return None
+              # Its description normalization is deliberately not an identity field.
+              return (category, *location_key(prop['sourceLocation']))
+
+          def qualify():
+              source_gate()
+              binding, completion = read_json('binding.json'), read_json('completion.json')
+              require(binding['model_sha256'] == completion['model_sha256'], 'proof/model binding mismatch')
+              require(digest_path(EVIDENCE / 'proof-model.out') == binding['model_sha256'], 'retained model identity mismatch')
+              require(digest_path(EVIDENCE / 'model-properties.json') == binding['model_properties_sha256'], 'retained model property inventory changed')
+              require(binding['loop_ids'] == list(LOOPS) and binding['global_unwind'] == 64 and binding['per_loop_unwind'] == 4 and binding['strict_unwinding_assertions'] is True, 'bound admission mismatch')
+              require(type(completion['cbmc_exit']) is int and completion['cbmc_exit'] in (0, 10), 'CBMC did not finish verification')
+              require((EVIDENCE / 'proof.exit').read_text().strip() == '0', 'normal Kani proof failed')
+              document = read_json('proof.json')
+              require(document['metadata']['kani_version'] == '0.68.0', 'wrong exported Kani version')
+              require(document['tools']['kani'] == '0.68.0' and document['tools']['cbmc'].split()[0] == '6.11.0', 'wrong exported tools')
+              metadata = document['harness_metadata']
+              require(len(metadata) == 1 and metadata[0]['pretty_name'] == HARNESS and metadata[0]['attributes']['should_panic'] is False, 'wrong or empty harness selection')
+              verification = document['verification_results']
+              summary = verification['summary']
+              for key, expected in [('total_harnesses', 1), ('executed', 1), ('successful', 1), ('failed', 0)]:
+                  require(type(summary[key]) is int and summary[key] == expected, 'wrong harness count: ' + key)
+              results = verification['results']
+              require(len(results) == 1 and results[0]['harness_id'] == HARNESS and results[0]['status'] == 'Success', 'no successful named proof')
+              errors = document['error_details']
+              require(len(errors) == 1 and errors[0]['harness_id'] == HARNESS and errors[0]['has_errors'] is False, 'export reports proof errors')
+              checks = results[0]['checks']
+              require(checks and len({check['id'] for check in checks}) == len(checks), 'missing or duplicate property results')
+              properties = inventory_items(read_json('model-properties.json'), 'properties')
+              require(len(properties) == binding['model_property_count'], 'model property census changed')
+              raw_document = read_json('cbmc-proof.json')
+              raw_results = inventory_items(raw_document, 'result')
+              raw_by_id = {prop['property']: prop for prop in raw_results}
+              require(raw_results and len(raw_by_id) == len(raw_results), 'missing or duplicate real property results')
+              raw_covers = [prop for prop in raw_results if property_class(prop['property']) == 'cover']
+              require(len(raw_covers) == 5 and all(prop['status'] == 'FAILURE' for prop in raw_covers), 'real five covers were not satisfied')
+              for prop in raw_results:
+                  category = property_class(prop['property'])
+                  if category == 'reachability_check':
+                      require(prop['status'] in ('SUCCESS', 'FAILURE'), 'incomplete raw reachability check')
+                  elif category != 'cover' and 'pointer_arithmetic' not in category and 'pointer_primitives' not in category:
+                      require(prop['status'] in ('SUCCESS', 'UNREACHABLE'), 'failed or incomplete actual assertion property')
+              prover_status = [item['cProverStatus'] for item in raw_document if type(item) is dict and 'cProverStatus' in item]
+              # The five satisfied covers are encoded as real failing CBMC assertions.
+              require(prover_status == ['failure'] and completion['cbmc_exit'] == 10, 'raw prover completion/exit does not match satisfied covers')
+              for prop in properties:
+                  require(prop['name'] in raw_by_id, 'model property omitted by actual proof: ' + prop['name'])
+                  actual = raw_by_id[prop['name']]
+                  require(property_class(prop['name']) == prop['class'] and actual['description'] == prop['description'] and location_key(actual['sourceLocation']) == location_key(prop['sourceLocation']), 'model/result property identity differs')
+              raw_keys = collections.Counter(key for prop in raw_results if (key := export_census_key(prop)) is not None)
+              export_keys = collections.Counter((check['category'], *location_key(check['location'])) for check in checks)
+              require(raw_keys == export_keys, 'export omitted, added or changed actual property results')
+              covers = [check for check in checks if check['category'] == 'cover']
+              require(len(covers) == 5 and all(check['status'] == 'Satisfied' for check in covers), 'unchanged five covers not all satisfied')
+              require(all(check['status'] in ('Success', 'Unreachable') for check in checks if check['category'] != 'cover'), 'failed, unknown or incomplete property')
+              unwinding = [check for check in checks if check['category'] == 'unwind']
+              for method, line in LOOPS.values():
+                  matches = [check for check in unwinding if method in check['function'] and 'Dying' in check['function'] and 'String' in check['function'] and 'u64' in check['function'] and check['location']['file'].endswith('/alloc/src/collections/btree/navigate.rs') and str(check['location']['line']) == str(line)]
+                  require(matches and any(check['status'] == 'Success' for check in matches), 'targeted strict unwind property not successfully checked: ' + method)
+              write_new('qualified.json', {'qualified': True, 'push_sha': os.environ['GITHUB_SHA'], 'harness': HARNESS, 'source_sha256': SOURCES, 'model_sha256': binding['model_sha256'], 'source_assertion_sites': 12, 'model_property_count': len(properties), 'actual_property_count': len(raw_results), 'symbolic_inputs': 7, 'covers_satisfied': 5, 'global_unwind': 64, 'per_loop_unwind': 4})
+
+          try:
+              if pathlib.Path(sys.argv[0]).name == 'cbmc':
+                  cbmc_guard()
+              elif sys.argv[1:] == ['source']:
+                  source_gate()
+              elif sys.argv[1:] == ['install']:
+                  install_guard()
+              elif sys.argv[1:] == ['qualify']:
+                  qualify()
+              else:
+                  raise RuntimeError('unknown probe mode')
+          except Exception as error:
+              print('CURRENT_CREATE_PROBE_REFUSED: ' + str(error), file=sys.stderr)
+              raise SystemExit(70)
+          PY
+          python3 "$PROBE_EVIDENCE/probe.py" source
+      - name: Install exactly the existing pinned Kani release
+        uses: model-checking/kani-github-action@69d357bade1eb7b32bc3fc3d5c3d173c5bfa5237 # v1
+        with:
+          kani-version: '0.68.0'
+          command: cargo-kani
+          args: --version
+      - name: Install the guard only inside this job's new Kani bundle
+        run: python3 "$PROBE_EVIDENCE/probe.py" install
+      - name: Run and time the actual unchanged helper proof
+        id: proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          unwindset='_RNvMsn_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB7_4node7NodeRefNtNtB10_6marker5DyingNtNtBb_6string6StringyNtB1k_14LeafOrInternalE15first_leaf_edgeCsls6Niw6mIAT_13mount_rs_core.0:4,_RINvMsj_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB8_4node6HandleINtB11_7NodeRefNtNtB11_6marker5DyingNtNtBc_6string6StringyNtB1z_4LeafENtB1z_4EdgeE16deallocating_endNtNtBc_5alloc6GlobalECsls6Niw6mIAT_13mount_rs_core.0:4,_RINvMsj_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB8_4node6HandleINtB11_7NodeRefNtNtB11_6marker5DyingNtNtBc_6string6StringyNtB1z_4LeafENtB1z_4EdgeE17deallocating_nextNtNtBc_5alloc6GlobalECsls6Niw6mIAT_13mount_rs_core.0:4'
+          status=0
+          /usr/bin/time -v -o "$PROBE_EVIDENCE/proof.resources" ./scripts/cargo-shared kani -p mount-rs-chunked --harness current_fresh_create_rebinds_only_eligible_preparation --verbose -Z unstable-options --export-json "$PROBE_EVIDENCE/proof.json" --cbmc-args --unwindset "$unwindset" --unwinding-assertions 2>&1 | tee "$PROBE_EVIDENCE/proof.log" || status=$?
+          printf '%s\n' "$status" > "$PROBE_EVIDENCE/proof.exit"
+          exit "$status"
+      - name: Require the named completed proof, strict checks and all five covers
+        if: ${{ !cancelled() && steps.proof.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          python3 "$PROBE_EVIDENCE/probe.py" qualify
+          sha256sum "$PROBE_EVIDENCE"/* > "$PROBE_EVIDENCE/SHA256SUMS"
+      - name: Retain complete or incomplete probe evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: current-create-proof-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PROBE_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
