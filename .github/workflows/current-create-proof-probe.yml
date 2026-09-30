@@ -58,7 +58,7 @@ jobs:
           HARNESS = 'create_rebase::verification::current_fresh_create_rebinds_only_eligible_preparation'
           REF = 'refs/heads/codex/full-target-evidence-probe-20260930-1106'
           SOURCES = {
-              'filesystems/mount-rs-chunked/src/create_rebase.rs': '1297d57284a94e33e7f8a10e213ae391864b76bae45e443975a650e0e1d59af1',
+              'filesystems/mount-rs-chunked/src/create_rebase.rs': 'b21e06af38c852a5e81c93751ac16caa3a56942a6c6c4a37a1e50535abe794f0',
               'filesystems/mount-rs-chunked/src/lib.rs': 'bb03103555564854b17c8e59235a2d2c4f590edd24430fe3e57d2c31e2235dee',
               'src/chunking.rs': 'fd1833fa0882a4f57dcd316122caf94b6b1fffff2f3da157839810c55172435a',
               'Cargo.lock': '7e492520ac5fdb132182779ec0c70f1285f321709c451e3efa5755a39e3ea5a5',
@@ -225,7 +225,7 @@ jobs:
                   inventory = read_json('model-properties.json')
                   properties = inventory_items(inventory, 'properties')
                   require(properties and len({prop['name'] for prop in properties}) == len(properties), 'missing or duplicate model properties')
-                  require(any(prop['class'] == 'assertion' and prop['sourceLocation'].get('file', '').endswith('/mount-rs-chunked/src/create_rebase.rs') and str(prop['sourceLocation'].get('line', '')) in ('617', '618', '619', '620') for prop in properties), 'model lacks the symbolic eligibility assertion')
+                  require(any(prop['class'] == 'assertion' and prop['sourceLocation'].get('file', '').endswith('/mount-rs-chunked/src/create_rebase.rs') and str(prop['sourceLocation'].get('line', '')) in ('613', '614', '615', '616') for prop in properties), 'model lacks the symbolic eligibility assertion')
                   require(digest_fd(fd) == model_digest, 'model changed during property admission')
                   retain_model(fd, model_digest)
                   write_new('binding.json', {'model_path': str(model), 'model_sha256': model_digest, 'model_properties_sha256': digest_path(EVIDENCE / 'model-properties.json'), 'model_property_count': len(properties), 'loop_ids': list(LOOPS), 'global_unwind': 64, 'per_loop_unwind': 4, 'strict_unwinding_assertions': True, 'argv': argv, 'started_unix_ns': time.time_ns()})

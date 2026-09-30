@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      FIXTURE_SOURCE_SHA256: 1297d57284a94e33e7f8a10e213ae391864b76bae45e443975a650e0e1d59af1
+      FIXTURE_SOURCE_SHA256: b21e06af38c852a5e81c93751ac16caa3a56942a6c6c4a37a1e50535abe794f0
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -32,7 +32,7 @@ jobs:
         run: |
           printf 'CARGO_TARGET_DIR=%s/current-create-fixture-controls-target-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
           printf 'FIXTURE_EVIDENCE=%s/current-create-fixture-controls-evidence-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
-      - name: Bind the original fixture and isolate the Cargo target
+      - name: Bind the fixture and isolate the Cargo target
         shell: bash
         run: |
           set -euo pipefail
@@ -58,8 +58,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/cargo-shared test --locked -p mount-rs-chunked --lib create_rebase::tests::occupied_array_fixture_preserves_namespace_and_rebase_outcomes -- --exact 2>&1 | tee "$FIXTURE_EVIDENCE/exact-fixture-control.log"
-          grep -Fx 'test create_rebase::tests::occupied_array_fixture_preserves_namespace_and_rebase_outcomes ... ok' "$FIXTURE_EVIDENCE/exact-fixture-control.log"
+          ./scripts/cargo-shared test --locked -p mount-rs-chunked --lib create_rebase::tests::verification_fixture_preserves_namespace_and_rebase_outcomes -- --exact 2>&1 | tee "$FIXTURE_EVIDENCE/exact-fixture-control.log"
+          grep -Fx 'test create_rebase::tests::verification_fixture_preserves_namespace_and_rebase_outcomes ... ok' "$FIXTURE_EVIDENCE/exact-fixture-control.log"
       - name: Run the existing create rebase suite
         shell: bash
         run: |

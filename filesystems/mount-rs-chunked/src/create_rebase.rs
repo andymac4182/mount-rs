@@ -59,25 +59,21 @@ fn verification_root_nodes(
         stats: base_stats(1, S_IFDIR | 0o755, 0, 0, 2, BLOCK_SIZE, 8),
         data: NodeData::Directory { entries },
     };
+    let mut nodes = BTreeMap::new();
+    nodes.insert(1, root);
     if occupied {
-        BTreeMap::from([
-            (1, root),
-            (
-                2,
-                NodeMetadata {
-                    stats: base_stats(2, S_IFREG | 0o644, 0, 0, 1, 0, 0),
-                    data: NodeData::File(FileLayout {
-                        chunker: chunker.clone(),
-                        extents: Vec::new(),
-                    }),
-                },
-            ),
-        ])
-    } else {
-        let mut nodes = BTreeMap::new();
-        nodes.insert(1, root);
-        nodes
+        nodes.insert(
+            2,
+            NodeMetadata {
+                stats: base_stats(2, S_IFREG | 0o644, 0, 0, 1, 0, 0),
+                data: NodeData::File(FileLayout {
+                    chunker: chunker.clone(),
+                    extents: Vec::new(),
+                }),
+            },
+        );
     }
+    nodes
 }
 
 #[cfg(test)]
@@ -119,9 +115,9 @@ mod tests {
     }
 
     #[test]
-    fn occupied_array_fixture_preserves_namespace_and_rebase_outcomes() {
-        // The original setup is an independent reference for representation;
-        // the expected decision below checks the helper's branch precedence.
+    fn verification_fixture_preserves_namespace_and_rebase_outcomes() {
+        // Retain the original serialized representation; explicit keys and
+        // expected decisions check the fixture and helper's branch precedence.
         let scalar_cases = [
             (0, 0, 0),
             (1, 2, 3),
