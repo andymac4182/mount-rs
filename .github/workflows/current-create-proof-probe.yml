@@ -409,6 +409,8 @@ jobs:
           kani-version: '0.68.0'
           command: cargo-kani
           args: --version
+      - name: Install source for exactly the admitted Kani standard library
+        run: rustup component add rust-src --toolchain nightly-2026-08-21-x86_64-unknown-linux-gnu
       - name: Install the guard only inside this job's new Kani bundle
         run: python3 "$PROBE_EVIDENCE/probe.py" install
       - name: Run and time the actual unchanged helper proof
