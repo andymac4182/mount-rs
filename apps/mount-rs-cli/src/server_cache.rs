@@ -600,7 +600,7 @@ mod tests {
     fn filesystem_cache_policy_requires_content_sha256() {
         let provider = StoreConfig::Filesystem {
             root: "blocks".into(),
-            durable: true,
+            persistent: true,
         };
         assert_eq!(
             block_policy(&provider).unwrap(),

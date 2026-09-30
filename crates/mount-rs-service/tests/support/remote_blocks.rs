@@ -166,22 +166,22 @@ fn resolve_filesystem_blocks(
     let root = lookup("MOUNT_RS_FILESYSTEM_ROOT").ok_or("MOUNT_RS_FILESYSTEM_ROOT required")?;
     let root = filesystem_root(&root)?;
     let namespace = filesystem_namespace(prefix)?;
-    if lookup("MOUNT_RS_FILESYSTEM_DURABLE").as_deref() != Some("1") {
-        return Err("MOUNT_RS_FILESYSTEM_DURABLE=1 required for the durable harness".into());
+    if lookup("MOUNT_RS_FILESYSTEM_PERSISTENT").as_deref() != Some("1") {
+        return Err("MOUNT_RS_FILESYSTEM_PERSISTENT=1 required for the persistent harness".into());
     }
     Ok(StoreConfig::Filesystem {
         root: root.join(namespace),
-        durable: true,
+        persistent: true,
     })
 }
 
 pub fn open_filesystem(
     blocks: &StoreConfig,
 ) -> Result<mount_rs_filesystem_blocks::FilesystemBlockStore, String> {
-    let StoreConfig::Filesystem { root, durable } = blocks else {
+    let StoreConfig::Filesystem { root, persistent } = blocks else {
         return Err("filesystem block configuration required".into());
     };
-    mount_rs_filesystem_blocks::FilesystemBlockStore::open(root, *durable)
+    mount_rs_filesystem_blocks::FilesystemBlockStore::open(root, *persistent)
         .map_err(|_| "filesystem block construction failed (redacted)".into())
 }
 
@@ -478,13 +478,13 @@ mod filesystem_selection_tests {
 
     fn selected(
         root: Option<&str>,
-        durable: Option<&str>,
+        persistent: Option<&str>,
         provider: &str,
         prefix: &str,
     ) -> Result<Option<StoreConfig>, String> {
         resolve_blocks(provider, prefix, Some("filesystem"), |name| match name {
             "MOUNT_RS_FILESYSTEM_ROOT" => root.map(str::to_owned),
-            "MOUNT_RS_FILESYSTEM_DURABLE" => durable.map(str::to_owned),
+            "MOUNT_RS_FILESYSTEM_PERSISTENT" => persistent.map(str::to_owned),
             _ => panic!("filesystem selection must not read RustFS or SQL settings"),
         })
     }
@@ -495,10 +495,10 @@ mod filesystem_selection_tests {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(store, StoreConfig::Filesystem { root, durable: true }
+            matches!(store, StoreConfig::Filesystem { root, persistent: true }
             if root == std::path::Path::new(ROOT).join("target/drive-4/blocks"))
         );
-        for durable in [
+        for persistent in [
             None,
             Some(""),
             Some("0"),
@@ -506,7 +506,7 @@ mod filesystem_selection_tests {
             Some(" 1"),
             Some("1\n"),
         ] {
-            assert!(selected(Some(ROOT), durable, "tidb", "target/drive-4/blocks").is_err());
+            assert!(selected(Some(ROOT), persistent, "tidb", "target/drive-4/blocks").is_err());
         }
         assert!(selected(None, Some("1"), "tidb", "target/drive-4/blocks").is_err());
         for provider in ["sqlite", "pglite", "foundationdb", ""] {
@@ -559,7 +559,7 @@ mod filesystem_selection_tests {
         let selected = selected(Some(ROOT), Some("1"), "tidb", "target/blocks").unwrap();
         let child = child_blocks(&selected, 7).unwrap();
         assert!(
-            matches!(child, StoreConfig::Filesystem { root, durable: true }
+            matches!(child, StoreConfig::Filesystem { root, persistent: true }
             if root == std::path::Path::new(ROOT).join("target/blocks/sandbox-7"))
         );
         assert!(require_online_preparation(&selected).is_err());

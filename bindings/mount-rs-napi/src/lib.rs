@@ -2562,6 +2562,10 @@ impl BlockStore for DynBlockStore {
         self.0.durable()
     }
 
+    fn persistent(&self) -> bool {
+        self.0.persistent()
+    }
+
     fn prepare_concurrent_backing<'a, 'async_trait>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = CoreResult<ConcurrentBackingId>> + Send + 'async_trait>>

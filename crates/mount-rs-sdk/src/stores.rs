@@ -1128,6 +1128,10 @@ impl BlockStore for ErasedBlockStore {
         result
     }
 
+    fn persistent(&self) -> bool {
+        self.inner.persistent()
+    }
+
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         let mut storage_span =
             StorageSpan::new(StorageOperation::SdkBlocksPrepareConcurrentBacking);
@@ -1337,6 +1341,10 @@ mod tests {
     #[async_trait]
     impl BlockStore for IdentityProbeBlockStore {
         fn durable(&self) -> bool {
+            false
+        }
+
+        fn persistent(&self) -> bool {
             true
         }
 
@@ -1381,6 +1389,8 @@ mod tests {
         let erased = ErasedBlockStore::new(inner, Telemetry::disabled());
         #[cfg(not(feature = "observability"))]
         let erased = ErasedBlockStore::new(inner);
+        assert!(!erased.durable());
+        assert!(erased.persistent());
         assert_eq!(erased.prepare_concurrent_backing().await.unwrap(), id);
         erased.verify_concurrent_backing(id).await.unwrap();
         let different = ConcurrentBackingId::from_bytes([0x92; 16]).unwrap();

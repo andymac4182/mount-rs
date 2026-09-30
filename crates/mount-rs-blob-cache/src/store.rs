@@ -708,6 +708,9 @@ impl BlockStore for CachedBlockStore {
     fn durable(&self) -> bool {
         self.backing.durable()
     }
+    fn persistent(&self) -> bool {
+        self.backing.persistent()
+    }
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         let epoch = self.cache.identity_epoch(&self.identity);
         match self.backing.prepare_concurrent_backing().await {

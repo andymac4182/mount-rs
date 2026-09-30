@@ -16,7 +16,7 @@
       "blocks": {
         "kind": "filesystem",
         "root": "./filesystem-blocks",
-        "durable": true
+        "persistent": true
       },
       "chunk_size_bytes": 65536,
       "concurrent_writes": true,

@@ -154,7 +154,7 @@ point. It constructs the selected filesystem through the public
 `mount-rs-sdk::Filesystem` facade, writes and reads a binary file through the
 shared `FsDriver` contract, synchronizes it, and cleans it up. With
 `--config PATH --reopen`, it shuts down the first SDK filesystem, opens the
-configured durable provider again, verifies the persisted bytes, and then
+configured persistent provider again, verifies the retained bytes, and then
 removes the test file. The default command uses memfs; a structured SQLite
 split-store config is a portable durable example:
 
@@ -251,15 +251,18 @@ TiDB metadata can also use direct filesystem blocks:
 
 ```json
 "metadata": {"kind": "tidb", "connection": {"env": "MOUNT_RS_TIDB_URL"}, "volume_key": "drive-one", "durable": true},
-"blocks": {"kind": "filesystem", "root": "/owned/drive-one/blocks", "durable": true}
+"blocks": {"kind": "filesystem", "root": "/owned/drive-one/blocks", "persistent": true}
 ```
 
 Start from `examples/config-tidb-filesystem.json`. The block root must already
 exist, belong to the process user and have mode `0700`; every path component
 must be a real directory rather than a symlink. Relative `root` paths resolve
-against the config file. Filesystem `durable` defaults to true and asserts the
-deployment's durability; setting false still performs the same persistence
-barriers. Independent servers sharing a Drive
+against the config file. Filesystem `persistent` defaults to true and asserts
+availability after owned shutdown and process reopen while the OS/backing
+survive. All filesystem writes use normal OS writeback with no forced syncs.
+The provider reports `durable_writes: false`; OS crashes or power loss can lose
+acknowledged blobs referenced by committed TiDB metadata. The old filesystem
+`durable` configuration field is rejected. Independent servers sharing a Drive
 must access the same block directory and persisted backing marker. Separate
 server-local disks require a shared storage design before they can hold one
 Drive's authority. The configured RustFS cold-holder admission remains

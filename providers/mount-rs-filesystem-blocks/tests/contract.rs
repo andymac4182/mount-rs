@@ -24,7 +24,7 @@ fn object_path(root: &Path, id: &BlockId) -> PathBuf {
 }
 
 #[tokio::test]
-async fn durable_roundtrip_reopens_the_same_backing_identity() {
+async fn writeback_roundtrip_reopens_the_same_backing_identity() {
     let (_parent, root) = root();
     let first = FilesystemBlockStore::open(&root, true).unwrap();
     let identity = first.prepare_concurrent_backing().await.unwrap();
@@ -37,7 +37,8 @@ async fn durable_roundtrip_reopens_the_same_backing_identity() {
     second.verify_concurrent_backing(identity).await.unwrap();
     assert_eq!(second.get_for_migration(&id).await.unwrap(), bytes);
     assert_eq!(second.put(bytes).await.unwrap(), id);
-    assert!(second.durable());
+    assert!(!first.durable() && !second.durable());
+    assert!(first.persistent() && second.persistent());
 }
 
 #[tokio::test]
@@ -100,6 +101,17 @@ async fn independent_contexts_concurrently_publish_identical_bytes() {
             .to_string_lossy()
             .starts_with("_mount-rs-stage-")
     }));
+    assert!(
+        std::fs::read_dir(root.join(&id.0[1..3]))
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("_mount-rs-stage-")
+            })
+    );
 }
 
 #[tokio::test]
@@ -299,6 +311,7 @@ async fn unsupported_maintenance_never_deletes_immutable_data() {
     let store = FilesystemBlockStore::open(&root, false).unwrap();
     let id = store.put(b"retained").await.unwrap();
     assert!(!store.durable());
+    assert!(!store.persistent());
     assert!(store.delete(&id).await.unwrap_err().is(ErrorCode::Enotsup));
     assert!(
         store

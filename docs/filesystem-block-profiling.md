@@ -19,14 +19,14 @@ no paths, block identifiers, Drive identifiers, credentials or payloads.
 | `input_copy`, `content_id` | Owned input copy and content hashing/identifier construction |
 | `initial_authority`, `shard_open`, `existing_verify` | Root/marker checks, shard access and full existing-content verification |
 | `stage_create_write`, `before_publish_authority`, `publish_name` | Staging write, authority checks and create-only publication attempt |
-| `file_sync`, `file_device_sync` | Regular-file sync and the subsequent device helper |
-| `shard_sync`, `root_sync`, `post_directory_device_sync` | Directory syncs and the final winning-file device helper |
-| `final_authority` | The existing checks after persistence barriers |
+| `file_sync`, `file_device_sync` | Reserved inactive rows; always zero with OS writeback |
+| `shard_sync`, `root_sync`, `post_directory_device_sync` | Reserved inactive rows; always zero with OS writeback |
+| `final_authority` | Root/marker and shard checks before successful acknowledgment |
 
 Waiter timing begins after input copy and admission checks. Constructors and
-their backing-marker barriers are excluded. Flush still performs its two
-authority checks without replaying PUT barriers or draining outstanding PUTs.
-All persistence operations retain their existing order.
+their marker initialization/checks are excluded. Flush performs its two
+authority checks without forcing OS writeback or draining outstanding PUTs.
+Constructor and PUT paths also issue no forced file/directory/device syncs.
 
 Each row retains starts, absolute inflight work, success/error/abandoned
 terminals, cumulative elapsed nanoseconds, lifetime maximum nanoseconds and
@@ -37,9 +37,11 @@ fail. A failed create-only rename can lead to a successful race-existing PUT.
 
 Durations overlap: the worker contains most PUT stages. They are wall time,
 not exclusive CPU time. Offered bytes count starts, including failure and
-abandonment; they are not bytes durably written. Device rows count helper
-invocations. `device_barrier_supported` distinguishes macOS's device helper
-from Linux's no-op helper. Neither row is physical device IOPS.
+abandonment; they are not bytes durably written. The five legacy sync rows
+remain in the fixed schema to identify unexpected forcing; normal writeback
+leaves them zero. `device_barrier_supported` is false on all platforms. These
+rows are not physical device IOPS. Historical forced-sync captures retain
+their original source-bound meanings.
 
 ## Snapshot quality and allocation scope
 
@@ -87,5 +89,7 @@ identity, filesystem block selection and rejection of changed root authority.
 The harness requires one named passed SDK test, its exact phase marker and
 Cargo status zero before the CLI self-test. Its stdout capture is capped at
 64 KiB and refuses skipped or filtered tests. The CLI performs its own write,
-sync, truncate and reopen round trip in each phase. This route is mount free;
+provider flush, truncate and reopen round trip in each phase. Filesystem
+`durable_writes` remains false; flush verifies authority without forcing
+writeback. This route is mount free;
 it does not qualify mounted traffic, cross-host roots or physical power loss.

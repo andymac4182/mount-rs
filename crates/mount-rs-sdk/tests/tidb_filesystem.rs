@@ -52,11 +52,6 @@ fn private_write(path: &Path, bytes: &[u8]) {
         .open(path)
         .unwrap();
     file.write_all(bytes).unwrap();
-    file.sync_all().unwrap();
-    fs::File::open(path.parent().unwrap())
-        .unwrap()
-        .sync_all()
-        .unwrap();
 }
 
 fn json_string(value: &str) -> String {
@@ -75,7 +70,7 @@ fn json_string(value: &str) -> String {
 
 fn cli_config(key: &str, root: &Path) -> String {
     format!(
-        "{{\"version\":1,\"driver\":{{\"kind\":\"splitstore\",\"storage\":{{\"metadata\":{{\"kind\":\"tidb\",\"connection\":{{\"env\":\"MOUNT_RS_TIDB_URL\"}},\"volume_key\":{},\"durable\":true}},\"blocks\":{{\"kind\":\"filesystem\",\"root\":{},\"durable\":true}},\"chunk_size_bytes\":4096,\"concurrent_writes\":true,\"inode_updates\":true,\"compact_inode_updates\":true}}}}}}\n",
+        "{{\"version\":1,\"driver\":{{\"kind\":\"splitstore\",\"storage\":{{\"metadata\":{{\"kind\":\"tidb\",\"connection\":{{\"env\":\"MOUNT_RS_TIDB_URL\"}},\"volume_key\":{},\"durable\":true}},\"blocks\":{{\"kind\":\"filesystem\",\"root\":{},\"persistent\":true}},\"chunk_size_bytes\":4096,\"concurrent_writes\":true,\"inode_updates\":true,\"compact_inode_updates\":true}}}}}}\n",
         json_string(key),
         json_string(root.to_str().unwrap()),
     )
@@ -93,7 +88,7 @@ fn options(connection: &str, key: &str, root: &Path, owner: &str) -> SplitOption
     };
     options.blocks = StoreConfig::Filesystem {
         root: root.into(),
-        durable: true,
+        persistent: true,
     };
     options
 }
@@ -165,7 +160,7 @@ async fn assert_file(filesystem: &Filesystem, path: &str, expected: &[u8]) {
 
 #[tokio::test]
 #[ignore = "requires the owned durable TiDB harness and private filesystem root"]
-async fn actual_tidb_filesystem_durable_peer_writes_reopen_and_root_authority() {
+async fn actual_tidb_filesystem_writeback_peer_writes_reopen_and_root_authority() {
     assert_eq!(required("MOUNT_RS_TIDB_FILESYSTEM"), "1");
     assert_eq!(required("MOUNT_RS_TIDB_TOPOLOGY"), "durable");
     let run = required("MOUNT_RS_TIDB_RUN_ID");
@@ -247,6 +242,7 @@ async fn actual_tidb_filesystem_durable_peer_writes_reopen_and_root_authority() 
     let first = Filesystem::split_with_context(first_options.clone(), &first_context)
         .await
         .unwrap();
+    assert!(!first.driver().capabilities().durable_writes);
     let backing = first.concurrent_backing_id().unwrap();
     if let Some(retained) = retained {
         assert_eq!(backing, retained);
@@ -260,6 +256,7 @@ async fn actual_tidb_filesystem_durable_peer_writes_reopen_and_root_authority() 
         )
         .await
         .unwrap();
+        assert!(!peer.driver().capabilities().durable_writes);
         assert_eq!(peer.concurrent_backing_id(), Some(backing));
         let first_view = Loopback::from_arc(first.driver());
         let peer_view = Loopback::from_arc(peer.driver());
@@ -312,6 +309,7 @@ async fn actual_tidb_filesystem_durable_peer_writes_reopen_and_root_authority() 
     let reopened = Filesystem::split_with_context(reopened_options, &reopened_context)
         .await
         .unwrap();
+    assert!(!reopened.driver().capabilities().durable_writes);
     assert_eq!(reopened.concurrent_backing_id(), Some(backing));
     assert_file(&reopened, FILE_A, &bytes_a).await;
     assert_file(&reopened, FILE_B, &bytes_b).await;

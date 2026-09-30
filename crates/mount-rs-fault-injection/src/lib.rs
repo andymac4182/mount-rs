@@ -1735,6 +1735,10 @@ where
         self.inner.durable()
     }
 
+    fn persistent(&self) -> bool {
+        self.inner.persistent()
+    }
+
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         self.inner.prepare_concurrent_backing().await
     }

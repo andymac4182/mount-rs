@@ -1,22 +1,22 @@
 # Filesystem blocks implementation plan
 
-**Goal:** Compare the existing TiDB metadata path with durable host filesystem blobs through the existing QUIC workload.
+**Goal:** Compare the existing TiDB metadata path with persistent host filesystem blobs using normal OS writeback through the existing QUIC workload.
 
 **Architecture:** Add a compiled block-only provider with immutable content identities and persisted authority, expose it through SDK/CLI configuration, and extend the native benchmark's owned-blob selector and direct oracle. Keep existing storage providers and workload geometry intact.
 
-**Global constraints:** Linux/macOS, same-host shared root; durable file and directory barriers; no symlink traversal or root replacement; no implicit cleanup; original eight containers/six volumes preserved; 64 GiB host-free floor; bounded evidence/deadlines; no automatic replay of unknown outcomes. Root applies source edits and executes every check; delegated workers prepare source-only patches and reviews.
+**Global constraints:** Linux/macOS, same-host shared root; no forced file/directory/device synchronization; durable=false with explicit persistent capability; no symlink traversal or root replacement; no implicit cleanup; original eight containers/six volumes preserved; 64 GiB host-free floor; bounded evidence/deadlines; no automatic replay of unknown outcomes. Root applies source edits and executes every check; delegated workers prepare source-only patches and reviews.
 
 ## 1. Provider
 
 - [ ] Apply the manifest, separable integration tests and ENOTSUP scaffold for `providers/mount-rs-filesystem-blocks`.
 - [ ] Run the real provider controls against the scaffold and confirm missing behavior fails. Use `scripts/cargo-shared test -p mount-rs-filesystem-blocks --offline -- --test-threads=1` under the bounded command owner.
-- [ ] Implement `FilesystemBlockStore::open(root, durable)` and the BlockStore methods using descriptor-relative Unix operations, SHA-256 sharding, private staging, atomic non-overwriting publication, file/directory barriers and stable marker verification.
+- [ ] Implement `FilesystemBlockStore::open(root, persistent)` and the BlockStore methods using descriptor-relative Unix operations, SHA-256 sharding, private staging, atomic non-overwriting publication, normal OS writeback and stable marker verification.
 - [ ] Run provider controls and strict Clippy; fix concrete failures before integration.
 
 ## 2. SDK and CLI
 
 - [ ] Add block-only selection controls first. Check an independent TiDB/Filesystem composition, reopen and exact bytes.
-- [ ] Add `StoreConfig::Filesystem { root, durable }`, context construction, CLI parser and runtime/cache mappings. Reject metadata selection and preserve existing provider behavior.
+- [ ] Add `StoreConfig::Filesystem { root, persistent }`, context construction, CLI parser and runtime/cache mappings. Reject metadata selection and preserve existing provider behavior.
 - [ ] Run formatting, SDK/CLI focused tests and strict all-target Clippy through `scripts/cargo-shared` with the isolated shared target.
 
 ## 3. Native admission and oracle

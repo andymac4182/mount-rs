@@ -940,7 +940,7 @@ fn filesystem_blocks_are_not_admitted_by_the_rustfs_cold_holder() {
     let mut configured = options(false);
     configured.blocks = StoreConfig::Filesystem {
         root: "local-drive-blocks".into(),
-        durable: true,
+        persistent: true,
     };
     assert!(
         DriverRuntimePlan::split_plan_for_holder_tests(configured)

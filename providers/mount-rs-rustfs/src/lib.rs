@@ -620,6 +620,10 @@ impl BlockStore for RustFsBlockStore {
         self.blocks.durable()
     }
 
+    fn persistent(&self) -> bool {
+        self.blocks.persistent()
+    }
+
     async fn prepare_concurrent_backing(
         &self,
     ) -> Result<mount_rs_core::storage::ConcurrentBackingId> {

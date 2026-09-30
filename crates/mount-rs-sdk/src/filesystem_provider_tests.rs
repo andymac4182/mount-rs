@@ -33,37 +33,39 @@ impl Drop for OwnedDirectory {
 }
 
 #[tokio::test]
-async fn filesystem_blocks_preserve_roots_durability_and_independent_context_reopen() {
+async fn filesystem_blocks_preserve_roots_persistence_and_independent_context_reopen() {
     let directory = OwnedDirectory::new();
     let context = StorageContext::new(1).unwrap();
-    for durable in [false, true] {
-        let root = directory.0.join(format!("blocks-{durable}"));
+    for persistent in [false, true] {
+        let root = directory.0.join(format!("blocks-{persistent}"));
         OwnedDirectory::create(&root);
         let config = StoreConfig::Filesystem {
             root: root.clone(),
-            durable,
+            persistent,
         };
         let (first, resources) = open_blocks(&config, Some(&context), None).await.unwrap();
         assert!(resources.is_empty());
-        assert_eq!(first.durable(), durable);
+        assert!(!first.durable());
+        assert_eq!(first.persistent(), persistent);
         let id = first.put(b"filesystem SDK bytes").await.unwrap();
         first.flush().await.unwrap();
         let backing = first.prepare_concurrent_backing().await.unwrap();
         drop(first);
         let (reopened, resources) = open_blocks(&config, None, None).await.unwrap();
         assert!(resources.is_empty());
-        assert_eq!(reopened.durable(), durable);
+        assert!(!reopened.durable());
+        assert_eq!(reopened.persistent(), persistent);
         reopened.verify_concurrent_backing(backing).await.unwrap();
         assert_eq!(
             reopened.prepare_concurrent_backing().await.unwrap(),
             backing
         );
         assert_eq!(reopened.get(&id).await.unwrap(), b"filesystem SDK bytes");
-        let other_root = directory.0.join(format!("other-{durable}"));
+        let other_root = directory.0.join(format!("other-{persistent}"));
         OwnedDirectory::create(&other_root);
         let other = StoreConfig::Filesystem {
             root: other_root,
-            durable,
+            persistent,
         };
         let (different, _) = open_blocks(&other, Some(&context), None).await.unwrap();
         assert_ne!(
@@ -82,7 +84,7 @@ async fn filesystem_metadata_rejects_before_creating_the_directory() {
     let root = directory.0.join("metadata-is-not-filesystem");
     let config = StoreConfig::Filesystem {
         root: root.clone(),
-        durable: true,
+        persistent: true,
     };
     let error = open_metadata(&config, &StoreConfig::Memory, None, None)
         .await
@@ -102,7 +104,7 @@ async fn filesystem_blocks_do_not_create_a_directory_after_context_close() {
         &StoreConfig::Memory,
         &StoreConfig::Filesystem {
             root: root.clone(),
-            durable: true,
+            persistent: true,
         },
         None,
         Some(&context),
@@ -126,11 +128,12 @@ async fn filesystem_blocks_reopen_through_the_public_split_driver() {
     OwnedDirectory::create(&blocks_root);
     options.blocks = StoreConfig::Filesystem {
         root: blocks_root,
-        durable: true,
+        persistent: true,
     };
     let first = Filesystem::split_with_context(options.clone(), &context)
         .await
         .unwrap();
+    assert!(!first.driver().capabilities().durable_writes);
     let first_view = Loopback::from_arc(first.driver());
     first_view
         .write_file("/roundtrip", b"multiple immutable chunks")
@@ -143,6 +146,7 @@ async fn filesystem_blocks_reopen_through_the_public_split_driver() {
     let second = Filesystem::split_with_context(options, &context)
         .await
         .unwrap();
+    assert!(!second.driver().capabilities().durable_writes);
     let second_view = Loopback::from_arc(second.driver());
     assert_eq!(
         second_view.read_file("/roundtrip").await.unwrap(),

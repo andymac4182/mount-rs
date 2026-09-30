@@ -18,11 +18,13 @@ pub enum StoreConfig {
     /// Immutable blocks stored in an existing owned 0700 filesystem directory.
     /// Every server using a Drive must see the same directory and backing identity.
     /// This provider is block-only; metadata remains independent. Block operations
-    /// require an active Tokio runtime. Opening validates and synchronizes its
-    /// identity marker synchronously; callers must include that in startup timing.
+    /// require an active Tokio runtime. Opening validates its identity marker
+    /// synchronously; callers must include that in startup timing. Writes use
+    /// normal OS writeback without forced synchronization. `persistent` asserts
+    /// process-restart persistence, not power-loss-safe acknowledgments.
     Filesystem {
         root: PathBuf,
-        durable: bool,
+        persistent: bool,
     },
     Sqlite {
         path: PathBuf,
@@ -90,10 +92,10 @@ impl fmt::Debug for StoreConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => formatter.write_str("Memory"),
-            Self::Filesystem { root, durable } => formatter
+            Self::Filesystem { root, persistent } => formatter
                 .debug_struct("Filesystem")
                 .field("root", root)
-                .field("durable", durable)
+                .field("persistent", persistent)
                 .finish(),
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")

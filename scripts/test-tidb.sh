@@ -737,7 +737,7 @@ run_filesystem_provider_test() {
       MOUNT_RS_TIDB_FILESYSTEM_WITNESS="$filesystem_witness" \
       MOUNT_RS_TIDB_FILESYSTEM_CLI_CONFIG="$filesystem_cli_config" \
         "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-sdk --test tidb_filesystem \
-          -- --ignored --exact actual_tidb_filesystem_durable_peer_writes_reopen_and_root_authority \
+          -- --ignored --exact actual_tidb_filesystem_writeback_peer_writes_reopen_and_root_authority \
           --nocapture --test-threads=1 --color never; then
       filesystem_sdk_exit=0
     else

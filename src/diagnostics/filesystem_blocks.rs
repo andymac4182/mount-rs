@@ -5,6 +5,9 @@
 //! never evidence of caller acknowledgement, durable storage or worker drain.
 //! Offered bytes are counted at start, including failed or abandoned work.
 //! Serialization and observer construction are outside warmed update claims.
+//! The filesystem provider uses OS writeback and leaves file_sync,
+//! file_device_sync, shard_sync, root_sync and post_directory_device_sync
+//! inactive. Their IDs remain reserved in the fixed stage schema.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -103,9 +106,9 @@ pub struct Snapshot {
     pub saturated: bool,
     /// Observed concurrent update; false is not a transactional snapshot proof.
     pub concurrent_activity: bool,
-    /// True only where the provider's device barrier performs F_FULLFSYNC.
-    /// Device-stage calls count helper invocations, including a platform no-op.
-    /// A false value means helper completion is not a device syscall observation.
+    /// Whether the provider performs a forced device barrier.
+    /// Always false for OS writeback, independently of platform syscall availability.
+    /// Reserved device-stage counters are not emitted by the filesystem provider.
     pub device_barrier_supported: bool,
 }
 
@@ -120,7 +123,7 @@ impl Default for Snapshot {
             stages: [CounterSnapshot::default(); STAGE_COUNT],
             saturated: false,
             concurrent_activity: false,
-            device_barrier_supported: cfg!(target_os = "macos"),
+            device_barrier_supported: false,
         }
     }
 }
@@ -717,7 +720,7 @@ mod tests {
             snapshot.put_path_names,
             ["existing", "created", "race_existing"]
         );
-        assert_eq!(snapshot.device_barrier_supported, cfg!(target_os = "macos"));
+        assert!(!snapshot.device_barrier_supported);
         let encoded = serde_json::to_value(snapshot).unwrap();
         numeric_tree(&encoded["operations"]);
         numeric_tree(&encoded["stages"]);

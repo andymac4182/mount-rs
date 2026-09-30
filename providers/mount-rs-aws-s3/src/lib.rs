@@ -164,6 +164,10 @@ impl BlockStore for AwsS3BlockStore {
         self.0.durable()
     }
 
+    fn persistent(&self) -> bool {
+        self.0.persistent()
+    }
+
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         match &self.1 {
             Some(probe) => {

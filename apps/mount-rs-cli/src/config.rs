@@ -65,7 +65,7 @@ pub enum StorageProvider {
     Memory,
     Filesystem {
         root: PathBuf,
-        durable: bool,
+        persistent: bool,
     },
     Sqlite {
         path: PathBuf,
@@ -119,10 +119,10 @@ impl fmt::Debug for StorageProvider {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => formatter.write_str("Memory"),
-            Self::Filesystem { root, durable } => formatter
+            Self::Filesystem { root, persistent } => formatter
                 .debug_struct("Filesystem")
                 .field("root", root)
-                .field("durable", durable)
+                .field("persistent", persistent)
                 .finish(),
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
@@ -898,12 +898,12 @@ fn parse_provider(
                     "provider 'filesystem' is block-only; select an independent metadata provider",
                 ));
             }
-            reject_unknown(object, &["kind", "root", "durable"], path)?;
+            reject_unknown(object, &["kind", "root", "persistent"], path)?;
             StorageProvider::Filesystem {
                 root: required_path(object, "root", path, base_dir)?,
-                durable: object
-                    .get("durable")
-                    .map(|value| required_value_bool(value, &format!("{path}.durable")))
+                persistent: object
+                    .get("persistent")
+                    .map(|value| required_value_bool(value, &format!("{path}.persistent")))
                     .transpose()?
                     .unwrap_or(true),
             }
@@ -2909,12 +2909,15 @@ mod tests {
         });
         let parsed = parse_config_str(&value.to_string(), Path::new("/owned/config")).unwrap();
         assert!(matches!(parsed.storage.unwrap().blocks,
-            StorageProvider::Filesystem { root, durable: true } if root == Path::new("/owned/config/drive-one/blocks")));
-        value["driver"]["storage"]["blocks"]["durable"] = serde_json::json!(false);
+            StorageProvider::Filesystem { root, persistent: true } if root == Path::new("/owned/config/drive-one/blocks")));
+        value["driver"]["storage"]["blocks"]["persistent"] = serde_json::json!(false);
         let parsed = parse_config_str(&value.to_string(), Path::new("/owned/config")).unwrap();
         assert!(matches!(
             parsed.storage.unwrap().blocks,
-            StorageProvider::Filesystem { durable: false, .. }
+            StorageProvider::Filesystem {
+                persistent: false,
+                ..
+            }
         ));
     }
 
@@ -2938,7 +2941,8 @@ mod tests {
             serde_json::json!({"kind":"filesystem"}),
             serde_json::json!({"kind":"filesystem", "root":""}),
             serde_json::json!({"kind":"filesystem", "root":9}),
-            serde_json::json!({"kind":"filesystem", "root":"blocks", "durable":"yes"}),
+            serde_json::json!({"kind":"filesystem", "root":"blocks", "persistent":"yes"}),
+            serde_json::json!({"kind":"filesystem", "root":"blocks", "durable":true}),
             serde_json::json!({"kind":"filesystem", "root":"blocks", "bucket":"ignored"}),
         ] {
             assert!(

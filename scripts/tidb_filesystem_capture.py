@@ -11,7 +11,7 @@ from native_backing_pair.artifacts import read_artifact
 from native_backing_pair.contracts import ContractError
 
 CAPTURE_CAP = 65536
-SDK_NAME = "actual_tidb_filesystem_durable_peer_writes_reopen_and_root_authority"
+SDK_NAME = "actual_tidb_filesystem_writeback_peer_writes_reopen_and_root_authority"
 PHASE_MARKERS = {
     "0": "TIDB_FILESYSTEM_SEED_PASS full_bytes=verified peer_contexts=verified fresh_reopen=verified root_authority=verified sql_blocks=0",
     "1": "TIDB_FILESYSTEM_REOPEN_PASS retained_backing=verified pre_constructor_sql=verified full_bytes=verified fresh_reopen=verified sql_blocks=0",

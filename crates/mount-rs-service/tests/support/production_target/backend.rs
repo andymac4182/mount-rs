@@ -104,7 +104,7 @@ impl Backend {
                             }
                             StoreConfig::Filesystem {
                                 root,
-                                durable: true,
+                                persistent: true,
                             } => {
                                 let namespace = root
                                     .parent()
@@ -222,7 +222,7 @@ mod receipt_pooling_tests {
                         "MOUNT_RS_FILESYSTEM_ROOT" => {
                             "/private/tmp/mount-rs-filesystem-0123456789abcdef01234567"
                         }
-                        "MOUNT_RS_FILESYSTEM_DURABLE" => "1",
+                        "MOUNT_RS_FILESYSTEM_PERSISTENT" => "1",
                         _ => panic!("filesystem plans must not read RustFS configuration"),
                     }
                     .into(),
@@ -246,7 +246,7 @@ mod receipt_pooling_tests {
                 "/private/tmp/mount-rs-filesystem-0123456789abcdef01234567/owned-target/drive-{drive}/blocks"
             );
             assert!(
-                matches!(options.blocks, StoreConfig::Filesystem {root,durable:true}
+                matches!(options.blocks, StoreConfig::Filesystem {root,persistent:true}
                 if root == std::path::Path::new(&expected_root))
             );
         }

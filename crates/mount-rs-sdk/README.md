@@ -68,7 +68,7 @@ tombstones and failed publication blocks until a distributed pin and safe
 reclamation protocol exists, so monitor storage growth on long-running
 volumes.
 
-`StoreConfig::Filesystem { root, durable }` stores immutable blocks directly in
+`StoreConfig::Filesystem { root, persistent }` stores immutable blocks directly in
 an existing filesystem directory and can be paired with TiDB metadata. Create
 an owned directory with mode `0700` first and use its physical absolute path;
 symlinks in any path component are refused. Reopening verifies the persisted
@@ -76,11 +76,15 @@ backing identity. Servers sharing a Drive must access the same directory and
 marker; unrelated local disks do not provide shared block storage.
 
 Filesystem block operations require an active Tokio runtime. Opening performs
-marker reads and synchronization synchronously on the provider construction
-path; include this cold startup work in construction measurements. With
-`durable: true`, block writes complete the provider's filesystem durability
-barrier before acknowledgment. `durable: false` is suitable for explicitly
-non-durable tests. Metadata selection rejects this block-only provider with
+marker initialization and authority checks synchronously on the provider
+construction path; include this cold startup work in construction measurements.
+The OS performs normal writeback: no forced file, directory or device syncs.
+`persistent: true` asserts availability after owned shutdown and process reopen
+while the OS/backing survive, allowing healthy runtime eviction. It does not
+guarantee stable-storage acknowledgment: `durable_writes` remains false, and
+OS crashes/power loss can lose blobs already referenced by committed TiDB
+metadata. Use `persistent: false` for ephemeral backing. Metadata selection
+rejects this block-only provider with
 `ENOTSUP`, and unsupported native targets fail closed. The existing mount
 adapters and default provider selection are unchanged.
 

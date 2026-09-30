@@ -22,12 +22,9 @@ const DIR_FLAGS: i32 = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | l
 const FILE_FLAGS: i32 = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OpenBarrier {
-    StagingFile,
-    MarkerFile,
-    RootDirectory,
-    ParentDirectory,
-    FinalDevice,
+enum OpenCheckpoint {
+    BeforeMarkerPublication,
+    BeforeFinalVerification,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +49,7 @@ struct Inner {
     root_identity: Identity,
     marker_identity: Identity,
     backing: ConcurrentBackingId,
-    durable: bool,
+    persistent: bool,
     observer: Observer,
     #[cfg(test)]
     faults: test_support::Faults,
@@ -61,29 +58,26 @@ struct Inner {
 /// Immutable blocks shared by independent contexts using the same local root.
 ///
 /// `open` requires an existing, effective-user-owned directory with mode 0700.
-/// It synchronously establishes and durably reads its backing marker. Async
+/// It synchronously establishes and checks its backing marker. Writes use OS
+/// writeback without forcing file, directory or device synchronization. Async
 /// operations own their input and descriptors in a Tokio blocking task; dropping
-/// an awaiting future cannot interrupt an admitted publication or its barriers.
+/// an awaiting future cannot interrupt an admitted publication.
 #[derive(Clone, Debug)]
 pub struct FilesystemBlockStore {
     inner: Arc<Inner>,
 }
 
 impl FilesystemBlockStore {
-    pub fn open(root: impl AsRef<Path>, durable: bool) -> Result<Self> {
-        Self::open_with_barriers(root.as_ref(), durable, |point, file| match point {
-            OpenBarrier::StagingFile | OpenBarrier::MarkerFile => file_barrier(file),
-            OpenBarrier::RootDirectory | OpenBarrier::ParentDirectory => {
-                file.sync_all().map_err(io_error)
-            }
-            OpenBarrier::FinalDevice => final_device_barrier(file),
-        })
+    /// `persistent` asserts that the deployment retains this root across process
+    /// restarts. It does not request forced synchronization or stable-storage ACKs.
+    pub fn open(root: impl AsRef<Path>, persistent: bool) -> Result<Self> {
+        Self::open_with_checkpoints(root.as_ref(), persistent, |_| Ok(()))
     }
 
-    fn open_with_barriers(
+    fn open_with_checkpoints(
         root: &Path,
-        durable: bool,
-        mut barrier: impl FnMut(OpenBarrier, &File) -> Result<()>,
+        persistent: bool,
+        mut checkpoint: impl FnMut(OpenCheckpoint) -> Result<()>,
     ) -> Result<Self> {
         let components = root_components(root)?;
         let directory = walk_root(&components)?;
@@ -109,7 +103,7 @@ impl FilesystemBlockStore {
                 bytes[4..].copy_from_slice(&backing.as_bytes());
                 let mut stage = Stage::create(&directory)?;
                 stage.file.write_all(&bytes).map_err(io_error)?;
-                barrier(OpenBarrier::StagingFile, &stage.file)?;
+                checkpoint(OpenCheckpoint::BeforeMarkerPublication)?;
                 stage.verify_named()?;
                 match rename_create_only(&directory, &stage.name, &directory, MARKER) {
                     Ok(()) => stage.published(),
@@ -126,12 +120,7 @@ impl FilesystemBlockStore {
             }
         };
         let (backing, marker_identity) = read_marker(&marker)?;
-        // A second opener completes the marker's barriers too: observing a
-        // name is insufficient evidence that its creator finished its syncs.
-        barrier(OpenBarrier::MarkerFile, &marker)?;
-        barrier(OpenBarrier::RootDirectory, &directory)?;
-        barrier(OpenBarrier::ParentDirectory, &parent)?;
-        barrier(OpenBarrier::FinalDevice, &marker)?;
+        checkpoint(OpenCheckpoint::BeforeFinalVerification)?;
         if checked_directory(&walk_root(&components)?)? != root_identity {
             return Err(stale("filesystem block root changed during initialization"));
         }
@@ -160,7 +149,7 @@ impl FilesystemBlockStore {
                 root_identity,
                 marker_identity,
                 backing,
-                durable,
+                persistent,
                 observer: if cfg!(feature = "io-profiling") {
                     Observer::enabled()
                 } else {
@@ -308,21 +297,24 @@ impl Inner {
     fn put(&self, bytes: Vec<u8>) -> Result<BlockId> {
         self.measured(MetricStage::InitialAuthority, 0, || self.verify())?;
         #[cfg(test)]
-        let mut _completion = None;
+        let mut _pre_publication_completion = None;
+        #[cfg(test)]
+        let mut _post_publication_completion = None;
         let id = self.measured(MetricStage::ContentId, bytes.len() as u64, || {
             Ok(content_id(&bytes))
         })?;
         let (shard, shard_name, shard_identity) =
             self.measured(MetricStage::ShardOpen, 0, || self.shard(&id, true))?;
         let final_name = CString::new(id.0.as_bytes()).expect("generated ASCII ID");
-        let acknowledged_file = match open_at(&shard, &final_name, FILE_FLAGS, 0) {
+        // Retain the exact published stage or verified existing descriptor
+        // through final authority checks without cloning the winner's file.
+        let _published_object = match open_at(&shard, &final_name, FILE_FLAGS, 0) {
             Ok(existing) => {
                 self.observer.put_path(PutPath::Existing);
                 self.measured(MetricStage::ExistingVerify, bytes.len() as u64, || {
                     verify_existing(&existing, &id, &bytes)
                 })?;
-                self.file_barrier(&existing)?;
-                existing
+                (None, Some(existing))
             }
             Err(error) if error.is(ErrorCode::Enoent) => {
                 let mut stage =
@@ -331,10 +323,9 @@ impl Inner {
                         stage.file.write_all(&bytes).map_err(io_error)?;
                         Ok(stage)
                     })?;
-                self.file_barrier(&stage.file)?;
                 #[cfg(test)]
                 {
-                    _completion = self.faults.pause_before_publication()?;
+                    _pre_publication_completion = self.faults.pause_before_publication()?;
                 }
                 self.measured(MetricStage::BeforePublishAuthority, 0, || {
                     self.verify()?;
@@ -347,7 +338,7 @@ impl Inner {
                     Ok(()) => {
                         self.observer.put_path(PutPath::Created);
                         stage.published();
-                        stage.file.try_clone().map_err(io_error)?
+                        (Some(stage), None)
                     }
                     Err(error) if error.is(ErrorCode::Eexist) => {
                         self.observer.put_path(PutPath::RaceExisting);
@@ -355,20 +346,18 @@ impl Inner {
                         self.measured(MetricStage::ExistingVerify, bytes.len() as u64, || {
                             verify_existing(&existing, &id, &bytes)
                         })?;
-                        self.file_barrier(&existing)?;
                         stage.remove()?;
-                        existing
+                        (None, Some(existing))
                     }
                     Err(error) => return Err(error),
                 }
             }
             Err(error) => return Err(error),
         };
-        // The winner's file and both directory entries receive barriers before
-        // any duplicate caller acknowledges the immutable object too.
-        self.directory_barrier(&shard)?;
-        self.root_barrier()?;
-        self.final_device_barrier(&acknowledged_file)?;
+        #[cfg(test)]
+        {
+            _post_publication_completion = self.faults.pause_after_publication()?;
+        }
         self.measured(MetricStage::FinalAuthority, 0, || {
             self.verify_shard(&shard_name, shard_identity)?;
             self.verify()
@@ -387,47 +376,16 @@ impl Inner {
         self.verify()?;
         Ok(bytes)
     }
-
-    fn file_barrier(&self, file: &File) -> Result<()> {
-        self.measured(MetricStage::FileSync, 0, || {
-            #[cfg(test)]
-            self.faults.check(test_support::Point::File)?;
-            file.sync_all().map_err(io_error)
-        })?;
-        self.measured(MetricStage::FileDeviceSync, 0, || {
-            final_device_barrier(file)
-        })
-    }
-
-    fn directory_barrier(&self, directory: &File) -> Result<()> {
-        self.measured(MetricStage::ShardSync, 0, || {
-            #[cfg(test)]
-            self.faults.check(test_support::Point::Directory)?;
-            directory.sync_all().map_err(io_error)
-        })
-    }
-
-    fn root_barrier(&self) -> Result<()> {
-        self.measured(MetricStage::RootSync, 0, || {
-            #[cfg(test)]
-            self.faults.check(test_support::Point::Root)?;
-            self.root.sync_all().map_err(io_error)
-        })
-    }
-
-    fn final_device_barrier(&self, file: &File) -> Result<()> {
-        self.measured(MetricStage::PostDirectoryDeviceSync, 0, || {
-            #[cfg(test)]
-            self.faults.check(test_support::Point::Publication)?;
-            final_device_barrier(file)
-        })
-    }
 }
 
 #[async_trait]
 impl BlockStore for FilesystemBlockStore {
     fn durable(&self) -> bool {
-        self.inner.durable
+        false
+    }
+
+    fn persistent(&self) -> bool {
+        self.inner.persistent
     }
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
@@ -482,8 +440,8 @@ impl BlockStore for FilesystemBlockStore {
 
     async fn flush(&self) -> Result<()> {
         self.owned_observed(Some((ObservedOperation::Flush, 0)), |inner| {
-            // Every acknowledged durable put already completed the file/shard/
-            // root barriers. There is no detached successful-put write buffer.
+            // PUT completes publication before acknowledging. Flush checks
+            // authority without forcing OS writeback or draining pending PUTs.
             inner.verify()?;
             #[cfg(test)]
             let _completion = inner.faults.pause_after_flush_first_verification()?;
@@ -701,22 +659,6 @@ fn id_digest(id: &BlockId) -> Result<[u8; 32]> {
         digest[index] = nibble(pair[0]) << 4 | nibble(pair[1]);
     }
     Ok(digest)
-}
-
-fn file_barrier(file: &File) -> Result<()> {
-    file.sync_all().map_err(io_error)?;
-    final_device_barrier(file)
-}
-
-fn final_device_barrier(_file: &File) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: a live owned regular-file descriptor and scalar fcntl command.
-        if unsafe { libc::fcntl(_file.as_raw_fd(), libc::F_FULLFSYNC) } != 0 {
-            return Err(io_error(std::io::Error::last_os_error()));
-        }
-    }
-    Ok(())
 }
 
 #[allow(clippy::unnecessary_cast)] // Darwin mode_t needs C variadic integer promotion.

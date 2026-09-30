@@ -189,7 +189,7 @@ impl Filesystem {
         )
         .await?;
         let persistent_eviction_allowed =
-            persistent_eviction_options && opened.metadata.durable() && opened.blocks.durable();
+            persistent_eviction_options && opened.metadata.durable() && opened.blocks.persistent();
         let resources = opened.resources.clone();
         match ChunkedFs::open_with_observer(opened.metadata, opened.blocks, chunk_options, observer)
             .await
@@ -450,7 +450,8 @@ impl Filesystem {
     /// Observe qualification for healthy persistent compact runtime eviction.
     ///
     /// This bounded observation captures successful compact MRC5 construction,
-    /// actual durable metadata/block providers and a fixed backing identity.
+    /// actual durable metadata, process-persistent blocks and a fixed backing
+    /// identity. This does not advertise stable-storage block acknowledgments.
     /// Other layouts and driver kinds remain ineligible. It allocates nothing
     /// and takes no filesystem-state lock. It does not validate fresh authority,
     /// prove that requests/handles drained, or acknowledge shutdown.

@@ -211,6 +211,10 @@ impl BlockStore for R2BlockStore {
         self.0.durable()
     }
 
+    fn persistent(&self) -> bool {
+        self.0.persistent()
+    }
+
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         self.require_qualification()?;
         match &self.1 {

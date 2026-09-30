@@ -615,9 +615,9 @@ fn sdk_store_config(
 ) -> Result<StoreConfig, CliError> {
     match provider {
         StorageProvider::Memory => Ok(StoreConfig::Memory),
-        StorageProvider::Filesystem { root, durable } => Ok(StoreConfig::Filesystem {
+        StorageProvider::Filesystem { root, persistent } => Ok(StoreConfig::Filesystem {
             root: resolved_path(root, cwd, home),
-            durable: *durable,
+            persistent: *persistent,
         }),
         StorageProvider::Sqlite { path } => Ok(StoreConfig::Sqlite {
             path: resolved_path(path, cwd, home),
@@ -960,7 +960,7 @@ async fn reenroll_sqlite_concurrent_backing_command(
 /// requiring a native mount helper. This is intentionally a separate command
 /// from the native mount lifecycle: it proves the CLI constructs a filesystem
 /// through `mount-rs-sdk`, performs real driver I/O, and releases provider
-/// resources before an optional durable reopen.
+/// resources before an optional process-persistence reopen check.
 async fn sdk_self_test_command(config_path: Option<&Path>, reopen: bool) -> Result<(), CliError> {
     let raw = CliOptions {
         config: config_path.map(Path::to_owned),
@@ -969,7 +969,7 @@ async fn sdk_self_test_command(config_path: Option<&Path>, reopen: bool) -> Resu
     let options = resolve_cli_options(raw)?;
     if reopen && !supports_sdk_reopen(&options) {
         return Err(CliError::usage(
-            "sdk-self-test --reopen requires a durable host, sqlite, or splitstore provider",
+            "sdk-self-test --reopen requires a persistent host, sqlite, or splitstore provider",
         ));
     }
 
@@ -2243,10 +2243,10 @@ mod tests {
             (PathBuf::from("~/blocks"), home.join("blocks")),
             (root.path().join("absolute"), root.path().join("absolute")),
         ] {
-            for durable in [false, true] {
+            for persistent in [false, true] {
                 let provider = StorageProvider::Filesystem {
                     root: path.clone(),
-                    durable,
+                    persistent,
                 };
                 let config = sdk_store_config(&provider, &cwd, &home, &mut |_| {
                     panic!("filesystem roots do not resolve credentials")
@@ -2256,7 +2256,7 @@ mod tests {
                     config,
                     StoreConfig::Filesystem {
                         root: expected.clone(),
-                        durable
+                        persistent
                     }
                 );
             }

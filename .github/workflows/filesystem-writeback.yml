@@ -1,45 +1,61 @@
-name: Filesystem Writeback Regression
+name: Filesystem Writeback
 
 on:
   push:
     paths:
       - providers/mount-rs-filesystem-blocks/**
-      - scripts/check-filesystem-writeback-red.py
+      - crates/mount-rs-sdk/**
+      - crates/mount-rs-service/**
+      - apps/mount-rs-cli/**
+      - src/storage.rs
+      - src/diagnostics/filesystem_blocks.rs
       - .github/workflows/filesystem-writeback.yml
   pull_request:
     paths:
       - providers/mount-rs-filesystem-blocks/**
-      - scripts/check-filesystem-writeback-red.py
+      - crates/mount-rs-sdk/**
+      - crates/mount-rs-service/**
+      - apps/mount-rs-cli/**
+      - src/storage.rs
+      - src/diagnostics/filesystem_blocks.rs
       - .github/workflows/filesystem-writeback.yml
 
 permissions:
   contents: read
 
 jobs:
-  expected-red:
-    name: expected writeback policy failure (${{ matrix.os }})
+  writeback:
+    name: filesystem writeback (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_BUILD_JOBS: '1'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
-      - name: Verify two executed assertions reject the old forced-sync policy
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-filesystem-writeback-target
-          MOUNT_RS_FILESYSTEM_WRITEBACK_EVIDENCE: ${{ runner.temp }}/mount-rs-filesystem-writeback-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-        run: python3 -I -S -B scripts/check-filesystem-writeback-red.py
-      - name: Retain bounded RED diagnostics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: filesystem-writeback-red-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mount-rs-filesystem-writeback-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-          retention-days: 7
+          components: rustfmt, clippy
+      - name: Select a private target directory
+        run: printf 'CARGO_TARGET_DIR=%s/mount-rs-filesystem-writeback-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Check workspace formatting
+        timeout-minutes: 1
+        run: ./scripts/cargo-shared fmt --all -- --check
+      - name: Verify complete filesystem provider contracts and profiling
+        timeout-minutes: 5
+        run: ./scripts/cargo-shared test --locked -p mount-rs-filesystem-blocks --features io-profiling --all-targets
+      - name: Verify SDK filesystem capabilities and CLI configuration
+        timeout-minutes: 10
+        run: |
+          ./scripts/cargo-shared test --locked -p mount-rs-sdk --lib filesystem_provider_tests
+          ./scripts/cargo-shared test --locked -p mount-rs-cli filesystem
+      - name: Verify actual runtime eviction and reopen with filesystem writeback
+        timeout-minutes: 5
+        run: ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime --test runtime_pool_filesystem
+      - name: Check strict Clippy for provider, SDK, service and CLI
+        timeout-minutes: 5
+        run: ./scripts/cargo-shared clippy --locked -p mount-rs-filesystem-blocks -p mount-rs-sdk -p mount-rs-service -p mount-rs-cli --all-targets --features mount-rs-filesystem-blocks/io-profiling -- -D warnings

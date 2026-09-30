@@ -1321,6 +1321,10 @@ where
         self.inner.durable()
     }
 
+    fn persistent(&self) -> bool {
+        self.inner.persistent()
+    }
+
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         self.telemetry
             .observe_fs(
@@ -1834,6 +1838,10 @@ mod tests {
     #[async_trait]
     impl BlockStore for IdentityBackedBlocks {
         fn durable(&self) -> bool {
+            false
+        }
+
+        fn persistent(&self) -> bool {
             true
         }
 
@@ -1872,6 +1880,8 @@ mod tests {
         let id = ConcurrentBackingId::from_bytes([0xa1; 16]).unwrap();
         let telemetry = Telemetry::new(TelemetryConfig::enabled("backing-id-test"));
         let blocks = InstrumentedBlockStore::new(IdentityBackedBlocks(id), telemetry.clone());
+        assert!(!blocks.durable());
+        assert!(blocks.persistent());
         assert_eq!(blocks.prepare_concurrent_backing().await.unwrap(), id);
         blocks.verify_concurrent_backing(id).await.unwrap();
         let other = ConcurrentBackingId::from_bytes([0xa2; 16]).unwrap();

@@ -1111,7 +1111,9 @@ pub trait MetadataStore: Send + Sync {
             .map(compact::CompactInodeRead::Loaded)
     }
     /// Atomically validate anchor generation and physical identity, then update
-    /// only the selected guard. Immutable blocks must be durable before this call.
+    /// only the selected guard. Referenced immutable blocks must complete their
+    /// provider's acknowledgment/flush contract before this call. Stable-storage
+    /// guarantees require the block provider to advertise `durable()`.
     /// EAGAIN is a proven noncommit; uncertain outcomes must never be replayed.
     async fn publish_compact_inode(
         &self,
@@ -1364,7 +1366,17 @@ pub trait MetadataStore: Send + Sync {
 
 #[async_trait]
 pub trait BlockStore: Send + Sync {
+    /// Advertise stable-storage acknowledgments only when the provider's
+    /// barriers and the caller's deployment assertion support that guarantee.
     fn durable(&self) -> bool;
+    /// The configured backing remains available to independent contexts and
+    /// after owned shutdown and process reopen while the OS and backing survive.
+    /// This does not qualify machine failure, promise power-loss-safe
+    /// acknowledgments or show that independent hosts share the same authority.
+    /// Durable providers preserve their existing behavior by default.
+    fn persistent(&self) -> bool {
+        self.durable()
+    }
     /// Establish and return the stable identity of this shared block authority.
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         Err(FsError::new(ErrorCode::Enotsup).with_syscall("prepare concurrent backing"))
@@ -1381,7 +1393,9 @@ pub trait BlockStore: Send + Sync {
     /// bytes. No caller can overwrite data referenced by an older layout.
     async fn put(&self, bytes: &[u8]) -> Result<BlockId>;
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>>;
-    /// Barrier covering prior successful puts before metadata publication.
+    /// Complete the provider's acknowledgment barrier covering prior successful
+    /// puts before metadata publication. Stable-storage guarantees require
+    /// `durable()`; process-persistent OS writeback need not force a device sync.
     async fn flush(&self) -> Result<()>;
     /// Only the coordinator may reclaim blocks proven unreachable from every
     /// live/persisted layout and in-flight write. This is not implicit on close.

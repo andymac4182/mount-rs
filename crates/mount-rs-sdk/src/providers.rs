@@ -836,11 +836,11 @@ async fn open_blocks(
 ) -> Result<(Arc<dyn BlockStore>, Vec<ProviderResource>)> {
     match provider {
         StoreConfig::Memory => Ok((Arc::new(MemoryBlockStore::new()), Vec::new())),
-        StoreConfig::Filesystem { root, durable } => {
+        StoreConfig::Filesystem { root, persistent } => {
             // This synchronous constructor performs marker I/O on the existing
             // provider-opening path. It does not detach a blocking worker.
             Ok((
-                Arc::new(FilesystemBlockStore::open(root, *durable)?),
+                Arc::new(FilesystemBlockStore::open(root, *persistent)?),
                 Vec::new(),
             ))
         }

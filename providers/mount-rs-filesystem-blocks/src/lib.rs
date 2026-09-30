@@ -24,7 +24,7 @@ mod unsupported {
     pub struct FilesystemBlockStore;
 
     impl FilesystemBlockStore {
-        pub fn open(_root: impl AsRef<Path>, _durable: bool) -> Result<Self> {
+        pub fn open(_root: impl AsRef<Path>, _persistent: bool) -> Result<Self> {
             Err(FsError::enotsup(
                 "filesystem block storage requires Linux or macOS",
             ))
@@ -34,6 +34,9 @@ mod unsupported {
     #[async_trait]
     impl BlockStore for FilesystemBlockStore {
         fn durable(&self) -> bool {
+            false
+        }
+        fn persistent(&self) -> bool {
             false
         }
         async fn put(&self, _bytes: &[u8]) -> Result<BlockId> {

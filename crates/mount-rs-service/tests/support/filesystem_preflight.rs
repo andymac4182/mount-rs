@@ -200,10 +200,10 @@ fn named_identity(parent: &File, name: &CString, file: &File) -> Result<(), Stri
 fn owner_root(blocks: &StoreConfig) -> Result<(Root, PathBuf), String> {
     let StoreConfig::Filesystem {
         root: blocks_root,
-        durable: true,
+        persistent: true,
     } = blocks
     else {
-        return Err("owned durable filesystem blocks required".into());
+        return Err("owned persistent filesystem blocks required".into());
     };
     let required = |name: &str| {
         std::env::var(name).map_err(|_| format!("{name} required for filesystem ownership"))
@@ -347,8 +347,8 @@ pub(super) fn preflight(blocks: &StoreConfig) -> Result<Value, String> {
         json!({"provider":"filesystem","complete":true,"qualified":true,"owner":root.owner,
         "root_identity_verified":true,"root_identity_redacted":true,"private_directory_mode":"0700",
         "owner_marker_mode":"0600","no_symlink_components":true,"anchored_directory_descriptors":true,
-        "persistent_local_filesystem":filesystem,"durable":true,
-        "scope":"owner-issued local shared filesystem root and configured sync barriers; no cross-host availability, process-crash or power-loss proof"}),
+        "persistent_local_filesystem":filesystem,"persistent":true,"durable":false,"writeback":"os",
+        "scope":"owner-issued local shared filesystem root with OS writeback; no cross-host availability or power-loss proof"}),
     )
 }
 
@@ -381,12 +381,6 @@ pub(super) fn prepare(blocks: &StoreConfig) -> Result<(), String> {
         let child = open_at(parent, &name, libc::O_RDONLY | libc::O_DIRECTORY)?;
         private_directory(&child, Some(dev))?;
         named_identity(parent, &name, &child)?;
-        child
-            .sync_all()
-            .map_err(|_| "filesystem new Drive directory sync failed")?;
-        parent
-            .sync_all()
-            .map_err(|_| "filesystem Drive parent directory sync failed")?;
         names.push(name);
         directories.push(child);
     }
