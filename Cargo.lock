@@ -2108,6 +2108,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures-util",
+ "libc",
  "mount-rs-auto",
  "mount-rs-core",
  "mount-rs-memfs",

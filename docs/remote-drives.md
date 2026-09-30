@@ -29,7 +29,7 @@ Token credentials are exactly one of:
 {"command":["token-helper","--audience","mount-rs"]}
 ```
 
-The command runs directly as argv with no shell, a ten-second limit and bounded stdout. Token files are freshly read for renewal; atomically replace the file. The server verifies signatures with configured RS256/ES256 allowlists, exact issuer and audience, standard time claims and exact workload grant conditions. Renewal with a changed workload identity or failure closes the session.
+The command runs directly as argv with no shell, a ten-second limit and bounded stdout. Token files must resolve to regular files and are freshly read for renewal; atomically replace the file or its projected symlink. Unix opens reject FIFOs without waiting for a writer. Reads retain the token size limit, but regular filesystem I/O has no wall-clock deadline. The server verifies signatures with configured RS256/ES256 allowlists, exact issuer and audience, standard time claims and exact workload grant conditions. Renewal with a changed workload identity or failure closes the session.
 
 ## Catalog updates and handles
 

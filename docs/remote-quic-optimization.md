@@ -1,6 +1,6 @@
 # QUIC protocol and transfer optimization
 
-Client and server advertise only `mount-rs/2`. ALPN selection binds the codec and hello checks the same version; unsupported versions are rejected. Negotiation remains extensible for future versions. There is no v1 codec or numeric I/O fallback in the production client. The transport trait can use the same envelope for a future binary WebSocket adapter; fallback transport is not implemented.
+Client and server advertise only `mount-rs/2`. ALPN selection binds the codec and hello checks the same version; unsupported versions are rejected. Negotiation remains extensible for future versions. There is no v1 codec or numeric I/O fallback in the production client. TLS WebSocket uses the same binary envelope with `mount-rs.v2` negotiation. Automatic initial fallback is permitted only after a QUIC timeout with no received UDP datagrams, before credentials are obtained or sent; see [remote transport selection](remote-drives.md#tls-websocket-and-initial-fallback).
 
 ## File I/O
 

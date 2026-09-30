@@ -105,9 +105,23 @@ impl CredentialSource {
     async fn token_with_timeout(&self, timeout: Duration) -> Result<SecretToken, CredentialError> {
         match self {
             Self::File(path) => {
-                let file = tokio::fs::File::open(path)
+                let mut options = tokio::fs::OpenOptions::new();
+                options.read(true);
+                // Do not wait for a writer when the configured path resolves
+                // to a FIFO. Symlinks to regular projected files remain valid.
+                #[cfg(unix)]
+                options.custom_flags(libc::O_NONBLOCK);
+                let file = options.open(path).await.map_err(|_| CredentialError::Io)?;
+                // Inspect the opened descriptor, so a pathname replacement
+                // between open and admission cannot substitute its file type.
+                if !file
+                    .metadata()
                     .await
-                    .map_err(|_| CredentialError::Io)?;
+                    .map_err(|_| CredentialError::Io)?
+                    .is_file()
+                {
+                    return Err(CredentialError::Io);
+                }
                 let mut contents = Vec::new();
                 file.take(MAX_INPUT_BYTES)
                     .read_to_end(&mut contents)

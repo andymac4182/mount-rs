@@ -20,6 +20,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 webpki-roots = "1"
 tokio = { version = "1", features = ["macros", "fs", "io-util", "net", "process", "rt", "sync", "time"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 ring = "0.17"
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
