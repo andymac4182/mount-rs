@@ -188,4 +188,39 @@ assert.throws(
   /ozone-foundationdb-artifact-invalid/,
 )
 
-console.log("W26_OZONE_EVIDENCE_PACKET_TEST_PASS cases=3")
+const sourceFailures = [
+  {
+    mutate: (sourceControl) => { delete sourceControl.mountRs },
+    reason: /ozone-foundationdb-artifact-source-control-metadata-missing/,
+  },
+  {
+    // The real failed container artifact could not read either Git command.
+    mutate: (sourceControl) => Object.assign(sourceControl.mountRs, {
+      revision: null, revisionVerified: false, dirty: null, dirtyEntryCount: null,
+    }),
+    reason: /ozone-foundationdb-artifact-source-revision-unverified/,
+  },
+  {
+    mutate: (sourceControl) => { sourceControl.mountRs.revision = null },
+    reason: /ozone-foundationdb-artifact-source-revision-does-not-match-packet/,
+  },
+  {
+    mutate: (sourceControl) => { sourceControl.mountRs.dirty = true },
+    reason: /ozone-foundationdb-artifact-source-checkout-dirty/,
+  },
+  {
+    mutate: (sourceControl) => { sourceControl.mountRs.dirtyEntryCount = 1 },
+    reason: /ozone-foundationdb-artifact-source-checkout-dirty/,
+  },
+  {
+    mutate: (sourceControl) => { sourceControl.mountRs.revision = "b".repeat(40) },
+    reason: /ozone-foundationdb-artifact-source-revision-does-not-match-packet/,
+  },
+]
+for (const { mutate, reason } of sourceFailures) {
+  const rejected = packet()
+  mutate(rejected.foundationdbArtifact.environment.sourceControl)
+  assert.throws(() => validateEvidencePacket(rejected), reason)
+}
+
+console.log(`W26_OZONE_EVIDENCE_PACKET_TEST_PASS cases=${3 + sourceFailures.length}`)

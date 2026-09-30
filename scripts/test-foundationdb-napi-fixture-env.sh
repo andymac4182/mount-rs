@@ -20,6 +20,23 @@ docker() {
   env | grep -E '^R2_(BUCKET|ACCESS_KEY_ID|SECRET_ACCESS_KEY)=' > "$env_capture" || :
 }
 
+assert_checkout_trust() {
+  trust_case=$1
+  grep -Fxq 'GIT_CONFIG_COUNT=1' "$capture" || fail "${trust_case}_git_config_count"
+  grep -Fxq 'GIT_CONFIG_KEY_0=safe.directory' "$capture" || fail "${trust_case}_git_config_key"
+  grep -Fxq 'GIT_CONFIG_VALUE_0=/workspace' "$capture" || fail "${trust_case}_git_config_checkout"
+  [ "$(grep -c '^GIT_CONFIG_' "$capture")" -eq 3 ] || fail "${trust_case}_git_config_extra"
+  [ "$GIT_CONFIG_COUNT" = 1 ] && [ "$GIT_CONFIG_KEY_0" = safe.directory ] &&
+    [ "$GIT_CONFIG_VALUE_0" = /caller-checkout ] || fail "${trust_case}_caller_git_config_changed"
+}
+
+# An inherited caller setting must stay outside the fixture container. Only the
+# owned checkout mounted at /workspace is trusted for its real Git evidence.
+GIT_CONFIG_COUNT=1
+GIT_CONFIG_KEY_0=safe.directory
+GIT_CONFIG_VALUE_0=/caller-checkout
+export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+
 cat > "$fake_docker_dir/docker" <<'EOF'
 #!/bin/sh
 printf 'called\n' >> "$NAPI_FIXTURE_DOCKER_CALLS"
@@ -35,6 +52,7 @@ export R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
 configure_foundationdb_napi_fixture generic
 [ "$MOUNT_RS_NAPI_FOUNDATIONDB_EXTERNAL_BLOCK_PROVIDER" = r2 ] || fail canonical_default
 foundationdb_napi_run_client https://canonical.example node:24 true
+assert_checkout_trust canonical
 grep -Fxq 'MOUNT_RS_NAPI_FOUNDATIONDB_EXTERNAL_BLOCK_PROVIDER=r2' "$capture" || fail canonical_forwarding
 grep -Fxq 'R2_ENDPOINT=https://canonical.example' "$capture" || fail canonical_endpoint_forwarding
 grep -Fxq 'R2_BUCKET' "$capture" || fail canonical_bucket_argument
@@ -57,6 +75,7 @@ unset R2_ENDPOINT R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
 configure_foundationdb_napi_fixture rustfs
 [ "$MOUNT_RS_NAPI_FOUNDATIONDB_EXTERNAL_BLOCK_PROVIDER" = rustfs ] || fail rustfs_selection
 foundationdb_napi_run_client http://rustfs.local node:24 true
+assert_checkout_trust rustfs
 grep -Fxq 'MOUNT_RS_NAPI_FOUNDATIONDB_EXTERNAL_BLOCK_PROVIDER=rustfs' "$capture" || fail rustfs_forwarding
 grep -Fxq 'RUSTFS_REGION=us-east-1' "$capture" || fail rustfs_region_forwarding
 grep -Fxq 'R2_BUCKET' "$capture" || fail rustfs_bucket_argument
@@ -79,6 +98,7 @@ configure_foundationdb_napi_fixture ozone us-east-1
 [ "$RUSTFS_REGION" = us-east-1 ] || fail ozone_region_selection
 [ -z "${RUSTFS_ENDPOINT:-}" ] || fail ozone_set_rustfs_endpoint
 foundationdb_napi_run_client http://ozone.local node:24 true
+assert_checkout_trust ozone
 grep -Fxq 'MOUNT_RS_NAPI_FOUNDATIONDB_EXTERNAL_BLOCK_PROVIDER=rustfs' "$capture" || fail ozone_forwarding
 grep -Fxq 'RUSTFS_REGION=us-east-1' "$capture" || fail ozone_region_forwarding
 grep -Fxq 'R2_BUCKET' "$capture" || fail ozone_bucket_argument
@@ -122,4 +142,4 @@ fi
 [ ! -e "$NAPI_FIXTURE_DOCKER_CALLS" ] || fail ozone_preflight_called_docker
 
 [ "$failures" -eq 0 ] || exit 1
-echo "FOUNDATIONDB_NAPI_FIXTURE_ENV_PASS cases=10"
+echo "FOUNDATIONDB_NAPI_FIXTURE_ENV_PASS cases=13"

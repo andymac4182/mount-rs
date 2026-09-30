@@ -69,7 +69,13 @@ foundationdb_napi_run_client() {
       R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY:-}
     fi
     export R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
+    # The container UID can differ from the checkout owner. Trust only this
+    # fixture's mounted repository so the runner can verify its real revision
+    # and dirty state; do not bypass either evidence check.
     docker run --rm \
+      --env GIT_CONFIG_COUNT=1 \
+      --env GIT_CONFIG_KEY_0=safe.directory \
+      --env GIT_CONFIG_VALUE_0=/workspace \
       --env "MOUNT_RS_NAPI_FOUNDATIONDB_EXTERNAL_BLOCK_PROVIDER=$MOUNT_RS_NAPI_FOUNDATIONDB_EXTERNAL_BLOCK_PROVIDER" \
       --env "RUSTFS_REGION=${RUSTFS_REGION:-}" \
       --env "R2_ENDPOINT=$fixture_endpoint" \
