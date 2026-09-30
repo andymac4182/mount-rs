@@ -1,4 +1,4 @@
-//! Current-candidate checks for a prepared concurrent fresh create.
+//! Current-candidate checks for a prepared fresh create.
 //!
 //! This only rebinds an ephemeral batch mutation. The queued preparation and
 //! the existing apply guard remain the source of truth for conflicts.

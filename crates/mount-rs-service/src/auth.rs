@@ -11,7 +11,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use url::Url;
 
-use crate::catalog::{CatalogSnapshot, Permission};
+use crate::catalog::{CatalogSnapshot, GrantDefinition, Permission};
+use crate::request_metadata::PreparedCatalog;
 use crate::server::{AuthStage, Outcome, auth_span};
 
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
@@ -454,6 +455,45 @@ pub fn authorize_drive(
     partition_id: &str,
     drive_id: &str,
 ) -> Option<Permission> {
+    authorize_drive_candidates(
+        catalog,
+        catalog.grants.values(),
+        policy_id,
+        claims,
+        partition_id,
+        drive_id,
+    )
+}
+
+pub(crate) fn authorize_prepared_drive(
+    catalog: &PreparedCatalog,
+    policy_id: &str,
+    claims: &Value,
+    partition_id: &str,
+    drive_id: &str,
+) -> Option<Permission> {
+    authorize_drive_candidates(
+        catalog.snapshot(),
+        catalog
+            .candidates(partition_id, policy_id)
+            .map(|(_, grant)| grant),
+        policy_id,
+        claims,
+        partition_id,
+        drive_id,
+    )
+}
+
+// Keep the original scope/claim predicates for public full-map callers and
+// dispatch. The prepared entry point binds its iterator and snapshot together.
+fn authorize_drive_candidates<'a>(
+    catalog: &CatalogSnapshot,
+    grants: impl Iterator<Item = &'a GrantDefinition>,
+    policy_id: &str,
+    claims: &Value,
+    partition_id: &str,
+    drive_id: &str,
+) -> Option<Permission> {
     if !catalog
         .partitions
         .get(partition_id)?
@@ -462,9 +502,7 @@ pub fn authorize_drive(
     {
         return None;
     }
-    catalog
-        .grants
-        .values()
+    grants
         .filter(|grant| {
             grant_matches(
                 &grant.partition_id,

@@ -1,0 +1,37 @@
+{
+  "base_revision": "c447194a6aad7f78d4921019079395a37e7a195d",
+  "compiled_test_source_hashes": {
+    "baseline_lib_sha256": "f12cb2dae393748c2121ed528869994a107066bcebaf6bc54a5d125232645b4e",
+    "candidate_lib_sha256": "bb03103555564854b17c8e59235a2d2c4f590edd24430fe3e57d2c31e2235dee",
+    "create_rebase_sha256": "a5e89a7803253e6977adebfe99dbe9c129f34c953da41cfa84b81fd81de106a6"
+  },
+  "gate_floor_unchanged_api_ops_per_second": 1000,
+  "production_target_qualified": false,
+  "rows": [
+    {
+      "measured": {
+        "creator_metadata_publications": 2,
+        "fresh_payload_membership_eof_verified": true,
+        "total_blob_puts": 3
+      },
+      "process_settled": true,
+      "receipt_sha256": "0f1947cb56a4bd80295c4d18a6325ede44a8d1f8f16e0d656ae589a28964ffe4",
+      "role": "baseline",
+      "stdout_sha256": "aa095febb81ffcbf1e29fb4407d8673536e1cd6af48439f5cdfc72070b1a40c1"
+    },
+    {
+      "measured": {
+        "creator_metadata_publications": 1,
+        "fresh_payload_membership_eof_verified": true,
+        "total_blob_puts": 2
+      },
+      "process_settled": true,
+      "receipt_sha256": "ff68a931aa104e1fa4ac35e2ce5463c8fe9259a3adff048f9fbb5dc62f021725",
+      "role": "candidate",
+      "stdout_sha256": "fec3dee31a38d2637b0e399c3ccd3a0c31f8734e412ecbe20a7505c899e2cbae"
+    }
+  ],
+  "schema": "mount-rs.legacy-create-call-control.v1",
+  "scope": "Deterministic durable SQLite race; logical provider calls, not throughput/HTTP/physical IOPS. Fresh reopen verifies payload, membership, sizes and EOF before measurements.",
+  "sql_provider": "durable SQLite"
+}

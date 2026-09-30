@@ -1,0 +1,154 @@
+{
+  "base_revision": "c447194a6aad7f78d4921019079395a37e7a195d",
+  "benchmark_elapsed_ns": 948690458,
+  "cfg_test_scope": "indexed audit retains two TLS candidate-visit observations/cycle; full reference has none, avoiding artificial full-map TLS cost; cold preparation includes test hook and allocation-meter overhead",
+  "exclusions": [
+    "catalog load and authority construction/validation",
+    "JWT verification",
+    "dispatcher freshness/wait paths",
+    "stderr OS audit I/O",
+    "transport/storage/provider/SQLite C",
+    "cluster capacity or full-production qualification"
+  ],
+  "public_observations_sha256": "d28d176b3d8f7bb8c7b26bab3484c00838792d5e9e987829d2c3d629473feae5",
+  "receipt_sha256": "bff560205bcaf249017e0fd5c33721faf740168fb353e8a143cfa91a4ccfb672",
+  "release_features": "sdk-runtime,allocation-profiling",
+  "rows": [
+    {
+      "cold_alloc_call_values": [
+        43
+      ],
+      "cold_alloc_requested_byte_values": [
+        4044
+      ],
+      "cold_median_wall_ns": 2145.5,
+      "cycles_per_window": 3072,
+      "full_median_process_cpu_ns_per_cycle": 454.58984375,
+      "full_median_wall_ns_per_cycle": 456.2921549479167,
+      "grants": 10,
+      "hot_alloc_requests_and_bytes_both_modes": [
+        0,
+        0
+      ],
+      "indexed_median_process_cpu_ns_per_cycle": 477.5390625,
+      "indexed_median_wall_ns_per_cycle": 478.529296875,
+      "paired_median_wall_speedup": 0.9563033349857204,
+      "pairs": 8,
+      "partitions": 5,
+      "wall_ns_ranges": {
+        "full": [
+          446.505859375,
+          472.42578125
+        ],
+        "indexed": [
+          463.1754557291667,
+          504.1910807291667
+        ]
+      }
+    },
+    {
+      "cold_alloc_call_values": [
+        410
+      ],
+      "cold_alloc_requested_byte_values": [
+        38368
+      ],
+      "cold_median_wall_ns": 12478.5,
+      "cycles_per_window": 3072,
+      "full_median_process_cpu_ns_per_cycle": 1229.1666666666667,
+      "full_median_wall_ns_per_cycle": 1232.59130859375,
+      "grants": 100,
+      "hot_alloc_requests_and_bytes_both_modes": [
+        0,
+        0
+      ],
+      "indexed_median_process_cpu_ns_per_cycle": 564.2903645833333,
+      "indexed_median_wall_ns_per_cycle": 564.1072591145833,
+      "paired_median_wall_speedup": 2.1797727654075447,
+      "pairs": 8,
+      "partitions": 50,
+      "wall_ns_ranges": {
+        "full": [
+          1190.7281901041667,
+          1312.8932291666667
+        ],
+        "indexed": [
+          551.513671875,
+          598.9583333333334
+        ]
+      }
+    },
+    {
+      "cold_alloc_call_values": [
+        4084
+      ],
+      "cold_alloc_requested_byte_values": [
+        383784
+      ],
+      "cold_median_wall_ns": 134979.0,
+      "cycles_per_window": 3012,
+      "full_median_process_cpu_ns_per_cycle": 7447.045152722443,
+      "full_median_wall_ns_per_cycle": 7488.220783532537,
+      "grants": 1000,
+      "hot_alloc_requests_and_bytes_both_modes": [
+        0,
+        0
+      ],
+      "indexed_median_process_cpu_ns_per_cycle": 688.4130146082337,
+      "indexed_median_wall_ns_per_cycle": 689.0770252324037,
+      "paired_median_wall_speedup": 10.951755120002009,
+      "pairs": 8,
+      "partitions": 500,
+      "wall_ns_ranges": {
+        "full": [
+          7321.049136786189,
+          8028.690903054448
+        ],
+        "indexed": [
+          665.1447543160691,
+          705.3452855245683
+        ]
+      }
+    },
+    {
+      "cold_alloc_call_values": [
+        40835
+      ],
+      "cold_alloc_requested_byte_values": [
+        3844696
+      ],
+      "cold_median_wall_ns": 1506271.0,
+      "cycles_per_window": 330,
+      "full_median_process_cpu_ns_per_cycle": 69674.24242424243,
+      "full_median_wall_ns_per_cycle": 70174.24393939393,
+      "grants": 10000,
+      "hot_alloc_requests_and_bytes_both_modes": [
+        0,
+        0
+      ],
+      "indexed_median_process_cpu_ns_per_cycle": 763.6363636363637,
+      "indexed_median_wall_ns_per_cycle": 761.3636363636364,
+      "paired_median_wall_speedup": 91.34320382296733,
+      "pairs": 8,
+      "partitions": 5000,
+      "wall_ns_ranges": {
+        "full": [
+          68993.81212121212,
+          74443.18181818182
+        ],
+        "indexed": [
+          741.9212121212121,
+          804.4181818181818
+        ]
+      }
+    }
+  ],
+  "schema": "mount-rs.grant-index-paired-summary.v1",
+  "scope": "policy matching, source/cache Arc selection, public or prepared authorization, writer mutex, buffered audit, exact permission/bytes checks, periodic budget checks",
+  "source_before_after_match": true,
+  "source_input_count": 635,
+  "source_input_sha256": "aa62aa7fe5038cf2895e8e075dd791fea89e32c6eb542ab94cc3774d9dcbf631",
+  "stderr_sha256": "a0c7950df2d97187fd21f9628aff71010ef77729e02a27250c6696f66da6a34a",
+  "stdout_sha256": "3ba5cf28820c1d74f92b696b9172168b64e8da32347b7d547ea294cc2a07fa0b",
+  "working_candidate": true
+}

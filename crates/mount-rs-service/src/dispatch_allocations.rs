@@ -68,6 +68,10 @@ fn audit_metadata_has_zero_heap_allocations() {
         );
     }
     let event = serde_json::json!({"event":"remote_access","partition_id":identity.partition_id,"drive_id":"d","grant_ids":["first","second"],"operation":"handle_write","request_id":42,"outcome":"ok"});
+    let catalog = PreparedCatalogCache::default()
+        .prepare(Arc::new(catalog))
+        .unwrap()
+        .catalog;
     let record = AuditRecord {
         event: "remote_access",
         partition_id: &identity.partition_id,

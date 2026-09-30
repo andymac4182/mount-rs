@@ -1,0 +1,56 @@
+{
+  "final_shipping_service_regressions": {
+    "ignored": 3,
+    "passed": 155,
+    "receipt_sha256": "863dc7050536c0c76e8cc58701538f658246e3091dde85c7b7252b29f75ee836"
+  },
+  "format_check": {
+    "passed": true,
+    "receipt_sha256": "2e1f0eee1462384b047fbbe89ab794b00b1bf8179ef3133a82d760d4633c07d6"
+  },
+  "fresh_tidb_rustfs_native_throughput_included": false,
+  "full_formal_verification_qualified": false,
+  "independent_arithmetic_audit": {
+    "allocation_windows": 64,
+    "checks": 3440,
+    "native_windows": 64,
+    "paired_rows": 32,
+    "passed": true,
+    "receipt_sha256": "d89a6b57390ce37f620596c9a7003828fb07fe6b68a75ab8a2e485529f009140",
+    "recorded_cold_preparations": 36,
+    "verifier_sha256": "1b88fc207f989725ac5f3196a18413e3e3332f29beae3a9565f32b7d236dcb5f"
+  },
+  "observed_negative_controls": {
+    "baseline_audit_candidates": {
+      "actual": 10000,
+      "receipt_sha256": "e50f3555420887aa273b6d9b60d343983e5b402838b46d7e145f8aeb275852ce",
+      "required": 2
+    },
+    "disabled_contention_rechecks_actual_security_failures": 2,
+    "disabled_recheck_receipt_sha256": "46c102ad61785f5257ad369b1aa78ffaed9a4a070b9b461f7fb9c6af0969eb4f",
+    "restored_receipt_sha256": "57ec9deb86cc62d3569e741f6cd4e299d9804c0ecf5291db4a7ad4a457f75077",
+    "restored_recheck_actual_passes": 2
+  },
+  "production_client_target_qualified": false,
+  "public_source_inputs_sha256": "80047bb49a537889b668c5531aa328f16ad7929cd1600e704c19bf79bec58d29",
+  "schema": "mount-rs.grant-index-qualification.v1",
+  "signed_quic_revocation_control": {
+    "passed": true,
+    "receipt_sha256": "dcec72a1abfcbadc6fbd4b58706fd7ef94a3e2d8d11ac6dc16bb728823fe6d8d",
+    "scope": "Eight current catalog handles; explicit enabled wire control; isolated signed local fixture"
+  },
+  "status": "qualified_local_hot_path_only",
+  "strict_clippy_all_targets": {
+    "features": [
+      "sdk-runtime",
+      "allocation-profiling"
+    ],
+    "packages": [
+      "mount-rs-service",
+      "mount-rs-chunked"
+    ],
+    "passed": true,
+    "receipt_sha256": "b676f75d6023739478a85ed2e2ae72b81be1d78dc555d791ddc6921e1bd8e39c"
+  },
+  "test_passed": true
+}

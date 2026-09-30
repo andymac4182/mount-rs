@@ -13,9 +13,11 @@ use mount_rs_remote_protocol::{Operation, OperationName, WireError};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::auth::authorize_drive;
-use crate::catalog::{CatalogSnapshot, CatalogStore, Permission};
-use crate::request_metadata::{AuditRecord, MatchingGrants, policy_matches, write_audit};
+use crate::auth::authorize_prepared_drive;
+use crate::catalog::{CatalogStore, Permission};
+use crate::request_metadata::{
+    AuditRecord, MatchingGrants, PreparedCatalog, PreparedCatalogCache, policy_matches, write_audit,
+};
 use crate::runtime_pool::{DriveRegistration, RuntimeHandle, RuntimeLease};
 
 #[derive(Debug, Clone)]
@@ -272,6 +274,7 @@ enum DriveBinding {
 
 pub struct DriveDispatcher {
     catalog: Arc<dyn CatalogStore>,
+    prepared_catalog: PreparedCatalogCache,
     drives: BTreeMap<String, BTreeMap<String, DriveBinding>>,
     definitions: BTreeMap<String, BTreeMap<String, Value>>,
 }
@@ -281,6 +284,7 @@ impl DriveDispatcher {
     pub fn new(catalog: Arc<dyn CatalogStore>) -> Self {
         Self {
             catalog,
+            prepared_catalog: PreparedCatalogCache::default(),
             drives: BTreeMap::new(),
             definitions: BTreeMap::new(),
         }
@@ -336,18 +340,29 @@ impl DriveDispatcher {
     }
 
     pub async fn renewal_matches(&self, current: &SessionIdentity, next: &SessionIdentity) -> bool {
-        let Ok(catalog) = self.catalog.load_shared_current().await else {
-            return false;
-        };
-        catalog
-            .grants
-            .values()
-            .filter(|g| g.partition_id == current.partition_id && g.policy_id == current.policy_id)
-            .flat_map(|g| g.claim_conditions.keys())
-            .all(|pointer| {
-                crate::request_metadata::claim_pointer(&current.claims, pointer)
-                    == crate::request_metadata::claim_pointer(&next.claims, pointer)
-            })
+        loop {
+            let Ok(catalog) = self.catalog.load_shared_current().await else {
+                return false;
+            };
+            let Ok(prepared) = self.prepared_catalog.prepare(catalog) else {
+                return false;
+            };
+            if prepared.waited {
+                continue;
+            }
+            return prepared
+                .catalog
+                .candidates(&current.partition_id, &current.policy_id)
+                .map(|(_, grant)| grant)
+                .filter(|g| {
+                    g.partition_id == current.partition_id && g.policy_id == current.policy_id
+                })
+                .flat_map(|g| g.claim_conditions.keys())
+                .all(|pointer| {
+                    crate::request_metadata::claim_pointer(&current.claims, pointer)
+                        == crate::request_metadata::claim_pointer(&next.claims, pointer)
+                });
+        }
     }
 
     pub async fn dispatch(
@@ -444,7 +459,7 @@ impl DriveDispatcher {
         drive_id: &str,
         operation: &Operation,
         handles: &SessionHandles,
-    ) -> Result<(Arc<CatalogSnapshot>, Permission), WireError> {
+    ) -> Result<(Arc<PreparedCatalog>, Permission), WireError> {
         let _authorization_profile = Span::new(Event::Authorization);
         loop {
             let now = SystemTime::now()
@@ -482,7 +497,17 @@ impl DriveDispatcher {
             if !policy_matches(policy, identity) {
                 return Err(error("EACCES"));
             }
-            let permission = authorize_drive(
+            let prepared = self
+                .prepared_catalog
+                .prepare(catalog)
+                .map_err(|_| error("EACCES"))?;
+            if prepared.waited {
+                // A contended index lock can block too. Repeat the same checks
+                // required after session/lazy-runtime suspension.
+                continue;
+            }
+            let catalog = prepared.catalog;
+            let permission = authorize_prepared_drive(
                 &catalog,
                 &identity.policy_id,
                 &identity.claims,
@@ -498,6 +523,7 @@ impl DriveDispatcher {
                 .get(identity.partition_id.as_str())
                 .and_then(|partition| partition.get(drive_id))
                 && catalog
+                    .snapshot()
                     .partitions
                     .get(&identity.partition_id)
                     .and_then(|p| p.drives.get(drive_id))
@@ -687,7 +713,7 @@ impl DriveDispatcher {
                             Ok(serde_json::json!({"kind":"created","identity":identity}))
                         }
                         mount_rs_core::GuardedMutationResult::Opened { handle, identity } => {
-                            let id = handles.insert_bound(drive_id, catalog.revision, handle, runtime.as_ref()).await?;
+                            let id = handles.insert_bound(drive_id, catalog.snapshot().revision, handle, runtime.as_ref()).await?;
                             Ok(serde_json::json!({"kind":"opened","identity":identity,"handle":id}))
                         }
                     }
@@ -729,7 +755,7 @@ impl DriveDispatcher {
                             .await
                     }
                     .map_err(fs_error)?;
-                    encode(handles.insert_bound(drive_id, catalog.revision, handle, runtime.as_ref()).await?)
+                    encode(handles.insert_bound(drive_id, catalog.snapshot().revision, handle, runtime.as_ref()).await?)
                 }
                 OperationName::HandleRead | OperationName::HandleStat | OperationName::HandleWrite
                 | OperationName::HandleTruncate | OperationName::HandleSync | OperationName::HandleDatasync
@@ -865,7 +891,7 @@ impl DriveDispatcher {
                 operation,
                 handles,
                 request_id,
-                catalog.revision,
+                catalog.snapshot().revision,
                 mode,
                 raw_output,
             )
@@ -1252,6 +1278,10 @@ fn validate_guarded_mutation(request: &mount_rs_core::GuardedMutation) -> Result
 #[cfg(test)]
 #[path = "lazy_handle_tests.rs"]
 mod lazy_handle_tests;
+
+#[cfg(test)]
+#[path = "grant_index_wait_tests.rs"]
+mod grant_index_wait_tests;
 
 #[cfg(test)]
 mod tests {

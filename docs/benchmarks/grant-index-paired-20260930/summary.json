@@ -1,0 +1,161 @@
+{
+  "all_shipping_strict_clippy_receipt_sha256": "b676f75d6023739478a85ed2e2ae72b81be1d78dc555d791ddc6921e1bd8e39c",
+  "base_revision": "c447194a6aad7f78d4921019079395a37e7a195d",
+  "benchmark_elapsed_ns": 1020913583,
+  "binary_before_after_match": true,
+  "binary_bytes": 7852864,
+  "binary_sha256": "99258b2cd78973af53ef56d5d821ce552b85a66f7dd137d1601eb0a7b7d29053",
+  "cfg_test_scope": "indexed audit retains two TLS candidate-visit observations/cycle; full reference has none, avoiding artificial full-map TLS cost; cold preparation includes test hook and allocation-meter overhead",
+  "exclusions": [
+    "catalog load and authority construction/validation",
+    "JWT verification",
+    "dispatcher freshness/wait paths",
+    "stderr OS audit I/O",
+    "transport/storage/provider/SQLite C",
+    "cluster capacity or full-production qualification"
+  ],
+  "final_release_regressions_receipt_sha256": "863dc7050536c0c76e8cc58701538f658246e3091dde85c7b7252b29f75ee836",
+  "inner_budget_seconds": 55,
+  "outer_deadline_seconds": 55,
+  "public_observations_sha256": "149ddffa43cf83dbf65c4009c62b770b07ba7ca055d8a566f349dbb2dfea1d92",
+  "receipt_sha256": "fb71f9fa5fcdb4027c8081106c6c17071a9b5604c4fd4f82b1a7cca1a84f8f19",
+  "release_features": "sdk-runtime,allocation-profiling",
+  "rows": [
+    {
+      "cold_alloc_call_values": [
+        43
+      ],
+      "cold_alloc_requested_byte_values": [
+        4044
+      ],
+      "cold_median_wall_ns": 3104.0,
+      "cycles_per_window": 3072,
+      "full_median_process_cpu_ns_per_cycle": 463.05338541666663,
+      "full_median_wall_ns_per_cycle": 463.08040364583337,
+      "grants": 10,
+      "hot_alloc_requests_and_bytes_both_modes": [
+        0,
+        0
+      ],
+      "indexed_median_process_cpu_ns_per_cycle": 482.0963541666667,
+      "indexed_median_wall_ns_per_cycle": 482.10302734375,
+      "paired_median_wall_speedup": 0.9723054479287839,
+      "pairs": 8,
+      "partitions": 5,
+      "wall_ns_ranges": {
+        "full": [
+          437.1744791666667,
+          795.654296875
+        ],
+        "indexed": [
+          468.0852864583333,
+          495.2526041666667
+        ]
+      }
+    },
+    {
+      "cold_alloc_call_values": [
+        410
+      ],
+      "cold_alloc_requested_byte_values": [
+        38368
+      ],
+      "cold_median_wall_ns": 13541.5,
+      "cycles_per_window": 3072,
+      "full_median_process_cpu_ns_per_cycle": 1248.046875,
+      "full_median_wall_ns_per_cycle": 1247.7350260416665,
+      "grants": 100,
+      "hot_alloc_requests_and_bytes_both_modes": [
+        0,
+        0
+      ],
+      "indexed_median_process_cpu_ns_per_cycle": 558.7565104166667,
+      "indexed_median_wall_ns_per_cycle": 558.5802408854167,
+      "paired_median_wall_speedup": 2.2646112028872984,
+      "pairs": 8,
+      "partitions": 50,
+      "wall_ns_ranges": {
+        "full": [
+          1206.9905598958333,
+          1464.2063802083333
+        ],
+        "indexed": [
+          541.4905598958334,
+          718.8720703125
+        ]
+      }
+    },
+    {
+      "cold_alloc_call_values": [
+        4084
+      ],
+      "cold_alloc_requested_byte_values": [
+        383784
+      ],
+      "cold_median_wall_ns": 134875.0,
+      "cycles_per_window": 3072,
+      "full_median_process_cpu_ns_per_cycle": 7562.662760416667,
+      "full_median_wall_ns_per_cycle": 7866.5703125,
+      "grants": 1000,
+      "hot_alloc_requests_and_bytes_both_modes": [
+        0,
+        0
+      ],
+      "indexed_median_process_cpu_ns_per_cycle": 697.75390625,
+      "indexed_median_wall_ns_per_cycle": 712.5921223958333,
+      "paired_median_wall_speedup": 11.036911871240719,
+      "pairs": 8,
+      "partitions": 500,
+      "wall_ns_ranges": {
+        "full": [
+          7503.634765625,
+          8960.44921875
+        ],
+        "indexed": [
+          682.5764973958334,
+          822.1302083333334
+        ]
+      }
+    },
+    {
+      "cold_alloc_call_values": [
+        40835
+      ],
+      "cold_alloc_requested_byte_values": [
+        3844696
+      ],
+      "cold_median_wall_ns": 1554145.5,
+      "cycles_per_window": 366,
+      "full_median_process_cpu_ns_per_cycle": 69398.90710382513,
+      "full_median_wall_ns_per_cycle": 70276.58333333334,
+      "grants": 10000,
+      "hot_alloc_requests_and_bytes_both_modes": [
+        0,
+        0
+      ],
+      "indexed_median_process_cpu_ns_per_cycle": 754.0983606557377,
+      "indexed_median_wall_ns_per_cycle": 752.1051912568306,
+      "paired_median_wall_speedup": 92.9802313163579,
+      "pairs": 8,
+      "partitions": 5000,
+      "wall_ns_ranges": {
+        "full": [
+          68293.3743169399,
+          74386.72677595628
+        ],
+        "indexed": [
+          732.0136612021857,
+          984.4043715846994
+        ]
+      }
+    }
+  ],
+  "schema": "mount-rs.grant-index-paired-summary.v1",
+  "scope": "policy matching, source/cache Arc selection, public or prepared authorization, writer mutex, buffered audit, exact permission/bytes checks, periodic budget checks",
+  "source_before_after_match": true,
+  "source_input_count": 635,
+  "source_input_sha256": "7967069aeb605b114ccb4323f1db54765045618ffd02c07c0baec92d0e4c209f",
+  "stderr_sha256": "96d812ea2ad12e3c316399f24d95d92ae99d6d3b91877fa59fa229dea907b67e",
+  "stdout_sha256": "f02600a51ffd76bdc4551207f5079b182c76f0a9b19443dcd4051c8ac09763a4",
+  "working_candidate": true
+}

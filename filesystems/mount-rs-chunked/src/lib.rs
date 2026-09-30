@@ -4640,8 +4640,8 @@ where
                         observed.considered();
                         let mut mutation = (**mutation).clone();
                         // Exclusive same-revision creates retain their inode
-                        // remap. Concurrent fresh creates check each current
-                        // accumulated candidate before using prepared blocks.
+                        // remap. Every fresh create checks the current accumulated
+                        // candidate before reusing prepared immutable blocks.
                         if !self.inner.options.concurrent_writes
                             && mutation.new_inode
                             && mutation.expected_revision == revision
@@ -4653,7 +4653,7 @@ where
                                 .units(namespace.nodes.len() as u64);
                             namespace.clone()
                         };
-                        if self.inner.options.concurrent_writes && mutation.new_inode {
+                        if mutation.new_inode {
                             match rebase_prepared_create(
                                 &candidate,
                                 revision,
@@ -12168,6 +12168,149 @@ mod compact_preparation_tests {
             resume: Arc::new(tokio::sync::Notify::new()),
             puts: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    async fn legacy_reopen_oracle(volume: &Volume, expected: &[(&str, &[u8])]) {
+        let fresh = ChunkedFs::open(
+            volume.metadata(),
+            volume.blocks(),
+            ChunkedOptions::fixed("legacy-create-fresh-oracle", 4096).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut actual_names: Vec<_> = fresh
+            .readdir("/")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        let mut expected_names: Vec<_> = expected
+            .iter()
+            .map(|(path, _)| path.strip_prefix('/').unwrap().to_owned())
+            .collect();
+        actual_names.sort();
+        expected_names.sort();
+        assert_eq!(
+            actual_names, expected_names,
+            "exact legacy fresh membership"
+        );
+        for (path, body) in expected {
+            let reader = FsDriver::open(&fresh, path, "r", 0).await.unwrap();
+            let mut got = vec![0; body.len() + 1];
+            assert_eq!(reader.read(&mut got, Some(0)).await.unwrap(), body.len());
+            assert_eq!(&got[..body.len()], *body, "fresh payload at {path}");
+            assert_eq!(
+                reader
+                    .read(&mut got, Some(body.len() as u64))
+                    .await
+                    .unwrap(),
+                0,
+                "fresh EOF at {path}"
+            );
+            reader.close().await.unwrap();
+        }
+        fresh.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn legacy_stale_fresh_create_reuses_prepared_blocks_and_one_publication() {
+        bounded(async {
+            let volume = Volume::new();
+            let blocks = paused_blocks(&volume);
+            let fs = ChunkedFs::open(
+                volume.metadata(),
+                blocks.clone(),
+                ChunkedOptions::fixed("legacy-create-rebase", 4096).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(!fs.inner.options.concurrent_writes);
+            assert!(!fs.inner.options.inode_updates);
+            assert!(!fs.inner.options.compact_inode_updates);
+            let created = vec![0x41; 4096];
+            let other = vec![0x42; 4096];
+            let captured_revision = fs.lock_state().unwrap().revision;
+            blocks.pause.store(true, Ordering::SeqCst);
+            let mut write = Box::pin(FsDriver::write_file(&fs, "/created", &created));
+            // The first PUT is reached only after the missing-path/revision
+            // capture. An unrelated publication on this same exclusive owner
+            // then makes that preparation stale without a provider CAS race.
+            at_pause(&mut write, &blocks.entered).await;
+            FsDriver::write_file(&fs, "/other", &other).await.unwrap();
+            let after_other = fs.lock_state().unwrap().revision;
+            assert!(after_other > captured_revision);
+            assert_eq!(blocks.puts.load(Ordering::SeqCst), 2);
+            blocks.resume.notify_one();
+            write.await.unwrap();
+            let puts = blocks.puts.load(Ordering::SeqCst);
+            let creator_publications = fs.lock_state().unwrap().revision - after_other;
+            assert!(!fs.failed());
+            fs.shutdown().await.unwrap();
+            drop(fs);
+            drop(blocks);
+            legacy_reopen_oracle(
+                &volume,
+                &[
+                    ("/created", created.as_slice()),
+                    ("/other", other.as_slice()),
+                ],
+            )
+            .await;
+            println!(
+                "legacy_create_rebase_measurement {{\"total_blob_puts\":{puts},\"creator_metadata_publications\":{creator_publications},\"fresh_payload_membership_eof_verified\":true}}"
+            );
+            assert_eq!(
+                puts, 2,
+                "one PUT per complete file; unrelated revisions must reuse the prepared layout"
+            );
+            assert_eq!(
+                creator_publications, 1,
+                "stale fresh create must acknowledge one durable publication, not open plus write"
+            );
+        });
+    }
+
+    #[test]
+    fn legacy_stale_fresh_create_occupied_path_retains_conflict_fallback() {
+        bounded(async {
+            let volume = Volume::new();
+            let blocks = paused_blocks(&volume);
+            let fs = ChunkedFs::open(
+                volume.metadata(),
+                blocks.clone(),
+                ChunkedOptions::fixed("legacy-create-occupied", 4096).unwrap(),
+            )
+            .await
+            .unwrap();
+            let replacement = vec![0x51; 4096];
+            let occupying = vec![0x52; 4096];
+            blocks.pause.store(true, Ordering::SeqCst);
+            let mut write = Box::pin(FsDriver::write_file(&fs, "/created", &replacement));
+            at_pause(&mut write, &blocks.entered).await;
+            FsDriver::write_file(&fs, "/created", &occupying)
+                .await
+                .unwrap();
+            let existing_inode = fs.stat("/created").await.unwrap().ino;
+            let after_occupation = fs.lock_state().unwrap().revision;
+            blocks.resume.notify_one();
+            write.await.unwrap();
+            let puts = blocks.puts.load(Ordering::SeqCst);
+            let replacement_publications = fs.lock_state().unwrap().revision - after_occupation;
+            assert_eq!(fs.stat("/created").await.unwrap().ino, existing_inode);
+            assert!(!fs.failed());
+            fs.shutdown().await.unwrap();
+            drop(fs);
+            drop(blocks);
+            legacy_reopen_oracle(&volume, &[("/created", replacement.as_slice())]).await;
+            // Occupation is a real path conflict. A fresh-create rebase must
+            // leave it to the existing whole-file replacement fallback.
+            assert_eq!(puts, 3, "occupied path must retain the fallback PUT");
+            assert_eq!(
+                replacement_publications, 2,
+                "occupied path retains existing truncate plus write publications"
+            );
+        });
     }
 
     #[test]
