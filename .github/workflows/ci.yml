@@ -1137,7 +1137,7 @@ jobs:
         timeout-minutes: 3
         run: |
           set -o pipefail
-          node --test --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
+          node --test --test-concurrency=1 --test-reporter=tap --test-timeout=10000 benchmarks/storage/owned-layout-arm.test.mjs benchmarks/storage/owned-layout-outcome.test.mjs benchmarks/storage/owned-layout-comparison.test.mjs benchmarks/storage/owned-layout-metrics.test.mjs benchmarks/storage/process-resource-metrics.test.mjs benchmarks/storage/owned-layout-entry.test.mjs scripts/verify-owned-layout-comparison.test.mjs 2>&1 | tee "$RUNNER_TEMP/owned-layout-controls.log"
       - name: Verify receipt producers and readonly handoff CLI
         timeout-minutes: 1
         run: |
