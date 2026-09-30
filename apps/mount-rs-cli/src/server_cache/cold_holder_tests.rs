@@ -936,6 +936,20 @@ async fn owner_state_poison_during_actual_cleanup_blocks_positive_drain() {
 }
 
 #[test]
+fn filesystem_blocks_are_not_admitted_by_the_rustfs_cold_holder() {
+    let mut configured = options(false);
+    configured.blocks = StoreConfig::Filesystem {
+        root: "local-drive-blocks".into(),
+        durable: true,
+    };
+    assert!(
+        DriverRuntimePlan::split_plan_for_holder_tests(configured)
+            .cold_cache_options()
+            .is_none()
+    );
+}
+
+#[test]
 fn cold_inspection_is_limited_to_exact_prepared_tidb_rustfs_mrc5_options() {
     let accepted = options(false);
     assert!(

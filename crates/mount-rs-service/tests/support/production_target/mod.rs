@@ -151,6 +151,14 @@ pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, 
             "../remote_blocks.rs",
             include_bytes!("../remote_blocks.rs").as_slice(),
         ),
+        (
+            "../filesystem_preflight.rs",
+            include_bytes!("../filesystem_preflight.rs").as_slice(),
+        ),
+        (
+            "../filesystem_preflight_tests.rs",
+            include_bytes!("../filesystem_preflight_tests.rs").as_slice(),
+        ),
         ("process.rs", include_bytes!("process.rs").as_slice()),
         ("workload.rs", include_bytes!("workload.rs").as_slice()),
         ("oracle.rs", include_bytes!("oracle.rs").as_slice()),
@@ -768,7 +776,12 @@ pub async fn controller() -> Result<(), String> {
             let selected_blocks = remote_blocks::resolve_blocks(&config.provider, "target-preflight/blocks",
                 Some(&block_provider), |name| std::env::var(name).ok())?;
             journal.value["metadata_provider"] = json!(config.provider);
-            journal.value["block_provider"] = json!(if selected_blocks.is_some() { "rustfs" } else { config.provider.as_str() });
+            journal.value["block_provider"] = json!(match &selected_blocks {
+                Some(mount_rs_sdk::StoreConfig::RustFs { .. }) => "rustfs",
+                Some(mount_rs_sdk::StoreConfig::Filesystem { .. }) => "filesystem",
+                Some(_) => return Err("target block provider shape invalid".into()),
+                None => config.provider.as_str(),
+            });
             journal.value["block_provider_selection"] = json!({"selector":"MOUNT_RS_TARGET_BLOCK_PROVIDER","requested":block_provider});
             journal.progress = progress::Progress::new(mount_rs_core::diagnostics::profile::enabled(), &config);
             journal.progress.start();
@@ -809,8 +822,17 @@ pub async fn controller() -> Result<(), String> {
             }
             if let Some(blocks) = &selected_blocks {
                 let receipt = remote_blocks::preflight(&mut commands, blocks).await?;
-                write_json(&output.join("rustfs-preflight.json"), &receipt)?;
-                journal.value["rustfs_preflight"] = receipt;
+                match blocks {
+                    mount_rs_sdk::StoreConfig::RustFs { .. } => {
+                        write_json(&output.join("rustfs-preflight.json"), &receipt)?;
+                        journal.value["rustfs_preflight"] = receipt;
+                    }
+                    mount_rs_sdk::StoreConfig::Filesystem { .. } => {
+                        write_json(&output.join("filesystem-preflight.json"), &receipt)?;
+                        journal.value["filesystem_preflight"] = receipt;
+                    }
+                    _ => return Err("target preflight block provider shape invalid".into()),
+                }
             }
             let directory = output.join("private");
             std::fs::create_dir(&directory).map_err(|_| "private fixture directory unavailable")?;
@@ -830,6 +852,7 @@ pub async fn controller() -> Result<(), String> {
             let mut last_progress = Instant::now();
             for drive in 0..config.drives {
                 resources.as_ref().unwrap().check()?;
+                backend.prepare_blocks(drive)?;
                 let receipt = initializer_owner.initialize_empty(&backend, drive).await?;
                 initialization_receipts.push(receipt);
                 journal.value["initialization"]["initialized_drives"] = json!(initialization_receipts.len());

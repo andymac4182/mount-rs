@@ -1833,6 +1833,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-filesystem-blocks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "mount-rs-core",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "mount-rs-foundationdb"
 version = "0.1.0"
 dependencies = [
@@ -2174,6 +2187,7 @@ dependencies = [
  "mount-rs-aws-s3",
  "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-filesystem-blocks",
  "mount-rs-foundationdb",
  "mount-rs-host",
  "mount-rs-memfs",
@@ -2203,6 +2217,7 @@ dependencies = [
  "libc",
  "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-filesystem-blocks",
  "mount-rs-memfs",
  "mount-rs-remote-protocol",
  "mount-rs-rustfs",

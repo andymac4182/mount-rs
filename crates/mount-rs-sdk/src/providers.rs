@@ -16,6 +16,7 @@ use mount_rs_aws_s3::{AwsS3BlockStore, AwsS3Config};
 use mount_rs_core::construction::{ConstructionObserver, ConstructionResource};
 use mount_rs_core::storage::{BlockStore, InodeModeState, MetadataStore};
 use mount_rs_core::{Result, backend_error};
+use mount_rs_filesystem_blocks::FilesystemBlockStore;
 #[cfg(all(
     feature = "foundationdb",
     any(
@@ -695,6 +696,9 @@ async fn open_metadata(
 ) -> Result<(Arc<dyn MetadataStore>, Vec<ProviderResource>)> {
     match provider {
         StoreConfig::Memory => Ok((Arc::new(MemoryMetadataStore::new()), Vec::new())),
+        StoreConfig::Filesystem { .. } => Err(mount_rs_core::FsError::enotsup(
+            "filesystem storage is block-only; select an independent metadata provider",
+        )),
         StoreConfig::Sqlite { path } => {
             Ok((Arc::new(SqliteMetadataStore::open(path)?), Vec::new()))
         }
@@ -832,6 +836,14 @@ async fn open_blocks(
 ) -> Result<(Arc<dyn BlockStore>, Vec<ProviderResource>)> {
     match provider {
         StoreConfig::Memory => Ok((Arc::new(MemoryBlockStore::new()), Vec::new())),
+        StoreConfig::Filesystem { root, durable } => {
+            // This synchronous constructor performs marker I/O on the existing
+            // provider-opening path. It does not detach a blocking worker.
+            Ok((
+                Arc::new(FilesystemBlockStore::open(root, *durable)?),
+                Vec::new(),
+            ))
+        }
         StoreConfig::SlateDb { .. } => Err(mount_rs_core::FsError::enotsup(
             "SlateDB is a metadata provider; use RustFS for immutable blocks",
         )),
@@ -1071,6 +1083,10 @@ fn open_foundationdb_storage(
     };
     FoundationDbStorage::connect(cluster_file, options)
 }
+
+#[cfg(all(test, unix))]
+#[path = "filesystem_provider_tests.rs"]
+mod filesystem_provider_tests;
 
 #[cfg(all(test, unix))]
 #[path = "provider_construction_tests.rs"]

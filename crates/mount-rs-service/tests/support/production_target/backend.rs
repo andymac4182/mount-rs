@@ -98,10 +98,22 @@ impl Backend {
                     None => metadata.clone(),
                     Some(blocks) => {
                         let mut blocks = blocks.clone();
-                        let StoreConfig::RustFs { prefix, .. } = &mut blocks else {
-                            return Err("prepared block provider shape invalid".into());
-                        };
-                        *prefix = format!("{}/drive-{drive}/blocks", self.prefix);
+                        match &mut blocks {
+                            StoreConfig::RustFs { prefix, .. } => {
+                                *prefix = format!("{}/drive-{drive}/blocks", self.prefix);
+                            }
+                            StoreConfig::Filesystem {
+                                root,
+                                durable: true,
+                            } => {
+                                let namespace = root
+                                    .parent()
+                                    .and_then(std::path::Path::parent)
+                                    .ok_or("prepared filesystem namespace invalid")?;
+                                *root = namespace.join(format!("drive-{drive}/blocks"));
+                            }
+                            _ => return Err("prepared block provider shape invalid".into()),
+                        }
                         blocks
                     }
                 };
@@ -113,6 +125,10 @@ impl Backend {
         Filesystem::split_with_context(self.options(drive)?, context)
             .await
             .map_err(|e| format!("provider open failed: {:?}", e.code))
+    }
+    pub fn prepare_blocks(&self, drive: usize) -> Result<(), String> {
+        let (_, blocks) = self.stores(drive)?;
+        super::remote_blocks::prepare_filesystem_drive(&blocks)
     }
     pub async fn receipt(&self, drive: usize, context: &StorageContext) -> Result<Value, String> {
         let (store, blocks) = self.stores(drive)?;
@@ -188,6 +204,54 @@ mod receipt_pooling_tests {
         );
         assert_eq!(calls, 0);
     }
+    #[test]
+    fn lazy_target_filesystem_options_resolve_once_and_preserve_exact_drive_roots() {
+        let backend = Backend {
+            provider: "tidb".into(),
+            block_provider: "filesystem".into(),
+            root: "/unused".into(),
+            prefix: "owned-target".into(),
+        };
+        let mut reads = std::collections::BTreeMap::<String, usize>::new();
+        let options = backend
+            .prepared_options_with(10, |name| {
+                *reads.entry(name.into()).or_default() += 1;
+                Some(
+                    match name {
+                        "MOUNT_RS_TIDB_URL" => "mysql://private@127.0.0.1:4000/db",
+                        "MOUNT_RS_FILESYSTEM_ROOT" => {
+                            "/private/tmp/mount-rs-filesystem-0123456789abcdef01234567"
+                        }
+                        "MOUNT_RS_FILESYSTEM_DURABLE" => "1",
+                        _ => panic!("filesystem plans must not read RustFS configuration"),
+                    }
+                    .into(),
+                )
+            })
+            .unwrap();
+        assert_eq!(reads.len(), 3);
+        assert!(reads.values().all(|count| *count == 1));
+        assert_eq!(options.len(), 10);
+        for (drive, options) in options.into_iter().enumerate() {
+            assert_eq!(options.chunk_size_bytes, 4096);
+            assert!(
+                options.concurrent_writes && options.inode_updates && options.compact_inode_updates
+            );
+            assert!(!options.writeback && !options.delegated);
+            assert!(
+                matches!(options.metadata, StoreConfig::Tidb {volume_key,durable:true,..}
+                if volume_key == format!("owned-target-drive-{drive}"))
+            );
+            let expected_root = format!(
+                "/private/tmp/mount-rs-filesystem-0123456789abcdef01234567/owned-target/drive-{drive}/blocks"
+            );
+            assert!(
+                matches!(options.blocks, StoreConfig::Filesystem {root,durable:true}
+                if root == std::path::Path::new(&expected_root))
+            );
+        }
+    }
+
     #[test]
     fn lazy_target_sqlite_plans_preserve_shared_metadata_blocks_without_env_reads() {
         let backend = Backend {

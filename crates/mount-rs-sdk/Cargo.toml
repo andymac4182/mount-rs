@@ -22,6 +22,7 @@ mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-aws-s3 = { path = "../../providers/mount-rs-aws-s3" }
 mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
+mount-rs-filesystem-blocks = { path = "../../providers/mount-rs-filesystem-blocks" }
 mount-rs-host = { path = "../../filesystems/mount-rs-host" }
 mount-rs-memory = { path = "../../providers/mount-rs-memory" }
 mount-rs-observability = { path = "../mount-rs-observability", optional = true }

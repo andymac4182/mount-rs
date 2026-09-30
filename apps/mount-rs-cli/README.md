@@ -247,6 +247,26 @@ trailing slash; provider paths and buckets go in their separate fields.
 Omitting RustFS `durable` defaults to false. Set it to true only when the
 configured RustFS service is expected to retain completed block writes.
 
+TiDB metadata can also use direct filesystem blocks:
+
+```json
+"metadata": {"kind": "tidb", "connection": {"env": "MOUNT_RS_TIDB_URL"}, "volume_key": "drive-one", "durable": true},
+"blocks": {"kind": "filesystem", "root": "/owned/drive-one/blocks", "durable": true}
+```
+
+Start from `examples/config-tidb-filesystem.json`. The block root must already
+exist, belong to the process user and have mode `0700`; every path component
+must be a real directory rather than a symlink. Relative `root` paths resolve
+against the config file. Filesystem `durable` defaults to true and asserts the
+deployment's durability; setting false still performs the same persistence
+barriers. Independent servers sharing a Drive
+must access the same block directory and persisted backing marker. Separate
+server-local disks require a shared storage design before they can hold one
+Drive's authority. The configured RustFS cold-holder admission remains
+restricted to its existing provider; filesystem blocks are not admitted by it.
+Opening the filesystem provider performs marker I/O synchronously during
+construction, so benchmark startup separately from steady state I/O.
+
 Explicit command-line flags override only the config fields they name.
 Unspecified flags retain config values. Relative config paths are resolved
 relative to the config file. An omitted splitstore owner gets a

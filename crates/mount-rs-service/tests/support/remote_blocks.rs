@@ -24,9 +24,13 @@ pub fn resolve_blocks(
 ) -> Result<Option<StoreConfig>, String> {
     match selector {
         None | Some("metadata") => return Ok(None),
+        Some("filesystem") if metadata_provider == "tidb" => {
+            return resolve_filesystem_blocks(prefix, &mut lookup).map(Some);
+        }
+        Some("filesystem") => return Err("filesystem harness blocks require TiDB metadata".into()),
         Some("rustfs") if metadata_provider == "tidb" => {}
         Some("rustfs") => return Err("RustFS harness blocks require TiDB metadata".into()),
-        Some(_) => return Err("block provider must be metadata or rustfs".into()),
+        Some(_) => return Err("block provider must be metadata, rustfs or filesystem".into()),
     }
     fn required(value: Option<String>, name: &str) -> Result<String, String> {
         value
@@ -77,6 +81,9 @@ pub fn child_blocks(blocks: &Option<StoreConfig>, index: usize) -> Option<StoreC
         if let StoreConfig::RustFs { prefix, .. } = &mut child {
             *prefix = format!("{prefix}-sandbox-{index}");
         }
+        if let StoreConfig::Filesystem { root, .. } = &mut child {
+            *root = root.join(format!("sandbox-{index}"));
+        }
         child
     })
 }
@@ -84,7 +91,7 @@ pub fn child_blocks(blocks: &Option<StoreConfig>, index: usize) -> Option<StoreC
 pub fn require_online_preparation(blocks: &Option<StoreConfig>) -> Result<(), String> {
     if blocks.is_some() {
         Err(
-            "RustFS blocks require online preparation; offline TiDB block preseed is unsupported"
+            "external blocks require online preparation; offline TiDB block preseed is unsupported"
                 .into(),
         )
     } else {
@@ -117,6 +124,74 @@ pub fn open_rustfs(blocks: &StoreConfig) -> Result<RustFsBlockStore, String> {
         *durable,
     )
     .map_err(|_| "RustFS block construction failed (redacted)".into())
+}
+
+/// The owner root is independent of the native evidence tree and retained after a run.
+fn filesystem_root(value: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(value);
+    if !path.is_absolute()
+        || value == "/"
+        || value.ends_with('/')
+        || value.chars().any(char::is_control)
+        || value.contains('\\')
+        || value[1..]
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("filesystem root must be a canonical absolute owner path".into());
+    }
+    Ok(path.to_path_buf())
+}
+
+fn filesystem_namespace(prefix: &str) -> Result<&std::path::Path, String> {
+    if prefix.is_empty()
+        || prefix.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+    {
+        return Err("filesystem block namespace must be a canonical relative fixture key".into());
+    }
+    Ok(std::path::Path::new(prefix))
+}
+
+fn resolve_filesystem_blocks(
+    prefix: &str,
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<StoreConfig, String> {
+    let root = lookup("MOUNT_RS_FILESYSTEM_ROOT").ok_or("MOUNT_RS_FILESYSTEM_ROOT required")?;
+    let root = filesystem_root(&root)?;
+    let namespace = filesystem_namespace(prefix)?;
+    if lookup("MOUNT_RS_FILESYSTEM_DURABLE").as_deref() != Some("1") {
+        return Err("MOUNT_RS_FILESYSTEM_DURABLE=1 required for the durable harness".into());
+    }
+    Ok(StoreConfig::Filesystem {
+        root: root.join(namespace),
+        durable: true,
+    })
+}
+
+pub fn open_filesystem(
+    blocks: &StoreConfig,
+) -> Result<mount_rs_filesystem_blocks::FilesystemBlockStore, String> {
+    let StoreConfig::Filesystem { root, durable } = blocks else {
+        return Err("filesystem block configuration required".into());
+    };
+    mount_rs_filesystem_blocks::FilesystemBlockStore::open(root, *durable)
+        .map_err(|_| "filesystem block construction failed (redacted)".into())
+}
+
+#[cfg(unix)]
+#[path = "filesystem_preflight.rs"]
+mod filesystem_preflight;
+
+#[cfg(unix)]
+pub fn prepare_filesystem_drive(blocks: &StoreConfig) -> Result<(), String> {
+    filesystem_preflight::prepare(blocks)
 }
 
 fn fixture_port(blocks: &StoreConfig) -> Result<u16, String> {
@@ -267,6 +342,9 @@ pub async fn preflight(
     commands: &mut super::command::Commands,
     blocks: &StoreConfig,
 ) -> Result<Value, String> {
+    if matches!(blocks, StoreConfig::Filesystem { .. }) {
+        return filesystem_preflight::preflight(blocks);
+    }
     use std::time::Duration;
     fn required(name: &str) -> Result<String, String> {
         std::env::var(name)
@@ -390,6 +468,103 @@ pub async fn preflight(
         "scope":"owned existing loopback fixture and configured durable blocks; no process-crash or power-loss proof",
         "docker_vm_memory_bytes":info["memory_bytes"],"docker_vm_cpus":info["cpus"]}),
     )
+}
+
+#[cfg(all(test, unix))]
+mod filesystem_selection_tests {
+    use super::*;
+
+    const ROOT: &str = "/private/tmp/mount-rs-filesystem-0123456789abcdef01234567";
+
+    fn selected(
+        root: Option<&str>,
+        durable: Option<&str>,
+        provider: &str,
+        prefix: &str,
+    ) -> Result<Option<StoreConfig>, String> {
+        resolve_blocks(provider, prefix, Some("filesystem"), |name| match name {
+            "MOUNT_RS_FILESYSTEM_ROOT" => root.map(str::to_owned),
+            "MOUNT_RS_FILESYSTEM_DURABLE" => durable.map(str::to_owned),
+            _ => panic!("filesystem selection must not read RustFS or SQL settings"),
+        })
+    }
+
+    #[test]
+    fn filesystem_selector_requires_durable_tidb_and_exact_per_drive_root() {
+        let store = selected(Some(ROOT), Some("1"), "tidb", "target/drive-4/blocks")
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(store, StoreConfig::Filesystem { root, durable: true }
+            if root == std::path::Path::new(ROOT).join("target/drive-4/blocks"))
+        );
+        for durable in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some(" 1"),
+            Some("1\n"),
+        ] {
+            assert!(selected(Some(ROOT), durable, "tidb", "target/drive-4/blocks").is_err());
+        }
+        assert!(selected(None, Some("1"), "tidb", "target/drive-4/blocks").is_err());
+        for provider in ["sqlite", "pglite", "foundationdb", ""] {
+            assert!(selected(Some(ROOT), Some("1"), provider, "target/drive-4/blocks").is_err());
+        }
+        for selector in [None, Some("metadata")] {
+            assert!(
+                resolve_blocks("tidb", "ignored", selector, |_| panic!(
+                    "metadata needs no block environment"
+                ))
+                .unwrap()
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn filesystem_selector_rejects_ambiguous_absolute_root_and_namespace() {
+        for root in [
+            "",
+            "/",
+            "/tmp/",
+            "relative",
+            "/private//tmp/owned",
+            "/private/tmp/./owned",
+            "/private/tmp/../owned",
+            "/private/tmp/owned\n",
+            "/private/tmp/owned\0",
+            "/private/tmp/owned\\other",
+        ] {
+            assert!(selected(Some(root), Some("1"), "tidb", "target/drive-4/blocks").is_err());
+        }
+        for prefix in [
+            "",
+            "/absolute",
+            "../foreign",
+            "target/../foreign",
+            "target//blocks",
+            "target/./blocks",
+            "target/blocks/",
+            "target\\blocks",
+            "target/blocks\n",
+        ] {
+            assert!(selected(Some(ROOT), Some("1"), "tidb", prefix).is_err());
+        }
+    }
+
+    #[test]
+    fn filesystem_selector_child_roots_remain_separate_and_require_online_population() {
+        let selected = selected(Some(ROOT), Some("1"), "tidb", "target/blocks").unwrap();
+        let child = child_blocks(&selected, 7).unwrap();
+        assert!(
+            matches!(child, StoreConfig::Filesystem { root, durable: true }
+            if root == std::path::Path::new(ROOT).join("target/blocks/sandbox-7"))
+        );
+        assert!(require_online_preparation(&selected).is_err());
+        require_online_preparation(&None).unwrap();
+    }
 }
 
 #[cfg(all(test, unix))]

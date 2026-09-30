@@ -63,6 +63,10 @@ pub struct EnvReference {
 #[derive(Clone, PartialEq, Eq)]
 pub enum StorageProvider {
     Memory,
+    Filesystem {
+        root: PathBuf,
+        durable: bool,
+    },
     Sqlite {
         path: PathBuf,
     },
@@ -115,6 +119,11 @@ impl fmt::Debug for StorageProvider {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => formatter.write_str("Memory"),
+            Self::Filesystem { root, durable } => formatter
+                .debug_struct("Filesystem")
+                .field("root", root)
+                .field("durable", durable)
+                .finish(),
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
                 .field("path", path)
@@ -881,6 +890,23 @@ fn parse_provider(
         "memory" => {
             reject_unknown(object, &["kind"], path)?;
             StorageProvider::Memory
+        }
+        "filesystem" => {
+            if !block_role {
+                return Err(ConfigError::at(
+                    path,
+                    "provider 'filesystem' is block-only; select an independent metadata provider",
+                ));
+            }
+            reject_unknown(object, &["kind", "root", "durable"], path)?;
+            StorageProvider::Filesystem {
+                root: required_path(object, "root", path, base_dir)?,
+                durable: object
+                    .get("durable")
+                    .map(|value| required_value_bool(value, &format!("{path}.durable")))
+                    .transpose()?
+                    .unwrap_or(true),
+            }
         }
         "sqlite" => {
             reject_unknown(object, &["kind", "path", "journal_mode"], path)?;
@@ -2864,6 +2890,70 @@ mod tests {
         legacy["driver"]["storage"]["metadata"]["path"] = serde_json::json!(":memory:");
         parse_config_str(&legacy.to_string(), Path::new("/tmp"))
             .expect("nonconcurrent SQLite path parsing remains compatible");
+    }
+
+    #[test]
+    fn filesystem_blocks_parse_tidb_split_storage_and_resolve_relative_roots() {
+        let mut value = serde_json::json!({
+            "version": 1,
+            "driver": {
+                "kind": "splitstore",
+                "storage": {
+                    "concurrent_writes": true,
+                    "inode_updates": true,
+                    "compact_inode_updates": true,
+                    "metadata": {"kind": "tidb", "connection": {"env": "TIDB_URL"}, "durable": true},
+                    "blocks": {"kind": "filesystem", "root": "drive-one/blocks"}
+                }
+            }
+        });
+        let parsed = parse_config_str(&value.to_string(), Path::new("/owned/config")).unwrap();
+        assert!(matches!(parsed.storage.unwrap().blocks,
+            StorageProvider::Filesystem { root, durable: true } if root == Path::new("/owned/config/drive-one/blocks")));
+        value["driver"]["storage"]["blocks"]["durable"] = serde_json::json!(false);
+        let parsed = parse_config_str(&value.to_string(), Path::new("/owned/config")).unwrap();
+        assert!(matches!(
+            parsed.storage.unwrap().blocks,
+            StorageProvider::Filesystem { durable: false, .. }
+        ));
+    }
+
+    #[test]
+    fn filesystem_config_is_block_only_strict_and_does_not_open_storage() {
+        let blocks =
+            serde_json::json!({"kind": "filesystem", "root": "/uncreated/filesystem-blocks"});
+        let config = |metadata: Value, blocks: Value| {
+            serde_json::json!({
+                "version": 1,
+                "driver": {"kind": "splitstore", "storage": {"metadata": metadata, "blocks": blocks}}
+            })
+        };
+        let error = parse_config_str(
+            &config(blocks.clone(), serde_json::json!({"kind":"memory"})).to_string(),
+            Path::new("/owned/config"),
+        )
+        .unwrap_err();
+        assert!(error.message().contains("block-only"));
+        for invalid in [
+            serde_json::json!({"kind":"filesystem"}),
+            serde_json::json!({"kind":"filesystem", "root":""}),
+            serde_json::json!({"kind":"filesystem", "root":9}),
+            serde_json::json!({"kind":"filesystem", "root":"blocks", "durable":"yes"}),
+            serde_json::json!({"kind":"filesystem", "root":"blocks", "bucket":"ignored"}),
+        ] {
+            assert!(
+                parse_config_str(
+                    &config(serde_json::json!({"kind":"memory"}), invalid).to_string(),
+                    Path::new("/owned/config"),
+                )
+                .is_err()
+            );
+        }
+        parse_config_str(
+            &config(serde_json::json!({"kind":"memory"}), blocks).to_string(),
+            Path::new("/owned/config"),
+        )
+        .unwrap();
     }
 
     #[test]

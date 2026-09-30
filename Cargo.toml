@@ -13,6 +13,7 @@ members = [
     "providers/mount-rs-sqlite",
     "providers/mount-rs-r2",
     "providers/mount-rs-rustfs",
+    "providers/mount-rs-filesystem-blocks",
     "providers/mount-rs-slatedb",
     "providers/mount-rs-object-store-blocks",
     "providers/mount-rs-aws-s3",

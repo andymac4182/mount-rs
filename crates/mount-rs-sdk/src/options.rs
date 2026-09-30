@@ -15,6 +15,15 @@ use std::time::Duration;
 #[derive(Clone, PartialEq, Eq)]
 pub enum StoreConfig {
     Memory,
+    /// Immutable blocks stored in an existing owned 0700 filesystem directory.
+    /// Every server using a Drive must see the same directory and backing identity.
+    /// This provider is block-only; metadata remains independent. Block operations
+    /// require an active Tokio runtime. Opening validates and synchronizes its
+    /// identity marker synchronously; callers must include that in startup timing.
+    Filesystem {
+        root: PathBuf,
+        durable: bool,
+    },
     Sqlite {
         path: PathBuf,
     },
@@ -81,6 +90,11 @@ impl fmt::Debug for StoreConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => formatter.write_str("Memory"),
+            Self::Filesystem { root, durable } => formatter
+                .debug_struct("Filesystem")
+                .field("root", root)
+                .field("durable", durable)
+                .finish(),
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
                 .field("path", path)

@@ -923,7 +923,12 @@ struct ObjectStoreCapture<'a> {
     enabled: bool,
     snapshot: &'a mut dyn FnMut() -> Option<ObjectStoreSnapshot>,
 }
-const OBJECT_STORE_SCOPE: &str = "process cumulative RustFS service dispatch/body and generic adapter cache observations; bounded records from one fixed snapshot; not exact wire requests, physical IOPS, transactional cut or provider/socket drain acknowledgment";
+const OBJECT_STORE_SCOPE: &str = "process cumulative RustFS service dispatch/body and generic adapter cache observations when configured; filesystem blobs have no object-store/HTTP transport; bounded records from one fixed snapshot; not exact wire requests, physical IOPS, transactional cut or provider/socket drain acknowledgment";
+fn filesystem_object_store_observation(enabled: bool) -> Value {
+    json!({"enabled":enabled,"configured":false,"available":false,"complete":false,
+        "status":"not_configured","reason":"filesystem blocks do not use an object-store or HTTP transport",
+        "records":[],"scope":OBJECT_STORE_SCOPE})
+}
 fn object_store_identity(
     identity: &Value,
     started: u64,
@@ -1047,6 +1052,8 @@ impl Local {
     ) -> Result<Value, String> {
         let start = Instant::now();
         let started = super::utc_ms();
+        let filesystem_blocks =
+            std::env::var("MOUNT_RS_TARGET_BLOCK_PROVIDER").as_deref() == Ok("filesystem");
         // One snapshot and its seven bounded records belong to this same
         // boundary/allowance. The private override supports isolated controls;
         // existing public paths always use the actual process bank.
@@ -1054,6 +1061,9 @@ impl Local {
             Some(capture) => {
                 object_store_records(capture.enabled, &identity, started, capture.snapshot)?
             }
+            None if filesystem_blocks => filesystem_object_store_observation(
+                mount_rs_core::diagnostics::object_store::Observer::enabled().is_enabled(),
+            ),
             None => {
                 let observer = mount_rs_core::diagnostics::object_store::Observer::enabled();
                 object_store_records(observer.is_enabled(), &identity, started, || {
@@ -1155,14 +1165,14 @@ impl Local {
             "capture_complete":!enabled || elapsed<=Duration::from_secs(30),"metrics_complete":enabled && quiescent && accounting_complete && runtime_complete && elapsed<=Duration::from_secs(30),"accounting_complete":accounting_complete,
             "quiescence":{"controller_work_drained":true,"service_observed":service.is_some(),"application_quiescent":application_quiescent,"instrumented_storage_in_flight_zero":storage_quiescent,"scope":"owned controller work drained; only instrumented service/storage activity observed; no global atomic cut or proof of all provider/background work"},
             "object_store_observation":object_store,"core":core,"storage":storage,"process_since_baseline":process,"process_since_previous_boundary":process_interval,"server_quic":service,"server_quic_before_local_capture":service_envelope,"oracle":oracle,"runtime_activation":runtime,
-            "coverage":{"object_store_observation":json!({"enabled":object_store["enabled"],"configured":true,"available":object_store["available"],"complete":false,"status":if object_store["available"]==true{"partial"}else if object_store["enabled"]==true{"unavailable"}else{"disabled"},"scope":OBJECT_STORE_SCOPE}),"core":family_state(enabled,true,true,quiescent),"storage":family_state(enabled,true,true,quiescent),"process":family_state(enabled,true,true,true),
+            "coverage":{"object_store_observation":json!({"enabled":object_store["enabled"],"configured":!filesystem_blocks,"available":object_store["available"],"complete":false,"status":if filesystem_blocks{"not_configured"}else if object_store["available"]==true{"partial"}else if object_store["enabled"]==true{"unavailable"}else{"disabled"},"scope":OBJECT_STORE_SCOPE}),"core":family_state(enabled,true,true,quiescent),"storage":family_state(enabled,true,true,quiescent),"process":family_state(enabled,true,true,true),
                 "server_quic":family_state(enabled,worker,service.is_some(),quiescent),
                 "runtime_activation":family_state(enabled,worker,runtime.as_ref().is_some_and(|value| value["available"]==true),runtime_complete),
                 "catalog_pager_core":{"status":if enabled{"partial"}else{"disabled"},"available":enabled,"scope":"catalog pager hit/miss/write/unavailable core rows retained; not all SQLite connections"},
                 "sqlite_cache_sql":{"enabled":enabled,"configured":true,"complete":false,"status":"unavailable","available":false,"reason":"live registry requires connection locks/PRAGMA; no independent blocking observer owner in this collector"},
                 "blob_cache":{"enabled":enabled,"configured":false,"complete":false,"status":"not_configured","available":false},
-                "raw_object_store":{"enabled":enabled,"configured":true,"complete":false,"status":"unavailable","available":false,"reason":"NAPI raw registry does not register these direct SDK/RustFs processes"},
-                "http_attempts":{"enabled":enabled,"complete":false,"status":"unavailable","available":false},"physical_iops":{"enabled":enabled,"complete":false,"status":"unavailable","available":false}},
+                "raw_object_store":{"enabled":enabled,"configured":!filesystem_blocks,"complete":false,"status":if filesystem_blocks{"not_configured"}else{"unavailable"},"available":false,"reason":if filesystem_blocks{"filesystem blocks do not use an object-store transport"}else{"NAPI raw registry does not register these direct SDK blob processes"}},
+                "http_attempts":{"enabled":enabled,"configured":!filesystem_blocks,"complete":false,"status":if filesystem_blocks{"not_configured"}else{"unavailable"},"available":false},"physical_iops":{"enabled":enabled,"complete":false,"status":"unavailable","available":false}},
             "scope":"process-local core and direct SDK storage counters; inclusive overlapping wall, logical API bytes/calls; process CPU includes observers/background; no NAPI or HTTP attribution",
             "observer":observer().snapshot(),"observer_scope":"fixed scalar counts/wall/known bytes; snapshot excludes its own completed capture/publication; later outer receipt includes those costs; no isolated observer CPU"});
         if let Some(before) = &self.previous {

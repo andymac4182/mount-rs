@@ -231,7 +231,9 @@ fn block_policy(config: &StoreConfig) -> Result<IntegrityPolicy> {
                 ),
             );
         }
-        StoreConfig::Tidb { .. } => IntegrityPolicy::Sha256Prefixed,
+        StoreConfig::Filesystem { .. } | StoreConfig::Tidb { .. } => {
+            IntegrityPolicy::Sha256Prefixed
+        }
         StoreConfig::FoundationDb { .. } => IntegrityPolicy::Sha256Colon,
         StoreConfig::R2 { .. } | StoreConfig::RustFs { .. } | StoreConfig::AwsS3 { .. } => {
             IntegrityPolicy::ObjectStoreSha256OrOpaque
@@ -594,6 +596,29 @@ mod tests {
         ];
         assert!(c.validate().is_err());
     }
+    #[test]
+    fn filesystem_cache_policy_requires_content_sha256() {
+        let provider = StoreConfig::Filesystem {
+            root: "blocks".into(),
+            durable: true,
+        };
+        assert_eq!(
+            block_policy(&provider).unwrap(),
+            IntegrityPolicy::Sha256Prefixed
+        );
+        let id = mount_rs_core::storage::BlockId(
+            "be3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
+        );
+        let policy = block_policy(&provider).unwrap();
+        policy.verify(&id, b"").unwrap();
+        assert!(policy.verify(&id, b"corrupt").is_err());
+        assert!(
+            policy
+                .verify(&mount_rs_core::storage::BlockId("bopaque".into()), b"")
+                .is_err()
+        );
+    }
+
     #[test]
     fn scope_and_partition_bounds_are_independent_of_blob_storage_limits() {
         let mut c = config();

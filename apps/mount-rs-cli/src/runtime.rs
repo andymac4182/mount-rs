@@ -615,6 +615,10 @@ fn sdk_store_config(
 ) -> Result<StoreConfig, CliError> {
     match provider {
         StorageProvider::Memory => Ok(StoreConfig::Memory),
+        StorageProvider::Filesystem { root, durable } => Ok(StoreConfig::Filesystem {
+            root: resolved_path(root, cwd, home),
+            durable: *durable,
+        }),
         StorageProvider::Sqlite { path } => Ok(StoreConfig::Sqlite {
             path: resolved_path(path, cwd, home),
         }),
@@ -1988,6 +1992,7 @@ fn resolution_directories(options: &CliOptions) -> Result<(PathBuf, PathBuf), Cl
         StorageProvider::Sqlite { path } | StorageProvider::SqliteWithOptions { path, .. } => {
             needs_directory(path)
         }
+        StorageProvider::Filesystem { root, .. } => needs_directory(root),
         StorageProvider::FoundationDb { cluster_file, .. } => needs_directory(cluster_file),
         _ => false,
     };
@@ -2226,6 +2231,36 @@ mod tests {
             &original,
             "a failed later resolution changed the prepared owner"
         );
+    }
+
+    #[test]
+    fn filesystem_block_roots_map_to_sdk_without_environment_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("cwd");
+        let home = root.path().join("home");
+        for (path, expected) in [
+            (PathBuf::from("blocks"), cwd.join("blocks")),
+            (PathBuf::from("~/blocks"), home.join("blocks")),
+            (root.path().join("absolute"), root.path().join("absolute")),
+        ] {
+            for durable in [false, true] {
+                let provider = StorageProvider::Filesystem {
+                    root: path.clone(),
+                    durable,
+                };
+                let config = sdk_store_config(&provider, &cwd, &home, &mut |_| {
+                    panic!("filesystem roots do not resolve credentials")
+                })
+                .unwrap();
+                assert_eq!(
+                    config,
+                    StoreConfig::Filesystem {
+                        root: expected.clone(),
+                        durable
+                    }
+                );
+            }
+        }
     }
 
     #[test]

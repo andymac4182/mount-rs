@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "mountpoint": "./mnt",
+  "transport": "auto",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "tidb",
+        "connection": {
+          "env": "MOUNT_RS_TIDB_URL"
+        },
+        "volume_key": "tidb-filesystem-cli-example",
+        "durable": true
+      },
+      "blocks": {
+        "kind": "filesystem",
+        "root": "./filesystem-blocks",
+        "durable": true
+      },
+      "chunk_size_bytes": 65536,
+      "concurrent_writes": true,
+      "inode_updates": true,
+      "compact_inode_updates": true
+    }
+  }
+}
