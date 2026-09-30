@@ -1,0 +1,75 @@
+name: Metric Publication Probe
+
+on:
+  push:
+    branches:
+      - codex/full-target-evidence-probe-20260930-1106
+    paths:
+      - crates/mount-rs-service/tests/support/production_target/metrics.rs
+      - .github/workflows/metric-publication-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  limits:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+      - name: Bind the actual publisher regression source
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'CARGO_TARGET_DIR=%s\nCARGO_TERM_COLOR=never\n' "$RUNNER_TEMP/metric-publication-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          source = Path('crates/mount-rs-service/tests/support/production_target/metrics.rs').read_bytes()
+          if hashlib.sha256(source).hexdigest() != 'f701fedde270e444b12750b0bc17f5a659c2fadd133a0f92d810dffae0fdaf9f':
+              raise SystemExit('Metric publisher source differs from the RED fixture')
+          PY
+      - name: Preserve actual readable immutable publication
+        run: timeout --kill-after=5s 16m ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target target::metrics::tests::large_metric_frame_is_compressed_readable_and_immutable -- --exact --nocapture
+      - name: Preserve actual decoded reader rejection
+        run: timeout --kill-after=5s 90s ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target target::metrics::tests::metric_reader_rejects_decoded_size_bomb_without_building_plain_payload -- --exact --nocapture
+      - name: Require precisely the writer decoded-limit RED
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          timeout --kill-after=5s 90s ./scripts/cargo-shared test --locked -p mount-rs-service --features sdk-runtime,resource-profiling --test quic_production_target target::metrics::tests::metric_publisher_rejects_decoded_size_bomb_and_cleans_pending -- --exact --nocapture > "$RUNNER_TEMP/metric-publisher-red.log" 2>&1 || status=$?
+          export METRIC_RED_STATUS="$status"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          path = Path(os.environ['RUNNER_TEMP']) / 'metric-publisher-red.log'
+          if path.stat().st_size > 4 * 1024 * 1024:
+              raise SystemExit('Metric publisher RED log exceeds its cap')
+          text = path.read_text(encoding='utf-8')
+          test = 'target::metrics::tests::metric_publisher_rejects_decoded_size_bomb_and_cleans_pending'
+          sentinel = 'METRIC_PUBLISHER_DECODED_LIMIT_REGRESSION: oversized decoded frame published'
+          summaries = re.findall(r'(?m)^test result: FAILED\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out; finished in .+$', text)
+          qualified = (
+              os.environ['METRIC_RED_STATUS'] == '101'
+              and text.count(sentinel) == 1
+              and re.findall(r'(?m)^running (\d+) tests?$', text) == ['1']
+              and len(re.findall(r'(?m)^test ' + re.escape(test) + r' \.\.\. FAILED$', text)) == 1
+              and len(summaries) == 1
+              and summaries[0][:4] == ('0', '1', '0', '0')
+          )
+          if not qualified:
+              print(text[-3000:])
+              raise SystemExit('Expected exactly the decoded publisher regression, not a build or runtime failure')
+          print('METRIC_PUBLISHER_DECODED_LIMIT_REGRESSION: exact writer RED; immutable and reader controls passed')
+          PY
+      - name: Retain the bounded writer regression trace
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: metric-publisher-red-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/metric-publisher-red.log
+          if-no-files-found: warn
+          retention-days: 14

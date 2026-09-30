@@ -2165,6 +2165,28 @@ mod tests {
         encoder.finish().unwrap()
     }
     #[test]
+    fn metric_publisher_rejects_decoded_size_bomb_and_cleans_pending() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized.json.gz");
+        // JSON's two quotes make this frame exceed the decoded cap even though
+        // the repetitive body compresses far below the encoded cap.
+        let value = Value::String("a".repeat(DECODED_METRIC_LIMIT as usize));
+        let result = publish_immutable(&path, &value);
+        assert!(
+            result.is_err(),
+            "METRIC_PUBLISHER_DECODED_LIMIT_REGRESSION: oversized decoded frame published"
+        );
+        assert!(
+            !path.exists(),
+            "oversized decoded frame must not have an immutable receipt"
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path()).unwrap().count(),
+            0,
+            "rejected oversized frame must remove its pending file"
+        );
+    }
+    #[test]
     fn metric_reader_accepts_one_complete_gzip_member_and_ordinary_json() {
         let directory = tempfile::tempdir().unwrap();
         let value = json!({"identity":identity(),"core":{"entries":[{"calls":7}]}});
