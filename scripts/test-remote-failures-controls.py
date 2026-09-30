@@ -158,6 +158,39 @@ class NativeMonitorCoverageControls(unittest.TestCase):
         'rss_diagnostic_reap_link_requires_the_exact_retained_child_identity',
         'rss_diagnostic_maximum_compact_and_pretty_payloads_keep_two_kibibyte_cap',
     ))
+    pending_required = tuple('ten_process_cache_support::process::tests::' + name for name in (
+        'rss_pending_exit_owner_records_only_the_first_successful_original_stop_budget',
+        'rss_pending_exit_stop_target_requires_actual_reap_and_fresh_complete_frame',
+        'rss_pending_exit_cleanup_target_requires_actual_reap_and_fresh_complete_frame',
+        'rss_pending_exit_frame_requires_actual_reap_without_target_native_reread',
+        'rss_pending_exit_direct_typed_error_requires_actual_reap_and_complete_frame',
+        'rss_pending_exit_running_forever_exhausts_original_bound_without_reset',
+        'rss_pending_exit_supervisor_sibling_caps_and_progress_failures_remain_fatal',
+        'rss_pending_exit_unsuccessful_and_forced_actual_exits_remain_fatal',
+        'rss_pending_exit_wrong_native_proofs_and_disallowed_scopes_remain_fatal',
+        'rss_pending_exit_compact_and_pretty_settlement_evidence_stays_bounded',
+        'rss_pending_exit_prior_bare_sigint_cannot_acquire_original_budget_later',
+        'rss_pending_exit_terminal_owner_cannot_record_a_successful_stop_budget',
+        'rss_pending_exit_original_capture_freshness_outer_and_resource_force_bounds_do_not_reset',
+        'rss_pending_exit_expired_original_owner_budget_refuses_before_waiting',
+        'rss_pending_exit_actual_successful_reap_cannot_publish_after_original_capture_bound',
+        'rss_pending_exit_retained_child_poll_failures_remain_fatal_before_and_during_pending',
+        'rss_pending_exit_common_clock_failure_during_pending_remains_fatal',
+        'rss_pending_exit_retained_owner_identity_cannot_change_during_pending',
+        'rss_pending_exit_two_intentional_frame_targets_require_two_actual_reaps',
+        'rss_pending_exit_later_target_cannot_reset_the_first_shared_original_bound',
+        'rss_pending_exit_direct_permission_does_not_cover_another_stopped_sibling',
+        'rss_pending_exit_prior_failure_survives_successful_actual_retirement',
+    ))
+    pending_reentry_required = tuple('ten_process_cache_support::process::tests::' + name for name in (
+        'rss_pending_exit_fatal_reentry_retains_quarantine_across_frame_and_direct_cleanup',
+        'rss_pending_exit_expired_capture_reentry_cannot_reread_or_restart_observation',
+        'rss_pending_exit_committed_authority_requires_exact_retained_roster',
+        'rss_pending_exit_direct_error_native_clock_must_be_inside_current_capture',
+        'rss_pending_exit_nonpending_failed_or_forced_sibling_reap_remains_fatal',
+    ))
+    pending_required += pending_reentry_required
+    rss_required += pending_required
     if sys.platform == 'darwin':
         rss_required += ('ten_process_cache_support::process::tests::rss_diagnostic_macos_invalid_pid_failure_has_actual_call_scalars',)
 
@@ -173,7 +206,7 @@ class NativeMonitorCoverageControls(unittest.TestCase):
 
     def test_native_monitor_inventory_requires_all_monitor_and_rss_controls(self):
         names = parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']
-        expected_count = 40 if sys.platform == 'darwin' else 39
+        expected_count = 67 if sys.platform == 'darwin' else 66
         self.assertEqual(len(names), expected_count)
         self.assertEqual(len(set(names)), expected_count)
         self.assertTrue(set(self.required + self.rss_required).issubset(names))
@@ -204,6 +237,59 @@ class NativeMonitorCoverageControls(unittest.TestCase):
         self.assertFalse(parent.package_harness_passed(
             self.fixture(old), parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
 
+    def test_native_rss_previous_package_without_pending_exit_controls_cannot_qualify(self):
+        old = tuple(name for name in self.complete_names() if name not in self.pending_required)
+        self.assertEqual(len(self.pending_required), 27)
+        self.assertEqual(len(set(self.pending_required)), 27)
+        self.assertEqual(len(old), 40 if sys.platform == 'darwin' else 39)
+        self.assertFalse(parent.package_harness_passed(
+            self.fixture(old), parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
+
+    def test_native_rss_previous_package_without_reentry_controls_cannot_qualify(self):
+        self.assertEqual(len(self.pending_reentry_required), 5)
+        self.assertEqual(len(set(self.pending_reentry_required)), 5)
+        for platform in ['linux', 'darwin']:
+            with self.subTest(platform=platform):
+                module = importlib.util.module_from_spec(spec)
+                with patch.object(sys, 'platform', platform):
+                    spec.loader.exec_module(module)
+                old = tuple(name for name in module.EXPECTED_PACKAGE_CASES['tidbcoldunit']
+                            if name not in self.pending_reentry_required)
+                self.assertEqual(len(old), 62 if platform == 'darwin' else 61)
+                self.assertTrue(set(self.pending_reentry_required).isdisjoint(old))
+                self.assertTrue((set(self.pending_required) - set(self.pending_reentry_required)).issubset(old))
+                self.assertFalse(module.package_harness_passed(
+                    self.fixture(old), module.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
+
+    def test_native_rss_renamed_pending_exit_control_cannot_qualify(self):
+        names = self.complete_names()
+        for name in self.pending_required:
+            with self.subTest(name=name):
+                renamed = tuple('unrelated::renamed_pending_exit_control' if item == name else item
+                                for item in names)
+                self.assertFalse(parent.package_harness_passed(
+                    self.fixture(renamed), parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
+
+    def test_native_rss_inventory_preserves_ordinary_command_and_four_ignored_native_cases(self):
+        self.assertEqual(parent.COMMANDS['tidbcoldunit'], (
+            ['./scripts/cargo-shared', 'test', '-p', 'mount-rs-cli', '--features',
+             'local-oidc-fixture', '--test', 'ten_process_cache', '--locked', '--offline'],
+            180, 0, 0))
+        names = self.complete_names()
+        ignored = (
+            'ten_process_sqlite_cache_qualification', 'native_worker',
+            'ten_process_tidb_rustfs_cold_retirement_qualification', 'native_tidb_rustfs_cold_worker',
+        )
+        self.assertTrue(set(ignored).isdisjoint(parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
+        output = f'running {len(names) + len(ignored)} tests\n'
+        output += ''.join(f'test {name} ... ok\n' for name in names)
+        output += ''.join(f'test {name} ... ignored, requires explicit native lease\n'
+                          for name in ignored)
+        output += (f'test result: ok. {len(names)} passed; 0 failed; {len(ignored)} ignored; '
+                   '0 measured; 0 filtered out; finished in 0.01s\n')
+        self.assertTrue(parent.package_harness_passed(
+            output, parent.EXPECTED_PACKAGE_CASES['tidbcoldunit']))
+
     def test_native_rss_duplicate_named_result_cannot_qualify(self):
         names = self.complete_names()
         for name in self.rss_required:
@@ -222,7 +308,7 @@ class NativeMonitorCoverageControls(unittest.TestCase):
                     spec.loader.exec_module(module)
                 names = module.EXPECTED_PACKAGE_CASES['tidbcoldunit']
                 self.assertEqual(set(names), baseline | portable | ({probe} if platform == 'darwin' else set()))
-                self.assertEqual(len(names), 40 if platform == 'darwin' else 39)
+                self.assertEqual(len(names), 67 if platform == 'darwin' else 66)
 
 
 class NativeRssFailureArtifactControls(unittest.TestCase):
