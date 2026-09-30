@@ -76,12 +76,20 @@ jobs:
           INSERT_LOOPS = {
               '_RINvMsN_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree4nodeINtB6_6HandleINtB6_7NodeRefNtNtB6_6marker3MutyNtNtCsls6Niw6mIAT_13mount_rs_core7storage12NodeMetadataNtB1n_4LeafENtB1n_4EdgeE16insert_recursingNtNtBc_5alloc6GlobalNCNvMs4_NtNtB8_3map5entryINtB3F_11VacantEntryyB1E_E12insert_entry0EB1I_.0': ('insert_recursing', 1072, 'node.rs', 'VacantEntry'),
           }
+          DROP_LOOPS = {
+              '_RNvXsy_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree3mapINtB5_8IntoIterNtNtBb_6string6StringyENtNtNtCs8xvirJzNMvV_4core3ops4drop4Drop4dropCsls6Niw6mIAT_13mount_rs_core.0': ('IntoIter::drop', 1920, 'map.rs'),
+          }
+          DROP_RAW_FUNCTION = '<std::collections::btree_map::IntoIter<std::string::String, u64> as std::ops::Drop>::drop'
+          DROP_RAW_PROPERTY_ID = DROP_RAW_FUNCTION + '.unwind.0'
+          DROP_RAW_DESCRIPTION = 'unwinding assertion loop 0'
+          STD_MAP_SHA256 = '67b794871d39e6c6e7dbd3e3cb4d6b7fadc9a534d13a52a054b9c03bd62abf78'
+          CHUNKER_CONFIG_GEOMETRY_SHA256 = '72e460dccd2ccbb2c2780d696082031d736ee19f848731c80f22dd094cc37200'
           # Observed hosted nightly source hashes; local stable fragments below are only
           # candidate facts and must match this actual source before any proof is admitted.
           STD_NODE_SHA256 = {'node.rs': '9c6aaab4c794d221ae98e943a79fea2d9a2836977d0d40c0e4e2b2da83e244ea', 'search.rs': '687b99a6f5f146591738c8039371499d5c5ca9adfdb47b9519694aba62387021'}
           INSERT_SOURCE_FACTS = {'leaf_init_and_new': {'marker': '    unsafe fn init(this: *mut Self) {', 'normalized_sha256': '5c6a1cecb7f74267d94797bbac75c20e9dc68ccb5f2daf44869c57aabf7577f6'}, 'leaf_insert_fit': {'marker': '    unsafe fn insert_fit(', 'normalized_sha256': '6af1e66a16fd961fd609dbce68a999cb9859e9eeb6173c85d088085a575fd7d4'}, 'leaf_insert': {'marker': '    fn insert<A: Allocator + Clone>(', 'normalized_sha256': '4a719f61ce85641bdc4e4efa880c0cd10d5ed4bb0329574e7b1f0686926e1489'}, 'insert_recursing': {'marker': '    pub(super) fn insert_recursing<A: Allocator + Clone>(', 'normalized_sha256': '722181c6a5e82e11caa8cd533f2f0fa6d9ec7d85db03eb225e0fc6d201190eb0'}}
           FIXTURE_GEOMETRY_SHA256 = '95ee0094f0d6610784e9dde2f55936b6b415b1d6156782293af2096bc2aa02ba'
-          LOOP_BOUNDS = {**dict.fromkeys(LOOPS, 4), **dict.fromkeys(NODE_LOOPS, 13), **dict.fromkeys(INSERT_LOOPS, 2)}
+          LOOP_BOUNDS = {**dict.fromkeys(LOOPS, 4), **dict.fromkeys(NODE_LOOPS, 13), **dict.fromkeys(INSERT_LOOPS, 2), **dict.fromkeys(DROP_LOOPS, 2)}
           UNWINDSET = ','.join(loop + ':' + str(bound) for loop, bound in LOOP_BOUNDS.items())
           EVIDENCE = pathlib.Path(os.environ['PROBE_EVIDENCE'])
           BUNDLE = pathlib.Path(os.environ['KANI_HOME']) / 'kani-0.68.0'
@@ -193,6 +201,15 @@ jobs:
               require(body.count('verification_root_nodes(occupied, &chunker)') == 1 and 'nodes.insert(' not in body, 'harness constructor use changed')
               require('namespace: &Namespace,' in source.split('fn verification_root_nodes(', 1)[0], 'rebase namespace is no longer borrowed immutably')
 
+              chunking = pathlib.Path('src/chunking.rs').read_text(encoding='utf-8')
+              start = chunking.index('impl Chunker for FixedSizeChunker {')
+              end = chunking.index('\n    fn chunks', start)
+              config = chunking[start:end]
+              require(hashlib.sha256(' '.join(config.split()).encode()).hexdigest() == CHUNKER_CONFIG_GEOMETRY_SHA256, 'one-entry chunker constructor source changed')
+              require(config.count('let mut parameters = BTreeMap::new();') == 1 and config.count('parameters.insert(') == 1, 'chunker parameter insertion census changed')
+              require('parameters.insert("chunk_size".to_owned(), self.size.get() as u64);' in config, 'fixed-size chunker parameter geometry changed')
+              require('parameters' not in body, 'harness mutates or directly constructs chunker parameters')
+
           def install_guard():
               source_gate()
               binary = BUNDLE / 'bin' / 'cbmc'
@@ -237,6 +254,16 @@ jobs:
               search = texts['search.rs']
               require('let keys = node.keys();' in search and 'debug_assert!(start_index <= keys.len());' in search, 'search key-slice contract changed')
               require(search.splitlines()[224].strip() == 'for (offset, k) in unsafe { keys.get_unchecked(start_index..) }.iter().enumerate() {', 'search key loop source changed')
+
+          def check_std_drop_sources(records):
+              expected = pathlib.Path.home() / '.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree/map.rs'
+              require(set(records) == {'map.rs'}, 'standard-library drop source census changed')
+              record = records['map.rs']
+              require(record['path'] == str(expected), 'standard-library map source path changed')
+              require(record['sha256'] == STD_MAP_SHA256 and digest_path(expected, 512 * 1024) == STD_MAP_SHA256, 'pinned-nightly map source identity changed')
+              source = expected.read_text(encoding='utf-8')
+              require(source.splitlines()[1919].strip() == 'while let Some(kv) = self.dying_next() {', 'IntoIter drop loop source line changed')
+              print('PINNED_STD_DROP_SOURCE_FACTS ' + json.dumps({'sources': records, 'chunker_config_geometry_sha256': CHUNKER_CONFIG_GEOMETRY_SHA256, 'chunker_max_parameters': 1, 'strict_drop_unwind': 2}, sort_keys=True), file=sys.stderr)
 
           def cbmc_guard():
               tools = read_json('tools.json')
@@ -292,6 +319,22 @@ jobs:
                   write_new('std-node-source-facts.json', std_sources)
                   print('PINNED_STD_NODE_SOURCE_FACTS ' + json.dumps(std_sources, sort_keys=True), file=sys.stderr)
                   check_std_node_sources(std_sources)
+                  drop_std_sources = {}
+                  for loop, (method, line, filename) in DROP_LOOPS.items():
+                      matches = [location for label, location in blocks if label == loop]
+                      require(len(matches) == 1, 'exact drop loop absent or repeated: ' + loop)
+                      location = matches[0]
+                      require('nightly-2026-08-21-x86_64-unknown-linux-gnu' in location and '/alloc/src/collections/btree/' + filename in location, 'wrong drop loop source')
+                      require(' line ' + str(line) + ' ' in location, 'wrong drop loop line')
+                      require('std::collections::btree_map::IntoIter<std::string::String, u64>' in location and 'std::ops::Drop>::drop' in location, 'wrong IntoIter drop monomorphization')
+                      source = re.search(r'file (/.+?) line [0-9]+(?: column [0-9]+)? function ', location)
+                      require(source is not None, 'drop loop source path unavailable')
+                      path = pathlib.Path(source.group(1))
+                      record = {'path': str(path), 'sha256': digest_path(path, 512 * 1024)}
+                      require(filename not in drop_std_sources or drop_std_sources[filename] == record, 'inconsistent drop loop source')
+                      drop_std_sources[filename] = record
+                  write_new('std-drop-source-facts.json', drop_std_sources)
+                  check_std_drop_sources(drop_std_sources)
                   require(digest_fd(fd) == model_digest, 'model changed during loop admission')
                   with (EVIDENCE / 'model-properties.json').open('xb') as properties, (EVIDENCE / 'model-properties.stderr').open('xb') as errors:
                       discovery = subprocess.run([str(REAL_CBMC), *prefix, descriptor, *suffix, '--show-properties'], stdout=properties, stderr=errors, pass_fds=(fd,), timeout=30)
@@ -302,10 +345,11 @@ jobs:
                   require(any(prop['class'] == 'assertion' and prop['sourceLocation'].get('file', '').endswith('/mount-rs-chunked/src/create_rebase.rs') and str(prop['sourceLocation'].get('line', '')) in ('613', '614', '615', '616') for prop in properties), 'model lacks the symbolic eligibility assertion')
                   require(digest_fd(fd) == model_digest, 'model changed during property admission')
                   retain_model(fd, model_digest)
-                  write_new('binding.json', {'model_path': str(model), 'model_sha256': model_digest, 'model_properties_sha256': digest_path(EVIDENCE / 'model-properties.json'), 'model_property_count': len(properties), 'loop_ids': list(LOOP_BOUNDS), 'global_unwind': 64, 'per_loop_unwind': LOOP_BOUNDS, 'std_node_source_facts_sha256': digest_path(EVIDENCE / 'std-node-source-facts.json'), 'strict_unwinding_assertions': True, 'argv': argv, 'started_unix_ns': time.time_ns()})
+                  write_new('binding.json', {'model_path': str(model), 'model_sha256': model_digest, 'model_properties_sha256': digest_path(EVIDENCE / 'model-properties.json'), 'model_property_count': len(properties), 'loop_ids': list(LOOP_BOUNDS), 'global_unwind': 64, 'per_loop_unwind': LOOP_BOUNDS, 'std_node_source_facts_sha256': digest_path(EVIDENCE / 'std-node-source-facts.json'), 'std_drop_source_facts_sha256': digest_path(EVIDENCE / 'std-drop-source-facts.json'), 'strict_unwinding_assertions': True, 'argv': argv, 'started_unix_ns': time.time_ns()})
                   actual_argv = [*prefix, descriptor, *suffix]
                   actual_exit = run_actual_proof(actual_argv, fd)
                   check_std_node_sources(std_sources)
+                  check_std_drop_sources(drop_std_sources)
                   require(digest_fd(fd) == model_digest, 'model changed during proof')
                   source_gate()
                   write_new('completion.json', {'model_sha256': model_digest, 'cbmc_exit': actual_exit, 'finished_unix_ns': time.time_ns()})
@@ -354,6 +398,33 @@ jobs:
               # Its description normalization is deliberately not an identity field.
               return (category, *location_key(prop['sourceLocation']))
 
+          def require_raw_drop_unwind_success(raw_results, admitted_map_path):
+              """Require the exact raw witness, using the already admitted map source path.
+
+              Existing model, raw, export, completion, source and bound gates stay in place.
+              This function adds a required successful witness for the new loop only.
+              """
+              require(type(raw_results) is list, 'raw drop witness results are not an array')
+              require(type(admitted_map_path) is str and admitted_map_path, 'raw drop witness source path is absent')
+              matches = [
+                  prop for prop in raw_results
+                  if type(prop) is dict and prop.get('property') == DROP_RAW_PROPERTY_ID
+              ]
+              require(len(matches) == 1, 'exact raw drop unwind witness absent or repeated')
+              witness = matches[0]
+              require(witness.get('status') == 'SUCCESS', 'exact raw drop unwind witness did not succeed')
+              require(witness.get('description') == DROP_RAW_DESCRIPTION, 'exact raw drop unwind description changed')
+              location = witness.get('sourceLocation')
+              require(type(location) is dict, 'exact raw drop unwind location absent')
+              require(
+                  location.get('file') == admitted_map_path
+                  and location.get('function') == DROP_RAW_FUNCTION
+                  and location.get('line') == '1920'
+                  and location.get('column') == '9',
+                  'exact raw drop unwind source identity changed',
+              )
+              return witness
+
           def qualify():
               source_gate()
               binding, completion = read_json('binding.json'), read_json('completion.json')
@@ -363,6 +434,9 @@ jobs:
               require(binding['loop_ids'] == list(LOOP_BOUNDS) and binding['global_unwind'] == 64 and binding['per_loop_unwind'] == LOOP_BOUNDS and binding['strict_unwinding_assertions'] is True, 'bound admission mismatch')
               require(digest_path(EVIDENCE / 'std-node-source-facts.json') == binding['std_node_source_facts_sha256'], 'standard-library source receipt changed')
               check_std_node_sources(read_json('std-node-source-facts.json'))
+              require(digest_path(EVIDENCE / 'std-drop-source-facts.json') == binding['std_drop_source_facts_sha256'], 'standard-library drop source receipt changed')
+              drop_source_facts = read_json('std-drop-source-facts.json')
+              check_std_drop_sources(drop_source_facts)
               require(type(completion['cbmc_exit']) is int and completion['cbmc_exit'] in (0, 10), 'CBMC did not finish verification')
               require((EVIDENCE / 'proof.exit').read_text().strip() == '0', 'normal Kani proof failed')
               document = read_json('proof.json')
@@ -386,6 +460,10 @@ jobs:
               raw_results = inventory_items(raw_document, 'result')
               raw_by_id = {prop['property']: prop for prop in raw_results}
               require(raw_results and len(raw_by_id) == len(raw_results), 'missing or duplicate real property results')
+              raw_drop_witness = require_raw_drop_unwind_success(
+                  raw_results,
+                  drop_source_facts['map.rs']['path'],
+              )
               raw_covers = [prop for prop in raw_results if property_class(prop['property']) == 'cover']
               require(len(raw_covers) == 5 and all(prop['status'] == 'FAILURE' for prop in raw_covers), 'real five covers were not satisfied')
               for prop in raw_results:
@@ -414,7 +492,10 @@ jobs:
               for method, line, filename, kind in {**NODE_LOOPS, **INSERT_LOOPS}.values():
                   matches = [check for check in unwinding if method in check['function'] and kind in check['function'] and 'Mut' in check['function'] and 'NodeMetadata' in check['function'] and 'u64' in check['function'] and check['location']['file'].endswith('/alloc/src/collections/btree/' + filename) and str(check['location']['line']) == str(line)]
                   require(matches and any(check['status'] == 'Success' for check in matches), 'targeted strict node unwind property not successfully checked: ' + method + ':' + kind)
-              write_new('qualified.json', {'qualified': True, 'push_sha': os.environ['GITHUB_SHA'], 'harness': HARNESS, 'source_sha256': SOURCES, 'model_sha256': binding['model_sha256'], 'source_assertion_sites': 12, 'model_property_count': len(properties), 'actual_property_count': len(raw_results), 'symbolic_inputs': 7, 'covers_satisfied': 5, 'global_unwind': 64, 'per_loop_unwind': LOOP_BOUNDS, 'std_node_source_facts_sha256': binding['std_node_source_facts_sha256']})
+              for method, line, filename in DROP_LOOPS.values():
+                  matches = [check for check in unwinding if 'std::collections::btree_map::IntoIter<std::string::String, u64>' in check['function'] and 'std::ops::Drop>::drop' in check['function'] and check['location']['file'].endswith('/alloc/src/collections/btree/' + filename) and str(check['location']['line']) == str(line)]
+                  require(matches and any(check['status'] == 'Success' for check in matches), 'targeted strict drop unwind property not successfully checked: ' + method)
+              write_new('qualified.json', {'qualified': True, 'push_sha': os.environ['GITHUB_SHA'], 'harness': HARNESS, 'source_sha256': SOURCES, 'model_sha256': binding['model_sha256'], 'source_assertion_sites': 12, 'model_property_count': len(properties), 'actual_property_count': len(raw_results), 'symbolic_inputs': 7, 'covers_satisfied': 5, 'global_unwind': 64, 'per_loop_unwind': LOOP_BOUNDS, 'std_node_source_facts_sha256': binding['std_node_source_facts_sha256'], 'std_drop_source_facts_sha256': binding['std_drop_source_facts_sha256']})
 
           try:
               if pathlib.Path(sys.argv[0]).name == 'cbmc':
