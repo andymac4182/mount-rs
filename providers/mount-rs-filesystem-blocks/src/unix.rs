@@ -1,5 +1,9 @@
 use crate::MAX_BLOCK_BYTES;
 use async_trait::async_trait;
+use mount_rs_core::diagnostics::filesystem_blocks::{
+    Observer, Operation as ObservedOperation, Path as PutPath, Span as ObservationSpan,
+    Stage as MetricStage,
+};
 use mount_rs_core::storage::{BlockId, BlockStore, ConcurrentBackingId};
 use mount_rs_core::{ErrorCode, FsError, Result};
 use sha2::{Digest, Sha256};
@@ -49,6 +53,7 @@ struct Inner {
     marker_identity: Identity,
     backing: ConcurrentBackingId,
     durable: bool,
+    observer: Observer,
     #[cfg(test)]
     faults: test_support::Faults,
 }
@@ -156,6 +161,11 @@ impl FilesystemBlockStore {
                 marker_identity,
                 backing,
                 durable,
+                observer: if cfg!(feature = "io-profiling") {
+                    Observer::enabled()
+                } else {
+                    Observer::disabled()
+                },
                 #[cfg(test)]
                 faults: test_support::Faults::default(),
             }),
@@ -166,17 +176,68 @@ impl FilesystemBlockStore {
         &self,
         work: impl FnOnce(&Inner) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let handle = tokio::runtime::Handle::try_current()
-            .map_err(|_| FsError::enotsup("filesystem block operations require a Tokio runtime"))?;
+        self.owned_observed(None, work).await
+    }
+
+    async fn owned_observed<T: Send + 'static>(
+        &self,
+        observation: Option<(ObservedOperation, u64)>,
+        work: impl FnOnce(&Inner) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let waiter =
+            observation.map(|(operation, bytes)| self.inner.observer.waiter(operation, bytes));
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle,
+            Err(_) => {
+                return finish_observation(
+                    waiter,
+                    Err(FsError::enotsup(
+                        "filesystem block operations require a Tokio runtime",
+                    )),
+                );
+            }
+        };
         let inner = self.inner.clone();
-        handle
-            .spawn_blocking(move || work(&inner))
+        // The queue token belongs to the admitted closure, not its async waiter.
+        let queue = observation.map(|(operation, bytes)| inner.observer.queue(operation, bytes));
+        let result = handle
+            .spawn_blocking(move || {
+                if let Some(queue) = queue {
+                    queue.finish_success();
+                }
+                let worker =
+                    observation.map(|(operation, bytes)| inner.observer.worker(operation, bytes));
+                finish_observation(worker, work(&inner))
+            })
             .await
-            .map_err(|_| FsError::backend("filesystem block operation worker failed"))?
+            .map_err(|_| FsError::backend("filesystem block operation worker failed"))
+            .and_then(|result| result);
+        finish_observation(waiter, result)
     }
 }
 
+fn finish_observation<T>(span: Option<ObservationSpan>, result: Result<T>) -> Result<T> {
+    if let Some(span) = span {
+        if result.is_ok() {
+            span.finish_success();
+        } else {
+            span.finish_error();
+        }
+    }
+    result
+}
+
 impl Inner {
+    fn measured<T>(
+        &self,
+        stage: MetricStage,
+        offered_bytes: u64,
+        work: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let span = self.observer.stage(stage, offered_bytes);
+        finish_observation(Some(span), work())
+    }
+
     fn verify(&self) -> Result<()> {
         let current = walk_root(&self.root_components)
             .map_err(|_| stale("filesystem block root is unavailable"))?;
@@ -245,37 +306,55 @@ impl Inner {
     }
 
     fn put(&self, bytes: Vec<u8>) -> Result<BlockId> {
-        self.verify()?;
+        self.measured(MetricStage::InitialAuthority, 0, || self.verify())?;
         #[cfg(test)]
         let mut _completion = None;
-        let id = content_id(&bytes);
-        let (shard, shard_name, shard_identity) = self.shard(&id, true)?;
+        let id = self.measured(MetricStage::ContentId, bytes.len() as u64, || {
+            Ok(content_id(&bytes))
+        })?;
+        let (shard, shard_name, shard_identity) =
+            self.measured(MetricStage::ShardOpen, 0, || self.shard(&id, true))?;
         let final_name = CString::new(id.0.as_bytes()).expect("generated ASCII ID");
         let acknowledged_file = match open_at(&shard, &final_name, FILE_FLAGS, 0) {
             Ok(existing) => {
-                verify_existing(&existing, &id, &bytes)?;
+                self.observer.put_path(PutPath::Existing);
+                self.measured(MetricStage::ExistingVerify, bytes.len() as u64, || {
+                    verify_existing(&existing, &id, &bytes)
+                })?;
                 self.file_barrier(&existing)?;
                 existing
             }
             Err(error) if error.is(ErrorCode::Enoent) => {
-                let mut stage = Stage::create(&shard)?;
-                stage.file.write_all(&bytes).map_err(io_error)?;
+                let mut stage =
+                    self.measured(MetricStage::StageCreateWrite, bytes.len() as u64, || {
+                        let mut stage = Stage::create(&shard)?;
+                        stage.file.write_all(&bytes).map_err(io_error)?;
+                        Ok(stage)
+                    })?;
                 self.file_barrier(&stage.file)?;
                 #[cfg(test)]
                 {
                     _completion = self.faults.pause_before_publication()?;
                 }
-                self.verify()?;
-                self.verify_shard(&shard_name, shard_identity)?;
-                stage.verify_named()?;
-                match rename_create_only(&shard, &stage.name, &shard, &final_name) {
+                self.measured(MetricStage::BeforePublishAuthority, 0, || {
+                    self.verify()?;
+                    self.verify_shard(&shard_name, shard_identity)?;
+                    stage.verify_named()
+                })?;
+                match self.measured(MetricStage::PublishName, 0, || {
+                    rename_create_only(&shard, &stage.name, &shard, &final_name)
+                }) {
                     Ok(()) => {
+                        self.observer.put_path(PutPath::Created);
                         stage.published();
                         stage.file.try_clone().map_err(io_error)?
                     }
                     Err(error) if error.is(ErrorCode::Eexist) => {
+                        self.observer.put_path(PutPath::RaceExisting);
                         let existing = open_at(&shard, &final_name, FILE_FLAGS, 0)?;
-                        verify_existing(&existing, &id, &bytes)?;
+                        self.measured(MetricStage::ExistingVerify, bytes.len() as u64, || {
+                            verify_existing(&existing, &id, &bytes)
+                        })?;
                         self.file_barrier(&existing)?;
                         stage.remove()?;
                         existing
@@ -290,8 +369,10 @@ impl Inner {
         self.directory_barrier(&shard)?;
         self.root_barrier()?;
         self.final_device_barrier(&acknowledged_file)?;
-        self.verify_shard(&shard_name, shard_identity)?;
-        self.verify()?;
+        self.measured(MetricStage::FinalAuthority, 0, || {
+            self.verify_shard(&shard_name, shard_identity)?;
+            self.verify()
+        })?;
         Ok(id)
     }
 
@@ -308,27 +389,38 @@ impl Inner {
     }
 
     fn file_barrier(&self, file: &File) -> Result<()> {
-        #[cfg(test)]
-        self.faults.check(test_support::Point::File)?;
-        file_barrier(file)
+        self.measured(MetricStage::FileSync, 0, || {
+            #[cfg(test)]
+            self.faults.check(test_support::Point::File)?;
+            file.sync_all().map_err(io_error)
+        })?;
+        self.measured(MetricStage::FileDeviceSync, 0, || {
+            final_device_barrier(file)
+        })
     }
 
     fn directory_barrier(&self, directory: &File) -> Result<()> {
-        #[cfg(test)]
-        self.faults.check(test_support::Point::Directory)?;
-        directory.sync_all().map_err(io_error)
+        self.measured(MetricStage::ShardSync, 0, || {
+            #[cfg(test)]
+            self.faults.check(test_support::Point::Directory)?;
+            directory.sync_all().map_err(io_error)
+        })
     }
 
     fn root_barrier(&self) -> Result<()> {
-        #[cfg(test)]
-        self.faults.check(test_support::Point::Root)?;
-        self.root.sync_all().map_err(io_error)
+        self.measured(MetricStage::RootSync, 0, || {
+            #[cfg(test)]
+            self.faults.check(test_support::Point::Root)?;
+            self.root.sync_all().map_err(io_error)
+        })
     }
 
     fn final_device_barrier(&self, file: &File) -> Result<()> {
-        #[cfg(test)]
-        self.faults.check(test_support::Point::Publication)?;
-        final_device_barrier(file)
+        self.measured(MetricStage::PostDirectoryDeviceSync, 0, || {
+            #[cfg(test)]
+            self.faults.check(test_support::Point::Publication)?;
+            final_device_barrier(file)
+        })
     }
 }
 
@@ -365,12 +457,21 @@ impl BlockStore for FilesystemBlockStore {
         if bytes.len() > MAX_BLOCK_BYTES {
             return Err(FsError::new(ErrorCode::Efbig));
         }
-        let mut owned = Vec::new();
-        owned
-            .try_reserve_exact(bytes.len())
-            .map_err(|_| FsError::new(ErrorCode::Enomem))?;
-        owned.extend_from_slice(bytes);
-        self.owned(move |inner| inner.put(owned)).await
+        let owned = self
+            .inner
+            .measured(MetricStage::InputCopy, bytes.len() as u64, || {
+                let mut owned = Vec::new();
+                owned
+                    .try_reserve_exact(bytes.len())
+                    .map_err(|_| FsError::new(ErrorCode::Enomem))?;
+                owned.extend_from_slice(bytes);
+                Ok(owned)
+            })?;
+        self.owned_observed(
+            Some((ObservedOperation::Put, bytes.len() as u64)),
+            move |inner| inner.put(owned),
+        )
+        .await
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -380,7 +481,7 @@ impl BlockStore for FilesystemBlockStore {
     }
 
     async fn flush(&self) -> Result<()> {
-        self.owned(|inner| {
+        self.owned_observed(Some((ObservedOperation::Flush, 0)), |inner| {
             // Every acknowledged durable put already completed the file/shard/
             // root barriers. There is no detached successful-put write buffer.
             inner.verify()?;

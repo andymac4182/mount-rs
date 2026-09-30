@@ -1,7 +1,7 @@
 //! Local, bounded service records for explicit periodic capture and shutdown.
 
 use crate::runtime::CliError;
-use mount_rs_core::diagnostics::{object_store, profile, storage};
+use mount_rs_core::diagnostics::{filesystem_blocks, object_store, profile, storage};
 use mount_rs_service::object_store_diagnostics::{Capture, CaptureContext, CodecError, Sample};
 use mount_rs_service::service_diagnostics_frames;
 use serde::Serialize;
@@ -135,6 +135,35 @@ fn capture_bank<T>(enabled: bool, snapshot: impl FnOnce() -> T) -> Bank<T> {
     }
 }
 
+// Process-local, fixed-bank export only. An observed zero snapshot does not
+// establish that a filesystem provider is configured or durable.
+fn capture_filesystem_blocks(
+    enabled: bool,
+    snapshot: impl FnOnce() -> Option<filesystem_blocks::Snapshot>,
+) -> Bank<filesystem_blocks::Snapshot> {
+    if !enabled {
+        return Bank {
+            available: false,
+            reason: Some("observer_disabled"),
+            snapshot: None,
+        };
+    }
+    match snapshot() {
+        Some(snapshot) => Bank {
+            available: true,
+            reason: None,
+            snapshot: Some(snapshot),
+        },
+        None => Bank {
+            available: false,
+            reason: Some("observer_snapshot_unavailable"),
+            snapshot: None,
+        },
+    }
+}
+
+const FILESYSTEM_BLOCKS_SCOPE: &str = "process cumulative filesystem PUT/flush helper observations; inclusive overlapping wall time; offered_bytes count starts, not stored or durable bytes; compiled device helper flag, not volume certification; no configured-provider census, physical IOPS or provider drain acknowledgment";
+
 #[derive(Serialize)]
 struct FamilyCoverage {
     rows: Vec<&'static str>,
@@ -175,6 +204,8 @@ struct ProcessDiagnostics<S, P> {
     duration_semantics: &'static str,
     storage: Bank<S>,
     profile: Bank<P>,
+    filesystem_blocks: Bank<filesystem_blocks::Snapshot>,
+    filesystem_blocks_scope: &'static str,
     coverage: Coverage,
     unavailable: UnavailableMetrics,
 }
@@ -199,6 +230,8 @@ fn process_diagnostics<S, P>(storage: Bank<S>, profile: Bank<P>) -> ProcessDiagn
         duration_semantics: "inclusive_overlapping_wall_time",
         storage,
         profile,
+        filesystem_blocks: capture_filesystem_blocks(false, || None),
+        filesystem_blocks_scope: FILESYSTEM_BLOCKS_SCOPE,
         coverage: Coverage {
             operation_names: storage::operation_names(),
             sdk: family(&["sdk."], "sdk_erased_method_boundary"),
@@ -219,6 +252,18 @@ fn process_diagnostics<S, P>(storage: Bank<S>, profile: Bank<P>) -> ProcessDiagn
             allocator_churn: unavailable("no_allocator_instrumentation"),
         },
     }
+}
+
+fn capture_process_diagnostics(
+    filesystem_enabled: bool,
+    filesystem_snapshot: impl FnOnce() -> Option<filesystem_blocks::Snapshot>,
+) -> ProcessDiagnostics<storage::Snapshot, profile::Snapshot> {
+    let mut process = process_diagnostics(
+        capture_bank(storage::enabled(), storage::snapshot),
+        capture_bank(profile::enabled(), profile::snapshot),
+    );
+    process.filesystem_blocks = capture_filesystem_blocks(filesystem_enabled, filesystem_snapshot);
+    process
 }
 
 struct BoundedRecord(Vec<u8>);
@@ -436,10 +481,8 @@ pub(super) fn emit_periodic(
     }
     // Process-wide banks are captured once for both listener records. The
     // listener snapshots remain separate, non-atomic observations.
-    let process = process_diagnostics(
-        capture_bank(storage::enabled(), storage::snapshot),
-        capture_bank(profile::enabled(), profile::snapshot),
-    );
+    let filesystem = filesystem_blocks::Observer::enabled();
+    let process = capture_process_diagnostics(filesystem.is_enabled(), || filesystem.snapshot());
     let quic = observer.map(|observer| observer.snapshot());
     let websocket = websocket.map(|observer| observer.snapshot());
     let object_store = object_store::Observer::enabled();
@@ -475,10 +518,8 @@ fn emit_snapshot(transport: Transport, snapshot: &impl Serialize) {
             object_store.snapshot()
         })
     });
-    let process = process_diagnostics(
-        capture_bank(storage::enabled(), storage::snapshot),
-        capture_bank(profile::enabled(), profile::snapshot),
-    );
+    let filesystem = filesystem_blocks::Observer::enabled();
+    let process = capture_process_diagnostics(filesystem.is_enabled(), || filesystem.snapshot());
     let record = encode_record(transport, snapshot, std::process::id(), &process);
     write_record(&record);
     if let Some(sample) = object_store_sample {
@@ -501,6 +542,197 @@ mod tests {
     use mount_rs_service::object_store_diagnostics;
     use serde::ser::Error as _;
     use serde_json::{Value, json};
+
+    fn maximum_filesystem_snapshot() -> filesystem_blocks::Snapshot {
+        let row = filesystem_blocks::CounterSnapshot {
+            started: u64::MAX,
+            inflight: u64::MAX,
+            succeeded: u64::MAX,
+            failed: u64::MAX,
+            abandoned: u64::MAX,
+            elapsed_ns: u64::MAX,
+            max_ns: u64::MAX,
+            offered_bytes: u64::MAX,
+        };
+        filesystem_blocks::Snapshot {
+            operations: [filesystem_blocks::OperationSnapshot {
+                waiter: row,
+                queue: row,
+                worker: row,
+                put_path: [u64::MAX; filesystem_blocks::PATH_COUNT],
+            }; filesystem_blocks::OP_COUNT],
+            stages: [row; filesystem_blocks::STAGE_COUNT],
+            saturated: true,
+            concurrent_activity: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn filesystem_blocks_disabled_missing_and_observed_zero_are_distinct() {
+        use std::cell::Cell;
+        let disabled = capture_filesystem_blocks(false, || panic!("disabled filesystem snapshot"));
+        let disabled = serde_json::to_value(disabled).unwrap();
+        assert_eq!(disabled["available"], false);
+        assert_eq!(disabled["reason"], "observer_disabled");
+        assert!(disabled.get("snapshot").is_none());
+        let calls = Cell::new(0);
+        let missing = capture_filesystem_blocks(true, || {
+            calls.set(calls.get() + 1);
+            None
+        });
+        assert_eq!(calls.get(), 1, "enabled filesystem bank was not sampled");
+        let missing = serde_json::to_value(missing).unwrap();
+        assert_eq!(missing["available"], false);
+        assert_eq!(missing["reason"], "observer_snapshot_unavailable");
+        assert!(missing.get("snapshot").is_none());
+        let zero = capture_filesystem_blocks(true, || Some(filesystem_blocks::Snapshot::default()));
+        let zero = serde_json::to_value(zero).unwrap();
+        assert_eq!(zero["available"], true);
+        assert!(zero.get("reason").is_none());
+        assert!(
+            zero["snapshot"].is_object(),
+            "observed zero work must retain a typed bank"
+        );
+        assert_eq!(zero["snapshot"]["schema"], filesystem_blocks::SCHEMA);
+        assert_eq!(zero["snapshot"]["stages"][0]["started"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn filesystem_blocks_complete_maximum_bank_keeps_record_identity_and_limits() {
+        let filesystem = maximum_filesystem_snapshot();
+        let expected = serde_json::to_value(filesystem).unwrap();
+        let storage = representative_storage(u64::MAX);
+        let mut profile = profile::snapshot();
+        assert_eq!(profile.entries.len(), 136);
+        for entry in &mut profile.entries {
+            entry.calls = u64::MAX;
+            entry.elapsed_ns = u64::MAX;
+            entry.units = u64::MAX;
+        }
+        let mut process = process_diagnostics(
+            capture_bank(true, || storage),
+            capture_bank(true, || profile),
+        );
+        process.filesystem_blocks = capture_filesystem_blocks(true, || Some(filesystem));
+        for transport in [Transport::Quic, Transport::WebSocket] {
+            let capture = CaptureMetadata {
+                sequence: u64::MAX,
+                observed_unix_ms: u64::MAX,
+            };
+            for (record, context) in [
+                (
+                    encode_periodic_record(transport, &json!({}), u32::MAX, &process, capture),
+                    "periodic",
+                ),
+                (
+                    encode_record(transport, &json!({}), u32::MAX, &process),
+                    "shutdown",
+                ),
+            ] {
+                assert!(
+                    record
+                        .split_inclusive(|byte| *byte == b'\n')
+                        .all(|line| line.len() <= service_diagnostics_frames::LINE_LIMIT)
+                );
+                let value = parse_record(&record);
+                assert!(value.get("diagnostic_incomplete").is_none());
+                assert_eq!(value["schema"], "mount-rs.cli-service-diagnostics.v2");
+                assert_eq!(value["pid"].as_u64(), Some(u64::from(u32::MAX)));
+                assert_eq!(value["transport"], transport.label());
+                assert_eq!(value["capture_context"], context);
+                if context == "periodic" {
+                    assert_eq!(value["capture"]["sequence"].as_u64(), Some(u64::MAX));
+                    assert_eq!(
+                        value["capture"]["observed_unix_ms"].as_u64(),
+                        Some(u64::MAX)
+                    );
+                } else {
+                    assert!(value.get("capture").is_none());
+                }
+                let banks = &value["process_diagnostics"];
+                assert_eq!(
+                    banks["filesystem_blocks"]["available"], true,
+                    "filesystem bank missing from complete service record"
+                );
+                assert_eq!(banks["filesystem_blocks"]["snapshot"], expected);
+                assert_eq!(banks["filesystem_blocks_scope"], FILESYSTEM_BLOCKS_SCOPE);
+                assert_eq!(banks["capture_atomic"], false);
+                assert_eq!(banks["application_drain_proven"], false);
+                assert_eq!(
+                    banks["storage"]["snapshot"]["entries"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    118
+                );
+                assert_eq!(
+                    banks["profile"]["snapshot"]["entries"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    136
+                );
+                assert_eq!(banks["filesystem_blocks"]["snapshot"]["operations"][1]["queue"]["offered_bytes"].as_u64(), Some(u64::MAX));
+            }
+        }
+    }
+
+    #[test]
+    fn filesystem_blocks_actual_process_capture_is_shared_by_periodic_listeners() {
+        use std::cell::Cell;
+        let filesystem = maximum_filesystem_snapshot();
+        let calls = Cell::new(0);
+        let process = capture_process_diagnostics(true, || {
+            calls.set(calls.get() + 1);
+            Some(filesystem)
+        });
+        assert_eq!(
+            calls.get(),
+            1,
+            "actual process capture skipped its enabled filesystem bank"
+        );
+        let capture = CaptureMetadata {
+            sequence: 9_007_199_254_740_993,
+            observed_unix_ms: 17,
+        };
+        let quic = json!({"active_operations": 1});
+        let websocket = json!({"active_operations": 2});
+        let mut records = Vec::new();
+        emit_periodic_records(
+            PeriodicRecords {
+                quic: Some(&quic),
+                websocket: Some(&websocket),
+                process: &process,
+                pid: 321,
+                capture,
+            },
+            false,
+            || panic!("disabled independent object-store bank"),
+            |record| records.push(record.to_vec()),
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "listener routing must not resample filesystem counters"
+        );
+        assert_eq!(records.len(), 2);
+        let first = parse_record(&records[0]);
+        let second = parse_record(&records[1]);
+        assert_eq!(first["capture"], second["capture"]);
+        assert_eq!(first["process_diagnostics"], second["process_diagnostics"]);
+        for value in [first, second] {
+            assert_eq!(value["pid"].as_u64(), Some(321));
+            assert_eq!(
+                value["capture"]["sequence"].as_u64(),
+                Some(capture.sequence)
+            );
+            assert_eq!(
+                value["process_diagnostics"]["filesystem_blocks"]["snapshot"],
+                serde_json::to_value(filesystem).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn disabled_object_store_sideband_never_samples_or_exports_zero_rows() {

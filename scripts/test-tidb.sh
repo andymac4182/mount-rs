@@ -81,6 +81,25 @@ case "$topology" in
     ;;
 esac
 
+run_filesystem=${MOUNT_RS_TIDB_FILESYSTEM:-0}
+case "$run_filesystem" in
+  0) ;;
+  1)
+    if [ "$topology" != durable ]; then
+      echo "test-tidb.sh: MOUNT_RS_TIDB_FILESYSTEM=1 requires the owned durable topology" >&2
+      exit 2
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "test-tidb.sh: MOUNT_RS_TIDB_FILESYSTEM=1 requires python3 for bounded capture verification" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "test-tidb.sh: MOUNT_RS_TIDB_FILESYSTEM must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
 image_version=${MOUNT_RS_TIDB_VERSION:-v8.5.7}
 case "$image_version" in
   v[0-9]*.[0-9]*.[0-9]*) ;;
@@ -693,6 +712,50 @@ run_direct_provider_test() {
   fi
 }
 
+run_filesystem_provider_test() {
+  persistence_expectation=$1
+  # Keep direct filesystem blobs and the SDK witness in this harness's private
+  # directory across its existing TiDB/PD/TiKV restart, with no extra service.
+  filesystem_directory=$(CDPATH= cd -- "$run_dir" && pwd -P) || return "$?"
+  filesystem_root="$filesystem_directory/filesystem-blocks"
+  filesystem_witness="$filesystem_directory/filesystem.witness"
+  filesystem_cli_config="$filesystem_directory/filesystem-cli.json"
+  if [ "$persistence_expectation" = 0 ]; then
+    mkdir -m 700 "$filesystem_root" || return "$?"
+  fi
+  filesystem_sdk_capture="$filesystem_directory/filesystem-sdk-$persistence_expectation.stdout"
+  filesystem_sdk_status="$filesystem_directory/filesystem-sdk-$persistence_expectation.status"
+  (
+    umask 077
+    if MOUNT_RS_TIDB_FILESYSTEM=1 \
+      MOUNT_RS_TIDB_TOPOLOGY="$topology" \
+      MOUNT_RS_TIDB_URL="$tidb_url" \
+      MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
+      MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
+      MOUNT_RS_TIDB_RUN_ID="$run_id" \
+      MOUNT_RS_TIDB_FILESYSTEM_ROOT="$filesystem_root" \
+      MOUNT_RS_TIDB_FILESYSTEM_WITNESS="$filesystem_witness" \
+      MOUNT_RS_TIDB_FILESYSTEM_CLI_CONFIG="$filesystem_cli_config" \
+        "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-sdk --test tidb_filesystem \
+          -- --ignored --exact actual_tidb_filesystem_durable_peer_writes_reopen_and_root_authority \
+          --nocapture --test-threads=1 --color never; then
+      filesystem_sdk_exit=0
+    else
+      filesystem_sdk_exit=$?
+    fi
+    # The pipeline's last status alone cannot establish Cargo's status. Publish
+    # its exact numeric exit into a create-new private status file before EOF.
+    (set -C; printf '%s\n' "$filesystem_sdk_exit" > "$filesystem_sdk_status")
+  ) | python3 -B "$repo_dir/scripts/tidb_filesystem_capture.py" \
+    "$persistence_expectation" "$filesystem_sdk_capture" "$filesystem_sdk_status" || return "$?"
+  # The public CLI uses the same TiDB volume and direct filesystem root. This
+  # mount-free SDK command still writes, syncs, shuts down, reopens and reads.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" run --locked -p mount-rs-cli -- \
+      sdk-self-test --config "$filesystem_cli_config" --reopen || return "$?"
+  echo "TIDB_FILESYSTEM_CLI_PASS phase=$persistence_expectation"
+}
+
 run_provider_test() {
   persistence_expectation=$1
   # A composition test must not replace direct TiDB identity, schema,
@@ -704,6 +767,9 @@ run_provider_test() {
     direct_status=$?
     echo "test-tidb.sh: direct provider contract failed before composition" >&2
     return "$direct_status"
+  fi
+  if [ "$run_filesystem" -eq 1 ]; then
+    run_filesystem_provider_test "$persistence_expectation" || return "$?"
   fi
   if [ -n "${MOUNT_RS_TIDB_COMPOSITION_COMMAND:-}" ]; then
     # The caller owns the block service and supplies a complete, explicit

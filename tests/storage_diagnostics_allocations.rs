@@ -62,6 +62,106 @@ fn selected_bytes(operation: Operation) -> u64 {
 }
 
 #[test]
+fn warmed_filesystem_block_spans_and_fixed_snapshots_do_not_add_allocations() {
+    use mount_rs_core::diagnostics::filesystem_blocks::{Observer, Operation as Work, Path, Stage};
+    let observer = Observer::isolated();
+    let disabled = Observer::disabled();
+    const STAGES: [Stage; 14] = [
+        Stage::InputCopy,
+        Stage::InitialAuthority,
+        Stage::ContentId,
+        Stage::ShardOpen,
+        Stage::ExistingVerify,
+        Stage::StageCreateWrite,
+        Stage::FileSync,
+        Stage::FileDeviceSync,
+        Stage::BeforePublishAuthority,
+        Stage::PublishName,
+        Stage::ShardSync,
+        Stage::RootSync,
+        Stage::PostDirectoryDeviceSync,
+        Stage::FinalAuthority,
+    ];
+    observer.worker(Work::Put, 0).finish_success();
+    let before = observer.snapshot().unwrap();
+    let _ = disabled.snapshot();
+    // Positive allocator control is independent of the observer implementation.
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    let positive = std::hint::black_box(Box::new([7_u8; 1024]));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let positive_calls = ALLOCATION_CALLS.with(Cell::get);
+    drop(positive);
+    assert!(positive_calls > 0, "allocator positive control failed");
+
+    ALLOCATION_CALLS.with(|calls| calls.set(0));
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(true));
+    for _ in 0..64 {
+        for operation in [Work::Put, Work::Flush] {
+            observer.waiter(operation, 4).finish_success();
+            observer.waiter(operation, 8).finish_error();
+            drop(observer.waiter(operation, 16));
+            observer.queue(operation, 4).finish_success();
+            observer.queue(operation, 8).finish_error();
+            drop(observer.queue(operation, 16));
+            observer.worker(operation, 4).finish_success();
+            observer.worker(operation, 8).finish_error();
+            drop(observer.worker(operation, 16));
+            drop(disabled.queue(operation, 4));
+        }
+        for stage in STAGES {
+            observer.stage(stage, 4).finish_success();
+            observer.stage(stage, 8).finish_error();
+            drop(observer.stage(stage, 16));
+            disabled.stage(stage, 4).finish_success();
+        }
+        observer.put_path(Path::Created);
+        std::hint::black_box(observer.snapshot());
+        std::hint::black_box(disabled.snapshot());
+        drop(observer.clone());
+        drop(disabled.clone());
+    }
+    COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+    let allocation_calls = ALLOCATION_CALLS.with(Cell::get);
+    assert_eq!(
+        allocation_calls, 0,
+        "warmed filesystem observer or fixed snapshot allocated"
+    );
+    let after = observer.snapshot().unwrap();
+    assert!(!after.saturated && !after.concurrent_activity);
+    for (old, new) in before.operations.iter().zip(after.operations.iter()) {
+        for (previous, current) in [
+            (old.waiter, new.waiter),
+            (old.queue, new.queue),
+            (old.worker, new.worker),
+        ] {
+            assert_eq!(current.started - previous.started, 192);
+            assert_eq!(current.inflight, 0);
+            assert_eq!(current.succeeded - previous.succeeded, 64);
+            assert_eq!(current.failed - previous.failed, 64);
+            assert_eq!(current.abandoned - previous.abandoned, 64);
+            assert_eq!(current.offered_bytes - previous.offered_bytes, 64 * 28);
+        }
+    }
+    for (old, new) in before.stages.iter().zip(after.stages.iter()) {
+        assert_eq!(new.started - old.started, 192);
+        assert_eq!(
+            (
+                new.succeeded - old.succeeded,
+                new.failed - old.failed,
+                new.abandoned - old.abandoned
+            ),
+            (64, 64, 64)
+        );
+        assert_eq!(new.inflight, 0);
+        assert_eq!(new.offered_bytes - old.offered_bytes, 64 * 28);
+    }
+    assert!(disabled.snapshot().is_none());
+    // Existing global rows and their allocation claims remain unchanged.
+    assert_eq!(storage::snapshot().entries.len(), 118);
+}
+
+#[test]
 #[ignore = "requires MOUNT_RS_PROFILE_IO=1 and MOUNT_RS_TRACE_STORAGE=0"]
 fn warmed_core_spans_record_without_added_allocations() {
     assert_eq!(std::env::var("MOUNT_RS_PROFILE_IO").as_deref(), Ok("1"));

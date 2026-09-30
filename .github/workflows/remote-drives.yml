@@ -45,6 +45,10 @@ jobs:
           components: clippy
       - name: Verify bounded startup and live progress controls
         run: python3 -B scripts/test-filter-startup-diagnostics.py
+      - name: Verify portable backing artifact contracts
+        run: python3 -I -S -B -m unittest discover -s scripts -p test_native_backing_artifacts.py
+      - name: Verify TiDB filesystem test capture admission
+        run: python3 -I -S -B -m unittest discover -s scripts -p test_tidb_filesystem_capture.py
       - run: ./scripts/cargo-shared test --locked -p mount-rs-service -p mount-rs-remote-protocol -p mount-rs-remote-client -p mount-rs-cli
       - run: ./scripts/cargo-shared clippy --locked -p mount-rs-service -p mount-rs-remote-protocol -p mount-rs-remote-client -p mount-rs-cli --all-targets -- -D warnings
       - name: Run bounded QUIC soak

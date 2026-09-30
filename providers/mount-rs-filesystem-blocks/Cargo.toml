@@ -6,6 +6,10 @@ rust-version = "1.95"
 description = "Durable immutable filesystem block storage for mount-rs"
 license = "Apache-2.0"
 
+[features]
+default = []
+io-profiling = []
+
 [dependencies]
 async-trait = "0.1"
 mount-rs-core = { path = "../.." }

@@ -468,6 +468,7 @@ jobs:
       - name: Verify durable TiDB, PD, and TiKV restart acceptance
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-cargo-target
+          MOUNT_RS_TIDB_FILESYSTEM: '1'
         run: ./scripts/test-tidb.sh
 
   tidb-tls-compile:

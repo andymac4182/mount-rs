@@ -918,6 +918,36 @@ pub(super) fn example_runtime(generation: u64, drives: usize) -> Value {
     json!({"schema":"mount-rs.target-runtime.v1","generation":generation,"capacity":drives,"available":false,"complete":false,"pool":pool,"diagnostics":null,"observations":(0..drives).map(|drive|json!({"drive":drive,"expected_backing":format!("{:032x}",drive+1),"observed_backing":null,"constructed":0})).collect::<Vec<_>>()})
 }
 
+type FilesystemBlocksSnapshot = mount_rs_core::diagnostics::filesystem_blocks::Snapshot;
+struct FilesystemBlocksCapture<'a> {
+    configured: bool,
+    enabled: bool,
+    snapshot: &'a mut dyn FnMut() -> Option<FilesystemBlocksSnapshot>,
+}
+const FILESYSTEM_BLOCKS_SCOPE: &str = "process cumulative selected filesystem block PUT/flush helper observations; inclusive overlapping wall time; offered_bytes count starts, not stored or durable bytes; compiled device helper flag, not volume certification; no instance census, physical IOPS or provider drain acknowledgment; additive cumulative snapshot, not legacy phase_delta coverage";
+fn filesystem_blocks_observation(
+    configured: bool,
+    enabled: bool,
+    snapshot: impl FnOnce() -> Option<FilesystemBlocksSnapshot>,
+) -> Value {
+    let absent = |status, reason| {
+        json!({"configured":configured,"enabled":enabled,"available":false,
+            "complete":false,"status":status,"reason":reason,
+            "scope":FILESYSTEM_BLOCKS_SCOPE})
+    };
+    if !configured {
+        return absent("not_configured", "filesystem blocks not selected");
+    }
+    if !enabled {
+        return absent("disabled", "filesystem profiling disabled");
+    }
+    let Some(snapshot) = snapshot() else {
+        return absent("unavailable", "filesystem observer snapshot unavailable");
+    };
+    json!({"configured":true,"enabled":true,"available":true,"complete":false,
+        "status":"observed","snapshot":snapshot,"scope":FILESYSTEM_BLOCKS_SCOPE})
+}
+
 type ObjectStoreSnapshot = mount_rs_core::diagnostics::object_store::Snapshot;
 struct ObjectStoreCapture<'a> {
     enabled: bool,
@@ -1022,7 +1052,7 @@ impl Local {
         oracle: Value,
     ) -> Result<Value, String> {
         let span = observer().begin("metric_capture");
-        let result = self.capture_inner(identity, service, oracle, None, None);
+        let result = self.capture_inner(identity, service, oracle, None, None, None);
         span.finish(result.is_ok(), 0);
         result
     }
@@ -1038,7 +1068,14 @@ impl Local {
         let span = observer().begin("metric_capture");
         let mut capture =
             || runtime().map_err(|_| "runtime metric capture unavailable".to_string());
-        let result = self.capture_inner(identity, service, Value::Null, Some(&mut capture), None);
+        let result = self.capture_inner(
+            identity,
+            service,
+            Value::Null,
+            Some(&mut capture),
+            None,
+            None,
+        );
         span.finish(result.is_ok(), 0);
         result
     }
@@ -1049,6 +1086,7 @@ impl Local {
         oracle: Value,
         runtime: Option<&mut dyn FnMut() -> Result<Value, String>>,
         object_store: Option<ObjectStoreCapture<'_>>,
+        filesystem: Option<FilesystemBlocksCapture<'_>>,
     ) -> Result<Value, String> {
         let start = Instant::now();
         let started = super::utc_ms();
@@ -1070,6 +1108,20 @@ impl Local {
                     observer.snapshot()
                 })?
             }
+        };
+        let filesystem_observation = match filesystem {
+            Some(capture) => {
+                filesystem_blocks_observation(capture.configured, capture.enabled, capture.snapshot)
+            }
+            None if filesystem_blocks => {
+                let observer = mount_rs_core::diagnostics::filesystem_blocks::Observer::enabled();
+                filesystem_blocks_observation(true, observer.is_enabled(), || observer.snapshot())
+            }
+            None => filesystem_blocks_observation(
+                false,
+                mount_rs_core::diagnostics::profile::enabled(),
+                || None,
+            ),
         };
         // Include the bounded runtime snapshot in the existing capture allowance
         // and observer category; no added sampler or deadline is created.
@@ -1164,8 +1216,8 @@ impl Local {
             "capture_started_unix_ms":started,"capture_ended_unix_ms":super::utc_ms(),"capture_elapsed_ns":elapsed.as_nanos().min(u128::from(u64::MAX)) as u64,"process_observation_elapsed_seconds":self.started.elapsed().as_secs_f64(),
             "capture_complete":!enabled || elapsed<=Duration::from_secs(30),"metrics_complete":enabled && quiescent && accounting_complete && runtime_complete && elapsed<=Duration::from_secs(30),"accounting_complete":accounting_complete,
             "quiescence":{"controller_work_drained":true,"service_observed":service.is_some(),"application_quiescent":application_quiescent,"instrumented_storage_in_flight_zero":storage_quiescent,"scope":"owned controller work drained; only instrumented service/storage activity observed; no global atomic cut or proof of all provider/background work"},
-            "object_store_observation":object_store,"core":core,"storage":storage,"process_since_baseline":process,"process_since_previous_boundary":process_interval,"server_quic":service,"server_quic_before_local_capture":service_envelope,"oracle":oracle,"runtime_activation":runtime,
-            "coverage":{"object_store_observation":json!({"enabled":object_store["enabled"],"configured":!filesystem_blocks,"available":object_store["available"],"complete":false,"status":if filesystem_blocks{"not_configured"}else if object_store["available"]==true{"partial"}else if object_store["enabled"]==true{"unavailable"}else{"disabled"},"scope":OBJECT_STORE_SCOPE}),"core":family_state(enabled,true,true,quiescent),"storage":family_state(enabled,true,true,quiescent),"process":family_state(enabled,true,true,true),
+            "object_store_observation":object_store,"filesystem_blocks_observation":filesystem_observation,"core":core,"storage":storage,"process_since_baseline":process,"process_since_previous_boundary":process_interval,"server_quic":service,"server_quic_before_local_capture":service_envelope,"oracle":oracle,"runtime_activation":runtime,
+            "coverage":{"filesystem_blocks_observation":json!({"enabled":filesystem_observation["enabled"],"configured":filesystem_observation["configured"],"available":filesystem_observation["available"],"complete":false,"status":if filesystem_observation["available"]==true{"partial"}else{filesystem_observation["status"].as_str().unwrap_or("unavailable")},"scope":FILESYSTEM_BLOCKS_SCOPE}),"object_store_observation":json!({"enabled":object_store["enabled"],"configured":!filesystem_blocks,"available":object_store["available"],"complete":false,"status":if filesystem_blocks{"not_configured"}else if object_store["available"]==true{"partial"}else if object_store["enabled"]==true{"unavailable"}else{"disabled"},"scope":OBJECT_STORE_SCOPE}),"core":family_state(enabled,true,true,quiescent),"storage":family_state(enabled,true,true,quiescent),"process":family_state(enabled,true,true,true),
                 "server_quic":family_state(enabled,worker,service.is_some(),quiescent),
                 "runtime_activation":family_state(enabled,worker,runtime.as_ref().is_some_and(|value| value["available"]==true),runtime_complete),
                 "catalog_pager_core":{"status":if enabled{"partial"}else{"disabled"},"available":enabled,"scope":"catalog pager hit/miss/write/unavailable core rows retained; not all SQLite connections"},
@@ -2174,6 +2226,158 @@ mod tests {
         std::fs::write(&path, encoded).unwrap();
         assert!(super::super::read_json(&path).is_err());
     }
+
+    fn maximum_filesystem_snapshot() -> FilesystemBlocksSnapshot {
+        use mount_rs_core::diagnostics::filesystem_blocks as fs;
+        let row = fs::CounterSnapshot {
+            started: u64::MAX,
+            inflight: u64::MAX,
+            succeeded: u64::MAX,
+            failed: u64::MAX,
+            abandoned: u64::MAX,
+            elapsed_ns: u64::MAX,
+            max_ns: u64::MAX,
+            offered_bytes: u64::MAX,
+        };
+        fs::Snapshot {
+            operations: [fs::OperationSnapshot {
+                waiter: row,
+                queue: row,
+                worker: row,
+                put_path: [u64::MAX; fs::PATH_COUNT],
+            }; fs::OP_COUNT],
+            stages: [row; fs::STAGE_COUNT],
+            saturated: true,
+            concurrent_activity: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn filesystem_blocks_disabled_missing_and_not_configured_are_distinct() {
+        let calls = std::cell::Cell::new(0);
+        let not_configured = filesystem_blocks_observation(false, true, || {
+            panic!("unconfigured filesystem snapshot")
+        });
+        assert_eq!(not_configured["status"], "not_configured");
+        assert_eq!(not_configured["available"], false);
+        assert!(not_configured.get("snapshot").is_none());
+        let disabled =
+            filesystem_blocks_observation(true, false, || panic!("disabled filesystem snapshot"));
+        assert_eq!(disabled["status"], "disabled");
+        assert_eq!(disabled["available"], false);
+        assert!(disabled.get("snapshot").is_none());
+        let missing = filesystem_blocks_observation(true, true, || {
+            calls.set(calls.get() + 1);
+            None
+        });
+        assert_eq!(
+            calls.get(),
+            1,
+            "enabled native filesystem bank was not sampled"
+        );
+        assert_eq!(missing["status"], "unavailable");
+        assert_eq!(missing["available"], false);
+        assert_eq!(missing["complete"], false);
+        assert!(missing.get("snapshot").is_none());
+        let zero =
+            filesystem_blocks_observation(true, true, || Some(FilesystemBlocksSnapshot::default()));
+        assert_eq!(zero["status"], "observed");
+        assert_eq!(zero["available"], true);
+        assert_eq!(zero["complete"], false);
+        assert_eq!(
+            zero["snapshot"]["schema"],
+            mount_rs_core::diagnostics::filesystem_blocks::SCHEMA
+        );
+        assert_eq!(zero["snapshot"]["stages"][0]["started"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn filesystem_blocks_actual_local_capture_encloses_one_fixed_snapshot() {
+        let filesystem = maximum_filesystem_snapshot();
+        let mut local = Local::new().unwrap();
+        let outer_identity = identity();
+        let mut calls = 0;
+        let mut callback_elapsed = Duration::ZERO;
+        let mut callback = || {
+            calls += 1;
+            let start = Instant::now();
+            std::thread::sleep(Duration::from_millis(25));
+            callback_elapsed = start.elapsed();
+            Some(filesystem)
+        };
+        let mut no_object_store = || panic!("disabled independent object-store capture");
+        let value = local
+            .capture_inner(
+                outer_identity.clone(),
+                None,
+                Value::Null,
+                None,
+                Some(ObjectStoreCapture {
+                    enabled: false,
+                    snapshot: &mut no_object_store,
+                }),
+                Some(FilesystemBlocksCapture {
+                    configured: true,
+                    enabled: true,
+                    snapshot: &mut callback,
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            calls, 1,
+            "actual local capture skipped its enabled filesystem bank"
+        );
+        assert!(
+            u128::from(value["capture_elapsed_ns"].as_u64().unwrap())
+                >= callback_elapsed.as_nanos()
+        );
+        assert_eq!(value["identity"], outer_identity);
+        assert_eq!(value["filesystem_blocks_observation"]["status"], "observed");
+        assert_eq!(value["filesystem_blocks_observation"]["available"], true);
+        assert_eq!(value["filesystem_blocks_observation"]["complete"], false);
+        assert_eq!(
+            value["filesystem_blocks_observation"]["snapshot"],
+            serde_json::to_value(filesystem).unwrap()
+        );
+        assert_eq!(
+            value["filesystem_blocks_observation"]["scope"],
+            FILESYSTEM_BLOCKS_SCOPE
+        );
+        assert_eq!(
+            value["coverage"]["filesystem_blocks_observation"]["status"],
+            "partial"
+        );
+        assert_eq!(
+            value["coverage"]["filesystem_blocks_observation"]["complete"],
+            false
+        );
+        assert_eq!(value["coverage"]["physical_iops"]["available"], false);
+        assert_eq!(value["schema"], "mount-rs-phase-metrics-v1");
+    }
+
+    #[test]
+    fn filesystem_blocks_cumulative_snapshot_does_not_enter_legacy_phase_delta() {
+        let mut before = json!({"identity":identity(),"core":{"entries":[]},"filesystem_blocks_observation":{"available":true,"snapshot":maximum_filesystem_snapshot()}});
+        before["identity"]["sequence"] = json!(3);
+        let mut after = before.clone();
+        after["identity"]["sequence"] = json!(4);
+        after["filesystem_blocks_observation"] = json!({"available":false,"status":"unavailable"});
+        let delta = phase_delta(&before, &after).unwrap();
+        assert!(delta.get("filesystem_blocks_observation").is_none());
+        let mut legacy_before = before.clone();
+        let mut legacy_after = after.clone();
+        legacy_before
+            .as_object_mut()
+            .unwrap()
+            .remove("filesystem_blocks_observation");
+        legacy_after
+            .as_object_mut()
+            .unwrap()
+            .remove("filesystem_blocks_observation");
+        assert_eq!(delta, phase_delta(&legacy_before, &legacy_after).unwrap());
+    }
+
     fn object_store_sample(value: &Value) -> mount_rs_service::object_store_diagnostics::Sample {
         let codec_records = value["records"].as_array().expect("bounded record array");
         let mut bytes = Vec::new();
@@ -2234,6 +2438,7 @@ mod tests {
                             enabled: true,
                             snapshot: &mut callback,
                         }),
+                        None,
                     )
                     .unwrap();
                 assert_eq!(calls, 1, "actual Local boundary must invoke one snapshot");

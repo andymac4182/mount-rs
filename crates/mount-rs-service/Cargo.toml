@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [features]
 sdk-runtime = ["dep:mount-rs-sdk"]
-io-profiling = ["dep:mount-rs-sqlite", "mount-rs-remote-protocol/io-profiling"]
+io-profiling = ["dep:mount-rs-sqlite", "mount-rs-remote-protocol/io-profiling", "mount-rs-sdk?/io-profiling"]
 resource-profiling = ["io-profiling"]
 allocation-profiling = ["resource-profiling"]
 saturation-foundationdb = ["mount-rs-sdk/foundationdb"]
