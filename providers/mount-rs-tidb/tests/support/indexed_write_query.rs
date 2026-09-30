@@ -170,12 +170,53 @@ async fn actual_indexed_write_cycle_uses_two_inode_reads() {
         assert_eq!(entry.cancelled, 0, "{name}");
     }
     assert_eq!(delta.in_flight, 0);
+    assert_write_point_queries(&queries);
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.eq_ignore_ascii_case("COMMIT"))
+            .count(),
+        1,
+        "one actual selected inode publication commits"
+    );
+    // The budget assertion follows cleanup and the complete durable oracle.
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| sql.as_str() == "SELECT @@SESSION.max_allowed_packet")
+            .count(),
+        0,
+        "the selected authority statement must carry its session packet budget"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|sql| {
+                sql.starts_with("SELECT ")
+                    && sql.contains(
+                        ",s.inode,@@SESSION.max_allowed_packet FROM mount_rs_tidb_metadata AS m ",
+                    )
+                    && sql.contains(" LEFT JOIN mount_rs_tidb_compact_members AS s ")
+                    && !sql.contains("mount_rs_tidb_compact_guards")
+            })
+            .count(),
+        1,
+        "one authority/member projection supplies the session packet budget"
+    );
+    assert_eq!(
+        delta
+            .entries
+            .iter()
+            .find(|entry| entry.name == "tidb.sql.session")
+            .map_or(0, |entry| entry.calls),
+        0,
+        "the warm selected write cycle issues no separate session SQL"
+    );
     assert_eq!(
         queries.len(),
-        8,
-        "one statement is removed from the complete write cycle"
+        7,
+        "the complete write cycle removes the standalone packet budget statement"
     );
-    assert_write_point_queries(&queries);
 }
 
 fn assert_no_write_dml(queries: &[String]) {

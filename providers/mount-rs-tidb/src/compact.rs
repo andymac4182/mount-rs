@@ -31,7 +31,7 @@ const FILE_POINT_SQL: &str = "SELECT /*+ SET_VAR(tidb_max_chunk_size=32) SET_VAR
 // for the parent range. Full binary-name equality and all matching rows remain
 // required, so a hash collision or duplicate cannot become an admitted hit.
 const ROOT_ENTRY_POINT_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,rm.inode,r.inode,r.incarnation,r.epoch,r.revision,r.node,d.parent,d.ordinal,d.name,d.inode,fm.inode,f.inode,f.incarnation,f.epoch,f.revision,f.node FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS rm ON rm.volume_key=? AND rm.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS r ON r.volume_key=? AND r.inode=? LEFT JOIN mount_rs_tidb_compact_dentries AS d FORCE INDEX(name_lookup) ON d.volume_key=? AND d.parent=? AND d.name_hash=? AND d.name=? LEFT JOIN mount_rs_tidb_compact_members AS fm ON fm.volume_key=? AND fm.inode=? LEFT JOIN mount_rs_tidb_compact_guards AS f ON f.volume_key=? AND f.inode=? WHERE m.volume_key=?";
-const FILE_AUTHORITY_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,s.inode FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS s ON s.volume_key=? AND s.inode=? WHERE m.volume_key=?";
+const FILE_AUTHORITY_SQL: &str = "SELECT m.revision,m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.namespace,m.delegation,s.inode,@@SESSION.max_allowed_packet FROM mount_rs_tidb_metadata AS m LEFT JOIN mount_rs_tidb_compact_members AS s ON s.volume_key=? AND s.inode=? WHERE m.volume_key=?";
 type GuardRow = (i64, i64, i64, i64, String);
 type DentryRow = (i64, i64, Vec<u8>, Vec<u8>, i64);
 type AnchorRow = (
@@ -206,7 +206,7 @@ async fn file_authority<C: Queryable>(
     volume: &str,
     backing: ConcurrentBackingId,
     inode: u64,
-) -> Result<(CompactAuthority, Option<u64>)> {
+) -> Result<(CompactAuthority, Option<u64>, Value)> {
     let row: Row = conn
         .exec_first_observed(
             StorageOperation::TidbSqlMetadataRead,
@@ -220,10 +220,14 @@ async fn file_authority<C: Queryable>(
     // Authority refusals precede selected membership conversion. The validated
     // primary keys give one authority and at most one member in this read view.
     let authority = joined_authority(&mut values, backing)?;
-    if values.len() != 9 {
+    if values.len() != 10 {
         return Err(backend_error("invalid indexed TiDB file authority shape"));
     }
-    Ok((authority, optional_member(&mut values, 8)?))
+    let selected_member = optional_member(&mut values, 8)?;
+    // Retain the raw cap until the original packet-preflight phase. Authority,
+    // membership and update-validation refusals keep their existing precedence.
+    let session_packet = values[9].take().ok_or_else(stale)?;
+    Ok((authority, selected_member, session_packet))
 }
 async fn anchor<C: Queryable>(
     conn: &mut C,
@@ -1107,7 +1111,7 @@ impl TidbMetadataStore {
             .await?
             .remove(&inode)
             .ok_or_else(stale)?;
-        let (authority, selected_member) =
+        let (authority, selected_member, session_packet) =
             file_authority(&mut tx, &self.0.volume_key, backing, inode).await?;
         let (guard, next_ordinal) = match stored.body {
             StoredBody::Node(current_node) if matches!(current_node.data, NodeData::File(_)) => {
@@ -1159,7 +1163,15 @@ impl TidbMetadataStore {
             }
         };
         let json = encode_guard(inode, &guard, next_ordinal)?;
-        let budget = packet_budget(&mut tx).await?;
+        // This provider-owned session stays on the same connection throughout
+        // the transaction. Preserve both the explicit client and server caps.
+        let session: u64 = from_value_opt(session_packet)
+            .map_err(|_| backend_error("invalid TiDB compact packet budget"))?;
+        let budget = tx
+            .opts()
+            .max_allowed_packet()
+            .unwrap_or(usize::MAX)
+            .min(usize::try_from(session).unwrap_or(usize::MAX));
         check_bytes(&self.0, json.len(), budget)?;
         write_guard(&mut tx, &self.0.volume_key, inode, &guard, json, false).await?;
         commit(tx, "publish compact inode").await?;

@@ -1,0 +1,290 @@
+{
+  "date": "2026-09-30",
+  "limits": [
+    "No latency, allocation or physical IOPS improvement measured.",
+    "Native Open/Write/Close cycle query profile requires fresh measurement.",
+    "This change does not remove structural churn directory/member scans.",
+    "Full 10,000-client target, current-head CI and merge remain unqualified."
+  ],
+  "logical_contract": {
+    "actual_commits": 1,
+    "complete_guard_rows_after": 2,
+    "complete_guard_rows_before": 2,
+    "durable_full_successor_oracle": true,
+    "proxy_commands_after": 7,
+    "proxy_commands_before": 8,
+    "selected_guard_updates": 1,
+    "standalone_packet_queries_after": 0,
+    "standalone_packet_queries_before": 1
+  },
+  "records": {
+    "all_targets": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 2148,
+          "sha256": "b96c4c89b2de7e1dedc8c9d0608a9032d3723aa69c430060a9312e7751aad3ba"
+        },
+        "stdout": {
+          "bytes": 21096,
+          "sha256": "e90600fc1e31fb430b85a3e8a64b7a8ea186edef6ebbf098bafda116273a4aab"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 36.04921237495728,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78375702528,
+      "owner_receipt_sha256": "85b6424f09c759f5ff5537e61467fd91de32123700065a77226dcf2ddc66100c",
+      "process_group_absent": true
+    },
+    "client_packet_refusal": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 356,
+          "sha256": "a2d149b4f872d7e635c618c7f8444550d9ae9b68792f85496e1eed632a40ceb4"
+        },
+        "stdout": {
+          "bytes": 516,
+          "sha256": "6b4ff73aa8c12d4824790cd22b5f09b1178e3c58bbdd6862e70e1eeeb789f442"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 1.0156870839418843,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78812979200,
+      "owner_receipt_sha256": "61732fb687fca953a1d1bdd8cf5ca1eabe483851ad99e69ef2c853566ad51511",
+      "process_group_absent": true
+    },
+    "format": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 0.40511775005143136,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78382272512,
+      "owner_receipt_sha256": "4e7ca23ea1cb431fef95f506743c29ad98905f4772ef6a0c3995b1058691ecd4",
+      "process_group_absent": true
+    },
+    "green": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 412,
+          "sha256": "b1ca6393b7fd1edced88900bb1234b296cdb30dde7f2e14070a56e97f3e8d0d5"
+        },
+        "stdout": {
+          "bytes": 514,
+          "sha256": "b90ad3b94acedaf0cafe36d19c2bf4e0387516d1f3f791088d88a32496256664"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 8.140079041011631,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78829654016,
+      "owner_receipt_sha256": "2514e67c31e54ae81c049ed0e57e44dfe655b55746c65e36aa60238cd0c151c6",
+      "process_group_absent": true
+    },
+    "guard_wait_freshness": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 196,
+          "sha256": "92f80436f1d2381adacce2e81eb51b91462b1152ee2204acdf11603a72f0a995"
+        },
+        "stdout": {
+          "bytes": 539,
+          "sha256": "c44581f04fe5e36bf2a8c407d018a065a4281d4e750e5994fe8bd55f1960b913"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 0.6103337500244379,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78732877824,
+      "owner_receipt_sha256": "44d29d5b51ef3fc441b5b6864494fe4e51a0accc80802da31dd322ff4e0dacb8",
+      "process_group_absent": true
+    },
+    "indexed_write_controls": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 291,
+          "sha256": "991f4132f5f14712326dbfa263c5b234b79eba269cfb3e90b3808e2b9d36a4c0"
+        },
+        "stdout": {
+          "bytes": 969,
+          "sha256": "ceeab18ad59a01724d268a29225ab0b2577811dc0bcd9bb1da037288ab438562"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 3.2492993329651654,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78817906688,
+      "owner_receipt_sha256": "485d14ad62e8fb9bf1153faaebb907682f0547a3d976809b157ce5af5991d9ef",
+      "process_group_absent": true
+    },
+    "lost_commit_ack": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 196,
+          "sha256": "ff211eca556e89283a94c15c76a40ed1811a5eaa2b7aa2d3b3a6d51e07d10cc0"
+        },
+        "stdout": {
+          "bytes": 492,
+          "sha256": "e89274689d0d36cafd76fa7d07d00bddda49076e66bbdad293840c36084cd338"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 1.0203998750075698,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78812614656,
+      "owner_receipt_sha256": "2cad95af165af582523576b82496a261f82fb18b706fb3d20d657642a1999f73",
+      "process_group_absent": true
+    },
+    "original_eight_after": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 253,
+          "sha256": "5c450a0085a43eb098412b115d27123133b53541f4a9e24e736826d759514000"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 0.2065659170038998,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78731677696,
+      "owner_receipt_sha256": "32eede93ba6a1ba648336bb6313c105c2b45d2e1de1f6cc366cee3a3aa226b6f",
+      "process_group_absent": true
+    },
+    "original_eight_before": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdout": {
+          "bytes": 253,
+          "sha256": "9dc59811e384c7d303b5ed2127e2272660c379e992fbd3aa4aed28a5b85177e9"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 0.20638787501957268,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 79088037888,
+      "owner_receipt_sha256": "60def53d2e6f96183062b18ed5b52397bdeb57b518b37ce5e14f4434dfb2ce00",
+      "process_group_absent": true
+    },
+    "red": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 1734,
+          "sha256": "b5a47a58f0a1e8ebee7930837da25a0cad3deffdc6e73213f5c4af54d0c59aed"
+        },
+        "stdout": {
+          "bytes": 615,
+          "sha256": "0ccdd8f3494774493611dce91a3f7d17c992dedfd7fdbe098c5839d658d54b2e"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 13.215476874960586,
+      "exit_code": 101,
+      "expected_exit_code": 101,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78868631552,
+      "owner_receipt_sha256": "63d590c9ec8ee3b503344ec6b14268b5481b36aef10e82dc526f23c26f654bd9",
+      "process_group_absent": true
+    },
+    "strict_clippy": {
+      "capture_cap_per_file_bytes": 67108864,
+      "captures": {
+        "stderr": {
+          "bytes": 1074,
+          "sha256": "1cdd8eb9a36f2e2b540d6709f479c1b933da74ad5424f09cecd7d5a20cd1d059"
+        },
+        "stdout": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "deadline_seconds": 300,
+      "direct_child_reaped": true,
+      "elapsed_seconds": 9.387545999954455,
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "failure": null,
+      "host_free_floor_bytes": 68719476736,
+      "minimum_host_free_bytes": 78714994688,
+      "owner_receipt_sha256": "e9f981b713bacd86f99c16732f26c6588232d29c59c2f1da78b805e32640ab1b",
+      "process_group_absent": true
+    }
+  },
+  "schema": "mount-rs.tidb-packet-budget-control.v1",
+  "scope": "owned TiDB MetadataStore warm file read and selected inode publication; not a cluster throughput benchmark",
+  "source_parent": "be510e4bd638504306eca37ec63f9379fdb6e8e9",
+  "source_sha256": {
+    "providers/mount-rs-tidb/src/compact.rs": "4877be93f85420cae4caaa558995e551ab23de8058c22834ba35dfba4d250464",
+    "providers/mount-rs-tidb/tests/support/indexed_write_query.rs": "416feb72cd6b6ccaa524b0620922a7227067c85c35876dfc61b8c3dd0ec6c714"
+  },
+  "validation": {
+    "distinct_actual_controls_passed": 9,
+    "format_passed": true,
+    "non_opt_in_tests_passed": 58,
+    "opt_in_tests_ignored_in_general_run": 97,
+    "original_eight_identity_lifecycle_six_volumes_preserved": true,
+    "strict_clippy_passed": true
+  }
+}
