@@ -1,0 +1,151 @@
+name: TiDBPointPlanDiagnosticProbe
+
+# Isolated diagnostics only. This does not replace any ordinary CI gate.
+on:
+  push:
+    branches:
+      - codex/full-target-evidence-probe-20260930-1106
+    paths:
+      - .github/workflows/tidb-point-plan-probe.yml
+      - providers/mount-rs-tidb/tests/support/indexed_point_scope.rs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tidb-point-plan-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  owned-tidb-point-plan:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/full-target-evidence-probe-20260930-1106'
+    runs-on: ubuntu-24.04
+    # Same whole-job budget as the existing owned TiDB job.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Bind source and prepare this job's exact-test capture
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/codex/full-target-evidence-probe-20260930-1106
+          sha256sum --check --strict <<'SOURCE_PINS'
+          93e8d4012fb78c916c41817da44697bf369e49c0b0cb3a31a3532fa7f0f78bdd  providers/mount-rs-tidb/tests/support/indexed_point_scope.rs
+          825c15c13da4a14bf7a02a67449a4da5d21ab10d15c2a13dfa295fc5ac66dfb8  providers/mount-rs-tidb/tests/compact.rs
+          12a8a280544193b37a138357d285b432576da82ac30f4f16c6683b0e40e36dac  providers/mount-rs-tidb/tests/support/compact_proxy.rs
+          68560a0b1aeaca3237a50c646c6f3efd1a742ef11418adf619f13c0c18077206  providers/mount-rs-tidb/src/compact/indexed.rs
+          7837ddbef8e33e0051817f82aba8a1d61d1401e10897e763e181f6fad0192386  providers/mount-rs-tidb/src/compact/borrowed.rs
+          4877be93f85420cae4caaa558995e551ab23de8058c22834ba35dfba4d250464  providers/mount-rs-tidb/src/compact.rs
+          b78e090eab3358666ad010bd449994ce415cb17942b7658e713fc51e195c28ae  providers/mount-rs-tidb/src/lib.rs
+          677ff2cbf11e4c176aaed4bb9658992ae47f2e75cb7453274e165e44fbbdd7b4  providers/mount-rs-tidb/src/storage.rs
+          919bfea3be0a9223e18d0a0bea57c6bdb27aa4bb063acf955fbf5bccef264aa0  providers/mount-rs-tidb/Cargo.toml
+          a0494b68a83b98c3b34706cd5d9afc5a05dd4cca9e80eb071902a7425506bdd1  scripts/test-tidb.sh
+          2451d3b0c30465ab28eb74e9203dae1551ed7d73fbac0d140068d71fbeadded8  tests/tidb/tidb-test.toml
+          6955067c3b90632b3f442851fadf05197d8747e03f36342aa272bce31840bd9b  tests/tidb/tikv-test.toml
+          7e492520ac5fdb132182779ec0c70f1285f321709c451e3efa5755a39e3ea5a5  Cargo.lock
+          a0d7e1c44f98cc6981cab9c604ea1214575888eab2f60152c59e5db6080c0ab6  scripts/cargo-shared
+          4a9fbed21a642c7576891e62617f0da93f9552d6e29da78f6eb292aaa92a42c6  scripts/cargo-shared-env.sh
+          SOURCE_PINS
+          umask 077
+          probe_dir=$(mktemp -d "$RUNNER_TEMP/mount-rs-tidb-point-plan.XXXXXX")
+          printf 'MOUNT_RS_TIDB_POINT_PLAN_DIR=%s\n' "$probe_dir" >> "$GITHUB_ENV"
+          printf 'CARGO_TARGET_DIR=%s\n' "$RUNNER_TEMP/mount-rs-tidb-point-plan-cargo-target" >> "$GITHUB_ENV"
+          printf 'MOUNT_RS_TIDB_COMPOSITION_COMMAND=bash "%s/exact-test.sh"\n' "$probe_dir" >> "$GITHUB_ENV"
+          {
+            printf 'source_commit=%s\n' "$GITHUB_SHA"
+            printf 'source_parent_proposal=80b3f10e75f644ccf758a1af6a73dd6e214ed0f0\n'
+            printf 'diagnostic_scope=owned-tidb-metadata-only\n'
+            sha256sum providers/mount-rs-tidb/tests/support/indexed_point_scope.rs scripts/test-tidb.sh tests/tidb/tidb-test.toml tests/tidb/tikv-test.toml Cargo.lock
+          } > "$probe_dir/source-binding.txt"
+          cat > "$probe_dir/exact-test.sh" <<'EXACT_TEST'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          phase=${MOUNT_RS_TIDB_EXPECT_PERSISTED:?missing owned TiDB phase}
+          case "$phase" in
+            0|1) ;;
+            *) echo 'TIDB_POINT_PLAN_CAPTURE_FAIL reason=invalid-phase' >&2; exit 125 ;;
+          esac
+          test_name=indexed_point_scope::actual_indexed_production_points_use_bounded_access_with_1000_siblings
+          capture="$MOUNT_RS_TIDB_POINT_PLAN_DIR/phase-$phase.exact-test.log"
+          # Exclusive creation, then keep the same descriptor through the drain.
+          set -C
+          exec 3>"$capture"
+          set +C
+          set +e
+          ./scripts/cargo-shared test --locked -p mount-rs-tidb --test compact \
+            -- --ignored --exact "$test_name" --nocapture --test-threads=1 --color never \
+            2>&1 | tee /dev/fd/3
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          exec 3>&-
+          cargo_status=${pipeline_status[0]}
+          drain_status=${pipeline_status[1]}
+          test "$drain_status" -eq 0
+          # An oversized capture is refused rather than clipped or used as evidence.
+          test "$(wc -c < "$capture")" -le 67108864
+          test "$(grep -Fxc 'running 1 test' "$capture")" -eq 1
+          test "$(grep -Fc "test $test_name ..." "$capture")" -eq 1
+          case "$cargo_status" in
+            0) summary='^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in ' ;;
+            101) summary='^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in ' ;;
+            *) echo "TIDB_POINT_PLAN_CAPTURE_FAIL reason=unexpected-cargo-status phase=$phase status=$cargo_status" >&2; exit 125 ;;
+          esac
+          test "$(grep -Ec "$summary" "$capture")" -eq 1
+          sha256sum "$capture" > "$MOUNT_RS_TIDB_POINT_PLAN_DIR/phase-$phase.exact-test.sha256"
+          printf 'TIDB_POINT_PLAN_CAPTURE_EXECUTED phase=%s tests=1 ignored=0 cargo_status=%s\n' "$phase" "$cargo_status" \
+            | tee "$MOUNT_RS_TIDB_POINT_PLAN_DIR/phase-$phase.executed.txt"
+          exit "$cargo_status"
+          EXACT_TEST
+      - name: Run the unchanged owned TiDB harness with the diagnostic hook
+        shell: bash
+        env:
+          MOUNT_RS_PROFILE_IO: '1'
+          MOUNT_RS_TIDB_TOPOLOGY: durable
+          MOUNT_RS_TIDB_VERSION: v8.5.7
+          MOUNT_RS_TIDB_STARTUP_TIMEOUT_SECONDS: '300'
+          MOUNT_RS_TIDB_TIKV_NOFILE_LIMIT: '200000'
+          MOUNT_RS_TIDB_ALLOW_UNDERPROVISIONED: '0'
+          MOUNT_RS_TIDB_NAPI: '0'
+          MOUNT_RS_TIDB_IOPS: '0'
+          MOUNT_RS_TIDB_FILESYSTEM: '0'
+          MOUNT_RS_BACKING_PILOT: '0'
+          MOUNT_RS_TIDB_COMPACT_TEST_PREFIX: point-plan-diagnostic
+        run: |
+          set -euo pipefail
+          set -C
+          exec 3>"$MOUNT_RS_TIDB_POINT_PLAN_DIR/owned-harness.log"
+          set +C
+          set +e
+          ./scripts/test-tidb.sh 2>&1 | tee /dev/fd/3
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          exec 3>&-
+          harness_status=${pipeline_status[0]}
+          drain_status=${pipeline_status[1]}
+          printf 'owned_harness_status=%s drain_status=%s\n' "$harness_status" "$drain_status" \
+            > "$MOUNT_RS_TIDB_POINT_PLAN_DIR/owned-harness-status.txt"
+          test "$drain_status" -eq 0
+          test "$(wc -c < "$MOUNT_RS_TIDB_POINT_PLAN_DIR/owned-harness.log")" -le 67108864
+          sha256sum "$MOUNT_RS_TIDB_POINT_PLAN_DIR/owned-harness.log" \
+            > "$MOUNT_RS_TIDB_POINT_PLAN_DIR/owned-harness.sha256"
+          exit "$harness_status"
+      - name: Require a real phase-zero diagnostic execution
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$MOUNT_RS_TIDB_POINT_PLAN_DIR/phase-0.exact-test.log"
+          test -f "$MOUNT_RS_TIDB_POINT_PLAN_DIR/phase-0.executed.txt"
+          grep -Ex 'TIDB_POINT_PLAN_CAPTURE_EXECUTED phase=0 tests=1 ignored=0 cargo_status=(0|101)' \
+            "$MOUNT_RS_TIDB_POINT_PLAN_DIR/phase-0.executed.txt"
+          sha256sum --check --strict "$MOUNT_RS_TIDB_POINT_PLAN_DIR/phase-0.exact-test.sha256"
+      - name: Retain diagnostic source and complete exact-test captures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tidb-point-plan-diagnostic-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MOUNT_RS_TIDB_POINT_PLAN_DIR }}
+          if-no-files-found: error
+          retention-days: 7

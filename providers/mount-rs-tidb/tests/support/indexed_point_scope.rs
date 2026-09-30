@@ -783,7 +783,7 @@ fn point_scope_assert_bounded_dentry(plan: &[PointScopePlanRow]) {
     assert_eq!(
         point_scope_processed_keys(index),
         vec![1],
-        "one processed name index entry"
+        "one processed name index entry; selected index={index:#?}; complete retained plan={plan:#?}"
     );
     let tables: Vec<_> = plan
         .iter()

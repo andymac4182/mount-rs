@@ -1,0 +1,87 @@
+# Isolated fixture controls. This does not run or qualify a formal proof.
+name: Current create fixture controls probe
+
+on:
+  push:
+    branches:
+      - codex/full-target-evidence-probe-20260930-1106
+    paths:
+      - .github/workflows/fixture-controls-probe.yml
+      - filesystems/mount-rs-chunked/src/create_rebase.rs
+
+permissions:
+  contents: read
+
+jobs:
+  fixture-controls-probe:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/full-target-evidence-probe-20260930-1106'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FIXTURE_SOURCE_SHA256: 1297d57284a94e33e7f8a10e213ae391864b76bae45e443975a650e0e1d59af1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - name: Select owned fixture paths
+        shell: bash
+        run: |
+          printf 'CARGO_TARGET_DIR=%s/current-create-fixture-controls-target-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          printf 'FIXTURE_EVIDENCE=%s/current-create-fixture-controls-evidence-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Bind the original fixture and isolate the Cargo target
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/codex/full-target-evidence-probe-20260930-1106
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test ! -e "$CARGO_TARGET_DIR"
+          test ! -e "$FIXTURE_EVIDENCE"
+          mkdir -m 700 "$CARGO_TARGET_DIR" "$FIXTURE_EVIDENCE"
+          printf '%s\n' "$GITHUB_SHA" > "$FIXTURE_EVIDENCE/checkout-sha.txt"
+          printf '%s  %s\n' "$FIXTURE_SOURCE_SHA256" filesystems/mount-rs-chunked/src/create_rebase.rs | sha256sum --check
+          sha256sum filesystems/mount-rs-chunked/src/create_rebase.rs > "$FIXTURE_EVIDENCE/fixture-source.sha256"
+          rustc --version --verbose > "$FIXTURE_EVIDENCE/rustc-version.txt"
+          cargo --version > "$FIXTURE_EVIDENCE/cargo-version.txt"
+      - name: Check touched package formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/cargo-shared fmt -p mount-rs-chunked -- --check 2>&1 | tee "$FIXTURE_EVIDENCE/format.log"
+      - name: Run the exact existing fixture control
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/cargo-shared test --locked -p mount-rs-chunked --lib create_rebase::tests::occupied_array_fixture_preserves_namespace_and_rebase_outcomes -- --exact 2>&1 | tee "$FIXTURE_EVIDENCE/exact-fixture-control.log"
+          grep -Fx 'test create_rebase::tests::occupied_array_fixture_preserves_namespace_and_rebase_outcomes ... ok' "$FIXTURE_EVIDENCE/exact-fixture-control.log"
+      - name: Run the existing create rebase suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/cargo-shared test --locked -p mount-rs-chunked --lib create_rebase::tests:: 2>&1 | tee "$FIXTURE_EVIDENCE/create-rebase-suite.log"
+      - name: Run strict chunked Clippy across all targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/cargo-shared clippy --locked -p mount-rs-chunked --all-targets -- -D warnings 2>&1 | tee "$FIXTURE_EVIDENCE/clippy.log"
+      - name: Confirm the fixture stayed pinned
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$FIXTURE_SOURCE_SHA256" filesystems/mount-rs-chunked/src/create_rebase.rs | sha256sum --check
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Retain fixture control evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: current-create-fixture-controls-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.FIXTURE_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
