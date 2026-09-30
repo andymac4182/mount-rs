@@ -51,10 +51,13 @@ impl FixedSizeChunker {
 
 impl Chunker for FixedSizeChunker {
     fn config(&self) -> ChunkerConfig {
+        let algorithm = "fixed-size".to_owned();
+        let mut parameters = BTreeMap::new();
+        parameters.insert("chunk_size".to_owned(), self.size.get() as u64);
         ChunkerConfig {
-            algorithm: "fixed-size".to_owned(),
+            algorithm,
             version: 1,
-            parameters: BTreeMap::from([("chunk_size".to_owned(), self.size.get() as u64)]),
+            parameters,
         }
     }
 
@@ -113,6 +116,35 @@ mod tests {
                     chunker.chunks(&bytes).collect::<Vec<_>>()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fixed_config_preserves_canonical_shape_and_serialization() {
+        for size in [1, 4096, 8192, 65536, usize::MAX] {
+            let expected = ChunkerConfig {
+                algorithm: "fixed-size".to_owned(),
+                version: 1,
+                parameters: BTreeMap::from([("chunk_size".to_owned(), size as u64)]),
+            };
+            let actual = FixedSizeChunker::new(size).unwrap().config();
+            assert_eq!(actual, expected, "size={size}");
+
+            // Pin the persisted shape independently of the config serializer.
+            let canonical_json = format!(
+                r#"{{"algorithm":"fixed-size","version":1,"parameters":{{"chunk_size":{}}}}}"#,
+                size as u64,
+            );
+            let encoded = serde_json::to_vec(&actual).unwrap();
+            assert_eq!(encoded.as_slice(), canonical_json.as_bytes(), "size={size}");
+
+            let decoded: ChunkerConfig = serde_json::from_slice(canonical_json.as_bytes()).unwrap();
+            assert_eq!(decoded, expected, "size={size}");
+            assert_eq!(
+                from_config(&decoded).unwrap().config(),
+                expected,
+                "size={size}"
+            );
         }
     }
 
