@@ -73,7 +73,15 @@ jobs:
               '_RINvMsp_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree4nodeINtB6_7NodeRefNtNtB6_6marker3MutyNtNtCsls6Niw6mIAT_13mount_rs_core7storage12NodeMetadataNtB1a_8InternalE30correct_childrens_parent_linksINtNtNtCs8xvirJzNMvV_4core3ops5range14RangeInclusivejEEB1v_.0': ('correct_childrens_parent_links', 558, 'node.rs', 'RangeInclusive<usize>'),
               '_RINvMsp_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree4nodeINtB6_7NodeRefNtNtB6_6marker3MutyNtNtCsls6Niw6mIAT_13mount_rs_core7storage12NodeMetadataNtB1a_8InternalE30correct_childrens_parent_linksINtNtNtCs8xvirJzNMvV_4core3ops5range5RangejEEB1v_.0': ('correct_childrens_parent_links', 558, 'node.rs', 'Range<usize>'),
           }
-          LOOP_BOUNDS = {**dict.fromkeys(LOOPS, 4), **dict.fromkeys(NODE_LOOPS, 13)}
+          INSERT_LOOPS = {
+              '_RINvMsN_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree4nodeINtB6_6HandleINtB6_7NodeRefNtNtB6_6marker3MutyNtNtCsls6Niw6mIAT_13mount_rs_core7storage12NodeMetadataNtB1n_4LeafENtB1n_4EdgeE16insert_recursingNtNtBc_5alloc6GlobalNCNvMs4_NtNtB8_3map5entryINtB3F_11VacantEntryyB1E_E12insert_entry0EB1I_.0': ('insert_recursing', 1072, 'node.rs', 'VacantEntry'),
+          }
+          # Observed hosted nightly source hashes; local stable fragments below are only
+          # candidate facts and must match this actual source before any proof is admitted.
+          STD_NODE_SHA256 = {'node.rs': '9c6aaab4c794d221ae98e943a79fea2d9a2836977d0d40c0e4e2b2da83e244ea', 'search.rs': '687b99a6f5f146591738c8039371499d5c5ca9adfdb47b9519694aba62387021'}
+          INSERT_SOURCE_FACTS = {'leaf_init_and_new': {'marker': '    unsafe fn init(this: *mut Self) {', 'normalized_sha256': '5c6a1cecb7f74267d94797bbac75c20e9dc68ccb5f2daf44869c57aabf7577f6'}, 'leaf_insert_fit': {'marker': '    unsafe fn insert_fit(', 'normalized_sha256': '6af1e66a16fd961fd609dbce68a999cb9859e9eeb6173c85d088085a575fd7d4'}, 'leaf_insert': {'marker': '    fn insert<A: Allocator + Clone>(', 'normalized_sha256': '4a719f61ce85641bdc4e4efa880c0cd10d5ed4bb0329574e7b1f0686926e1489'}, 'insert_recursing': {'marker': '    pub(super) fn insert_recursing<A: Allocator + Clone>(', 'normalized_sha256': '722181c6a5e82e11caa8cd533f2f0fa6d9ec7d85db03eb225e0fc6d201190eb0'}}
+          FIXTURE_GEOMETRY_SHA256 = '95ee0094f0d6610784e9dde2f55936b6b415b1d6156782293af2096bc2aa02ba'
+          LOOP_BOUNDS = {**dict.fromkeys(LOOPS, 4), **dict.fromkeys(NODE_LOOPS, 13), **dict.fromkeys(INSERT_LOOPS, 2)}
           UNWINDSET = ','.join(loop + ':' + str(bound) for loop, bound in LOOP_BOUNDS.items())
           EVIDENCE = pathlib.Path(os.environ['PROBE_EVIDENCE'])
           BUNDLE = pathlib.Path(os.environ['KANI_HOME']) / 'kani-0.68.0'
@@ -175,6 +183,16 @@ jobs:
               require(len(re.findall(r'kani::cover!\s*\(', body)) == 5, 'cover inventory changed')
               require('#[kani::unwind(64)]' in source, 'global unwind annotation changed')
 
+              start = source.index('fn verification_root_nodes(')
+              end = source.index('\n#[cfg(test)]', start)
+              constructor = source[start:end]
+              normalized = ' '.join(constructor.split())
+              require(hashlib.sha256(normalized.encode()).hexdigest() == FIXTURE_GEOMETRY_SHA256, 'two-node constructor source changed')
+              require(constructor.count('let mut nodes = BTreeMap::new();') == 1 and constructor.count('nodes.insert(') == 2, 'two-node constructor insertion census changed')
+              require('nodes.insert(1, root);' in constructor and re.search(r'if occupied\s*\{\s*nodes\.insert\(\s*2,', constructor), 'root/optional-second insertion geometry changed')
+              require(body.count('verification_root_nodes(occupied, &chunker)') == 1 and 'nodes.insert(' not in body, 'harness constructor use changed')
+              require('namespace: &Namespace,' in source.split('fn verification_root_nodes(', 1)[0], 'rebase namespace is no longer borrowed immutably')
+
           def install_guard():
               source_gate()
               binary = BUNDLE / 'bin' / 'cbmc'
@@ -199,8 +217,19 @@ jobs:
                   expected = expected_root / name
                   require(record['path'] == str(expected), 'standard-library source path changed')
                   require(digest_path(expected, 512 * 1024) == record['sha256'], 'standard-library source changed: ' + name)
+                  require(record['sha256'] == STD_NODE_SHA256[name], 'observed pinned-nightly source identity changed: ' + name)
                   texts[name] = expected.read_text(encoding='utf-8')
               node = texts['node.rs']
+              require(node.splitlines()[1071].strip() == 'loop {', 'insert recursion loop source line changed')
+              fragments = {}
+              for name, expected in INSERT_SOURCE_FACTS.items():
+                  start = node.index(expected['marker'])
+                  end = node.index('\n}\n', start)
+                  normalized = ' '.join(node[start:end].split())
+                  fragments[name] = hashlib.sha256(normalized.encode()).hexdigest()
+              print('PINNED_INSERT_RECURSION_FACTS ' + json.dumps({'node_sha256':records['node.rs']['sha256'], 'fragments':fragments, 'fixture_geometry_sha256':FIXTURE_GEOMETRY_SHA256, 'fixture_max_nodes':2, 'strict_insert_unwind':2}, sort_keys=True), file=sys.stderr)
+              require(all(fragments[name] == expected['normalized_sha256'] for name, expected in INSERT_SOURCE_FACTS.items()), 'pinned-nightly leaf insertion/recursion differs from candidate source facts')
+
               require('const B: usize = 6;' in node and 'pub(super) const CAPACITY: usize = 2 * B - 1;' in node, 'B-tree node capacity changed')
               require('keys: [MaybeUninit<K>; CAPACITY]' in node and 'edges: [MaybeUninit<BoxedNode<K, V>>; 2 * B]' in node, 'B-tree key/edge capacity changed')
               require('Every item returned by `range` is a valid edge index for the node.' in node, 'parent range safety contract changed')
@@ -245,13 +274,15 @@ jobs:
                       require(' line ' + str(line) + ' ' in location, 'wrong loop line')
                       require(method in location and 'Dying' in location and 'String' in location and 'u64' in location, 'wrong loop monomorphization')
                   std_sources = {}
-                  for loop, (method, line, filename, kind) in NODE_LOOPS.items():
+                  for loop, (method, line, filename, kind) in {**NODE_LOOPS, **INSERT_LOOPS}.items():
                       matches = [location for label, location in blocks if label == loop]
                       require(len(matches) == 1, 'exact node loop absent or repeated: ' + loop)
                       location = matches[0]
                       require('nightly-2026-08-21-x86_64-unknown-linux-gnu' in location and '/alloc/src/collections/btree/' + filename in location, 'wrong node loop source')
                       require(' line ' + str(line) + ' ' in location, 'wrong node loop line')
                       require(method in location and kind in location and 'Mut' in location and 'NodeMetadata' in location and 'u64' in location, 'wrong node loop monomorphization')
+                      if loop in INSERT_LOOPS:
+                          require('marker::Leaf>' in location and 'marker::Edge>' in location and 'insert_entry' in location and 'std::alloc::Global' in location, 'wrong insertion recursion specialization')
                       source = re.search(r'file (/.+?) line [0-9]+(?: column [0-9]+)? function ', location)
                       require(source is not None, 'node loop source path unavailable')
                       path = pathlib.Path(source.group(1))
@@ -380,7 +411,7 @@ jobs:
               for method, line in LOOPS.values():
                   matches = [check for check in unwinding if method in check['function'] and 'Dying' in check['function'] and 'String' in check['function'] and 'u64' in check['function'] and check['location']['file'].endswith('/alloc/src/collections/btree/navigate.rs') and str(check['location']['line']) == str(line)]
                   require(matches and any(check['status'] == 'Success' for check in matches), 'targeted strict unwind property not successfully checked: ' + method)
-              for method, line, filename, kind in NODE_LOOPS.values():
+              for method, line, filename, kind in {**NODE_LOOPS, **INSERT_LOOPS}.values():
                   matches = [check for check in unwinding if method in check['function'] and kind in check['function'] and 'Mut' in check['function'] and 'NodeMetadata' in check['function'] and 'u64' in check['function'] and check['location']['file'].endswith('/alloc/src/collections/btree/' + filename) and str(check['location']['line']) == str(line)]
                   require(matches and any(check['status'] == 'Success' for check in matches), 'targeted strict node unwind property not successfully checked: ' + method + ':' + kind)
               write_new('qualified.json', {'qualified': True, 'push_sha': os.environ['GITHUB_SHA'], 'harness': HARNESS, 'source_sha256': SOURCES, 'model_sha256': binding['model_sha256'], 'source_assertion_sites': 12, 'model_property_count': len(properties), 'actual_property_count': len(raw_results), 'symbolic_inputs': 7, 'covers_satisfied': 5, 'global_unwind': 64, 'per_loop_unwind': LOOP_BOUNDS, 'std_node_source_facts_sha256': binding['std_node_source_facts_sha256']})
