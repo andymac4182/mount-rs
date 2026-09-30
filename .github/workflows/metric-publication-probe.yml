@@ -25,16 +25,28 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697
+        with:
+          components: rustfmt, clippy
       - name: Bind the bounded publisher source
         run: |
           set -euo pipefail
           printf 'CARGO_TARGET_DIR=%s\nCARGO_TERM_COLOR=never\n' "$RUNNER_TEMP/metric-publication-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
           python3 - <<'PY'
           import hashlib
+          import subprocess
           from pathlib import Path
-          source = Path('crates/mount-rs-service/tests/support/production_target/metrics.rs').read_bytes()
-          if hashlib.sha256(source).hexdigest() != '46e39eea032f706e03af08ec146335dc2883a6c1fe280ae6a1b16b11ff3a738b':
-              raise SystemExit('Metric publisher source differs from the GREEN fixture')
+          path = 'crates/mount-rs-service/tests/support/production_target/metrics.rs'
+          source = Path(path).read_bytes()
+          blob = subprocess.check_output(['git', 'show', 'HEAD:' + path])
+          print('Metric checkout SHA256:', hashlib.sha256(source).hexdigest())
+          if hashlib.sha256(blob).hexdigest() != '46e39eea032f706e03af08ec146335dc2883a6c1fe280ae6a1b16b11ff3a738b':
+              raise SystemExit('Metric publisher Git blob differs from the GREEN fixture')
+          if source == blob:
+              print('Metric checkout matches the pinned LF blob')
+          elif source == blob.replace(b'\n', b'\r\n'):
+              print('Metric checkout matches only the pinned CRLF representation')
+          else:
+              raise SystemExit('Metric checkout differs from both exact representations of its pinned blob')
           PY
       - name: Verify formatting
         run: ./scripts/cargo-shared fmt --all -- --check
