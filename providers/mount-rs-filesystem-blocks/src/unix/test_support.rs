@@ -10,6 +10,7 @@ pub(super) enum Point {
     File = 1,
     Directory = 2,
     Publication = 3,
+    Root = 4,
 }
 
 #[derive(Debug)]
@@ -24,6 +25,7 @@ pub(super) struct Faults {
     next: AtomicU8,
     pub events: Mutex<Vec<Point>>,
     pub gate: Mutex<Option<Gate>>,
+    pub flush_gate: Mutex<Option<Gate>>,
 }
 
 impl Faults {
@@ -60,6 +62,22 @@ impl Faults {
         gate.release
             .recv()
             .map_err(|_| FsError::backend("test publication release disappeared"))?;
+        Ok(Some(completion))
+    }
+    pub fn pause_after_flush_first_verification(&self) -> Result<Option<Completion>> {
+        let gate = self
+            .flush_gate
+            .lock()
+            .map_err(|_| FsError::backend("test flush gate state poisoned"))?
+            .take();
+        let Some(gate) = gate else { return Ok(None) };
+        let completion = Completion(gate.settled);
+        gate.started
+            .send(())
+            .map_err(|_| FsError::backend("test flush observer disappeared"))?;
+        gate.release
+            .recv()
+            .map_err(|_| FsError::backend("test flush release disappeared"))?;
         Ok(Some(completion))
     }
 }

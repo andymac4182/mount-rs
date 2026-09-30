@@ -288,7 +288,7 @@ impl Inner {
         // The winner's file and both directory entries receive barriers before
         // any duplicate caller acknowledges the immutable object too.
         self.directory_barrier(&shard)?;
-        self.root.sync_all().map_err(io_error)?;
+        self.root_barrier()?;
         self.final_device_barrier(&acknowledged_file)?;
         self.verify_shard(&shard_name, shard_identity)?;
         self.verify()?;
@@ -317,6 +317,12 @@ impl Inner {
         #[cfg(test)]
         self.faults.check(test_support::Point::Directory)?;
         directory.sync_all().map_err(io_error)
+    }
+
+    fn root_barrier(&self) -> Result<()> {
+        #[cfg(test)]
+        self.faults.check(test_support::Point::Root)?;
+        self.root.sync_all().map_err(io_error)
     }
 
     fn final_device_barrier(&self, file: &File) -> Result<()> {
@@ -378,7 +384,8 @@ impl BlockStore for FilesystemBlockStore {
             // Every acknowledged durable put already completed the file/shard/
             // root barriers. There is no detached successful-put write buffer.
             inner.verify()?;
-            inner.root.sync_all().map_err(io_error)?;
+            #[cfg(test)]
+            let _completion = inner.faults.pause_after_flush_first_verification()?;
             inner.verify()
         })
         .await
