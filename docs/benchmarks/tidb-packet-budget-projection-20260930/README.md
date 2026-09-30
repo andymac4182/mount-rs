@@ -29,6 +29,6 @@ Typical actual commands used Rust 1.95.0, an isolated shared Cargo target, `--lo
 
 ## Remaining scope
 
-No allocation or latency gain is claimed from these controls. A fresh native TiDB/RustFS run is needed to measure the complete Open/Write/Close cycle after the query removal. The [previous native profile](../tidb-rustfs-current-scale-20260930/README.md) measured source 642 and therefore still reports six SQL calls per overwrite cycle. This selected-write change leaves the 44-call structural churn path and its full directory/member reads intact.
+The [fresh matched native comparison](../tidb-packet-paired-20260930/README.md) now confirms six to five classified SQL calls per overwrite. Its single instrumented source pair showed no all-active overwrite throughput or process-wide allocation gain; it does not isolate metadata allocation or a causal performance change. The [previous native profile](../tidb-rustfs-current-scale-20260930/README.md) measured source 642 and therefore still reports six SQL calls per overwrite cycle. This selected-write change leaves the 44-call structural churn path and its full directory/member reads intact.
 
 The full ten-server / 10,000-client / 10,000-Drive / 5,000-Partition / 1,000-files-per-Drive target, composed peer cache qualification and final CI/merge remain outstanding.
