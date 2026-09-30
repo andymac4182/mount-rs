@@ -43,9 +43,225 @@ pub(super) fn rebase_prepared_create(
     Ok(PreparedCreateRebase::Rebased)
 }
 
+#[cfg(any(test, kani))]
+fn verification_root_nodes(
+    occupied: bool,
+    chunker: &mount_rs_core::chunking::ChunkerConfig,
+) -> BTreeMap<InodeId, NodeMetadata> {
+    let mut entries = Vec::new();
+    if occupied {
+        entries.push(mount_rs_core::storage::DirectoryEntry {
+            name: "created".into(),
+            inode: 2,
+        });
+    }
+    let root = NodeMetadata {
+        stats: base_stats(1, S_IFDIR | 0o755, 0, 0, 2, BLOCK_SIZE, 8),
+        data: NodeData::Directory { entries },
+    };
+    if occupied {
+        BTreeMap::from([
+            (1, root),
+            (
+                2,
+                NodeMetadata {
+                    stats: base_stats(2, S_IFREG | 0o644, 0, 0, 1, 0, 0),
+                    data: NodeData::File(FileLayout {
+                        chunker: chunker.clone(),
+                        extents: Vec::new(),
+                    }),
+                },
+            ),
+        ])
+    } else {
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn original_verification_nodes(
+        occupied: bool,
+        chunker: &mount_rs_core::chunking::ChunkerConfig,
+    ) -> BTreeMap<InodeId, NodeMetadata> {
+        let mut nodes = BTreeMap::new();
+        let mut entries = Vec::new();
+        if occupied {
+            entries.push(mount_rs_core::storage::DirectoryEntry {
+                name: "created".into(),
+                inode: 2,
+            });
+        }
+        nodes.insert(
+            1,
+            NodeMetadata {
+                stats: base_stats(1, S_IFDIR | 0o755, 0, 0, 2, BLOCK_SIZE, 8),
+                data: NodeData::Directory { entries },
+            },
+        );
+        if occupied {
+            nodes.insert(
+                2,
+                NodeMetadata {
+                    stats: base_stats(2, S_IFREG | 0o644, 0, 0, 1, 0, 0),
+                    data: NodeData::File(FileLayout {
+                        chunker: chunker.clone(),
+                        extents: Vec::new(),
+                    }),
+                },
+            );
+        }
+        nodes
+    }
+
+    #[test]
+    fn occupied_array_fixture_preserves_namespace_and_rebase_outcomes() {
+        // The original setup is an independent reference for representation;
+        // the expected decision below checks the helper's branch precedence.
+        let scalar_cases = [
+            (0, 0, 0),
+            (1, 2, 3),
+            (7, 1, 2),
+            (u64::MAX, u64::MAX, u64::MAX),
+            (u64::MAX, 0, u64::MAX),
+            (0, u64::MAX, 0),
+        ];
+        for occupied in [false, true] {
+            for fresh in [false, true] {
+                for chunker_matches in [false, true] {
+                    for authority_denied in [false, true] {
+                        for (revision, current_inode, prepared_inode) in scalar_cases {
+                            let chunker = FixedSizeChunker::new(4096).unwrap().config();
+                            let namespace = |nodes| Namespace {
+                                format_version: NAMESPACE_FORMAT_VERSION,
+                                root: 1,
+                                next_inode: current_inode,
+                                default_uid: 0,
+                                default_gid: 0,
+                                umask: 0,
+                                default_chunker: if chunker_matches {
+                                    chunker.clone()
+                                } else {
+                                    FixedSizeChunker::new(8192).unwrap().config()
+                                },
+                                nodes,
+                            };
+                            let reference =
+                                namespace(original_verification_nodes(occupied, &chunker));
+                            let candidate = namespace(verification_root_nodes(occupied, &chunker));
+                            assert_eq!(candidate.format_version, reference.format_version);
+                            assert_eq!(candidate.root, reference.root);
+                            assert_eq!(candidate.next_inode, reference.next_inode);
+                            assert_eq!(candidate.default_uid, reference.default_uid);
+                            assert_eq!(candidate.default_gid, reference.default_gid);
+                            assert_eq!(candidate.umask, reference.umask);
+                            assert_eq!(candidate.default_chunker, reference.default_chunker);
+                            assert_eq!(candidate.nodes, reference.nodes);
+                            assert_eq!(
+                                candidate.nodes.keys().copied().collect::<Vec<_>>(),
+                                if occupied { vec![1, 2] } else { vec![1] }
+                            );
+                            assert_eq!(
+                                serde_json::to_vec(&candidate).unwrap(),
+                                serde_json::to_vec(&reference).unwrap()
+                            );
+
+                            let mut candidate_mutation = WholeFileMutation {
+                                path: "/created".into(),
+                                inode: prepared_inode,
+                                expected_revision: 7,
+                                new_inode: fresh,
+                                original: None,
+                                layout: FileLayout {
+                                    chunker,
+                                    extents: Vec::new(),
+                                },
+                                data_length: 3,
+                            };
+                            let mut reference_mutation = candidate_mutation.clone();
+                            let mut candidate_parent = None;
+                            let mut reference_parent = None;
+                            let candidate_result = rebase_prepared_create(
+                                &candidate,
+                                revision,
+                                &mut candidate_mutation,
+                                |parent| {
+                                    candidate_parent = Some(parent);
+                                    if authority_denied {
+                                        Err(FsError::new(ErrorCode::Eacces))
+                                    } else {
+                                        Ok(())
+                                    }
+                                },
+                            );
+                            let reference_result = rebase_prepared_create(
+                                &reference,
+                                revision,
+                                &mut reference_mutation,
+                                |parent| {
+                                    reference_parent = Some(parent);
+                                    if authority_denied {
+                                        Err(FsError::new(ErrorCode::Eacces))
+                                    } else {
+                                        Ok(())
+                                    }
+                                },
+                            );
+                            let expected = if !fresh || occupied {
+                                Ok(PreparedCreateRebase::Unchanged)
+                            } else if authority_denied {
+                                Err(ErrorCode::Eacces)
+                            } else if !chunker_matches {
+                                Ok(PreparedCreateRebase::ChunkerChanged)
+                            } else {
+                                Ok(PreparedCreateRebase::Rebased)
+                            };
+                            let candidate_decision = candidate_result
+                                .as_ref()
+                                .copied()
+                                .map_err(|error| error.code);
+                            let reference_decision = reference_result
+                                .as_ref()
+                                .copied()
+                                .map_err(|error| error.code);
+                            assert_eq!(candidate_decision, expected);
+                            assert_eq!(candidate_decision, reference_decision);
+                            assert_eq!(candidate_parent, reference_parent);
+                            assert_eq!(candidate_parent, (fresh && !occupied).then_some(1));
+                            assert_unchanged(&candidate_mutation, &reference_mutation);
+                            let eligible =
+                                fresh && !occupied && !authority_denied && chunker_matches;
+                            assert_eq!(
+                                candidate_mutation.expected_revision,
+                                if eligible { revision } else { 7 }
+                            );
+                            assert_eq!(
+                                candidate_mutation.inode,
+                                if eligible {
+                                    current_inode
+                                } else {
+                                    prepared_inode
+                                }
+                            );
+                            assert_eq!(candidate_mutation.path, "/created");
+                            assert_eq!(candidate_mutation.new_inode, fresh);
+                            assert!(candidate_mutation.original.is_none());
+                            assert_eq!(
+                                candidate_mutation.layout.chunker,
+                                FixedSizeChunker::new(4096).unwrap().config()
+                            );
+                            assert!(candidate_mutation.layout.extents.is_empty());
+                            assert_eq!(candidate_mutation.data_length, 3);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn fixture() -> (Namespace, WholeFileMutation) {
         let chunker = FixedSizeChunker::new(4096).unwrap().config();
@@ -362,33 +578,7 @@ mod verification {
         let authority_denied: bool = kani::any();
 
         let chunker = FixedSizeChunker::new(4096).unwrap().config();
-        let mut nodes = BTreeMap::new();
-        let mut entries = Vec::new();
-        if occupied {
-            entries.push(mount_rs_core::storage::DirectoryEntry {
-                name: "created".into(),
-                inode: 2,
-            });
-        }
-        nodes.insert(
-            1,
-            NodeMetadata {
-                stats: base_stats(1, S_IFDIR | 0o755, 0, 0, 2, BLOCK_SIZE, 8),
-                data: NodeData::Directory { entries },
-            },
-        );
-        if occupied {
-            nodes.insert(
-                2,
-                NodeMetadata {
-                    stats: base_stats(2, S_IFREG | 0o644, 0, 0, 1, 0, 0),
-                    data: NodeData::File(FileLayout {
-                        chunker: chunker.clone(),
-                        extents: Vec::new(),
-                    }),
-                },
-            );
-        }
+        let nodes = verification_root_nodes(occupied, &chunker);
         let namespace = Namespace {
             format_version: NAMESPACE_FORMAT_VERSION,
             root: 1,

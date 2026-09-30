@@ -155,6 +155,15 @@ occupied, denied, changed-chunker and non-fresh decisions to be reachable.
 The harness is included in `scripts/verify-formal` and a focused supported Linux
 CI job. It has not been executed on this macOS host, and no current-head proof
 result is claimed here. Existing historical proof results do not qualify it.
+At `2c17e6b`, both hosted runs reached their unchanged 20-minute deadline while
+expanding standard-library B-tree fixture construction; neither reported a
+completed proof or SAT result. The occupied fixture now uses a fixed two-entry
+array constructor for the same owned production metadata. The unoccupied fixture
+retains its original construction. A normal regression compares all namespace
+fields, serialization and helper outcomes against the original setup across
+96 cases. Symbolic inputs, assertions, covers, unwind 64 and the hosted deadline
+are unchanged. This construction change still needs a completed hosted proof;
+generic bulk growth and border repair remain possible verifier costs.
 It does not prove arbitrary namespace graphs, asynchronous publication,
 provider commit/durability, or deployment capacity. Symbolic inode values
 include values that a real validated namespace cannot contain; this checks the
