@@ -32,7 +32,8 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
-const READY_SHA: &str = "50f2c006d5a947d9523b1a6b89dc280005b27e1faa530a217d8283535a555fd0";
+// Exact enrollment after the owned RustFS recovery to its 2 GiB memory limit.
+const READY_SHA: &str = "ca1f4833feb3cf54c75a1e13c4977645b52fa0add3f18b88af19396bde2d561a";
 
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
@@ -82,7 +83,7 @@ fn worker_observation() -> super::object_store_projection::Captured {
     )
 }
 
-const CONFIG_SHA: &str = "7c43a6f84ca662faf2224ee5d9a5658c7645e2260326b95d1f3d424f8b4cfbb3";
+const CONFIG_SHA: &str = "8af8118967d352e3d4065ec72521ff49473cd051da1875b00b8841b000e4748d";
 
 #[derive(Clone)]
 struct Backing {
