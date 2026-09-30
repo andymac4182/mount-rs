@@ -1,0 +1,33 @@
+name: Production Target Evidence Probe
+
+on:
+  push:
+    branches:
+      - 'codex/full-target-evidence-probe-20260930-1106'
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Bind unchanged verifier and tests
+        run: |
+          test ! -e scripts/verify-production-target-evidence.py
+          python3 -B - <<'PY'
+          import hashlib
+          from pathlib import Path
+          expected = {
+              'scripts/bench-remote-production-target.sh': 'd545b1cb14b9e3bf58efc1f74f44c32948bc73a25b7e8c6f5077ea8aaa9452e0',
+              'scripts/test-production-target-evidence.py': '46965047133a1c5c4751559f360a540c5a0c6fb0b08108f826732172a7bb288d',
+          }
+          for path, digest in expected.items():
+              if hashlib.sha256(Path(path).read_bytes()).hexdigest() != digest:
+                  raise SystemExit('source identity mismatch: ' + path)
+          PY
+      - name: Observe exact geometry RED with four passing controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-production-target-evidence.py --expect-geometry-red

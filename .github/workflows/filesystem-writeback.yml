@@ -2,6 +2,8 @@ name: Filesystem Writeback
 
 on:
   push:
+    branches-ignore:
+      - 'codex/full-target-evidence-probe-20260930-1106'
     paths:
       - providers/mount-rs-filesystem-blocks/**
       - crates/mount-rs-sdk/**

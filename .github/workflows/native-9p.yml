@@ -3,6 +3,8 @@ name: Native 9P
 on:
   workflow_dispatch:
   push:
+    branches-ignore:
+      - 'codex/full-target-evidence-probe-20260930-1106'
     paths:
       - '.github/workflows/native-9p.yml'
       - 'Cargo.toml'

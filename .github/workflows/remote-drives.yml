@@ -1,6 +1,8 @@
 name: Remote Drives
 on:
   push:
+    branches-ignore:
+      - 'codex/full-target-evidence-probe-20260930-1106'
   pull_request:
   workflow_dispatch:
     inputs:
