@@ -68,7 +68,13 @@ jobs:
               '_RINvMsj_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB8_4node6HandleINtB11_7NodeRefNtNtB11_6marker5DyingNtNtBc_6string6StringyNtB1z_4LeafENtB1z_4EdgeE16deallocating_endNtNtBc_5alloc6GlobalECsls6Niw6mIAT_13mount_rs_core.0': ('deallocating_end', 518),
               '_RINvMsj_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB8_4node6HandleINtB11_7NodeRefNtNtB11_6marker5DyingNtNtBc_6string6StringyNtB1z_4LeafENtB1z_4EdgeE17deallocating_nextNtNtBc_5alloc6GlobalECsls6Niw6mIAT_13mount_rs_core.0': ('deallocating_next', 465),
           }
-          UNWINDSET = ','.join(loop + ':4' for loop in LOOPS)
+          NODE_LOOPS = {
+              '_RINvMs0_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree6searchINtNtB8_4node7NodeRefNtNtBZ_6marker3MutyNtNtCsls6Niw6mIAT_13mount_rs_core7storage12NodeMetadataNtB1j_14LeafOrInternalE14find_key_indexyEB1E_.0': ('find_key_index', 225, 'search.rs', 'LeafOrInternal'),
+              '_RINvMsp_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree4nodeINtB6_7NodeRefNtNtB6_6marker3MutyNtNtCsls6Niw6mIAT_13mount_rs_core7storage12NodeMetadataNtB1a_8InternalE30correct_childrens_parent_linksINtNtNtCs8xvirJzNMvV_4core3ops5range14RangeInclusivejEEB1v_.0': ('correct_childrens_parent_links', 558, 'node.rs', 'RangeInclusive<usize>'),
+              '_RINvMsp_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree4nodeINtB6_7NodeRefNtNtB6_6marker3MutyNtNtCsls6Niw6mIAT_13mount_rs_core7storage12NodeMetadataNtB1a_8InternalE30correct_childrens_parent_linksINtNtNtCs8xvirJzNMvV_4core3ops5range5RangejEEB1v_.0': ('correct_childrens_parent_links', 558, 'node.rs', 'Range<usize>'),
+          }
+          LOOP_BOUNDS = {**dict.fromkeys(LOOPS, 4), **dict.fromkeys(NODE_LOOPS, 13)}
+          UNWINDSET = ','.join(loop + ':' + str(bound) for loop, bound in LOOP_BOUNDS.items())
           EVIDENCE = pathlib.Path(os.environ['PROBE_EVIDENCE'])
           BUNDLE = pathlib.Path(os.environ['KANI_HOME']) / 'kani-0.68.0'
           REAL_CBMC = BUNDLE / 'bin' / 'cbmc.unmodified'
@@ -183,6 +189,26 @@ jobs:
               binary.chmod(0o755)
               write_new('tools.json', {'cbmc_sha256': binary_digest, 'cbmc_bytes': binary_bytes, 'cbmc_byte_cap': BINARY_CAP, 'cbmc_version': version, 'kani_version': '0.68.0', 'source_sha256': SOURCES, 'push_sha': os.environ['GITHUB_SHA']})
 
+          def check_std_node_sources(records):
+              # These source facts motivate a bound. Strict unwind assertions must prove
+              # it sufficient; this checker adds no assumptions or model restrictions.
+              expected_root = pathlib.Path.home() / '.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/collections/btree'
+              require(set(records) == {'node.rs', 'search.rs'}, 'standard-library source census changed')
+              texts = {}
+              for name, record in records.items():
+                  expected = expected_root / name
+                  require(record['path'] == str(expected), 'standard-library source path changed')
+                  require(digest_path(expected, 512 * 1024) == record['sha256'], 'standard-library source changed: ' + name)
+                  texts[name] = expected.read_text(encoding='utf-8')
+              node = texts['node.rs']
+              require('const B: usize = 6;' in node and 'pub(super) const CAPACITY: usize = 2 * B - 1;' in node, 'B-tree node capacity changed')
+              require('keys: [MaybeUninit<K>; CAPACITY]' in node and 'edges: [MaybeUninit<BoxedNode<K, V>>; CAPACITY + 1]' in node, 'B-tree key/edge capacity changed')
+              require('Every item returned by `range` is a valid edge index for the node.' in node, 'parent range safety contract changed')
+              require(node.splitlines()[557].strip() == 'for i in range {', 'parent range loop source changed')
+              search = texts['search.rs']
+              require('let keys = node.keys();' in search and 'debug_assert!(start_index <= keys.len());' in search, 'search key-slice contract changed')
+              require(search.splitlines()[224].strip() == 'for (offset, k) in unsafe { keys.get_unchecked(start_index..) }.iter().enumerate() {', 'search key loop source changed')
+
           def cbmc_guard():
               tools = read_json('tools.json')
               require(digest_path(REAL_CBMC, BINARY_CAP) == tools['cbmc_sha256'], 'CBMC binary identity changed')
@@ -218,6 +244,22 @@ jobs:
                       require('nightly-2026-08-21' in location and '/alloc/src/collections/btree/navigate.rs' in location, 'wrong loop source')
                       require(' line ' + str(line) + ' ' in location, 'wrong loop line')
                       require(method in location and 'Dying' in location and 'String' in location and 'u64' in location, 'wrong loop monomorphization')
+                  std_sources = {}
+                  for loop, (method, line, filename, kind) in NODE_LOOPS.items():
+                      matches = [location for label, location in blocks if label == loop]
+                      require(len(matches) == 1, 'exact node loop absent or repeated: ' + loop)
+                      location = matches[0]
+                      require('nightly-2026-08-21-x86_64-unknown-linux-gnu' in location and '/alloc/src/collections/btree/' + filename in location, 'wrong node loop source')
+                      require(' line ' + str(line) + ' ' in location, 'wrong node loop line')
+                      require(method in location and kind in location and 'Mut' in location and 'NodeMetadata' in location and 'u64' in location, 'wrong node loop monomorphization')
+                      source = re.search(r'file (/.+?) line [0-9]+(?: column [0-9]+)? function ', location)
+                      require(source is not None, 'node loop source path unavailable')
+                      path = pathlib.Path(source.group(1))
+                      record = {'path': str(path), 'sha256': digest_path(path, 512 * 1024)}
+                      require(filename not in std_sources or std_sources[filename] == record, 'inconsistent node loop source')
+                      std_sources[filename] = record
+                  check_std_node_sources(std_sources)
+                  write_new('std-node-source-facts.json', std_sources)
                   require(digest_fd(fd) == model_digest, 'model changed during loop admission')
                   with (EVIDENCE / 'model-properties.json').open('xb') as properties, (EVIDENCE / 'model-properties.stderr').open('xb') as errors:
                       discovery = subprocess.run([str(REAL_CBMC), *prefix, descriptor, *suffix, '--show-properties'], stdout=properties, stderr=errors, pass_fds=(fd,), timeout=30)
@@ -228,9 +270,10 @@ jobs:
                   require(any(prop['class'] == 'assertion' and prop['sourceLocation'].get('file', '').endswith('/mount-rs-chunked/src/create_rebase.rs') and str(prop['sourceLocation'].get('line', '')) in ('613', '614', '615', '616') for prop in properties), 'model lacks the symbolic eligibility assertion')
                   require(digest_fd(fd) == model_digest, 'model changed during property admission')
                   retain_model(fd, model_digest)
-                  write_new('binding.json', {'model_path': str(model), 'model_sha256': model_digest, 'model_properties_sha256': digest_path(EVIDENCE / 'model-properties.json'), 'model_property_count': len(properties), 'loop_ids': list(LOOPS), 'global_unwind': 64, 'per_loop_unwind': 4, 'strict_unwinding_assertions': True, 'argv': argv, 'started_unix_ns': time.time_ns()})
+                  write_new('binding.json', {'model_path': str(model), 'model_sha256': model_digest, 'model_properties_sha256': digest_path(EVIDENCE / 'model-properties.json'), 'model_property_count': len(properties), 'loop_ids': list(LOOP_BOUNDS), 'global_unwind': 64, 'per_loop_unwind': LOOP_BOUNDS, 'std_node_source_facts_sha256': digest_path(EVIDENCE / 'std-node-source-facts.json'), 'strict_unwinding_assertions': True, 'argv': argv, 'started_unix_ns': time.time_ns()})
                   actual_argv = [*prefix, descriptor, *suffix]
                   actual_exit = run_actual_proof(actual_argv, fd)
+                  check_std_node_sources(std_sources)
                   require(digest_fd(fd) == model_digest, 'model changed during proof')
                   source_gate()
                   write_new('completion.json', {'model_sha256': model_digest, 'cbmc_exit': actual_exit, 'finished_unix_ns': time.time_ns()})
@@ -285,7 +328,9 @@ jobs:
               require(binding['model_sha256'] == completion['model_sha256'], 'proof/model binding mismatch')
               require(digest_path(EVIDENCE / 'proof-model.out') == binding['model_sha256'], 'retained model identity mismatch')
               require(digest_path(EVIDENCE / 'model-properties.json') == binding['model_properties_sha256'], 'retained model property inventory changed')
-              require(binding['loop_ids'] == list(LOOPS) and binding['global_unwind'] == 64 and binding['per_loop_unwind'] == 4 and binding['strict_unwinding_assertions'] is True, 'bound admission mismatch')
+              require(binding['loop_ids'] == list(LOOP_BOUNDS) and binding['global_unwind'] == 64 and binding['per_loop_unwind'] == LOOP_BOUNDS and binding['strict_unwinding_assertions'] is True, 'bound admission mismatch')
+              require(digest_path(EVIDENCE / 'std-node-source-facts.json') == binding['std_node_source_facts_sha256'], 'standard-library source receipt changed')
+              check_std_node_sources(read_json('std-node-source-facts.json'))
               require(type(completion['cbmc_exit']) is int and completion['cbmc_exit'] in (0, 10), 'CBMC did not finish verification')
               require((EVIDENCE / 'proof.exit').read_text().strip() == '0', 'normal Kani proof failed')
               document = read_json('proof.json')
@@ -334,11 +379,17 @@ jobs:
               for method, line in LOOPS.values():
                   matches = [check for check in unwinding if method in check['function'] and 'Dying' in check['function'] and 'String' in check['function'] and 'u64' in check['function'] and check['location']['file'].endswith('/alloc/src/collections/btree/navigate.rs') and str(check['location']['line']) == str(line)]
                   require(matches and any(check['status'] == 'Success' for check in matches), 'targeted strict unwind property not successfully checked: ' + method)
-              write_new('qualified.json', {'qualified': True, 'push_sha': os.environ['GITHUB_SHA'], 'harness': HARNESS, 'source_sha256': SOURCES, 'model_sha256': binding['model_sha256'], 'source_assertion_sites': 12, 'model_property_count': len(properties), 'actual_property_count': len(raw_results), 'symbolic_inputs': 7, 'covers_satisfied': 5, 'global_unwind': 64, 'per_loop_unwind': 4})
+              for method, line, filename, kind in NODE_LOOPS.values():
+                  matches = [check for check in unwinding if method in check['function'] and kind in check['function'] and 'Mut' in check['function'] and 'NodeMetadata' in check['function'] and 'u64' in check['function'] and check['location']['file'].endswith('/alloc/src/collections/btree/' + filename) and str(check['location']['line']) == str(line)]
+                  require(matches and any(check['status'] == 'Success' for check in matches), 'targeted strict node unwind property not successfully checked: ' + method + ':' + kind)
+              write_new('qualified.json', {'qualified': True, 'push_sha': os.environ['GITHUB_SHA'], 'harness': HARNESS, 'source_sha256': SOURCES, 'model_sha256': binding['model_sha256'], 'source_assertion_sites': 12, 'model_property_count': len(properties), 'actual_property_count': len(raw_results), 'symbolic_inputs': 7, 'covers_satisfied': 5, 'global_unwind': 64, 'per_loop_unwind': LOOP_BOUNDS, 'std_node_source_facts_sha256': binding['std_node_source_facts_sha256']})
 
           try:
               if pathlib.Path(sys.argv[0]).name == 'cbmc':
                   cbmc_guard()
+              elif sys.argv[1:] == ['unwindset']:
+                  source_gate()
+                  print(UNWINDSET)
               elif sys.argv[1:] == ['source']:
                   source_gate()
               elif sys.argv[1:] == ['install']:
@@ -365,7 +416,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          unwindset='_RNvMsn_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB7_4node7NodeRefNtNtB10_6marker5DyingNtNtBb_6string6StringyNtB1k_14LeafOrInternalE15first_leaf_edgeCsls6Niw6mIAT_13mount_rs_core.0:4,_RINvMsj_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB8_4node6HandleINtB11_7NodeRefNtNtB11_6marker5DyingNtNtBc_6string6StringyNtB1z_4LeafENtB1z_4EdgeE16deallocating_endNtNtBc_5alloc6GlobalECsls6Niw6mIAT_13mount_rs_core.0:4,_RINvMsj_NtNtNtCs6xMQmN1AWUs_5alloc11collections5btree8navigateINtNtB8_4node6HandleINtB11_7NodeRefNtNtB11_6marker5DyingNtNtBc_6string6StringyNtB1z_4LeafENtB1z_4EdgeE17deallocating_nextNtNtBc_5alloc6GlobalECsls6Niw6mIAT_13mount_rs_core.0:4'
+          unwindset="$(python3 "$PROBE_EVIDENCE/probe.py" unwindset)"
           status=0
           /usr/bin/time -v -o "$PROBE_EVIDENCE/proof.resources" ./scripts/cargo-shared kani -p mount-rs-chunked --harness current_fresh_create_rebinds_only_eligible_preparation --verbose -Z unstable-options --export-json "$PROBE_EVIDENCE/proof.json" --cbmc-args --unwindset "$unwindset" --unwinding-assertions 2>&1 | tee "$PROBE_EVIDENCE/proof.log" || status=$?
           printf '%s\n' "$status" > "$PROBE_EVIDENCE/proof.exit"
