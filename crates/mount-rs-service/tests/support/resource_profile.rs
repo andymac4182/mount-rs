@@ -182,6 +182,75 @@ impl Network {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)] // Other fixture targets share this module without using synthetic inputs.
+pub(super) fn artifact_fixture_connection_deltas(
+    cell: usize,
+    lanes: usize,
+) -> Result<serde_json::Value, &'static str> {
+    // Inputs are synthetic; the production checked-delta and row serializer
+    // below remain the ones used by the controller. Capture no process/socket.
+    fn snapshot(network: Vec<Network>) -> Snapshot {
+        Snapshot {
+            cpu_user_us: 0,
+            cpu_system_us: 0,
+            minor_faults: 0,
+            major_faults: 0,
+            block_inputs: 0,
+            block_outputs: 0,
+            voluntary_switches: 0,
+            involuntary_switches: 0,
+            peak_rss_bytes: 0,
+            resident_bytes: None,
+            sqlite_heap_bytes: 0,
+            sqlite_heap_peak_bytes: 0,
+            allocations: 0,
+            deallocations: 0,
+            reallocations: 0,
+            allocated_bytes: 0,
+            freed_bytes: 0,
+            live_bytes: 0,
+            network,
+            os_io: device_io::Snapshot::disabled(),
+        }
+    }
+    let base = Network {
+        tx_bytes: 4096,
+        rx_bytes: 8192,
+        tx_datagrams: 4,
+        rx_datagrams: 8,
+        tx_ios: 3,
+        rx_ios: 7,
+        lost_packets: 1,
+        lost_bytes: 1200,
+        sent_packets: 4,
+        congestion_events: 1,
+    };
+    let before = snapshot(vec![base; lanes]);
+    let after = snapshot(
+        (0..lanes)
+            .map(|lane| {
+                let lane = lane as u64;
+                let cell = cell as u64;
+                let lost = (lane + cell) % 3;
+                Network {
+                    tx_bytes: base.tx_bytes + 1_000_000 + lane * 4096 + cell,
+                    rx_bytes: base.rx_bytes + 2_000_000 + lane * 8192 + cell,
+                    tx_datagrams: base.tx_datagrams + 1000 + lane + cell,
+                    rx_datagrams: base.rx_datagrams + 2000 + lane + cell,
+                    tx_ios: base.tx_ios + 900 + lane + cell,
+                    rx_ios: base.rx_ios + 1800 + lane + cell,
+                    lost_packets: base.lost_packets + lost,
+                    lost_bytes: base.lost_bytes + lost * 1200,
+                    sent_packets: base.sent_packets + 1000 + lane + cell,
+                    congestion_events: base.congestion_events + cell % 4,
+                }
+            })
+            .collect(),
+    );
+    after.connection_deltas(&before)
+}
+
 pub struct Snapshot {
     cpu_user_us: u64,
     cpu_system_us: u64,

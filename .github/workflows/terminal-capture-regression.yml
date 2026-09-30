@@ -1,0 +1,215 @@
+name: Terminal Capture Regression
+
+on:
+  push:
+    branches:
+      - codex/full-target-evidence-probe-20260930-1106
+    paths:
+      - .github/workflows/terminal-capture-regression.yml
+      - crates/mount-rs-service/tests/support/production_target/artifact_size_tests.rs
+      - crates/mount-rs-service/tests/support/production_target/mod.rs
+      - crates/mount-rs-service/tests/support/resource_profile.rs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terminal-capture-red-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  terminal-capture:
+    name: Synthetic settled terminal regular-file bound (expected RED)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CASE: target::artifact_size_tests::settled_full_geometry_terminal_obeys_capture_regular_file_limit
+      BASELINE_COMMIT: 25f8d6f30714cc1a937aa0fe029fe967529cf566
+      BASELINE_TREE: e56798c27402ead2ca4bc450c2ae7334143e8a4a
+      METRICS_SHA256: 46e39eea032f706e03af08ec146335dc2883a6c1fe280ae6a1b16b11ff3a738b
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt, clippy
+      - name: Select a private target directory
+        shell: bash
+        run: printf 'CARGO_TARGET_DIR=%s/mount-rs-terminal-capture-target-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Pin exact checkout and all tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
+          umask 077
+          test ! -e "$CARGO_TARGET_DIR"
+          test ! -L "$CARGO_TARGET_DIR"
+          mkdir -m 700 "$CARGO_TARGET_DIR"
+          test "$(stat -c '%a' "$CARGO_TARGET_DIR")" = 700
+          test "$(stat -c '%u' "$CARGO_TARGET_DIR")" = "$(id -u)"
+          test ! -e "$proof"
+          test ! -L "$proof"
+          mkdir -m 700 "$proof"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          printf '%s  %s\n' "$METRICS_SHA256" \
+            crates/mount-rs-service/tests/support/production_target/metrics.rs \
+            | sha256sum -c -
+          git ls-files -z | LC_ALL=C sort -z | xargs -0 sha256sum > "$proof/source.sha256"
+          {
+            printf 'source_sha=%s\n' "$GITHUB_SHA"
+            printf 'source_tree=%s\n' "$(git rev-parse HEAD^{tree})"
+            printf 'baseline_sha=%s\n' "$BASELINE_COMMIT"
+            printf 'baseline_tree=%s\n' "$BASELINE_TREE"
+            printf 'cargo_target_dir=%s\n' "$CARGO_TARGET_DIR"
+            printf 'toolchain=1.95.0 components=rustfmt,clippy\n'
+            printf 'features=sdk-runtime,resource-profiling\n'
+            printf 'test=%s\n' "$CASE"
+            printf 'scope=synthetic artifact serialization; no native/provider capacity result\n'
+            rustc -Vv
+            cargo -V
+            rustfmt -V
+            cargo clippy -V
+          } > "$proof/identity.txt"
+      - name: Check scoped fixture and helper formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
+          python3 -B - "$proof/scoped-helper.rs" <<'PY'
+          import pathlib, sys
+          source = pathlib.Path("crates/mount-rs-service/tests/support/resource_profile.rs").read_text()
+          function = source.index("pub(super) fn artifact_fixture_connection_deltas(")
+          start = source.rfind("#[cfg(test)]", 0, function)
+          if start < 0:
+              raise SystemExit("synthetic helper lacks its test-only guard")
+          end = source.index("\npub struct Snapshot {", function)
+          pathlib.Path(sys.argv[1]).write_text(source[start:end].rstrip() + "\n")
+          PY
+          rustfmt --check --edition 2024 \
+            crates/mount-rs-service/tests/support/production_target/artifact_size_tests.rs \
+            "$proof/scoped-helper.rs" 2>&1 | tee "$proof/fmt.log"
+      - name: Check shared fixture consumers with strict Clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
+          ./scripts/cargo-shared clippy --locked -p mount-rs-service \
+            --features sdk-runtime,resource-profiling --all-targets \
+            -- -D warnings 2>&1 | tee "$proof/clippy.log"
+      - name: Compile the actual fixture binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
+          ./scripts/cargo-shared test --locked -p mount-rs-service \
+            --features sdk-runtime,resource-profiling --test quic_production_target \
+            --no-run --message-format=json > "$proof/build.jsonl" 2> "$proof/build.log"
+          python3 -B - "$proof/build.jsonl" "$proof/test-executable.txt" <<'PY'
+          import json, pathlib, sys
+          artifacts = []
+          for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+              record = json.loads(line)
+              if (record.get("reason") == "compiler-artifact"
+                  and record.get("target", {}).get("name") == "quic_production_target"
+                  and record.get("executable")):
+                  artifacts.append(record["executable"])
+          if len(artifacts) != 1:
+              raise SystemExit("expected exactly one production-target test executable")
+          pathlib.Path(sys.argv[2]).write_text(artifacts[0] + "\n")
+          PY
+          test_binary="$(cat "$proof/test-executable.txt")"
+          sha256sum "$test_binary" > "$proof/binary.sha256"
+          "$test_binary" --ignored --exact "$CASE" --list > "$proof/selection.log"
+          test "$(grep -c ': test$' "$proof/selection.log")" -eq 1
+          grep -Fx "$CASE: test" "$proof/selection.log"
+          grep -Fx '1 test, 0 benchmarks' "$proof/selection.log"
+      - name: Run exact regression and retain only the intended RED
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/terminal-capture-proof"
+          test_binary="$(cat "$proof/test-executable.txt")"
+          sha256sum -c "$proof/binary.sha256"
+          # No provider env, native mount, floor reduction, or benchmark runner.
+          set +e
+          "$test_binary" --ignored --exact "$CASE" --nocapture --test-threads=1 \
+            > "$proof/regression.log" 2>&1
+          test_status=$?
+          set -e
+          printf '%s\n' "$test_status" > "$proof/test-status.txt"
+          sha256sum -c "$proof/binary.sha256"
+          sha256sum -c "$proof/source.sha256" > "$proof/source-after-check.log"
+          test -z "$(git status --porcelain)"
+          python3 -B - "$proof" "$CASE" "$test_status" <<'PY'
+          import json, os, pathlib, re, sys
+          proof, case, status = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+          log = (proof / "regression.log").read_text()
+          records = re.findall(r"ARTIFACT_LAYOUT_MEASUREMENT (\{[^\n]*\})", log)
+          if status != 101 or len(records) != 1:
+              raise SystemExit("unqualified regression result: expected one measured RED")
+          value = json.loads(records[0])
+          panics = re.findall(
+              r"^thread '([^'\n]+)'(?: \(\d+\))? panicked at "
+              r"[^\n]*artifact_size_tests\.rs:\d+:\d+:\n"
+              r"TERMINAL_CAPTURE_REGULAR_FILE_LIMIT bytes=(\d+) limit=(\d+)\n",
+              log, re.M)
+          if len(panics) != 1:
+              raise SystemExit("unqualified regression result: missing selected-test panic binding")
+          panic_case, panic_bytes, panic_limit = panics[0]
+          checks = [
+              "running 1 test" in log,
+              f"\nfailures:\n    {case}\n" in log,
+              len(re.findall(r"panicked at", log)) == 1,
+              len(re.findall(r"^TERMINAL_CAPTURE_REGULAR_FILE_LIMIT bytes=\d+ limit=16777216$", log, re.M)) == 1,
+              panic_case == case,
+              int(panic_bytes) == value["terminal_bytes"],
+              int(panic_limit) == value["regular_file_limit_bytes"],
+              value["baseline_commit"] == os.environ["BASELINE_COMMIT"],
+              value["baseline_tree"] == os.environ["BASELINE_TREE"],
+              re.search(r"test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured;", log) is not None,
+              value["cells"] == 16,
+              value["connections_per_cell"] == 10000,
+              value["counter_fields_per_connection"] == 10,
+              value["regular_file_limit_bytes"] == 16777216,
+              value["terminal_bytes"] > 16777216,
+              value["compiled_sources_sha256"]["metrics.rs"] == "46e39eea032f706e03af08ec146335dc2883a6c1fe280ae6a1b16b11ff3a738b",
+          ]
+          if not all(checks):
+              raise SystemExit("unqualified regression result: unexpected failure or geometry")
+          (proof / "measurement.json").write_text(json.dumps(value, indent=2) + "\n")
+          (proof / "expected-red.json").write_text(json.dumps({
+              "qualified_expected_red": True,
+              "source_sha": os.environ["GITHUB_SHA"],
+              "test": case,
+              "test_exit_code": status,
+              "scope": "synthetic artifact serialization only; no native/provider capacity result"
+          }, indent=2) + "\n")
+          print("QUALIFIED_EXPECTED_RED settled terminal exceeds original 16 MiB regular-file capture bound")
+          PY
+          cat "$proof/regression.log"
+          # Preserve the failed regression status; qualification is not a fix.
+          exit "$test_status"
+      - name: Retain source-bound regression proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: terminal-capture-red-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/terminal-capture-proof/identity.txt
+            ${{ runner.temp }}/terminal-capture-proof/source.sha256
+            ${{ runner.temp }}/terminal-capture-proof/binary.sha256
+            ${{ runner.temp }}/terminal-capture-proof/fmt.log
+            ${{ runner.temp }}/terminal-capture-proof/clippy.log
+            ${{ runner.temp }}/terminal-capture-proof/build.log
+            ${{ runner.temp }}/terminal-capture-proof/selection.log
+            ${{ runner.temp }}/terminal-capture-proof/test-status.txt
+            ${{ runner.temp }}/terminal-capture-proof/regression.log
+            ${{ runner.temp }}/terminal-capture-proof/measurement.json
+            ${{ runner.temp }}/terminal-capture-proof/expected-red.json

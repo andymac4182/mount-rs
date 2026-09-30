@@ -1,4 +1,6 @@
 //! Fixture-only independent-process controller. No production runtime policy changes.
+#[cfg(test)]
+mod artifact_size_tests;
 mod backend;
 mod checkpoints;
 mod command;
@@ -82,6 +84,10 @@ pub fn write_json(path: &Path, value: &Value) -> Result<(), String> {
 }
 pub async fn source_identity(commands: &mut command::Commands) -> Result<Value, String> {
     let sources = [
+        (
+            "artifact_size_tests.rs",
+            include_bytes!("artifact_size_tests.rs").as_slice(),
+        ),
         ("command.rs", include_bytes!("command.rs").as_slice()),
         ("timing.rs", include_bytes!("timing.rs").as_slice()),
         ("metrics.rs", include_bytes!("metrics.rs").as_slice()),
