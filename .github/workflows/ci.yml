@@ -244,7 +244,7 @@ jobs:
           MOUNT_RS_OZONE_TIDB_COMPOSITION: '1'
           MOUNT_RS_TIDB_NAPI: '1'
           MOUNT_RS_TIDB_IOPS: '1'
-          MOUNT_RS_TIDB_IOPS_OUTPUT: artifacts/ozone-tidb-iops.json
+          MOUNT_RS_TIDB_IOPS_OUTPUT: ${{ runner.temp }}/w26-ozone-tidb/ozone-tidb-iops.json
           MOUNT_RS_TIDB_IOPS_MIN: '1000'
           MOUNT_RS_TIDB_IOPS_ITERATIONS: '400'
           MOUNT_RS_TIDB_IOPS_CONCURRENCY: '64'
@@ -254,16 +254,17 @@ jobs:
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: |
           set -o pipefail
-          mkdir -p artifacts
-          sh scripts/test-ozone.sh 2>&1 | tee artifacts/ozone-tidb.log
+          mkdir -p "$RUNNER_TEMP/w26-ozone-tidb"
+          sh scripts/test-ozone.sh 2>&1 \
+            | tee "$RUNNER_TEMP/w26-ozone-tidb/ozone-tidb.log"
       - name: Preserve W26 Ozone TiDB evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: w26-ozone-tidb-evidence
           path: |
-            artifacts/ozone-tidb.log
-            artifacts/ozone-tidb-iops.json
+            ${{ runner.temp }}/w26-ozone-tidb/ozone-tidb.log
+            ${{ runner.temp }}/w26-ozone-tidb/ozone-tidb-iops.json
           if-no-files-found: error
 
   ozone-foundationdb:
@@ -288,7 +289,7 @@ jobs:
           MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
           MOUNT_RS_FOUNDATIONDB_IOPS: '1'
-          MOUNT_RS_FOUNDATIONDB_IOPS_OUTPUT: artifacts/ozone-foundationdb-iops.json
+          MOUNT_RS_FOUNDATIONDB_IOPS_OUTPUT: ${{ runner.temp }}/w26-ozone-foundationdb/ozone-foundationdb-iops.json
           MOUNT_RS_FOUNDATIONDB_IOPS_MIN: '1000'
           MOUNT_RS_FOUNDATIONDB_IOPS_ITERATIONS: '400'
           MOUNT_RS_FOUNDATIONDB_IOPS_CONCURRENCY: '64'
@@ -296,16 +297,17 @@ jobs:
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: |
           set -o pipefail
-          mkdir -p artifacts
-          sh scripts/test-ozone.sh 2>&1 | tee artifacts/ozone-foundationdb.log
+          mkdir -p "$RUNNER_TEMP/w26-ozone-foundationdb"
+          sh scripts/test-ozone.sh 2>&1 \
+            | tee "$RUNNER_TEMP/w26-ozone-foundationdb/ozone-foundationdb.log"
       - name: Preserve W26 Ozone FoundationDB evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: w26-ozone-foundationdb-evidence
           path: |
-            artifacts/ozone-foundationdb.log
-            artifacts/ozone-foundationdb-iops.json
+            ${{ runner.temp }}/w26-ozone-foundationdb/ozone-foundationdb.log
+            ${{ runner.temp }}/w26-ozone-foundationdb/ozone-foundationdb-iops.json
           if-no-files-found: error
 
   w26-ozone-evidence:

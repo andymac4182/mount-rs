@@ -364,6 +364,8 @@ EXPECTED_SUITES = {
         'damaged_traversed_or_unrelated_guard_refuses_create_without_publication',
         'targeted_create_preserves_selected_physical_body_pairs_and_pending_atime',
         'targeted_create_mutates_unique_namespace_and_preserves_genuine_pinned_reader',
+        'legacy_stale_fresh_create_reuses_prepared_blocks_and_one_publication',
+        'legacy_stale_fresh_create_occupied_path_retains_conflict_fallback',
     )),
     'createpath': (
         'missing_compact_create_preparation_avoids_full_scan_with_128_siblings',

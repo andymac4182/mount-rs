@@ -804,7 +804,7 @@ class ResultControls(unittest.TestCase):
 
 
 class CreateUnitSelectors(unittest.TestCase):
-    # Independent inventory: the selected module includes the indexed-read race control.
+    # Independent inventory: retain all indexed controls and both legacy create regressions.
     names = tuple('compact_preparation_tests::' + name for name in (
         'point_receipt_cannot_admit_after_local_revision_advances',
         'missing_preparation_waits_for_full_publication_and_releases_gate_before_blocks',
@@ -813,6 +813,8 @@ class CreateUnitSelectors(unittest.TestCase):
         'damaged_traversed_or_unrelated_guard_refuses_create_without_publication',
         'targeted_create_preserves_selected_physical_body_pairs_and_pending_atime',
         'targeted_create_mutates_unique_namespace_and_preserves_genuine_pinned_reader',
+        'legacy_stale_fresh_create_reuses_prepared_blocks_and_one_publication',
+        'legacy_stale_fresh_create_occupied_path_retains_conflict_fallback',
     ))
 
     @staticmethod
@@ -824,7 +826,7 @@ class CreateUnitSelectors(unittest.TestCase):
             + f'test result: ok. {count} passed; 0 failed; 0 ignored;\n'
         )
 
-    def test_inventory_binds_all_seven_cases_and_existing_module_filter(self):
+    def test_inventory_binds_all_nine_cases_and_existing_module_filter(self):
         self.assertEqual(parent.EXPECTED_SUITES['createunit'], self.names)
         self.assertEqual(parent.COMMANDS['createunit'], (
             ['./scripts/cargo-shared', 'test', '-p', 'mount-rs-chunked', '--lib',
@@ -846,9 +848,50 @@ class CreateUnitSelectors(unittest.TestCase):
             names, nocapture=True))
 
     def test_previous_six_case_suite_cannot_qualify_current_module(self):
-        previous = self.fixture(self.names[1:])
+        previous = self.fixture(self.names[1:7])
         self.assertFalse(parent.named_suite_passed(
             previous, parent.EXPECTED_SUITES['createunit'], nocapture=True))
+
+    def test_previous_seven_case_suite_cannot_qualify_current_module(self):
+        previous = self.fixture(self.names[:7])
+        self.assertFalse(parent.named_suite_passed(
+            previous, parent.EXPECTED_SUITES['createunit'], nocapture=True))
+
+    def test_legacy_measurement_does_not_hide_complete_nine_case_suite(self):
+        name = self.names[7]
+        complete = self.fixture(self.names).replace(
+            f'test {name} ... ok\n',
+            f'test {name} ... legacy_create_rebase_measurement '
+            '{"total_blob_puts":2,"creator_metadata_publications":1,'
+            '"fresh_payload_membership_eof_verified":true}\nok\n',
+        )
+        self.assertTrue(parent.named_suite_passed(
+            complete, parent.EXPECTED_SUITES['createunit'], nocapture=True))
+
+    def test_each_legacy_case_is_required_once_with_original_controls(self):
+        required = parent.EXPECTED_SUITES['createunit']
+        complete = self.fixture(self.names)
+        for name in self.names[7:]:
+            with self.subTest(name=name):
+                omitted = self.fixture(tuple(case for case in self.names if case != name))
+                foreign = complete.replace(name, 'compact_preparation_tests::unrelated')
+                duplicate = complete.replace(name, self.names[0])
+                for label, output in (
+                    ('omitted', omitted), ('foreign', foreign), ('duplicate', duplicate),
+                ):
+                    with self.subTest(output=label):
+                        self.assertFalse(parent.named_suite_passed(
+                            output, required, nocapture=True))
+                failed = complete.replace(f'test {name} ... ok', f'test {name} ... FAILED').replace(
+                    'test result: ok. 9 passed; 0 failed; 0 ignored;',
+                    'test result: FAILED. 8 passed; 1 failed; 0 ignored;',
+                )
+                ignored = complete.replace(f'test {name} ... ok', f'test {name} ... ignored').replace(
+                    'test result: ok. 9 passed; 0 failed; 0 ignored;',
+                    'test result: ok. 8 passed; 0 failed; 1 ignored;',
+                )
+                self.assertFalse(parent.named_suite_passed(failed, required, nocapture=True))
+                self.assertFalse(parent.named_suite_passed(ignored, required, nocapture=True))
 
 
 class CacheStageSelectors(unittest.TestCase):
@@ -975,7 +1018,7 @@ class CacheStageSelectors(unittest.TestCase):
         self.assertFalse(parent.exact_case_passed(f"running 1 test\ntest {name} ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;\n", name))
 
     def test_create_qualification_requires_complete_executed_controls(self):
-        for kind, count in [("createpath", 5), ("createunit", 7)]:
+        for kind, count in [("createpath", 5), ("createunit", 9)]:
             names = parent.EXPECTED_SUITES[kind]
             self.assertEqual(len(names), count)
             valid = f"running {count} tests\n"+"".join(f"test {name} ... ok\n" for name in names)+f"test result: ok. {count} passed; 0 failed; 0 ignored;\n"

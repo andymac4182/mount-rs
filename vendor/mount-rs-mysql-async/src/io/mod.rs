@@ -480,6 +480,7 @@ impl stream::Stream for Stream {
 
 #[cfg(test)]
 mod test {
+    #[cfg(unix)]
     use std::time::Duration;
 
     #[cfg(unix)] // no sane way to retrieve current keepalive value on windows
