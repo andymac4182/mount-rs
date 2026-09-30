@@ -347,6 +347,67 @@ async fn filesystem_profile_flush_is_owned_authority_work_without_barrier_replay
 }
 
 #[tokio::test]
+async fn filesystem_writeback_puts_do_not_start_forced_sync_stages() {
+    use mount_rs_core::diagnostics::filesystem_blocks::{Operation, Path as PutPath, Stage};
+    let (_parent, root, store, observer) = observed_store();
+    let identity = store.prepare_concurrent_backing().await.unwrap();
+    let marker = std::fs::read(root.join("_mount-rs-backing-id-v1")).unwrap();
+    let bytes = b"OS writeback keeps complete content and create-only duplicate identity";
+    let expected = content_id(bytes);
+    let id = store.put(bytes).await.unwrap();
+    assert_eq!(id, expected);
+    assert_eq!(store.put(bytes).await.unwrap(), id);
+    store.flush().await.unwrap();
+    assert_eq!(store.get(&id).await.unwrap(), bytes);
+    assert_eq!(std::fs::read(object_path(&root, &id)).unwrap(), bytes);
+
+    let reopened = FilesystemBlockStore::open(&root, true).unwrap();
+    assert_eq!(reopened.prepare_concurrent_backing().await.unwrap(), identity);
+    reopened.verify_concurrent_backing(identity).await.unwrap();
+    assert_eq!(
+        std::fs::read(root.join("_mount-rs-backing-id-v1")).unwrap(),
+        marker
+    );
+    assert_eq!(reopened.get(&id).await.unwrap(), bytes);
+
+    let snapshot = observer.snapshot().unwrap();
+    assert!(!snapshot.saturated && !snapshot.concurrent_activity);
+    let put = snapshot.operations[Operation::Put as usize];
+    filesystem_profile_successful(put.waiter, 2);
+    filesystem_profile_successful(put.queue, 2);
+    filesystem_profile_successful(put.worker, 2);
+    assert_eq!(put.put_path[PutPath::Created as usize], 1);
+    assert_eq!(put.put_path[PutPath::Existing as usize], 1);
+    assert_eq!(put.put_path[PutPath::RaceExisting as usize], 0);
+    let flush = snapshot.operations[Operation::Flush as usize];
+    filesystem_profile_successful(flush.waiter, 1);
+    filesystem_profile_successful(flush.queue, 1);
+    filesystem_profile_successful(flush.worker, 1);
+    filesystem_profile_successful(snapshot.stages[Stage::ExistingVerify as usize], 1);
+    filesystem_profile_successful(snapshot.stages[Stage::FinalAuthority as usize], 2);
+    for stage in [
+        Stage::FileSync,
+        Stage::FileDeviceSync,
+        Stage::ShardSync,
+        Stage::RootSync,
+        Stage::PostDirectoryDeviceSync,
+    ] {
+        let row = snapshot.stages[stage as usize];
+        assert_eq!(
+            (
+                row.started,
+                row.inflight,
+                row.succeeded,
+                row.failed,
+                row.abandoned
+            ),
+            (0, 0, 0, 0, 0),
+            "FS_WRITEBACK_SYNC_REGRESSION: {stage:?} must not force OS writeback"
+        );
+    }
+}
+
+#[tokio::test]
 async fn filesystem_profile_public_constructor_follows_build_and_preselected_runtime_flag() {
     use mount_rs_core::diagnostics::filesystem_blocks::{Operation, Stage};
     // ROOT selects the environment before this fresh test process starts.

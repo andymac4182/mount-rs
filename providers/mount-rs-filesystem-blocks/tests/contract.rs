@@ -40,6 +40,33 @@ async fn durable_roundtrip_reopens_the_same_backing_identity() {
     assert!(second.durable());
 }
 
+#[tokio::test]
+async fn filesystem_writeback_acknowledgments_do_not_claim_stable_storage() {
+    let (_parent, root) = root();
+    let first = FilesystemBlockStore::open(&root, true).unwrap();
+    let identity = first.prepare_concurrent_backing().await.unwrap();
+    let marker = std::fs::read(root.join(MARKER)).unwrap();
+    let bytes =
+        b"filesystem writeback retains complete immutable bytes across independent contexts";
+    let id = first.put(bytes).await.unwrap();
+    first.flush().await.unwrap();
+    assert_eq!(first.get(&id).await.unwrap(), bytes);
+    assert_eq!(std::fs::read(object_path(&root, &id)).unwrap(), bytes);
+
+    let second = FilesystemBlockStore::open(&root, true).unwrap();
+    assert_eq!(second.prepare_concurrent_backing().await.unwrap(), identity);
+    second.verify_concurrent_backing(identity).await.unwrap();
+    assert_eq!(std::fs::read(root.join(MARKER)).unwrap(), marker);
+    assert_eq!(second.get_for_migration(&id).await.unwrap(), bytes);
+    assert_eq!(second.put(bytes).await.unwrap(), id);
+    second.flush().await.unwrap();
+    assert_eq!(second.get(&id).await.unwrap(), bytes);
+    assert!(
+        !first.durable() && !second.durable(),
+        "FS_WRITEBACK_DURABILITY_REGRESSION: filesystem acknowledgments must not claim stable storage"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn independent_contexts_concurrently_publish_identical_bytes() {
     let (_parent, root) = root();
