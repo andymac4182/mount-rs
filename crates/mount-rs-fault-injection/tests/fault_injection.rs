@@ -243,7 +243,7 @@ fn namespace() -> Namespace {
             version: 1,
             parameters: BTreeMap::from([("chunk_size".to_owned(), 4096)]),
         },
-        nodes: BTreeMap::new(),
+        nodes: Default::default(),
     }
 }
 

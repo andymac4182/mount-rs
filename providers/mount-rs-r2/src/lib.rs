@@ -178,6 +178,56 @@ impl R2Config {
     }
 }
 
+/// Explicit application-owned S3 client shared across scoped block stores.
+/// Clone preserves connection-pool identity; separate constructors never share
+/// credentials through a global registry. Debug output excludes credentials.
+#[derive(Clone)]
+pub struct SharedR2Client(Arc<dyn ObjectStore>);
+impl SharedR2Client {
+    pub fn from_config(config: &R2Config) -> Result<Self> {
+        Ok(Self(config.build_store()?))
+    }
+    pub fn blocks(&self, prefix: impl Into<String>, durable: bool) -> Result<R2BlockStore> {
+        R2BlockStore::new(self.0.clone(), prefix, durable)
+    }
+}
+impl PartialEq for SharedR2Client {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for SharedR2Client {}
+impl fmt::Debug for SharedR2Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SharedR2Client([redacted])")
+    }
+}
+
+#[cfg(test)]
+mod shared_client_tests {
+    use super::*;
+    use mount_rs_core::storage::BlockStore;
+    #[tokio::test]
+    async fn shared_client_preserves_prefix_isolation() {
+        let client = SharedR2Client(Arc::new(object_store::memory::InMemory::new()));
+        assert_eq!(client, client.clone());
+        assert_ne!(
+            client,
+            SharedR2Client(Arc::new(object_store::memory::InMemory::new()))
+        );
+        let a = client.blocks("volume-a", false).unwrap();
+        let b = client.blocks("volume-b", false).unwrap();
+        let id = a.put(b"same bytes").await.unwrap();
+        let other_id = b.put(b"other bytes").await.unwrap();
+        assert!(b.get(&id).await.is_err());
+        assert!(a.get(&other_id).await.is_err());
+        a.delete(&id).await.unwrap();
+        assert!(a.get(&id).await.is_err());
+        assert_eq!(b.get(&other_id).await.unwrap(), b"other bytes");
+        assert!(!b.durable());
+    }
+}
+
 fn validate_endpoint(endpoint: &str) -> Result<()> {
     let Some((scheme, remainder)) = endpoint.split_once("://") else {
         return Err(invalid_config("endpoint", "must use http:// or https://"));

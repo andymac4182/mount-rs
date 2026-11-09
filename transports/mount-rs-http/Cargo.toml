@@ -17,8 +17,9 @@ observability-otlp = [
 
 [dependencies]
 bytes = "1"
+flate2 = "1"
 http-body-util = { version = "0.1", features = ["channel"] }
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
 mount-rs-core = { path = "../.." }
 mount-rs-observability = { path = "../../crates/mount-rs-observability", optional = true }
@@ -31,5 +32,6 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 mount-rs-sqlite-fs = { path = "../../filesystems/mount-rs-sqlite-fs" }
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
 tokio = { version = "1", features = ["io-util"] }

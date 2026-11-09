@@ -1,0 +1,26 @@
+[package]
+name = "mount-rs-remote"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Public-server session client for mount-rs"
+
+[features]
+body-timing = []
+
+[dependencies]
+async-trait = "0.1"
+serde = "1"
+mount-rs-core = { path = "../.." }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+
+[dev-dependencies]
+mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
+http = "1"
+mount-rs-cluster = { path = "../mount-rs-cluster", features = ["http3"] }
+mount-rs-sdk = { path = "../mount-rs-sdk" }
+mount-rs-http = { path = "../../transports/mount-rs-http" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }

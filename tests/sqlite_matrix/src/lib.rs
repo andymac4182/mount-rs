@@ -336,7 +336,7 @@ async fn open_faulted(
 }
 
 fn test_namespace() -> Namespace {
-    let mut nodes = BTreeMap::new();
+    let mut nodes: BTreeMap<u64, NodeMetadata> = BTreeMap::new();
     nodes.insert(
         1,
         NodeMetadata {
@@ -357,7 +357,7 @@ fn test_namespace() -> Namespace {
                 birthtime_ms: 1,
             },
             data: NodeData::Directory {
-                entries: Vec::new(),
+                entries: Vec::new().into(),
             },
         },
     );
@@ -373,7 +373,7 @@ fn test_namespace() -> Namespace {
             version: 1,
             parameters: BTreeMap::from([(String::from("chunk_size"), 64)]),
         },
-        nodes,
+        nodes: nodes.into(),
     }
 }
 

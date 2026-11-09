@@ -1,0 +1,59 @@
+[package]
+name = "mount-rs-cluster"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+description = "Server-side advisory volume routing for mount-rs"
+
+[features]
+default = []
+audit-storage-timing = ["mount-rs-sdk/observability"]
+peer-stream-timing = ["http3", "tunnel-transport/peer-stream-timing"]
+http3 = ["dep:tunnel-transport", "dep:quinn-proto", "dep:mount-rs-http", "dep:http", "dep:http-body-util", "dep:hyper", "dep:futures-util"]
+
+[dependencies]
+arc-swap = "1.9"
+subtle = "2.6"
+getrandom = "0.3"
+mount-rs-core = { path = "../.." }
+mount-rs-http = { path = "../../transports/mount-rs-http", optional = true }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+mount-rs-sdk = { path = "../mount-rs-sdk" }
+# Keep the stream-credit fix selected even when newer registry versions exist.
+quinn-proto = { version = "=0.11.18", optional = true, default-features = false }
+tunnel-transport = { path = "../../vendor/tunnel-transport", optional = true }
+
+redis = { version = "1.7", default-features = false, features = ["tokio-rustls-comp", "connection-manager"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "sync", "macros", "rt"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+mount-rs-remote = { path = "../mount-rs-remote", features = ["body-timing"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
+flate2 = "1"
+libc = "0.2"
+socket2 = "0.6"
+base64 = "0.22"
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+bytes = "1"
+http = "1"
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-std", "io-util", "net"] }
+
+[[example]]
+name = "cluster_load"
+required-features = ["http3"]
+
+[[example]]
+name = "peer_contention"
+required-features = ["http3"]

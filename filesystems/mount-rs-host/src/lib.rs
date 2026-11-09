@@ -12,6 +12,11 @@
 //! Linux-only). This implementation is not a sandbox against concurrent host
 //! namespace changes.
 
+mod blocks;
+mod disk_cache;
+pub use blocks::{LOCAL_MAX_BLOCK_BYTES, LocalBlockStore, LocalWriteBudget};
+pub use disk_cache::{DiskCacheBudget, DiskCacheStats, DiskCachedBlockStore};
+
 use std::collections::{HashMap, VecDeque};
 #[cfg(not(windows))]
 use std::fs::Metadata;

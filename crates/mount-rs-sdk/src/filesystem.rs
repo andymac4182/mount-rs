@@ -5,19 +5,22 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mount_rs_chunked::{
-    ChunkedFs, ChunkedOptions, migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing,
+    BlockCacheStats, ChunkedFs, ChunkedOptions, migrate_mrc1_backing,
+    migrate_trusted_unstamped_mrc1_backing,
 };
 use mount_rs_core::storage::{
     BlockStore, ConcurrentBackingId, DelegatedRecovery, DelegationState, MetadataStore,
 };
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, Result};
-use mount_rs_host::{HostFs, HostFsOptions};
+use mount_rs_host::{DiskCacheBudget, DiskCacheStats, HostFs, HostFsOptions};
 use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_sqlite_fs::{SqliteFs, open_sqlite};
 
-use crate::options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
-use crate::providers::{StorageResources, open_storage, open_storage_decorated};
+use crate::options::{
+    DiskCacheOptions, FoundationDbLeaseAuthority, SplitOptions, SplitRuntimeOptions, StoreConfig,
+};
+use crate::providers::{CacheLayers, StorageResources, open_storage, open_storage_layered};
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 #[cfg(feature = "observability")]
 use crate::{Telemetry, global_telemetry};
@@ -80,7 +83,7 @@ impl Filesystem {
 
     /// Open a filesystem composed from independent metadata and block stores.
     pub async fn split(options: SplitOptions) -> Result<Self> {
-        Self::split_impl(options, None).await
+        Self::split_impl(options, None, None).await
     }
 
     /// Open split storage with an application-owned block provider decorator.
@@ -88,20 +91,101 @@ impl Filesystem {
         options: SplitOptions,
         decorator: &dyn BlockStoreDecorator,
     ) -> Result<Self> {
-        Self::split_impl(options, Some(decorator)).await
+        Self::split_impl(options, Some(decorator), None).await
+    }
+
+    /// Open an exclusive split store with explicit owner-serving policies:
+    /// lease length, atime, idle-owner heartbeat and an optional RAM block
+    /// cache. `runtime.lease_ttl` replaces `options.lease_ttl`.
+    pub async fn split_with_runtime(
+        options: SplitOptions,
+        runtime: SplitRuntimeOptions,
+    ) -> Result<Self> {
+        Self::split_impl(
+            options,
+            None,
+            Some(RuntimeSetup {
+                runtime,
+                disk_cache: None,
+                budget: DiskCacheBudget::default(),
+                verify_blocks: false,
+            }),
+        )
+        .await
+    }
+
+    /// Add a persistent disk cache beneath the optional RAM cache. The root must
+    /// already exist and be application-owned. Drop all filesystem/driver clones
+    /// after shutdown to release the scope's exclusive cache-directory lock.
+    pub async fn split_with_disk_cache(
+        options: SplitOptions,
+        runtime: SplitRuntimeOptions,
+        disk_cache: DiskCacheOptions,
+    ) -> Result<Self> {
+        Self::split_with_disk_cache_budget(options, runtime, disk_cache, DiskCacheBudget::default())
+            .await
+    }
+
+    /// Share disk-worker and fill-copy admission across volumes by passing clones
+    /// of one budget. Resident cache byte/entry limits remain per volume.
+    pub async fn split_with_disk_cache_budget(
+        options: SplitOptions,
+        runtime: SplitRuntimeOptions,
+        disk_cache: DiskCacheOptions,
+        budget: DiskCacheBudget,
+    ) -> Result<Self> {
+        Self::split_impl(
+            options,
+            None,
+            Some(RuntimeSetup {
+                runtime,
+                disk_cache: Some(disk_cache),
+                budget,
+                verify_blocks: false,
+            }),
+        )
+        .await
+    }
+
+    /// Recovery open: verify every referenced immutable block against the
+    /// authoritative provider before handing the filesystem to the caller.
+    pub async fn split_with_verified_blocks(
+        options: SplitOptions,
+        runtime: SplitRuntimeOptions,
+        disk_cache: Option<DiskCacheOptions>,
+        budget: DiskCacheBudget,
+    ) -> Result<Self> {
+        Self::split_impl(
+            options,
+            None,
+            Some(RuntimeSetup {
+                runtime,
+                disk_cache,
+                budget,
+                verify_blocks: true,
+            }),
+        )
+        .await
     }
 
     async fn split_impl(
         options: SplitOptions,
         decorator: Option<&dyn BlockStoreDecorator>,
+        setup: Option<RuntimeSetup>,
     ) -> Result<Self> {
         if options.chunk_size_bytes == 0 {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("chunk_size_bytes must be greater than zero"));
         }
         validate_concurrent_split_options(&options)?;
+        if let Some(setup) = &setup {
+            setup.validate(&options)?;
+        }
+        let lease_ttl = setup
+            .as_ref()
+            .map_or(options.lease_ttl, |setup| setup.runtime.lease_ttl);
         let mut chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
-            .with_lease_ttl(options.lease_ttl)
+            .with_lease_ttl(lease_ttl)
             .with_concurrent_writes(options.concurrent_writes)
             .with_inode_updates(options.inode_updates)
             .with_writeback(options.writeback)
@@ -109,21 +193,129 @@ impl Filesystem {
         if options.delegated {
             chunk_options =
                 chunk_options.with_ownership_mode(mount_rs_chunked::OwnershipMode::Shared);
-            if let Some(path) = options.checkout_path {
+            if let Some(path) = options.checkout_path.clone() {
                 chunk_options = chunk_options.with_checkout_path(path);
             }
         }
-        let opened = open_storage_decorated(&options.metadata, &options.blocks, decorator).await?;
+        // Startup block checks apply only to the owner-serving runtime
+        // constructors; plain `split` keeps its established open semantics.
+        let checked_startup = setup.is_some();
+        let mut layers = CacheLayers::default();
+        let mut verify_blocks = false;
+        if let Some(setup) = setup {
+            chunk_options = chunk_options
+                .with_atime_policy(setup.runtime.atime_policy)
+                .with_read_lease_cache_window(setup.runtime.read_lease_cache_window);
+            layers = CacheLayers {
+                block_cache: setup.runtime.block_cache,
+                disk_cache: setup.disk_cache,
+                budget: setup.budget,
+            };
+            verify_blocks = setup.verify_blocks;
+        }
+        let opened =
+            open_storage_layered(&options.metadata, &options.blocks, decorator, layers).await?;
         let resources = opened.resources.clone();
-        match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await {
-            Ok(driver) => Ok(Self {
-                inner: FilesystemInner::Split(driver, resources),
-            }),
+        let driver = if checked_startup && matches!(options.blocks, StoreConfig::Memory) {
+            // A fresh in-memory block store cannot hold earlier committed extents.
+            ChunkedFs::open_with_empty_blocks(opened.metadata, opened.blocks, chunk_options).await
+        } else if checked_startup
+            && !verify_blocks
+            && matches!(
+                options.metadata,
+                StoreConfig::Tidb { .. } | StoreConfig::TidbShared { .. }
+            )
+            && matches!(
+                options.blocks,
+                StoreConfig::Local { .. }
+                    | StoreConfig::LocalWithWriteBudget { .. }
+                    | StoreConfig::R2 { .. }
+                    | StoreConfig::R2Shared { .. }
+            )
+        {
+            ChunkedFs::open_with_backing_probe(
+                opened.metadata,
+                opened.blocks,
+                chunk_options,
+                opened.authoritative.as_ref(),
+            )
+            .await
+        } else {
+            ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await
+        };
+        match driver {
+            Ok(driver) => {
+                if verify_blocks
+                    && let Err(error) = driver
+                        .verify_backing_extents(opened.authoritative.as_ref())
+                        .await
+                {
+                    let _ = driver.shutdown().await;
+                    let _ = resources.close().await;
+                    return Err(error);
+                }
+                Ok(Self {
+                    inner: FilesystemInner::Split(driver, resources),
+                })
+            }
             Err(error) => {
                 let _ = resources.close().await;
                 Err(error)
             }
         }
+    }
+
+    /// Validate split-store ownership for server registration/admission.
+    /// The returned generation is a snapshot; it does not authorize later writes.
+    pub async fn checked_owner_fence(&self) -> Result<u64> {
+        match &self.inner {
+            FilesystemInner::Split(fs, _) => fs.checked_owner_fence().await,
+            _ => Err(FsError::enotsup(
+                "owner registration requires a split-store volume",
+            )),
+        }
+    }
+
+    /// Cache counters for split stores with the optional local RAM cache enabled.
+    pub async fn block_cache_stats(&self) -> Option<BlockCacheStats> {
+        match &self.inner {
+            FilesystemInner::Split(_, resources) => match &resources.cache {
+                Some(cache) => Some(cache.stats().await),
+                None => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Evict only RAM block-cache copies. Disk cache, backing data and metadata remain
+    /// untouched. Useful for cache administration and explicit cold-read audits.
+    pub async fn clear_block_cache(&self) {
+        if let FilesystemInner::Split(_, resources) = &self.inner
+            && let Some(cache) = &resources.cache
+        {
+            cache.clear().await;
+        }
+    }
+
+    /// Counters for the optional persistent disk cache (independent of RAM).
+    pub async fn disk_cache_stats(&self) -> Result<Option<DiskCacheStats>> {
+        if let FilesystemInner::Split(_, resources) = &self.inner
+            && let Some(cache) = &resources.disk_cache
+        {
+            return cache.stats().await.map(Some);
+        }
+        Ok(None)
+    }
+
+    /// Clear disk copies only, retaining RAM entries and authoritative data.
+    /// Clear both tiers while requests are quiescent for a fully cold audit.
+    pub async fn clear_disk_cache(&self) -> Result<()> {
+        if let FilesystemInner::Split(_, resources) = &self.inner
+            && let Some(cache) = &resources.disk_cache
+        {
+            cache.clear().await?;
+        }
+        Ok(())
     }
 
     /// Bind an offline MRC1 volume to its verified shared block backing.
@@ -442,6 +634,45 @@ impl Clone for Filesystem {
             }
         };
         Self { inner }
+    }
+}
+
+/// Owner-serving policies applied by the `split_with_*` runtime constructors.
+struct RuntimeSetup {
+    runtime: SplitRuntimeOptions,
+    disk_cache: Option<DiskCacheOptions>,
+    budget: DiskCacheBudget,
+    verify_blocks: bool,
+}
+
+impl RuntimeSetup {
+    fn validate(&self, options: &SplitOptions) -> Result<()> {
+        if options.concurrent_writes || options.delegated {
+            return Err(FsError::enotsup(
+                "split runtime options require exclusive ownership",
+            ));
+        }
+        if self.runtime.read_parallelism != 1 {
+            return Err(FsError::new(ErrorCode::Einval).with_message(
+                "read_parallelism must be 1; parallel block reads are not supported",
+            ));
+        }
+        if self.disk_cache.as_ref().is_some_and(|cache| {
+            cache.scope.is_empty() || cache.max_bytes < 80 || cache.max_entries == 0
+        }) {
+            return Err(
+                FsError::new(ErrorCode::Einval).with_message("invalid disk cache scope or bounds")
+            );
+        }
+        if self
+            .runtime
+            .block_cache
+            .is_some_and(|cache| cache.max_bytes == 0 || cache.max_entries == 0)
+        {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("enabled block cache requires positive byte and entry limits"));
+        }
+        Ok(())
     }
 }
 

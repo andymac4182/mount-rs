@@ -112,6 +112,8 @@ pub struct MountOptions {
     pub default_permissions: bool,
     pub allow_other: bool,
     pub read_only: bool,
+    /// Zero metadata TTLs and direct file I/O; needed without cross-mount invalidation.
+    pub uncached: bool,
     pub max_read: Option<u32>,
     /// Additional kernel/libfuse mount options. Each item is one option, not
     /// another argv element or a shell fragment.
@@ -134,6 +136,7 @@ impl Default for MountOptions {
             default_permissions: true,
             allow_other: false,
             read_only: false,
+            uncached: false,
             max_read: None,
             mount_options: Vec::new(),
             device: PathBuf::from("/dev/fuse"),
@@ -513,13 +516,16 @@ async fn mount_linux(
     // Keep the transport buffer and protocol decoder on the same boundary.
     // The default is one MiB, but callers may deliberately choose a smaller
     // frame ceiling for a constrained device.
-    let session = FuseSession::with_options(
-        driver,
-        FuseSessionOptions {
-            max_request: options.max_frame,
-            ..FuseSessionOptions::default()
-        },
-    );
+    let session_options = FuseSessionOptions {
+        max_request: options.max_frame,
+        ..FuseSessionOptions::default()
+    };
+    let session_options = if options.uncached {
+        session_options.without_kernel_cache()
+    } else {
+        session_options
+    };
+    let session = FuseSession::with_options(driver, session_options);
     let state = Arc::new(MountState::new(
         mode,
         target.clone(),

@@ -15,6 +15,8 @@ pub mod snapshot;
 pub mod storage;
 pub mod types;
 pub mod versioning;
+#[doc(hidden)]
+pub mod wait_timing;
 
 pub use driver::{
     FileHandle, FsDriver, GuardedDirectoryEntry, GuardedMutation, GuardedMutationResult,

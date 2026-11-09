@@ -24,7 +24,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 const MAX_SYMLINK_DEPTH: usize = 40;
 const BLOCK_SIZE: u64 = 4096;
@@ -989,7 +989,16 @@ where
         self.renew(self.lifetime.default_ttl).await?;
         let mut copied = self.record.namespace.clone();
         let mut blocks: BTreeMap<BlockId, BlockId> = BTreeMap::new();
-        for node in copied.nodes.values_mut() {
+        let file_inodes: Vec<_> = copied
+            .nodes
+            .iter()
+            .filter_map(|(inode, node)| matches!(node.data, NodeData::File(_)).then_some(*inode))
+            .collect();
+        for inode in file_inodes {
+            let node = copied
+                .nodes
+                .get_mut(&inode)
+                .expect("captured inode remains present");
             let NodeData::File(layout) = &mut node.data else {
                 continue;
             };
@@ -1238,7 +1247,7 @@ where
             blocks: self.blocks.clone(),
             inode,
             path: normalized,
-            state: Mutex::new(HandleState {
+            state: RwLock::new(HandleState {
                 position: 0,
                 closed: false,
             }),
@@ -1340,7 +1349,7 @@ where
     blocks: B,
     inode: u64,
     path: String,
-    state: Mutex<HandleState>,
+    state: RwLock<HandleState>,
 }
 
 #[async_trait]
@@ -1350,7 +1359,24 @@ where
     B: BlockStore + Clone + Send + Sync + 'static,
 {
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> Result<usize> {
-        let mut state = self.state.lock().await;
+        // Retain admission through finish so close cannot release this handle's
+        // pin while I/O is in flight. Only implicit-position reads mutate the
+        // cursor; positional reads may overlap each other and stat.
+        let mut cursor = if position.is_none() {
+            Some(self.state.write().await)
+        } else {
+            None
+        };
+        let positional = if position.is_some() {
+            Some(self.state.read().await)
+        } else {
+            None
+        };
+        let state = match (&cursor, &positional) {
+            (Some(state), _) => &**state,
+            (_, Some(state)) => &**state,
+            _ => unreachable!("read must hold handle admission"),
+        };
         if state.closed {
             return Err(error_with_path(ErrorCode::Ebadf, "read", &self.path));
         }
@@ -1388,7 +1414,7 @@ where
                 count
             }
         };
-        if position.is_none() {
+        if let Some(state) = cursor.as_mut() {
             state.position = start
                 .checked_add(u64::try_from(count).map_err(|_| FsError::new(ErrorCode::Eoverflow))?)
                 .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
@@ -1401,8 +1427,7 @@ where
     }
 
     async fn stat(&self) -> Result<Stats> {
-        let _state = self.state.lock().await;
-        let state = &_state;
+        let state = self.state.read().await;
         if state.closed {
             return Err(error_with_path(ErrorCode::Ebadf, "fstat", &self.path));
         }
@@ -1428,10 +1453,10 @@ where
     }
 
     async fn close(&self) -> Result<()> {
-        // Keep the handle mutex held until provider cleanup succeeds. This
+        // Keep exclusive handle admission until provider cleanup succeeds. This
         // serializes concurrent close calls and leaves `closed == false` on a
         // retryable provider failure.
-        let mut state = self.state.lock().await;
+        let mut state = self.state.write().await;
         if state.closed {
             return Ok(());
         }

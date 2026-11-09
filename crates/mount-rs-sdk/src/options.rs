@@ -13,8 +13,31 @@ use std::time::Duration;
 #[derive(Clone, PartialEq, Eq)]
 pub enum StoreConfig {
     Memory,
+    /// Owner-local immutable blocks on a host filesystem (block-only).
+    Local {
+        path: PathBuf,
+    },
+    /// Local blocks with shared server-local mutation admission; equality
+    /// compares budget identity.
+    LocalWithWriteBudget {
+        path: PathBuf,
+        budget: mount_rs_host::LocalWriteBudget,
+    },
     Sqlite {
         path: PathBuf,
+    },
+    /// TiDB stores borrowed from an application-owned connection pool.
+    /// Closing the filesystem does not disconnect the pool.
+    TidbShared {
+        pool: mount_rs_tidb::TidbStorePool,
+        volume_key: String,
+        durable: bool,
+    },
+    /// R2/S3-compatible blocks from an application-owned shared client.
+    R2Shared {
+        client: mount_rs_r2::SharedR2Client,
+        prefix: String,
+        durable: bool,
     },
     Pglite {
         connection: String,
@@ -75,6 +98,32 @@ impl fmt::Debug for StoreConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => formatter.write_str("Memory"),
+            Self::Local { path } => formatter.debug_struct("Local").field("path", path).finish(),
+            Self::LocalWithWriteBudget { path, budget } => formatter
+                .debug_struct("LocalWithWriteBudget")
+                .field("path", path)
+                .field("budget", budget)
+                .finish(),
+            Self::TidbShared {
+                pool: _,
+                volume_key,
+                durable,
+            } => formatter
+                .debug_struct("TidbShared")
+                .field("pool", &"<explicit shared owner>")
+                .field("volume_key", volume_key)
+                .field("durable", durable)
+                .finish(),
+            Self::R2Shared {
+                client,
+                prefix,
+                durable,
+            } => formatter
+                .debug_struct("R2Shared")
+                .field("client", client)
+                .field("prefix", prefix)
+                .field("durable", durable)
+                .finish(),
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
                 .field("path", path)
@@ -252,6 +301,52 @@ pub enum FoundationDbLeaseAuthority {
     /// Concurrent-volume manifest revision CAS needs no lease-time oracle.
     /// Only choose this with `SplitOptions::concurrent_writes`.
     RevisionCas,
+}
+
+/// Limits for the process-local immutable-block write-through cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockCacheOptions {
+    pub max_bytes: usize,
+    pub max_entries: usize,
+}
+
+/// Persistent owner-local content cache, below the optional RAM cache.
+/// The scope must identify the backing volume/generation, not just its owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskCacheOptions {
+    pub root: PathBuf,
+    pub scope: String,
+    /// Encoded bytes, including entry headers; must be at least 80.
+    pub max_bytes: u64,
+    pub max_entries: usize,
+}
+
+/// Owner-serving runtime policies for exclusive split stores: a 240-second
+/// lease, a 60-second idle-owner heartbeat window and noatime by default.
+/// Backing durability is unchanged. These override `SplitOptions::lease_ttl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitRuntimeOptions {
+    /// Authoritative ownership lease; default 240 seconds.
+    pub lease_ttl: Duration,
+    pub atime_policy: mount_rs_chunked::AtimePolicy,
+    /// Idle-owner heartbeat window; zero disables the heartbeat. Must be at
+    /// least 20 ms and at most a quarter of `lease_ttl`.
+    pub read_lease_cache_window: Duration,
+    pub block_cache: Option<BlockCacheOptions>,
+    /// Concurrent block gets per read. Only 1 (sequential) is supported.
+    pub read_parallelism: usize,
+}
+
+impl Default for SplitRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            lease_ttl: Duration::from_secs(240),
+            read_lease_cache_window: Duration::from_secs(60),
+            atime_policy: mount_rs_chunked::AtimePolicy::NoAtime,
+            block_cache: None,
+            read_parallelism: 1,
+        }
+    }
 }
 
 /// Options for a filesystem with independent metadata and block providers.

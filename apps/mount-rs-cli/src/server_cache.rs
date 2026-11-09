@@ -213,13 +213,23 @@ impl BlockStoreDecorator for DriveCacheDecorator {
         store: Arc<dyn BlockStore>,
     ) -> Result<Arc<dyn BlockStore>> {
         let policy = match config {
-            StoreConfig::Tidb { .. } => IntegrityPolicy::Sha256Prefixed,
+            StoreConfig::Tidb { .. } | StoreConfig::TidbShared { .. } => {
+                IntegrityPolicy::Sha256Prefixed
+            }
             StoreConfig::FoundationDb { .. } => IntegrityPolicy::Sha256Colon,
-            StoreConfig::R2 { .. } | StoreConfig::RustFs { .. } | StoreConfig::AwsS3 { .. } => {
+            StoreConfig::R2 { .. }
+            | StoreConfig::R2Shared { .. }
+            | StoreConfig::RustFs { .. }
+            | StoreConfig::AwsS3 { .. } => {
                 IntegrityPolicy::ObjectStoreSha256OrOpaque
             }
             StoreConfig::Pglite { .. } => IntegrityPolicy::PgliteMd5,
-            StoreConfig::Memory | StoreConfig::Sqlite { .. } => IntegrityPolicy::Opaque,
+            StoreConfig::Memory
+            | StoreConfig::Sqlite { .. }
+            | StoreConfig::Local { .. }
+            | StoreConfig::LocalWithWriteBudget { .. }
+            // SlateDB is metadata-only; block opening rejects it before decoration.
+            | StoreConfig::SlateDb { .. } => IntegrityPolicy::Opaque,
         };
         let store = CachedBlockStore::new(store, self.cache.clone(), self.identity.clone(), policy)
             .with_runtime(self.runtime.clone());

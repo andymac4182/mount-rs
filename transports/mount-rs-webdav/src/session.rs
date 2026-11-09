@@ -27,6 +27,29 @@ use crate::protocol::{
     submitted_tokens, supported_lock_node,
 };
 
+// Protect handles while preparing a GET. Normal early exits await close;
+// cancellation on the Tokio HTTP runtime schedules a best-effort close.
+struct ReadHandleGuard(Option<Arc<dyn FileHandle>>);
+impl ReadHandleGuard {
+    async fn close(&mut self) -> Result<(), FsError> {
+        if let Some(handle) = &self.0 {
+            handle.close().await?;
+            self.0 = None;
+        }
+        Ok(())
+    }
+}
+impl Drop for ReadHandleGuard {
+    fn drop(&mut self) {
+        if let (Some(handle), Ok(runtime)) = (self.0.take(), tokio::runtime::Handle::try_current())
+        {
+            runtime.spawn(async move {
+                let _ = handle.close().await;
+            });
+        }
+    }
+}
+
 /// A transport-neutral stream of request-body chunks.
 ///
 /// The WebDAV session consumes `PUT` bodies incrementally and only buffers the
@@ -519,13 +542,64 @@ impl WebdavSession {
                 .with_message("that resource is not a regular file")
                 .into());
         }
-        let conditional = evaluate_conditionals(&head.headers, Some(&stats), &head.method);
+        if head.method.eq_ignore_ascii_case("HEAD") {
+            return self
+                .get_headers(head, &stats)
+                .map(|(response, _, _)| response);
+        }
+        let mut opened = ReadHandleGuard(Some(self.driver.open(path, "r", 0).await?));
+        let result = async {
+            let handle = opened.0.as_ref().expect("opened read handle");
+            let stats = handle.stat().await?;
+            if !stats.is_file() {
+                return Err(refuse(403)
+                    .with_message("that resource is not a regular file")
+                    .into());
+            }
+            self.get_headers(head, &stats)
+        }
+        .await;
+        match result {
+            Ok((mut response, start, length)) if length != 0 => {
+                response.body = Some(WebdavBody::File(FileBody {
+                    handle: crate::response_handle::ResponseHandle::wrap(
+                        opened.0.take().expect("opened read handle"),
+                    ),
+                    start,
+                    length,
+                    chunk_size: self.options.read_chunk_bytes.max(1),
+                }));
+                Ok(response)
+            }
+            result => {
+                let close = opened.close().await;
+                match result {
+                    Err(error) => Err(error),
+                    Ok((response, _, _)) => {
+                        close?;
+                        Ok(response)
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_headers(
+        &self,
+        head: &WebdavRequestHead,
+        stats: &Stats,
+    ) -> Result<(WebdavResponse, u64, u64), WebdavError> {
+        let conditional = evaluate_conditionals(&head.headers, Some(stats), &head.method);
         if conditional.status == 304 {
-            return Ok(WebdavResponse {
-                status: 304,
-                headers: self.resource_headers(&stats),
-                body: None,
-            });
+            return Ok((
+                WebdavResponse {
+                    status: 304,
+                    headers: self.resource_headers(stats),
+                    body: None,
+                },
+                0,
+                0,
+            ));
         }
         if conditional.status == 412 {
             return Err(refuse(412)
@@ -533,7 +607,7 @@ impl WebdavSession {
                 .into());
         }
         let range = parse_range(head.headers.get("range").map(String::as_str), stats.size);
-        let mut headers = self.resource_headers(&stats);
+        let mut headers = self.resource_headers(stats);
         let (status, start, length) = match range {
             RangeSpec::Full => (200, 0, stats.size),
             RangeSpec::Range { start, length, end } => {
@@ -550,24 +624,15 @@ impl WebdavSession {
             }
         };
         headers.insert("content-length".to_owned(), length.to_string());
-        if length == 0 || head.method.eq_ignore_ascii_case("HEAD") {
-            return Ok(WebdavResponse {
+        Ok((
+            WebdavResponse {
                 status,
                 headers,
                 body: None,
-            });
-        }
-        let handle = self.driver.open(path, "r", 0).await?;
-        Ok(WebdavResponse {
-            status,
-            headers,
-            body: Some(WebdavBody::File(FileBody {
-                handle,
-                start,
-                length,
-                chunk_size: self.options.read_chunk_bytes.max(1),
-            })),
-        })
+            },
+            start,
+            length,
+        ))
     }
 
     fn resource_headers(&self, stats: &Stats) -> BTreeMap<String, String> {
@@ -1907,4 +1972,162 @@ fn propfind_directory_error(error: FsError) -> WebdavError {
 
 fn refuse(status: u16) -> DavFault {
     crate::protocol::refuse(status)
+}
+
+#[cfg(test)]
+mod read_identity_tests {
+    use super::*;
+    use mount_rs_core::{Capabilities, DirEntry};
+    use mount_rs_memfs::MemoryFs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ReplacedFile {
+        fs: MemoryFs,
+        closes: Arc<AtomicUsize>,
+    }
+    struct CountClose {
+        inner: Arc<dyn FileHandle>,
+        closes: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl FileHandle for CountClose {
+        async fn read(&self, b: &mut [u8], p: Option<u64>) -> mount_rs_core::Result<usize> {
+            self.inner.read(b, p).await
+        }
+        async fn write(&self, b: &[u8], p: Option<u64>) -> mount_rs_core::Result<usize> {
+            self.inner.write(b, p).await
+        }
+        async fn stat(&self) -> mount_rs_core::Result<Stats> {
+            self.inner.stat().await
+        }
+        async fn truncate(&self, n: u64) -> mount_rs_core::Result<()> {
+            self.inner.truncate(n).await
+        }
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            self.inner.close().await
+        }
+    }
+    #[async_trait::async_trait]
+    impl FsDriver for ReplacedFile {
+        fn capabilities(&self) -> Capabilities {
+            self.fs.capabilities()
+        }
+        async fn stat(&self, _: &str) -> mount_rs_core::Result<Stats> {
+            self.fs.stat("/old").await
+        }
+        async fn readdir(&self, p: &str) -> mount_rs_core::Result<Vec<DirEntry>> {
+            self.fs.readdir(p).await
+        }
+        async fn open(
+            &self,
+            _: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn FileHandle>> {
+            Ok(Arc::new(CountClose {
+                inner: self.fs.open("/replacement", flags, mode).await?,
+                closes: self.closes.clone(),
+            }))
+        }
+    }
+    #[tokio::test]
+    async fn cancelled_preparation_closes_on_the_live_runtime() {
+        let fs = MemoryFs::empty();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let handle: Arc<dyn FileHandle> = Arc::new(CountClose {
+            inner: fs.open("/file", "w", 0o644).await.unwrap(),
+            closes: closes.clone(),
+        });
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = ReadHandleGuard(Some(handle));
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while closes.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn get_uses_opened_identity_and_closes_bodyless_responses() {
+        let fs = MemoryFs::empty();
+        for (path, bytes) in [
+            ("/old", b"old".as_slice()),
+            ("/replacement", b"replacement".as_slice()),
+        ] {
+            let file = fs.open(path, "w", 0o644).await.unwrap();
+            file.write(bytes, None).await.unwrap();
+            file.close().await.unwrap();
+        }
+        let replacement = fs.stat("/replacement").await.unwrap();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let session = WebdavSession::new(
+            Arc::new(ReplacedFile {
+                fs,
+                closes: closes.clone(),
+            }),
+            WebdavSessionOptions::default(),
+        );
+        let mut head = WebdavRequestHead {
+            method: "GET".into(),
+            target: "/file".into(),
+            ..Default::default()
+        };
+        let response = session.get(&head, "/file").await.unwrap();
+        assert_eq!(response.headers["content-length"], "11");
+        assert_eq!(response.headers["etag"], resource_etag(&replacement));
+        assert_eq!(
+            response.body.unwrap().into_bytes().await.unwrap(),
+            b"replacement"
+        );
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        head.headers.insert("range".into(), "bytes=-4".into());
+        let response = session.get(&head, "/file").await.unwrap();
+        assert_eq!(response.headers["content-range"], "bytes 7-10/11");
+        assert_eq!(response.body.unwrap().into_bytes().await.unwrap(), b"ment");
+        assert_eq!(closes.load(Ordering::SeqCst), 2);
+        head.headers.insert("range".into(), "bytes=20-".into());
+        assert!(session.get(&head, "/file").await.is_err());
+        assert_eq!(closes.load(Ordering::SeqCst), 3);
+        head.headers.clear();
+        head.headers
+            .insert("if-none-match".into(), resource_etag(&replacement));
+        assert_eq!(session.get(&head, "/file").await.unwrap().status, 304);
+        assert_eq!(closes.load(Ordering::SeqCst), 4);
+        head.headers.clear();
+        head.method = "HEAD".into();
+        assert_eq!(
+            session.get(&head, "/file").await.unwrap().headers["content-length"],
+            "3"
+        );
+        assert_eq!(closes.load(Ordering::SeqCst), 4);
+        head.method = "GET".into();
+        let response = session.get(&head, "/file").await.unwrap();
+        let retained = match response.body.as_ref().unwrap() {
+            WebdavBody::File(file) => file.handle.clone(),
+            WebdavBody::Bytes(_) => panic!("expected file response"),
+        };
+        drop(response);
+        tokio::task::yield_now().await;
+        assert_eq!(closes.load(Ordering::SeqCst), 4);
+        drop(retained);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while closes.load(Ordering::SeqCst) == 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(closes.load(Ordering::SeqCst), 5);
+    }
 }

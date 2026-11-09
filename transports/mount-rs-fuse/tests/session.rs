@@ -1598,3 +1598,148 @@ async fn file_io_and_orphan_handles_through_fuse_frames() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn uncached_sessions_emit_zero_ttls_and_direct_io_for_open_and_create() {
+    use mount_rs_fuse::{FOPEN_DIRECT_IO, FUSE_DIRECT_IO_ALLOW_MMAP, FUSE_WRITEBACK_CACHE};
+    let fs = Arc::new(MemoryFs::empty());
+    fs.open("/visible", "w", 0o600)
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    let mut options = FuseSessionOptions::default();
+    options.init.flags |= FUSE_WRITEBACK_CACHE | FUSE_DIRECT_IO_ALLOW_MMAP;
+    let options = options.without_kernel_cache();
+    assert_eq!(
+        options.init.flags & (FUSE_WRITEBACK_CACHE | FUSE_DIRECT_IO_ALLOW_MMAP),
+        0
+    );
+    let mut session = FuseSession::with_options(fs, options);
+    let lookup = request(&mut session, 1, 1, b"visible\0").await;
+    assert_eq!(&lookup[16..40], &[0; 24]);
+    // Zero negative TTL returns ENOENT instead of a cacheable negative entry.
+    let missing = session
+        .handle(&frame(1, 1, b"missing\0"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(i32::from_le_bytes(missing[4..8].try_into().unwrap()), -2);
+    let inode = number(&lookup, 0);
+    let attrs = request(&mut session, 3, inode, &[0; 16]).await;
+    assert_eq!(&attrs[..12], &[0; 12]);
+    let opened = request(&mut session, 14, inode, &[0; 8]).await;
+    assert_eq!(
+        u32::from_le_bytes(opened[8..12].try_into().unwrap()),
+        FOPEN_DIRECT_IO
+    );
+    let mut create = vec![0; 16];
+    create[..4].copy_from_slice(&0x42u32.to_le_bytes());
+    create[4..8].copy_from_slice(&0o600u32.to_le_bytes());
+    create.extend(b"created-uncached\0");
+    let created = request(&mut session, 35, 1, &create).await;
+    assert_eq!(&created[16..40], &[0; 24]);
+    assert_eq!(
+        u32::from_le_bytes(created[136..140].try_into().unwrap()),
+        FOPEN_DIRECT_IO
+    );
+}
+
+#[tokio::test]
+async fn metadata_requests_reject_unknown_or_wrong_inode_handles_before_mutation() {
+    let fs = Arc::new(MemoryFs::empty());
+    for name in ["/first", "/second"] {
+        let file = fs.open(name, "w", 0o600).await.unwrap();
+        file.write(b"unchanged", Some(0)).await.unwrap();
+        file.close().await.unwrap();
+    }
+    let mut session = FuseSession::new(fs.clone());
+    let first = number(&request(&mut session, 1, 1, b"first\0").await, 0);
+    let second = number(&request(&mut session, 1, 1, b"second\0").await, 0);
+    let opened = request(&mut session, 14, first, &[2, 0, 0, 0, 0, 0, 0, 0]).await;
+    let first_handle = number(&opened, 0);
+    for (node, handle) in [(first, u64::MAX), (second, first_handle)] {
+        let mut getattr = vec![0; 16];
+        getattr[..4].copy_from_slice(&1u32.to_le_bytes());
+        getattr[8..16].copy_from_slice(&handle.to_le_bytes());
+        let response = session
+            .handle(&frame(3, node, &getattr))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(i32::from_le_bytes(response[4..8].try_into().unwrap()), -9);
+        let mut setattr = vec![0; 88];
+        setattr[..4].copy_from_slice(&(64u32 | 8).to_le_bytes());
+        setattr[8..16].copy_from_slice(&handle.to_le_bytes());
+        // Truncate to zero must not run on either the supplied or fallback inode.
+        let response = session
+            .handle(&frame(4, node, &setattr))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(i32::from_le_bytes(response[4..8].try_into().unwrap()), -9);
+        for opcode in [15, 16, 18, 20, 25] {
+            let mut body = match opcode {
+                15 | 16 => io_body(handle, 0, 1),
+                20 => vec![0; 16],
+                _ => vec![0; 24],
+            };
+            body[..8].copy_from_slice(&handle.to_le_bytes());
+            if opcode == 16 {
+                body.push(b'X');
+            }
+            let reply = session
+                .handle(&frame(opcode, node, &body))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                i32::from_le_bytes(reply[4..8].try_into().unwrap()),
+                -9,
+                "mismatched handle for opcode {opcode}"
+            );
+        }
+        assert_eq!(fs.stat("/first").await.unwrap().size, 9);
+        assert_eq!(fs.stat("/second").await.unwrap().size, 9);
+    }
+    request(&mut session, 18, first, &release_body(first_handle)).await;
+}
+
+#[tokio::test]
+async fn directory_handles_reject_wrong_inode_without_closing_the_valid_session() {
+    let fs = Arc::new(MemoryFs::empty());
+    fs.mkdir("/left", Default::default()).await.unwrap();
+    fs.mkdir("/right", Default::default()).await.unwrap();
+    let mut session = FuseSession::new(fs);
+    let left = number(&request(&mut session, 1, 1, b"left\0").await, 0);
+    let right = number(&request(&mut session, 1, 1, b"right\0").await, 0);
+    let opened = request(&mut session, 27, left, &[0; 8]).await;
+    let handle = number(&opened, 0);
+    for (node, supplied_handle) in [(right, handle), (left, u64::MAX)] {
+        for opcode in [28, 44, 30, 29] {
+            let mut body = match opcode {
+                28 | 44 => io_body(supplied_handle, 0, 4096),
+                30 => vec![0; 16],
+                _ => vec![0; 24],
+            };
+            body[..8].copy_from_slice(&supplied_handle.to_le_bytes());
+            let reply = session
+                .handle(&frame(opcode, node, &body))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                i32::from_le_bytes(reply[4..8].try_into().unwrap()),
+                -9,
+                "directory handle mismatch for opcode {opcode}"
+            );
+        }
+    }
+    assert!(
+        !request(&mut session, 28, left, &io_body(handle, 0, 4096))
+            .await
+            .is_empty()
+    );
+    request(&mut session, 29, left, &release_body(handle)).await;
+}

@@ -36,6 +36,16 @@ reach request handling. Directory listings are bounded by
 `max_directory_entries` and `max_response_bytes`; oversized listings fail
 closed before a response is sent.
 
+Uploads coalesce transport fragments into at most 64 KiB
+per filesystem write, flushing the remainder at end of body. This bounds added
+buffering and avoids a durable write for each small network fragment. An
+incomplete buffer is not visible to readers until it is flushed.
+
+Accepted TCP connections enable `TCP_NODELAY` by default to avoid packet
+coalescing delays on small streaming writes. Set `HttpServerOptions::tcp_nodelay`
+to `false` to restore coalescing. This controls the public TCP listener, not
+server-to-server HTTP/3.
+
 `PUT` is a bounded streaming write, not an atomic publish. The current driver
 contract has no portable temporary-file/atomic-publish operation, so a request
 body that exceeds the limit or disconnects after writing can leave a partial
@@ -58,6 +68,38 @@ are intentionally outside this primary slice.
 This crate is a root workspace member and uses the shared lockfile:
 
 ```text
-cargo test -p mount-rs-http --locked
-cargo clippy -p mount-rs-http --locked --all-targets -- -D warnings
+./scripts/cargo-shared test -p mount-rs-http --locked
+./scripts/cargo-shared clippy -p mount-rs-http --locked --all-targets -- -D warnings
 ```
+
+### Typed metadata reads
+
+Authenticated `GET` or `HEAD /v1/drives/{id}/{operation}/{path}` supports:
+
+| Operation | GET JSON result |
+| --- | --- |
+| `stat` | Core `Stats`, following symlinks |
+| `lstat` | Core `Stats`, without following the final symlink |
+| `statfs` | Core `StatsFs` |
+| `readlink` | JSON string containing the symlink target |
+
+These use the same drive authorization and path validation as file routes.
+HEAD executes the metadata operation and omits the response body. Other methods
+return 405. Filesystem errors retain the existing JSON error envelope. These
+routes do not create persistent remote file handles or provide a mounted client.
+
+Directory-entry responses (`GET /v1/drives/{drive}/entries/...`) support
+negotiated gzip. Clients without an `Accept-Encoding` preference retain plain
+JSON. Responses include `Vary: Accept-Encoding`; compressed responses advertise
+their encoded Content-Length, including for HEAD. Quality values and explicit
+identity/gzip exclusions are respected; rejecting both supported representations
+returns 406. Listings below 1 KiB use identity when permitted. Compression uses
+level 1 on blocking workers with four concurrent encoders per process; waiting
+requests and their already-serialized listings are not memory admission bounded.
+File contents and directory JSON returned by the `fs` route are unchanged.
+
+File-response streaming uses one bounded ordered channel for data, errors and
+EOF. This avoids the final-frame race in the dependency's separate data/error
+channels. Shutdown can cancel an error send when the queue is full, and dropping
+the receiver releases blocked producers. The channel does not snapshot a file
+against mutations of the same inode; the driver retains that responsibility.

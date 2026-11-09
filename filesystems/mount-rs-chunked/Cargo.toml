@@ -7,16 +7,19 @@ description = "Split metadata/block chunked filesystem orchestration for mount-r
 license = "Apache-2.0"
 
 [dependencies]
+arc-swap = "1.9"
 async-trait = "0.1"
 async-io = "2.6"
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 mount-rs-core = { path = "../.." }
-tokio = { version = "1", default-features = false, features = ["sync"] }
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "time"] }
 
 [dev-dependencies]
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 serde_json = "1"
 futures-lite = "2"
 mount-rs-memory = { path = "../../providers/mount-rs-memory" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

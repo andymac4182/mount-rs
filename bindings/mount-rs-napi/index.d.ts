@@ -1295,6 +1295,8 @@ export interface JsCapabilities {
 }
 
 export interface JsChunkedOptions {
+  /** Access-time policy: noatime (default) or strict. */
+  atime?: string
   metadata: JsChunkedStoreOptions
   blocks: JsChunkedStoreOptions
   chunkSize: number

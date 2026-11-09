@@ -372,6 +372,7 @@ async function checkFilesystemAndHandles(): Promise<void> {
 
 async function checkFactories(): Promise<void> {
   const chunkedOptions: JsChunkedOptions = {
+    atime: "noatime",
     metadata: { kind: "memory" },
     blocks: { kind: "memory" },
     chunkSize: 4096,

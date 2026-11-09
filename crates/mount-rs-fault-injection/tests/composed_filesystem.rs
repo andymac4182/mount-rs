@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_chunked::{AtimePolicy, CachedBlockStore, ChunkedFs, ChunkedOptions};
 use mount_rs_core::driver::FsDriver;
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
@@ -86,6 +86,8 @@ impl BlockStore for DynBlocks {
 }
 
 enum Backend {
+    #[cfg(unix)]
+    Local(TempDir),
     Memory {
         metadata: MemoryMetadataStore,
         blocks: MemoryBlockStore,
@@ -118,6 +120,15 @@ impl Backend {
 
     fn open(&self) -> Result<(DynMetadata, DynBlocks)> {
         match self {
+            #[cfg(unix)]
+            Self::Local(dir) => Ok((
+                DynMetadata(Arc::new(SqliteMetadataStore::open(
+                    dir.path().join("metadata.sqlite"),
+                )?)),
+                DynBlocks(Arc::new(mount_rs_host::LocalBlockStore::open(
+                    dir.path().join("blocks"),
+                )?)),
+            )),
             Self::Memory { metadata, blocks } => Ok((
                 DynMetadata(Arc::new(metadata.clone())),
                 DynBlocks(Arc::new(blocks.clone())),
@@ -135,6 +146,8 @@ impl Backend {
 
     fn close(self) -> std::io::Result<()> {
         match self {
+            #[cfg(unix)]
+            Self::Local(dir) => dir.close(),
             Self::Memory { .. } => Ok(()),
             Self::Sqlite { temp_dir, .. } => temp_dir.close(),
         }
@@ -223,8 +236,7 @@ fn one_rule_plan(
     .expect("test fault plan validates")
 }
 
-#[tokio::test]
-async fn before_block_put_does_not_publish_partial_write_on_memory_or_sqlite() {
+async fn assert_failed_put_preserves_namespace(phase: FaultPhase, code: ErrorCode) {
     for backend in [Backend::memory(), Backend::sqlite()] {
         let expected_namespace = seed_file(&backend, "seed-block-put", BASELINE)
             .await
@@ -233,29 +245,27 @@ async fn before_block_put_does_not_publish_partial_write_on_memory_or_sqlite() {
             10,
             FaultBoundary::Blocks,
             FaultOperation::Put,
-            FaultPhase::Before,
+            phase,
             FaultOccurrence::Once,
-            FaultAction::Error(ErrorCode::Enospc),
+            FaultAction::Error(code),
         );
         let (filesystem, injector, metadata) = open_faulted(&backend, plan, "fault-block-put")
             .await
             .unwrap();
         let file = filesystem.open("/payload", "r+", 0).await.unwrap();
         let error = file.write(UPDATED, Some(0)).await.unwrap_err();
-        assert_eq!(error.code, ErrorCode::Enospc);
+        assert_eq!(error.code, code);
         assert!(!filesystem.failed());
 
         let loaded = metadata.load().await.unwrap();
         assert_namespace_exact(&expected_namespace, loaded.namespace.as_ref());
         let trace = injector.trace();
         assert_eq!(trace.events.len(), 1);
-        assert_eq!(trace.events[0].phase, FaultPhase::Before);
+        assert_eq!(trace.events[0].phase, phase);
         assert_eq!(trace.events[0].operation, FaultOperation::Put);
         assert_eq!(
             trace.events[0].outcome,
-            FaultOutcome::InjectedError {
-                code: ErrorCode::Enospc,
-            }
+            FaultOutcome::InjectedError { code }
         );
 
         file.close().await.unwrap();
@@ -270,6 +280,109 @@ async fn before_block_put_does_not_publish_partial_write_on_memory_or_sqlite() {
         backend
             .close()
             .expect("close scoped block-put backend directory");
+    }
+}
+
+#[tokio::test]
+async fn before_block_put_does_not_publish_partial_write_on_memory_or_sqlite() {
+    assert_failed_put_preserves_namespace(FaultPhase::Before, ErrorCode::Enospc).await;
+}
+
+#[tokio::test]
+async fn successful_block_put_with_lost_reply_does_not_publish_partial_write() {
+    assert_failed_put_preserves_namespace(FaultPhase::After, ErrorCode::Eio).await;
+}
+
+#[tokio::test]
+async fn warm_reader_sees_committed_bytes_after_second_block_reply_is_lost() {
+    exercise_warm_reader_after_lost_reply(false).await;
+}
+
+#[tokio::test]
+async fn retry_after_lost_block_reply_updates_open_reader_and_survives_reopen() {
+    exercise_warm_reader_after_lost_reply(true).await;
+}
+
+async fn exercise_warm_reader_after_lost_reply(retry: bool) {
+    #[cfg(unix)]
+    let local = {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("blocks")).unwrap();
+        Backend::Local(dir)
+    };
+    for backend in [
+        Backend::memory(),
+        Backend::sqlite(),
+        #[cfg(unix)]
+        local,
+    ] {
+        let expected = seed_file(&backend, "seed-warm-reader", BASELINE)
+            .await
+            .unwrap();
+        let (metadata, blocks) = backend.open().unwrap();
+        let plan = one_rule_plan(
+            11,
+            FaultBoundary::Blocks,
+            FaultOperation::Put,
+            FaultPhase::After,
+            FaultOccurrence::Nth(2),
+            FaultAction::Error(ErrorCode::Eio),
+        );
+        let injector = FaultInjector::new(plan).unwrap();
+        let cache = CachedBlockStore::new(FaultBlockStore::new(blocks, injector), 4096, 128);
+        let fs = ChunkedFs::open(
+            metadata.clone(),
+            cache.clone(),
+            options("cached-writer").with_atime_policy(AtimePolicy::NoAtime),
+        )
+        .await
+        .unwrap();
+        let reader = fs.open("/payload", "r", 0).await.unwrap();
+        let writer = fs.open("/payload", "r+", 0).await.unwrap();
+        let mut bytes = vec![0; BASELINE.len()];
+        assert_eq!(reader.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
+        assert_eq!(bytes, BASELINE);
+        assert_eq!(
+            writer.write(UPDATED, Some(0)).await.unwrap_err().code,
+            ErrorCode::Eio
+        );
+        bytes.fill(0);
+        let before = cache.stats().await;
+        assert_eq!(reader.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
+        assert_eq!(bytes, BASELINE);
+        let after = cache.stats().await;
+        assert!(after.hits > before.hits);
+        assert_eq!(after.backing_gets_completed, before.backing_gets_completed);
+        assert_namespace_exact(&expected, metadata.load().await.unwrap().namespace.as_ref());
+        let mut committed_bytes = BASELINE.to_vec();
+        let mut committed_namespace = expected;
+        if retry {
+            assert_eq!(writer.write(UPDATED, Some(0)).await.unwrap(), UPDATED.len());
+            committed_bytes[..UPDATED.len()].copy_from_slice(UPDATED);
+            bytes.fill(0);
+            let before = cache.stats().await;
+            assert_eq!(reader.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
+            assert_eq!(bytes, committed_bytes);
+            let after = cache.stats().await;
+            assert!(after.hits > before.hits);
+            assert_eq!(after.backing_gets_completed, before.backing_gets_completed);
+            committed_namespace = metadata.load().await.unwrap().namespace.unwrap();
+        }
+        reader.close().await.unwrap();
+        writer.close().await.unwrap();
+        fs.shutdown().await.unwrap();
+        // Release every store handle before reopening so SQLite files are
+        // closed; Windows cannot delete the temp directory otherwise.
+        drop((reader, writer, fs, cache, metadata));
+        reopen_and_assert(
+            &backend,
+            &committed_namespace,
+            &committed_bytes,
+            "reopen-warm-reader",
+        )
+        .await
+        .unwrap();
+        backend.close().unwrap();
     }
 }
 

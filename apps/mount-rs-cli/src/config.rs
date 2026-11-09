@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mount_rs_sdk::{AtimePolicy, BlockCacheOptions, DiskCacheOptions, SplitRuntimeOptions};
 use serde_json::{Map, Value};
 
 use crate::parser::{CliOptions, CliOverrides, DriverChoice, TransportChoice};
@@ -61,6 +62,9 @@ pub struct EnvReference {
 #[derive(Clone, PartialEq, Eq)]
 pub enum StorageProvider {
     Memory,
+    Local {
+        path: PathBuf,
+    },
     Sqlite {
         path: PathBuf,
     },
@@ -109,6 +113,7 @@ impl fmt::Debug for StorageProvider {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => formatter.write_str("Memory"),
+            Self::Local { path } => formatter.debug_struct("Local").field("path", path).finish(),
             Self::Sqlite { path } => formatter
                 .debug_struct("Sqlite")
                 .field("path", path)
@@ -197,6 +202,10 @@ impl fmt::Debug for StorageProvider {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitStorageConfig {
+    pub verify_backing_blocks: bool,
+    pub disk_cache: Option<DiskCacheOptions>,
+    /// Owner-serving policies; present only for exclusive ownership.
+    pub runtime: Option<SplitRuntimeOptions>,
     pub metadata: StorageProvider,
     pub blocks: StorageProvider,
     pub chunk_size_bytes: usize,
@@ -209,6 +218,14 @@ pub struct SplitStorageConfig {
     pub owner: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteConfig {
+    pub server: String,
+    pub volume: String,
+    pub token: EnvReference,
+    pub timeout_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigSpec {
     pub mountpoint: Option<PathBuf>,
@@ -218,6 +235,7 @@ pub struct ConfigSpec {
     pub read_only: Option<bool>,
     pub empty: Option<bool>,
     pub allow_other: Option<bool>,
+    pub fuse_uncached: Option<bool>,
     pub sqlite_single_host: Option<bool>,
     pub driver: Option<DriverChoice>,
     pub root: Option<PathBuf>,
@@ -229,21 +247,49 @@ pub struct ConfigSpec {
     pub root_uid: Option<u32>,
     pub root_gid: Option<u32>,
     pub storage: Option<SplitStorageConfig>,
+    pub remote: Option<RemoteConfig>,
     pub(crate) http: Option<HttpServiceConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HttpServiceConfig {
+    pub remote_sessions: bool,
+    pub forwarding: Option<ForwardingConfig>,
     pub host: String,
     pub port: u16,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
     pub max_directory_entries: usize,
     pub read_chunk_bytes: usize,
+    pub tcp_nodelay: bool,
+    pub http2_prior_knowledge: bool,
     pub drain_timeout_ms: u64,
     pub max_connections: usize,
     pub request_timeout_ms: u64,
     pub drives: Vec<HttpDriveConfig>,
+    pub disk_cache_budget: Option<DiskCacheBudgetConfig>,
+    pub tidb_metadata_pool_limit: Option<usize>,
+    pub cache_report_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForwardingConfig {
+    pub peers: PathBuf,
+    pub certificate: PathBuf,
+    pub private_key: PathBuf,
+    pub ca: PathBuf,
+    pub redis_url: EnvReference,
+    pub namespace: String,
+    pub bind: std::net::SocketAddr,
+    pub owner: bool,
+    pub refresh_active_routes: bool,
+    pub route_refresh_idle_ttls: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DiskCacheBudgetConfig {
+    pub workers: usize,
+    pub fill_copies: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +393,7 @@ fn parse_config_value(value: &Value, base_dir: &Path) -> Result<ConfigSpec, Conf
             "read_only",
             "empty",
             "allow_other",
+            "fuse_uncached",
             "sqlite_single_host",
             "driver",
             "http",
@@ -370,6 +417,7 @@ fn parse_config_value(value: &Value, base_dir: &Path) -> Result<ConfigSpec, Conf
         read_only: optional_bool(object, "read_only", "config")?,
         empty: optional_bool(object, "empty", "config")?,
         allow_other: optional_bool(object, "allow_other", "config")?,
+        fuse_uncached: optional_bool(object, "fuse_uncached", "config")?,
         sqlite_single_host: optional_bool(object, "sqlite_single_host", "config")?,
         ..ConfigSpec::default()
     };
@@ -398,6 +446,31 @@ fn parse_driver(
     let object = object(value, path)?;
     let kind = required_string(object, "kind", path)?;
     match kind {
+        "remote" => {
+            reject_unknown(
+                object,
+                &["kind", "server", "volume", "token", "timeout_ms"],
+                path,
+            )?;
+            let server = required_string(object, "server", path)?.to_owned();
+            let volume = required_string(object, "volume", path)?.to_owned();
+            mount_rs_remote::RemoteSession::validate_endpoint(&server, &volume)
+                .map_err(|_| ConfigError::at(path, "invalid remote server origin or volume"))?;
+            let timeout_ms = match object.get("timeout_ms") {
+                None => 30_000,
+                Some(value) => value
+                    .as_u64()
+                    .filter(|n| (1..=300_000).contains(n))
+                    .ok_or_else(|| ConfigError::at(path, "timeout_ms must be 1..300000"))?,
+            };
+            spec.remote = Some(RemoteConfig {
+                server,
+                volume,
+                timeout_ms,
+                token: required_env_reference(object, "token", &format!("{path}.token"))?,
+            });
+            spec.driver = Some(DriverChoice::Remote);
+        }
         "memory" => {
             reject_unknown(object, &["kind"], path)?;
             spec.driver = Some(DriverChoice::Memory);
@@ -454,6 +527,72 @@ fn parse_driver(
     Ok(())
 }
 
+fn parse_disk_budget(value: &Value) -> Result<DiskCacheBudgetConfig, ConfigError> {
+    let path = "config.http.disk_cache_budget";
+    let fields = object(value, path)?;
+    reject_unknown(fields, &["workers", "fill_copies"], path)?;
+    let limit = |name: &str| -> Result<usize, ConfigError> {
+        let field = format!("{path}.{name}");
+        let value = fields
+            .get(name)
+            .ok_or_else(|| ConfigError::at(&field, "is required"))?;
+        let value = positive_usize(value, &field)?;
+        if value > 512 {
+            return Err(ConfigError::at(&field, "must be 1..512"));
+        }
+        Ok(value)
+    };
+    Ok(DiskCacheBudgetConfig {
+        workers: limit("workers")?,
+        fill_copies: limit("fill_copies")?,
+    })
+}
+
+fn validate_cache_capacity(value: &Value, drives: &[HttpDriveConfig]) -> Result<(), ConfigError> {
+    let path = "config.http.cache_capacity";
+    let fields = object(value, path)?;
+    reject_unknown(fields, &["ram_bytes", "disk_bytes"], path)?;
+    let limit = |name: &str| -> Result<u64, ConfigError> {
+        fields.get(name).and_then(Value::as_u64).ok_or_else(|| {
+            ConfigError::at(&format!("{path}.{name}"), "must be a non-negative integer")
+        })
+    };
+    let ram_limit = limit("ram_bytes")?;
+    let disk_limit = limit("disk_bytes")?;
+    let mut ram = 0u64;
+    let mut disk = 0u64;
+    for drive in drives {
+        if let Some(storage) = &drive.driver.storage {
+            let ram_bytes = storage
+                .runtime
+                .and_then(|runtime| runtime.block_cache)
+                .map_or(0, |cache| cache.max_bytes);
+            let ram_bytes = u64::try_from(ram_bytes)
+                .map_err(|_| ConfigError::at(path, "RAM capacity overflow"))?;
+            ram = ram
+                .checked_add(ram_bytes)
+                .ok_or_else(|| ConfigError::at(path, "RAM capacity overflow"))?;
+            disk = disk
+                .checked_add(
+                    storage
+                        .disk_cache
+                        .as_ref()
+                        .map_or(0, |cache| cache.max_bytes),
+                )
+                .ok_or_else(|| ConfigError::at(path, "disk capacity overflow"))?;
+        }
+    }
+    if ram > ram_limit || disk > disk_limit {
+        return Err(ConfigError::at(
+            path,
+            format!(
+                "configured cache reservations exceed capacity: RAM {ram}/{ram_limit} bytes, disk {disk}/{disk_limit} bytes"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, ConfigError> {
     let object = object(value, "config.http")?;
     reject_unknown(
@@ -465,9 +604,17 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "max_response_bytes",
             "max_directory_entries",
             "read_chunk_bytes",
+            "tcp_nodelay",
+            "http2_prior_knowledge",
             "drain_timeout_ms",
             "max_connections",
             "request_timeout_ms",
+            "disk_cache_budget",
+            "tidb_metadata_pool_limit",
+            "cache_report_interval_seconds",
+            "remote_sessions",
+            "forwarding",
+            "cache_capacity",
             "drives",
         ],
         "config.http",
@@ -525,12 +672,17 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         .map(|value| positive_u64(value, "config.http.request_timeout_ms"))
         .transpose()?
         .unwrap_or(DEFAULT_HTTP_REQUEST_TIMEOUT_MS);
+    let tcp_nodelay = optional_bool(object, "tcp_nodelay", "config.http")?.unwrap_or(true);
     let drives = object
         .get("drives")
         .ok_or_else(|| ConfigError::at("config.http.drives", "is required"))?
         .as_array()
         .ok_or_else(|| ConfigError::at("config.http.drives", "must be an array"))?;
-    if drives.is_empty() {
+    let forwarding = object
+        .get("forwarding")
+        .map(|value| parse_forwarding(value, base_dir))
+        .transpose()?;
+    if drives.is_empty() && forwarding.is_none() {
         return Err(ConfigError::at(
             "config.http.drives",
             "must contain at least one drive",
@@ -549,17 +701,114 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         }
         parsed_drives.push(parsed);
     }
+    if let Some(capacity) = object.get("cache_capacity") {
+        validate_cache_capacity(capacity, &parsed_drives)?;
+    }
+    let remote_sessions = optional_bool(object, "remote_sessions", "config.http")?.unwrap_or(false);
+    if parsed_drives
+        .iter()
+        .any(|drive| drive.driver.driver != Some(DriverChoice::SplitStore))
+    {
+        let option = if remote_sessions {
+            Some("config.http.remote_sessions")
+        } else if forwarding.as_ref().is_some_and(|config| config.owner) {
+            Some("config.http.forwarding.owner")
+        } else {
+            None
+        };
+        if let Some(option) = option {
+            return Err(ConfigError::at(
+                option,
+                "requires splitstore drivers for every drive",
+            ));
+        }
+    }
     Ok(HttpServiceConfig {
+        forwarding,
+        remote_sessions,
         host,
         port,
         max_request_bytes,
         max_response_bytes,
         max_directory_entries,
         read_chunk_bytes,
+        tcp_nodelay,
+        http2_prior_knowledge: optional_bool(object, "http2_prior_knowledge", "config.http")?
+            .unwrap_or(false),
         drain_timeout_ms,
         max_connections,
         request_timeout_ms,
         drives: parsed_drives,
+        tidb_metadata_pool_limit: object
+            .get("tidb_metadata_pool_limit")
+            .map(|v| positive_usize(v, "config.http.tidb_metadata_pool_limit"))
+            .transpose()?,
+        cache_report_interval_seconds: object
+            .get("cache_report_interval_seconds")
+            .map(|value| positive_u64(value, "config.http.cache_report_interval_seconds"))
+            .transpose()?,
+        disk_cache_budget: object
+            .get("disk_cache_budget")
+            .map(parse_disk_budget)
+            .transpose()?,
+    })
+}
+
+fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, ConfigError> {
+    let path = "config.http.forwarding";
+    let fields = object(value, path)?;
+    reject_unknown(
+        fields,
+        &[
+            "peers",
+            "certificate",
+            "private_key",
+            "ca",
+            "redis_url",
+            "namespace",
+            "bind",
+            "owner",
+            "refresh_active_routes",
+            "route_refresh_idle_ttls",
+        ],
+        path,
+    )?;
+    let namespace = required_string(fields, "namespace", path)?;
+    if namespace.is_empty()
+        || namespace.len() > 256
+        || !namespace
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    {
+        return Err(ConfigError::at(
+            "config.http.forwarding.namespace",
+            "invalid registry namespace",
+        ));
+    }
+    let route_refresh_idle_ttls =
+        optional_u32(fields, "route_refresh_idle_ttls", path)?.unwrap_or(5);
+    if !(1..=60).contains(&route_refresh_idle_ttls) {
+        return Err(ConfigError::at(
+            "config.http.forwarding.route_refresh_idle_ttls",
+            "must be between 1 and 60",
+        ));
+    }
+    Ok(ForwardingConfig {
+        route_refresh_idle_ttls,
+        refresh_active_routes: optional_bool(fields, "refresh_active_routes", path)?
+            .unwrap_or(false),
+        owner: optional_bool(fields, "owner", path)?.unwrap_or(false),
+        peers: required_path(fields, "peers", path, base)?,
+        certificate: required_path(fields, "certificate", path, base)?,
+        private_key: required_path(fields, "private_key", path, base)?,
+        ca: required_path(fields, "ca", path, base)?,
+        redis_url: required_env_reference(fields, "redis_url", path)?,
+        namespace: namespace.to_owned(),
+        bind: required_string(fields, "bind", path)?
+            .parse()
+            .map_err(|_| {
+                ConfigError::at("config.http.forwarding.bind", "invalid UDP socket address")
+            })?,
     })
 }
 
@@ -588,7 +837,8 @@ fn parse_http_drive(
             .ok_or_else(|| ConfigError::at(&format!("{path}.id"), "is required"))?,
         &format!("{path}.id"),
     )?;
-    validate_http_drive_id(&id, &format!("{path}.id"))?;
+    mount_rs_http::DriveConfig::validate_id(&id)
+        .map_err(|error| ConfigError::at(&format!("{path}.id"), error.to_string()))?;
     let token = required_env_reference(object, "token", &format!("{path}.token"))?;
     let driver_value = object
         .get("driver")
@@ -600,23 +850,14 @@ fn parse_http_drive(
         &mut driver,
         &format!("{path}.driver"),
     )?;
-    validate_spec(&driver)?;
-    Ok(HttpDriveConfig { id, token, driver })
-}
-
-fn validate_http_drive_id(id: &str, path: &str) -> Result<(), ConfigError> {
-    if id.is_empty()
-        || id.len() > 64
-        || id
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
-    {
+    if driver.remote.is_some() {
         return Err(ConfigError::at(
             path,
-            "must be 1-64 ASCII letters, digits, '-', '_' or '.'",
+            "remote drivers are mount clients, not HTTP service providers",
         ));
     }
-    Ok(())
+    validate_spec(&driver)?;
+    Ok(HttpDriveConfig { id, token, driver })
 }
 
 fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, ConfigError> {
@@ -633,6 +874,12 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
             "ownership_mode",
             "checkout_path",
             "owner",
+            "atime",
+            "verify_backing_blocks",
+            "block_cache",
+            "disk_cache",
+            "read_parallelism",
+            "read_lease_cache_window_ms",
         ],
         "config.driver.storage",
     )?;
@@ -813,7 +1060,146 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
     if let Some(owner) = &owner {
         validate_owner(owner)?;
     }
+    let atime_policy = match object
+        .get("atime")
+        .map(|value| required_value_string(value, "config.driver.storage.atime"))
+        .transpose()?
+        .as_deref()
+    {
+        Some("strict") => AtimePolicy::Strict,
+        None | Some("noatime") => AtimePolicy::NoAtime,
+        Some(_) => {
+            return Err(ConfigError::at(
+                "config.driver.storage.atime",
+                "must be strict or noatime",
+            ));
+        }
+    };
+    // Owner-serving runtime policies are exclusive-ownership only. Shared
+    // and concurrent modes keep their own lease and atime semantics.
+    let exclusive = !concurrent_writes && !delegated;
+    if !exclusive {
+        for key in [
+            "atime",
+            "verify_backing_blocks",
+            "block_cache",
+            "disk_cache",
+            "read_parallelism",
+            "read_lease_cache_window_ms",
+        ] {
+            if object.contains_key(key) {
+                return Err(ConfigError::at(
+                    &format!("config.driver.storage.{key}"),
+                    "requires exclusive ownership (no concurrent_writes or shared ownership_mode)",
+                ));
+            }
+        }
+    }
+    let runtime_lease_ttl_ms = lease_ttl_ms.unwrap_or(240_000);
+    let lease_ttl = std::time::Duration::from_millis(runtime_lease_ttl_ms);
+    let window_ms = match object.get("read_lease_cache_window_ms") {
+        // Default to 60 s, capped at a quarter of the lease; leases too short
+        // for a 20 ms window fall back to per-operation renewal.
+        None => match (runtime_lease_ttl_ms / 4).min(60_000) {
+            window if window < 20 => 0,
+            window => window,
+        },
+        Some(value) => value.as_u64().ok_or_else(|| {
+            ConfigError::at(
+                "config.driver.storage.read_lease_cache_window_ms",
+                "must be a nonnegative integer",
+            )
+        })?,
+    };
+    if window_ms != 0 && (window_ms < 20 || window_ms > runtime_lease_ttl_ms / 4) {
+        return Err(ConfigError::at(
+            "config.driver.storage.read_lease_cache_window_ms",
+            "must be zero or at least 20ms and at most one quarter of lease_ttl_ms",
+        ));
+    }
+    let read_lease_cache_window = std::time::Duration::from_millis(window_ms);
+    let block_cache = object
+        .get("block_cache")
+        .map(|value| {
+            let path = "config.driver.storage.block_cache";
+            let fields = value
+                .as_object()
+                .ok_or_else(|| ConfigError::at(path, "must be an object"))?;
+            reject_unknown(fields, &["max_bytes", "max_entries"], path)?;
+            let limit = |name: &str| {
+                positive_usize(
+                    fields
+                        .get(name)
+                        .ok_or_else(|| ConfigError::at(path, format!("{name} is missing")))?,
+                    &format!("{path}.{name}"),
+                )
+            };
+            Ok::<_, ConfigError>(BlockCacheOptions {
+                max_bytes: limit("max_bytes")?,
+                max_entries: limit("max_entries")?,
+            })
+        })
+        .transpose()?;
+    let disk_cache = object
+        .get("disk_cache")
+        .map(|value| {
+            let path = "config.driver.storage.disk_cache";
+            let fields = value
+                .as_object()
+                .ok_or_else(|| ConfigError::at(path, "must be an object"))?;
+            reject_unknown(fields, &["root", "scope", "max_bytes", "max_entries"], path)?;
+            let scope = required_string(fields, "scope", path)?;
+            if scope.is_empty() {
+                return Err(ConfigError::at(path, "scope must not be empty"));
+            }
+            let limit = |key: &str| {
+                positive_usize(
+                    fields
+                        .get(key)
+                        .ok_or_else(|| ConfigError::at(path, format!("{key} is missing")))?,
+                    &format!("{path}.{key}"),
+                )
+            };
+            let max_bytes = limit("max_bytes")? as u64;
+            if max_bytes < 80 {
+                return Err(ConfigError::at(path, "max_bytes must be at least 80"));
+            }
+            Ok(DiskCacheOptions {
+                root: required_path(fields, "root", path, base_dir)?,
+                scope: scope.to_owned(),
+                max_bytes,
+                max_entries: limit("max_entries")?,
+            })
+        })
+        .transpose()?;
     Ok(SplitStorageConfig {
+        verify_backing_blocks: optional_bool(
+            object,
+            "verify_backing_blocks",
+            "config.driver.storage",
+        )?
+        .unwrap_or(false),
+        disk_cache,
+        runtime: exclusive.then_some(SplitRuntimeOptions {
+            read_parallelism: {
+                let value = object
+                    .get("read_parallelism")
+                    .map(|value| positive_usize(value, "config.driver.storage.read_parallelism"))
+                    .transpose()?
+                    .unwrap_or(1);
+                if value != 1 {
+                    return Err(ConfigError::at(
+                        "config.driver.storage.read_parallelism",
+                        "must be 1; parallel block reads are not supported",
+                    ));
+                }
+                value
+            },
+            lease_ttl,
+            atime_policy,
+            read_lease_cache_window,
+            block_cache,
+        }),
         metadata,
         blocks,
         chunk_size_bytes,
@@ -839,6 +1225,15 @@ fn parse_provider(
         "memory" => {
             reject_unknown(object, &["kind"], path)?;
             StorageProvider::Memory
+        }
+        "local" => {
+            if !block_role {
+                return Err(ConfigError::at(path, "provider 'local' is block-only"));
+            }
+            reject_unknown(object, &["kind", "path"], path)?;
+            StorageProvider::Local {
+                path: required_path(object, "path", path, base_dir)?,
+            }
         }
         "sqlite" => {
             reject_unknown(object, &["kind", "path"], path)?;
@@ -1108,6 +1503,7 @@ fn has_native_fields(spec: &ConfigSpec) -> bool {
         || spec.read_only.is_some()
         || spec.empty.is_some()
         || spec.allow_other.is_some()
+        || spec.fuse_uncached.is_some()
         || spec.sqlite_single_host.is_some()
         || spec.driver.is_some()
         || spec.root.is_some()
@@ -1141,6 +1537,9 @@ fn apply_explicit_overrides(resolved: &mut CliOptions, raw: &CliOptions) {
     if overrides.empty {
         resolved.empty = raw.empty;
     }
+    if overrides.fuse_uncached {
+        resolved.fuse_uncached = raw.fuse_uncached;
+    }
     if overrides.allow_other {
         resolved.allow_other = raw.allow_other;
     }
@@ -1162,6 +1561,22 @@ fn apply_explicit_overrides(resolved: &mut CliOptions, raw: &CliOptions) {
 }
 
 pub(crate) fn validate_resolved_options(options: &CliOptions) -> Result<(), ConfigError> {
+    if (options.driver == DriverChoice::Remote) != options.remote.is_some() {
+        return Err(ConfigError::new(
+            "remote driver requires remote configuration and cannot be overridden with another driver",
+        ));
+    }
+    if options.remote.is_some()
+        && (options.root.is_some()
+            || options.database.is_some()
+            || options.blocks.is_some()
+            || options.storage.is_some()
+            || options.sqlite_single_host)
+    {
+        return Err(ConfigError::new(
+            "remote driver cannot include local storage or SQLite settings",
+        ));
+    }
     if options
         .storage
         .as_ref()
@@ -1245,6 +1660,12 @@ pub(crate) fn validate_resolved_options(options: &CliOptions) -> Result<(), Conf
         ));
     }
 
+    if options.fuse_uncached && options.transport != TransportChoice::Fuse {
+        return Err(ConfigError::new(
+            "--fuse-uncached requires --transport fuse",
+        ));
+    }
+
     if options.sqlite_single_host
         && matches!(
             options.transport,
@@ -1280,6 +1701,7 @@ impl ConfigSpec {
             read_only: self.read_only.unwrap_or(false),
             empty: self.empty.unwrap_or(false),
             allow_other: self.allow_other.unwrap_or(false),
+            fuse_uncached: self.fuse_uncached.unwrap_or(false),
             sqlite_single_host: self.sqlite_single_host.unwrap_or(false),
             driver: self.driver.unwrap_or(DriverChoice::Memory),
             root: self.root.clone(),
@@ -1289,6 +1711,7 @@ impl ConfigSpec {
             root_gid: self.root_gid,
             config: None,
             storage: self.storage.clone().map(Box::new),
+            remote: self.remote.clone().map(Box::new),
             overrides: CliOverrides::default(),
         }
     }
@@ -1819,6 +2242,164 @@ mod tests {
                     .message()
                     .contains("inode_updates")
             );
+        }
+    }
+
+    #[test]
+    fn split_defaults_to_noatime_with_explicit_strict_override() {
+        let config = parse_config_str(SPLIT_MEMORY, Path::new(".")).unwrap();
+        assert_eq!(
+            config.storage.unwrap().runtime.unwrap().atime_policy,
+            AtimePolicy::NoAtime
+        );
+        let mut source: serde_json::Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        source["driver"]["storage"]["atime"] = serde_json::json!("strict");
+        let config = parse_config_str(&source.to_string(), Path::new(".")).unwrap();
+        assert_eq!(
+            config.storage.unwrap().runtime.unwrap().atime_policy,
+            AtimePolicy::Strict
+        );
+    }
+
+    #[test]
+    fn tidb_cache_config_is_static_and_strictly_validated() {
+        let source = serde_json::json!({"version": 1, "driver": {"kind": "splitstore", "storage": {
+            "metadata": {"kind": "tidb", "connection": {"env": "MOUNT_RS_TIDB_URL"}, "volume_key": "audit", "durable": true},
+            "blocks": {"kind": "memory"}, "atime": "noatime",
+            "block_cache": {"max_bytes": 1048576, "max_entries": 128}
+        }}});
+        let config = parse_config_str(&source.to_string(), Path::new(".")).unwrap();
+        let storage = config.storage.unwrap();
+        assert!(matches!(
+            storage.metadata,
+            StorageProvider::Tidb { durable: true, .. }
+        ));
+        let mut normalized = source.clone();
+        normalized["driver"]["storage"]["metadata"]["normalized"] = serde_json::json!(true);
+        assert!(parse_config_str(&normalized.to_string(), Path::new(".")).is_err());
+        assert_eq!(storage.runtime.unwrap().atime_policy, AtimePolicy::NoAtime);
+        assert_eq!(
+            storage.runtime.unwrap().block_cache.unwrap().max_entries,
+            128
+        );
+        let mut invalid = source.clone();
+        invalid["driver"]["storage"]["block_cache"]["max_bytes"] = serde_json::json!(0);
+        assert!(parse_config_str(&invalid.to_string(), Path::new(".")).is_err());
+        invalid = source.clone();
+        invalid["driver"]["storage"]["atime"] = serde_json::json!("lazy");
+        assert!(parse_config_str(&invalid.to_string(), Path::new(".")).is_err());
+        invalid = source;
+        invalid["driver"]["storage"]["metadata"]["connection"] =
+            serde_json::json!("mysql://secret");
+        let error = parse_config_str(&invalid.to_string(), Path::new(".")).unwrap_err();
+        assert!(!error.to_string().contains("mysql://secret"));
+    }
+
+    #[test]
+    fn disk_cache_has_explicit_scope_bounds_and_config_relative_root() {
+        let mut source: Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        source["driver"]["storage"]["disk_cache"] = serde_json::json!({"root":"cache","scope":"volume-generation","max_bytes":4096,"max_entries":8});
+        let parsed = parse_config_str(&source.to_string(), Path::new("/config-root")).unwrap();
+        let disk = parsed.storage.unwrap().disk_cache.unwrap();
+        assert_eq!(disk.root, Path::new("/config-root/cache"));
+        assert_eq!(disk.scope, "volume-generation");
+        for (field, value) in [
+            ("max_bytes", serde_json::json!(79)),
+            ("max_entries", serde_json::json!(0)),
+            ("scope", serde_json::json!("")),
+            ("extra", serde_json::json!(true)),
+        ] {
+            let mut invalid = source.clone();
+            invalid["driver"]["storage"]["disk_cache"][field] = value;
+            assert!(parse_config_str(&invalid.to_string(), Path::new(".")).is_err());
+        }
+    }
+
+    #[test]
+    fn owner_serving_window_has_explicit_safe_bounds() {
+        let source: Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        let runtime = parse_config_str(&source.to_string(), Path::new("."))
+            .unwrap()
+            .storage
+            .unwrap()
+            .runtime
+            .unwrap();
+        assert_eq!(runtime.lease_ttl, std::time::Duration::from_secs(240));
+        assert_eq!(runtime.read_parallelism, 1);
+        assert_eq!(
+            runtime.read_lease_cache_window,
+            std::time::Duration::from_secs(60)
+        );
+        for ms in [0, 20, 5000, 7500, 60000] {
+            let mut config = source.clone();
+            config["driver"]["storage"]["read_lease_cache_window_ms"] = serde_json::json!(ms);
+            assert_eq!(
+                parse_config_str(&config.to_string(), Path::new("."))
+                    .unwrap()
+                    .storage
+                    .unwrap()
+                    .runtime
+                    .unwrap()
+                    .read_lease_cache_window,
+                std::time::Duration::from_millis(ms)
+            );
+        }
+        for (ttl_ms, window_ms, valid) in [
+            (240_000, 60_000, true),
+            (239_999, 60_000, false),
+            (30_000, 7_500, true),
+            (30_000, 7_501, false),
+            (0, 0, false),
+        ] {
+            let mut config = source.clone();
+            config["driver"]["storage"]["lease_ttl_ms"] = serde_json::json!(ttl_ms);
+            config["driver"]["storage"]["read_lease_cache_window_ms"] =
+                serde_json::json!(window_ms);
+            assert_eq!(
+                parse_config_str(&config.to_string(), Path::new(".")).is_ok(),
+                valid
+            );
+        }
+        for invalid in [
+            serde_json::json!(1),
+            serde_json::json!(19),
+            serde_json::json!(60001),
+            serde_json::json!(-1),
+            serde_json::json!(20.5),
+            serde_json::json!("5000"),
+        ] {
+            let mut config = source.clone();
+            config["driver"]["storage"]["read_lease_cache_window_ms"] = invalid;
+            assert!(parse_config_str(&config.to_string(), Path::new(".")).is_err());
+        }
+    }
+
+    #[test]
+    fn read_parallelism_is_explicit_and_bounded() {
+        let source: Value = serde_json::from_str(SPLIT_MEMORY).unwrap();
+        for value in [
+            serde_json::json!(1),
+            serde_json::json!(4),
+            serde_json::json!(0),
+            serde_json::json!(5),
+            serde_json::json!("4"),
+        ] {
+            let mut config = source.clone();
+            config["driver"]["storage"]["read_parallelism"] = value.clone();
+            let result = parse_config_str(&config.to_string(), Path::new("."));
+            match value.as_u64() {
+                Some(1) => assert_eq!(
+                    result
+                        .unwrap()
+                        .storage
+                        .unwrap()
+                        .runtime
+                        .unwrap()
+                        .read_parallelism,
+                    1
+                ),
+                _ => assert!(result.is_err()),
+            }
         }
     }
 
@@ -2723,6 +3304,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(spec.storage.as_ref().unwrap().lease_ttl_ms, Some(120_000));
+        assert_eq!(
+            spec.storage
+                .as_ref()
+                .unwrap()
+                .runtime
+                .unwrap()
+                .read_lease_cache_window,
+            std::time::Duration::from_secs(30)
+        );
 
         let error = parse_config_str(
             r#"{
@@ -2807,6 +3397,121 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_cache_capacity_reserves_all_drives_before_opening() {
+        let drive = |id: &str| {
+            serde_json::json!({"id":id,"token":{"env":"TEST_TOKEN"},
+            "driver":{"kind":"splitstore","storage":{
+                "metadata":{"kind":"memory"},"blocks":{"kind":"memory"},
+                "block_cache":{"max_bytes":1024,"max_entries":8},
+                "disk_cache":{"root":".","scope":id,"max_bytes":2048,"max_entries":8}
+            }}})
+        };
+        let mut source = serde_json::json!({"version":1,"http":{
+            "cache_capacity":{"ram_bytes":2048,"disk_bytes":4096},
+            "drives":[drive("a"),drive("b")]
+        }});
+        assert!(parse_config_str(&source.to_string(), Path::new(".")).is_ok());
+        for limits in [
+            serde_json::json!({"ram_bytes":2047,"disk_bytes":4096}),
+            serde_json::json!({"ram_bytes":2048,"disk_bytes":4095}),
+            serde_json::json!({"ram_bytes":2048}),
+            serde_json::json!({"ram_bytes":-1,"disk_bytes":4096}),
+            serde_json::json!({"ram_bytes":2048,"disk_bytes":4096,"extra":1}),
+        ] {
+            source["http"]["cache_capacity"] = limits;
+            assert!(parse_config_str(&source.to_string(), Path::new(".")).is_err());
+        }
+        source["http"]["cache_capacity"] =
+            serde_json::json!({"ram_bytes":u64::MAX,"disk_bytes":u64::MAX});
+        for index in 0..2 {
+            source["http"]["drives"][index]["driver"]["storage"]["disk_cache"]["max_bytes"] =
+                serde_json::json!(u64::MAX);
+        }
+        assert!(parse_config_str(&source.to_string(), Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn ingress_only_config_resolves_peer_files_and_requires_redis_env_reference() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let base = Path::new("/etc/mount-rs");
+        let config = parse_config_str(&source.to_string(), base)
+            .unwrap()
+            .http
+            .unwrap();
+        assert!(config.drives.is_empty());
+        assert_eq!(config.forwarding.unwrap().peers, base.join("peers.json"));
+        source["http"]["forwarding"]["redis_url"] = serde_json::json!("redis://localhost/");
+        assert!(parse_config_str(&source.to_string(), base).is_err());
+        source["http"].as_object_mut().unwrap().remove("forwarding");
+        assert!(parse_config_str(&source.to_string(), base).is_err());
+    }
+
+    #[test]
+    fn route_refresh_idle_window_defaults_to_five_ttls_and_is_bounded() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod",
+            "refresh_active_routes":true
+        }}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new(".")).map(|config| {
+                config
+                    .http
+                    .unwrap()
+                    .forwarding
+                    .unwrap()
+                    .route_refresh_idle_ttls
+            })
+        };
+        assert_eq!(parse(&source).unwrap(), 5);
+        source["http"]["forwarding"]["route_refresh_idle_ttls"] = 25.into();
+        assert_eq!(parse(&source).unwrap(), 25);
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(61),
+            serde_json::json!("25"),
+        ] {
+            source["http"]["forwarding"]["route_refresh_idle_ttls"] = invalid;
+            assert!(parse(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn shared_disk_budget_is_explicit_and_bounded() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[{
+            "id":"memory","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}
+        }]}});
+        assert!(
+            parse_config_str(&source.to_string(), Path::new("."))
+                .unwrap()
+                .http
+                .unwrap()
+                .disk_cache_budget
+                .is_none()
+        );
+        source["http"]["disk_cache_budget"] = serde_json::json!({"workers":8,"fill_copies":4});
+        let budget = parse_config_str(&source.to_string(), Path::new("."))
+            .unwrap()
+            .http
+            .unwrap()
+            .disk_cache_budget
+            .unwrap();
+        assert_eq!((budget.workers, budget.fill_copies), (8, 4));
+        for invalid in [
+            serde_json::json!({"workers":0,"fill_copies":4}),
+            serde_json::json!({"workers":513,"fill_copies":4}),
+            serde_json::json!({"workers":8}),
+            serde_json::json!({"workers":8,"fill_copies":4,"extra":1}),
+        ] {
+            source["http"]["disk_cache_budget"] = invalid;
+            assert!(parse_config_str(&source.to_string(), Path::new(".")).is_err());
+        }
+    }
+
+    #[test]
     fn http_config_reuses_driver_shapes_for_multiple_named_drives() {
         let spec = parse_config_str(
             r#"{
@@ -2849,6 +3554,8 @@ mod tests {
         assert_eq!(http.max_response_bytes, 8192);
         assert_eq!(http.max_directory_entries, 12);
         assert_eq!(http.read_chunk_bytes, 1024);
+        assert!(http.tcp_nodelay);
+        assert!(!http.http2_prior_knowledge);
         assert_eq!(http.drain_timeout_ms, 250);
         assert_eq!(http.max_connections, 12);
         assert_eq!(http.request_timeout_ms, 750);
@@ -2859,6 +3566,32 @@ mod tests {
             Some("/tmp/config/state/sqlite.db".into())
         );
         assert_eq!(http.drives[1].driver.root_uid, Some(501));
+    }
+
+    #[test]
+    fn http_owner_requires_splitstore_before_opening_any_drives() {
+        let mut value = serde_json::json!({
+            "forwarding": {"peers":"peers.json", "certificate":"peer.pem", "private_key":"peer.key",
+                "ca":"ca.pem", "redis_url":{"env":"TEST_REDIS"}, "namespace":"test",
+                "bind":"127.0.0.1:0", "owner":true},
+            "drives":[{"id":"volume", "token":{"env":"TEST_TOKEN"}, "driver":{"kind":"memory"}}]
+        });
+        let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+        assert!(error.to_string().contains("config.http.forwarding.owner"));
+        value["forwarding"]["owner"] = false.into();
+        assert!(parse_http(&value, Path::new("/tmp")).is_ok());
+    }
+
+    #[test]
+    fn http_tcp_nodelay_override_requires_boolean() {
+        let mut value = serde_json::json!({
+            "tcp_nodelay": false,
+            "drives": [{"id":"memory", "token":{"env":"TEST_TOKEN"},
+                "driver":{"kind":"memory"}}]
+        });
+        assert!(!parse_http(&value, Path::new("/tmp")).unwrap().tcp_nodelay);
+        value["tcp_nodelay"] = serde_json::json!("false");
+        assert!(parse_http(&value, Path::new("/tmp")).is_err());
     }
 
     #[test]
@@ -2878,19 +3611,13 @@ mod tests {
         .unwrap_err();
         assert!(duplicate.message().contains("duplicates another"));
 
-        let unsafe_id = parse_config_str(
-            r#"{
-                "version": 1,
-                "http": {
-                    "drives": [
-                        {"id": "../escape", "token": {"env": "TOKEN"}, "driver": {"kind": "memory"}}
-                    ]
-                }
-            }"#,
-            Path::new("/tmp"),
-        )
-        .unwrap_err();
-        assert!(unsafe_id.message().contains("1-64 ASCII"));
+        for id in [".", "..", "../escape"] {
+            let config = serde_json::json!({"version": 1, "http": {"drives": [{
+                "id": id, "token": {"env": "TOKEN"}, "driver": {"kind": "memory"}
+            }]}});
+            let error = parse_config_str(&config.to_string(), Path::new("/tmp")).unwrap_err();
+            assert!(error.message().contains("1-64 ASCII"));
+        }
     }
 
     #[test]
@@ -2937,5 +3664,108 @@ mod tests {
         let error = resolve_cli_options(raw).unwrap_err();
         assert!(error.message().contains("serve-http"));
         let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn uncached_fuse_requires_explicit_fuse_and_preserves_config_merge() {
+        for transport in ["auto", "nfs", "9p"] {
+            assert!(parse_args(["mount-rs", "--fuse-uncached", "--transport", transport]).is_err());
+        }
+        let parsed = parse_args(["mount-rs", "--fuse-uncached", "--transport", "fuse"]).unwrap();
+        let Command::Mount(options) = parsed else {
+            panic!("expected mount")
+        };
+        assert!(options.fuse_uncached);
+        assert!(
+            parse_config_str(
+                r#"{"version":1,"transport":"fuse","fuse_uncached":"yes"}"#,
+                Path::new("/tmp")
+            )
+            .is_err()
+        );
+        let incompatible = parse_config_str(
+            r#"{"version":1,"transport":"nfs","fuse_uncached":true}"#,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        assert!(validate_resolved_options(&incompatible.to_options()).is_err());
+        let spec = parse_config_str(
+            r#"{"version":1,"transport":"fuse","fuse_uncached":true}"#,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        assert!(spec.to_options().fuse_uncached);
+        let path =
+            std::env::temp_dir().join(format!("fuse-uncached-{}.json", unique_default_owner()));
+        std::fs::write(
+            &path,
+            r#"{"version":1,"transport":"fuse","fuse_uncached":false}"#,
+        )
+        .unwrap();
+        let parsed = parse_args([
+            "mount-rs",
+            "--config",
+            path.to_str().unwrap(),
+            "--fuse-uncached",
+        ])
+        .unwrap();
+        let Command::Mount(options) = parsed else {
+            panic!("expected mount")
+        };
+        let result = resolve_cli_options(options);
+        std::fs::remove_file(path).unwrap();
+        assert!(result.unwrap().fuse_uncached);
+    }
+    #[test]
+    fn remote_configuration_is_static_and_credential_reference_only() {
+        let spec = parse_config_str(r#"{"version":1,"driver":{"kind":"remote","server":"https://mount.example","volume":"drive-1","token":{"env":"MOUNT_CLIENT_TOKEN"}}}"#, Path::new(".")).unwrap();
+        let options = spec.to_options();
+        validate_resolved_options(&options).unwrap();
+        assert_eq!(options.driver, DriverChoice::Remote);
+        assert_eq!(options.remote.as_ref().unwrap().timeout_ms, 30_000);
+        let mut mixed = options.clone();
+        mixed.database = Some("local.db".into());
+        assert!(validate_resolved_options(&mixed).is_err());
+        mixed = options;
+        mixed.driver = DriverChoice::Memory;
+        assert!(validate_resolved_options(&mixed).is_err());
+        for driver in [
+            r#"{"kind":"remote","server":"https://mount.example","volume":"drive","token":"secret"}"#,
+            r#"{"kind":"remote","server":"http://mount.example","volume":"drive","token":{"env":"TOKEN"}}"#,
+            r#"{"kind":"remote","server":"https://mount.example","volume":"../drive","token":{"env":"TOKEN"}}"#,
+            r#"{"kind":"remote","server":"https://mount.example","volume":"drive","token":{"env":"TOKEN"},"timeout_ms":0}"#,
+            r#"{"kind":"remote","server":"https://mount.example","volume":"drive","token":{"env":"TOKEN"},"storage":{}}"#,
+        ] {
+            assert!(
+                parse_config_str(
+                    &format!("{{\"version\":1,\"driver\":{driver}}}"),
+                    Path::new(".")
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn remote_http_sessions_require_explicit_splitstore_configuration() {
+        let mut value = serde_json::json!({
+            "remote_sessions": true,
+            "drives": [{"id":"volume", "token":{"env":"TOKEN"}, "driver":{"kind":"memory"}}]
+        });
+        assert!(parse_http(&value, Path::new("/tmp")).is_err());
+        value["drives"][0]["driver"] = serde_json::json!({"kind":"splitstore", "storage":{
+            "metadata":{"kind":"memory"},"blocks":{"kind":"memory"}
+        }});
+        assert!(
+            parse_http(&value, Path::new("/tmp"))
+                .unwrap()
+                .remote_sessions
+        );
+        value["remote_sessions"] = serde_json::json!("true");
+        assert!(parse_http(&value, Path::new("/tmp")).is_err());
+        value.as_object_mut().unwrap().remove("remote_sessions");
+        assert!(
+            !parse_http(&value, Path::new("/tmp"))
+                .unwrap()
+                .remote_sessions
+        );
     }
 }

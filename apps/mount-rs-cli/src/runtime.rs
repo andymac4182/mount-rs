@@ -12,9 +12,7 @@ use std::time::Duration;
 use mount_rs_auto::{AutoMount, AutoMountError, AutoMountOptions, AutoTransport};
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, Loopback, Result as FsResult};
-use mount_rs_http::{
-    DriveConfig as HttpDriveConfig, DriveRegistry, HttpServer, HttpServerError, HttpServerOptions,
-};
+use mount_rs_http::{DriveConfig as HttpDriveConfig, DriveRegistry, HttpServerOptions};
 #[cfg(feature = "observability")]
 use mount_rs_observability::{Telemetry, set_global as set_global_telemetry};
 use mount_rs_sdk::{
@@ -68,7 +66,7 @@ impl Display for CliError {
 
 impl std::error::Error for CliError {}
 
-/// A Ctrl-C listener whose registration is completed before native mount
+/// A Ctrl-C (or, on Unix, SIGTERM) listener whose registration is completed before native mount
 /// readiness can be reported. Tokio installs the process signal handler on the
 /// first poll of `signal::ctrl_c`; merely constructing the future is not
 /// sufficient for a caller that may receive SIGINT during mount startup.
@@ -77,10 +75,31 @@ pub(crate) struct CtrlCHandler {
     pending_signal: bool,
 }
 
+type ShutdownFuture = Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
+
+/// Resolve on Ctrl-C, or on SIGTERM where supported, so supervised servers
+/// drain sessions and release ownership leases before exiting.
+fn shutdown_signal() -> Result<ShutdownFuture, CliError> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate()).map_err(io_error)?;
+        Ok(Box::pin(async move {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result,
+                _ = terminate.recv() => Ok(()),
+            }
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Box::pin(tokio::signal::ctrl_c()))
+    }
+}
+
 impl CtrlCHandler {
     pub(crate) async fn install() -> Result<Self, CliError> {
-        let mut signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>> =
-            Box::pin(tokio::signal::ctrl_c());
+        let mut signal = shutdown_signal()?;
         let received = poll_signal_registration(signal.as_mut()).await?;
         if received {
             return Err(CliError::runtime(
@@ -102,8 +121,7 @@ impl CtrlCHandler {
     }
 
     async fn rearm(&mut self) -> Result<(), CliError> {
-        let mut signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>> =
-            Box::pin(tokio::signal::ctrl_c());
+        let mut signal = shutdown_signal()?;
         // Poll once before reporting that another Ctrl-C can be received.
         // A signal during registration remains ready for the next wait.
         let received = poll_signal_registration(signal.as_mut()).await?;
@@ -149,14 +167,75 @@ impl From<FsError> for CliError {
 
 #[derive(Clone)]
 pub(crate) struct DriverRuntime {
-    filesystem: Filesystem,
+    backend: Backend,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
 }
 
+#[derive(Clone)]
+enum Backend {
+    Local(Arc<Filesystem>),
+    Remote(Arc<RemoteRuntime>),
+}
+
+/// A remote HTTP session client plus the keepalive worker that holds its
+/// server-side session open.
+struct RemoteRuntime {
+    filesystem: mount_rs_remote::RemoteFs,
+    stop: tokio::sync::watch::Sender<bool>,
+    worker: tokio::sync::Mutex<Option<tokio::task::JoinHandle<FsResult<()>>>>,
+}
+
+impl RemoteRuntime {
+    fn new(filesystem: mount_rs_remote::RemoteFs) -> Self {
+        let (stop, receiver) = tokio::sync::watch::channel(false);
+        let worker_fs = filesystem.clone();
+        let worker = tokio::spawn(async move { worker_fs.run_keepalive(receiver).await });
+        Self {
+            filesystem,
+            stop,
+            worker: tokio::sync::Mutex::new(Some(worker)),
+        }
+    }
+
+    async fn shutdown(&self) -> FsResult<()> {
+        let _ = self.stop.send(true);
+        let mut worker = self.worker.lock().await;
+        let result = match worker.as_mut() {
+            Some(task) => task
+                .await
+                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("keepalive"))
+                .and_then(|result| result),
+            None => Ok(()),
+        };
+        worker.take();
+        // Cleanup is attempted even when refreshing failed. Keep the handle in
+        // the mutex until joined so cancellation cannot detach a running task.
+        let close = self.filesystem.shutdown().await;
+        result.and(close)
+    }
+}
+
+impl Drop for RemoteRuntime {
+    fn drop(&mut self) {
+        let _ = self.stop.send(true);
+        if let Some(worker) = self.worker.get_mut().take() {
+            worker.abort();
+        }
+        // Unexpected drop cannot await session cleanup; server expiry owns it.
+    }
+}
+
+/// Optional process-shared resources for HTTP-served split stores.
+#[derive(Default)]
+struct SharedResources {
+    disk_budget: Option<mount_rs_sdk::DiskCacheBudget>,
+    metadata_pool: Option<mount_rs_sdk::TidbStorePool>,
+}
+
 impl DriverRuntime {
     pub(crate) async fn open(options: &CliOptions, uid: u32, gid: u32) -> Result<Self, CliError> {
-        Self::open_with_block_decorator(options, uid, gid, None).await
+        Self::open_inner(options, uid, gid, None, SharedResources::default()).await
     }
 
     pub(crate) async fn open_with_block_decorator(
@@ -165,9 +244,37 @@ impl DriverRuntime {
         gid: u32,
         decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
     ) -> Result<Self, CliError> {
+        Self::open_inner(options, uid, gid, decorator, SharedResources::default()).await
+    }
+
+    async fn open_inner(
+        options: &CliOptions,
+        uid: u32,
+        gid: u32,
+        decorator: Option<&dyn mount_rs_sdk::BlockStoreDecorator>,
+        shared: SharedResources,
+    ) -> Result<Self, CliError> {
         #[cfg(feature = "observability")]
         let telemetry = mount_rs_observability::global();
+        if let Some(remote) = &options.remote {
+            let credential = resolve_storage_env(&remote.token)?;
+            let filesystem = mount_rs_remote::RemoteFs::connect(
+                &remote.server,
+                &remote.volume,
+                &credential,
+                Duration::from_millis(remote.timeout_ms),
+            )
+            .await?;
+            return Ok(Self {
+                backend: Backend::Remote(Arc::new(RemoteRuntime::new(filesystem))),
+                #[cfg(feature = "observability")]
+                telemetry,
+            });
+        }
         let filesystem = match options.driver {
+            DriverChoice::Remote => {
+                return Err(CliError::usage("remote driver requires configuration"));
+            }
             DriverChoice::Memory => Filesystem::memory(MemoryOptions {
                 uid,
                 gid,
@@ -194,12 +301,47 @@ impl DriverRuntime {
                 Filesystem::sqlite(expand_path(database)).await?
             }
             DriverChoice::SplitStore => {
-                let split = split_options(options, uid, gid)?;
-                match decorator {
-                    Some(decorator) => {
+                let mut split = split_options(options, uid, gid)?;
+                if let (
+                    Some(pool),
+                    StoreConfig::Tidb {
+                        volume_key,
+                        durable,
+                        ..
+                    },
+                ) = (shared.metadata_pool, &split.metadata)
+                {
+                    split.metadata = StoreConfig::TidbShared {
+                        pool,
+                        volume_key: volume_key.clone(),
+                        durable: *durable,
+                    };
+                }
+                let storage = options.storage.as_deref();
+                let runtime = storage.and_then(|storage| storage.runtime);
+                match (decorator, runtime) {
+                    (Some(decorator), _) => {
                         Filesystem::split_with_block_decorator(split, decorator).await?
                     }
-                    None => Filesystem::split(split).await?,
+                    (None, None) => Filesystem::split(split).await?,
+                    (None, Some(policies)) => {
+                        let storage = storage.expect("runtime policies come from storage");
+                        let budget = shared.disk_budget.unwrap_or_default();
+                        if storage.verify_backing_blocks {
+                            Filesystem::split_with_verified_blocks(
+                                split,
+                                policies,
+                                storage.disk_cache.clone(),
+                                budget,
+                            )
+                            .await?
+                        } else if let Some(cache) = storage.disk_cache.clone() {
+                            Filesystem::split_with_disk_cache_budget(split, policies, cache, budget)
+                                .await?
+                        } else {
+                            Filesystem::split_with_runtime(split, policies).await?
+                        }
+                    }
                 }
             }
         };
@@ -218,30 +360,45 @@ impl DriverRuntime {
             configure_sqlite_root_owner(&driver, options, uid, gid).await?;
         }
         Ok(Self {
-            filesystem,
+            backend: Backend::Local(Arc::new(filesystem)),
             #[cfg(feature = "observability")]
             telemetry,
         })
     }
 
     pub(crate) fn driver(&self) -> Arc<dyn FsDriver> {
-        #[cfg(feature = "observability")]
-        {
-            self.filesystem
-                .driver_with_telemetry(self.telemetry.clone())
-        }
-        #[cfg(not(feature = "observability"))]
-        {
-            self.filesystem.driver()
+        match &self.backend {
+            Backend::Remote(remote) => Arc::new(remote.filesystem.clone()),
+            Backend::Local(filesystem) => {
+                #[cfg(feature = "observability")]
+                {
+                    filesystem.driver_with_telemetry(self.telemetry.clone())
+                }
+                #[cfg(not(feature = "observability"))]
+                {
+                    filesystem.driver()
+                }
+            }
         }
     }
 
     pub(crate) async fn shutdown(&self) -> FsResult<()> {
-        self.filesystem.shutdown().await
+        match &self.backend {
+            Backend::Local(filesystem) => filesystem.shutdown().await,
+            Backend::Remote(remote) => remote.shutdown().await,
+        }
+    }
+
+    fn local(&self) -> Option<&Arc<Filesystem>> {
+        match &self.backend {
+            Backend::Local(filesystem) => Some(filesystem),
+            Backend::Remote(_) => None,
+        }
     }
 
     fn is_memory(&self) -> bool {
-        self.filesystem.kind() == FilesystemKind::Memory
+        self.local()
+            .is_some_and(|filesystem| filesystem.kind() == FilesystemKind::Memory)
     }
 
     #[cfg(feature = "observability")]
@@ -311,6 +468,7 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
 fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError> {
     match provider {
         StorageProvider::Memory => Ok(StoreConfig::Memory),
+        StorageProvider::Local { path } => Ok(StoreConfig::Local { path: path.clone() }),
         StorageProvider::Sqlite { path } => Ok(StoreConfig::Sqlite { path: path.clone() }),
         StorageProvider::Pglite {
             connection,
@@ -752,7 +910,7 @@ async fn sdk_self_test_command(config_path: Option<&Path>, reopen: bool) -> Resu
 
 fn supports_sdk_reopen(options: &CliOptions) -> bool {
     match options.driver {
-        DriverChoice::Memory => false,
+        DriverChoice::Memory | DriverChoice::Remote => false,
         DriverChoice::Host | DriverChoice::Sqlite => true,
         DriverChoice::SplitStore => options.storage.as_deref().map_or(
             options.database.is_some() && options.blocks.is_some(),
@@ -774,75 +932,129 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     })?;
     let (uid, gid) = effective_identity();
     #[cfg(feature = "observability")]
-    let telemetry = mount_rs_observability::global();
-    let mut runtimes = Vec::with_capacity(http.drives.len());
-    let mut registry = DriveRegistry::new();
-
-    for drive in &http.drives {
-        let options = drive.driver.to_options();
-        let runtime = match DriverRuntime::open(&options, uid, gid).await {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = shutdown_runtimes(&runtimes).await;
-                return Err(error);
-            }
-        };
-        runtimes.push(runtime);
-        let token = match std::env::var(&drive.token.name) {
-            Ok(token) => token,
-            Err(_) => {
-                let _ = shutdown_runtimes(&runtimes).await;
-                return Err(CliError::runtime(format!(
-                    "missing environment variable {}",
-                    drive.token.name
-                )));
-            }
-        };
-        let configured = match HttpDriveConfig::new(
-            drive.id.clone(),
-            runtimes
-                .last()
-                .expect("HTTP runtime was pushed before configuration")
-                .driver(),
-            token,
-        ) {
-            Ok(configured) => configured,
-            Err(error) => {
-                let _ = shutdown_runtimes(&runtimes).await;
-                return Err(CliError::usage(format!(
-                    "invalid HTTP drive '{}': {error}",
-                    drive.id
-                )));
-            }
-        };
-        if let Err(error) = registry.register(configured) {
-            let _ = shutdown_runtimes(&runtimes).await;
-            return Err(CliError::usage(format!(
-                "invalid HTTP drive '{}': {error}",
-                drive.id
-            )));
-        }
-    }
-
-    #[cfg(feature = "observability")]
-    let server_options = http_server_options(http, telemetry);
+    let server_options = http_server_options(http, mount_rs_observability::global());
     #[cfg(not(feature = "observability"))]
     let server_options = http_server_options(http);
-    let mut ctrl_c = match CtrlCHandler::install().await {
-        Ok(handler) => handler,
-        Err(error) => {
-            let _ = shutdown_runtimes(&runtimes).await;
-            return Err(error);
+    let mut runtimes = Vec::with_capacity(http.drives.len());
+    let mut registry = DriveRegistry::new();
+    let mut sessions = crate::http_sessions::Sessions::new(http.max_request_bytes)?;
+    let disk_budget = http
+        .disk_cache_budget
+        .map(|limits| mount_rs_sdk::DiskCacheBudget::new(limits.workers, limits.fill_copies))
+        .transpose()?;
+
+    let mut metadata_pools =
+        std::collections::BTreeMap::<String, mount_rs_sdk::TidbStorePool>::new();
+    let mut configured_drives = Vec::with_capacity(http.drives.len());
+    for drive in &http.drives {
+        let token = std::env::var(&drive.token.name).map_err(|_| {
+            CliError::runtime(format!("missing environment variable {}", drive.token.name))
+        })?;
+        HttpDriveConfig::validate_bearer_token(&token).map_err(|error| {
+            CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id))
+        })?;
+        let credentials = if http.remote_sessions {
+            Some(mount_rs_cluster::SessionCredentials::new(vec![(
+                "configured-volume-client".into(),
+                token.clone(),
+            )])?)
+        } else {
+            None
+        };
+        configured_drives.push((drive, token, credentials));
+    }
+    let mut ctrl_c = CtrlCHandler::install().await?;
+    let startup = async {
+        let mut owned = Vec::new();
+        for (drive, token, credentials) in configured_drives {
+            let options = drive.driver.to_options();
+            let metadata_pool = match (
+                http.tidb_metadata_pool_limit,
+                options.storage.as_ref().map(|storage| &storage.metadata),
+            ) {
+                (Some(limit), Some(StorageProvider::Tidb { connection, .. })) => {
+                    let pool = match metadata_pools.entry(connection.name.clone()) {
+                        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(mount_rs_sdk::TidbStorePool::new(
+                                &resolve_storage_env(connection)?,
+                                limit,
+                            )?)
+                        }
+                    };
+                    Some(pool.clone())
+                }
+                _ => None,
+            };
+            let runtime = DriverRuntime::open_inner(
+                &options,
+                uid,
+                gid,
+                None,
+                SharedResources {
+                    disk_budget: disk_budget.clone(),
+                    metadata_pool,
+                },
+            )
+            .await?;
+            runtimes.push(runtime);
+            // Finish the open before observing shutdown: cancelling it could
+            // discard a newly acquired lease before its runtime is retained.
+            if poll_signal_registration(ctrl_c.signal.as_mut()).await? {
+                return Err(CliError::runtime(
+                    "received shutdown signal during HTTP startup",
+                ));
+            }
+            let runtime = runtimes.last().expect("opened HTTP runtime");
+            if http.forwarding.as_ref().is_some_and(|config| config.owner) {
+                let Some(filesystem) = runtime.local() else {
+                    return Err(CliError::usage(
+                        "peer owner requires a local splitstore runtime",
+                    ));
+                };
+                owned.push((drive.id.clone(), token, filesystem.clone(), credentials));
+                continue;
+            }
+            if let Some(credentials) = credentials {
+                let filesystem = runtime.local().expect("HTTP config rejects remote drivers");
+                sessions.add(&drive.id, credentials, filesystem.clone())?;
+            }
+            let invalid_drive =
+                |error| CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id));
+            let configured = HttpDriveConfig::new(drive.id.clone(), runtime.driver(), token)
+                .map_err(invalid_drive)?;
+            registry.register(configured).map_err(invalid_drive)?;
         }
-    };
-    let server = match HttpServer::start(registry, server_options).await {
-        Ok(server) => server,
-        Err(error) => {
-            let _ = shutdown_runtimes(&runtimes).await;
-            return Err(http_error(error));
+        if let Some(config) = http.forwarding.as_ref().filter(|config| config.owner) {
+            return crate::http_sessions::start_owner(config, owned, server_options.clone()).await;
+        }
+        sessions
+            .start(registry, server_options.clone(), http.forwarding.as_ref())
+            .await
+    }
+    .await;
+    let server = match startup {
+        Ok(ready) => ready,
+        Err(mut primary) => {
+            if let Err(cleanup) = shutdown_runtimes(&runtimes, &metadata_pools).await {
+                primary.message.push_str(&format!(
+                    " (drive rollback failed with {})",
+                    cleanup.code.as_str()
+                ));
+            }
+            return Err(primary);
         }
     };
 
+    let before_ready = poll_signal_registration(ctrl_c.signal.as_mut()).await;
+    if !matches!(before_ready, Ok(false)) {
+        server.close().await?;
+        shutdown_runtimes(&runtimes, &metadata_pools).await?;
+        before_ready?;
+        return Err(CliError::runtime(
+            "received shutdown signal during HTTP startup",
+        ));
+    }
     let drive_ids = http
         .drives
         .iter()
@@ -852,19 +1064,69 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     println!("http listening at {} (drives: {drive_ids})", server.url());
     println!("Press Ctrl-C to stop.");
     if let Err(error) = std::io::stdout().flush() {
-        let _ = server.close().await;
-        let _ = shutdown_runtimes(&runtimes).await;
+        server.close().await?;
+        shutdown_runtimes(&runtimes, &metadata_pools).await?;
         return Err(io_error(error));
     }
 
-    let signal_result = ctrl_c.wait().await;
-    let close_result = server.close().await.map_err(http_error);
-    let shutdown_result = shutdown_runtimes(&runtimes).await.map_err(CliError::from);
+    let signal_result = tokio::select! {
+        _ = report_cache_stats(http, &runtimes), if http.cache_report_interval_seconds.is_some() => unreachable!(),
+        result = ctrl_c.wait() => result,
+        reason = async {
+            loop {
+                if let Some(reason) = server.failure() { break reason; }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        } => Err(CliError::runtime(reason)),
+    };
+    // Keep SDK ownership alive through successful listener/session drain.
+    // An unsuccessful drain is not permission to release the writer lease.
+    server.close().await?;
+    shutdown_runtimes(&runtimes, &metadata_pools).await?;
     signal_result?;
-    close_result?;
-    shutdown_result?;
     println!("http stopped");
     Ok(())
+}
+
+async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntime]) {
+    let period = Duration::from_secs(
+        config
+            .cache_report_interval_seconds
+            .expect("reporting enabled"),
+    );
+    loop {
+        tokio::time::sleep(period).await;
+        for (drive, runtime) in config.drives.iter().zip(runtimes) {
+            let Some(fs) = runtime.local() else {
+                continue;
+            };
+            let ram = fs.block_cache_stats().await.map(|s| {
+                serde_json::json!({
+                    "hits": s.hits, "misses": s.misses, "evictions": s.evictions,
+                    "backing_gets_completed": s.backing_gets_completed,
+                    "backing_gets_failed": s.backing_gets_failed,
+                    "backing_read_bytes": s.backing_read_bytes,
+                    "backing_get_nanoseconds": s.backing_get_nanoseconds,
+                    "resident_bytes": s.resident_bytes, "resident_entries": s.resident_entries,
+                })
+            });
+            let disk = match fs.disk_cache_stats().await {
+                Ok(stats) => stats.map(|s| serde_json::json!({
+                    "hits": s.hits, "misses": s.misses, "evictions": s.evictions,
+                    "resident_bytes": s.resident_bytes, "resident_entries": s.resident_entries,
+                    "io_failures": s.io_failures, "corruptions": s.corruptions, "disabled": s.disabled,
+                })),
+                Err(error) => Some(serde_json::json!({"error": error.code.as_str()})),
+            };
+            if ram.is_some() || disk.is_some() {
+                let record = serde_json::json!({"event":"mount_cache_stats", "drive":drive.id, "ram":ram, "disk":disk});
+                let _ = tokio::task::spawn_blocking(move || {
+                    writeln!(std::io::stderr().lock(), "{record}")
+                })
+                .await;
+            }
+        }
+    }
 }
 
 fn http_server_options(
@@ -878,6 +1140,8 @@ fn http_server_options(
         max_response_bytes: config.max_response_bytes,
         max_directory_entries: config.max_directory_entries,
         read_chunk_bytes: config.read_chunk_bytes,
+        tcp_nodelay: config.tcp_nodelay,
+        http2_prior_knowledge: config.http2_prior_knowledge,
         drain_timeout: Duration::from_millis(config.drain_timeout_ms),
         max_connections: config.max_connections,
         request_timeout: Duration::from_millis(config.request_timeout_ms),
@@ -886,13 +1150,22 @@ fn http_server_options(
     }
 }
 
-async fn shutdown_runtimes(runtimes: &[DriverRuntime]) -> FsResult<()> {
+async fn shutdown_runtimes(
+    runtimes: &[DriverRuntime],
+    pools: &std::collections::BTreeMap<String, mount_rs_sdk::TidbStorePool>,
+) -> FsResult<()> {
     let mut first_error = None;
     for runtime in runtimes.iter().rev() {
         if let Err(error) = runtime.shutdown().await
             && first_error.is_none()
         {
             first_error = Some(error);
+        }
+    }
+    // Shared pools close only after every volume borrowing them has shut down.
+    for pool in pools.values() {
+        if let Err(error) = pool.close().await {
+            first_error.get_or_insert(error);
         }
     }
     first_error.map_or(Ok(()), Err)
@@ -1155,6 +1428,7 @@ fn native_mount_options(options: &CliOptions, uid: u32) -> AutoMountOptions {
         nfs: shared_view_nfs_options(options),
         fuse: Some(mount_rs_auto::MountOptions {
             allow_other: options.allow_other || uid == 0,
+            uncached: options.fuse_uncached || options.driver == DriverChoice::Remote,
             ..mount_rs_auto::MountOptions::default()
         }),
         ..AutoMountOptions::default()
@@ -1434,10 +1708,6 @@ fn render_probe(probe: &mount_rs_auto::AutoProbe, color: Color) -> String {
 }
 
 fn auto_error(error: AutoMountError) -> CliError {
-    CliError::runtime(error.to_string())
-}
-
-fn http_error(error: HttpServerError) -> CliError {
     CliError::runtime(error.to_string())
 }
 
@@ -1727,6 +1997,124 @@ mod tests {
     use crate::parser::parse_args;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[tokio::test]
+    async fn remote_runtime_owns_keepalive_and_releases_capacity_on_shutdown() {
+        use mount_rs_cluster::{SessionCredentials, SessionHttpHandler, VolumeSessions};
+        use mount_rs_http::HttpServer;
+        let owner = Arc::new(
+            Filesystem::split(SplitOptions::memory("cli-keepalive", 4096))
+                .await
+                .unwrap(),
+        );
+        let registry =
+            Arc::new(VolumeSessions::new(owner.clone(), 1, 4, Duration::from_secs(1)).unwrap());
+        let secret = "k".repeat(32);
+        let handler = SessionHttpHandler::new(
+            "volume",
+            SessionCredentials::new(vec![("client".into(), secret.clone())]).unwrap(),
+            registry.clone(),
+        )
+        .unwrap();
+        let server = HttpServer::start_with_handler(Arc::new(handler), Default::default())
+            .await
+            .unwrap();
+        let remote = mount_rs_remote::RemoteFs::connect(
+            &server.url(),
+            "volume",
+            &secret,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let remote = Arc::new(RemoteRuntime::new(remote));
+        let runtime = DriverRuntime {
+            backend: Backend::Remote(remote.clone()),
+            #[cfg(feature = "observability")]
+            telemetry: mount_rs_observability::global(),
+        };
+        let file = runtime.driver().open("/idle", "w+", 0o600).await.unwrap();
+        for _ in 0..7 {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            assert_eq!(registry.expire_idle().await.unwrap(), 0);
+        }
+        assert_eq!(file.stat().await.unwrap().size, 0);
+        runtime.shutdown().await.unwrap();
+        assert!(remote.worker.lock().await.is_none());
+        let next = mount_rs_remote::RemoteFs::connect(
+            &server.url(),
+            "volume",
+            &secret,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        next.shutdown().await.unwrap();
+        server.close().await.unwrap();
+        registry.close().await.unwrap();
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn configured_disk_cache_is_used_by_the_cli_runtime() {
+        let root =
+            std::env::temp_dir().join(format!("mount-rs-cli-disk-{}", unique_default_owner()));
+        std::fs::create_dir(&root).unwrap();
+        let options = CliOptions {
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                verify_backing_blocks: false,
+                disk_cache: Some(mount_rs_sdk::DiskCacheOptions {
+                    root: root.clone(),
+                    scope: "cli-test-generation".into(),
+                    max_bytes: 4096,
+                    max_entries: 8,
+                }),
+                runtime: Some(Default::default()),
+                metadata: StorageProvider::Memory,
+                blocks: StorageProvider::Memory,
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: None,
+                concurrent_writes: false,
+                inode_updates: false,
+                writeback: false,
+                delegated: false,
+                checkout_path: None,
+                owner: Some("disk-test-owner".into()),
+            })),
+            ..CliOptions::default()
+        };
+        let runtime = DriverRuntime::open_inner(
+            &options,
+            1000,
+            1000,
+            None,
+            SharedResources {
+                disk_budget: Some(mount_rs_sdk::DiskCacheBudget::new(1, 1).unwrap()),
+                metadata_pool: None,
+            },
+        )
+        .await
+        .unwrap();
+        let driver = runtime.driver();
+        let handle = driver.open("/file", "w+", 0o600).await.unwrap();
+        handle.write(b"disk", Some(0)).await.unwrap();
+        let mut bytes = [0; 4];
+        handle.read(&mut bytes, Some(0)).await.unwrap();
+        assert_eq!(&bytes, b"disk");
+        let filesystem = runtime.local().expect("expected local driver");
+        assert_eq!(
+            filesystem.disk_cache_stats().await.unwrap().unwrap().hits,
+            1
+        );
+        handle.close().await.unwrap();
+        drop(handle);
+        drop(driver);
+        runtime.shutdown().await.unwrap();
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     struct RegistrationProbe {
         registered: Arc<AtomicBool>,
     }
@@ -1794,6 +2182,9 @@ mod tests {
             transport: TransportChoice::Nfs,
             driver: DriverChoice::SplitStore,
             storage: Some(Box::new(SplitStorageConfig {
+                verify_backing_blocks: false,
+                disk_cache: None,
+                runtime: None,
                 metadata: StorageProvider::Sqlite {
                     path: primary.join("metadata.sqlite"),
                 },
@@ -1849,6 +2240,9 @@ mod tests {
             transport: TransportChoice::Nfs,
             driver: DriverChoice::SplitStore,
             storage: Some(Box::new(SplitStorageConfig {
+                verify_backing_blocks: false,
+                disk_cache: None,
+                runtime: None,
                 metadata: StorageProvider::Sqlite {
                     path: scope.join("missing/../view/metadata.sqlite"),
                 },
@@ -1901,6 +2295,9 @@ mod tests {
             transport: TransportChoice::Nfs,
             driver: DriverChoice::SplitStore,
             storage: Some(Box::new(SplitStorageConfig {
+                verify_backing_blocks: false,
+                disk_cache: None,
+                runtime: None,
                 metadata: StorageProvider::Sqlite {
                     path: metadata_link.clone(),
                 },
@@ -2007,6 +2404,9 @@ mod tests {
             transport: TransportChoice::Nfs,
             driver: DriverChoice::SplitStore,
             storage: Some(Box::new(SplitStorageConfig {
+                verify_backing_blocks: false,
+                disk_cache: None,
+                runtime: None,
                 metadata: StorageProvider::Sqlite {
                     path: metadata.clone(),
                 },
@@ -2194,6 +2594,9 @@ mod tests {
         let options = CliOptions {
             driver: DriverChoice::SplitStore,
             storage: Some(Box::new(SplitStorageConfig {
+                verify_backing_blocks: false,
+                disk_cache: None,
+                runtime: None,
                 metadata: StorageProvider::Memory,
                 blocks: StorageProvider::Memory,
                 chunk_size_bytes: 4096,
@@ -2575,6 +2978,9 @@ mod tests {
         let options = CliOptions {
             driver: DriverChoice::SplitStore,
             storage: Some(Box::new(SplitStorageConfig {
+                verify_backing_blocks: false,
+                disk_cache: None,
+                runtime: None,
                 metadata: StorageProvider::Memory,
                 blocks: StorageProvider::Memory,
                 chunk_size_bytes: 4096,
@@ -2609,6 +3015,9 @@ mod tests {
         let options = CliOptions {
             driver: DriverChoice::SplitStore,
             storage: Some(Box::new(SplitStorageConfig {
+                verify_backing_blocks: false,
+                disk_cache: None,
+                runtime: None,
                 metadata: StorageProvider::Sqlite {
                     path: metadata_path.clone(),
                 },

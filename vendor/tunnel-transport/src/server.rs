@@ -1,0 +1,1917 @@
+//! Bounded TLS acceptor and Axum connection supervisor.
+
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use axum::{Extension, Router};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo, TokioTimer},
+    server::conn::auto,
+    service::TowerToHyperService,
+};
+use socket2::SockRef;
+use thiserror::Error;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    task::JoinSet,
+    time::timeout,
+};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tokio_util::sync::CancellationToken;
+
+use crate::tls::{TlsIdentity, TlsIdentityError, parse_leaf_identity};
+
+/// Maximum number of TLS handshakes and HTTP connections supervised at once.
+///
+/// The public API intentionally takes a fixed `ServerConfig`; this hard cap
+/// prevents an unauthenticated peer from creating an unbounded number of
+/// handshake tasks before the relay's admission layer runs.
+pub const DEFAULT_MAX_CONCURRENT_HANDSHAKES: usize = 64;
+
+/// Default number of extra connections the listener accepts beyond
+/// [`DEFAULT_MAX_CONCURRENT_HANDSHAKES`] only to refuse them (task row
+/// M6-C153).
+///
+/// Each such connection completes TLS, reads one request head and a body of
+/// at most [`MAX_REFUSAL_BODY_BYTES`], is answered `503 CONNECTION_LIMIT` with
+/// `Retry-After`, and is closed with `close_notify`, all within
+/// [`DEFAULT_REFUSAL_TIMEOUT`].  The margin bounds that TLS work.  When the
+/// margin is also full the listener stops calling `accept`, so further
+/// connections wait in the kernel listen backlog instead of being reset.
+pub const DEFAULT_REFUSAL_MARGIN: usize = 16;
+
+/// Largest accepted [`ListenerCapacity::max_connections`].
+pub const MAX_LISTENER_CONNECTIONS: usize = 4096;
+
+/// Largest accepted [`ListenerCapacity::refusal_margin`].
+pub const MAX_REFUSAL_MARGIN: usize = 256;
+
+/// Default bound on the whole life of one over-capacity connection: TLS
+/// handshake, request, refusal and close.
+pub const DEFAULT_REFUSAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Largest request body an over-capacity connection reads before answering.
+///
+/// The body is read, not ignored, because closing a socket with unread bytes
+/// in its receive buffer sends a TCP reset, which can destroy the refusal
+/// before the client reads it.
+pub const MAX_REFUSAL_BODY_BYTES: usize = 64 * 1024;
+
+/// Retry hint carried by a `CONNECTION_LIMIT` refusal, in milliseconds.
+pub const CONNECTION_LIMIT_RETRY_AFTER_MS: u64 = 1_000;
+
+/// The fixed, payload-free body of a `CONNECTION_LIMIT` refusal.  Its shape
+/// matches the relay's other flat error bodies.
+pub const CONNECTION_LIMIT_BODY: &str = concat!(
+    r#"{"code":"CONNECTION_LIMIT","execution":"not_dispatched","#,
+    r#""message":"relay listener connection limit reached","#,
+    r#""retryable":true,"retry_after_ms":1000}"#
+);
+
+/// Maximum HTTP/2 streams advertised for one accepted connection.
+///
+/// A connection permit is held until the HTTP connection future completes;
+/// this second bound prevents one long-lived HTTP/2 connection from creating
+/// an unbounded number of concurrent request streams.  Device WebSocket
+/// quotas remain an application-level concern because Hyper hands an HTTP/1
+/// upgrade to the route's `on_upgrade` task before its connection future
+/// completes.
+pub const DEFAULT_MAX_HTTP2_STREAMS: u32 = 100;
+
+/// Maximum HTTP header-list bytes accepted by HTTP/2.
+pub const DEFAULT_MAX_HTTP2_HEADER_LIST_BYTES: u32 = 32 * 1024;
+
+/// Maximum HTTP/1 header count accepted by Hyper.
+pub const DEFAULT_MAX_HTTP1_HEADERS: usize = 100;
+
+/// Deadline for a TCP connection to complete its TLS handshake.
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Deadline for an accepted connection to dispatch its first complete HTTP
+/// request after its TLS handshake completes.
+///
+/// A connection permit is held for the whole HTTP connection, so the
+/// pre-request phase needs its own bound.  Hyper cannot supply one: the
+/// `hyper_util` protocol sniffer waits for up to the 24-byte HTTP/2 preface
+/// with no deadline of its own, and HTTP/2 has no header-read timeout at all.
+/// A peer that completes the TLS handshake and then sends nothing — or just a
+/// prefix of the preface — would otherwise hold its permit until it closed the
+/// socket, so [`DEFAULT_MAX_CONCURRENT_HANDSHAKES`] silent connections would
+/// block every further accept.
+///
+/// This bound covers the entire pre-request phase: version sniffing, the
+/// HTTP/2 preamble, and the first request head.  It is disarmed permanently as
+/// soon as any request is dispatched to the router, so an established device
+/// WebSocket upgrade or a long-lived consumer request is never closed by it.
+pub const DEFAULT_PRE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Deadline for Hyper to read one complete HTTP/1 request head.
+///
+/// Hyper arms this bound for every head read, so it also bounds an idle
+/// HTTP/1 keep-alive connection between requests.  It is not armed while a
+/// request is in flight, while a response body is streaming, or after an
+/// upgrade, so legitimately long-lived connections are unaffected.  Hyper
+/// discards the setting (logging a warning) unless a timer is installed on the
+/// builder, which [`serve`] now does.
+pub const DEFAULT_HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+const MIN_ACCEPTED_SEND_BUFFER_BYTES: u32 = 1024;
+const MAX_ACCEPTED_SEND_BUFFER_BYTES: u32 = 1024 * 1024;
+
+/// Smallest accepted listener deadline.  Shorter values are indistinguishable
+/// from scheduling noise on a loaded host and would close healthy connections.
+const MIN_LISTENER_TIMEOUT: Duration = Duration::from_millis(100);
+/// Largest accepted listener deadline, matching the documented 300-second
+/// ceiling used by the other configured handshake and overlap bounds.
+const MAX_LISTENER_TIMEOUT: Duration = Duration::from_secs(300);
+const LISTENER_TIMEOUT_RANGE: &str = "must be 100ms..=300s";
+
+/// Bounded deadlines applied to every accepted listener connection.
+///
+/// Each value is a configuration value with a documented default rather than a
+/// literal in the accept path.  `validate` enforces the same kind of range and
+/// cross-field rules as the relay's configured limits, and is called before the
+/// listener accepts its first socket so an invalid deployment fails closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListenerTimeouts {
+    /// Deadline for a TCP connection to complete its TLS handshake.
+    ///
+    /// Default [`DEFAULT_HANDSHAKE_TIMEOUT`]; accepts 100ms..=300s.
+    pub handshake_timeout: Duration,
+    /// Deadline for a handshaken connection to dispatch its first complete
+    /// HTTP request.
+    ///
+    /// Default [`DEFAULT_PRE_REQUEST_TIMEOUT`]; accepts 100ms..=300s.  The
+    /// bound applies only to the pre-request phase; it is disarmed once the
+    /// connection dispatches a request.
+    pub pre_request_timeout: Duration,
+    /// Deadline for Hyper to read one complete HTTP/1 request head, including
+    /// an idle keep-alive gap between requests.
+    ///
+    /// Default [`DEFAULT_HTTP1_HEADER_READ_TIMEOUT`]; accepts 100ms..=300s and
+    /// must not exceed `pre_request_timeout`.
+    pub http1_header_read_timeout: Duration,
+}
+
+impl Default for ListenerTimeouts {
+    fn default() -> Self {
+        Self {
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            pre_request_timeout: DEFAULT_PRE_REQUEST_TIMEOUT,
+            http1_header_read_timeout: DEFAULT_HTTP1_HEADER_READ_TIMEOUT,
+        }
+    }
+}
+
+impl ListenerTimeouts {
+    /// Validate every configured listener deadline and their cross-field rule.
+    ///
+    /// The pre-request bound encloses the first HTTP/1 head read, so an
+    /// HTTP/1 header deadline larger than the pre-request deadline would be
+    /// unreachable configuration on a first request and a weaker bound than
+    /// the operator asked for on an idle keep-alive connection.
+    pub fn validate(&self) -> Result<(), TransportError> {
+        for (field, value) in [
+            ("handshake_timeout", self.handshake_timeout),
+            ("pre_request_timeout", self.pre_request_timeout),
+            ("http1_header_read_timeout", self.http1_header_read_timeout),
+        ] {
+            if !(MIN_LISTENER_TIMEOUT..=MAX_LISTENER_TIMEOUT).contains(&value) {
+                return Err(TransportError::InvalidListenerTimeouts {
+                    field,
+                    reason: LISTENER_TIMEOUT_RANGE,
+                });
+            }
+        }
+        if self.http1_header_read_timeout > self.pre_request_timeout {
+            return Err(TransportError::InvalidListenerTimeouts {
+                field: "http1_header_read_timeout",
+                reason: "must not exceed pre_request_timeout",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The listener's connection limit and its bounded over-capacity refusal
+/// (task row M6-C153).
+///
+/// `max_connections` permits are held for the whole HTTP connection, as
+/// before.  A connection accepted while they are all held takes one of
+/// `refusal_margin` refusal slots and is answered `503 CONNECTION_LIMIT`
+/// (see [`DEFAULT_REFUSAL_MARGIN`]).  While both are full the listener does
+/// not accept, so the kernel listen backlog holds further connections; it
+/// never accepts and drops one.  A margin of zero therefore means "no TLS
+/// work beyond the limit": excess connections wait in the backlog until a
+/// permit frees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListenerCapacity {
+    /// Concurrent served connections.  Default
+    /// [`DEFAULT_MAX_CONCURRENT_HANDSHAKES`]; accepts
+    /// 1..=[`MAX_LISTENER_CONNECTIONS`].
+    pub max_connections: usize,
+    /// Concurrent over-capacity refusals.  Default
+    /// [`DEFAULT_REFUSAL_MARGIN`]; accepts 0..=[`MAX_REFUSAL_MARGIN`].
+    pub refusal_margin: usize,
+    /// Bound on one over-capacity connection's whole life.  Default
+    /// [`DEFAULT_REFUSAL_TIMEOUT`]; accepts 100ms..=300s.
+    pub refusal_timeout: Duration,
+}
+
+impl Default for ListenerCapacity {
+    fn default() -> Self {
+        Self {
+            max_connections: DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            refusal_margin: DEFAULT_REFUSAL_MARGIN,
+            refusal_timeout: DEFAULT_REFUSAL_TIMEOUT,
+        }
+    }
+}
+
+impl ListenerCapacity {
+    /// Validate the limit, the margin and the refusal deadline.
+    pub fn validate(&self) -> Result<(), TransportError> {
+        if !(1..=MAX_LISTENER_CONNECTIONS).contains(&self.max_connections) {
+            return Err(TransportError::InvalidListenerCapacity {
+                field: "max_connections",
+                reason: "must be 1..=4096",
+            });
+        }
+        if self.refusal_margin > MAX_REFUSAL_MARGIN {
+            return Err(TransportError::InvalidListenerCapacity {
+                field: "refusal_margin",
+                reason: "must be 0..=256",
+            });
+        }
+        if !(MIN_LISTENER_TIMEOUT..=MAX_LISTENER_TIMEOUT).contains(&self.refusal_timeout) {
+            return Err(TransportError::InvalidListenerCapacity {
+                field: "refusal_timeout",
+                reason: LISTENER_TIMEOUT_RANGE,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Bounded diagnostics for the most recently accepted TCP socket configured by
+/// [`AcceptedSocketOptions`].  The value is deliberately a single atomic
+/// sample: it cannot retain connection identifiers, addresses, or payloads.
+#[derive(Clone, Debug, Default)]
+pub struct AcceptedSocketDiagnostics {
+    last_send_buffer_bytes: Arc<AtomicUsize>,
+    capacity_refusals: Arc<AtomicUsize>,
+    /// Accepted sockets whose `TCP_NODELAY` read back as set (M6-C124).
+    nodelay_set: Arc<AtomicUsize>,
+    /// Accepted sockets whose `TCP_NODELAY` read back as clear or unreadable.
+    nodelay_unset: Arc<AtomicUsize>,
+    /// Served connections closed for turnover under pressure (M6-C193).
+    fairness_recycles: Arc<AtomicUsize>,
+    /// Over-limit connections served with a handed-off permit (M6-C193).
+    fairness_handoffs: Arc<AtomicUsize>,
+}
+
+impl AcceptedSocketDiagnostics {
+    /// Create an empty diagnostic sample.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the most recently observed accepted-socket send buffer size.
+    ///
+    /// `None` means that no accepted socket has yet been observed.
+    pub fn last_send_buffer_bytes(&self) -> Option<usize> {
+        match self.last_send_buffer_bytes.load(Ordering::Acquire) {
+            0 => None,
+            value => Some(value),
+        }
+    }
+
+    /// Connections accepted over the connection limit and answered
+    /// `503 CONNECTION_LIMIT` (task row M6-C153).
+    pub fn capacity_refusals(&self) -> usize {
+        self.capacity_refusals.load(Ordering::Acquire)
+    }
+
+    fn record_capacity_refusal(&self) {
+        self.capacity_refusals.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Connections accepted over the limit that were served with a permit
+    /// freed within [`crate::HANDOFF_WAIT`] (task row M6-C193).
+    pub fn fairness_handoffs(&self) -> usize {
+        self.fairness_handoffs.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn record_fairness_handoff(&self) {
+        self.fairness_handoffs.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Served connections this listener closed after a response to turn its
+    /// permit over while it was full (task row M6-C193).
+    pub fn fairness_recycles(&self) -> usize {
+        self.fairness_recycles.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn record_fairness_recycle(&self) {
+        self.fairness_recycles.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn record_send_buffer_bytes(&self, bytes: usize) {
+        self.last_send_buffer_bytes.store(bytes, Ordering::Release);
+    }
+
+    /// Accepted sockets observed with `TCP_NODELAY` set, and observed with it
+    /// clear (or unreadable), in that order.  Task row M6-C124: every
+    /// accepted socket is expected in the first count.
+    pub fn nodelay_counts(&self) -> (usize, usize) {
+        (
+            self.nodelay_set.load(Ordering::Acquire),
+            self.nodelay_unset.load(Ordering::Acquire),
+        )
+    }
+
+    fn record_nodelay(&self, set: bool) {
+        let counter = if set {
+            &self.nodelay_set
+        } else {
+            &self.nodelay_unset
+        };
+        counter.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Optional configuration for accepted public TCP sockets.
+///
+/// The default is empty and preserves the platform's normal socket defaults.
+/// A requested send buffer is applied only after `accept`, so it does not rely
+/// on listener-option inheritance, which differs across supported platforms.
+#[derive(Clone, Debug, Default)]
+pub struct AcceptedSocketOptions {
+    /// Requested accepted-socket send buffer size in bytes.
+    pub send_buffer_bytes: Option<u32>,
+    /// Optional bounded sample of the actual accepted-socket buffer size.
+    pub diagnostics: Option<AcceptedSocketDiagnostics>,
+    /// A fixed name for this listener (`consumer`, `device`) carried by its
+    /// TLS refusal log lines (M6-C52); `None` logs `unnamed`.
+    pub listener: Option<&'static str>,
+    /// The connection limit and its over-capacity refusal (M6-C153).
+    pub capacity: ListenerCapacity,
+    /// Connection turnover while the listener is full (M6-C193).  `None`,
+    /// the default, never recycles a connection; the relay sets it on the
+    /// public consumer listener only.
+    pub turnover: Option<crate::ListenerTurnover>,
+}
+
+/// Errors returned by the listener supervisor itself.  A malformed or
+/// unauthorized client handshake is a connection-local event and is closed;
+/// it does not terminate the listener.
+#[derive(Debug, Error)]
+pub enum TransportError {
+    /// The listener failed to accept a TCP connection.
+    #[error("TCP accept failed: {0}")]
+    Accept(#[source] std::io::Error),
+    /// A supervised connection task panicked or was cancelled unexpectedly.
+    #[error("transport connection task failed: {0}")]
+    Task(#[source] tokio::task::JoinError),
+    /// A connection task encountered an HTTP serving error.
+    #[error("HTTP connection failed: {0}")]
+    Http(String),
+    /// The accepted socket could not be configured as requested.
+    #[error("accepted TCP socket configuration failed for {requested_bytes} bytes: {source}")]
+    SocketConfiguration {
+        /// Requested send buffer size.
+        requested_bytes: u32,
+        /// Platform error returned by the socket option.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The accepted-socket option was outside the bounded test/deployment
+    /// range.
+    #[error(
+        "accepted TCP socket send buffer request {requested_bytes} is outside the 1024..=1048576 byte range"
+    )]
+    InvalidSocketConfiguration {
+        /// Requested send buffer size that failed validation.
+        requested_bytes: u32,
+    },
+    /// A configured listener deadline was outside its documented range or
+    /// violated the cross-field rule.
+    #[error("listener timeout {field} is invalid: {reason}")]
+    InvalidListenerTimeouts {
+        /// Name of the offending [`ListenerTimeouts`] field.
+        field: &'static str,
+        /// Bounded explanation; it never contains connection data.
+        reason: &'static str,
+    },
+    /// A configured [`ListenerCapacity`] value was outside its range.
+    #[error("listener capacity {field} is invalid: {reason}")]
+    InvalidListenerCapacity {
+        /// Name of the offending [`ListenerCapacity`] field.
+        field: &'static str,
+        /// Bounded explanation; it never contains connection data.
+        reason: &'static str,
+    },
+    /// A configured [`crate::ListenerTurnover`] value was outside its range.
+    #[error("listener turnover {field} is invalid: {reason}")]
+    InvalidListenerTurnover {
+        /// Name of the offending [`crate::ListenerTurnover`] field.
+        field: &'static str,
+        /// Bounded explanation; it never contains connection data.
+        reason: &'static str,
+    },
+}
+
+/// Serve an Axum router over TLS 1.3 on a TCP listener.
+///
+/// The supplied [`rustls::ServerConfig`] must be constructed by
+/// [`crate::load_server_config_from_pem`] or an equivalent TLS-1.3-only
+/// configuration.  The helper enables HTTP/1.1 and HTTP/2 through ALPN and
+/// verifies device/peer client certificates when a client CA is configured.
+///
+/// Every successful TLS handshake extracts the peer certificate chain from
+/// the rustls connection itself.  A [`TlsIdentity`] is placed in request
+/// extensions for mTLS listeners; no request header can create or replace it.
+/// Consumer configs without client authentication receive no identity
+/// extension and remain responsible for HTTP-layer authentication.
+///
+/// Handshake work is bounded by [`DEFAULT_MAX_CONCURRENT_HANDSHAKES`], and
+/// cancellation stops accepting sockets then asks active HTTP/1.1 and HTTP/2
+/// connections to drain before their task groups are joined.
+///
+/// Every connection permit is additionally bounded in time by the default
+/// [`ListenerTimeouts`], so a peer that completes the TLS handshake and never
+/// sends a complete request is closed and releases its permit.
+pub async fn serve(
+    listener: TcpListener,
+    router: Router,
+    config: Arc<rustls::ServerConfig>,
+    cancel: CancellationToken,
+) -> Result<(), TransportError> {
+    serve_with_socket_options(
+        listener,
+        router,
+        config,
+        cancel,
+        AcceptedSocketOptions::default(),
+    )
+    .await
+}
+
+/// Serve an Axum router while applying bounded options to each accepted TCP
+/// socket before its TLS task starts.
+///
+/// The ordinary [`serve`] entry point leaves platform socket defaults
+/// unchanged.  This optioned entry point exists for narrowly scoped transport
+/// fixtures and deployments that explicitly need a deterministic accepted
+/// socket setting; it never changes the listener's handshake or HTTP limits.
+pub async fn serve_with_socket_options(
+    listener: TcpListener,
+    router: Router,
+    config: Arc<rustls::ServerConfig>,
+    cancel: CancellationToken,
+    socket_options: AcceptedSocketOptions,
+) -> Result<(), TransportError> {
+    serve_with_listener_options(
+        listener,
+        router,
+        config,
+        cancel,
+        socket_options,
+        ListenerTimeouts::default(),
+    )
+    .await
+}
+
+/// Serve an Axum router with explicit accepted-socket options and explicit
+/// bounded listener deadlines.
+///
+/// Deployments and fixtures that need a tighter or looser pre-request bound use
+/// this entry point; [`serve`] and [`serve_with_socket_options`] apply the
+/// documented [`ListenerTimeouts`] defaults.  The deadlines are validated
+/// before the listener accepts a socket, so an invalid value returns an error
+/// and releases the listener instead of serving with an unbounded permit.
+pub async fn serve_with_listener_options(
+    listener: TcpListener,
+    router: Router,
+    config: Arc<rustls::ServerConfig>,
+    cancel: CancellationToken,
+    socket_options: AcceptedSocketOptions,
+    timeouts: ListenerTimeouts,
+) -> Result<(), TransportError> {
+    validate_socket_options(&socket_options)?;
+    timeouts.validate()?;
+    let capacity = socket_options.capacity;
+    capacity.validate()?;
+    let turnover = socket_options.turnover;
+    if let Some(turnover) = &turnover {
+        turnover.validate()?;
+    }
+    let acceptor = TlsAcceptor::from(config);
+    let permits = Arc::new(tokio::sync::Semaphore::new(capacity.max_connections));
+    let refusals = Arc::new(tokio::sync::Semaphore::new(capacity.refusal_margin));
+    let mut tasks = JoinSet::new();
+    let child_cancel = cancel.child_token();
+    let mut first_error = None;
+    let listener_name = socket_options.listener.unwrap_or("unnamed");
+    // M6-C193: refusals mark the listener under pressure, which is what lets
+    // served connections turn their permits over.
+    let pressure =
+        crate::fairness::ListenerPressure::new(listener_name, socket_options.diagnostics.clone());
+
+    loop {
+        // M6-C153: take a slot before accepting.  While neither a connection
+        // permit nor a refusal slot is free the listener does not accept, so
+        // the kernel listen backlog holds the connection; an accepted socket
+        // is never dropped unanswered.
+        let slot = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            Some(result) = tasks.join_next() => {
+                if let Err(error) = joined_result(result) {
+                    first_error = Some(error);
+                    break;
+                }
+                continue;
+            }
+            slot = next_slot(&permits, &refusals) => slot,
+        };
+        let Some(slot) = slot else { break };
+        let (stream, remote_addr) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            Some(result) = tasks.join_next() => {
+                // The slot is released and taken again on the next pass.
+                if let Err(error) = joined_result(result) {
+                    first_error = Some(error);
+                    break;
+                }
+                continue;
+            }
+            result = listener.accept() => match result {
+                Ok(accepted) => accepted,
+                Err(error) => match transient_accept_error(&error) {
+                    // M6-C155: descriptor or buffer exhaustion, or a peer that
+                    // aborted before accept, is not the listener's failure.
+                    // Release the slot, back off so a pending connection
+                    // cannot spin the loop, and keep serving.
+                    Some(class) => {
+                        drop(slot);
+                        let backoff = accept_error_backoff(class);
+                        if backoff.is_zero() {
+                            // Peer-caused: retry at once, as axum does, so a
+                            // client that connects and resets cannot throttle
+                            // the listener.
+                            tracing::debug!(listener = listener_name, class, "accept failed; peer went away");
+                            continue;
+                        }
+                        log_accept_error(&ACCEPT_ERROR_LOG, listener_name, class);
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep(backoff) => {}
+                        }
+                        continue;
+                    }
+                    None => {
+                        first_error = Some(TransportError::Accept(error));
+                        break;
+                    }
+                },
+            },
+        };
+        // A permit may have been released while this slot waited in accept.
+        let slot = match slot {
+            Slot::Refuse(refusal) => match permits.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    drop(refusal);
+                    Slot::Serve(permit)
+                }
+                Err(_) => Slot::Refuse(refusal),
+            },
+            serve => serve,
+        };
+        if let Err(error) = configure_accepted_socket(&stream, &socket_options, remote_addr) {
+            first_error = Some(error);
+            break;
+        }
+        let acceptor = acceptor.clone();
+        let connection_cancel = child_cancel.child_token();
+        match slot {
+            Slot::Serve(permit) => {
+                let router = router.clone();
+                let turnover = turnover.map(|policy| {
+                    crate::fairness::ConnectionTurnover::new(policy, pressure.clone())
+                });
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    if let Err(error) = serve_connection(
+                        stream,
+                        acceptor,
+                        router,
+                        connection_cancel,
+                        timeouts,
+                        listener_name,
+                        turnover,
+                    )
+                    .await
+                    {
+                        tracing::debug!(%remote_addr, ?error, "TLS/HTTP connection closed");
+                    }
+                    Ok::<(), TransportError>(())
+                });
+            }
+            Slot::Refuse(refusal) => {
+                pressure.record_full();
+                // M6-C193 hand-off: on a listener with turnover, wait briefly
+                // (before any TLS work) in the permit queue, so a permit freed
+                // by turnover reaches a connection that was already waiting.
+                let handoff = turnover.map(|policy| (policy, permits.clone()));
+                let router = router.clone();
+                let pressure = pressure.clone();
+                let diagnostics = socket_options.diagnostics.clone();
+                tasks.spawn(async move {
+                    if let Some((policy, permits)) = handoff {
+                        let permit = tokio::select! {
+                            biased;
+                            _ = connection_cancel.cancelled() => return Ok(()),
+                            permit = timeout(crate::HANDOFF_WAIT, permits.acquire_owned()) => permit,
+                        };
+                        if let Ok(Ok(permit)) = permit {
+                            // The refusal slot is not needed any more.
+                            drop(refusal);
+                            pressure.record_handoff();
+                            let turnover =
+                                crate::fairness::ConnectionTurnover::new(policy, pressure);
+                            let _permit = permit;
+                            if let Err(error) = serve_connection(
+                                stream,
+                                acceptor,
+                                router,
+                                connection_cancel,
+                                timeouts,
+                                listener_name,
+                                Some(turnover),
+                            )
+                            .await
+                            {
+                                tracing::debug!(%remote_addr, ?error, "TLS/HTTP connection closed");
+                            }
+                            return Ok(());
+                        }
+                    }
+                    let _refusal = refusal;
+                    if let Some(diagnostics) = &diagnostics {
+                        diagnostics.record_capacity_refusal();
+                    }
+                    pressure.record_refusal();
+                    if let Some(suppressed) = CAPACITY_REFUSAL_LOG.admit(listener_name) {
+                        tracing::info!(
+                            phase = "listener_capacity",
+                            listener = listener_name,
+                            max_connections = capacity.max_connections,
+                            suppressed,
+                            "refusing connection over the listener connection limit"
+                        );
+                    }
+                    refuse_connection(
+                        stream,
+                        acceptor,
+                        connection_cancel,
+                        capacity.refusal_timeout,
+                        timeouts,
+                        listener_name,
+                        &TLS_REFUSAL_LOG,
+                    )
+                    .await;
+                    Ok::<(), TransportError>(())
+                });
+            }
+        }
+    }
+
+    if first_error.is_some() {
+        cancel.cancel();
+    }
+    child_cancel.cancel();
+    while let Some(result) = tasks.join_next().await {
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => Err(TransportError::Task(error)),
+        };
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// A connection permit, or a slot to answer one connection over the limit.
+enum Slot {
+    Serve(tokio::sync::OwnedSemaphorePermit),
+    Refuse(tokio::sync::OwnedSemaphorePermit),
+}
+
+/// Wait for a connection permit, or failing that a refusal slot, preferring a
+/// permit.  `None` only if a semaphore was closed, which this module never
+/// does.
+async fn next_slot(
+    permits: &Arc<tokio::sync::Semaphore>,
+    refusals: &Arc<tokio::sync::Semaphore>,
+) -> Option<Slot> {
+    if let Ok(permit) = permits.clone().try_acquire_owned() {
+        return Some(Slot::Serve(permit));
+    }
+    if let Ok(refusal) = refusals.clone().try_acquire_owned() {
+        return Some(Slot::Refuse(refusal));
+    }
+    tokio::select! {
+        biased;
+        permit = permits.clone().acquire_owned() => permit.ok().map(Slot::Serve),
+        refusal = refusals.clone().acquire_owned() => refusal.ok().map(Slot::Refuse),
+    }
+}
+
+fn joined_result(
+    result: Result<Result<(), TransportError>, tokio::task::JoinError>,
+) -> Result<(), TransportError> {
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(TransportError::Task(error)),
+    }
+}
+
+/// The process-wide limit on over-capacity refusal lines, keyed by listener.
+static CAPACITY_REFUSAL_LOG: std::sync::LazyLock<crate::log_limit::RefusalLogLimiter> =
+    std::sync::LazyLock::new(crate::log_limit::RefusalLogLimiter::with_defaults);
+
+/// The `503 CONNECTION_LIMIT` answer.  It is built from constants only: no
+/// request data reaches it.
+fn connection_limit_response(version: http::Version) -> axum::response::Response {
+    let retry_after_seconds = CONNECTION_LIMIT_RETRY_AFTER_MS.div_ceil(1_000);
+    let mut response = axum::response::Response::new(axum::body::Body::from(CONNECTION_LIMIT_BODY));
+    *response.status_mut() = http::StatusCode::SERVICE_UNAVAILABLE;
+    let headers = response.headers_mut();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from(retry_after_seconds),
+    );
+    // HTTP/2 forbids connection-specific headers; it closes with GOAWAY.
+    if version < http::Version::HTTP_2 {
+        headers.insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+    }
+    response
+}
+
+/// Answer every request on an over-capacity connection with
+/// [`connection_limit_response`], after reading at most
+/// [`MAX_REFUSAL_BODY_BYTES`] of its body.
+fn connection_limit_router() -> Router {
+    Router::new().fallback(|request: axum::extract::Request| async move {
+        let version = request.version();
+        // The outcome is ignored: an oversized or broken body still gets the
+        // refusal.  Only a body read to its end avoids a reset on close.
+        let _ = axum::body::to_bytes(request.into_body(), MAX_REFUSAL_BODY_BYTES).await;
+        connection_limit_response(version)
+    })
+}
+
+/// Serve one over-capacity connection: TLS, one `503 CONNECTION_LIMIT`
+/// answer, then a graceful close (`Connection: close` on HTTP/1, GOAWAY on
+/// HTTP/2).  The whole life is bounded by `refusal_timeout`; a peer that has
+/// not finished by then is dropped, which releases the refusal slot.
+async fn refuse_connection(
+    stream: TcpStream,
+    acceptor: TlsAcceptor,
+    cancel: CancellationToken,
+    refusal_timeout: Duration,
+    timeouts: ListenerTimeouts,
+    listener: &'static str,
+    tls_refusal_log: &crate::log_limit::RefusalLogLimiter,
+) {
+    let refusal = async {
+        let tls_stream = match acceptor.accept(stream).await {
+            Ok(tls_stream) => tls_stream,
+            Err(error) => {
+                // M6-C156: the same level, label and rate limit as a TLS
+                // refusal on a served connection.
+                log_handshake_failure(tls_refusal_log, listener, &error);
+                return;
+            }
+        };
+        let first_request = CancellationToken::new();
+        let service = ObserveFirstRequest {
+            inner: TowerToHyperService::new(connection_limit_router().into_service()),
+            first_request: first_request.clone(),
+        };
+        let mut builder = auto::Builder::new(TokioExecutor::new());
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .keep_alive(false)
+            .max_headers(DEFAULT_MAX_HTTP1_HEADERS)
+            .header_read_timeout(Some(timeouts.http1_header_read_timeout));
+        builder
+            .http2()
+            .timer(TokioTimer::new())
+            .max_concurrent_streams(1)
+            .max_header_list_size(DEFAULT_MAX_HTTP2_HEADER_LIST_BYTES);
+        let connection = builder.serve_connection(TokioIo::new(tls_stream), service);
+        tokio::pin!(connection);
+        let mut closing = false;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled(), if !closing => {
+                    connection.as_mut().graceful_shutdown();
+                    closing = true;
+                }
+                _ = &mut connection => return,
+                _ = first_request.cancelled(), if !closing => {
+                    // One answer per connection: stop accepting further
+                    // requests and close once the refusal is written.
+                    connection.as_mut().graceful_shutdown();
+                    closing = true;
+                }
+            }
+        }
+    };
+    if timeout(refusal_timeout, refusal).await.is_err() {
+        tracing::debug!("over-capacity connection did not finish within the refusal bound");
+    }
+}
+
+fn validate_socket_options(options: &AcceptedSocketOptions) -> Result<(), TransportError> {
+    if let Some(requested_bytes) = options.send_buffer_bytes
+        && !(MIN_ACCEPTED_SEND_BUFFER_BYTES..=MAX_ACCEPTED_SEND_BUFFER_BYTES)
+            .contains(&requested_bytes)
+    {
+        return Err(TransportError::InvalidSocketConfiguration { requested_bytes });
+    }
+    Ok(())
+}
+
+/// Disable Nagle's algorithm on an accepted socket (task row M6-C124).
+///
+/// Both listeners carry request/reply traffic in small TLS records: a
+/// WebSocket frame to a device and the device's reply, or an HTTP response
+/// head and body to a consumer.  With Nagle on, a small write that follows an
+/// unacknowledged one waits for the peer's delayed ACK (40 ms on Linux).
+/// Bulk transfers are unaffected in kind: they fill whole segments, which
+/// Nagle never held back.  Listener-option inheritance differs across
+/// platforms, so the option is set on each accepted socket.  A failure is
+/// connection-local (a peer that already reset makes some platforms refuse
+/// the option) and the connection is still served; the diagnostics count it.
+fn set_accepted_nodelay(
+    stream: &TcpStream,
+    diagnostics: Option<&AcceptedSocketDiagnostics>,
+    remote_addr: std::net::SocketAddr,
+) {
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::debug!(%remote_addr, %error, "TCP_NODELAY could not be set on an accepted socket");
+    }
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.record_nodelay(stream.nodelay().unwrap_or(false));
+    }
+}
+
+fn configure_accepted_socket(
+    stream: &TcpStream,
+    options: &AcceptedSocketOptions,
+    remote_addr: std::net::SocketAddr,
+) -> Result<(), TransportError> {
+    set_accepted_nodelay(stream, options.diagnostics.as_ref(), remote_addr);
+    if options.send_buffer_bytes.is_none() && options.diagnostics.is_none() {
+        return Ok(());
+    }
+
+    let socket = SockRef::from(stream);
+    if let Some(requested_bytes) = options.send_buffer_bytes {
+        socket
+            .set_send_buffer_size(requested_bytes as usize)
+            .map_err(|source| TransportError::SocketConfiguration {
+                requested_bytes,
+                source,
+            })?;
+    }
+    let actual_bytes =
+        socket
+            .send_buffer_size()
+            .map_err(|source| TransportError::SocketConfiguration {
+                requested_bytes: options.send_buffer_bytes.unwrap_or_default(),
+                source,
+            })?;
+    if let Some(diagnostics) = &options.diagnostics {
+        diagnostics.record_send_buffer_bytes(actual_bytes);
+    }
+    tracing::debug!(
+        %remote_addr,
+        requested_send_buffer_bytes = options.send_buffer_bytes,
+        accepted_send_buffer_bytes = actual_bytes,
+        "configured accepted TCP socket"
+    );
+    Ok(())
+}
+
+/// Hyper service wrapper that records the first dispatched request.
+///
+/// Hyper calls the service only after it has parsed a complete request head, so
+/// the first call is the exact boundary between the bounded pre-request phase
+/// and an established connection.  The wrapper adds no per-request state and
+/// retains no request data.
+#[derive(Clone)]
+struct ObserveFirstRequest<S> {
+    inner: S,
+    first_request: CancellationToken,
+}
+
+impl<S, R> hyper::service::Service<R> for ObserveFirstRequest<S>
+where
+    S: hyper::service::Service<R>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn call(&self, request: R) -> Self::Future {
+        self.first_request.cancel();
+        self.inner.call(request)
+    }
+}
+
+/// Hyper service wrapper that applies connection turnover (task row
+/// M6-C193) to each response.
+///
+/// It counts each dispatched request and, when the listener is under pressure
+/// and this connection has used its budget, closes the connection after the
+/// response it is returning: `Connection: close` on HTTP/1, a GOAWAY on
+/// HTTP/2 (via [`crate::fairness::ConnectionTurnover::goaway`]).  A
+/// `101 Switching Protocols` response is never marked, so an upgraded
+/// connection (a device or consumer WebSocket) is never recycled, and a
+/// response body is never cut: HTTP/1 closes after the body ends, and HTTP/2
+/// GOAWAY lets accepted streams finish.
+#[derive(Clone)]
+struct TurnoverService<S> {
+    inner: S,
+    turnover: Option<Arc<crate::fairness::ConnectionTurnover>>,
+}
+
+impl<S, B, ResBody> hyper::service::Service<http::Request<B>> for TurnoverService<S>
+where
+    S: hyper::service::Service<http::Request<B>, Response = http::Response<ResBody>>,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+    ResBody: Send + 'static,
+{
+    type Response = http::Response<ResBody>;
+    type Error = S::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn call(&self, request: http::Request<B>) -> Self::Future {
+        let Some(turnover) = self.turnover.clone() else {
+            return Box::pin(self.inner.call(request));
+        };
+        turnover.on_request();
+        let version = request.version();
+        let response = self.inner.call(request);
+        Box::pin(async move {
+            let mut response = response.await?;
+            if response.status() != http::StatusCode::SWITCHING_PROTOCOLS && turnover.recycle_now()
+            {
+                if version < http::Version::HTTP_2 {
+                    response.headers_mut().insert(
+                        http::header::CONNECTION,
+                        http::HeaderValue::from_static("close"),
+                    );
+                } else {
+                    turnover.goaway.cancel();
+                }
+            }
+            Ok(response)
+        })
+    }
+}
+
+async fn serve_connection(
+    stream: TcpStream,
+    acceptor: TlsAcceptor,
+    router: Router,
+    cancel: CancellationToken,
+    timeouts: ListenerTimeouts,
+    listener: &'static str,
+    turnover: Option<Arc<crate::fairness::ConnectionTurnover>>,
+) -> Result<(), TransportError> {
+    let handshake = timeout(timeouts.handshake_timeout, acceptor.accept(stream));
+    let tls_stream = match tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        result = handshake => result,
+    } {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            // Certificate failures, protocol mismatches, and missing client
+            // certificates are expected per-connection authentication failures.
+            // Task row M6-C52: a certificate refusal is the answer to "why is
+            // my device refused", so it is logged at the default level with a
+            // fixed label; anything else (a scanner, a health check's bare
+            // TCP close) stays at debug.
+            // Any peer that can reach the listener can trigger it, so the
+            // line is rate limited per label (review of M6-C52).
+            log_handshake_failure(&TLS_REFUSAL_LOG, listener, &error);
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::debug!("TLS handshake timed out");
+            return Ok(());
+        }
+    };
+
+    let identity = verified_identity(&tls_stream)?;
+    let io = TokioIo::new(tls_stream);
+    let router = match identity {
+        Some(identity) => router.layer(Extension(identity)),
+        None => router,
+    };
+    let first_request = CancellationToken::new();
+    // M6-C193: an HTTP/2 connection chosen for turnover sends GOAWAY; one
+    // that has none never does.
+    let goaway = turnover
+        .as_ref()
+        .map_or_else(CancellationToken::new, |turnover| turnover.goaway.clone());
+    let service = TurnoverService {
+        inner: ObserveFirstRequest {
+            inner: TowerToHyperService::new(router.into_service()),
+            first_request: first_request.clone(),
+        },
+        turnover,
+    };
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    // Hyper discards its header-read deadline and logs a warning when no timer
+    // is installed, so install one before configuring that deadline.
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .max_headers(DEFAULT_MAX_HTTP1_HEADERS)
+        .header_read_timeout(Some(timeouts.http1_header_read_timeout));
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .max_concurrent_streams(DEFAULT_MAX_HTTP2_STREAMS)
+        .max_header_list_size(DEFAULT_MAX_HTTP2_HEADER_LIST_BYTES);
+    let mut connection = Box::pin(builder.serve_connection_with_upgrades(io, service));
+
+    // The pre-request deadline is armed from the completed handshake and
+    // disarmed for good by the first dispatched request.  Returning on the
+    // deadline drops the connection future and its TLS stream, which closes the
+    // socket and releases this task's listener permit.
+    let pre_request_deadline = tokio::time::sleep(timeouts.pre_request_timeout);
+    tokio::pin!(pre_request_deadline);
+    let mut pre_request_phase = true;
+    let mut going_away = false;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                connection.as_mut().graceful_shutdown();
+                return connection.await.map_err(|error| TransportError::Http(error.to_string()));
+            }
+            result = &mut connection => {
+                return result.map_err(|error| TransportError::Http(error.to_string()));
+            }
+            _ = goaway.cancelled(), if !going_away => {
+                // HTTP/2 turnover (M6-C193): GOAWAY, then every stream
+                // already accepted runs to its end before the connection
+                // future completes and releases the permit.
+                going_away = true;
+                connection.as_mut().graceful_shutdown();
+            }
+            _ = first_request.cancelled(), if pre_request_phase => {
+                pre_request_phase = false;
+            }
+            _ = &mut pre_request_deadline, if pre_request_phase => {
+                tracing::debug!(
+                    pre_request_timeout_ms = timeouts.pre_request_timeout.as_millis(),
+                    "closing connection that dispatched no request before the pre-request deadline"
+                );
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Log a failed TLS handshake: a certificate refusal at `info` with its fixed
+/// label, rate limited per label; anything else at `debug`.  Served and
+/// over-capacity connections share it (M6-C156).  Returns the refusal label,
+/// if the failure had one.
+fn log_handshake_failure(
+    limiter: &crate::log_limit::RefusalLogLimiter,
+    listener: &'static str,
+    error: &std::io::Error,
+) -> Option<&'static str> {
+    match tls_refusal_label(error) {
+        Some(refusal) => {
+            log_tls_refusal(limiter, listener, refusal);
+            Some(refusal)
+        }
+        None => {
+            tracing::debug!(?error, "TLS handshake rejected");
+            None
+        }
+    }
+}
+
+/// Pause after a resource-exhaustion `accept` error before accepting again
+/// (M6-C155); see [`accept_error_backoff`].
+///
+/// A connection that cannot be accepted stays pending, so without a pause the
+/// accept loop would spin on the same error at full speed.
+pub const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
+/// The pause before accepting again after a transient `accept` error of
+/// `class` (review of M6-C155).
+///
+/// Only resource exhaustion (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`) waits
+/// [`ACCEPT_ERROR_BACKOFF`]: retrying at once would spin on the same error.
+/// An aborted or reset connection is peer-caused and retried immediately with
+/// no pause, so a client that connects and resets repeatedly cannot throttle
+/// the listener to one accept per backoff.
+pub fn accept_error_backoff(class: &str) -> Duration {
+    match class {
+        "connection_aborted" | "connection_reset" => Duration::ZERO,
+        _ => ACCEPT_ERROR_BACKOFF,
+    }
+}
+
+/// The process-wide limit on `accept failed` lines, keyed by error class.
+static ACCEPT_ERROR_LOG: std::sync::LazyLock<crate::log_limit::RefusalLogLimiter> =
+    std::sync::LazyLock::new(crate::log_limit::RefusalLogLimiter::with_defaults);
+
+/// A fixed label for an `accept` error the listener survives (M6-C155), or
+/// `None` for one that ends it.
+///
+/// Recoverable: the process or system is out of file descriptors (`EMFILE`,
+/// `ENFILE`), buffer space or memory (`ENOBUFS`, `ENOMEM`), or the peer went
+/// away between the handshake and `accept` (`ECONNABORTED`; on Windows also
+/// `WSAECONNRESET`).  These describe the moment, not the listener.  Anything
+/// else (a closed or invalid listening socket) still ends the listener with
+/// [`TransportError::Accept`].
+pub fn transient_accept_error(error: &std::io::Error) -> Option<&'static str> {
+    #[cfg(unix)]
+    if let Some(errno) = rustix::io::Errno::from_io_error(error) {
+        use rustix::io::Errno;
+        return match errno {
+            Errno::MFILE => Some("process_file_descriptors_exhausted"),
+            Errno::NFILE => Some("system_file_descriptors_exhausted"),
+            Errno::NOBUFS => Some("no_buffer_space"),
+            Errno::NOMEM => Some("out_of_memory"),
+            Errno::CONNABORTED => Some("connection_aborted"),
+            _ => None,
+        };
+    }
+    #[cfg(windows)]
+    match error.raw_os_error() {
+        // WSAEMFILE, WSAENOBUFS, WSAECONNABORTED, WSAECONNRESET.
+        Some(10024) => return Some("process_file_descriptors_exhausted"),
+        Some(10055) => return Some("no_buffer_space"),
+        Some(10053) => return Some("connection_aborted"),
+        Some(10054) => return Some("connection_reset"),
+        Some(_) => return None,
+        None => {}
+    }
+    match error.kind() {
+        std::io::ErrorKind::ConnectionAborted => Some("connection_aborted"),
+        std::io::ErrorKind::OutOfMemory => Some("out_of_memory"),
+        _ => None,
+    }
+}
+
+/// Write one `accept failed` line for `class` unless `limiter` suppresses it.
+fn log_accept_error(
+    limiter: &crate::log_limit::RefusalLogLimiter,
+    listener: &'static str,
+    class: &'static str,
+) -> bool {
+    match limiter.admit(class) {
+        Some(suppressed) => {
+            tracing::warn!(
+                phase = "accept_error",
+                listener,
+                class,
+                suppressed,
+                backoff_ms = ACCEPT_ERROR_BACKOFF.as_millis() as u64,
+                "accept failed; backing off and continuing to serve"
+            );
+            true
+        }
+        None => false,
+    }
+}
+
+/// The process-wide limit on `TLS handshake refused` lines.
+static TLS_REFUSAL_LOG: std::sync::LazyLock<crate::log_limit::RefusalLogLimiter> =
+    std::sync::LazyLock::new(crate::log_limit::RefusalLogLimiter::with_defaults);
+
+/// Write one `TLS handshake refused` line for `refusal` on `listener` unless
+/// `limiter` suppresses it; returns whether it was written.  An admitted line
+/// carries `suppressed`, the number of lines for this label the limiter
+/// dropped since the previous one.
+pub fn log_tls_refusal(
+    limiter: &crate::log_limit::RefusalLogLimiter,
+    listener: &'static str,
+    refusal: &'static str,
+) -> bool {
+    match limiter.admit(refusal) {
+        Some(suppressed) => {
+            tracing::info!(
+                phase = "tls_refused",
+                listener,
+                refusal,
+                suppressed,
+                "TLS handshake refused"
+            );
+            true
+        }
+        None => false,
+    }
+}
+
+/// A fixed, payload-free label for a TLS handshake that failed over a
+/// certificate, on either side (task row M6-C52), or `None` for any other
+/// handshake failure.  The labels name the rustls error class only: no
+/// certificate content, subject, address or alert detail beyond its fixed
+/// name reaches the log.
+pub(crate) fn tls_refusal_label(error: &std::io::Error) -> Option<&'static str> {
+    use rustls::{AlertDescription, CertificateError, Error};
+    let error = error.get_ref()?.downcast_ref::<Error>()?;
+    Some(match error {
+        Error::NoCertificatesPresented => "client_certificate_missing",
+        Error::InvalidCertificate(certificate) => match certificate {
+            CertificateError::Expired | CertificateError::ExpiredContext { .. } => {
+                "client_certificate_expired"
+            }
+            CertificateError::NotValidYet | CertificateError::NotValidYetContext { .. } => {
+                "client_certificate_not_yet_valid"
+            }
+            CertificateError::UnknownIssuer => "client_certificate_unknown_issuer",
+            CertificateError::BadSignature => "client_certificate_bad_signature",
+            CertificateError::Revoked => "client_certificate_revoked",
+            CertificateError::InvalidPurpose | CertificateError::InvalidPurposeContext { .. } => {
+                "client_certificate_wrong_purpose"
+            }
+            _ => "client_certificate_invalid",
+        },
+        // The peer refused this listener's own certificate.
+        Error::AlertReceived(alert) => match alert {
+            AlertDescription::UnknownCA => "peer_refused_server_certificate_unknown_ca",
+            AlertDescription::CertificateExpired => "peer_refused_server_certificate_expired",
+            AlertDescription::BadCertificate
+            | AlertDescription::UnsupportedCertificate
+            | AlertDescription::CertificateUnknown
+            | AlertDescription::CertificateRevoked
+            | AlertDescription::BadCertificateStatusResponse => "peer_refused_server_certificate",
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+fn verified_identity<S>(stream: &TlsStream<S>) -> Result<Option<TlsIdentity>, TransportError> {
+    let certificates = stream.get_ref().1.peer_certificates();
+    certificates
+        .map(parse_leaf_identity)
+        .transpose()
+        .map_err(|error: TlsIdentityError| TransportError::Http(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_SEND_BUFFER_BYTES: u32 = 16 * 1024;
+
+    fn test_server_config() -> Arc<rustls::ServerConfig> {
+        let builder = rustls::ServerConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3 is supported by the test provider")
+        .with_no_client_auth();
+        Arc::new(
+            builder.with_cert_resolver(Arc::new(rustls::server::ResolvesServerCertUsingSni::new())),
+        )
+    }
+
+    /// M6-C52: certificate refusals on either side get a fixed label that is
+    /// logged at the default level; every other handshake failure -- a
+    /// scanner, a load balancer's bare TCP close -- gets none and stays at
+    /// debug.  The labels are the only thing logged, so no certificate
+    /// content can reach the line.
+    /// Review of M6-C52: a peer that presents no client certificate, as fast
+    /// as it likes, gets at most the limiter's burst of lines per window.
+    #[test]
+    fn tls_refusal_lines_are_rate_limited() {
+        let limiter = crate::log_limit::RefusalLogLimiter::new(5, Duration::from_secs(60));
+        let written = (0..500)
+            .filter(|_| log_tls_refusal(&limiter, "device", "client_certificate_missing"))
+            .count();
+        assert_eq!(written, 5);
+    }
+
+    #[test]
+    fn only_certificate_refusals_are_labelled_for_the_default_log() {
+        use rustls::{AlertDescription, CertificateError, Error};
+        let io = |error: Error| std::io::Error::new(std::io::ErrorKind::InvalidData, error);
+        for (error, label) in [
+            (Error::NoCertificatesPresented, "client_certificate_missing"),
+            (
+                Error::InvalidCertificate(CertificateError::Expired),
+                "client_certificate_expired",
+            ),
+            (
+                Error::InvalidCertificate(CertificateError::NotValidYet),
+                "client_certificate_not_yet_valid",
+            ),
+            (
+                Error::InvalidCertificate(CertificateError::UnknownIssuer),
+                "client_certificate_unknown_issuer",
+            ),
+            (
+                Error::AlertReceived(AlertDescription::UnknownCA),
+                "peer_refused_server_certificate_unknown_ca",
+            ),
+            (
+                Error::AlertReceived(AlertDescription::BadCertificate),
+                "peer_refused_server_certificate",
+            ),
+        ] {
+            assert_eq!(tls_refusal_label(&io(error)), Some(label), "{label}");
+        }
+        for unlabelled in [
+            io(Error::AlertReceived(AlertDescription::ProtocolVersion)),
+            io(Error::DecryptError),
+            std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+            std::io::Error::other("not a rustls error"),
+        ] {
+            assert_eq!(tls_refusal_label(&unlabelled), None, "{unlabelled:?}");
+        }
+    }
+
+    #[test]
+    fn capacity_and_handshake_deadline_are_bounded() {
+        assert_eq!(DEFAULT_MAX_CONCURRENT_HANDSHAKES, 64);
+        assert_eq!(DEFAULT_HANDSHAKE_TIMEOUT, Duration::from_secs(10));
+    }
+
+    fn invalid_field(timeouts: ListenerTimeouts) -> &'static str {
+        match timeouts.validate() {
+            Err(TransportError::InvalidListenerTimeouts { field, .. }) => field,
+            other => panic!("expected an invalid listener timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_timeout_defaults_are_documented_and_valid() {
+        let timeouts = ListenerTimeouts::default();
+        assert_eq!(timeouts.handshake_timeout, Duration::from_secs(10));
+        assert_eq!(timeouts.pre_request_timeout, Duration::from_secs(15));
+        assert_eq!(timeouts.http1_header_read_timeout, Duration::from_secs(10));
+        assert!(
+            timeouts.http1_header_read_timeout <= timeouts.pre_request_timeout,
+            "the default values must satisfy the cross-field rule"
+        );
+        assert!(timeouts.validate().is_ok());
+        // A silent connection holds a permit for at most the handshake budget
+        // plus the pre-request budget.
+        assert_eq!(
+            timeouts.handshake_timeout + timeouts.pre_request_timeout,
+            Duration::from_secs(25)
+        );
+    }
+
+    #[test]
+    fn listener_timeout_boundaries_are_inclusive() {
+        let minimum = ListenerTimeouts {
+            handshake_timeout: MIN_LISTENER_TIMEOUT,
+            pre_request_timeout: MIN_LISTENER_TIMEOUT,
+            http1_header_read_timeout: MIN_LISTENER_TIMEOUT,
+        };
+        assert!(minimum.validate().is_ok(), "100ms must be accepted");
+        let maximum = ListenerTimeouts {
+            handshake_timeout: MAX_LISTENER_TIMEOUT,
+            pre_request_timeout: MAX_LISTENER_TIMEOUT,
+            http1_header_read_timeout: MAX_LISTENER_TIMEOUT,
+        };
+        assert!(maximum.validate().is_ok(), "300s must be accepted");
+    }
+
+    #[test]
+    fn listener_timeouts_below_the_minimum_are_rejected_per_field() {
+        let below = MIN_LISTENER_TIMEOUT - Duration::from_millis(1);
+        assert_eq!(
+            invalid_field(ListenerTimeouts {
+                handshake_timeout: below,
+                ..ListenerTimeouts::default()
+            }),
+            "handshake_timeout"
+        );
+        assert_eq!(
+            invalid_field(ListenerTimeouts {
+                pre_request_timeout: below,
+                http1_header_read_timeout: below,
+                ..ListenerTimeouts::default()
+            }),
+            "pre_request_timeout"
+        );
+        assert_eq!(
+            invalid_field(ListenerTimeouts {
+                http1_header_read_timeout: below,
+                ..ListenerTimeouts::default()
+            }),
+            "http1_header_read_timeout"
+        );
+        assert_eq!(
+            invalid_field(ListenerTimeouts {
+                handshake_timeout: Duration::ZERO,
+                pre_request_timeout: Duration::ZERO,
+                http1_header_read_timeout: Duration::ZERO,
+            }),
+            "handshake_timeout",
+            "a zero deadline must never disable a bound"
+        );
+    }
+
+    #[test]
+    fn listener_timeouts_above_the_maximum_are_rejected_per_field() {
+        let above = MAX_LISTENER_TIMEOUT + Duration::from_millis(1);
+        assert_eq!(
+            invalid_field(ListenerTimeouts {
+                handshake_timeout: above,
+                ..ListenerTimeouts::default()
+            }),
+            "handshake_timeout"
+        );
+        assert_eq!(
+            invalid_field(ListenerTimeouts {
+                pre_request_timeout: above,
+                ..ListenerTimeouts::default()
+            }),
+            "pre_request_timeout"
+        );
+        assert_eq!(
+            invalid_field(ListenerTimeouts {
+                pre_request_timeout: MAX_LISTENER_TIMEOUT,
+                http1_header_read_timeout: above,
+                ..ListenerTimeouts::default()
+            }),
+            "http1_header_read_timeout"
+        );
+    }
+
+    #[test]
+    fn header_read_deadline_may_not_exceed_the_pre_request_deadline() {
+        let equal = ListenerTimeouts {
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            pre_request_timeout: Duration::from_secs(5),
+            http1_header_read_timeout: Duration::from_secs(5),
+        };
+        assert!(
+            equal.validate().is_ok(),
+            "an equal header-read deadline is the accepted boundary"
+        );
+        let above = ListenerTimeouts {
+            http1_header_read_timeout: Duration::from_secs(5) + Duration::from_millis(1),
+            ..equal
+        };
+        let error = above
+            .validate()
+            .expect_err("a header-read deadline above the pre-request deadline must be rejected");
+        assert!(matches!(
+            error,
+            TransportError::InvalidListenerTimeouts {
+                field: "http1_header_read_timeout",
+                reason: "must not exceed pre_request_timeout",
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_listener_timeouts_return_and_release_listener() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind invalid-timeout test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(serve_with_listener_options(
+            listener,
+            Router::new(),
+            test_server_config(),
+            CancellationToken::new(),
+            AcceptedSocketOptions::default(),
+            ListenerTimeouts {
+                pre_request_timeout: Duration::ZERO,
+                ..ListenerTimeouts::default()
+            },
+        ));
+
+        let error = timeout(Duration::from_secs(1), server)
+            .await
+            .expect("invalid timeout did not fail before the deadline")
+            .expect("invalid-timeout supervisor task panicked")
+            .expect_err("invalid timeout unexpectedly started the listener");
+        assert!(matches!(
+            error,
+            TransportError::InvalidListenerTimeouts {
+                field: "pre_request_timeout",
+                ..
+            }
+        ));
+
+        // Five seconds, not one: Windows answers a connect to a closed
+        // loopback port only after retrying the refused SYN (about two
+        // seconds), where Unix refuses at once. The assertion below is what
+        // can fail; this bound only keeps the check from hanging.
+        let connection = timeout(Duration::from_secs(5), TcpStream::connect(address))
+            .await
+            .expect("released listener connection check timed out");
+        assert!(
+            connection.is_err(),
+            "listener remained reachable after timeout validation failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_socket_send_buffer_option_is_observed_after_accept() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind transport test listener");
+        let address = listener.local_addr().expect("listener address");
+        let cancel = CancellationToken::new();
+        let diagnostics = AcceptedSocketDiagnostics::new();
+        let server = tokio::spawn(serve_with_socket_options(
+            listener,
+            Router::new(),
+            test_server_config(),
+            cancel.clone(),
+            AcceptedSocketOptions {
+                send_buffer_bytes: Some(TEST_SEND_BUFFER_BYTES),
+                diagnostics: Some(diagnostics.clone()),
+                listener: None,
+                capacity: ListenerCapacity::default(),
+                turnover: None,
+            },
+        ));
+
+        let client = TcpStream::connect(address)
+            .await
+            .expect("connect accepted-socket test client");
+        let effective = timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(bytes) = diagnostics.last_send_buffer_bytes() {
+                    break bytes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted socket was not configured before the deadline");
+        assert!(
+            effective > 0,
+            "platform returned an empty effective send-buffer sample"
+        );
+
+        cancel.cancel();
+        drop(client);
+        let result = timeout(Duration::from_secs(1), server)
+            .await
+            .expect("transport supervisor did not join after cancellation")
+            .expect("transport supervisor task panicked");
+        assert!(result.is_ok(), "cancellation returned an error: {result:?}");
+    }
+
+    /// Task row M6-C124: every accepted socket has `TCP_NODELAY` set, with no
+    /// socket option requested — the listener default, which is what the
+    /// relay's consumer and device listeners use.
+    #[tokio::test]
+    async fn accepted_sockets_have_nodelay_set_by_default() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind nodelay test listener");
+        let address = listener.local_addr().expect("listener address");
+        let cancel = CancellationToken::new();
+        let diagnostics = AcceptedSocketDiagnostics::new();
+        let server = tokio::spawn(serve_with_socket_options(
+            listener,
+            Router::new(),
+            test_server_config(),
+            cancel.clone(),
+            AcceptedSocketOptions {
+                send_buffer_bytes: None,
+                diagnostics: Some(diagnostics.clone()),
+                listener: None,
+                capacity: ListenerCapacity::default(),
+                turnover: None,
+            },
+        ));
+
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            clients.push(
+                TcpStream::connect(address)
+                    .await
+                    .expect("connect nodelay test client"),
+            );
+        }
+        let counts = timeout(Duration::from_secs(5), async {
+            loop {
+                let (set, unset) = diagnostics.nodelay_counts();
+                if set + unset >= 3 {
+                    break (set, unset);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted sockets were not observed before the deadline");
+        assert_eq!(
+            counts,
+            (3, 0),
+            "every accepted socket must have TCP_NODELAY set (set, unset)"
+        );
+
+        cancel.cancel();
+        drop(clients);
+        let result = timeout(Duration::from_secs(1), server)
+            .await
+            .expect("transport supervisor did not join after cancellation")
+            .expect("transport supervisor task panicked");
+        assert!(result.is_ok(), "cancellation returned an error: {result:?}");
+    }
+
+    /// M6-C124 with M6-C153: a connection accepted into the over-capacity
+    /// refusal margin (answered `503 CONNECTION_LIMIT`, not served) gets
+    /// `TCP_NODELAY` too.  With a limit of one, the second connection is
+    /// refused; both must be counted as set.
+    #[tokio::test]
+    async fn a_connection_refused_for_capacity_has_nodelay_set() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind refused-nodelay test listener");
+        let address = listener.local_addr().expect("listener address");
+        let cancel = CancellationToken::new();
+        let diagnostics = AcceptedSocketDiagnostics::new();
+        let server = tokio::spawn(serve_with_socket_options(
+            listener,
+            Router::new(),
+            test_server_config(),
+            cancel.clone(),
+            AcceptedSocketOptions {
+                send_buffer_bytes: None,
+                diagnostics: Some(diagnostics.clone()),
+                listener: None,
+                capacity: ListenerCapacity {
+                    max_connections: 1,
+                    refusal_margin: 1,
+                    ..ListenerCapacity::default()
+                },
+                turnover: None,
+            },
+        ));
+
+        let served = TcpStream::connect(address)
+            .await
+            .expect("connect the served client");
+        // The served connection holds the only permit before the next arrives.
+        timeout(Duration::from_secs(5), async {
+            while diagnostics.nodelay_counts().0 + diagnostics.nodelay_counts().1 < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the served connection was not accepted before the deadline");
+        let refused = TcpStream::connect(address)
+            .await
+            .expect("connect the over-capacity client");
+        let counts = timeout(Duration::from_secs(5), async {
+            loop {
+                let (set, unset) = diagnostics.nodelay_counts();
+                if diagnostics.capacity_refusals() >= 1 && set + unset >= 2 {
+                    break (set, unset);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the over-capacity connection was not accepted before the deadline");
+        assert_eq!(
+            diagnostics.capacity_refusals(),
+            1,
+            "the second connection is refused"
+        );
+        assert_eq!(
+            counts,
+            (2, 0),
+            "the served and the refused socket must both have TCP_NODELAY set (set, unset)"
+        );
+
+        cancel.cancel();
+        drop((served, refused));
+        let result = timeout(Duration::from_secs(5), server)
+            .await
+            .expect("transport supervisor did not join after cancellation")
+            .expect("transport supervisor task panicked");
+        assert!(result.is_ok(), "cancellation returned an error: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn invalid_accepted_socket_option_returns_and_releases_listener() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind invalid-option test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(serve_with_socket_options(
+            listener,
+            Router::new(),
+            test_server_config(),
+            CancellationToken::new(),
+            AcceptedSocketOptions {
+                send_buffer_bytes: Some(0),
+                diagnostics: None,
+                listener: None,
+                capacity: ListenerCapacity::default(),
+                turnover: None,
+            },
+        ));
+
+        let error = timeout(Duration::from_secs(1), server)
+            .await
+            .expect("invalid option did not fail before the deadline")
+            .expect("invalid-option supervisor task panicked")
+            .expect_err("invalid option unexpectedly started the listener");
+        assert!(matches!(
+            error,
+            TransportError::InvalidSocketConfiguration { requested_bytes: 0 }
+        ));
+
+        // Five seconds, not one: Windows answers a connect to a closed
+        // loopback port only after retrying the refused SYN (about two
+        // seconds), where Unix refuses at once. The assertion below is what
+        // can fail; this bound only keeps the check from hanging.
+        let connection = timeout(Duration::from_secs(5), TcpStream::connect(address))
+            .await
+            .expect("released listener connection check timed out");
+        assert!(
+            connection.is_err(),
+            "listener remained reachable after configuration failure"
+        );
+    }
+}
+
+#[cfg(test)]
+mod accept_error_tests {
+    use super::*;
+
+    /// M6-C155: descriptor, buffer and memory exhaustion and an aborted peer
+    /// are survivable; a broken listening socket is not.
+    #[cfg(unix)]
+    #[test]
+    fn transient_accept_errors_are_classified_and_others_are_fatal() {
+        use rustix::io::Errno;
+        let io = |errno: Errno| std::io::Error::from_raw_os_error(errno.raw_os_error());
+        for (errno, class) in [
+            (Errno::MFILE, "process_file_descriptors_exhausted"),
+            (Errno::NFILE, "system_file_descriptors_exhausted"),
+            (Errno::NOBUFS, "no_buffer_space"),
+            (Errno::NOMEM, "out_of_memory"),
+            (Errno::CONNABORTED, "connection_aborted"),
+        ] {
+            assert_eq!(transient_accept_error(&io(errno)), Some(class), "{class}");
+        }
+        for fatal in [Errno::BADF, Errno::INVAL, Errno::NOTSOCK, Errno::OPNOTSUPP] {
+            assert_eq!(transient_accept_error(&io(fatal)), None, "{fatal:?}");
+        }
+        assert_eq!(
+            transient_accept_error(&std::io::Error::other("not an OS error")),
+            None
+        );
+    }
+
+    /// Review of M6-C155: an aborted or reset accept is peer-caused and must
+    /// not pause the listener; only descriptor, buffer and memory exhaustion
+    /// back off.  Red before the fix, which slept 100 ms for every class.
+    #[test]
+    fn aborted_accepts_do_not_pause_and_exhaustion_backs_off() {
+        for class in ["connection_aborted", "connection_reset"] {
+            assert_eq!(accept_error_backoff(class), Duration::ZERO, "{class}");
+        }
+        for class in [
+            "process_file_descriptors_exhausted",
+            "system_file_descriptors_exhausted",
+            "no_buffer_space",
+            "out_of_memory",
+        ] {
+            assert_eq!(accept_error_backoff(class), ACCEPT_ERROR_BACKOFF, "{class}");
+        }
+        let aborted = std::io::Error::from(std::io::ErrorKind::ConnectionAborted);
+        let class = transient_accept_error(&aborted).expect("aborted is transient");
+        assert!(accept_error_backoff(class).is_zero());
+        #[cfg(unix)]
+        {
+            let aborted =
+                std::io::Error::from_raw_os_error(rustix::io::Errno::CONNABORTED.raw_os_error());
+            let class = transient_accept_error(&aborted).expect("ECONNABORTED is transient");
+            assert!(accept_error_backoff(class).is_zero());
+        }
+    }
+
+    /// The accept-error line is rate limited per class like the TLS lines.
+    #[test]
+    fn accept_error_lines_are_rate_limited() {
+        let limiter = crate::log_limit::RefusalLogLimiter::new(3, Duration::from_secs(60));
+        let written = (0..100)
+            .filter(|_| {
+                log_accept_error(&limiter, "consumer", "process_file_descriptors_exhausted")
+            })
+            .count();
+        assert_eq!(written, 3);
+    }
+
+    /// M6-C156: a certificate refusal on an over-capacity connection is logged
+    /// through the same labelled, rate-limited path as on a served one.  The
+    /// limiter admits one line, so the refusal consuming it is observable: a
+    /// further admit for the same label is suppressed.  Red before the fix,
+    /// which returned without logging.
+    #[tokio::test]
+    async fn refused_connection_tls_failure_uses_the_tls_refusal_log() {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, SanType};
+
+        let server_key = KeyPair::generate().expect("server key");
+        let mut server_params = CertificateParams::default();
+        server_params
+            .subject_alt_names
+            .push(SanType::DnsName("localhost".try_into().expect("name")));
+        let server_cert = server_params.self_signed(&server_key).expect("server cert");
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).expect("client ca");
+        let server_config = crate::load_server_config_from_pem(
+            server_cert.pem().as_bytes(),
+            server_key.serialize_pem().as_bytes(),
+            Some(ca_cert.pem().as_bytes()),
+        )
+        .expect("mTLS server config");
+        let roots = crate::require_root_certificates(server_cert.pem().as_bytes()).expect("roots");
+        let client_config = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let client = tokio::spawn(async move {
+            let tcp = TcpStream::connect(address).await?;
+            let mut tls = tokio_rustls::TlsConnector::from(Arc::new(client_config))
+                .connect("localhost".try_into().expect("name"), tcp)
+                .await?;
+            // TLS 1.3 completes on the client first; reading surfaces the
+            // server's refusal of the missing certificate.
+            let _ = tokio::io::AsyncReadExt::read(&mut tls, &mut [0_u8; 1]).await;
+            Ok::<(), std::io::Error>(())
+        });
+        let (stream, _) = listener.accept().await.expect("accept");
+
+        let limiter = crate::log_limit::RefusalLogLimiter::new(1, Duration::from_secs(60));
+        refuse_connection(
+            stream,
+            TlsAcceptor::from(server_config),
+            CancellationToken::new(),
+            Duration::from_secs(5),
+            ListenerTimeouts::default(),
+            "device",
+            &limiter,
+        )
+        .await;
+        let _ = client.await;
+
+        assert_eq!(
+            limiter.admit("client_certificate_missing"),
+            None,
+            "the over-capacity certificate refusal did not reach the TLS refusal log"
+        );
+    }
+}

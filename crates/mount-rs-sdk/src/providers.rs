@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use mount_rs_aws_s3::{AwsS3BlockStore, AwsS3Config};
+use mount_rs_chunked::CachedBlockStore;
 use mount_rs_core::storage::{BlockStore, MetadataStore};
 use mount_rs_core::{Result, backend_error};
 #[cfg(all(
@@ -28,6 +29,7 @@ use mount_rs_foundationdb::{
     FoundationDbLimits, FoundationDbSharedLeaseOracle, FoundationDbStorage,
     FoundationDbStorageOptions,
 };
+use mount_rs_host::{DiskCacheBudget, DiskCachedBlockStore, LocalBlockStore};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
@@ -46,7 +48,7 @@ use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
     )
 ))]
 use crate::options::FoundationDbLeaseAuthority;
-use crate::options::StoreConfig;
+use crate::options::{BlockCacheOptions, DiskCacheOptions, StoreConfig};
 use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
 
 #[derive(Clone)]
@@ -98,6 +100,8 @@ impl ProviderResource {
 
 #[derive(Clone, Default)]
 pub(crate) struct StorageResources {
+    pub(crate) disk_cache: Option<DiskCachedBlockStore<dyn BlockStore>>,
+    pub(crate) cache: Option<CachedBlockStore<dyn BlockStore>>,
     resources: Vec<ProviderResource>,
 }
 
@@ -116,6 +120,8 @@ impl StorageResources {
 }
 
 pub(crate) struct OpenStorage {
+    /// The provider block store beneath any local caches.
+    pub(crate) authoritative: Arc<dyn BlockStore>,
     pub(crate) metadata: ErasedMetadataStore,
     pub(crate) blocks: ErasedBlockStore,
     pub(crate) resources: StorageResources,
@@ -136,10 +142,27 @@ pub(crate) async fn open_storage(
     open_storage_decorated(metadata, blocks, None).await
 }
 
+/// Optional owner-local cache tiers layered above the authoritative blocks.
+#[derive(Clone, Default)]
+pub(crate) struct CacheLayers {
+    pub(crate) block_cache: Option<BlockCacheOptions>,
+    pub(crate) disk_cache: Option<DiskCacheOptions>,
+    pub(crate) budget: DiskCacheBudget,
+}
+
 pub(crate) async fn open_storage_decorated(
     metadata: &StoreConfig,
     blocks: &StoreConfig,
     decorator: Option<&dyn crate::filesystem::BlockStoreDecorator>,
+) -> Result<OpenStorage> {
+    open_storage_layered(metadata, blocks, decorator, CacheLayers::default()).await
+}
+
+pub(crate) async fn open_storage_layered(
+    metadata: &StoreConfig,
+    blocks: &StoreConfig,
+    decorator: Option<&dyn crate::filesystem::BlockStoreDecorator>,
+    layers: CacheLayers,
 ) -> Result<OpenStorage> {
     let block_config = blocks;
     let (metadata, mut metadata_resources) = open_metadata(metadata).await?;
@@ -148,6 +171,7 @@ pub(crate) async fn open_storage_decorated(
         Err(error) => {
             let resources = StorageResources {
                 resources: metadata_resources,
+                ..Default::default()
             };
             let _ = resources.close().await;
             return Err(error);
@@ -160,11 +184,47 @@ pub(crate) async fn open_storage_decorated(
             Err(error) => {
                 let resources = StorageResources {
                     resources: metadata_resources,
+                    ..Default::default()
                 };
                 let _ = resources.close().await;
                 return Err(error);
             }
         },
+        None => blocks,
+    };
+    let authoritative = blocks.clone();
+    let disk_cache = match layers.disk_cache {
+        Some(options) => match DiskCachedBlockStore::open_with_budget(
+            blocks.clone(),
+            options.root,
+            &options.scope,
+            options.max_bytes,
+            options.max_entries,
+            layers.budget,
+        )
+        .await
+        {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                let resources = StorageResources {
+                    resources: metadata_resources,
+                    ..Default::default()
+                };
+                let _ = resources.close().await;
+                return Err(error);
+            }
+        },
+        None => None,
+    };
+    let blocks: Arc<dyn BlockStore> = match &disk_cache {
+        Some(cache) => Arc::new(cache.clone()),
+        None => blocks,
+    };
+    let cache = layers.block_cache.map(|options| {
+        CachedBlockStore::from_shared(blocks.clone(), options.max_bytes, options.max_entries)
+    });
+    let blocks: Arc<dyn BlockStore> = match &cache {
+        Some(cache) => Arc::new(cache.clone()),
         None => blocks,
     };
     #[cfg(feature = "observability")]
@@ -181,9 +241,12 @@ pub(crate) async fn open_storage_decorated(
         ErasedBlockStore::new(blocks),
     );
     Ok(OpenStorage {
+        authoritative,
         metadata,
         blocks,
         resources: StorageResources {
+            cache,
+            disk_cache,
             resources: metadata_resources,
         },
     })
@@ -193,6 +256,20 @@ async fn open_metadata(
     provider: &StoreConfig,
 ) -> Result<(Arc<dyn MetadataStore>, Vec<ProviderResource>)> {
     match provider {
+        StoreConfig::Local { .. } | StoreConfig::LocalWithWriteBudget { .. } => Err(
+            mount_rs_core::FsError::enotsup("local files are block-only"),
+        ),
+        StoreConfig::TidbShared {
+            pool,
+            volume_key,
+            durable,
+        } => {
+            // The application owns the pool; closing this volume leaves it open.
+            let store = pool
+                .metadata(TidbStorageOptions::new(volume_key.clone()).with_durable(*durable))
+                .await?;
+            Ok((Arc::new(store), Vec::new()))
+        }
         StoreConfig::Memory => Ok((Arc::new(MemoryMetadataStore::new()), Vec::new())),
         StoreConfig::Sqlite { path } => {
             Ok((Arc::new(SqliteMetadataStore::open(path)?), Vec::new()))
@@ -290,11 +367,12 @@ async fn open_metadata(
                 ))
             }
         }
-        StoreConfig::R2 { .. } | StoreConfig::RustFs { .. } | StoreConfig::AwsS3 { .. } => {
-            Err(backend_error(
-                "object-store metadata is unsupported; R2, RustFS, and AWS S3 are block-only",
-            ))
-        }
+        StoreConfig::R2 { .. }
+        | StoreConfig::R2Shared { .. }
+        | StoreConfig::RustFs { .. }
+        | StoreConfig::AwsS3 { .. } => Err(backend_error(
+            "object-store metadata is unsupported; R2, RustFS, and AWS S3 are block-only",
+        )),
     }
 }
 
@@ -302,6 +380,32 @@ async fn open_blocks(
     provider: &StoreConfig,
 ) -> Result<(Arc<dyn BlockStore>, Vec<ProviderResource>)> {
     match provider {
+        StoreConfig::Local { path } => Ok((Arc::new(LocalBlockStore::open(path)?), Vec::new())),
+        StoreConfig::LocalWithWriteBudget { path, budget } => Ok((
+            Arc::new(LocalBlockStore::open_with_write_budget(
+                path,
+                budget.clone(),
+            )?),
+            Vec::new(),
+        )),
+        StoreConfig::TidbShared {
+            pool,
+            volume_key,
+            durable,
+        } => {
+            let store = pool
+                .blocks(TidbStorageOptions::new(volume_key.clone()).with_durable(*durable))
+                .await?;
+            Ok((Arc::new(store), Vec::new()))
+        }
+        StoreConfig::R2Shared {
+            client,
+            prefix,
+            durable,
+        } => Ok((
+            Arc::new(client.blocks(prefix.clone(), *durable)?),
+            Vec::new(),
+        )),
         StoreConfig::Memory => Ok((Arc::new(MemoryBlockStore::new()), Vec::new())),
         StoreConfig::SlateDb { .. } => Err(mount_rs_core::FsError::enotsup(
             "SlateDB is a metadata provider; use RustFS for immutable blocks",

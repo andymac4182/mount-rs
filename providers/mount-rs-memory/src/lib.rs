@@ -19,7 +19,7 @@ use mount_rs_core::{ErrorCode, FsError, Result};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Provider-owned time source used by the metadata lease implementation.
@@ -521,10 +521,12 @@ impl VersionedMetadataStore for MemoryMetadataStore {
     }
 }
 
+type MemoryBlocks = BTreeMap<BlockId, Arc<Vec<u8>>>;
+
 /// Volatile immutable block store. A clone shares the same block map.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryBlockStore {
-    blocks: Arc<Mutex<BTreeMap<BlockId, Vec<u8>>>>,
+    blocks: Arc<RwLock<MemoryBlocks>>,
 }
 
 impl MemoryBlockStore {
@@ -532,9 +534,9 @@ impl MemoryBlockStore {
         Self::default()
     }
 
-    fn lock_blocks(&self) -> Result<MutexGuard<'_, BTreeMap<BlockId, Vec<u8>>>> {
+    fn lock_blocks(&self) -> Result<RwLockWriteGuard<'_, MemoryBlocks>> {
         self.blocks
-            .lock()
+            .write()
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("block store lock poisoned"))
     }
 }
@@ -547,32 +549,52 @@ impl BlockStore for MemoryBlockStore {
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let base_id = block_id(bytes);
+        let mut cached = None;
         let mut id = base_id.clone();
         let mut collision = 0_u64;
-        let mut blocks = self.lock_blocks()?;
         loop {
-            match blocks.get(&id) {
-                Some(existing) if existing == bytes => return Ok(id),
-                Some(_) => {
-                    collision = collision
-                        .checked_add(1)
-                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-                    id = BlockId(format!("{}-{collision}", base_id.0));
-                }
-                None => {
-                    blocks.insert(id.clone(), bytes.to_vec());
+            let existing = {
+                let blocks = self.blocks.read().map_err(|_| {
+                    FsError::new(ErrorCode::Eio).with_message("block store lock poisoned")
+                })?;
+                blocks.get(&id).cloned()
+            };
+            if let Some(existing) = existing {
+                // Immutable bytes may be compared outside map admission.
+                // An ordinary duplicate put needs no payload allocation.
+                if existing.as_slice() == bytes {
                     return Ok(id);
                 }
+                collision = collision
+                    .checked_add(1)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                id = BlockId(format!("{}-{collision}", base_id.0));
+                continue;
             }
+            cached.get_or_insert_with(|| Arc::new(bytes.to_vec()));
+            let mut blocks = self.lock_blocks()?;
+            if let std::collections::btree_map::Entry::Vacant(entry) = blocks.entry(id.clone()) {
+                entry.insert(cached.take().expect("prepared immutable payload"));
+                return Ok(id);
+            }
+            // Another put won publication. Release exclusive admission and
+            // recheck its immutable value; never overwrite a competing block.
         }
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
-        let blocks = self.lock_blocks()?;
-        blocks
-            .get(id)
-            .cloned()
-            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_message("block not found"))
+        let bytes = {
+            let blocks = self.blocks.read().map_err(|_| {
+                FsError::new(ErrorCode::Eio).with_message("block store lock poisoned")
+            })?;
+            blocks
+                .get(id)
+                .cloned()
+                .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_message("block not found"))?
+        };
+        // Retain immutable bytes under shared admission; allocate/copy after
+        // releasing the map so unrelated readers and writers can proceed.
+        Ok(bytes.as_ref().clone())
     }
 
     async fn flush(&self) -> Result<()> {
@@ -580,8 +602,8 @@ impl BlockStore for MemoryBlockStore {
     }
 
     async fn delete(&self, id: &BlockId) -> Result<()> {
-        let mut blocks = self.lock_blocks()?;
-        if blocks.remove(id).is_some() {
+        let removed = { self.lock_blocks()?.remove(id) };
+        if removed.is_some() {
             Ok(())
         } else {
             Err(FsError::new(ErrorCode::Enoent).with_message("block not found"))
@@ -688,6 +710,60 @@ fn block_id(bytes: &[u8]) -> BlockId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn concurrent_duplicate_publication_preserves_colliding_blocks() {
+        let blocks = MemoryBlockStore::new();
+        let base = block_id(b"new bytes");
+        blocks
+            .lock_blocks()
+            .unwrap()
+            .insert(base.clone(), Arc::new(b"collision".to_vec()));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let blocks = blocks.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    block_on(blocks.put(b"new bytes")).unwrap()
+                })
+            })
+            .collect();
+        let ids: Vec<_> = tasks.into_iter().map(|task| task.join().unwrap()).collect();
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        assert_ne!(ids[0], base);
+        assert_eq!(block_on(blocks.get(&base)).unwrap(), b"collision");
+        assert_eq!(block_on(blocks.get(&ids[0])).unwrap(), b"new bytes");
+        assert_eq!(blocks.blocks.read().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn immutable_block_reads_share_admission_and_own_returned_bytes() {
+        let blocks = MemoryBlockStore::new();
+        let id = block_on(blocks.put(&vec![19; 65536])).unwrap();
+        let admitted = blocks.blocks.read().unwrap();
+        let reader = blocks.clone();
+        let read_id = id.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            send.send(block_on(reader.get(&read_id))).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(2));
+        // Always release admission before joining, including a failed assertion.
+        drop(admitted);
+        task.join().unwrap();
+        let mut bytes = result
+            .expect("reader must not require exclusive admission")
+            .unwrap();
+        bytes[0] = 0;
+        assert_eq!(block_on(blocks.get(&id)).unwrap()[0], 19);
+        block_on(blocks.delete(&id)).unwrap();
+        assert_eq!(bytes.len(), 65536);
+        assert_eq!(
+            block_on(blocks.get(&id)).unwrap_err().code,
+            ErrorCode::Enoent
+        );
+    }
     use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
     use mount_rs_core::storage::{BlockExtent, FileLayout, NodeData, NodeMetadata};
     use mount_rs_core::types::{S_IFDIR, S_IFREG, Stats};
@@ -716,7 +792,7 @@ mod tests {
     }
 
     fn sample_namespace(marker: u64) -> Namespace {
-        let mut nodes = BTreeMap::new();
+        let mut nodes: BTreeMap<u64, NodeMetadata> = BTreeMap::new();
         nodes.insert(
             1,
             NodeMetadata {
