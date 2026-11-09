@@ -371,6 +371,9 @@ async fn exercise_warm_reader_after_lost_reply(retry: bool) {
         reader.close().await.unwrap();
         writer.close().await.unwrap();
         fs.shutdown().await.unwrap();
+        // Release every store handle before reopening so SQLite files are
+        // closed; Windows cannot delete the temp directory otherwise.
+        drop((reader, writer, fs, cache, metadata));
         reopen_and_assert(
             &backend,
             &committed_namespace,
