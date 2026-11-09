@@ -7,6 +7,7 @@
 mod server;
 
 pub use server::{
-    DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_READ_CHUNK_BYTES, DriveConfig,
-    DriveRegistry, HttpServer, HttpServerError, HttpServerOptions, RegistryError,
+    BoxError, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_READ_CHUNK_BYTES,
+    DriveConfig, DriveRegistry, HttpBody, HttpRequestHandler, HttpServer, HttpServerError,
+    HttpServerOptions, RegistryError,
 };

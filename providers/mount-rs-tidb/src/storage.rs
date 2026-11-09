@@ -13,7 +13,8 @@ use mount_rs_core::storage::{
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mysql_async::prelude::Queryable;
 use mysql_async::{
-    Conn, Error as MysqlError, IsolationLevel, Opts, OptsBuilder, Params, Pool, Transaction, TxOpts,
+    Conn, Error as MysqlError, IsolationLevel, Opts, OptsBuilder, Params, Pool, PoolConstraints,
+    Transaction, TxOpts,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -143,6 +144,9 @@ impl Default for TidbStorageOptions {
 #[derive(Clone)]
 struct Database {
     pool: Pool,
+    /// False for stores borrowed from a `TidbStorePool`; closing them must
+    /// not disconnect the shared pool.
+    owns_pool: bool,
     volume_key: String,
     durable: bool,
     max_block_bytes: usize,
@@ -174,8 +178,20 @@ impl Database {
                 .pool_opts(pool_options)
                 .after_connect(|connection| Box::pin(configure_pessimistic_session(connection))),
         );
+        Self::from_pool(pool, true, options, schema, ensure_metadata_row).await
+    }
+
+    async fn from_pool(
+        pool: Pool,
+        owns_pool: bool,
+        options: TidbStorageOptions,
+        schema: &str,
+        ensure_metadata_row: bool,
+    ) -> Result<Self> {
+        options.validate()?;
         let database = Self {
             pool,
+            owns_pool,
             volume_key: options.volume_key,
             durable: options.durable,
             max_block_bytes: options.max_block_bytes,
@@ -250,11 +266,108 @@ impl Database {
     }
 
     async fn close(&self) -> Result<()> {
+        if !self.owns_pool {
+            return Ok(());
+        }
         self.pool
             .clone()
             .disconnect()
             .await
             .map_err(|error| db_error("close TiDB connection pool", error))
+    }
+}
+
+/// Explicitly owned connection pool shared by multiple volume-scoped stores.
+/// No process-global cache or credential-based implicit sharing is used.
+/// The owner must close this pool after all its filesystems have shut down.
+/// Closing an individual borrowed store is a no-op and does not disconnect peers.
+#[derive(Clone)]
+pub struct TidbStorePool {
+    pool: std::sync::Arc<Pool>,
+}
+
+// Pool equality is owner identity, never credential or endpoint equality.
+impl PartialEq for TidbStorePool {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.pool, &other.pool)
+    }
+}
+impl Eq for TidbStorePool {}
+
+impl std::fmt::Debug for TidbStorePool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TidbStorePool { .. }")
+    }
+}
+
+fn shared_pool_options(url: &str, max_connections: usize) -> Result<OptsBuilder> {
+    if url.trim().is_empty() {
+        return Err(FsError::new(ErrorCode::Einval).with_message("TiDB URL must not be empty"));
+    }
+    let constraints = PoolConstraints::new(0, max_connections)
+        .ok_or_else(|| FsError::new(ErrorCode::Einval).with_message("invalid TiDB pool limit"))?;
+    let opts =
+        Opts::from_url(url).map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+    // Same session policy as a private pool: every new session is configured
+    // and verified for pessimistic transactions, so returned connections do
+    // not need COM_RESET_CONNECTION.
+    let pool_opts = opts
+        .pool_opts()
+        .clone()
+        .with_constraints(constraints)
+        .with_inactive_connection_ttl(Duration::from_secs(30))
+        .with_reset_connection(false);
+    Ok(OptsBuilder::from_opts(opts)
+        .pool_opts(pool_opts)
+        .after_connect(|connection| Box::pin(configure_pessimistic_session(connection))))
+}
+
+impl TidbStorePool {
+    /// Build a lazy pool with a hard connection limit, zero minimum idle count,
+    /// and a 30-second idle retention window to reuse returned connections.
+    /// URL transport, authentication and request timeout options are preserved;
+    /// pool capacity and idle retention are controlled by this owner.
+    pub fn new(url: &str, max_connections: usize) -> Result<Self> {
+        let opts = shared_pool_options(url, max_connections)?;
+        Ok(Self {
+            pool: std::sync::Arc::new(Pool::new(opts)),
+        })
+    }
+
+    pub async fn metadata(&self, options: TidbStorageOptions) -> Result<TidbMetadataStore> {
+        Ok(TidbMetadataStore(
+            Database::from_pool(
+                self.pool.as_ref().clone(),
+                false,
+                options,
+                METADATA_SCHEMA,
+                true,
+            )
+            .await?,
+        ))
+    }
+
+    pub async fn blocks(&self, options: TidbStorageOptions) -> Result<TidbBlockStore> {
+        Ok(TidbBlockStore(
+            Database::from_pool(
+                self.pool.as_ref().clone(),
+                false,
+                options,
+                BLOCK_SCHEMA,
+                false,
+            )
+            .await?,
+        ))
+    }
+
+    /// Disconnect the shared pool. This affects every store created from it.
+    pub async fn close(&self) -> Result<()> {
+        self.pool
+            .as_ref()
+            .clone()
+            .disconnect()
+            .await
+            .map_err(|error| db_error("close shared TiDB connection pool", error))
     }
 }
 

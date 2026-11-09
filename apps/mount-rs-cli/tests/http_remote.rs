@@ -450,3 +450,152 @@ fn remote_cli_http_roundtrip_forced_cleanup() {
     // the Unix-only test is the durable reopen evidence.
     let _ = child.kill_owned();
 }
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires isolated real TiDB and RustFS harnesses"]
+fn tidb_cli_http_cached_reopen() {
+    check_tidb_cli_http_cached_reopen(false);
+}
+
+#[cfg(unix)]
+fn check_tidb_cli_http_cached_reopen(normalized: bool) {
+    use mysql_async::{Pool, prelude::Queryable};
+    assert!(Path::new(&required_env("RUSTFS_RUN_DIR")).is_dir());
+    let endpoint = required_env("R2_ENDPOINT");
+    assert!(endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("http://localhost:"));
+    let url = required_env("MOUNT_RS_TIDB_URL");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (pool, mut connection) = rt.block_on(async {
+        let pool = Pool::from_url(&url).expect("valid TiDB URL");
+        let mut conn = pool.get_conn().await.expect("connect real TiDB");
+        let identity: Option<(String, String)> = conn
+            .query_first("SELECT tidb_version(), VERSION()")
+            .await
+            .expect("real TiDB identity");
+        assert!(identity.is_some_and(|(a, b)| format!("{a} {b}").to_lowercase().contains("tidb")));
+        (pool, conn)
+    });
+    let root = temporary_root();
+    let key = format!(
+        "cli-tidb-audit-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let lease_window_ms: u64 = std::env::var("AUDIT_LEASE_WINDOW_MS")
+        .unwrap_or_else(|_| "0".into())
+        .parse()
+        .expect("integer owner window");
+    let config_path = root.join("tidb-http.json");
+    let config = serde_json::json!({"version":1,"http":{
+        "host":"127.0.0.1","port":0,"max_request_bytes":524288,"read_chunk_bytes":65536,"drain_timeout_ms":5000,
+        "drives":[{"id":"tidb","token":{"env":PGLITE_TOKEN_ENV},"driver":{"kind":"splitstore","storage":{
+            "metadata":{"kind":"tidb","connection":{"env":"MOUNT_RS_TIDB_URL"},"volume_key":key,"durable":false},
+            "blocks":{"kind":"r2","endpoint":endpoint,"bucket":required_env("R2_BUCKET"),"prefix":format!("{}/cli-tidb/{key}",required_env("RUSTFS_COMBO_PREFIX")),"access_key_id":{"env":"R2_ACCESS_KEY_ID"},"secret_access_key":{"env":"R2_SECRET_ACCESS_KEY"},"durable":false},
+            "atime":"noatime","read_lease_cache_window_ms":lease_window_ms,"block_cache":{"max_bytes":16777216,"max_entries":4096},"chunk_size_bytes":65536
+        }}}]
+    }});
+    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    let mut first = HttpChild::start(&config_path, root.clone());
+    let address = first.ready();
+    let data = payload(0x57);
+    round_trip(address, "tidb", PGLITE_TOKEN, &data);
+    let path = "/v1/drives/tidb/fs/remote-binary";
+    assert_eq!(
+        request(address, "GET", path, "wrong-token", &[], None).status,
+        401
+    );
+    let mut timings = Vec::new();
+    for _ in 0..20 {
+        let start = Instant::now();
+        let response = request(address, "GET", path, PGLITE_TOKEN, &[], None);
+        timings.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, data);
+    }
+    println!("TIDB_CLI_HTTP_LEASE_WINDOW_MS {lease_window_ms}");
+    println!(
+        "TIDB_CLI_HTTP_READ_SAMPLES_MS {}",
+        serde_json::to_string(&timings).unwrap()
+    );
+    first.graceful_shutdown();
+    let mut second = HttpChild::start(&config_path, root.clone());
+    let address = second.ready();
+    persisted_read(address, "tidb", PGLITE_TOKEN, &data);
+    second.graceful_shutdown();
+
+    // Seed a disposable disk cache from the persisted RustFS objects, then
+    // restart with empty RAM so no memory hit can hide corrupted disk bytes.
+    let cache_root = root.join("disk-cache");
+    fs::create_dir(&cache_root).unwrap();
+    let mut disk_config = config.clone();
+    disk_config["http"]["drives"][0]["driver"]["storage"]["disk_cache"] = serde_json::json!({
+        "root": cache_root, "scope": key, "max_bytes": 16777216, "max_entries": 4096
+    });
+    fs::write(&config_path, serde_json::to_vec(&disk_config).unwrap()).unwrap();
+    let mut seed = HttpChild::start(&config_path, root.clone());
+    persisted_read(seed.ready(), "tidb", PGLITE_TOKEN, &data);
+    seed.graceful_shutdown();
+    let mut entries = Vec::new();
+    for scope in fs::read_dir(&cache_root).unwrap() {
+        for entry in fs::read_dir(scope.unwrap().path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() == "lock" {
+                continue;
+            }
+            let path = entry.path();
+            let original = fs::read(&path).unwrap();
+            let mut corrupt = original.clone();
+            *corrupt.last_mut().expect("nonempty cache entry") ^= 1;
+            fs::write(&path, corrupt).unwrap();
+            entries.push((path, original));
+        }
+    }
+    assert!(!entries.is_empty());
+    let mut repaired = HttpChild::start(&config_path, root.clone());
+    persisted_read(repaired.ready(), "tidb", PGLITE_TOKEN, &data);
+    repaired.graceful_shutdown();
+    for (path, original) in &entries {
+        assert_eq!(fs::read(path).unwrap(), *original);
+    }
+    println!(
+        "TIDB_RUSTFS_DISK_CACHE_REPAIRED normalized={normalized} entries={}",
+        entries.len()
+    );
+    rt.block_on(async {
+        let stored: String = connection
+            .exec_first(
+                "SELECT namespace FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap()
+            .expect("committed TiDB namespace");
+        assert_eq!(stored == "{\"mount_rs_normalized_records\":1}", normalized);
+        if normalized {
+            connection
+                .exec_drop(
+                    "DELETE FROM mount_rs_tidb_metadata_records WHERE volume_key=?",
+                    (&key,),
+                )
+                .await
+                .expect("scoped normalized-record cleanup");
+        }
+        connection
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .expect("scoped TiDB cleanup");
+        drop(connection);
+        pool.disconnect().await.unwrap();
+    });
+    println!("TIDB_CLI_HTTP_CACHE_REOPEN_PASS normalized={normalized}");
+}

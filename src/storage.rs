@@ -20,6 +20,8 @@ pub use crate::delegation::{
     DirectoryGrant, GrantToken,
 };
 
+pub mod records;
+
 pub type InodeId = u64;
 
 /// Stable identity for the physical immutable-block authority shared by
@@ -982,6 +984,11 @@ pub struct WriterLease {
 
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
+    /// Whether computing record deltas is useful for this provider.
+    fn prefers_incremental_publication(&self) -> bool {
+        false
+    }
+
     /// False for volatile stores; never advertise durable commits for memfs.
     fn durable(&self) -> bool;
     async fn load(&self) -> Result<LoadedMetadata>;
@@ -1191,6 +1198,58 @@ pub trait MetadataStore: Send + Sync {
     fn publish_includes_flush_barrier(&self) -> bool {
         false
     }
+    /// Publish an immutable candidate shared with the caller's pending cache.
+    /// Has exactly the same fencing, atomicity and durability contract as
+    /// `publish`. Stores may override this to avoid a full namespace clone;
+    /// the compatibility default preserves existing implementations.
+    async fn publish_shared(
+        &self,
+        expected_revision: u64,
+        lease: &WriterLease,
+        namespace: std::sync::Arc<Namespace>,
+    ) -> Result<u64> {
+        self.publish(expected_revision, lease, namespace.as_ref().clone())
+            .await
+    }
+    /// Publish affected normalized records with the same atomic revision,
+    /// fencing and block-before-reference contract as `publish`.
+    ///
+    /// The compatibility implementation reconstructs a complete candidate.
+    /// It is not a scaling optimization. Incremental stores override this to
+    /// update only affected rows in one fenced transaction. A conflict or an
+    /// uncertain commit is returned to the caller; this method never retries.
+    async fn publish_batch(
+        &self,
+        expected_revision: u64,
+        lease: &WriterLease,
+        batch: records::MetadataBatch,
+    ) -> Result<u64> {
+        batch.validate_keys()?;
+        let loaded = self.load().await?;
+        if loaded.revision != expected_revision {
+            return Err(FsError::new(ErrorCode::Eagain).with_syscall("metadata batch"));
+        }
+        let candidate = batch.apply_to(loaded.namespace.as_ref())?;
+        // The provider rechecks revision and lease atomically at commit;
+        // the load above is not an authorization or publication boundary.
+        self.publish(expected_revision, lease, candidate).await
+    }
+    /// Publish a driver-prepared candidate and its affected records together.
+    /// The batch must describe exactly the changes from expected_revision to
+    /// candidate. Incremental providers override this; snapshot providers use
+    /// the supplied candidate without an extra load/reconstruction. The caller
+    /// installs this candidate only after publication and flush succeed.
+    async fn publish_incremental(
+        &self,
+        expected_revision: u64,
+        lease: &WriterLease,
+        candidate: std::sync::Arc<Namespace>,
+        batch: records::MetadataBatch,
+    ) -> Result<u64> {
+        batch.validate_keys()?;
+        self.publish_shared(expected_revision, lease, candidate)
+            .await
+    }
     /// Complete the store's durability barrier; errors must reach fsync callers.
     async fn flush(&self) -> Result<()>;
 }
@@ -1300,7 +1359,7 @@ mod tests {
         }
     }
 
-    fn valid_namespace() -> Namespace {
+    pub(crate) fn valid_namespace() -> Namespace {
         Namespace {
             format_version: NAMESPACE_FORMAT_VERSION,
             root: 1,

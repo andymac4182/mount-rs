@@ -1154,3 +1154,239 @@ async fn disconnect_cleans_up_a_blocked_put_handle() {
     assert_eq!(closed.load(Ordering::Acquire), 1);
     server.close().await.expect("server close");
 }
+
+#[tokio::test]
+async fn typed_metadata_reads_preserve_symlink_semantics_and_authentication() {
+    let memory = Arc::new(MemoryFs::empty());
+    let file = memory.open("/data", "w", 0o640).await.unwrap();
+    file.write(b"contents", Some(0)).await.unwrap();
+    file.close().await.unwrap();
+    memory.symlink("/data", "/link").await.unwrap();
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(DriveConfig::new("memory", memory, MEMORY_TOKEN).unwrap())
+        .unwrap();
+    let server = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    for operation in ["stat", "lstat", "statfs", "readlink"] {
+        let url = format!("{}/v1/drives/memory/{operation}/link", server.url());
+        assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+        let response = client
+            .get(&url)
+            .bearer_auth(MEMORY_TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let value: serde_json::Value = response.json().await.unwrap();
+        match operation {
+            "stat" => {
+                let stats: Stats = serde_json::from_value(value).unwrap();
+                assert!(stats.is_file());
+                assert_eq!(stats.size, 8);
+            }
+            "lstat" => {
+                let stats: Stats = serde_json::from_value(value).unwrap();
+                assert!(stats.is_symbolic_link());
+            }
+            "readlink" => assert_eq!(value, "/data"),
+            "statfs" => {
+                let _: mount_rs_core::StatsFs = serde_json::from_value(value).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let head = client
+            .head(&url)
+            .bearer_auth(MEMORY_TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(head.status(), 200);
+        assert!(head.bytes().await.unwrap().is_empty());
+        assert_eq!(
+            client
+                .post(&url)
+                .bearer_auth(MEMORY_TOKEN)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            405
+        );
+    }
+    let missing = client
+        .get(format!("{}/v1/drives/memory/stat/missing", server.url()))
+        .bearer_auth(MEMORY_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    assert_eq!(
+        missing.json::<serde_json::Value>().await.unwrap()["error"]["code"],
+        "ENOENT"
+    );
+    server.close().await.unwrap();
+}
+
+struct ReplaceBeforeOpenFs {
+    inner: MemoryFs,
+    replaced: std::sync::atomic::AtomicBool,
+}
+#[async_trait]
+impl FsDriver for ReplaceBeforeOpenFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn stat(&self, path: &str) -> Result<Stats> {
+        self.inner.stat(path).await
+    }
+    async fn lstat(&self, path: &str) -> Result<Stats> {
+        self.inner.lstat(path).await
+    }
+    async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {
+        if !self.replaced.swap(true, Ordering::SeqCst) {
+            self.inner.rename(path, "/old").await?;
+            let new = self.inner.open(path, "w", 0o600).await?;
+            new.write(b"new", Some(0)).await?;
+            new.close().await?;
+        }
+        self.inner.open(path, flags, mode).await
+    }
+}
+
+#[tokio::test]
+async fn get_headers_and_ranges_use_open_inode_after_path_replacement() {
+    for ranged in [false, true] {
+        let inner = MemoryFs::empty();
+        let file = inner.open("/file", "w", 0o600).await.unwrap();
+        file.write(b"old longer contents", Some(0)).await.unwrap();
+        file.close().await.unwrap();
+        let mut registry = DriveRegistry::new();
+        registry
+            .register(
+                DriveConfig::new(
+                    "race",
+                    Arc::new(ReplaceBeforeOpenFs {
+                        inner,
+                        replaced: std::sync::atomic::AtomicBool::new(false),
+                    }),
+                    MEMORY_TOKEN,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let server = HttpServer::start(registry, HttpServerOptions::default())
+            .await
+            .unwrap();
+        let mut request = reqwest::Client::new()
+            .get(format!("{}/v1/drives/race/fs/file", server.url()))
+            .bearer_auth(MEMORY_TOKEN)
+            .timeout(Duration::from_secs(3));
+        if ranged {
+            request = request.header(RANGE, "bytes=0-4095");
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status().as_u16(), if ranged { 206 } else { 200 });
+        assert_eq!(response.headers()[CONTENT_LENGTH], "3");
+        if ranged {
+            assert_eq!(response.headers()[CONTENT_RANGE], "bytes 0-2/3");
+        }
+        assert_eq!(response.bytes().await.unwrap().as_ref(), b"new");
+        server.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rejected_range_closes_the_handle_opened_for_representation_metadata() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for range in ["bytes=2-3", "not-a-range"] {
+            let closed = Arc::new(AtomicUsize::new(0));
+            let mut registry = DriveRegistry::new();
+            registry
+                .register(
+                    DriveConfig::new(
+                        "range",
+                        Arc::new(BlockingReadFs {
+                            closed: closed.clone(),
+                            block_close: false,
+                        }),
+                        MEMORY_TOKEN,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let server = HttpServer::start(registry, HttpServerOptions::default())
+                .await
+                .unwrap();
+            let response = reqwest::Client::new()
+                .get(format!("{}/v1/drives/range/fs/file", server.url()))
+                .bearer_auth(MEMORY_TOKEN)
+                .header(RANGE, range)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 416);
+            response.bytes().await.unwrap();
+            server.close().await.unwrap();
+            assert_eq!(closed.load(Ordering::SeqCst), 1);
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn negotiated_listing_head_preserves_encoded_length_over_http() {
+    use std::io::Read;
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/drives/memory/entries", server.url());
+    let get = client
+        .get(&url)
+        .bearer_auth(MEMORY_TOKEN)
+        .header("Accept-Encoding", "gzip, identity;q=0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get.status(), reqwest::StatusCode::OK);
+    assert_eq!(get.headers()["content-encoding"], "gzip");
+    assert_eq!(get.headers()["vary"], "Accept-Encoding");
+    let length = get.headers()[CONTENT_LENGTH].clone();
+    let bytes = get.bytes().await.unwrap();
+    assert_eq!(
+        length.to_str().unwrap().parse::<usize>().unwrap(),
+        bytes.len()
+    );
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(bytes.as_ref())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(),
+        json!([])
+    );
+    let head = client
+        .head(&url)
+        .bearer_auth(MEMORY_TOKEN)
+        .header("Accept-Encoding", "gzip, identity;q=0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.headers()[CONTENT_LENGTH], length);
+    assert_eq!(head.headers()["content-encoding"], "gzip");
+    assert!(head.bytes().await.unwrap().is_empty());
+    let rejected = client
+        .get(&url)
+        .bearer_auth(MEMORY_TOKEN)
+        .header("Accept-Encoding", "*;q=0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), reqwest::StatusCode::NOT_ACCEPTABLE);
+    server.close().await.unwrap();
+}

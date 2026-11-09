@@ -38,12 +38,20 @@ struct HttpChild {
 
 impl HttpChild {
     fn start(config: &Path, root: PathBuf) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+        Self::start_command(Command::new(env!("CARGO_BIN_EXE_mount-rs")), config, root)
+    }
+
+    fn start_command(mut command: Command, config: &Path, root: PathBuf) -> Self {
+        let mut child = command
             .args(["serve-http", "--config"])
             .arg(config)
             .env("MOUNT_RS_HTTP_MEMORY_TOKEN", "memory-test-token")
             .env("MOUNT_RS_HTTP_SQLITE_TOKEN", "sqlite-test-token")
             .env("MOUNT_RS_HTTP_SPLIT_TOKEN", "splitstore-test-token")
+            .env(
+                "MOUNT_RS_HTTP_SESSION_TOKEN",
+                "session-token-01234567890123456789",
+            )
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -73,15 +81,16 @@ impl HttpChild {
     }
 
     fn ready(&self) -> (SocketAddr, String) {
-        let line = self
-            .stdout
-            // A freshly linked CLI can take longer to start on hosted macOS.
-            // Keep the subprocess startup bound separate from request deadlines.
-            .recv_timeout(Duration::from_secs(30))
-            .unwrap_or_else(|error| {
-                let stderr = self.stderr.try_iter().collect::<Vec<_>>();
-                panic!("HTTP subprocess did not announce readiness: {error}; stderr={stderr:?}");
-            });
+        // A freshly linked CLI can take longer to start on hosted macOS.
+        // Keep the subprocess startup bound separate from request deadlines.
+        self.ready_with_timeout(Duration::from_secs(30))
+    }
+
+    fn ready_with_timeout(&self, wait: Duration) -> (SocketAddr, String) {
+        let line = self.stdout.recv_timeout(wait).unwrap_or_else(|error| {
+            let stderr = self.stderr.try_iter().collect::<Vec<_>>();
+            panic!("HTTP subprocess did not announce readiness: {error}; stderr={stderr:?}");
+        });
         let url = line
             .split_whitespace()
             .find(|part| part.starts_with("http://"))
@@ -103,11 +112,11 @@ impl HttpChild {
     }
 
     #[cfg(unix)]
-    fn interrupt(&mut self) {
+    fn signal(&mut self, signal: libc::c_int) {
         // SAFETY: the child process was spawned by this test and its PID is
         // not reused while it is still running.
-        let result = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGINT) };
-        assert_eq!(result, 0, "send SIGINT to HTTP subprocess");
+        let result = unsafe { libc::kill(self.child.id() as libc::pid_t, signal) };
+        assert_eq!(result, 0, "signal HTTP subprocess");
     }
 
     #[cfg(unix)]
@@ -290,6 +299,37 @@ fn current_gid() -> u32 {
 #[cfg(not(unix))]
 const fn current_gid() -> u32 {
     0
+}
+
+#[test]
+fn later_invalid_drive_token_fails_before_opening_earlier_database() {
+    let root = temporary_root();
+    let config = write_http_config(&root);
+    for token in [None, Some("invalid token")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mount-rs"));
+        command
+            .args(["serve-http", "--config"])
+            .arg(&config)
+            .env("MOUNT_RS_HTTP_MEMORY_TOKEN", "memory-test-token")
+            .env("MOUNT_RS_HTTP_SQLITE_TOKEN", "sqlite-test-token")
+            .env_remove("MOUNT_RS_HTTP_SPLIT_TOKEN");
+        if let Some(token) = token {
+            command.env("MOUNT_RS_HTTP_SPLIT_TOKEN", token);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(if token.is_some() {
+                "invalid HTTP drive 'splitstore'"
+            } else {
+                "missing environment variable MOUNT_RS_HTTP_SPLIT_TOKEN"
+            }),
+            "{stderr}"
+        );
+        assert!(!root.join("sqlite.db").exists());
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn write_http_config(root: &Path) -> PathBuf {
@@ -624,7 +664,7 @@ fn unix_http_subprocess_stops_gracefully_and_boundedly() {
     assert!(!memory_discovery.contains("sqlite"));
 
     let shutdown_started = Instant::now();
-    child.interrupt();
+    child.signal(libc::SIGINT);
     let status = child.wait_for_exit(Duration::from_secs(3));
     assert!(
         status.success(),
@@ -636,4 +676,531 @@ fn unix_http_subprocess_stops_gracefully_and_boundedly() {
         stdout.iter().any(|line| line == "http stopped"),
         "HTTP subprocess did not report bounded shutdown: stdout={stdout:?}, stderr={stderr:?}"
     );
+}
+
+#[cfg(unix)]
+async fn run_configured_session_case(tidb: bool, rustfs: bool, crash: bool) {
+    use mount_rs_core::FsDriver;
+    let root = temporary_root();
+    let config = root.join("sessions.json");
+    let key = format!(
+        "cli-sessions-{}",
+        root.file_name().unwrap().to_string_lossy()
+    );
+    let pool = if tidb {
+        use mysql_async::prelude::Queryable;
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("isolated TiDB fixture required");
+        let pool = mysql_async::Pool::from_url(&url).expect("TiDB fixture URL");
+        let mut connection = pool.get_conn().await.expect("TiDB fixture connection");
+        let identity: Option<(String, String)> = connection
+            .query_first("SELECT tidb_version(), VERSION()")
+            .await
+            .expect("real TiDB identity");
+        assert!(identity.is_some_and(|(a, b)| format!("{a} {b}").to_lowercase().contains("tidb")));
+        drop(connection);
+        Some(pool)
+    } else {
+        None
+    };
+    let metadata = if tidb {
+        serde_json::json!({"kind":"tidb", "connection":{"env":"MOUNT_RS_TIDB_URL"}, "volume_key":key, "durable":false})
+    } else {
+        serde_json::json!({"kind":"memory"})
+    };
+    let blocks = if rustfs {
+        assert!(tidb, "RustFS restart coverage requires persistent metadata");
+        let required = |name: &str| std::env::var(name).expect("isolated RustFS fixture required");
+        assert!(std::path::Path::new(&required("RUSTFS_RUN_DIR")).is_dir());
+        let endpoint = required("R2_ENDPOINT");
+        assert!(endpoint.starts_with("http://127.0.0.1:"));
+        serde_json::json!({
+            "kind":"r2", "endpoint":endpoint, "bucket":required("R2_BUCKET"),
+            "prefix":format!("{}/{}", required("RUSTFS_COMBO_PREFIX"), key),
+            "access_key_id":{"env":"R2_ACCESS_KEY_ID"},
+            "secret_access_key":{"env":"R2_SECRET_ACCESS_KEY"}, "durable":false
+        })
+    } else if tidb {
+        fs::create_dir(root.join("blocks")).expect("create isolated local block directory");
+        serde_json::json!({"kind":"local", "path":root.join("blocks")})
+    } else {
+        serde_json::json!({"kind":"memory"})
+    };
+    let timeout = Duration::from_secs(if tidb { 30 } else { 2 });
+    fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "http": {
+                "remote_sessions": true,
+            "max_request_bytes": 512,
+                "drives": [{
+                    "id": "volume", "token": {"env": "MOUNT_RS_HTTP_SESSION_TOKEN"},
+                    "driver": {"kind": "splitstore", "storage": {
+                        "metadata": metadata, "blocks": blocks,
+                        "verify_backing_blocks": tidb,
+                        "chunk_size_bytes": 4096,
+                        "lease_ttl_ms": if crash { 10000 } else { 240000 },
+                        "read_lease_cache_window_ms": if crash { 0 } else { 60000 }
+                    }}
+                }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    if let Some(pool) = pool.as_ref().filter(|_| !crash) {
+        use mysql_async::prelude::Queryable;
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base: serde_json::Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        let mut occupied_port = base.clone();
+        occupied_port["http"]["host"] = "127.0.0.1".into();
+        occupied_port["http"]["port"] = occupied.local_addr().unwrap().port().into();
+        let mut two_drives = base;
+        let mut missing = two_drives["http"]["drives"][0].clone();
+        missing["id"] = "missing-block-store".into();
+        missing["driver"]["storage"]["metadata"] = serde_json::json!({"kind":"memory"});
+        missing["driver"]["storage"]["blocks"] = serde_json::json!({
+            "kind":"local", "path":root.join("unprovisioned")
+        });
+        two_drives["http"]["drives"]
+            .as_array_mut()
+            .unwrap()
+            .push(missing);
+        let mut previous_fence = 0;
+        for (scenario, unavailable) in [
+            ("later-volume", two_drives),
+            ("occupied-port", occupied_port),
+        ] {
+            let path = root.join(format!("{scenario}.json"));
+            fs::write(&path, serde_json::to_vec(&unavailable).unwrap()).unwrap();
+            let mut failed = HttpChild::start(&path, temporary_root());
+            assert!(!failed.wait_for_exit(timeout).success());
+            let (stdout, stderr) = failed.output();
+            assert!(!stdout.iter().any(|line| line.contains("http listening")));
+            if scenario == "later-volume" {
+                assert!(stderr.join(" ").contains("open local blocks"), "{stderr:?}");
+            }
+            let (released, fence): (i64, i64) = pool
+                .get_conn()
+                .await
+                .unwrap()
+                .exec_first(
+                    "SELECT owner IS NULL, fence FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                    (&key,),
+                )
+                .await
+                .unwrap()
+                .expect("first drive was initialized");
+            assert_eq!(released, 1, "{scenario} retained writer lease");
+            assert!(
+                fence > previous_fence,
+                "{scenario} never acquired a new lease"
+            );
+            previous_fence = fence;
+        }
+        // Hold the second volume's row so the signal arrives after the first lease
+        // is visible but before startup can finish opening both volumes.
+        let mut blocked: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        let first_key = format!("{key}-startup");
+        let mut first_drive = blocked["http"]["drives"][0].clone();
+        first_drive["id"] = "first".into();
+        first_drive["driver"]["storage"]["metadata"]["volume_key"] = first_key.clone().into();
+        first_drive["driver"]["storage"]["blocks"] = serde_json::json!({"kind":"memory"});
+        blocked["http"]["drives"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, first_drive);
+        let path = root.join("interrupted-startup.json");
+        fs::write(&path, serde_json::to_vec(&blocked).unwrap()).unwrap();
+        let mut lock = pool.get_conn().await.unwrap();
+        lock.query_drop("BEGIN PESSIMISTIC").await.unwrap();
+        lock.exec_drop(
+            "SELECT fence FROM mount_rs_tidb_metadata WHERE volume_key=? FOR UPDATE",
+            (&key,),
+        )
+        .await
+        .unwrap();
+        let mut starting = HttpChild::start(&path, temporary_root());
+        let mut observer = pool.get_conn().await.unwrap();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let owned: Option<i64> = observer
+                .exec_first(
+                    "SELECT owner IS NOT NULL FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                    (&first_key,),
+                )
+                .await
+                .unwrap();
+            if owned == Some(1) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "first startup lease was never acquired"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        starting.signal(libc::SIGTERM);
+        lock.query_drop("ROLLBACK").await.unwrap();
+        assert!(!starting.wait_for_exit(timeout).success());
+        let (stdout, stderr) = starting.output();
+        assert!(!stdout.iter().any(|line| line.contains("http listening")));
+        assert!(
+            stderr
+                .iter()
+                .any(|line| line.contains("shutdown signal during HTTP startup")),
+            "{stderr:?}"
+        );
+        let released: Option<i64> = observer.exec_first("SELECT COUNT(*) FROM mount_rs_tidb_metadata WHERE volume_key IN (?,?) AND owner IS NULL", (&first_key, &key)).await.unwrap();
+        assert_eq!(released, Some(2));
+        observer
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&first_key,),
+            )
+            .await
+            .unwrap();
+        // Restrict only the new server process. The parent keeps its normal socket budget.
+        let mut limited = Command::new("sh");
+        limited.args([
+            "-c",
+            r#"ulimit -n 64 && exec "$@""#,
+            "limited-mount",
+            env!("CARGO_BIN_EXE_mount-rs"),
+        ]);
+        let mut exhausted = HttpChild::start_command(limited, &config, temporary_root());
+        let (address, _) = exhausted.ready_with_timeout(timeout);
+        let mut sockets = Vec::new();
+        for _ in 0..80 {
+            match std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
+                Ok(socket) => sockets.push(socket),
+                Err(_) => break,
+            }
+        }
+        // Keep accepted sockets occupied until the accept task encounters its limit.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while std::net::TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok() {
+            assert!(Instant::now() < deadline, "limited listener kept accepting");
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(sockets);
+        assert!(!exhausted.wait_for_exit(timeout).success());
+        let (_, stderr) = exhausted.output();
+        assert!(
+            stderr
+                .iter()
+                .any(|line| line.contains("HTTP listener exited unexpectedly")),
+            "{stderr:?}"
+        );
+        let (released, fence): (i64, i64) = pool
+            .get_conn()
+            .await
+            .unwrap()
+            .exec_first(
+                "SELECT owner IS NULL, fence FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(released, 1, "failed accept retained writer lease");
+        assert!(fence > previous_fence);
+    }
+    let check_failed_put = tidb && !rustfs && !crash;
+    if check_failed_put {
+        fs::create_dir(root.join("cache")).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        let storage = &mut value["http"]["drives"][0]["driver"]["storage"];
+        storage["block_cache"] = serde_json::json!({"max_bytes": 65536, "max_entries": 128});
+        storage["disk_cache"] = serde_json::json!({
+            "root": root.join("cache"), "scope": key, "max_bytes": 65536, "max_entries": 128
+        });
+        fs::write(&config, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+    let mut child = HttpChild::start(&config, root);
+    let (address, _) = child.ready_with_timeout(Duration::from_secs(if tidb { 30 } else { 5 }));
+    let endpoint = format!("http://{address}");
+    let token = "session-token-01234567890123456789";
+    assert!(
+        mount_rs_remote::RemoteFs::connect(&endpoint, "volume", &"x".repeat(32), timeout)
+            .await
+            .is_err()
+    );
+    let first = mount_rs_remote::RemoteFs::connect(&endpoint, "volume", token, timeout)
+        .await
+        .unwrap();
+    let second = mount_rs_remote::RemoteFs::connect(&endpoint, "volume", token, timeout)
+        .await
+        .unwrap();
+    let writer = first.open("/shared", "w+", 0o600).await.unwrap();
+    writer.write(b"shared bytes", Some(0)).await.unwrap();
+    let reader = second.open("/shared", "r", 0).await.unwrap();
+    let mut bytes = [0; 12];
+    assert_eq!(reader.read(&mut bytes, Some(0)).await.unwrap(), 12);
+    assert_eq!(&bytes, b"shared bytes");
+    let second_writer = second.open("/shared", "r+", 0).await.unwrap();
+    second_writer.write(b"files", Some(7)).await.unwrap();
+    assert_eq!(writer.read(&mut bytes, Some(0)).await.unwrap(), 12);
+    assert_eq!(&bytes, b"shared files");
+    // Both writes modify different bytes of one immutable backing chunk.
+    // Losing either read-modify-write must be visible to both open sessions.
+    let (left, right) = tokio::join!(
+        writer.write(b"A", Some(1)),
+        second_writer.write(b"B", Some(2))
+    );
+    assert_eq!(left.unwrap(), 1);
+    assert_eq!(right.unwrap(), 1);
+    for handle in [&reader, &writer] {
+        assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 12);
+        assert_eq!(&bytes, b"sABred files");
+    }
+    let bounded = first.open("/bounded", "w+", 0o600).await.unwrap();
+    let payload = vec![42; 1024];
+    assert_eq!(bounded.write(&payload, Some(0)).await.unwrap(), 512);
+    assert_eq!(
+        bounded.write(&payload[512..], Some(512)).await.unwrap(),
+        512
+    );
+    let mut received = vec![0; 1024];
+    assert_eq!(bounded.read(&mut received, Some(0)).await.unwrap(), 512);
+    assert_eq!(&received[..512], &payload[..512]);
+    assert_eq!(bounded.stat().await.unwrap().size, 1024);
+    if check_failed_put {
+        use mysql_async::prelude::Queryable;
+        let mut observer = pool.as_ref().unwrap().get_conn().await.unwrap();
+        let revision_sql = "SELECT revision FROM mount_rs_tidb_metadata WHERE volume_key=?";
+        let before: u64 = observer
+            .exec_first(revision_sql, (&key,))
+            .await
+            .unwrap()
+            .unwrap();
+        let blocks = child.root.join("blocks");
+        let offline = child.root.join("offline-blocks");
+        fs::rename(&blocks, &offline).unwrap();
+        // Append beyond EOF: the attempted write changes length as well as data.
+        let rejected = second_writer.write(b"uncommitted", Some(4096)).await;
+        fs::rename(&offline, &blocks).unwrap();
+        assert!(rejected.is_err());
+        let after: u64 = observer
+            .exec_first(revision_sql, (&key,))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, before, "failed authoritative put published metadata");
+        assert_eq!(writer.stat().await.unwrap().size, 12);
+        assert_eq!(writer.read(&mut bytes, Some(0)).await.unwrap(), 12);
+        assert_eq!(&bytes, b"sABred files");
+        assert_eq!(writer.read(&mut bytes, Some(4096)).await.unwrap(), 0);
+    }
+    // Leave sessions and handles open in both shutdown modes.
+    let mut crashed_fence = None;
+    if crash {
+        use mysql_async::prelude::Queryable;
+        assert!(tidb);
+        assert!(!child.kill_owned().success());
+        assert_listener_closed(address);
+        let mut connection = pool.as_ref().unwrap().get_conn().await.unwrap();
+        let sql = "SELECT owner, fence, expires, CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS SIGNED) FROM mount_rs_tidb_metadata WHERE volume_key=?";
+        let (owner, fence, expires, now): (Option<String>, i64, i64, i64) =
+            connection.exec_first(sql, (&key,)).await.unwrap().unwrap();
+        assert!(
+            owner.is_some() && expires > now,
+            "crash must retain a live lease"
+        );
+        crashed_fence = Some(fence);
+        // This child's cleanup root is separate: its rejected startup must not
+        // remove the crashed owner's configuration or local blocks.
+        let mut rejected = HttpChild::start(&config, temporary_root());
+        assert!(!rejected.wait_for_exit(Duration::from_secs(5)).success());
+        let (_, stderr) = rejected.output();
+        assert!(
+            stderr
+                .iter()
+                .any(|line| line.contains("EAGAIN") && line.contains("TiDB acquire writer")),
+            "expected owner admission rejection: {stderr:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let (_, current_fence, expires, now): (Option<String>, i64, i64, i64) =
+                connection.exec_first(sql, (&key,)).await.unwrap().unwrap();
+            assert_eq!(current_fence, fence);
+            if expires <= now {
+                break;
+            }
+            assert!(Instant::now() < deadline, "crashed lease did not expire");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    } else {
+        child.signal(libc::SIGTERM);
+        assert!(child.wait_for_exit(Duration::from_secs(30)).success());
+        let (stdout, stderr) = child.output();
+        assert!(
+            stdout.iter().any(|line| line == "http stopped"),
+            "{stdout:?} {stderr:?}"
+        );
+    }
+    if let Some(pool) = pool {
+        use mysql_async::prelude::Queryable;
+        if !rustfs && !crash {
+            // Replace each nonempty block in this isolated store so the test does
+            // not depend on extent layout or on which old chunks await GC.
+            let mut originals = Vec::new();
+            for entry in fs::read_dir(child.root.join("blocks")).unwrap() {
+                let path = entry.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                if !bytes.is_empty() {
+                    let mut damaged = bytes.clone();
+                    damaged[0] ^= 1;
+                    fs::write(&path, damaged).unwrap();
+                    originals.push((path, bytes));
+                }
+            }
+            assert!(!originals.is_empty());
+            let mut rejected = HttpChild::start(&config, temporary_root());
+            assert!(!rejected.wait_for_exit(timeout).success());
+            let (stdout, stderr) = rejected.output();
+            assert!(!stdout.iter().any(|line| line.contains("http listening")));
+            assert!(
+                stderr
+                    .join(" ")
+                    .contains("local block content hash mismatch"),
+                "{stderr:?}"
+            );
+            for (path, bytes) in originals {
+                fs::write(path, bytes).unwrap();
+            }
+        }
+        let mut reopened = HttpChild::start(&config, child.root.clone());
+        let (address, _) = reopened.ready_with_timeout(Duration::from_secs(30));
+        if let Some(old_fence) = crashed_fence {
+            let mut connection = pool.get_conn().await.unwrap();
+            let new_fence: i64 = connection
+                .exec_first(
+                    "SELECT fence FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                    (&key,),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(new_fence > old_fence);
+        }
+        let remote = mount_rs_remote::RemoteFs::connect(
+            &format!("http://{address}"),
+            "volume",
+            token,
+            timeout,
+        )
+        .await
+        .unwrap();
+        let file = remote.open("/shared", "r", 0).await.unwrap();
+        assert_eq!(file.stat().await.unwrap().size, 12);
+        let mut bytes = [0; 12];
+        assert_eq!(file.read(&mut bytes, Some(0)).await.unwrap(), 12);
+        assert_eq!(&bytes, b"sABred files");
+        file.close().await.unwrap();
+        remote.shutdown().await.unwrap();
+        reopened.signal(libc::SIGINT);
+        assert!(reopened.wait_for_exit(Duration::from_secs(30)).success());
+        let mut connection = pool.get_conn().await.unwrap();
+        connection
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        pool.disconnect().await.unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_clients_use_configured_sessions_and_shutdown_drains_open_handles() {
+    run_configured_session_case(false, false, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated MOUNT_RS_TIDB_URL with actual TiDB"]
+async fn tidb_remote_sessions_reopen_local_blocks_after_server_shutdown() {
+    run_configured_session_case(true, false, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated actual TiDB and RustFS fixtures"]
+async fn tidb_remote_sessions_reopen_rustfs_blocks_after_server_shutdown() {
+    run_configured_session_case(true, true, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated actual TiDB; waits for crashed owner lease expiry"]
+async fn tidb_remote_sessions_recover_after_process_kill_and_lease_expiry() {
+    run_configured_session_case(true, false, true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated actual TiDB and RustFS; waits for crashed owner lease expiry"]
+async fn tidb_remote_sessions_recover_rustfs_after_process_kill_and_lease_expiry() {
+    run_configured_session_case(true, true, true).await;
+}
+
+#[test]
+fn cache_report_exposes_per_drive_read_tiers() {
+    let root = temporary_root();
+    let path = write_http_config(&root);
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    fs::create_dir(root.join("cache")).unwrap();
+    let drive = config["http"]["drives"][2].take();
+    config["http"]["drives"] = serde_json::json!([drive]);
+    config["http"]["cache_report_interval_seconds"] = 1.into();
+    let storage = &mut config["http"]["drives"][0]["driver"]["storage"];
+    storage["block_cache"] = serde_json::json!({"max_bytes": 4096, "max_entries": 8});
+    storage["disk_cache"] = serde_json::json!({
+        "root":"cache", "scope":"cache-report-test", "max_bytes":4096, "max_entries":8
+    });
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let child = HttpChild::start(&path, root);
+    let (address, _) = child.ready();
+    let target = "/v1/drives/splitstore/fs/report";
+    let token = "splitstore-test-token";
+    let put = request(address, "PUT", target, token, b"cache report");
+    assert!((200..300).contains(&put.status));
+    assert_eq!(
+        request(address, "GET", target, token, &[]).body,
+        b"cache report"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let line = child
+            .stderr
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+        let Ok(report) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if report["event"] != "mount_cache_stats"
+            || report["ram"]["hits"].as_u64().unwrap_or(0) == 0
+        {
+            continue;
+        }
+        assert_eq!(report["drive"], "splitstore");
+        for counter in [
+            "backing_gets_completed",
+            "backing_gets_failed",
+            "backing_read_bytes",
+            "backing_get_nanoseconds",
+        ] {
+            assert_eq!(report["ram"][counter], 0, "{counter}");
+        }
+        assert_eq!(report["disk"]["misses"], 0);
+        assert_eq!(report["disk"]["disabled"], false);
+        assert!(report["disk"]["resident_entries"].as_u64().unwrap() > 0);
+        break;
+    }
 }

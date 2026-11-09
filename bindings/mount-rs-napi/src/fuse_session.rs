@@ -370,6 +370,7 @@ fn session_options(options: Option<NativeFuseSessionOptions>) -> napi::Result<Fu
         entry_timeout,
         negative_timeout,
         keep_cache: options.keep_cache.unwrap_or(true),
+        direct_io: false,
         flush_mechanism,
         init,
     })

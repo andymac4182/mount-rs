@@ -8,6 +8,7 @@ license = "Apache-2.0"
 repository = "https://github.com/andymac4182/mount-rs"
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
 bytes = "1"
 http-body-util = { version = "0.1", features = ["channel"] }

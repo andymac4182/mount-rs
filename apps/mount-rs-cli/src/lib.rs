@@ -8,6 +8,7 @@
 
 pub mod color;
 pub mod config;
+mod http_sessions;
 pub mod parser;
 mod remote;
 pub mod runtime;

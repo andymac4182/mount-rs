@@ -230,6 +230,13 @@ redact_stream() {
 print_logs() {
   for container in $created_containers; do
     echo "--- Docker logs: $container ---" >&2
+    # A Go crash can end with thousands of goroutine lines after the fatal stack.
+    if [ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)" = exited ]; then
+      docker logs "$container" 2>&1 | awk '
+        !found && /^(panic:|fatal error:|runtime: out of memory|SIG[A-Z]+:)|\[(FATAL|PANIC)\]/ { found = 1 }
+        found && shown++ < 80 { print }
+      ' | redact_stream >&2 || true
+    fi
     docker logs --tail 60 "$container" 2>&1 | redact_stream >&2 || true
   done
 }
@@ -239,7 +246,7 @@ print_diagnostics() {
   echo "docker_capacity cpus=$docker_cpu_count mem_bytes=$docker_mem_bytes" >&2
   for container in $created_containers; do
     docker inspect --format \
-      'container={{.Name}} state={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}} ip={{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+      'container={{.Name}} state={{.State.Status}} exit={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} finished={{.State.FinishedAt}} error={{.State.Error}} ip={{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
       "$container" 2>&1 | redact_stream >&2 || true
   done
   if docker network inspect "$network_name" >/dev/null 2>&1; then
@@ -666,6 +673,7 @@ run_direct_provider_test() {
 
 run_provider_test() {
   persistence_expectation=$1
+  phase_name="provider test (persisted=$persistence_expectation)"
   # A composition test must not replace direct TiDB identity, schema,
   # fencing, ambiguous-commit, or reconnect evidence for the metadata
   # provider itself.
@@ -677,11 +685,14 @@ run_provider_test() {
     return "$direct_status"
   fi
   if [ -n "${MOUNT_RS_TIDB_COMPOSITION_COMMAND:-}" ]; then
+    phase_name="composition workload (persisted=$persistence_expectation)"
+    echo "TiDB phase=$phase_name" >&2
     # The caller owns the block service and supplies a complete, explicit
     # command for a split-provider composition. Keep the TiDB URL and the
     # restart expectation in the child environment without putting either
     # credentials or URLs into the command string.
     MOUNT_RS_TIDB_URL="$tidb_url" \
+    MOUNT_RS_TIDB_RUN_DIR="$run_dir" \
     MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
     MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
     MOUNT_RS_TIDB_RUN_ID="$run_id" \
@@ -729,6 +740,8 @@ run_node_provider_test() {
 }
 
 run_ambiguous_commit_test() {
+  phase_name="ambiguous commit test"
+  echo "TiDB phase=$phase_name" >&2
   MOUNT_RS_TIDB_URL="$tidb_url" \
     "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
 }

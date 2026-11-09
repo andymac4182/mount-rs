@@ -9,6 +9,16 @@ rustfs_access_key="mount-rs-rustfs-test"
 rustfs_secret_key="mount-rs-rustfs-test-secret"
 rustfs_region="us-east-1"
 
+case "${RUSTFS_COMBO_ONLY:-0}" in
+  0) ;;
+  1) : "${RUSTFS_COMBO_COMMAND:?RUSTFS_COMBO_ONLY requires an explicit command}" ;;
+  *) echo "RUSTFS_COMBO_ONLY must be 0 or 1" >&2; exit 2 ;;
+esac
+# Older benchmark drivers use the unprefixed name for combo-only mode.
+if [ "${RUSTFS_COMBO_ONLY:-0}" = 1 ]; then
+  MOUNT_RS_RUSTFS_COMBO_ONLY=1
+fi
+
 bounded_docker_command_for_timeout() {
   bounded_timeout=$1
   action_name=$2
@@ -261,6 +271,26 @@ remove_owned_data_contents() {
     if [ "$inspect_status" -ne 1 ]; then
       return 1
     fi
+  fi
+
+  # On Docker Desktop the bind-mounted data is often locally owned. Removing
+  # it on the host avoids thousands of slow VM filesystem round trips. The
+  # path/ownership marker and absence of both containers were verified above.
+  # Permission failures fall back to the root helper without changing modes.
+  if bounded_docker_command "host-data-cleanup" python3 -c '
+import pathlib, shutil, sys
+root = pathlib.Path(sys.argv[1])
+if root.is_symlink() or not root.is_dir() or not shutil.rmtree.avoids_symlink_attacks:
+    sys.exit(1)
+for child in root.iterdir():
+    if child.is_symlink() or not child.is_dir():
+        child.unlink()
+    else:
+        shutil.rmtree(child)
+if any(root.iterdir()):
+    sys.exit(1)
+' "$data_dir" >/dev/null 2>&1; then
+    return 0
   fi
 
   # RustFS may leave root-owned metadata in the test bind mount. Use the
@@ -615,7 +645,16 @@ if [ "${MOUNT_RS_RUSTFS_COMBO_ONLY:-0}" != "1" ]; then
 fi
 export RUSTFS_SQLITE_METADATA_FILE="$run_dir/sqlite-metadata.db"
 
-if bounded_docker_startup_command "run-service" docker run --detach \
+# Optional timing collector for isolated benchmark runs.
+set --
+if [ -n "${AUDIT_RUSTFS_WEBHOOK_ENDPOINT:-}" ]; then
+  audit_origin=$(python3 -c 'import sys; from urllib.parse import urlsplit; u=urlsplit(sys.argv[1]); print(f"{u.scheme}://{u.netloc}")' "$AUDIT_RUSTFS_WEBHOOK_ENDPOINT")
+  set -- --env RUSTFS_AUDIT_ENABLE=true --env "RUSTFS_OUTBOUND_ALLOW_ORIGINS=$audit_origin" \
+    --env RUSTFS_AUDIT_WEBHOOK_QUEUE_DIR_MOUNT=/tmp/mount-audit-queue \
+    --env RUSTFS_AUDIT_WEBHOOK_ENABLE_MOUNT=on \
+    --env "RUSTFS_AUDIT_WEBHOOK_ENDPOINT_MOUNT=$AUDIT_RUSTFS_WEBHOOK_ENDPOINT"
+fi
+if bounded_docker_startup_command "run-service" docker run --detach "$@" \
   --name "$container_name" \
   --label "com.mount-rs.rustfs-test=$ownership_label" \
   --label "com.mount-rs.rustfs-test-run=$container_name" \

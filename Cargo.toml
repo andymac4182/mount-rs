@@ -37,6 +37,8 @@ members = [
     "crates/mount-rs-service",
     "crates/mount-rs-remote-protocol",
     "crates/mount-rs-remote-client",
+    "crates/mount-rs-cluster",
+    "crates/mount-rs-remote",
 ]
 resolver = "3"
 
@@ -88,3 +90,12 @@ mount-rs-sqlite = { path = "providers/mount-rs-sqlite" }
 mount-rs-sqlite-fs = { path = "filesystems/mount-rs-sqlite-fs" }
 object_store = { version = "0.12", features = ["aws"] }
 tempfile = "3"
+
+# Agentuplink's HTTP/3 transport uses these lifecycle/cancellation fixes.
+# h3 and h3-quinn are pinned to one reviewed source revision. quinn-proto is
+# vendored at 0.11.18 (required by quinn 0.11.12) with the same MAX_STREAMS
+# fix; see vendor/quinn-proto/UPSTREAM_PATCH.md.
+[patch.crates-io]
+h3 = { git = "https://github.com/andymac4182/agentuplink.git", rev = "626ba9365b5d3e1faf8265f0b6ff50cc9111b749" }
+h3-quinn = { git = "https://github.com/andymac4182/agentuplink.git", rev = "626ba9365b5d3e1faf8265f0b6ff50cc9111b749" }
+quinn-proto = { path = "vendor/quinn-proto" }

@@ -5,11 +5,11 @@ use crate::constants::{FUSE_DESTROY, FUSE_READ};
 use crate::{
     Request,
     constants::{
-        FOPEN_KEEP_CACHE, FOPEN_NOFLUSH, FUSE_BATCH_FORGET, FUSE_BMAP, FUSE_COPY_FILE_RANGE,
-        FUSE_FALLOCATE, FUSE_FORGET, FUSE_GETLK, FUSE_GETXATTR, FUSE_INTERRUPT, FUSE_IOCTL,
-        FUSE_KERNEL_MINOR_VERSION, FUSE_LISTXATTR, FUSE_LK_FLOCK, FUSE_LSEEK, FUSE_NOTIFY_REPLY,
-        FUSE_POLL, FUSE_READLINK, FUSE_REMOVEXATTR, FUSE_RENAME2, FUSE_SETLK, FUSE_SETLKW,
-        FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS, FUSE_SYNCFS,
+        FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FOPEN_NOFLUSH, FUSE_BATCH_FORGET, FUSE_BMAP,
+        FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_FORGET, FUSE_GETLK, FUSE_GETXATTR,
+        FUSE_INTERRUPT, FUSE_IOCTL, FUSE_KERNEL_MINOR_VERSION, FUSE_LISTXATTR, FUSE_LK_FLOCK,
+        FUSE_LSEEK, FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK, FUSE_REMOVEXATTR, FUSE_RENAME2,
+        FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS, FUSE_SYNCFS,
     },
     error_reply,
     inodes::InodeTable,
@@ -141,6 +141,8 @@ pub struct FuseSessionOptions {
     pub entry_timeout: std::time::Duration,
     pub negative_timeout: std::time::Duration,
     pub keep_cache: bool,
+    /// Bypass the kernel file page cache on OPEN and CREATE.
+    pub direct_io: bool,
     pub flush_mechanism: FuseFlushMechanism,
 }
 
@@ -173,10 +175,26 @@ impl Default for FuseSessionOptions {
             entry_timeout: std::time::Duration::from_secs(10),
             negative_timeout: std::time::Duration::ZERO,
             keep_cache: true,
+            direct_io: false,
             flush_mechanism: FuseFlushMechanism::Sync,
         }
     }
 }
+impl FuseSessionOptions {
+    /// Request uncached metadata and file I/O for externally mutable volumes.
+    /// This does not supply remote sessions, invalidation, or distributed locks.
+    pub fn without_kernel_cache(mut self) -> Self {
+        self.attr_timeout = std::time::Duration::ZERO;
+        self.entry_timeout = std::time::Duration::ZERO;
+        self.negative_timeout = std::time::Duration::ZERO;
+        self.keep_cache = false;
+        self.direct_io = true;
+        self.init.flags &=
+            !(crate::constants::FUSE_WRITEBACK_CACHE | crate::constants::FUSE_DIRECT_IO_ALLOW_MMAP);
+        self
+    }
+}
+
 fn u32_at(b: &[u8], offset: usize) -> Result<u32> {
     b.get(offset..offset + 4)
         .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
@@ -386,7 +404,9 @@ impl FuseSession {
     }
 
     fn open_flags(&self) -> u32 {
-        let mut flags = if self.session_options.keep_cache {
+        let mut flags = if self.session_options.direct_io {
+            FOPEN_DIRECT_IO
+        } else if self.session_options.keep_cache {
             FOPEN_KEEP_CACHE
         } else {
             0

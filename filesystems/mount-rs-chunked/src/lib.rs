@@ -6,7 +6,9 @@
 //! The implementation is intentionally not a snapshot adapter and does not
 //! provide copy-on-write views.
 
+pub mod cache;
 mod migration;
+pub use cache::{BlockCacheStats, CachedBlockStore};
 pub use migration::{migrate_mrc1_backing, migrate_trusted_unstamped_mrc1_backing};
 
 use async_trait::async_trait;
@@ -103,6 +105,18 @@ mod verification {
 
 /// Runtime configuration for a newly-created namespace.
 ///
+/// Read and directory-listing access-time behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AtimePolicy {
+    /// Preserve the existing atime updates on reads and directory listings.
+    #[default]
+    Strict,
+    /// Do not change atime on reads or listings. Lease checks and write
+    /// durability are unchanged. This is an explicit filesystem semantic
+    /// choice, not lazy metadata writeback.
+    NoAtime,
+}
+
 /// Coordination policy for independently mounted clients.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnershipMode {
@@ -128,6 +142,13 @@ pub struct ChunkedOptions {
     pub gid: u32,
     pub umask: u32,
     pub root_mode: u32,
+    /// Read and listing atime behavior. Defaults to strict.
+    pub atime_policy: AtimePolicy,
+    /// Opt-in background heartbeat window for an idle exclusive owner. Zero
+    /// (the default) disables it. When set it must be at least 20 ms and at
+    /// most a quarter of `lease_ttl`; the provider lease is renewed every
+    /// half window so an idle owner keeps its fence.
+    pub read_lease_cache_window: Duration,
 }
 
 impl ChunkedOptions {
@@ -145,6 +166,8 @@ impl ChunkedOptions {
             gid: 0,
             umask: 0,
             root_mode: 0o755,
+            atime_policy: AtimePolicy::Strict,
+            read_lease_cache_window: Duration::ZERO,
         }
     }
 
@@ -157,6 +180,16 @@ impl ChunkedOptions {
 
     pub fn with_lease_ttl(mut self, lease_ttl: Duration) -> Self {
         self.lease_ttl = lease_ttl;
+        self
+    }
+
+    pub fn with_atime_policy(mut self, policy: AtimePolicy) -> Self {
+        self.atime_policy = policy;
+        self
+    }
+
+    pub fn with_read_lease_cache_window(mut self, window: Duration) -> Self {
+        self.read_lease_cache_window = window;
         self
     }
 
@@ -568,6 +601,53 @@ where
     lease_renewed: AtomicBool,
     preparing_mutations: Arc<AtomicUsize>,
     mutations: Mutex<MutationQueue>,
+    /// Optional idle-owner heartbeat; aborted under `lease_gate` on shutdown.
+    lease_worker: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+/// Optional proof, checked before a reopened volume is exposed, that the
+/// authoritative block store still holds committed data.
+enum StartupBlocks<'a> {
+    Unchecked,
+    Empty,
+    Probe(&'a dyn BlockStore),
+}
+
+impl StartupBlocks<'_> {
+    async fn check(&self, namespace: &Namespace) -> Result<()> {
+        if matches!(self, Self::Unchecked) {
+            return Ok(());
+        }
+        let Some(extent) = namespace.nodes.values().find_map(|node| match &node.data {
+            NodeData::File(layout) => layout.extents.first(),
+            _ => None,
+        }) else {
+            return Ok(());
+        };
+        let stale = || {
+            FsError::new(ErrorCode::Estale)
+                .with_syscall("open")
+                .with_message("authoritative store lacks a committed file extent")
+        };
+        let Self::Probe(store) = self else {
+            return Err(stale());
+        };
+        let bytes = store.get(&extent.block).await.map_err(|error| {
+            if error.code == ErrorCode::Enoent {
+                stale()
+            } else {
+                error
+            }
+        })?;
+        if extent
+            .block_offset
+            .checked_add(extent.length)
+            .is_none_or(|end| end > bytes.len() as u64)
+        {
+            return Err(stale());
+        }
+        Ok(())
+    }
 }
 
 /// A filesystem driver composed from one metadata provider and one block
@@ -686,6 +766,7 @@ where
                 lease_renewed: AtomicBool::new(false),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: Mutex::new(MutationQueue::new()),
+                lease_worker: Mutex::new(None),
             }),
         };
         if let Some(path) = checkout {
@@ -1022,6 +1103,66 @@ where
     /// protocol. An empty metadata store is initialized with an empty root
     /// directory through the selected publication path.
     pub async fn open(metadata: M, blocks: B, options: ChunkedOptions) -> Result<Self> {
+        Self::open_inner(metadata, blocks, options, StartupBlocks::Unchecked).await
+    }
+
+    /// Open a volume whose authoritative block store is known to be empty,
+    /// such as a fresh owner-local disk tier. A namespace that references any
+    /// committed extent fails with `ESTALE` instead of serving missing data.
+    pub async fn open_with_empty_blocks(
+        metadata: M,
+        blocks: B,
+        options: ChunkedOptions,
+    ) -> Result<Self> {
+        Self::open_inner(metadata, blocks, options, StartupBlocks::Empty).await
+    }
+
+    /// Check one committed extent directly against the authoritative store
+    /// before exposing a reopened volume. The normal read path may include
+    /// warm caches, so it cannot prove the backing store still holds data.
+    pub async fn open_with_backing_probe(
+        metadata: M,
+        blocks: B,
+        options: ChunkedOptions,
+        authoritative: &dyn BlockStore,
+    ) -> Result<Self> {
+        Self::open_inner(
+            metadata,
+            blocks,
+            options,
+            StartupBlocks::Probe(authoritative),
+        )
+        .await
+    }
+
+    async fn open_inner(
+        metadata: M,
+        blocks: B,
+        options: ChunkedOptions,
+        startup_blocks: StartupBlocks<'_>,
+    ) -> Result<Self> {
+        let checked_startup = !matches!(startup_blocks, StartupBlocks::Unchecked);
+        if (checked_startup || !options.read_lease_cache_window.is_zero())
+            && (options.concurrent_writes || options.delegated)
+        {
+            return Err(FsError::enotsup(
+                "startup block checks and the owner heartbeat require exclusive ownership",
+            ));
+        }
+        if !options.read_lease_cache_window.is_zero() {
+            if options.read_lease_cache_window > options.lease_ttl / 4
+                || options.read_lease_cache_window < Duration::from_millis(20)
+            {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "read lease window must be at least 20ms and at most one quarter of the provider lease TTL",
+                ));
+            }
+            if tokio::runtime::Handle::try_current().is_err() {
+                return Err(FsError::enotsup(
+                    "the owner heartbeat requires a Tokio runtime",
+                ));
+            }
+        }
         if let Some(path) = &options.checkout_path {
             validate_checkout_path(path)?;
             if !options.delegated {
@@ -1193,6 +1334,7 @@ where
                         lease_renewed: AtomicBool::new(false),
                         preparing_mutations: Arc::new(AtomicUsize::new(0)),
                         mutations: Mutex::new(MutationQueue::new()),
+                        lease_worker: Mutex::new(None),
                     }),
                 });
             }
@@ -1241,6 +1383,10 @@ where
                 return Err(error);
             }
         };
+        if let Err(error) = startup_blocks.check(&namespace).await {
+            let _ = metadata.release_writer(&lease).await;
+            return Err(error);
+        }
 
         let filesystem = Self {
             inner: Arc::new(ChunkedInner {
@@ -1273,6 +1419,7 @@ where
                 lease_renewed: AtomicBool::new(false),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: Mutex::new(MutationQueue::new()),
+                lease_worker: Mutex::new(None),
             }),
         };
 
@@ -1290,7 +1437,120 @@ where
             }
             return Err(error);
         }
+        filesystem.start_lease_worker();
         Ok(filesystem)
+    }
+
+    /// Keep an idle exclusive owner's provider lease alive. Each renewal is
+    /// serialized with publication through `lease_gate`, so the heartbeat
+    /// never swaps the token between a publication's validation and commit.
+    fn start_lease_worker(&self) {
+        let window = self.inner.options.read_lease_cache_window;
+        if window.is_zero() {
+            return;
+        }
+        let weak = Arc::downgrade(&self.inner);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(window / 2).await;
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                let filesystem = Self { inner };
+                let _lease_gate = filesystem.inner.lease_gate.lock().await;
+                match filesystem.lock_state() {
+                    Ok(state) if state.failure.is_none() && !state.closed => {}
+                    _ => return,
+                }
+                match tokio::time::timeout(window / 2, filesystem.renew_lease_inner(true)).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(_)) => return,
+                    Err(_) => {
+                        filesystem.fail_closed(
+                            FsError::new(ErrorCode::Estale)
+                                .with_syscall("lease-renew-timeout")
+                                .with_message(
+                                    "owner lease renewal timed out; commit outcome may be unknown",
+                                ),
+                        );
+                        return;
+                    }
+                }
+            }
+        });
+        if let Ok(mut worker) = self.inner.lease_worker.lock() {
+            *worker = Some(task.abort_handle());
+        }
+    }
+
+    /// Validate current owner permission and return its fencing generation.
+    /// This is a routing/admission snapshot, not a transferable write lease.
+    /// Every filesystem operation still validates its own owner permission.
+    pub async fn checked_owner_fence(&self) -> Result<u64> {
+        if self.inner.options.concurrent_writes || self.inner.options.delegated {
+            return Err(FsError::enotsup(
+                "owner fences are only defined for exclusive ownership",
+            ));
+        }
+        self.ensure_operation_lease().await?;
+        {
+            let state = self.lock_state()?;
+            if let Some(error) = &state.failure {
+                return Err(error.clone());
+            }
+            if state.closed {
+                return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
+            }
+        }
+        self.lock_lease()?
+            .as_ref()
+            .map(|lease| lease.fence)
+            .ok_or_else(|| FsError::new(ErrorCode::Estale).with_message("no active writer lease"))
+    }
+
+    /// Recovery check: confirm every committed file extent is readable from
+    /// the authoritative block store before exposing the volume. Ownership is
+    /// re-confirmed after the last provider read, and a concurrent namespace
+    /// change returns `Eagain`.
+    pub async fn verify_backing_extents(&self, authoritative: &dyn BlockStore) -> Result<()> {
+        if self.inner.options.concurrent_writes || self.inner.options.delegated {
+            return Err(FsError::enotsup(
+                "backing verification is only defined for exclusive ownership",
+            ));
+        }
+        self.ensure_operation_lease().await?;
+        let (namespace, revision) = self.snapshot()?;
+        let mut required = BTreeMap::new();
+        for node in namespace.nodes.values() {
+            if let NodeData::File(layout) = &node.data {
+                for extent in layout.extents.iter() {
+                    let end = extent
+                        .block_offset
+                        .checked_add(extent.length)
+                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                    let length = required.entry(extent.block.clone()).or_insert(0);
+                    *length = end.max(*length);
+                }
+            }
+        }
+        for (block, end) in required {
+            self.ensure_operation_lease().await?;
+            match authoritative.get(&block).await {
+                Ok(bytes) if end <= bytes.len() as u64 => {}
+                Err(error) if error.code != ErrorCode::Enoent => return Err(error),
+                _ => {
+                    return Err(FsError::new(ErrorCode::Estale)
+                        .with_syscall("verify backing extents")
+                        .with_message("authoritative store lacks a committed file extent"));
+                }
+            }
+        }
+        // Confirm ownership after the last provider GET before exposing the volume.
+        self.renew_lease().await?;
+        if self.snapshot()?.1 != revision {
+            return Err(FsError::new(ErrorCode::Eagain).with_syscall("verify backing extents"));
+        }
+        Ok(())
     }
 
     /// Release the provider lease. Handles become unusable after shutdown;
@@ -1300,6 +1560,20 @@ where
             self.checkin_scope().await?;
             self.lock_state()?.closed = true;
             return Ok(());
+        }
+        // Wait for any in-flight heartbeat renewal before cancelling it, so a
+        // renewal is never abandoned with an unknown outcome.
+        {
+            let _lease_gate = self.inner.lease_gate.lock().await;
+            if let Some(worker) = self
+                .inner
+                .lease_worker
+                .lock()
+                .map_err(|_| FsError::new(ErrorCode::Eio))?
+                .take()
+            {
+                worker.abort();
+            }
         }
         // Optimistic block I/O deliberately runs outside the operation gate.
         // Take the lifecycle write lock first so an in-flight write can
@@ -3065,7 +3339,9 @@ where
         } else {
             self.ensure_operation_lease().await?;
         }
-        if self.inner.options.concurrent_writes {
+        if self.inner.options.concurrent_writes
+            || self.inner.options.atime_policy == AtimePolicy::NoAtime
+        {
             return Ok(count);
         }
         if count == 0 {
@@ -4758,7 +5034,9 @@ where
                 })
             })
             .collect();
-        if self.inner.options.concurrent_writes {
+        if self.inner.options.concurrent_writes
+            || self.inner.options.atime_policy == AtimePolicy::NoAtime
+        {
             return Ok(result);
         }
         if let Some(node) = namespace.nodes.get_mut(&inode) {
@@ -4804,7 +5082,9 @@ where
                 });
             }
         }
-        if self.inner.options.concurrent_writes {
+        if self.inner.options.concurrent_writes
+            || self.inner.options.atime_policy == AtimePolicy::NoAtime
+        {
             return Ok(result);
         }
         if let Some(node) = namespace.nodes.get_mut(&inode) {

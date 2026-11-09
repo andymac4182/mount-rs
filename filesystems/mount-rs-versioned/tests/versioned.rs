@@ -1239,6 +1239,97 @@ async fn slow_read_expiry_and_delete_fail_closed_after_read() {
 }
 
 #[tokio::test]
+async fn positional_reads_overlap_without_releasing_close_or_cursor_admission() {
+    let metadata = MemoryMetadataStore::new();
+    let blocks = SlowBlockStore::new();
+    seed_current(metadata.clone(), blocks.clone(), "parallel-history-writer").await;
+    let coordinator = VersionedCoordinator::new(
+        metadata,
+        blocks.clone(),
+        options("parallel-history", "parallel-history-blocks"),
+    )
+    .unwrap();
+    let first = coordinator.snapshot().await.unwrap();
+    let _current = coordinator.snapshot().await.unwrap();
+    let view = coordinator.view(&first.id).await.unwrap();
+    let handle = view.open("/hello", "r", 0).await.unwrap();
+    let spawn_read = || {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let mut bytes = [0; 9];
+            let count = handle.read(&mut bytes, Some(0)).await?;
+            Ok::<_, FsError>((count, bytes))
+        })
+    };
+    let first_read = spawn_read();
+    tokio::time::timeout(Duration::from_secs(1), blocks.entered.notified())
+        .await
+        .unwrap();
+    let second_read = spawn_read();
+    tokio::time::timeout(Duration::from_secs(1), blocks.entered.notified())
+        .await
+        .expect("second positional read must reach backing storage before the first finishes");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), handle.stat())
+            .await
+            .unwrap()
+            .unwrap()
+            .size,
+        9
+    );
+    let mut cursor_bytes = [0; 3];
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            handle.read(&mut cursor_bytes, None)
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), handle.close())
+            .await
+            .is_err()
+    );
+    blocks.release.notify_waiters();
+    for read in [first_read, second_read] {
+        let (count, bytes) = read.await.unwrap().unwrap();
+        assert_eq!(count, 9);
+        assert_eq!(&bytes, b"old bytes");
+    }
+    // Positional reads and cancelled cursor admission must not move the cursor.
+    blocks.release.notify_one();
+    assert_eq!(handle.read(&mut cursor_bytes, None).await.unwrap(), 3);
+    blocks.entered.notified().await;
+    assert_eq!(&cursor_bytes, b"old");
+    blocks.release.notify_one();
+    assert_eq!(handle.read(&mut cursor_bytes, None).await.unwrap(), 3);
+    blocks.entered.notified().await;
+    assert_eq!(&cursor_bytes, b" by");
+    let cancelled = spawn_read();
+    tokio::time::timeout(Duration::from_secs(1), blocks.entered.notified())
+        .await
+        .unwrap();
+    let surviving = spawn_read();
+    tokio::time::timeout(Duration::from_secs(1), blocks.entered.notified())
+        .await
+        .unwrap();
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    // Historical operation cancellation deliberately invalidates the whole
+    // view. Shared admission must preserve that fail-closed policy.
+    blocks.release.notify_one();
+    assert_eq!(
+        surviving.await.unwrap().unwrap_err().code,
+        ErrorCode::Estale
+    );
+    handle.close().await.unwrap();
+    view.close().await.unwrap();
+    // A leaked operation/handle pin would prevent deleting the historical version.
+    coordinator.delete(&first.id).await.unwrap();
+}
+
+#[tokio::test]
 async fn cancelled_read_balances_operation_and_allows_pin_cleanup() {
     let metadata = MemoryMetadataStore::new();
     let blocks = SlowBlockStore::new();

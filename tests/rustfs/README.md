@@ -100,3 +100,14 @@ The RustFS container is single-node/single-disk test storage. It is not a
 durability or power-loss claim, and it does not replace live Cloudflare R2
 verification. Storage benchmark workloads may consume an explicitly retained
 endpoint later; this package does not fabricate or publish benchmark results.
+
+
+## Isolated custom-command diagnostics
+
+Set `RUSTFS_COMBO_ONLY=1` together with an explicit `RUSTFS_COMBO_COMMAND` to
+run only that bounded command after service/bucket readiness. The existing
+ownership-checked cleanup still runs. This mode skips all standard contract,
+Node/CLI, and restart gates and reports
+`RUSTFS_COMBO_ONLY_PASS evidence=custom-command-only-not-full-acceptance`.
+It is intended for focused direct-Rust performance diagnostics, not full
+RustFS production acceptance. Omit the flag for the complete existing gate.

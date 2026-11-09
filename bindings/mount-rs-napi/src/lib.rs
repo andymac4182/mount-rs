@@ -22,7 +22,7 @@ use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountHooks, AutoMountOptions, AutoTransport, Transport,
     TransportProbe,
 };
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions, OwnershipMode};
+use mount_rs_chunked::{AtimePolicy, ChunkedFs, ChunkedOptions, OwnershipMode};
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, CheckoutRequest, ConcurrentBackingId,
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
@@ -1426,6 +1426,8 @@ pub struct JsChunkedStoreOptions {
 
 #[napi(object)]
 pub struct JsChunkedOptions {
+    /// Access-time policy: noatime (default) or strict.
+    pub atime: Option<String>,
     pub metadata: JsChunkedStoreOptions,
     pub blocks: JsChunkedStoreOptions,
     pub chunk_size: f64,
@@ -1703,6 +1705,20 @@ impl MetadataStore for DynMetadataStore {
     {
         self.0
             .migrate_trusted_unstamped_mrc1(backing, expected_revision, expected_volume)
+    }
+
+    fn publish_shared<'a, 'b, 'async_trait>(
+        &'a self,
+        expected_revision: u64,
+        lease: &'b WriterLease,
+        namespace: Arc<Namespace>,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.publish_shared(expected_revision, lease, namespace)
     }
 
     fn flush<'a, 'async_trait>(
@@ -4120,8 +4136,20 @@ fn chunked_ownership_mode(
     Ok((mode, shared.or(concurrent_writes).unwrap_or(false)))
 }
 
+fn chunked_atime(value: Option<&str>) -> Result<AtimePolicy, Error> {
+    match value {
+        None | Some("noatime") => Ok(AtimePolicy::NoAtime),
+        Some("strict") => Ok(AtimePolicy::Strict),
+        Some(_) => Err(Error::new(
+            Status::InvalidArg,
+            "atime must be noatime or strict",
+        )),
+    }
+}
+
 #[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
+    let atime = chunked_atime(options.atime.as_deref())?;
     let (ownership_mode, concurrent_writes) =
         chunked_ownership_mode(options.ownership_mode.as_deref(), options.concurrent_writes)?;
     if concurrent_writes {
@@ -4183,6 +4211,7 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
     let root_mode = optional_u32("rootMode", options.root_mode, 0o755)?;
     let mut chunk_options = ChunkedOptions::fixed(owner, chunk_size)
         .map_err(to_js_error)?
+        .with_atime_policy(atime)
         .with_lease_ttl(ttl)
         .with_concurrent_writes(concurrent_writes)
         .with_identity(uid, gid, umask)
@@ -4953,6 +4982,13 @@ mod tests {
 
     #[test]
     fn chunked_options_validate_fixed_size_and_lease_values() {
+        assert_eq!(chunked_atime(None).unwrap(), AtimePolicy::NoAtime);
+        assert_eq!(
+            chunked_atime(Some("noatime")).unwrap(),
+            AtimePolicy::NoAtime
+        );
+        assert_eq!(chunked_atime(Some("strict")).unwrap(), AtimePolicy::Strict);
+        assert!(chunked_atime(Some("lazy")).is_err());
         assert_eq!(validate_chunk_size(4096.0).unwrap(), 4096);
         assert!(validate_chunk_size(0.0).is_err());
         assert!(validate_chunk_size(1.5).is_err());

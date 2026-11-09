@@ -1094,6 +1094,10 @@ impl<M> MetadataStore for InstrumentedMetadataStore<M>
 where
     M: MetadataStore + 'static,
 {
+    fn prefers_incremental_publication(&self) -> bool {
+        self.inner.prefers_incremental_publication()
+    }
+
     fn durable(&self) -> bool {
         self.inner.durable()
     }
@@ -1197,6 +1201,57 @@ where
                 "publish",
                 None,
                 self.inner.publish(expected_revision, lease, namespace),
+            )
+            .await
+    }
+
+    async fn publish_shared(
+        &self,
+        expected_revision: u64,
+        lease: &WriterLease,
+        namespace: Arc<Namespace>,
+    ) -> Result<u64> {
+        self.telemetry
+            .observe_fs(
+                "provider.metadata",
+                "publish",
+                None,
+                self.inner
+                    .publish_shared(expected_revision, lease, namespace),
+            )
+            .await
+    }
+
+    async fn publish_incremental(
+        &self,
+        expected_revision: u64,
+        lease: &WriterLease,
+        namespace: Arc<Namespace>,
+        batch: mount_rs_core::storage::records::MetadataBatch,
+    ) -> Result<u64> {
+        self.telemetry
+            .observe_fs(
+                "provider.metadata",
+                "publish",
+                None,
+                self.inner
+                    .publish_incremental(expected_revision, lease, namespace, batch),
+            )
+            .await
+    }
+
+    async fn publish_batch(
+        &self,
+        expected_revision: u64,
+        lease: &WriterLease,
+        batch: mount_rs_core::storage::records::MetadataBatch,
+    ) -> Result<u64> {
+        self.telemetry
+            .observe_fs(
+                "provider.metadata",
+                "publish",
+                None,
+                self.inner.publish_batch(expected_revision, lease, batch),
             )
             .await
     }

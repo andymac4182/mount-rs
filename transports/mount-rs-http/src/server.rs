@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,7 +9,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, channel::Channel, combinators::UnsyncBoxBody};
+#[cfg(test)]
+use http_body_util::channel::Channel;
+use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::body::{Body as HttpBodyTrait, Frame, Incoming, SizeHint};
 use hyper::header;
 use hyper::service::service_fn;
@@ -32,8 +35,8 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 4096;
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
 
 /// Errors found while constructing a named-drive registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +50,7 @@ impl fmt::Display for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDriveId => {
-                f.write_str("drive id must be 1-64 ASCII letters, digits, '-', '_' or '.'")
+                f.write_str("drive id must be 1-64 ASCII letters, digits, '-', '_' or '.' and cannot equal '.' or '..'")
             }
             Self::EmptyBearerToken => {
                 f.write_str("drive bearer token must be non-empty and contain no whitespace")
@@ -96,15 +99,36 @@ impl DriveConfig {
     ) -> Result<Self, RegistryError> {
         let id = id.into();
         let bearer_token = bearer_token.into();
-        validate_drive_id(&id)?;
-        if bearer_token.is_empty() || bearer_token.bytes().any(|byte| byte.is_ascii_whitespace()) {
-            return Err(RegistryError::EmptyBearerToken);
-        }
+        Self::validate_id(&id)?;
+        Self::validate_bearer_token(&bearer_token)?;
         Ok(Self {
             id,
             driver,
             bearer_token,
         })
+    }
+
+    /// Validate a public drive path segment before opening its backend.
+    pub fn validate_id(id: &str) -> Result<(), RegistryError> {
+        if id.is_empty()
+            || id.len() > 64
+            || id == "."
+            || id == ".."
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(RegistryError::InvalidDriveId);
+        }
+        Ok(())
+    }
+
+    /// Validate the configured token before acquiring backend resources.
+    pub fn validate_bearer_token(token: &str) -> Result<(), RegistryError> {
+        if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            return Err(RegistryError::EmptyBearerToken);
+        }
+        Ok(())
     }
 
     pub fn id(&self) -> &str {
@@ -165,6 +189,10 @@ pub struct HttpServerOptions {
     pub max_response_bytes: usize,
     pub max_directory_entries: usize,
     pub read_chunk_bytes: usize,
+    /// Disable TCP packet coalescing on accepted connections (default: true).
+    pub tcp_nodelay: bool,
+    /// Accept prior-knowledge HTTP/2 instead of HTTP/1.1 (default: false).
+    pub http2_prior_knowledge: bool,
     pub drain_timeout: Duration,
     pub max_connections: usize,
     pub request_timeout: Duration,
@@ -181,6 +209,8 @@ impl Default for HttpServerOptions {
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_directory_entries: DEFAULT_MAX_DIRECTORY_ENTRIES,
             read_chunk_bytes: DEFAULT_READ_CHUNK_BYTES,
+            tcp_nodelay: true,
+            http2_prior_knowledge: false,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -225,7 +255,20 @@ impl fmt::Display for HttpServerError {
 
 impl std::error::Error for HttpServerError {}
 
+/// Request adapter for an HTTP listener (for example, server-side forwarding).
+/// Implementations own authorization, request limits and response semantics.
+/// Bodies remain streaming; dropping a response must release its resources.
+pub trait HttpRequestHandler: Send + Sync + 'static {
+    fn on_http_service_call(&self, _request: &mut Request<HttpBody>) {}
+
+    fn handle(
+        &self,
+        request: Request<HttpBody>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Response<HttpBody>> + Send + '_>>;
+}
+
 struct AppState {
+    handler: Option<Arc<dyn HttpRequestHandler>>,
     registry: Arc<DriveRegistry>,
     config: RequestConfig,
 }
@@ -270,11 +313,13 @@ enum ListenerState {
     Finished(CloseOutcome),
 }
 
-/// A running multi-drive HTTP/1.1 server.
+/// A running multi-drive HTTP server.
 pub struct HttpServer {
     state: Arc<AppState>,
     host: String,
     requested_port: u16,
+    tcp_nodelay: bool,
+    http2_prior_knowledge: bool,
     actual_port: AtomicU16,
     drain_timeout: Duration,
     shutdown: Arc<Notify>,
@@ -307,6 +352,20 @@ impl HttpServer {
         Ok(server)
     }
 
+    /// Bind a public listener to an application-owned streaming request adapter.
+    /// This retains the normal connection and graceful-shutdown lifecycle.
+    pub async fn start_with_handler(
+        handler: Arc<dyn HttpRequestHandler>,
+        options: HttpServerOptions,
+    ) -> Result<Self, HttpServerError> {
+        let mut server = Self::new(DriveRegistry::new(), options);
+        Arc::get_mut(&mut server.state)
+            .expect("new application state is unique")
+            .handler = Some(handler);
+        server.listen().await?;
+        Ok(server)
+    }
+
     fn new(registry: DriveRegistry, options: HttpServerOptions) -> Self {
         let background_tasks = Arc::new(AtomicUsize::new(0));
         let drained = Arc::new(Notify::new());
@@ -320,6 +379,7 @@ impl HttpServer {
         };
         Self {
             state: Arc::new(AppState {
+                handler: None,
                 registry: Arc::new(registry),
                 config: RequestConfig {
                     max_request_bytes: options.max_request_bytes.max(1),
@@ -334,6 +394,8 @@ impl HttpServer {
             }),
             host: options.host,
             requested_port: options.port,
+            tcp_nodelay: options.tcp_nodelay,
+            http2_prior_knowledge: options.http2_prior_knowledge,
             actual_port: AtomicU16::new(options.port),
             drain_timeout: options.drain_timeout,
             shutdown,
@@ -344,6 +406,32 @@ impl HttpServer {
             task: Mutex::new(None),
             connections: Arc::new(AtomicUsize::new(0)),
             connection_permits: Arc::new(Semaphore::new(options.max_connections.max(1))),
+        }
+    }
+
+    /// Construct the HTTP application without opening a TCP listener.
+    /// Alternate transports must call `close` after draining their requests.
+    pub fn unbound(registry: DriveRegistry, options: HttpServerOptions) -> Self {
+        let mut server = Self::new(registry, options);
+        // There is deliberately no listener task to await during close.
+        server.task = Mutex::new(Some(ListenerState::Finished(CloseOutcome::Success)));
+        server
+    }
+
+    /// Serve one request from an alternate transport using the same authorization,
+    /// filesystem semantics, limits and shutdown tracking as the TCP listener.
+    pub async fn handle(&self, request: Request<HttpBody>) -> Response<HttpBody> {
+        self.connections.fetch_add(1, Ordering::AcqRel);
+        let _guard = ConnectionGuard {
+            counter: self.connections.clone(),
+            drained: self.drained.clone(),
+        };
+        if self.closing.load(Ordering::Acquire) != 0 {
+            return error_response(RequestError::server_closing());
+        }
+        match handle_request(request, self.state.clone()).await {
+            Ok(response) => response,
+            Err(never) => match never {},
         }
     }
 
@@ -389,6 +477,8 @@ impl HttpServer {
         let drained = Arc::clone(&self.drained);
         let closing = Arc::clone(&self.closing);
         let connection_permits = Arc::clone(&self.connection_permits);
+        let tcp_nodelay = self.tcp_nodelay;
+        let http2_prior_knowledge = self.http2_prior_knowledge;
         let task = tokio::spawn(async move {
             loop {
                 if closing.load(Ordering::Acquire) != 0 {
@@ -403,7 +493,14 @@ impl HttpServer {
                 tokio::select! {
                     _ = shutdown_notified => break,
                     accepted = listener.accept() => {
-                        let Ok((stream, _peer)) = accepted else { break };
+                        let stream = match accepted {
+                            Ok((stream, _peer)) => stream,
+                            Err(error) if retry_accept(error.kind()) => continue,
+                            Err(_) => break,
+                        };
+                        if stream.set_nodelay(tcp_nodelay).is_err() {
+                            continue;
+                        }
                         if closing.load(Ordering::Acquire) != 0 {
                             break;
                         }
@@ -421,10 +518,39 @@ impl HttpServer {
                             let _permit = permit;
                             let _guard = ConnectionGuard { counter, drained };
                             let request_timeout = state.config.request_timeout;
-                            let service = service_fn(move |request| {
+                            let service = service_fn(move |request: Request<Incoming>| {
+                                let mut request = request.map(|body| {
+                                    body.map_err(|error| -> BoxError { Box::new(error) })
+                                        .boxed_unsync()
+                                });
+                                if let Some(handler) = &state.handler {
+                                    handler.on_http_service_call(&mut request);
+                                }
                                 handle_request(request, Arc::clone(&state))
                             });
                             let io = TokioIo::new(stream);
+                            if http2_prior_knowledge {
+                                let mut builder = hyper::server::conn::http2::Builder::new(
+                                    hyper_util::rt::TokioExecutor::new(),
+                                );
+                                builder.timer(TokioTimer::new());
+                                let connection = builder.serve_connection(io, service);
+                                tokio::pin!(connection);
+                                let shutdown_notified = shutdown.notified();
+                                tokio::pin!(shutdown_notified);
+                                shutdown_notified.as_mut().enable();
+                                if closing.load(Ordering::Acquire) != 0 {
+                                    return;
+                                }
+                                tokio::select! {
+                                    _ = shutdown_notified => {
+                                        connection.as_mut().graceful_shutdown();
+                                        let _ = connection.await;
+                                    }
+                                    _ = &mut connection => {}
+                                }
+                                return;
+                            }
                             let mut builder = hyper::server::conn::http1::Builder::new();
                             builder
                                 .keep_alive(true)
@@ -458,6 +584,15 @@ impl HttpServer {
             task.abort();
         }
         Ok(())
+    }
+
+    /// Report an accept task that terminated before shutdown was requested.
+    /// Checking the join handle leaves it available for the normal drain path.
+    pub fn listener_failed(&self) -> bool {
+        self.task.try_lock().is_ok_and(|slot| {
+            matches!(slot.as_ref(), Some(ListenerState::Running(task)) if task.is_finished())
+                && self.closing.load(Ordering::Acquire) == 0
+        })
     }
 
     pub async fn close(&self) -> Result<(), HttpServerError> {
@@ -768,11 +903,27 @@ impl RequestError {
 
 #[derive(Debug)]
 enum Route {
-    Health { readiness: bool },
+    Health {
+        readiness: bool,
+    },
     Discovery,
-    File { drive: String, path: String },
-    Entries { drive: String, path: String },
-    Operation { drive: String, operation: String },
+    File {
+        drive: String,
+        path: String,
+    },
+    Entries {
+        drive: String,
+        path: String,
+    },
+    Metadata {
+        drive: String,
+        path: String,
+        kind: String,
+    },
+    Operation {
+        drive: String,
+        operation: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -879,14 +1030,14 @@ impl HttpResponseFailure {
 }
 
 async fn handle_request(
-    request: Request<Incoming>,
+    request: Request<HttpBody>,
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
     handle_request_instrumented(request, state).await
 }
 
 async fn handle_request_instrumented(
-    request: Request<Incoming>,
+    request: Request<HttpBody>,
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
     #[cfg(feature = "observability")]
@@ -934,7 +1085,7 @@ async fn handle_request_instrumented(
 }
 
 async fn handle_request_with_timeout(
-    request: Request<Incoming>,
+    request: Request<HttpBody>,
     state: Arc<AppState>,
 ) -> Response<HttpBody> {
     match tokio::time::timeout(
@@ -949,9 +1100,15 @@ async fn handle_request_with_timeout(
 }
 
 async fn handle_request_uninstrumented(
-    request: Request<Incoming>,
+    request: Request<HttpBody>,
     state: Arc<AppState>,
 ) -> Response<HttpBody> {
+    if state.config.control.closing.load(Ordering::Acquire) != 0 {
+        return error_response(RequestError::server_closing());
+    }
+    if let Some(handler) = &state.handler {
+        return handler.handle(request).await;
+    }
     let (parts, body) = request.into_parts();
     let route = match parse_route(parts.uri.path()) {
         Ok(route) => route,
@@ -965,11 +1122,15 @@ async fn handle_request_uninstrumented(
         Route::Discovery => {
             return handle_discovery(&parts.method, &parts.headers, &state.registry);
         }
-        Route::File { .. } | Route::Entries { .. } | Route::Operation { .. } => {}
+        Route::File { .. }
+        | Route::Metadata { .. }
+        | Route::Entries { .. }
+        | Route::Operation { .. } => {}
     }
 
     let drive_id = match &route {
         Route::File { drive, .. }
+        | Route::Metadata { drive, .. }
         | Route::Entries { drive, .. }
         | Route::Operation { drive, .. } => drive,
         Route::Discovery | Route::Health { .. } => unreachable!(),
@@ -996,8 +1157,18 @@ async fn handle_request_uninstrumented(
             )
             .await
         }
+        Route::Metadata { path, kind, .. } => {
+            handle_metadata(parts.method, drive, path, kind).await
+        }
         Route::Entries { path, .. } => {
-            handle_entries(parts.method, drive, path, state.config.clone()).await
+            handle_entries(
+                parts.method,
+                &parts.headers,
+                drive,
+                path,
+                state.config.clone(),
+            )
+            .await
         }
         Route::Operation { operation, .. } => {
             handle_operation(parts.method, body, drive, operation, state.config.clone()).await
@@ -1005,6 +1176,48 @@ async fn handle_request_uninstrumented(
         Route::Discovery | Route::Health { .. } => unreachable!(),
     };
     result.unwrap_or_else(error_response)
+}
+
+async fn handle_metadata(
+    method: Method,
+    drive: DriveConfig,
+    path: String,
+    kind: String,
+) -> Result<Response<HttpBody>, RequestError> {
+    if method != Method::GET && method != Method::HEAD {
+        return Err(RequestError::method_not_allowed("GET, HEAD"));
+    }
+    let payload = match kind.as_str() {
+        "stat" => serde_json::to_vec(&drive.driver().stat(&path).await.map_err(RequestError::Fs)?),
+        "lstat" => serde_json::to_vec(
+            &drive
+                .driver()
+                .lstat(&path)
+                .await
+                .map_err(RequestError::Fs)?,
+        ),
+        "statfs" => serde_json::to_vec(
+            &drive
+                .driver()
+                .statfs(&path)
+                .await
+                .map_err(RequestError::Fs)?,
+        ),
+        "readlink" => serde_json::to_vec(
+            &drive
+                .driver()
+                .readlink(&path)
+                .await
+                .map_err(RequestError::Fs)?,
+        ),
+        _ => return Err(RequestError::not_found()),
+    }
+    .map_err(|_| RequestError::Fs(FsError::backend("failed to encode metadata result")))?;
+    Ok(json_response(
+        StatusCode::OK,
+        Bytes::from(payload),
+        method == Method::HEAD,
+    ))
 }
 
 fn handle_discovery(
@@ -1057,7 +1270,7 @@ fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> 
 async fn handle_file(
     method: Method,
     headers: hyper::HeaderMap,
-    body: Incoming,
+    body: HttpBody,
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
@@ -1122,6 +1335,34 @@ async fn handle_file_read(
         return Ok(json_response(StatusCode::OK, Bytes::from(payload), head));
     }
 
+    // Bind representation metadata to the same open inode as the body. Path
+    // metadata above only selects directory/special handling and can race rename.
+    let mut opened = if head {
+        None
+    } else {
+        Some(FileCloseGuard::new(
+            drive
+                .driver()
+                .open(&path, "r", 0)
+                .await
+                .map_err(RequestError::Fs)?,
+            &config.control,
+        ))
+    };
+    let stats = if let Some(guard) = &opened {
+        let stats = guard.handle().stat().await.map_err(RequestError::Fs)?;
+        if !stats.is_file() {
+            return Err(RequestError::Fs(FsError::new(if stats.is_directory() {
+                ErrorCode::Eisdir
+            } else {
+                ErrorCode::Enxio
+            })));
+        }
+        stats
+    } else {
+        stats
+    };
+
     let range = match headers.get(header::RANGE) {
         None => None,
         Some(value) => {
@@ -1163,11 +1404,12 @@ async fn handle_file_read(
             .map_err(|_| RequestError::Fs(FsError::backend("failed to build HTTP response")));
     }
 
-    let handle = drive
-        .driver()
-        .open(&path, "r", 0)
-        .await
-        .map_err(RequestError::Fs)?;
+    let handle = opened
+        .as_mut()
+        .expect("GET opened handle")
+        .handle
+        .take()
+        .expect("GET handle ownership");
     builder
         .body(stream_file(
             handle,
@@ -1180,7 +1422,7 @@ async fn handle_file_read(
 }
 
 async fn handle_file_write(
-    mut body: Incoming,
+    mut body: HttpBody,
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
@@ -1194,36 +1436,14 @@ async fn handle_file_write(
     let handle = close_guard.handle();
     let mut written = 0usize;
     let result = async {
-        while let Some(frame) =
-            next_request_frame(&mut body, &config.control.shutdown, &config.control.closing).await?
-        {
-            let Ok(data) = frame.into_data() else {
-                continue;
-            };
-            if written.saturating_add(data.len()) > config.max_request_bytes {
-                return Err(RequestError::body_too_large());
-            }
-            let mut offset = 0;
-            while offset < data.len() {
-                let count = write_with_shutdown(
-                    &handle,
-                    &data[offset..],
-                    &config.control.shutdown,
-                    &config.control.closing,
-                )
-                .await?;
-                if count == 0 || count > data.len() - offset {
-                    return Err(RequestError::Fs(
-                        FsError::new(ErrorCode::Eio)
-                            .with_syscall("write")
-                            .with_path(path.clone())
-                            .with_message("driver returned an invalid write length"),
-                    ));
-                }
-                offset += count;
-                written += count;
-            }
-        }
+        written = write_upload(
+            &mut body,
+            &handle,
+            &path,
+            config.max_request_bytes,
+            &config.control,
+        )
+        .await?;
         close_guard.close().await.map_err(RequestError::Fs)?;
         Ok::<_, RequestError>(())
     }
@@ -1238,6 +1458,73 @@ async fn handle_file_write(
     })
     .map_err(|_| RequestError::Fs(FsError::backend("failed to encode write result")))?;
     Ok(json_response(StatusCode::OK, Bytes::from(payload), false))
+}
+
+// Bound buffering independently of request size and transport frame boundaries.
+// PUT remains non-atomic: a failed upload may leave an accepted prefix.
+const UPLOAD_BUFFER_BYTES: usize = 64 * 1024;
+
+async fn write_upload(
+    body: &mut HttpBody,
+    handle: &Arc<dyn FileHandle>,
+    path: &str,
+    limit: usize,
+    control: &RuntimeControl,
+) -> Result<usize, RequestError> {
+    let mut buffer = Vec::with_capacity(UPLOAD_BUFFER_BYTES.min(limit));
+    let mut received = 0usize;
+    loop {
+        let next = next_request_frame(body, &control.shutdown, &control.closing).await;
+        let frame = match next {
+            Ok(Some(frame)) => frame,
+            ending => {
+                // Preserve the accepted prefix on body errors, unless shutdown
+                // has begun. Never acknowledge a failed or cancelled upload.
+                flush_upload(handle, &buffer, path, control).await?;
+                return ending.map(|_| received);
+            }
+        };
+        let Ok(mut data) = frame.into_data() else {
+            continue;
+        };
+        if received.saturating_add(data.len()) > limit {
+            flush_upload(handle, &buffer, path, control).await?;
+            return Err(RequestError::body_too_large());
+        }
+        received += data.len();
+        while !data.is_empty() {
+            let count = (UPLOAD_BUFFER_BYTES - buffer.len()).min(data.len());
+            buffer.extend_from_slice(&data.split_to(count));
+            if buffer.len() == UPLOAD_BUFFER_BYTES {
+                flush_upload(handle, &buffer, path, control).await?;
+                buffer.clear();
+            }
+        }
+    }
+}
+
+async fn flush_upload(
+    handle: &Arc<dyn FileHandle>,
+    data: &[u8],
+    path: &str,
+    control: &RuntimeControl,
+) -> Result<(), RequestError> {
+    let mut offset = 0;
+    while offset < data.len() {
+        let count =
+            write_with_shutdown(handle, &data[offset..], &control.shutdown, &control.closing)
+                .await?;
+        if count == 0 || count > data.len() - offset {
+            return Err(RequestError::Fs(
+                FsError::new(ErrorCode::Eio)
+                    .with_syscall("write")
+                    .with_path(path)
+                    .with_message("driver returned an invalid write length"),
+            ));
+        }
+        offset += count;
+    }
+    Ok(())
 }
 
 async fn handle_file_delete(
@@ -1267,6 +1554,7 @@ async fn handle_file_delete(
 
 async fn handle_entries(
     method: Method,
+    headers: &hyper::HeaderMap,
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
@@ -1284,11 +1572,111 @@ async fn handle_entries(
     if payload.len() > config.max_response_bytes {
         return Err(RequestError::response_too_large());
     }
-    Ok(json_response(
-        StatusCode::OK,
-        Bytes::from(payload),
-        method == Method::HEAD,
-    ))
+    entries_response(payload, headers, method == Method::HEAD).await
+}
+
+// Bound compression work across all drives without occupying async executor threads.
+static LISTING_ENCODERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+fn encoding_quality(value: &str) -> Option<u16> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if fraction.len() > 3 || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match whole {
+        "0" => Some(fraction.parse::<u16>().unwrap_or(0) * 10u16.pow(3 - fraction.len() as u32)),
+        "1" if fraction.bytes().all(|b| b == b'0') => Some(1000),
+        _ => None,
+    }
+}
+
+fn listing_encodings(headers: &hyper::HeaderMap) -> (u16, u16) {
+    let mut gzip = None;
+    let mut identity = None;
+    let mut wildcard = None;
+    for header in headers.get_all(header::ACCEPT_ENCODING) {
+        let Ok(value) = header.to_str() else { continue };
+        for item in value.split(',') {
+            let mut parts = item.trim().split(';');
+            let name = parts.next().unwrap_or("").trim();
+            let mut quality = 1000;
+            let mut seen_quality = false;
+            for parameter in parts {
+                let Some((key, value)) = parameter.trim().split_once('=') else {
+                    quality = 0;
+                    break;
+                };
+                if !key.trim().eq_ignore_ascii_case("q") || seen_quality {
+                    quality = 0;
+                    break;
+                }
+                seen_quality = true;
+                quality = encoding_quality(value.trim()).unwrap_or(0);
+            }
+            let slot = if name.eq_ignore_ascii_case("gzip") {
+                &mut gzip
+            } else if name.eq_ignore_ascii_case("identity") {
+                &mut identity
+            } else if name == "*" {
+                &mut wildcard
+            } else {
+                continue;
+            };
+            // Conflicting duplicate preferences resolve conservatively.
+            *slot = Some(slot.map_or(quality, |old: u16| old.min(quality)));
+        }
+    }
+    (
+        gzip.or(wildcard).unwrap_or(0),
+        identity.unwrap_or(if wildcard == Some(0) { 0 } else { 1000 }),
+    )
+}
+
+async fn entries_response(
+    payload: Vec<u8>,
+    headers: &hyper::HeaderMap,
+    head: bool,
+) -> Result<Response<HttpBody>, RequestError> {
+    let (gzip, identity) = listing_encodings(headers);
+    if gzip == 0 && identity == 0 {
+        let mut response = empty_response(StatusCode::NOT_ACCEPTABLE);
+        response.headers_mut().insert(
+            header::VARY,
+            header::HeaderValue::from_static("Accept-Encoding"),
+        );
+        return Ok(response);
+    }
+    let use_gzip = gzip > 0 && gzip >= identity && (payload.len() >= 1024 || identity == 0);
+    let bytes = if use_gzip {
+        let permit = LISTING_ENCODERS
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Fs(FsError::backend("listing encoder unavailable")))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&payload)?;
+            encoder.finish()
+        })
+        .await
+        .map_err(|_| RequestError::Fs(FsError::backend("listing encoder failed")))?
+        .map_err(|_| RequestError::Fs(FsError::backend("listing compression failed")))?
+    } else {
+        payload
+    };
+    let mut response = json_response(StatusCode::OK, Bytes::from(bytes), head);
+    response.headers_mut().insert(
+        header::VARY,
+        header::HeaderValue::from_static("Accept-Encoding"),
+    );
+    if use_gzip {
+        response.headers_mut().insert(
+            header::CONTENT_ENCODING,
+            header::HeaderValue::from_static("gzip"),
+        );
+    }
+    Ok(response)
 }
 
 fn directory_listing_error(error: FsError) -> RequestError {
@@ -1301,7 +1689,7 @@ fn directory_listing_error(error: FsError) -> RequestError {
 
 async fn handle_operation(
     method: Method,
-    body: Incoming,
+    body: HttpBody,
     drive: DriveConfig,
     operation: String,
     config: RequestConfig,
@@ -1378,7 +1766,7 @@ async fn handle_operation(
 }
 
 async fn next_request_frame(
-    body: &mut Incoming,
+    body: &mut HttpBody,
     shutdown: &Notify,
     closing: &AtomicUsize,
 ) -> Result<Option<Frame<Bytes>>, RequestError> {
@@ -1433,7 +1821,7 @@ async fn write_with_shutdown(
 }
 
 async fn parse_json_body<T: for<'de> Deserialize<'de>>(
-    body: Incoming,
+    body: HttpBody,
     max_request_bytes: usize,
     control: &RuntimeControl,
 ) -> Result<T, RequestError> {
@@ -1442,7 +1830,7 @@ async fn parse_json_body<T: for<'de> Deserialize<'de>>(
 }
 
 async fn read_limited_body(
-    mut body: Incoming,
+    mut body: HttpBody,
     max_request_bytes: usize,
     control: &RuntimeControl,
 ) -> Result<Vec<u8>, RequestError> {
@@ -1481,6 +1869,17 @@ fn parse_route(raw_path: &str) -> Result<Route, RequestError> {
             Ok(Route::Entries {
                 drive: drive.clone(),
                 path: path_from_segments(rest),
+            })
+        }
+        [version, drives, drive, kind, rest @ ..]
+            if version == "v1"
+                && drives == "drives"
+                && matches!(kind.as_str(), "stat" | "lstat" | "statfs" | "readlink") =>
+        {
+            Ok(Route::Metadata {
+                drive: drive.clone(),
+                path: path_from_segments(rest),
+                kind: kind.clone(),
             })
         }
         [version, drives, drive, kind, operation]
@@ -1564,6 +1963,14 @@ fn validate_virtual_path(path: &str) -> Result<String, RequestError> {
             .map(str::to_owned)
             .collect::<Vec<_>>(),
     ))
+}
+
+fn retry_accept(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        kind,
+        ErrorKind::Interrupted | ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset
+    )
 }
 
 fn authorized(headers: &hyper::HeaderMap, drive: &DriveConfig) -> bool {
@@ -1804,6 +2211,43 @@ fn head_body(length: u64) -> HttpBody {
     HeadBody { length }.boxed_unsync()
 }
 
+// Data, errors and EOF share one ordered queue. A separate error channel can
+// close between polling an empty data queue and polling that second channel,
+// incorrectly reporting EOF while the final data frame is already queued.
+struct OrderedResponseBody {
+    receiver: tokio::sync::mpsc::Receiver<Result<Bytes, BoxError>>,
+}
+impl HttpBodyTrait for OrderedResponseBody {
+    type Data = Bytes;
+    type Error = BoxError;
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        self.get_mut()
+            .receiver
+            .poll_recv(cx)
+            .map(|item| item.map(|result| result.map(Frame::data)))
+    }
+}
+
+async fn send_response_failure(
+    sender: &tokio::sync::mpsc::Sender<Result<Bytes, BoxError>>,
+    error: BoxError,
+    control: &RuntimeControl,
+) {
+    let notified = control.shutdown.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if control.closing.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    tokio::select! {
+        _ = notified => {}
+        _ = sender.send(Err(error)) => {}
+    }
+}
+
 fn stream_file(
     handle: Arc<dyn FileHandle>,
     start: u64,
@@ -1811,7 +2255,8 @@ fn stream_file(
     chunk_size: usize,
     control: RuntimeControl,
 ) -> HttpBody {
-    let (mut sender, body) = Channel::<Bytes, BoxError>::new(2);
+    let (sender, receiver) = tokio::sync::mpsc::channel(2);
+    let body = OrderedResponseBody { receiver };
     let task = TaskGuard::new(
         Arc::clone(&control.background_tasks),
         Arc::clone(&control.drained),
@@ -1822,7 +2267,10 @@ fn stream_file(
         let handle = close_guard.handle();
         let end = start.saturating_add(length);
         let mut position = start;
-        let mut buffer = vec![0_u8; chunk_size.max(1)];
+        // Small ranges should not reserve an entire streaming chunk. Keep the
+        // configured bound for large responses and avoid allocating for EOF.
+        let buffer_size = length.min(chunk_size.max(1) as u64) as usize;
+        let mut buffer = vec![0_u8; buffer_size];
         let mut failure: Option<BoxError> = None;
         while position < end {
             let wanted = (end - position).min(buffer.len() as u64) as usize;
@@ -1857,7 +2305,7 @@ fn stream_file(
                     }
                     let send_result = tokio::select! {
                         _ = notified => break,
-                        result = sender.send_data(Bytes::copy_from_slice(&buffer[..count])) => result,
+                        result = sender.send(Ok(Bytes::copy_from_slice(&buffer[..count]))) => result,
                     };
                     if send_result.is_err() {
                         break;
@@ -1884,7 +2332,7 @@ fn stream_file(
             failure = Some(Box::new(error));
         }
         if let Some(error) = failure {
-            sender.abort(error);
+            send_response_failure(&sender, error, &control).await;
         }
     });
     body.boxed_unsync()
@@ -1922,24 +2370,278 @@ fn unbracket_host(host: &str) -> Option<&str> {
     }
 }
 
-fn validate_drive_id(id: &str) -> Result<(), RegistryError> {
-    if id.is_empty()
-        || id.len() > 64
-        || id == "."
-        || id == ".."
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err(RegistryError::InvalidDriveId);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mount_rs_memfs::MemoryFs;
+
+    #[test]
+    fn interrupted_and_aborted_accepts_keep_the_listener_running() {
+        use std::io::ErrorKind;
+        for kind in [
+            ErrorKind::Interrupted,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+        ] {
+            assert!(retry_accept(kind));
+        }
+        assert!(!retry_accept(ErrorKind::PermissionDenied));
+        assert!(!retry_accept(ErrorKind::OutOfMemory));
+    }
+
+    #[test]
+    fn listing_encoding_preferences() {
+        for (value, expected) in [
+            ("", (0, 1000)),
+            ("gzip", (1000, 1000)),
+            ("GZIP;q=0.5, identity;q=0.2", (500, 200)),
+            ("*;q=1, gzip;q=0", (0, 1000)),
+            ("*;q=0", (0, 0)),
+            ("*;q=0, identity;q=1", (0, 1000)),
+            ("gzip;q=1.001", (0, 1000)),
+            ("gzip;q=0.0001", (0, 1000)),
+            ("gzip;q=NaN", (0, 1000)),
+            ("gzip;q=1;q=0", (0, 1000)),
+            ("gzip;q=0, gzip", (0, 1000)),
+        ] {
+            let mut headers = hyper::HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, value.parse().unwrap());
+            assert_eq!(listing_encodings(&headers), expected, "{value}");
+        }
+        let mut headers = hyper::HeaderMap::new();
+        headers.append(header::ACCEPT_ENCODING, "br".parse().unwrap());
+        headers.append(
+            header::ACCEPT_ENCODING,
+            "gzip, identity;q=0".parse().unwrap(),
+        );
+        assert_eq!(listing_encodings(&headers), (1000, 0));
+        assert_eq!(listing_encodings(&hyper::HeaderMap::new()), (0, 1000));
+    }
+
+    #[tokio::test]
+    async fn listing_compression_roundtrip_and_head_length() {
+        use std::io::Read;
+        let payload = vec![b'a'; 67054];
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        let get = entries_response(payload.clone(), &headers, false)
+            .await
+            .unwrap();
+        assert_eq!(get.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(get.headers()[header::VARY], "Accept-Encoding");
+        let length = get.headers()[header::CONTENT_LENGTH].clone();
+        let bytes = get.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            length.to_str().unwrap().parse::<usize>().unwrap(),
+            bytes.len()
+        );
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(bytes.as_ref())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, payload);
+        let head = entries_response(payload.clone(), &headers, true)
+            .await
+            .unwrap();
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], length);
+        assert_eq!(head.headers()[header::CONTENT_ENCODING], "gzip");
+        assert!(
+            head.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+        headers.insert(header::ACCEPT_ENCODING, "gzip;q=0".parse().unwrap());
+        let plain = entries_response(payload.clone(), &headers, false)
+            .await
+            .unwrap();
+        assert!(!plain.headers().contains_key(header::CONTENT_ENCODING));
+        assert_eq!(
+            plain.into_body().collect().await.unwrap().to_bytes(),
+            payload
+        );
+        headers.insert(header::ACCEPT_ENCODING, "*;q=0".parse().unwrap());
+        assert_eq!(
+            entries_response(payload, &headers, false)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_ACCEPTABLE
+        );
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            "gzip, identity;q=0".parse().unwrap(),
+        );
+        assert_eq!(
+            entries_response(b"[]".to_vec(), &headers, false)
+                .await
+                .unwrap()
+                .headers()[header::CONTENT_ENCODING],
+            "gzip"
+        );
+    }
+
+    mod handoff_waker {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/support/handoff_waker.rs"
+        ));
+    }
+
+    #[test]
+    fn final_response_frame_survives_producer_close_during_poll_registration() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let mut body = OrderedResponseBody { receiver };
+        let waker = handoff_waker::on_clone(1, move || {
+            sender
+                .try_send(Ok(Bytes::from_static(b"complete")))
+                .unwrap();
+            drop(sender);
+        });
+        let mut cx = Context::from_waker(&waker);
+        let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut body).poll_frame(&mut cx) else {
+            panic!("final data frame must be delivered before EOF");
+        };
+        assert_eq!(frame.into_data().unwrap(), b"complete".as_slice());
+        assert!(matches!(
+            Pin::new(&mut body).poll_frame(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn response_error_follows_queued_data_and_receiver_drop_releases_sender() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let mut body = OrderedResponseBody { receiver };
+        sender
+            .send(Ok(Bytes::from_static(b"prefix")))
+            .await
+            .unwrap();
+        sender
+            .send(Err(Box::new(FsError::new(ErrorCode::Eio)) as BoxError))
+            .await
+            .unwrap();
+        drop(sender);
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            b"prefix".as_slice()
+        );
+        assert!(body.frame().await.unwrap().is_err());
+        assert!(body.frame().await.is_none());
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Bytes, BoxError>>(1);
+        drop(OrderedResponseBody { receiver });
+        assert!(sender.send(Ok(Bytes::new())).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn full_error_queue_does_not_prevent_server_shutdown() {
+        let control = RuntimeControl {
+            background_tasks: Arc::new(AtomicUsize::new(0)),
+            drained: Arc::new(Notify::new()),
+            shutdown: Arc::new(Notify::new()),
+            closing: Arc::new(AtomicUsize::new(0)),
+        };
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        sender
+            .send(Ok(Bytes::from_static(b"queued")))
+            .await
+            .unwrap();
+        let mut error = Box::pin(send_response_failure(
+            &sender,
+            Box::new(FsError::new(ErrorCode::Eio)),
+            &control,
+        ));
+        assert!(std::future::poll_fn(|cx| Poll::Ready(error.as_mut().poll(cx).is_pending())).await);
+        control.closing.store(1, Ordering::Release);
+        control.shutdown.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), error)
+            .await
+            .unwrap();
+        // A shutdown already in progress also bypasses the full queue.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            send_response_failure(&sender, Box::new(FsError::new(ErrorCode::Eio)), &control),
+        )
+        .await
+        .unwrap();
+    }
+
+    struct UploadHandle {
+        bytes: std::sync::Mutex<Vec<u8>>,
+        calls: AtomicUsize,
+        max_write: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl FileHandle for UploadHandle {
+        async fn read(&self, _: &mut [u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            unreachable!()
+        }
+        async fn write(&self, bytes: &[u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let count = bytes.len().min(self.max_write);
+            self.bytes
+                .lock()
+                .unwrap()
+                .extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        async fn stat(&self) -> mount_rs_core::Result<Stats> {
+            unreachable!()
+        }
+        async fn truncate(&self, _: u64) -> mount_rs_core::Result<()> {
+            unreachable!()
+        }
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn fragmented_uploads_are_bounded_and_preserve_partial_writes() {
+        for max_write in [usize::MAX, 997, 0] {
+            let expected: Vec<u8> = (0..UPLOAD_BUFFER_BYTES * 2 + 51)
+                .map(|i| (i % 251) as u8)
+                .collect();
+            let frames = expected
+                .chunks(113)
+                .map(Bytes::copy_from_slice)
+                .collect::<Vec<_>>();
+            let (mut sender, body) = Channel::<Bytes, BoxError>::new(2);
+            tokio::spawn(async move {
+                for frame in frames {
+                    if sender.send_data(frame).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let mut body = body.boxed_unsync();
+            let recorded = Arc::new(UploadHandle {
+                bytes: std::sync::Mutex::new(Vec::new()),
+                calls: AtomicUsize::new(0),
+                max_write,
+            });
+            let handle: Arc<dyn FileHandle> = recorded.clone();
+            let control = RuntimeControl {
+                background_tasks: Arc::new(AtomicUsize::new(0)),
+                drained: Arc::new(Notify::new()),
+                shutdown: Arc::new(Notify::new()),
+                closing: Arc::new(AtomicUsize::new(0)),
+            };
+            let result = write_upload(&mut body, &handle, "/file", expected.len(), &control).await;
+            if max_write == 0 {
+                assert!(result.is_err());
+                continue;
+            }
+            assert_eq!(result.unwrap(), expected.len());
+            assert_eq!(*recorded.bytes.lock().unwrap(), expected);
+            if max_write == usize::MAX {
+                assert_eq!(recorded.calls.load(Ordering::Relaxed), 3);
+            }
+        }
+    }
 
     struct PendingCloseHandle {
         release: Arc<Notify>,
@@ -2064,6 +2766,25 @@ mod tests {
         .expect("cancelled handle cleanup did not drain");
     }
 
+    #[tokio::test]
+    async fn unexpected_listener_exit_is_visible_before_close() {
+        let server = HttpServer::new(DriveRegistry::new(), HttpServerOptions::default());
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move { wait.await.unwrap() });
+        *server.task.lock().await = Some(ListenerState::Running(task));
+        assert!(!server.listener_failed());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !server.listener_failed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server.close().await.unwrap();
+        assert!(!server.listener_failed());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_close_keeps_listener_for_a_retry() {
         let server = Arc::new(HttpServer::new(
@@ -2130,6 +2851,32 @@ mod tests {
             .close()
             .await
             .expect("final close after drain release");
+    }
+
+    #[tokio::test]
+    async fn prior_knowledge_http2_roundtrip_and_drain() {
+        let server = HttpServer::new(
+            DriveRegistry::new(),
+            HttpServerOptions {
+                http2_prior_knowledge: true,
+                ..HttpServerOptions::default()
+            },
+        );
+        server.listen().await.unwrap();
+        let client = reqwest::Client::builder()
+            .http2_prior_knowledge()
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("http://127.0.0.1:{}/missing", server.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.version(), hyper::Version::HTTP_2);
+        assert!(!response.status().is_success());
+        let _ = response.bytes().await.unwrap();
+        server.close().await.unwrap();
+        assert_eq!(server.connections(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

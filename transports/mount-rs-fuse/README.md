@@ -139,3 +139,19 @@ must not be inferred from the wire codec or from a mount-free test.
 The library does not claim automatic process crash/restart supervision or
 stale-mount recovery. Those are deployment/supervisor responsibilities and
 remain hosted Linux lifecycle gates rather than local protocol evidence.
+
+### Externally mutable volumes
+
+Rust callers can select `MountOptions { uncached: true, ..Default::default() }`.
+This sets attribute, entry and negative-entry TTLs to zero and emits
+`FOPEN_DIRECT_IO` for file OPEN and CREATE, without `FOPEN_KEEP_CACHE`. It also
+removes writeback-cache and direct-I/O mmap negotiation flags. Existing local
+mount defaults remain unchanged. Direct session users can call
+`FuseSessionOptions::without_kernel_cache()`.
+
+This mode avoids relying on kernel data/attribute caches when other clients can
+modify the volume. It is a prerequisite, not proof of cross-mount coherence:
+remote sessions, inode/handle identity, invalidation, concurrent operations and
+native Linux tests still matter. It does not configure NFS or 9P, and no CLI
+remote filesystem driver is supplied by this option. Shared mmap behavior is
+not enabled in this mode.

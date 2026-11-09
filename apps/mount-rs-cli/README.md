@@ -252,7 +252,8 @@ Unspecified flags retain config values. Relative config paths are resolved
 relative to the config file. An omitted splitstore owner gets a
 process-and-instance-specific writer-fence owner; explicit owners are
 validated before provider construction. Splitstore also accepts the optional
-`lease_ttl_ms` field, in milliseconds; it defaults to 30 seconds. Set it
+`lease_ttl_ms` field, in milliseconds. Exclusive ownership defaults to 240
+seconds (see the owner serving window below); concurrent writes reject it. Set it
 explicitly for remote providers when the observed operation latency requires
 more lease headroom, while keeping stale-writer recovery within the
 deployment's recovery objective.
@@ -276,13 +277,19 @@ and 8 MiB by default; all values can be overridden in the `http`
 object. Only loopback hosts are accepted; remote customers must terminate TLS
 and authenticate at a reverse proxy before forwarding to this listener.
 
+The public listener serves HTTP/1.1 by default. Set `http.http2_prior_knowledge` to `true` for a cleartext HTTP/2-only listener. Configure the upstream proxy to send the HTTP/2 connection preface on its target connection. TLS termination remains at the proxy. The server-to-server forwarding connection uses its own transport configuration.
+
+`http.tcp_nodelay` defaults to `true`, disabling TCP packet coalescing to reduce
+streaming-response latency. Set it to the boolean `false` to restore coalescing.
+
+Split storage accepts `read_parallelism` only as `1` (the default): block reads
+within a file read are sequential. Parallel block fetches are not supported.
+
 The token value is read from the named environment variable only when the
 service starts and is never printed or stored in the config. Each token is
 authorized only for its configured drive. The service is unmounted: it does
 not create a FUSE, 9P, or NFS mount, and it does not add a distributed cache.
-The readiness line reports the selected address and drive IDs. Ctrl-C closes
-HTTP connections within the configured drain bound and then shuts down the
-configured providers.
+The readiness line reports the selected address and drive IDs. Ctrl-C and, on Unix, SIGTERM initiate graceful shutdown. The server drains HTTP connections and writable sessions before shutting down the configured providers.
 
 See `examples/config-http.json` for a memory drive and a durable SQLite drive
 with isolated tokens.
@@ -522,6 +529,259 @@ These commands open provider administration handles without acquiring a subtree
 checkout or starting a native transport. Recovery does not synchronize another
 process's pending work. Legacy MRC2 migration commands do not accept explicit
 MRC3 shared configurations.
+
+## Split-store tuning and HTTP cluster sessions
+
+### TiDB metadata and explicit cache policy
+
+Structured split-store configuration accepts TiDB through an environment
+reference, and supports the opt-in process-local block cache and noatime policy:
+
+```json
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "tidb",
+        "connection": {"env": "MOUNT_RS_TIDB_URL"},
+        "volume_key": "example-volume",
+        "durable": false
+      },
+      "blocks": {"kind": "memory"},
+      "atime": "noatime",
+      "block_cache": {"max_bytes": 16777216, "max_entries": 4096}
+    }
+  }
+}
+```
+
+This example is deliberately ephemeral; memory blocks are lost on restart.
+Replace `blocks` with a configured SQLite or R2/RustFS provider for persistence.
+`durable` is a deployment assertion, not an automatically inferred guarantee.
+Omit `atime` and `block_cache` for noatime/uncached defaults. Reads do not update
+access timestamps. Set `"atime": "strict"` explicitly to retain synchronous
+access-time updates, which add TiDB metadata publication to reads/listings. Cache
+limits must be positive; unknown options and inline connection secrets fail
+static validation. The same storage object works inside a `serve-http` drive.
+
+The current SDK still holds a single writer lease per volume. These options
+**do not yet allow independent mounts to open the same volume concurrently**;
+distributed metadata coherence and multi-mount acceptance remain outstanding.
+
+### Experimental owner serving window
+
+The SDK `SplitRuntimeOptions.read_lease_cache_window` (CLI storage field
+`read_lease_cache_window_ms`) defaults to 60000ms, paired with an authoritative
+`lease_ttl_ms` default of 240000ms. With a shorter explicit `lease_ttl_ms` the
+default window is a quarter of the lease (zero below 80ms). Background renewals run every 30000ms.
+Zero explicitly restores per-operation renewal. A nonzero serving window must
+be at least 20ms and at most one quarter of `lease_ttl_ms`. The serving window,
+`atime`, `block_cache`, `disk_cache` and `verify_backing_blocks` apply only to
+exclusive ownership; they are rejected with `concurrent_writes` or shared
+`ownership_mode`. After an owner crash,
+takeover may wait roughly four minutes; Redis route expiry does not shorten it.
+This requires managed provider clocks without abrupt forward expiry jumps or
+out-of-band early revocation. It requires a Tokio runtime. Renewal failures or unknown outcomes
+fail the owner closed. This is an experimental owner-service optimization, not
+an implementation of multi-server discovery or multi-client cache coherence.
+
+The block provider `{"kind":"local","path":"/existing/owned/block-directory"}`
+uses immutable content-addressed files with file and directory synchronization
+on Unix. Provision the directory durably before use. It must be application-owned;
+local disk contents are not automatically replicated to another owner server.
+
+### Uncached FUSE mounts
+
+Use `--transport fuse --fuse-uncached`, or set `"transport": "fuse"` and
+`"fuse_uncached": true` in a version-1 native mount config, to request zero
+kernel metadata TTLs and direct file I/O. The resolved transport must explicitly
+be FUSE; auto/NFS/9P are rejected rather than silently using another cache policy.
+This bypasses kernel caching, not the owner's backing-store cache. Existing
+mount defaults are unchanged. This option does not add a remote driver or prove
+multi-mount coherence; native shared-writer acceptance remains outstanding.
+
+### Verifying restored content before serving
+
+Set `"verify_backing_blocks": true` inside `driver.storage` to verify a restored split volume before opening it to clients. The owner reads every distinct referenced block directly from the authoritative provider and checks that it contains all byte ranges committed in metadata. A missing or short block fails startup with `ESTALE`, even when its contents are present in the local cache. The scan reads the entire referenced block set and can substantially increase startup time and RustFS GET traffic. Its checks cover availability and length. Detecting same-length corruption requires content integrity checks from the provider or a trusted digest.
+
+### Persistent disk content cache
+
+Structured split storage can opt into a disk tier below the optional RAM cache:
+
+```json
+"disk_cache": {
+  "root": "./cache",
+  "scope": "volume-42-generation-7",
+  "max_bytes": 1073741824,
+  "max_entries": 16384
+}
+```
+
+Place this object beside `metadata`, `blocks` and `block_cache` inside `storage`.
+The root is resolved relative to the configuration file and must already exist.
+Each volume needs an explicit non-secret scope identifying its backing generation.
+Change it if backing data is recreated or block IDs can be reused, including when
+starting a fresh memory backing store. The same scope cannot be owned by two
+independent disk-cache instances. This setting works for local split-store mounts
+and `serve-http` drives. The experimental remote client/session libraries exist,
+but production cluster-server startup and native remote-mount acceptance remain
+incomplete; this cache setting does not supply that lifecycle.
+
+Limits cover encoded cache bytes (including 80-byte entry headers) and entry
+count. `max_bytes` must be at least 80 and `max_entries` positive. Omission keeps
+disk caching disabled. This is currently Unix-only and preserves authoritative
+provider durability. Per-server aggregate limits and RustFS performance
+qualification remain outstanding. See the SDK documentation for separate RAM and
+disk cache counters and clearing controls.
+
+For a multi-drive HTTP server, an optional `http.disk_cache_budget` object shares
+disk-cache admission across all disk-cached drives in that process:
+
+```json
+"disk_cache_budget": { "workers": 8, "fill_copies": 4 }
+```
+
+Both fields are required integers from 1 through 512. This example is a resource
+limit, not a recommended performance setting. Omitting the object preserves
+private four-worker/four-copy admission per cached volume. Shared admission also
+covers cache opening; shutdown of one volume does not close the budget. It does
+not limit aggregate resident disk/RAM capacity, provider/request buffers or
+unrelated runtime blocking work. Each admitted fill copy is at most 16 MiB.
+Tune against the intended concurrency: measured four-slot budgets improved some
+workloads and worsened others. Non-disk-cached drives do not use this budget.
+
+Optionally set `http.cache_capacity` to reject cache overcommit before providers
+open. Both non-negative integer fields are required:
+
+```json
+"cache_capacity": { "ram_bytes": 536870912, "disk_bytes": 17179869184 }
+```
+
+The parser sums every drive's configured `block_cache.max_bytes` and
+`disk_cache.max_bytes` independently, rejecting overflow or totals above these
+limits. Disabled caches reserve zero. This is static admission of configured
+maxima, not a shared LRU or physical disk quota. It does not account for metadata,
+allocator overhead, transient encoded files, returned read buffers or provider
+buffers; allow headroom for those separately. Omission preserves existing
+configuration behavior. SDK callers managing volumes dynamically must enforce
+their own capacity reservations.
+
+## Remote volume client (experimental)
+
+A mount client can use an authenticated public server without Redis, TiDB or
+block-store connection settings:
+
+```json
+{
+  "version": 1,
+  "driver": {
+    "kind": "remote",
+    "server": "https://mount.example",
+    "volume": "drive-1",
+    "token": { "env": "MOUNT_CLIENT_TOKEN" },
+    "timeout_ms": 30000
+  }
+}
+```
+
+Run `mount-rs mount /path/to/mount --config remote.json`. The credential is read
+from the named environment variable, never from an argument or literal config
+field. The server must expose the authenticated session protocol; the existing
+`serve-http` file endpoint alone is insufficient. HTTPS is required except for
+loopback testing. Redirects and automatic request replay are disabled.
+
+`mount-rs sdk-self-test --config remote.json` checks public-endpoint read/write
+and session cleanup without a native mount. Remote `--reopen` qualification is
+not supported by this command. FUSE requests uncached kernel access for remote
+volumes. NFS/9p cache coherence and native remote mounts remain unqualified.
+The CLI owns a keepalive worker using the server-advertised idle timeout and
+joins it before session shutdown. Failed refreshes stop without recreating the
+session. Failover recovery and production server startup remain unfinished. Do not use
+this experimental mode as production acceptance evidence.
+
+### Remote sessions on a configured HTTP server
+
+For split-store drives, `http.remote_sessions: true` enables the session and
+handle API used by the remote mount CLI on the real `serve-http` command.
+It defaults to false. All drives in that service must be split-store drivers.
+Each configured drive token must satisfy the session credential format: 32–256
+ASCII letters/digits or `-._~+/=`; use a high-entropy secret from its environment
+reference. The drive token authorizes both file and session routes for that volume.
+
+```json
+{
+  "version": 1,
+  "http": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "remote_sessions": true,
+    "drives": [{
+      "id": "volume",
+      "token": {"env": "MOUNT_VOLUME_TOKEN"},
+      "driver": {"kind": "splitstore", "storage": {
+        "metadata": {"kind": "memory"},
+        "blocks": {"kind": "memory"},
+        "chunk_size_bytes": 4096
+      }}
+    }]
+  }
+}
+```
+
+The memory example is volatile. Existing split-store provider configuration can
+select TiDB and local or object-store blocks. Sessions have a shared process
+budget of 4096, a per-volume limit of 128 sessions, 128 handles per session and a
+60-second idle timeout; the remote CLI owns keepalive. The command supervises
+expiry and closes listeners/sessions before shutting down SDK owners. Session
+drain uses `drain_timeout_ms`; a failure returns an error and does not explicitly
+release SDK ownership as though cleanup succeeded. A process exit after failure
+still relies on the provider's lease-expiry/fencing behavior.
+
+Multiple writable clients can use the same volume through any configured ingress. Clients need the public HTTPS endpoint and bearer credential. Servers use Redis for volume discovery and mutually authenticated HTTP/3 to forward requests to the owner.
+
+For an ingress with no local drives, set `http.drives` to `[]` and configure `http.forwarding` as follows.
+
+```json
+{
+  "peers": "peers.json",
+  "certificate": "ingress.pem",
+  "private_key": "ingress.key",
+  "ca": "ca.pem",
+  "redis_url": {"env": "MOUNT_RS_REDIS_URL"},
+  "namespace": "mount-production",
+  "bind": "0.0.0.0:0"
+}
+```
+
+Distribute a trusted membership file to the servers. It contains a JSON array with one record per server. Each record has a unique `node`, a `boot` identifier, a UDP socket `address`, a `tls_server_name`, and the hexadecimal SHA-256 public-key pin `spki_sha256`. Each server uses its own certificate and key. Use the same Redis namespace across servers serving the cluster.
+
+On a volume owner, set `http.forwarding.owner` to `true`, supply the owner's certificate and key, and configure its assigned drives. The owner listens for peer requests at its membership address. The forwarding `bind` setting controls the outbound QUIC endpoint. Enable `http.remote_sessions` on the owner for remote mount clients. Ownership assignment is operator-configured. Serve the public endpoint through HTTPS termination for bearer credentials.
+
+Set `http.forwarding.refresh_active_routes` to `true` to recheck recently used routes in Redis before their one-second cache lifetime expires. This option defaults to `false`. Each refresh verifies the exact registration and stops after `http.forwarding.route_refresh_idle_ttls` route lifetimes without use (default `5`, allowed `1`–`60`). The route lifetime and its hard expiry are unchanged by this setting. Owners still check the route and their current fencing generation before serving forwarded requests.
+
+For many TiDB volumes on an owner, `http.tidb_metadata_pool_limit` sets a shared SQL connection limit for volumes that use the same connection environment variable name. The 100-volume local benchmark used 16.
+
+Session JSON control requests and write bodies also respect `max_request_bytes`,
+including chunked uploads. Oversized requests are rejected before mutation.
+The session advertises the smaller of that limit and its 64KiB protocol I/O cap;
+the current remote client honors smaller advertised limits and may return short
+reads/writes accordingly. Very small limits can also reject control operations
+whose JSON exceeds the configured bound.
+
+
+Set `http.cache_report_interval_seconds` to a positive integer to have
+`serve-http` write periodic JSON records to stderr for drives with a configured
+content cache. Reporting defaults to off. Each `mount_cache_stats` record
+contains the configured drive ID and separate `ram` and `disk` snapshots.
+An absent tier is JSON null. Hits, misses, and evictions are cumulative for
+the open drive. Use differences between successive snapshots from the same
+process to measure a workload interval. A RAM miss can be a disk hit. With
+both tiers enabled, the disk misses identify lookups that fell through the
+local caches. Resident entries and bytes describe each tier at sampling time.
+
+The RAM snapshot also reports completed and failed gets to its next storage tier, bytes returned by those gets, and their cumulative duration in nanoseconds. For a workload interval with completed gets, divide the duration delta by the completed-get delta for the mean duration. A configured disk cache is the next tier below RAM, so these counters can include disk hits.
 
 ## Remote Drive provider
 

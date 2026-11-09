@@ -1267,7 +1267,41 @@ impl FsDriver for ShortSourceFs {
     }
 
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
-        self.inner.open(path, flags, mode).await
+        let handle = self.inner.open(path, flags, mode).await?;
+        if path == "/source" {
+            return Ok(Arc::new(ShortSourceHandle { inner: handle }));
+        }
+        Ok(handle)
+    }
+}
+
+/// Reports one byte more than it can read, so a streamed body ends short.
+struct ShortSourceHandle {
+    inner: Arc<dyn FileHandle>,
+}
+
+#[async_trait]
+impl FileHandle for ShortSourceHandle {
+    async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> FsResult<usize> {
+        self.inner.read(buffer, position).await
+    }
+
+    async fn write(&self, buffer: &[u8], position: Option<u64>) -> FsResult<usize> {
+        self.inner.write(buffer, position).await
+    }
+
+    async fn stat(&self) -> FsResult<Stats> {
+        let mut stats = self.inner.stat().await?;
+        stats.size = stats.size.saturating_add(1);
+        Ok(stats)
+    }
+
+    async fn truncate(&self, length: u64) -> FsResult<()> {
+        self.inner.truncate(length).await
+    }
+
+    async fn close(&self) -> FsResult<()> {
+        self.inner.close().await
     }
 }
 

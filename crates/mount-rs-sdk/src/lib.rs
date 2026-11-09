@@ -15,18 +15,24 @@ pub use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountOptions, AutoProbe, AutoTransport, Transport,
     TransportProbe, probe_transports,
 };
-pub use mount_rs_chunked::OwnershipMode;
+pub use mount_rs_chunked::{AtimePolicy, BlockCacheStats, OwnershipMode};
 pub use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, Loopback, MkdirOptions, OpenFlags,
     Result, Stats, StatsFs,
 };
 pub use mount_rs_host::HostFsOptions as HostOptions;
+pub use mount_rs_host::{DiskCacheBudget, DiskCacheStats, LocalWriteBudget};
 pub use mount_rs_memfs::MemoryOptions;
 #[cfg(feature = "observability")]
 pub use mount_rs_observability::{
     Telemetry, TelemetryConfig, global as global_telemetry, set_global as set_global_telemetry,
 };
-pub use options::{FoundationDbLeaseAuthority, SplitOptions, StoreConfig};
+pub use mount_rs_r2::SharedR2Client;
+pub use mount_rs_tidb::TidbStorePool;
+pub use options::{
+    BlockCacheOptions, DiskCacheOptions, FoundationDbLeaseAuthority, SplitOptions,
+    SplitRuntimeOptions, StoreConfig,
+};
 
 #[cfg(test)]
 mod tests {

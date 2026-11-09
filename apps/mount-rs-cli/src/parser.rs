@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use crate::color::Color;
 
 const TRANSPORT_NAMES: [&str; 4] = ["auto", "fuse", "9p", "nfs"];
-const DRIVER_NAMES: [&str; 4] = ["memory", "host", "sqlite", "splitstore"];
+const DRIVER_NAMES: [&str; 5] = ["memory", "host", "sqlite", "splitstore", "remote"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportChoice {
@@ -52,6 +52,7 @@ pub enum DriverChoice {
     Host,
     Sqlite,
     SplitStore,
+    Remote,
 }
 
 impl DriverChoice {
@@ -61,6 +62,7 @@ impl DriverChoice {
             Self::Host => "host",
             Self::Sqlite => "sqlite",
             Self::SplitStore => "splitstore",
+            Self::Remote => "remote",
         }
     }
 
@@ -70,6 +72,7 @@ impl DriverChoice {
             "host" => Ok(Self::Host),
             "sqlite" => Ok(Self::Sqlite),
             "splitstore" => Ok(Self::SplitStore),
+            "remote" => Ok(Self::Remote),
             _ => Err(ParseError::new(format!(
                 "unknown driver '{value}' (expected {})",
                 DRIVER_NAMES.join(", ")
@@ -90,6 +93,7 @@ pub struct CliOptions {
     pub read_only: bool,
     pub empty: bool,
     pub allow_other: bool,
+    pub fuse_uncached: bool,
     pub sqlite_single_host: bool,
     pub driver: DriverChoice,
     pub root: Option<PathBuf>,
@@ -105,6 +109,7 @@ pub struct CliOptions {
     pub config: Option<PathBuf>,
     /// Explicit storage composition supplied by a config file.
     pub storage: Option<Box<crate::config::SplitStorageConfig>>,
+    pub remote: Option<Box<crate::config::RemoteConfig>>,
     /// Flags that were actually present on the command line. Defaults must
     /// never silently override values from a config file.
     pub overrides: CliOverrides,
@@ -119,6 +124,7 @@ pub struct CliOverrides {
     pub read_only: bool,
     pub empty: bool,
     pub allow_other: bool,
+    pub fuse_uncached: bool,
     pub sqlite_single_host: bool,
     pub driver: bool,
     pub root: bool,
@@ -138,6 +144,7 @@ impl PartialEq for CliOptions {
             && self.read_only == other.read_only
             && self.empty == other.empty
             && self.allow_other == other.allow_other
+            && self.fuse_uncached == other.fuse_uncached
             && self.sqlite_single_host == other.sqlite_single_host
             && self.driver == other.driver
             && self.root == other.root
@@ -147,6 +154,7 @@ impl PartialEq for CliOptions {
             && self.root_gid == other.root_gid
             && self.config == other.config
             && self.storage == other.storage
+            && self.remote == other.remote
     }
 }
 
@@ -163,6 +171,7 @@ impl Default for CliOptions {
             read_only: false,
             empty: false,
             allow_other: false,
+            fuse_uncached: false,
             sqlite_single_host: false,
             driver: DriverChoice::Memory,
             root: None,
@@ -172,6 +181,7 @@ impl Default for CliOptions {
             root_gid: None,
             config: None,
             storage: None,
+            remote: None,
             overrides: CliOverrides::default(),
         }
     }
@@ -649,6 +659,10 @@ where
                     values.empty = true;
                     values.overrides.empty = true;
                 }
+                "fuse-uncached" => {
+                    values.fuse_uncached = true;
+                    values.overrides.fuse_uncached = true;
+                }
                 "allow-other" => {
                     values.allow_other = true;
                     values.overrides.allow_other = true;
@@ -849,6 +863,12 @@ fn validate_driver_options(values: &CliOptions) -> Result<(), ParseError> {
 }
 
 fn validate_transport_options(values: &CliOptions) -> Result<(), ParseError> {
+    if values.fuse_uncached
+        && values.transport != TransportChoice::Fuse
+        && (values.config.is_none() || values.overrides.transport)
+    {
+        return Err(ParseError::new("--fuse-uncached requires --transport fuse"));
+    }
     if values.sqlite_single_host
         && matches!(
             values.transport,
@@ -866,7 +886,7 @@ pub fn help_text(color: Color) -> String {
     let b = |text: &str| color.bold(text).to_string();
     let d = |text: &str| color.dim(text).to_string();
     let output = format!(
-        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs serve-remote --config <path>\n       mount-rs mount-remote --config <path>\n       mount-rs catalog-apply --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n       mount-rs enroll-directory-ownership --config <path> --expected-revision <u64>\n       mount-rs directory-ownership-status --config <path>\n       mount-rs recover-directory-ownership --config <path> --root-inode <u64> --expected-fence <u64>\n\n{}\n  -m, --mountpoint {}  where to mount {}\n      --also-mountpoint <path>  add another NFS view of this filesystem (repeatable)\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
+        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs serve-remote --config <path>\n       mount-rs mount-remote --config <path>\n       mount-rs catalog-apply --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n       mount-rs enroll-directory-ownership --config <path> --expected-revision <u64>\n       mount-rs directory-ownership-status --config <path>\n       mount-rs recover-directory-ownership --config <path> --root-inode <u64> --expected-fence <u64>\n\n{}\n  -m, --mountpoint {}  where to mount {}\n      --also-mountpoint <path>  add another NFS view of this filesystem (repeatable)\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --fuse-uncached      bypass kernel caches (requires --transport fuse)\n      --driver {}    memory | host | sqlite | splitstore | remote {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
         b("mount-rs"),
         d("— mount a selected filesystem driver and watch kernel requests"),
         b("Usage:"),

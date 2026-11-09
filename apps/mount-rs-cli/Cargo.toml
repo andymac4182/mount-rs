@@ -7,6 +7,7 @@ description = "The mount-rs command-line mount and transport probe tool"
 license = "Apache-2.0"
 
 [features]
+audit-forward-timing = ["mount-rs-cluster/peer-stream-timing"]
 default = []
 observability = [
     "dep:mount-rs-observability",
@@ -25,6 +26,12 @@ name = "mount-rs"
 path = "src/main.rs"
 
 [dependencies]
+tokio-util = { version = "0.7", features = ["rt"] }
+getrandom = "0.3"
+redis = { version = "1.7", default-features = false, features = ["tokio-rustls-comp", "connection-manager"] }
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+http = "1"
+mount-rs-cluster = { path = "../../crates/mount-rs-cluster", features = ["http3"] }
 async-trait = "0.1"
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-core = { path = "../.." }
@@ -36,6 +43,7 @@ mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }
 mount-rs-sdk = { path = "../../crates/mount-rs-sdk" }
 mount-rs-service = { path = "../../crates/mount-rs-service" }
 mount-rs-remote-client = { path = "../../crates/mount-rs-remote-client" }
+mount-rs-remote = { path = "../../crates/mount-rs-remote" }
 serde = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
@@ -51,3 +59,4 @@ mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
 tempfile = "3"
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }

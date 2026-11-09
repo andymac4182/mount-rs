@@ -260,3 +260,12 @@ MOUNT_RS_NAPI_FEATURES=rustls pnpm --dir bindings/mount-rs-napi build
 This is a build capability, not live TLS/provider acceptance. The deployment
 still owns the TiDB URL, CA/certificate policy, secret injection, rotation and
 the credentialed handshake test.
+### Chunked-volume access timestamps
+
+`createChunkedDriver` defaults to `atime: "noatime"`: reading file contents or
+listing directories does not update access timestamps. Set `atime: "strict"`
+explicitly when synchronous access-time updates are required. Strict reads can
+publish metadata to TiDB for each read chunk and directory listing. Unknown
+values are rejected before opening provider connections. This matches the
+production noatime policy used by the Rust SDK and CLI split-volume entry points.
+Direct low-level Rust `ChunkedOptions` retains its strict default.
