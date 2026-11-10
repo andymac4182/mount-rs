@@ -985,7 +985,7 @@ mod tests {
             default_gid: 1000,
             umask: 0o022,
             default_chunker: FixedSizeChunker::new(4096).unwrap().config(),
-            nodes,
+            nodes: nodes.into(),
         }
     }
 

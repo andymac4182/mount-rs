@@ -4573,7 +4573,8 @@ mod tests {
                     stats,
                     data: NodeData::Directory { entries: vec![] },
                 },
-            )]),
+            )])
+            .into(),
         }
     }
 

@@ -1,5 +1,6 @@
 //! Best-effort persistent cache for one immutable backing-store generation.
 use async_trait::async_trait;
+use mount_rs_core::drain_gate::DrainGate;
 use mount_rs_core::storage::{BlockId, BlockStore};
 use mount_rs_core::{ErrorCode, FsError, Result};
 use sha2::{Digest, Sha256};
@@ -9,7 +10,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::RwLock;
 
 const MAGIC: &[u8; 8] = b"MNTCACH1";
 const HEADER: usize = 80;
@@ -131,6 +131,10 @@ struct Disk {
     // Sequence ordering is process-local; reopening starts a fresh LRU order.
     entries: BTreeMap<String, (u64, u64)>,
     recency: BTreeMap<u64, String>,
+    /// Space set aside for fills whose files are being written outside the
+    /// mutex. It counts against both bounds until the fill commits or fails.
+    reserved_bytes: u64,
+    reserved_entries: usize,
     index: Arc<ReadIndex>,
     stats: DiskCacheStats,
 }
@@ -251,6 +255,8 @@ impl Disk {
             max_entries,
             entries: BTreeMap::new(),
             recency: BTreeMap::new(),
+            reserved_bytes: 0,
+            reserved_entries: 0,
             index: Arc::default(),
             stats: DiskCacheStats::default(),
         };
@@ -284,8 +290,9 @@ impl Disk {
                 fs::remove_file(item.path()).map_err(error)?;
                 continue;
             }
-            disk.make_room(size).map_err(error)?;
-            disk.record(name, size);
+            if disk.make_room(size).map_err(error)? {
+                disk.record(name, size);
+            }
         }
         Ok(disk)
     }
@@ -314,17 +321,17 @@ impl Disk {
         self.forget(key);
         Ok(())
     }
-    fn make_room(&mut self, size: u64) -> std::io::Result<()> {
+    /// Evicts until an entry of `size` bytes fits. `false` means it cannot:
+    /// what is left of the budget is reserved by fills still being written.
+    fn make_room(&mut self, size: u64) -> std::io::Result<bool> {
         let cutoff = self.index.sequence.load(Ordering::Relaxed);
-        while self.entries.len() >= self.max_entries
-            || self.stats.resident_bytes > self.max_bytes - size
+        while self.entries.len() + self.reserved_entries >= self.max_entries
+            || self.stats.resident_bytes + self.reserved_bytes > self.max_bytes - size
         {
-            let key = self
-                .recency
-                .first_key_value()
-                .expect("nonempty over-budget cache")
-                .1
-                .clone();
+            let Some((_, key)) = self.recency.first_key_value() else {
+                return Ok(false);
+            };
+            let key = key.clone();
             // Hits publish recency without a writer. Repair stale recency order
             // lazily when this entry reaches the eviction frontier.
             let entry = self.entries.get_mut(&key).expect("indexed entry");
@@ -338,7 +345,7 @@ impl Disk {
             self.remove(&key)?;
             self.stats.evictions += 1;
         }
-        Ok(())
+        Ok(true)
     }
     fn disable(&mut self) {
         self.stats.io_failures += 1;
@@ -367,34 +374,120 @@ impl Disk {
             _ => self.disable(),
         }
     }
-    fn insert(&mut self, key: String, bytes: &[u8]) {
-        let size = (HEADER + bytes.len()) as u64;
-        if self.stats.disabled || bytes.len() > MAX_PAYLOAD || size > self.max_bytes {
+    /// First half of a fill: admit an entry of `size` bytes and set its space
+    /// aside, so the file can be written without the mutex and still never
+    /// take the cache over its bounds.
+    fn reserve(&mut self, key: &str, size: u64) -> bool {
+        if self.stats.disabled || size > (HEADER + MAX_PAYLOAD) as u64 || size > self.max_bytes {
             self.stats.admission_rejections += 1;
-            return;
+            return false;
         }
-        let result = (|| -> std::io::Result<()> {
-            self.remove(&key)?;
-            self.make_room(size)?;
-            // Reserve space before creating the sole serialized temporary entry.
-            let mut temp = tempfile::Builder::new()
-                .prefix(".cache-tmp-")
-                .tempfile_in(&self.root)?;
-            let mut header = [0; HEADER];
-            header[..8].copy_from_slice(MAGIC);
-            header[8..40].copy_from_slice(&Sha256::digest(key.as_bytes()));
-            header[40..48].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
-            header[48..].copy_from_slice(&Sha256::digest(bytes));
-            temp.write_all(&header)?;
-            temp.write_all(bytes)?;
-            temp.persist(self.root.join(&key)).map_err(|e| e.error)?;
-            self.record(key, size);
+        // Every file in the directory is indexed (see `open`), so only an
+        // indexed key has a file to remove; an unlink that finds nothing is
+        // still a directory operation, and this is the serialized section.
+        let replaced = if self.entries.contains_key(key) {
+            self.remove(key)
+        } else {
             Ok(())
-        })();
-        if result.is_err() {
-            self.disable();
+        };
+        match replaced.and_then(|()| self.make_room(size)) {
+            Ok(true) => {
+                self.reserved_bytes += size;
+                self.reserved_entries += 1;
+                true
+            }
+            Ok(false) => {
+                self.stats.admission_rejections += 1;
+                false
+            }
+            Err(_) => {
+                self.disable();
+                false
+            }
         }
     }
+    /// Both halves of a fill in one step.
+    #[cfg(test)]
+    fn insert(&mut self, key: String, bytes: &[u8]) {
+        let size = (HEADER + bytes.len()) as u64;
+        if self.reserve(&key, size) {
+            let written = write_entry(&self.root.clone(), &key, bytes);
+            self.commit(key, size, written);
+        }
+    }
+    /// Second half of a fill: index the file `write_entry` put in place, or
+    /// give the reserved space back.
+    fn commit(&mut self, key: String, size: u64, written: std::io::Result<()>) {
+        self.reserved_bytes -= size;
+        self.reserved_entries -= 1;
+        if self.stats.disabled {
+            return;
+        }
+        match written {
+            Ok(()) => {
+                // Another fill of the same block may have committed
+                // meanwhile; its file is the one just replaced.
+                self.forget(&key);
+                self.record(key, size);
+            }
+            Err(_) => self.disable(),
+        }
+    }
+}
+/// Writes one cache entry and renames it into place under `key`. Needs no
+/// lock. The temporary name is unique, the rename is atomic, and nothing
+/// looks for the file before `Disk::commit` indexes it. Blocks are named by
+/// their content, so two fills of one key rename identical files over each
+/// other. An eviction of the same key between this rename and the commit
+/// removes the file first; the index then names a missing file, which the
+/// first read reports and `read_failed` drops as an ordinary miss.
+fn write_entry(root: &Path, key: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let mut temp = tempfile::Builder::new()
+        .prefix(".cache-tmp-")
+        .tempfile_in(root)?;
+    let mut header = [0; HEADER];
+    header[..8].copy_from_slice(MAGIC);
+    header[8..40].copy_from_slice(&Sha256::digest(key.as_bytes()));
+    header[40..48].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+    header[48..].copy_from_slice(&Sha256::digest(bytes));
+    temp.write_all(&header)?;
+    temp.write_all(bytes)?;
+    temp.persist(root.join(key)).map_err(|e| e.error)?;
+    Ok(())
+}
+/// Caches `bytes` under `key`, holding the mutex only to reserve space and to
+/// publish the written file; hashing and writing happen between the two.
+/// `finish` runs in the last critical section this takes.
+fn fill(
+    disk: &Mutex<Disk>,
+    root: &Path,
+    key: String,
+    bytes: Option<&[u8]>,
+    finish: impl FnOnce(&mut Disk),
+) -> Result<()> {
+    let mut finish = Some(finish);
+    let size = bytes.map(|bytes| (HEADER + bytes.len()) as u64);
+    let reserved = with_disk(disk, |disk| {
+        let reserved = match size {
+            Some(size) => disk.reserve(&key, size),
+            None => {
+                disk.stats.admission_rejections += 1;
+                false
+            }
+        };
+        if !reserved && let Some(finish) = finish.take() {
+            finish(disk);
+        }
+        reserved
+    })?;
+    let (Some(bytes), Some(size), Some(finish), true) = (bytes, size, finish, reserved) else {
+        return Ok(());
+    };
+    let written = write_entry(root, &key, bytes);
+    with_disk(disk, |disk| {
+        disk.commit(key, size, written);
+        finish(disk);
+    })
 }
 
 /// Persistent owner-local cache. `root` is pre-existing and application-owned;
@@ -412,8 +505,11 @@ pub struct DiskCachedBlockStore<B: ?Sized> {
     disk: Arc<Mutex<Disk>>,
     index: Arc<ReadIndex>,
     root: Arc<PathBuf>,
-    io: Arc<RwLock<()>>,
-    writes: Arc<tokio::sync::Mutex<()>>,
+    io: Arc<DrainGate>,
+    /// Puts share this gate and flush takes it exclusively, so puts to the
+    /// backing store overlap while a flush still covers every put
+    /// acknowledged before it.
+    writes: Arc<DrainGate>,
     workers: Arc<tokio::sync::Semaphore>,
     fills: Arc<tokio::sync::Semaphore>,
     background_read_fills: bool,
@@ -482,8 +578,8 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
             root: Arc::new(disk.root.clone()),
             index: disk.index.clone(),
             disk: Arc::new(Mutex::new(disk)),
-            io: Arc::new(RwLock::new(())),
-            writes: Arc::new(tokio::sync::Mutex::new(())),
+            io: Arc::new(DrainGate::new()),
+            writes: Arc::new(DrainGate::new()),
             workers: budget.workers,
             fills: budget.fills,
             background_read_fills: budget.background_read_fills,
@@ -588,12 +684,8 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
         let queued = std::time::Instant::now();
         let permit = self.fills.clone().acquire_owned().await.map_err(error)?;
         let bytes = (bytes.len() <= self.max_payload).then(|| bytes.to_vec());
-        let insert = move |disk: &mut Disk| {
-            let started = std::time::Instant::now();
-            match bytes {
-                Some(bytes) => disk.insert(key, &bytes),
-                None => disk.stats.admission_rejections += 1,
-            }
+        let started = std::sync::OnceLock::new();
+        let finish = move |disk: &mut Disk, started: std::time::Instant| {
             let nanos = |duration: std::time::Duration| {
                 u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
             };
@@ -617,13 +709,25 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
                 .fill_service_nanoseconds
                 .saturating_add(nanos(started.elapsed()));
         };
+        let workers = self.workers.clone();
+        let (disk, root) = (self.disk.clone(), self.root.clone());
+        let work = async move {
+            let worker = workers.acquire_owned().await.map_err(error)?;
+            tokio::task::spawn_blocking(move || {
+                // Held until the worker is done with the cache files.
+                let _held = (guard, permit, worker);
+                let started = *started.get_or_init(std::time::Instant::now);
+                fill(&disk, &root, key, bytes.as_deref(), |disk| {
+                    finish(disk, started)
+                })
+            })
+            .await
+            .map_err(error)?
+        };
         if self.background_read_fills && backing_get.is_some() {
-            let cache = self.clone();
-            tokio::spawn(async move {
-                let _ = cache.disk((guard, permit), insert).await;
-            });
+            tokio::spawn(work);
         } else {
-            drop(self.disk((guard, permit), insert).await?);
+            work.await?;
         }
         Ok(())
     }
@@ -669,7 +773,7 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
     }
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let guard = self.io.clone().read_owned().await;
-        let _write = self.writes.lock().await;
+        let _write = self.writes.read().await;
         let id = self.backing.put(bytes).await?;
         // Only authoritative put/flush ordering needs this gate. Keep the I/O
         // exclusion guard through cache work, but do not delay backing flush
@@ -693,7 +797,7 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
         Ok(bytes)
     }
     async fn flush(&self) -> Result<()> {
-        let _write = self.writes.lock().await;
+        let _write = self.writes.write().await;
         self.backing.flush().await
     }
     async fn delete(&self, id: &BlockId) -> Result<()> {
@@ -796,7 +900,7 @@ mod tests {
             .unwrap();
         assert_eq!(read, b"from provider");
         assert_eq!(cache.fills.available_permits(), 0);
-        assert!(cache.io.try_write().is_err());
+        assert!(cache.io.try_write().is_none());
         drop(worker);
         // Acquiring the sole fill permit waits for insertion to finish.
         let filled = cache.fills.clone().acquire_owned().await.unwrap();
@@ -886,9 +990,10 @@ mod tests {
         let hit_stats = reopened.stats().await.unwrap();
         let miss_stats = other.stats().await.unwrap();
         // Ordinary probes never acquire the maintenance mutex.
-        // Stats snapshots exclude their own section; misses also fill.
+        // Stats snapshots exclude their own section; misses also fill, which
+        // takes one section to reserve space and one to publish the file.
         assert_eq!(hit_stats.lock_sections, 0);
-        assert_eq!(miss_stats.lock_sections, 1);
+        assert_eq!(miss_stats.lock_sections, 2);
         for stats in [hit_stats, miss_stats] {
             assert!(stats.lock_wait_max_nanoseconds <= stats.lock_wait_nanoseconds);
             assert!(stats.lock_hold_max_nanoseconds <= stats.lock_hold_nanoseconds);
@@ -1111,7 +1216,7 @@ mod tests {
         let first = tasks.remove(0);
         first.abort();
         assert!(first.await.unwrap_err().is_cancelled());
-        assert!(cache.io.try_write().is_err());
+        assert!(cache.io.try_write().is_none());
         assert!(cache.workers.try_acquire().is_err());
         for release in releases {
             release.send(()).unwrap();
@@ -1241,7 +1346,7 @@ mod tests {
         started.notified().await;
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        let excluded = cache.io.try_write().is_err();
+        let excluded = cache.io.try_write().is_none();
         let shared_worker_held = other.workers.try_acquire().is_err();
         release.wait();
         assert!(
@@ -1303,5 +1408,43 @@ mod tests {
         fs::remove_dir(&path).unwrap();
         cache.delete(&id).await.unwrap();
         assert!(backing.get(&id).await.is_err());
+    }
+
+    #[test]
+    fn a_fill_being_written_holds_its_space_against_both_bounds() {
+        let root = tempfile::tempdir().unwrap();
+        let size = (HEADER + 8) as u64;
+        // Room for two entries by count and by bytes.
+        let mut disk = Disk::open(root.path(), "reserve", size * 2, 2).unwrap();
+        let (first, second, third) = (digest(b"1"), digest(b"2"), digest(b"3"));
+        assert!(disk.reserve(&first, size));
+        assert!(disk.reserve(&second, size));
+        // Nothing is resident yet, so there is nothing to evict for a third.
+        assert!(!disk.reserve(&third, size));
+        assert_eq!(disk.stats.admission_rejections, 1);
+        let root = disk.root.clone();
+        disk.commit(first.clone(), size, write_entry(&root, &first, b"11111111"));
+        assert_eq!((disk.stats.resident_entries, disk.reserved_entries), (1, 1));
+        // The committed entry can be evicted; the reserved one cannot.
+        assert!(disk.reserve(&third, size));
+        assert_eq!(disk.stats.evictions, 1);
+        assert!(!root.join(&first).exists());
+        disk.commit(
+            second.clone(),
+            size,
+            write_entry(&root, &second, b"22222222"),
+        );
+        disk.commit(third.clone(), size, write_entry(&root, &third, b"33333333"));
+        assert_eq!((disk.reserved_bytes, disk.reserved_entries), (0, 0));
+        assert_eq!(disk.stats.resident_bytes, size * 2);
+        // A second fill of a resident block replaces it without counting twice.
+        assert!(disk.reserve(&third, size));
+        disk.commit(third.clone(), size, write_entry(&root, &third, b"33333333"));
+        assert_eq!(
+            (disk.stats.resident_entries, disk.stats.resident_bytes),
+            (2, size * 2)
+        );
+        assert_eq!(disk.stats.evictions, 1);
+        assert!(!disk.stats.disabled);
     }
 }

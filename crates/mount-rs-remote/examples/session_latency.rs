@@ -17,7 +17,8 @@
 //! `BENCH_METADATA` memory|sqlite [memory], `BENCH_BLOCKS` memory|local|sqlite
 //! [memory], `BENCH_BLOCK_CACHE` 0|1 [1], `BENCH_SHARED_HANDLE` 0|1 [0],
 //! `BENCH_WRITER` 0|1 [0] (one background writer during every phase),
-//! `BENCH_OPS` comma list of read,stat,readdir,open,mixed [all],
+//! `BENCH_OPS` comma list of read,stat,readdir,open,mixed,write,all
+//! [all but write],
 //! `BENCH_SERVER_THREADS` [4], `BENCH_DIR` scratch root for sqlite/local.
 use mount_rs_cluster::{SessionCredentials, SessionHttpHandler, VolumeSessions};
 use mount_rs_core::{FileHandle, FsDriver, MkdirOptions};
@@ -59,9 +60,12 @@ enum Op {
     Stat,
     Readdir,
     Open,
+    Write,
 }
 
-const OPS: [Op; 4] = [Op::Read, Op::Stat, Op::Readdir, Op::Open];
+const OPS: [Op; 5] = [Op::Read, Op::Stat, Op::Readdir, Op::Open, Op::Write];
+/// What `mixed` runs: the read-only operations.
+const MIXED: [Op; 4] = [Op::Read, Op::Stat, Op::Readdir, Op::Open];
 
 struct Worker {
     driver: Arc<dyn FsDriver>,
@@ -108,6 +112,17 @@ impl Worker {
                     .open(&format!("/data/d{:03}", self.index), "r", 0)
                     .await?;
                 handle.close().await?;
+            }
+            Op::Write => {
+                // Small whole-file rewrites: the cost is the metadata
+                // mutation and its publication, not the bytes.
+                let target = self.random() % 8;
+                self.driver
+                    .write_file(
+                        &format!("/fill/w{:03}-{target}", self.index),
+                        &self.state.to_le_bytes(),
+                    )
+                    .await?;
             }
         }
         Ok(())
@@ -372,7 +387,9 @@ fn main() -> Result<(), Failure> {
                 "stat" => &[Op::Stat],
                 "readdir" => &[Op::Readdir],
                 "open" => &[Op::Open],
-                "mixed" => &OPS,
+                "mixed" => &MIXED,
+                "write" => &[Op::Write],
+                "all" => &OPS,
                 _ => return Err(format!("unknown BENCH_OPS entry {name}").into()),
             };
             workers = phase(name, ops, workers, duration).await?;

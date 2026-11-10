@@ -1,12 +1,13 @@
-//! Reader-writer exclusion whose shared side is one atomic counter.
+//! Reader-writer exclusion with no lock inside it.
 //!
 //! Ordinary operations enter shared; the rare transitions that must drain
-//! them (shutdown, close, cursor moves) enter exclusive. General-purpose
-//! async reader-writer locks take an internal mutex when a shared guard is
-//! released, so a lock shared by every operation becomes a contention point
-//! on every core. Here shared entry and exit are an atomic increment and
-//! decrement while no transition is queued or running; the mutex below is
-//! only touched around transitions.
+//! them (shutdown, close, cursor moves, flushes) enter exclusive.
+//! General-purpose async reader-writer locks keep their state behind an
+//! internal mutex, which a lock shared by every operation turns into a
+//! contention point on every core. Here shared entry and exit are an atomic
+//! increment and decrement while no transition is queued or running, and a
+//! transition is a turn at a lock-free queue followed by a wait for the
+//! shared holders to leave. Nothing in the gate blocks a thread.
 //!
 //! A gate that every core enters on every operation can spread its counter
 //! over `N` stripes (`DrainGate<N>`), each on cache lines of its own. A
@@ -17,29 +18,18 @@
 //! Exclusive entry is first-come-first-served and takes priority: once a
 //! transition is queued, new shared entries wait until every queued
 //! transition has finished. Both futures are cancellation-safe.
+use crate::turn_gate::{TurnGate, TurnWait};
+use atomic_waker::AtomicWaker;
+use crossbeam_queue::SegQueue;
 use std::{
-    collections::VecDeque,
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
 };
-
-#[derive(Default)]
-struct Transitions {
-    /// A transition owns the gate (it may still be draining shared holders).
-    held: bool,
-    next_ticket: u64,
-    /// Transitions waiting their turn, oldest first.
-    queued: VecDeque<(u64, Waker)>,
-    /// Shared entries waiting for the transitions to finish.
-    shared: Vec<Waker>,
-    /// The owning transition, waiting for shared holders to leave.
-    drain: Option<Waker>,
-}
 
 /// Every shared entry and exit writes this counter. Keeping it on cache lines
 /// of its own stops those writes invalidating whatever the gate's owner
@@ -58,10 +48,15 @@ pub struct DrainGate<const N: usize = 1> {
     /// Shared holders admitted and not yet finished, by stripe. A holder
     /// leaves through the stripe it entered, so no stripe goes negative.
     active: [Active; N],
-    /// True while a transition is queued or owns the gate. Written only
-    /// under `transitions`.
-    draining: AtomicBool,
-    transitions: Mutex<Transitions>,
+    /// Transitions queued or owning the gate. Shared entry waits while this
+    /// is not zero.
+    draining: AtomicUsize,
+    /// Transitions take the gate one at a time, in arrival order.
+    turn: TurnGate,
+    /// The transition that has its turn, waiting for shared holders to leave.
+    drain: AtomicWaker,
+    /// Shared entries waiting for the transitions to finish.
+    shared: SegQueue<Waker>,
 }
 
 /// Shared admission; released on drop.
@@ -73,12 +68,17 @@ pub struct DrainExclusive<'a, const N: usize = 1>(&'a DrainGate<N>);
 /// Exclusive admission that keeps its gate alive; released on drop.
 pub struct OwnedDrainExclusive<const N: usize = 1>(Arc<DrainGate<N>>);
 
+/// Shared admission that keeps its gate alive; released on drop.
+pub struct OwnedDrainShared<const N: usize = 1>(Arc<DrainGate<N>>, usize);
+
 impl<const N: usize> Default for DrainGate<N> {
     fn default() -> Self {
         Self {
             active: std::array::from_fn(|_| Active::default()),
-            draining: AtomicBool::new(false),
-            transitions: Mutex::default(),
+            draining: AtomicUsize::new(0),
+            turn: TurnGate::new(),
+            drain: AtomicWaker::new(),
+            shared: SegQueue::new(),
         }
     }
 }
@@ -114,13 +114,6 @@ impl<const N: usize> DrainGate<N> {
             .any(|stripe| stripe.0.load(Ordering::SeqCst) != 0)
     }
 
-    fn transitions(&self) -> MutexGuard<'_, Transitions> {
-        // No code panics while holding this lock; recover the state anyway.
-        self.transitions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     /// Enter shared. Resolves immediately unless a transition is in progress.
     #[inline]
     pub fn read(&self) -> DrainRead<'_, N> {
@@ -147,6 +140,22 @@ impl<const N: usize> DrainGate<N> {
         self.try_acquire().then(|| DrainExclusive(self))
     }
 
+    /// `read` for a guard that must outlive the borrow, such as one moved
+    /// into a blocking worker.
+    pub async fn read_owned(self: Arc<Self>) -> OwnedDrainShared<N> {
+        let shared = self.read().await;
+        let stripe = shared.1;
+        // The owned guard takes over the admission.
+        std::mem::forget(shared);
+        OwnedDrainShared(self, stripe)
+    }
+
+    /// `write` for a guard that must outlive the borrow.
+    pub async fn write_owned(self: Arc<Self>) -> OwnedDrainExclusive<N> {
+        std::mem::forget(self.write().await);
+        OwnedDrainExclusive(self)
+    }
+
     /// `try_write` for a gate that must outlive the borrow.
     pub fn try_write_owned(self: &Arc<Self>) -> Option<OwnedDrainExclusive<N>> {
         self.try_acquire()
@@ -154,29 +163,25 @@ impl<const N: usize> DrainGate<N> {
     }
 
     fn try_acquire(&self) -> bool {
-        let mut transitions = self.transitions();
-        if transitions.held || !transitions.queued.is_empty() {
+        // The turn is free only when no transition holds or awaits the gate.
+        if !self.turn.try_acquire() {
             return false;
         }
-        self.draining.store(true, Ordering::SeqCst);
+        self.draining.fetch_add(1, Ordering::SeqCst);
         if self.occupied() {
-            self.draining.store(false, Ordering::SeqCst);
-            let waiting = std::mem::take(&mut transitions.shared);
-            drop(transitions);
-            waiting.into_iter().for_each(Waker::wake);
+            self.release();
             return false;
         }
-        transitions.held = true;
         true
     }
 
     #[inline]
     fn try_shared(&self) -> Option<usize> {
-        // Announce before checking: a transition sets `draining` and then
+        // Announce before checking: a transition raises `draining` and then
         // reads every stripe, so one side always observes the other.
         let stripe = Self::stripe();
         self.active[stripe].0.fetch_add(1, Ordering::SeqCst);
-        if !self.draining.load(Ordering::SeqCst) {
+        if self.draining.load(Ordering::SeqCst) == 0 {
             return Some(stripe);
         }
         self.leave(stripe);
@@ -188,7 +193,7 @@ impl<const N: usize> DrainGate<N> {
         // The last holder of each stripe wakes the transition, which looks
         // at all of them again.
         if self.active[stripe].0.fetch_sub(1, Ordering::SeqCst) == 1
-            && self.draining.load(Ordering::SeqCst)
+            && self.draining.load(Ordering::SeqCst) != 0
         {
             self.wake_drain();
         }
@@ -196,31 +201,28 @@ impl<const N: usize> DrainGate<N> {
 
     #[cold]
     fn wake_drain(&self) {
-        let waker = self.transitions().drain.take();
-        if let Some(waker) = waker {
-            waker.wake();
+        self.drain.wake();
+    }
+
+    /// One transition fewer is queued or running. The last one re-opens
+    /// shared entry.
+    fn settle(&self) {
+        if self.draining.fetch_sub(1, Ordering::SeqCst) == 1 {
+            // A shared entry queues its waker and then looks at `draining`
+            // again; this side lowers `draining` and then empties the queue.
+            // One of the two sees the other.
+            while let Some(waker) = self.shared.pop() {
+                waker.wake();
+            }
         }
     }
 
-    /// Hand the gate to the next queued transition, or re-open shared entry.
-    fn pass_on(&self, mut transitions: MutexGuard<'_, Transitions>) {
-        if let Some((_, next)) = transitions.queued.front() {
-            let next = next.clone();
-            drop(transitions);
-            next.wake();
-            return;
-        }
-        self.draining.store(false, Ordering::SeqCst);
-        let waiting = std::mem::take(&mut transitions.shared);
-        drop(transitions);
-        waiting.into_iter().for_each(Waker::wake);
-    }
-
+    /// Leave exclusive: the next queued transition gets its turn, or shared
+    /// entry re-opens.
     fn release(&self) {
-        let mut transitions = self.transitions();
-        transitions.held = false;
-        transitions.drain = None;
-        self.pass_on(transitions);
+        drop(self.drain.take());
+        self.turn.release();
+        self.settle();
     }
 }
 
@@ -242,29 +244,34 @@ impl<'a, const N: usize> Future for DrainRead<'a, N> {
 impl<const N: usize> DrainGate<N> {
     #[cold]
     fn poll_shared_slow<'a>(&'a self, context: &mut Context<'_>) -> Poll<DrainShared<'a, N>> {
-        let gate = self;
-        let mut transitions = gate.transitions();
-        // `draining` only changes under this lock, so the answer is stable.
-        if !gate.draining.load(Ordering::SeqCst) {
-            let stripe = Self::stripe();
-            gate.active[stripe].0.fetch_add(1, Ordering::SeqCst);
-            return Poll::Ready(DrainShared(gate, stripe));
+        loop {
+            self.shared.push(context.waker().clone());
+            // The transitions may have finished before the push, in which
+            // case nobody is left to wake this task: look again.
+            if self.draining.load(Ordering::SeqCst) != 0 {
+                return Poll::Pending;
+            }
+            if let Some(stripe) = self.try_shared() {
+                // The queued waker stays behind; the next re-opening wakes it
+                // once for nothing.
+                return Poll::Ready(DrainShared(self, stripe));
+            }
         }
-        transitions.shared.push(context.waker().clone());
-        Poll::Pending
     }
 }
 
-enum Stage {
+enum Stage<'a> {
     New,
-    Queued(u64),
+    /// Counted in `draining`, waiting for the turn.
+    Queued(TurnWait<'a>),
+    /// Has the turn, waiting for shared holders to leave.
     Draining,
     Done,
 }
 
 pub struct DrainWrite<'a, const N: usize = 1> {
     gate: &'a DrainGate<N>,
-    stage: Stage,
+    stage: Stage<'a>,
 }
 
 impl<'a, const N: usize> Future for DrainWrite<'a, N> {
@@ -272,39 +279,25 @@ impl<'a, const N: usize> Future for DrainWrite<'a, N> {
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let gate = self.gate;
-        let mut transitions = gate.transitions();
         if matches!(self.stage, Stage::New) {
-            let ticket = transitions.next_ticket;
-            transitions.next_ticket += 1;
-            transitions
-                .queued
-                .push_back((ticket, context.waker().clone()));
             // From here shared entry waits, so this transition cannot starve.
-            gate.draining.store(true, Ordering::SeqCst);
-            self.stage = Stage::Queued(ticket);
+            gate.draining.fetch_add(1, Ordering::SeqCst);
+            self.stage = Stage::Queued(gate.turn.lock());
         }
-        if let Stage::Queued(ticket) = self.stage {
-            let first = transitions.queued.front().map(|(first, _)| *first);
-            if transitions.held || first != Some(ticket) {
-                if let Some(entry) = transitions
-                    .queued
-                    .iter_mut()
-                    .find(|(queued, _)| *queued == ticket)
-                {
-                    entry.1.clone_from(context.waker());
-                }
-                return Poll::Pending;
+        if let Stage::Queued(wait) = &mut self.stage {
+            match Pin::new(wait).poll(context) {
+                // The turn is given back by `release`, not by a guard.
+                Poll::Ready(turn) => std::mem::forget(turn),
+                Poll::Pending => return Poll::Pending,
             }
-            transitions.queued.pop_front();
-            transitions.held = true;
             self.stage = Stage::Draining;
         }
         // Register before checking, so a holder leaving now wakes this task.
-        transitions.drain = Some(context.waker().clone());
+        gate.drain.register(context.waker());
         if gate.occupied() {
             return Poll::Pending;
         }
-        transitions.drain = None;
+        drop(gate.drain.take());
         self.stage = Stage::Done;
         Poll::Ready(DrainExclusive(gate))
     }
@@ -312,15 +305,14 @@ impl<'a, const N: usize> Future for DrainWrite<'a, N> {
 
 impl<const N: usize> Drop for DrainWrite<'_, N> {
     fn drop(&mut self) {
-        match self.stage {
+        match std::mem::replace(&mut self.stage, Stage::Done) {
             Stage::New | Stage::Done => {}
             Stage::Draining => self.gate.release(),
-            Stage::Queued(ticket) => {
-                let mut transitions = self.gate.transitions();
-                transitions.queued.retain(|(queued, _)| *queued != ticket);
-                if !transitions.held {
-                    self.gate.pass_on(transitions);
-                }
+            Stage::Queued(wait) => {
+                // Dropping the wait leaves the queue, or passes the turn on
+                // if it was already handed over.
+                drop(wait);
+                self.gate.settle();
             }
         }
     }
@@ -339,6 +331,24 @@ impl<const N: usize> Drop for DrainExclusive<'_, N> {
     }
 }
 
+impl<const N: usize> std::fmt::Debug for OwnedDrainShared<N> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OwnedDrainShared")
+    }
+}
+
+impl<const N: usize> std::fmt::Debug for OwnedDrainExclusive<N> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OwnedDrainExclusive")
+    }
+}
+
+impl<const N: usize> Drop for OwnedDrainShared<N> {
+    fn drop(&mut self) {
+        self.0.leave(self.1);
+    }
+}
+
 impl<const N: usize> Drop for OwnedDrainExclusive<N> {
     fn drop(&mut self) {
         self.0.release();
@@ -348,6 +358,7 @@ impl<const N: usize> Drop for OwnedDrainExclusive<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, atomic::AtomicBool};
     use std::task::Wake;
 
     struct Flag(AtomicBool);
@@ -389,7 +400,7 @@ mod tests {
         drop(ready(&mut late));
         drop(transition);
         assert_eq!(gate.active[0].0.load(Ordering::SeqCst), 0);
-        assert!(!gate.draining.load(Ordering::SeqCst));
+        assert_eq!(gate.draining.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -448,7 +459,7 @@ mod tests {
         drop(head);
         drop(ready(&mut next));
         drop(ready(gate.read()));
-        assert!(!gate.draining.load(Ordering::SeqCst));
+        assert_eq!(gate.draining.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -552,5 +563,18 @@ mod tests {
         assert!(gate.try_read().is_none());
         drop(exclusive);
         assert!(gate.try_read().is_some());
+    }
+
+    #[test]
+    fn owned_guards_hold_the_gate_until_dropped() {
+        let gate = Arc::new(DrainGate::new());
+        let shared = ready(Box::pin(Arc::clone(&gate).read_owned()));
+        assert!(gate.try_read().is_some());
+        assert!(gate.try_write().is_none());
+        drop(shared);
+        let exclusive = ready(Box::pin(Arc::clone(&gate).write_owned()));
+        assert!(gate.try_read().is_none());
+        drop(exclusive);
+        assert!(gate.try_write().is_some());
     }
 }

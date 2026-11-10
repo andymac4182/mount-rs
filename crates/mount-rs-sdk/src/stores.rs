@@ -1108,7 +1108,7 @@ mod tests {
                 version: 1,
                 parameters: BTreeMap::from([("chunk_size".into(), 4096)]),
             },
-            nodes: BTreeMap::new(),
+            nodes: BTreeMap::new().into(),
         };
         assert_eq!(
             erased

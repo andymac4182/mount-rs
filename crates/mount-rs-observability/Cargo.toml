@@ -21,6 +21,7 @@ otlp = [
 http-propagation = ["otlp", "dep:http"]
 
 [dependencies]
+arc-swap = "1.9"
 async-trait = "0.1"
 http = { version = "1", optional = true }
 mount-rs-core = { path = "../.." }

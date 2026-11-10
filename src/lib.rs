@@ -11,9 +11,11 @@ pub mod drain_gate;
 pub mod driver;
 pub mod error;
 pub mod handle;
+pub mod node_map;
 pub mod path;
 pub mod snapshot;
 pub mod storage;
+pub mod turn_gate;
 pub mod types;
 pub mod versioning;
 #[doc(hidden)]

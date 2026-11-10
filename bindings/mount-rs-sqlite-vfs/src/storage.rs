@@ -1432,7 +1432,7 @@ fn empty_namespace(chunk_size: usize) -> Namespace {
         default_gid: 0,
         umask: 0,
         default_chunker: chunker_config(chunk_size),
-        nodes: BTreeMap::from([(1, root)]),
+        nodes: BTreeMap::from([(1, root)]).into(),
     }
 }
 

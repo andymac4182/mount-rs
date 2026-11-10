@@ -259,17 +259,17 @@ impl Default for ChunkedOptions {
     }
 }
 
-type AsyncGateGuard<'a> = tokio::sync::MutexGuard<'a, ()>;
+type AsyncGateGuard<'a> = mount_rs_core::turn_gate::Turn<'a>;
 
 #[derive(Clone)]
 struct AsyncGate {
-    state: Arc<tokio::sync::Mutex<()>>,
+    state: Arc<mount_rs_core::turn_gate::TurnGate>,
 }
 
 impl AsyncGate {
     fn new() -> Self {
         Self {
-            state: Arc::new(tokio::sync::Mutex::new(())),
+            state: Arc::new(mount_rs_core::turn_gate::TurnGate::new()),
         }
     }
 
@@ -356,6 +356,10 @@ impl ReadLayoutSnapshot {
 struct StateCell {
     mutex: Mutex<RuntimeState>,
     published: arc_swap::ArcSwap<Namespace>,
+    /// `RuntimeState::revision` as of the last mutex release. It is stored
+    /// separately from `published`, so the two are only a matched pair for a
+    /// caller that tolerates a revision one publication apart.
+    revision: std::sync::atomic::AtomicU64,
     /// True when readers must take the mutex instead of `published`.
     locked_reads: AtomicBool,
     /// Open references taken without the mutex. An inode's open count is
@@ -391,6 +395,12 @@ struct StateCell {
 /// therefore read the table directly; everyone else takes shared admission.
 struct PendingAtimes {
     gate: mount_rs_core::drain_gate::DrainGate,
+    /// False only when every slot is free, so the per-publication sweep and
+    /// the per-mutation listing can skip an empty table. A recorder raises it
+    /// after writing its slot; a sweep lowers it before looking and raises it
+    /// again if anything is left, so a slot written during the sweep is never
+    /// left behind an unraised flag.
+    occupied: AtomicBool,
     /// `(inode + 1, access time)`; a zero key is a free slot.
     slots: Box<[(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicI64)]>,
 }
@@ -403,6 +413,7 @@ impl PendingAtimes {
     fn new() -> Self {
         Self {
             gate: mount_rs_core::drain_gate::DrainGate::new(),
+            occupied: AtomicBool::new(false),
             slots: (0..ATIME_SLOTS)
                 .map(|_| {
                     (
@@ -430,6 +441,7 @@ impl PendingAtimes {
         for (slot, value) in self.window(inode) {
             if slot.load(Ordering::SeqCst) == key {
                 value.fetch_max(atime_ms, Ordering::SeqCst);
+                self.mark_occupied();
                 return true;
             }
         }
@@ -440,9 +452,18 @@ impl PendingAtimes {
                 Err(_) => continue,
             }
             value.fetch_max(atime_ms, Ordering::SeqCst);
+            self.mark_occupied();
             return true;
         }
         false
+    }
+
+    #[inline]
+    fn mark_occupied(&self) {
+        // Almost always already raised: do not write the shared line then.
+        if !self.occupied.load(Ordering::SeqCst) {
+            self.occupied.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Caller holds shared admission or the state mutex.
@@ -470,7 +491,12 @@ impl PendingAtimes {
 
     /// Caller holds the state mutex.
     fn entries_locked(&self) -> impl Iterator<Item = (InodeId, i64)> {
-        self.slots.iter().filter_map(|(slot, value)| {
+        let slots: &[_] = if self.occupied.load(Ordering::SeqCst) {
+            &self.slots
+        } else {
+            &[]
+        };
+        slots.iter().filter_map(|(slot, value)| {
             let key = slot.load(Ordering::SeqCst);
             let value = value.load(Ordering::SeqCst);
             (key != 0 && value != ATIME_EMPTY).then(|| (key - 1, value))
@@ -482,7 +508,11 @@ impl PendingAtimes {
     /// otherwise their times are cleared and the slots are reused or freed by
     /// a later sweep.
     fn sweep_locked(&self, covered: impl Fn(InodeId, i64) -> bool) {
+        if !self.occupied.swap(false, Ordering::SeqCst) {
+            return;
+        }
         let exclusive = self.gate.try_write();
+        let mut left = false;
         for (slot, value) in self.slots.iter() {
             let key = slot.load(Ordering::SeqCst);
             if key == 0 {
@@ -490,12 +520,17 @@ impl PendingAtimes {
             }
             let current = value.load(Ordering::SeqCst);
             if current != ATIME_EMPTY && !covered(key - 1, current) {
+                left = true;
                 continue;
             }
             if exclusive.is_some() {
                 value.store(ATIME_EMPTY, Ordering::SeqCst);
                 slot.store(0, Ordering::SeqCst);
-            } else if current != ATIME_EMPTY {
+            } else {
+                // The slot stays claimed for a later sweep to free.
+                left = true;
+            }
+            if exclusive.is_none() && current != ATIME_EMPTY {
                 // A recorder may be raising this time right now: clear only
                 // the value that was published.
                 let _ = value.compare_exchange(
@@ -505,6 +540,9 @@ impl PendingAtimes {
                     Ordering::SeqCst,
                 );
             }
+        }
+        if left {
+            self.occupied.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -517,6 +555,11 @@ impl PendingAtimes {
 /// fit, the caller counts the reference under the state mutex instead.
 struct FastRefs {
     slots: Box<[Padded<std::sync::atomic::AtomicU64>]>,
+    /// One bit per slot that may hold references, so listing the open inodes
+    /// visits the slots in use rather than all of them. Whoever adds a
+    /// reference makes sure its slot's bit is set before returning; `inodes`
+    /// clears the bit of a slot it finds empty and looks at the slot again.
+    in_use: [Padded<std::sync::atomic::AtomicU64>; FAST_REF_SLOTS / 64],
 }
 
 /// A value on cache lines of its own, so writes to it do not invalidate
@@ -536,12 +579,29 @@ impl FastRefs {
             slots: (0..FAST_REF_SLOTS)
                 .map(|_| Padded(std::sync::atomic::AtomicU64::new(0)))
                 .collect(),
+            in_use: std::array::from_fn(|_| Padded(std::sync::atomic::AtomicU64::new(0))),
         }
     }
 
-    fn window(&self, inode: InodeId) -> impl Iterator<Item = &std::sync::atomic::AtomicU64> {
+    fn indexes(inode: InodeId) -> impl Iterator<Item = usize> {
         let start = (inode.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize;
-        (0..FAST_REF_PROBES).map(move |probe| &self.slots[(start + probe) % FAST_REF_SLOTS].0)
+        (0..FAST_REF_PROBES).map(move |probe| (start + probe) % FAST_REF_SLOTS)
+    }
+
+    fn window(&self, inode: InodeId) -> impl Iterator<Item = &std::sync::atomic::AtomicU64> {
+        Self::indexes(inode).map(|index| &self.slots[index].0)
+    }
+
+    /// Called with a reference already counted in the slot, and before the
+    /// caller validates its open against `handle_seq`: a listing that starts
+    /// after that validation therefore finds the bit set.
+    #[inline]
+    fn mark_in_use(&self, index: usize) {
+        let (word, bit) = (&self.in_use[index / 64].0, 1_u64 << (index % 64));
+        // Almost always already set: do not write the shared line then.
+        if word.load(Ordering::SeqCst) & bit == 0 {
+            word.fetch_or(bit, Ordering::SeqCst);
+        }
     }
 
     fn key(inode: InodeId) -> Option<u64> {
@@ -553,22 +613,34 @@ impl FastRefs {
         let Some(key) = Self::key(inode) else {
             return false;
         };
-        for slot in self.window(inode) {
+        for index in Self::indexes(inode) {
+            let slot = &self.slots[index].0;
             let mut word = slot.load(Ordering::SeqCst);
             while word & !FAST_REF_COUNT_MASK == key
                 && word & FAST_REF_COUNT_MASK != 0
                 && word & FAST_REF_COUNT_MASK != FAST_REF_COUNT_MASK
             {
                 match slot.compare_exchange(word, word + 1, Ordering::SeqCst, Ordering::SeqCst) {
-                    Ok(_) => return true,
+                    Ok(_) => {
+                        // Whoever claimed the slot may not have marked it yet.
+                        self.mark_in_use(index);
+                        return true;
+                    }
                     Err(current) => word = current,
                 }
             }
         }
-        self.window(inode).any(|slot| {
-            slot.compare_exchange(0, key | 1, Ordering::SeqCst, Ordering::SeqCst)
+        for index in Self::indexes(inode) {
+            if self.slots[index]
+                .0
+                .compare_exchange(0, key | 1, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
-        })
+            {
+                self.mark_in_use(index);
+                return true;
+            }
+        }
+        false
     }
 
     /// Drops one reference previously added by `acquire`.
@@ -604,12 +676,35 @@ impl FastRefs {
             .sum()
     }
 
+    /// The inodes holding references, visiting only slots marked in use.
     fn inodes(&self) -> impl Iterator<Item = InodeId> {
-        self.slots
+        self.in_use
             .iter()
-            .map(|slot| slot.0.load(Ordering::SeqCst))
-            .filter(|word| word & FAST_REF_COUNT_MASK != 0)
-            .map(|word| word >> FAST_REF_COUNT_BITS)
+            .enumerate()
+            .flat_map(move |(group, marks)| {
+                let mut bits = marks.0.load(Ordering::SeqCst);
+                std::iter::from_fn(move || {
+                    while bits != 0 {
+                        let bit = 1_u64 << bits.trailing_zeros();
+                        bits &= !bit;
+                        let slot = &self.slots[group * 64 + bit.trailing_zeros() as usize].0;
+                        let mut word = slot.load(Ordering::SeqCst);
+                        if word & FAST_REF_COUNT_MASK == 0 {
+                            // Unmark, then look again: a reference added in
+                            // between either is seen here or finds the bit clear
+                            // and sets it.
+                            marks.0.fetch_and(!bit, Ordering::SeqCst);
+                            word = slot.load(Ordering::SeqCst);
+                            if word & FAST_REF_COUNT_MASK == 0 {
+                                continue;
+                            }
+                            marks.0.fetch_or(bit, Ordering::SeqCst);
+                        }
+                        return Some(word >> FAST_REF_COUNT_BITS);
+                    }
+                    None
+                })
+            })
     }
 }
 
@@ -617,6 +712,7 @@ impl StateCell {
     fn new(state: RuntimeState) -> Self {
         Self {
             published: arc_swap::ArcSwap::new(Arc::clone(&state.namespace)),
+            revision: std::sync::atomic::AtomicU64::new(state.revision),
             locked_reads: AtomicBool::new(state.needs_locked_reads()),
             fast_refs: FastRefs::new(),
             handle_seq: std::sync::atomic::AtomicU64::new(0),
@@ -793,6 +889,9 @@ impl Drop for StateGuard<'_> {
         if swapped {
             self.cell.published.store(Arc::clone(&self.guard.namespace));
         }
+        self.cell
+            .revision
+            .store(self.guard.revision, Ordering::Release);
         if !locked_reads && self.seen_locked_reads {
             self.cell.locked_reads.store(false, Ordering::Release);
         }
@@ -1132,25 +1231,6 @@ async fn concurrent_cas_backoff(attempt: usize, owner: &str) {
     let jitter = (owner_salt ^ tick ^ (attempt as u64).wrapping_mul(0x9e3779b97f4a7c15)) % window;
     let delay = Duration::from_micros((window + jitter).min(CAS_BACKOFF_MAX_MICROS));
     async_io::Timer::after(delay).await;
-}
-
-/// Namespaces at least this large are copied and freed off the async worker.
-const OFF_WORKER_NAMESPACE_NODES: usize = 2048;
-
-/// Run CPU work proportional to the namespace without stalling the tasks
-/// queued behind this one. On a multi-threaded Tokio runtime the worker hands
-/// its queue to another thread for the duration; anywhere else (no runtime,
-/// a current-thread runtime, small namespaces) the work simply runs inline.
-fn off_worker<R>(nodes: usize, work: impl FnOnce() -> R) -> R {
-    let multi_threaded = nodes >= OFF_WORKER_NAMESPACE_NODES
-        && tokio::runtime::Handle::try_current().is_ok_and(|runtime| {
-            runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-        });
-    if multi_threaded {
-        tokio::task::block_in_place(work)
-    } else {
-        work()
-    }
 }
 
 struct ChunkedInner<M, B>
@@ -2292,7 +2372,7 @@ where
             )
         };
         let _profile = Span::new(Event::Snapshot).units(shared.nodes.len() as u64);
-        let mut namespace = off_worker(shared.nodes.len(), || shared.as_ref().clone());
+        let mut namespace = shared.as_ref().clone();
         // Full snapshots are reserved for namespace operations. Fold selected
         // inode acknowledgements into that candidate without copying the
         // namespace on ordinary handle reads or writes.
@@ -3055,6 +3135,15 @@ where
     /// `read_view` plus the local revision it was captured at, for an
     /// optimistic mutation that only reads while it prepares.
     fn read_view_at_revision(&self) -> Result<(Arc<Namespace>, u64)> {
+        // An exclusive owner's batch runner rebases a prepared request onto
+        // the revision it finds, so the revision read here need not match the
+        // namespace exactly and the pair can be read without the mutex.
+        if !self.inner.options.concurrent_writes
+            && !self.inner.options.delegated
+            && let Some(namespace) = self.inner.state.shared()
+        {
+            return Ok((namespace, self.inner.state.revision.load(Ordering::Acquire)));
+        }
         let state = self.lock_state()?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
@@ -3519,7 +3608,7 @@ where
         let _lease_gate = self.inner.lease_gate.lock().await;
         let lease = self.renew_lease_inner(false).await?;
         let mut publication = PublicationGuard::new(&self.inner.state);
-        let candidate = off_worker(namespace.nodes.len(), || namespace.clone());
+        let candidate = namespace.clone();
         let revision = match self
             .inner
             .metadata
@@ -3552,7 +3641,7 @@ where
         state.settle_published_atimes();
         publication.disarm();
         drop(state);
-        off_worker(previous.nodes.len(), || drop(previous));
+        drop(previous);
         trace.finish(format_args!("revision={revision}"));
         Ok(revision)
     }
@@ -3645,14 +3734,41 @@ where
             );
         };
         if run {
-            self.run_mutation_batches().await;
+            self.run_mutation_batches(false).await;
         }
         Ok(())
     }
 
-    async fn run_mutation_batches(&self) {
+    /// The runner role, already claimed, carried on by a task of its own.
+    fn detached_mutation_runner(self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async move { self.run_mutation_batches(true).await })
+    }
+
+    async fn run_mutation_batches(&self, detached: bool) {
         let mut runner = MutationRunnerGuard::new(&self.inner.mutations);
+        let mut served = false;
         loop {
+            // The first batch answered the request that made this caller the
+            // runner. Under steady load the queue never empties, and a caller
+            // that kept the role would never return to its own operation: pass
+            // the role, still claimed, to a task instead. Without a runtime
+            // there is nowhere to pass it, so the caller keeps draining.
+            if served
+                && !detached
+                && !self.inner.mutations.pending.is_empty()
+                && let Ok(runtime) = tokio::runtime::Handle::try_current()
+            {
+                runner.finish();
+                runtime.spawn(self.clone().detached_mutation_runner());
+                return;
+            }
+            // Nothing arrived while the batch ran: leave without spending
+            // another gathering window on an empty queue.
+            if served && self.inner.mutations.pending.is_empty() && !self.inner.mutations.release()
+            {
+                runner.finish();
+                return;
+            }
             // Let other operations finish their immutable block work and
             // enqueue their prepared metadata mutations before this runner
             // snapshots the namespace. The bounded adaptive window improves
@@ -3689,6 +3805,7 @@ where
                 return;
             }
             self.apply_mutation_batch(requests).await;
+            served = true;
         }
     }
 
@@ -3728,6 +3845,22 @@ where
                             continue;
                         }
                         let mut mutation = (**mutation).clone();
+                        // An exclusive owner made every publication since
+                        // this request was prepared, and the checks below
+                        // re-read from the current namespace everything the
+                        // request depends on: the path still naming the same
+                        // inode with an unchanged layout, or still naming
+                        // nothing. Its prepared blocks depend only on the
+                        // bytes and the chunker, so an older revision alone
+                        // is no reason to send it down the replay path.
+                        if mutation.expected_revision != revision
+                            && !self.inner.options.concurrent_writes
+                            && !self.inner.options.delegated
+                            && (!mutation.new_inode
+                                || mutation.layout.chunker == namespace.default_chunker)
+                        {
+                            mutation.expected_revision = revision;
+                        }
                         // Same-revision creates can share one batch. A
                         // remote CAS loss invalidates prepared inode/layout
                         // assumptions, so those requests report Conflict
@@ -6939,7 +7072,7 @@ fn initial_namespace(options: &ChunkedOptions) -> Result<Namespace> {
         default_gid: options.gid,
         umask: options.umask,
         default_chunker,
-        nodes,
+        nodes: nodes.into(),
     })
 }
 
@@ -9450,6 +9583,118 @@ mod tests {
         block_on(heartbeat).expect("heartbeat renews after the commit");
         assert!(block_on(fs.stat("/directory")).unwrap().is_directory());
         block_on(fs.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn open_reference_listing_follows_the_slots_in_use() {
+        let refs = FastRefs::new();
+        let marked = |refs: &FastRefs| -> u32 {
+            refs.in_use
+                .iter()
+                .map(|marks| marks.0.load(Ordering::SeqCst).count_ones())
+                .sum()
+        };
+        let listed = |refs: &FastRefs| {
+            let mut inodes: Vec<_> = refs.inodes().collect();
+            inodes.sort_unstable();
+            inodes
+        };
+        assert!(listed(&refs).is_empty());
+        for inode in [7, 7, 900, 123_456] {
+            assert!(refs.acquire(inode));
+        }
+        assert_eq!(listed(&refs), [7, 900, 123_456]);
+        assert_eq!(marked(&refs), 3);
+        refs.release(900);
+        refs.release(7);
+        // A freed slot stays marked until a listing finds it empty.
+        assert_eq!(marked(&refs), 3);
+        assert_eq!(listed(&refs), [7, 123_456]);
+        assert_eq!(marked(&refs), 2);
+        refs.release(7);
+        refs.release(123_456);
+        assert!(listed(&refs).is_empty());
+        assert_eq!(marked(&refs), 0);
+        // Taking a slot again marks it again.
+        assert!(refs.acquire(900));
+        assert_eq!(listed(&refs), [900]);
+        assert_eq!(refs.count(900), 1);
+    }
+
+    #[test]
+    fn pending_atime_sweeps_skip_an_empty_table() {
+        let atimes = PendingAtimes::new();
+        let occupied = |atimes: &PendingAtimes| atimes.occupied.load(Ordering::SeqCst);
+        assert!(!occupied(&atimes));
+        assert_eq!(atimes.entries_locked().count(), 0);
+        assert!(atimes.record(5, 100));
+        assert!(occupied(&atimes));
+        assert_eq!(atimes.entries_locked().collect::<Vec<_>>(), [(5, 100)]);
+        // A publication that does not carry the time leaves it pending.
+        atimes.sweep_locked(|_, _| false);
+        assert!(occupied(&atimes));
+        assert_eq!(atimes.get(5), Ok(Some(100)));
+        atimes.sweep_locked(|_, _| true);
+        assert!(!occupied(&atimes));
+        assert_eq!(atimes.entries_locked().count(), 0);
+        assert_eq!(atimes.get(5), Ok(None));
+        assert!(atimes.record(5, 200));
+        assert!(occupied(&atimes));
+        assert_eq!(atimes.get(5), Ok(Some(200)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_whole_file_writers_all_make_progress() {
+        let fs = ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            MemoryBlockStore::new(),
+            options("concurrent-whole-file-writers"),
+        )
+        .await
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        let writers: Vec<_> = (0..8_u64)
+            .map(|index| {
+                let fs = fs.clone();
+                tokio::spawn(async move {
+                    let mut written = 0_u64;
+                    while std::time::Instant::now() < deadline {
+                        fs.write_file(
+                            &format!("/w{index}-{}", written % 4),
+                            &written.to_le_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                        written += 1;
+                    }
+                    written
+                })
+            })
+            .collect();
+        let mut counts = Vec::new();
+        for writer in writers {
+            counts.push(writer.await.unwrap());
+        }
+        // The writer whose request started the batch runner used to keep
+        // serving the others for as long as they kept writing, and so
+        // finished one write in the whole run.
+        assert!(counts.iter().all(|count| *count >= 16), "{counts:?}");
+        // Every file holds the last value its writer put there.
+        for (index, count) in counts.into_iter().enumerate() {
+            for slot in 0..4 {
+                let last = (0..count).rev().find(|value| value % 4 == slot).unwrap();
+                let handle = fs.open(&format!("/w{index}-{slot}"), "r", 0).await.unwrap();
+                let mut bytes = [0; 8];
+                assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 8);
+                assert_eq!(u64::from_le_bytes(bytes), last);
+                handle.close().await.unwrap();
+            }
+        }
+        // All of it went through the batch runner: with an exclusive owner a
+        // request prepared at an older revision is rebased, not replayed
+        // through a handle, so no handle was ever opened for writing.
+        assert!(!fs.lock_state().unwrap().any_open());
+        fs.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

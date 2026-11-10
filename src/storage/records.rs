@@ -345,7 +345,7 @@ pub fn from_records(records: impl IntoIterator<Item = MetadataRecord>) -> Result
         default_gid: volume.default_gid,
         umask: volume.umask,
         default_chunker: volume.default_chunker,
-        nodes,
+        nodes: nodes.into(),
     };
     namespace.validate()?;
     Ok(namespace)

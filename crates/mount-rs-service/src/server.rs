@@ -8,7 +8,7 @@ use mount_rs_remote_protocol::binary::{self, Incoming, InlineDriveId, IoRequest}
 use mount_rs_remote_protocol::{Message, PROTOCOL_VERSION, WireError};
 use quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
 use crate::dispatch::{DriveDispatcher, SessionHandles, SessionIdentity};
 pub use crate::transfer::RemoteTransferLimits;
@@ -252,7 +252,8 @@ async fn serve_connection(
     let _ = send.finish();
     drop(send);
     drop(recv);
-    let identity = Arc::new(Mutex::new(Arc::new(identity)));
+    // Requests read the identity with one atomic load; a renewal swaps it.
+    let identity = Arc::new(arc_swap::ArcSwap::from_pointee(identity));
     let handles = Arc::new(SessionHandles::default());
     let mut tasks = tokio::task::JoinSet::new();
     while let Ok((send, recv)) = connection.accept_bi().await {
@@ -288,7 +289,7 @@ async fn serve_connection(
 async fn serve_stream(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
-    identity: Arc<Mutex<Arc<SessionIdentity>>>,
+    identity: Arc<arc_swap::ArcSwap<SessionIdentity>>,
     dispatcher: Arc<DriveDispatcher>,
     authenticator: Arc<dyn Authenticator>,
     handles: Arc<SessionHandles>,
@@ -383,7 +384,7 @@ async fn serve_stream(
                 connection.close(1_u32.into(), b"invalid request id");
                 return;
             }
-            let current = identity.lock().await.clone();
+            let current = identity.load_full();
             let result = match tokio::time::timeout(OPERATION_TIMEOUT, async {
                 dispatcher
                     .dispatch_request(&current, &drive_id, &operation, &handles, request_id)
@@ -410,18 +411,18 @@ async fn serve_stream(
             Message::Response { request_id, result }
         }
         Message::Renew { bearer } => {
-            let partition = identity.lock().await.partition_id.clone();
+            let partition = identity.load().partition_id.clone();
             let Ok(Ok(next)) = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 authenticator.authenticate(&bearer, &partition),
             )
             .await
             else {
-                Arc::make_mut(&mut *identity.lock().await).expires_at = 0;
+                expire_identity(&identity);
                 connection.close(1_u32.into(), b"authentication failed");
                 return;
             };
-            let mut current = identity.lock().await;
+            let current = identity.load_full();
 
             if next.partition_id != current.partition_id
                 || next.policy_id != current.policy_id
@@ -429,7 +430,7 @@ async fn serve_stream(
                 || next.subject != current.subject
                 || !dispatcher.renewal_matches(&current, &next).await
             {
-                Arc::make_mut(&mut *current).expires_at = 0;
+                expire_identity(&identity);
                 connection.close(1_u32.into(), b"identity changed");
                 denied()
             } else {
@@ -437,7 +438,7 @@ async fn serve_stream(
                     connection.close(1_u32.into(), b"session invalidated");
                     return;
                 }
-                *current = Arc::new(next);
+                identity.store(Arc::new(next));
                 Message::ServerHello {
                     version: PROTOCOL_VERSION,
                     session_id: "renewed".into(),
@@ -460,12 +461,21 @@ async fn serve_stream(
     let _ = send.finish();
 }
 
+/// Marks the session's identity expired, whichever identity is current.
+fn expire_identity(identity: &arc_swap::ArcSwap<SessionIdentity>) {
+    identity.rcu(|current| {
+        let mut expired = SessionIdentity::clone(current);
+        expired.expires_at = 0;
+        expired
+    });
+}
+
 // The typed lane retains inline/borrowed metadata through authoritative dispatch.
 #[allow(clippy::too_many_arguments)]
 async fn serve_io(
     send: &mut quinn::SendStream,
     connection: &quinn::Connection,
-    identity: &Mutex<Arc<SessionIdentity>>,
+    identity: &arc_swap::ArcSwap<SessionIdentity>,
     dispatcher: &DriveDispatcher,
     handles: &SessionHandles,
     budgets: &Budgets,
@@ -482,7 +492,7 @@ async fn serve_io(
         connection.close(1_u32.into(), b"session invalidated");
         return;
     }
-    let current = Arc::clone(&*identity.lock().await);
+    let current = identity.load_full();
     let result = match tokio::time::timeout(
         OPERATION_TIMEOUT,
         dispatcher.dispatch_io(&current, request, handles, request_id, length, data),

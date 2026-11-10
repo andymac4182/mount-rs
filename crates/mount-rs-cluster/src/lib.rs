@@ -49,7 +49,9 @@ pub use registration_supervisor::RegistrationSupervisor;
 mod sessions;
 pub use sessions::{SessionBudget, SessionToken, VolumeSessions};
 
+mod coalesce;
 mod handles;
+mod join_slot;
 pub use handles::OwnedHandleSession;
 
 mod owner;

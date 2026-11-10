@@ -53,6 +53,12 @@ The direct benchmark runs its clients on four threads. One client does 1.86M
 reads a second, so 6.6M is 89% of linear; before the second pass it was 52%.
 The readdir p99.9 difference is within run-to-run noise.
 
+A third pass took each lock the second one had kept and either removed it or
+measured it, and went after write latency, which the first two had not
+measured at all. A whole-file write went from 1.06 ms to 0.010 ms with one
+writer and from 31 ms to 0.12 ms with sixteen; the tables are under
+"Removed in the third pass".
+
 ## `DrainGate`
 
 `mount_rs_core::drain_gate::DrainGate` replaces every reader-writer lock on
@@ -60,10 +66,11 @@ this path whose shared side is hot. A tokio `RwLock` locks its waiter mutex
 whenever a read guard is released, so a lock every operation shares becomes a
 mutex every core contends on; this was the largest contention point left once
 the operation gate was gone. `DrainGate` admits shared holders with one atomic
-increment and releases them with one decrement. Its internal mutex is touched
-only when an exclusive transition is queued or running. Transitions are
-first-come-first-served, take priority over new shared entries, and both
-futures are cancellation-safe. It has no runtime dependency.
+increment and releases them with one decrement. It has no lock inside it: a
+transition takes a turn at a lock-free queue (`TurnGate`), raises a counter
+that holds new shared entries back, and waits for the holders to leave.
+Transitions are first-come-first-served, take priority over new shared
+entries, and both futures are cancellation-safe. It has no runtime dependency.
 
 A counter every core increments is still one cache line passed between them.
 `DrainGate<N>` spreads it over `N` stripes, one per thread; a transition waits
@@ -130,42 +137,116 @@ the lifecycle gate's counter (striped), the reference-count slots and the fd
 counter (each on lines of their own), and the payload reference count a cache
 hit used to take.
 
-## Kept, with the reason each cannot go
+## Removed in the third pass
 
-| Lock | Taken by | Why it stays |
-| --- | --- | --- |
-| State mutex (`StateCell::mutex`) | mutations and publications; readers only while the filesystem is failed, closed or has uncommitted per-inode overlays; opens and closes only for an inode that is retained or raced a publication | It makes a mutation's multi-field update (namespace, revision, orphans, references, failure) one step. Everything a read-only operation needs from it is mirrored in atomics. |
-| Operation gate and lease gate (async mutexes) | mutations, publications, lease renewal; reads only in concurrent-writer and delegated modes | Publication is a compare-and-swap of one revision against the metadata store: two publishers cannot both succeed, so they are ordered here instead of failing and retrying against the provider. Concurrent mutations are merged by the queue above, not run in parallel. The lease gate keeps a heartbeat from replacing the fencing token in the middle of a publication. |
-| Block cache and provider cache index (`RwLock`) | misses, puts, deletes, eviction | Eviction order and the byte budget span every entry. Hits no longer take it. |
-| `DrainGate`'s internal mutex | exclusive transitions only | It holds the queue of waiting transitions and their wakers. Shared entry and exit never touch it. |
-| `MemoryMetadataStore` (`RwLock`) | lease and revision transitions take it exclusively | Each is a check and an update of several fields that must be one linearizable step; that is the provider's contract. |
-| SQLite providers' connection mutex | metadata and block I/O on SQLite | A SQLite connection is not usable from two threads at once. |
-| `DiskCachedBlockStore` (`mount-rs-host`) | only with the optional disk cache tier | Every operation is a blocking disk read behind a four-permit worker pool, which bounds it long before its index mutex does. Not on the session server's path. |
-| Route-lookup mutex (`IngressForwarder`) | route cache misses only | It is the wait that lets concurrent requests for one volume share a single registry lookup, followed by network I/O. |
-| Session budget semaphore, HTTP `connection_permits` | session creation, connection accept | Admission limits; not per request. |
-| hyper header-read timer, reqwest request timer, hyper-util connection pool | one registration per request on each side | Inside third-party crates. They are where the remaining mutex waits in the remote profile come from. |
+The second pass left a list of locks marked "kept". Each was then either
+removed or measured. Measurements used temporary counters at every remaining
+acquisition site (try-lock first, time the wait on failure) under 16 and 64
+clients running writes alone and all five operations together, on both
+surfaces.
+
+| Was | Now |
+| --- | --- |
+| Operation gate and lease gate: an async mutex with its waiters behind a mutex | `mount_rs_core::turn_gate::TurnGate`: one atomic flag and a lock-free waiter queue. Taking a free gate is one compare-and-swap; release hands the gate to the oldest waiter. Cancellation-safe. |
+| `DrainGate`'s internal mutex, taken by every exclusive entry and exit (three per whole-file write through the cache's flush gate; 1.1 to 1.6 million acquisitions in a 3 s run) | Gone. Transitions queue on a `TurnGate`; the draining holder's waker sits in an `AtomicWaker`; waiting shared entries sit in a lock-free queue. |
+| State mutex taken once per whole-file write to read the namespace and revision (422k acquisitions, 4656 contended in a 3 s, 16-writer run) | Write preparation reads the published namespace and a revision mirror without it (50k acquisitions, none contended, same run). |
+| Publication scanning all 1024 open-reference slots (128 KiB of cache lines) and all 1024 pending-atime slots while holding the state mutex. This was the 16 µs mean wait other state-mutex users saw on the remote surface. | A bitmap marks the reference slots in use and a flag marks a non-empty atime table, so a publication visits only what is there. |
+| `IngressForwarder`'s route-lookup mutex | `Coalesce`: a slot table of in-flight lookups; requests for one volume share a `TurnGate`. |
+| `Mutex<Option<JoinHandle>>` in the session and registration supervisors | `JoinSlot`: the handle in an atomic slot, joiners ordered by a `TurnGate`. |
+| Service session identity (`RwLock`), telemetry global (`RwLock`), remote client handle state and renewal lock (mutexes) | Atomic swaps, a `DrainGate`, a `TurnGate`. |
+| Disk cache: one mutex around each whole fill, including two SHA-256 passes, the file write, the rename and an unlink that usually found nothing. 4000 fills from 16 readers waited 2639 ms in total for it (9.6 ms worst), and fills ran one at a time. | The mutex covers two short index updates per fill: reserve the space, then index the file. Hashing, writing and the rename happen between them. Same run: 15 ms total wait, 0.09 ms worst, 4000 fills in 450 ms instead of 890 ms. Its I/O and put/flush tokio locks are `DrainGate`s. |
+
+Two things found on the way were not locks but cost more than any of them:
+
+- **Every mutation copied the whole namespace three times.** `Namespace::nodes`
+  was a `BTreeMap`, and a mutation cloned it to edit, cloned it again to hand
+  to the provider, and the provider cloned it to keep. It is now `NodeMap`, a
+  persistent 64-way radix tree: a clone is one reference count, an edit copies
+  the few branches above the inode, and the serialized form is unchanged. The
+  hand-offs to another thread that surrounded those copies are gone with them.
+- **Whole-file writers starved and replayed.** The writer whose request started
+  the batch runner kept the role for as long as others kept writing, so one
+  writer finished a single write in the whole run (the multi-second maximum in
+  the baseline). The role now passes to a task after the first batch. And a
+  request prepared at an older revision was reported as a conflict and redone
+  through open, write and close; with an exclusive owner every newer revision
+  is its own, and the path, inode and layout checks already decide whether the
+  request still applies, so it is rebased instead.
+
+An attempt that was reverted: the first lock-free `DrainGate` and `TurnGate`
+kept their wakers in `ArcSwapOption`. Every store to an `ArcSwap` walks the
+debt list of every thread that has used one, and that showed up as 10% of
+server CPU on remote writes and cut direct open+close from 2.4M to 0.85M
+ops/s. `AtomicWaker` has no such cost.
+
+Whole-file writes, 8 bytes each, memory providers, before (`f3f98e5d`) and
+after; p50 / p99 / p99.9 in ms:
+
+| Workload | Before | ops/s | After | ops/s |
+| --- | --- | --- | --- | --- |
+| direct, 1 writer, 2000 files | 1.057 / 1.149 / 1.589 | 941 | 0.010 / 0.013 / 0.019 | 102,443 |
+| direct, 16 writers, 2000 files | 31.3 / 34.4 / 36.8 (max 4006) | 484 | 0.117 / 0.202 / 0.243 (max 0.45) | 131,858 |
+| direct, 1 writer, 20000 files | 14.3 / 15.6 / 23.2 | 70 | 0.024 / 0.027 / 0.033 | 40,629 |
+| direct, 16 writers, 20000 files | 384 / 415 / 4180 | 42 | 0.245 / 0.454 / 0.601 | 59,223 |
+| remote, 16 writers, 2000 files | 27.2 / 36.7 / 40.4 | 578 | 0.768 / 0.964 / 1.045 | 20,828 |
+
+Reads were re-measured and did not move outside run-to-run noise: direct
+read 6.7M to 6.8M ops/s, stat 0.94M to 1.05M, readdir 0.64M to 0.94M (p99
+0.010 to 0.006 ms), open+close 1.9M to 2.8M across repeated runs of either
+build. Remote mixed p99.9 went from 0.71 to 0.43 ms for read and from 1.44 to
+0.74 ms for open.
+
+## Kept, with what was measured
+
+| Lock | Taken by | Measured | Why it stays |
+| --- | --- | --- | --- |
+| State mutex (`StateCell::mutex`) | the batch runner and publications; handle writes and closes of written handles; readers only while the filesystem is failed, closed or has uncommitted per-inode overlays; opens and closes only for an inode that is retained or raced a publication | Direct, 16 clients, all operations: 44k acquisitions in 3 s for 1.3M operations, 1.7% contended. Remote, same mix: 187k acquisitions, 5.1% contended, before the publication scans above were removed. | It makes a mutation's multi-field update (namespace, revision, orphans, references, failure) one step. Everything a read-only operation or a write's preparation needs from it is mirrored in atomics. What still contends on the remote surface is the handle path that remote whole-file writes use (see below). |
+| Block cache index (`RwLock`) | misses, puts, deletes, eviction; never hits | One write acquisition per put. With 16 writers, 7 to 10% of them wait, 1.5 to 2.5 µs each: about 0.2 µs per write on average. Read acquisitions: 460 in 3 s. | Eviction order and the byte budget span every entry. Replacing it means a different eviction policy, not a different lock; the measured cost does not justify that. The object-store provider's cache index has the same shape, behind network puts. |
+| `MemoryMetadataStore` (`RwLock`) | lease and revision transitions take it exclusively | Never contended in any run: publications are already serialized by the operation gate. | Each is a check and an update of several fields that must be one linearizable step; that is the provider's contract. |
+| SQLite providers' connection mutex | metadata and block I/O on SQLite | Not measured: not reachable with the memory providers the benchmark uses. | A SQLite connection is not usable from two threads at once. |
+| Disk cache index mutex (`mount-rs-host`) | fills, deletes, clears; never hits | 7 µs mean hold, 0.09 ms worst wait under 16 concurrent fills. | Eviction and the byte budget, as for the block cache. File I/O no longer happens under it. |
+| Session budget semaphore, HTTP `connection_permits`, disk cache worker and fill semaphores | session creation, connection accept, disk cache fills | | Admission limits; not per request on the session path. |
+| hyper header-read timer, reqwest request timer, hyper-util connection pool, tokio's timer wheel | one registration per request on each side | About 1% of active samples in the remote write profile. | Inside third-party crates. They are where the remaining mutex waits in the remote profile come from. |
 
 ## Still open
 
-1. **Mutations are O(namespace).** Each mutation deep-clones the namespace and
-   publishes all of it. Readers no longer block on that, but writes at 6000+
-   files cost milliseconds and are the source of the residual read p99.9 when a
-   writer is active. This is the largest remaining cost and needs a persistent
-   map for `Namespace::nodes` plus incremental publication.
-2. **HTTP/2 on one connection** runs at about half the HTTP/1.1 throughput
+1. **Remote whole-file writes take three round trips.** `RemoteFs` has no
+   whole-file write operation, so `write_file` is open, write and close over
+   HTTP, and on the owner each of those goes through the handle path and its
+   own publication rather than the batch runner. That is why a remote write
+   costs 0.77 ms against 0.19 ms for a remote read. A single session operation
+   carrying the bytes would put remote writes on the batched path. It is a
+   wire-protocol addition and was left for its own change.
+2. **Providers still receive the whole namespace.** Copies inside the process
+   are now O(1), but `MetadataStore::publish` takes a full `Namespace`, and a
+   provider that serializes it does work proportional to the volume on every
+   publication. The memory provider used above does not. The SQLite provider
+   encodes the namespace as one JSON document per publication: a single
+   writer's p50 is 0.45 ms at 100 files, 1.45 ms at 2000 and 6.5 ms at 8000
+   (`BENCH_METADATA=sqlite`), almost all of it in `serde_json`. This pass still
+   helped it (2.63 to 1.51 ms with one writer at 2000 files, 185 to 2.3 ms with
+   sixteen, because they now share publications), but writes on a large volume
+   stay above 10 ms until that provider stores changed inodes only. `NodeMap`
+   makes the change set cheap to find: two versions share every subtree that
+   did not change, so a walk can skip them by pointer.
+3. **The batch runner yields at least eight times per batch** to let other
+   writers' requests gather. That costs a single writer a few microseconds and
+   was left alone: it is what coalesces publications against a slow provider,
+   and nothing here measures one.
+4. **HTTP/2 on one connection** runs at about half the HTTP/1.1 throughput
    because every stream shares h2's connection mutex. The CLI uses HTTP/1.1.
-3. **Directory entries are scanned linearly** in `walk`; fine at 64 entries,
+5. **Directory entries are scanned linearly** in `walk`; fine at 64 entries,
    visible in profiles for very large directories.
-4. **`read_parallelism` is still 1.** A 4 KiB read touches one block, so it does
+6. **`read_parallelism` is still 1.** A 4 KiB read touches one block, so it does
    not affect the target above; multi-block reads against a remote object store
    would benefit.
-5. **Per-operation statistics** in the object-store provider are shared atomic
+7. **Per-operation statistics** in the object-store provider are shared atomic
    counters written on every block read. They are not locks, but they are the
    next shared cache lines on that provider's hit path.
-6. **Per-session and per-handle gates have one stripe.** Many cores working
+8. **Per-session and per-handle gates have one stripe.** Many cores working
    one session's path operations, or one shared handle, still pass that
    counter between them. Striping them costs two kilobytes per gate.
-7. **A cache hit still writes the block's own hit counter**, so cores reading
+9. **A cache hit still writes the block's own hit counter**, so cores reading
    the same block share that line. Different blocks share nothing.
-8. **Strict-atime reads were not benchmarked**; the benchmark has no switch
+10. **Strict-atime reads were not benchmarked**; the benchmark has no switch
    for the policy. A test covers that they skip the gate and the mutex.

@@ -12,6 +12,7 @@ allocation-profiling = ["resource-profiling"]
 saturation-foundationdb = ["mount-rs-sdk/foundationdb"]
 
 [dependencies]
+arc-swap = "1.9"
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite", optional = true }
 async-trait = "0.1"
 bytes = "1"

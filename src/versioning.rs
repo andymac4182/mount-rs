@@ -504,7 +504,8 @@ mod tests {
                     },
                     data: NodeData::Directory { entries: vec![] },
                 },
-            )]),
+            )])
+            .into(),
         }
     }
 

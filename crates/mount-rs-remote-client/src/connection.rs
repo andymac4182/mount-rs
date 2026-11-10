@@ -8,11 +8,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::Engine;
+use mount_rs_core::turn_gate::TurnGate;
 use mount_rs_remote_protocol::binary::{self, IoRequest};
 use mount_rs_remote_protocol::{Message, Operation, PROTOCOL_VERSION, read_frame, write_frame};
 use quinn::crypto::rustls::QuicClientConfig;
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 use crate::credentials::{CredentialSource, SecretToken};
 
@@ -166,7 +166,7 @@ pub struct RemoteConnection {
     transport: Arc<dyn Transport>,
     credentials: Option<CredentialSource>,
     expires_at: AtomicI64,
-    renew_lock: Mutex<()>,
+    renew_lock: TurnGate,
     next_id: AtomicU64,
     closed: AtomicBool,
 }
@@ -262,7 +262,7 @@ impl RemoteConnection {
             transport,
             credentials: Some(credentials),
             expires_at: AtomicI64::new(token_exp(&token)),
-            renew_lock: Mutex::new(()),
+            renew_lock: TurnGate::new(),
             next_id: AtomicU64::new(0),
             closed: AtomicBool::new(false),
         }))
@@ -274,7 +274,7 @@ impl RemoteConnection {
             transport,
             credentials: None,
             expires_at: AtomicI64::new(i64::MAX),
-            renew_lock: Mutex::new(()),
+            renew_lock: TurnGate::new(),
             next_id: AtomicU64::new(0),
             closed: AtomicBool::new(false),
         })

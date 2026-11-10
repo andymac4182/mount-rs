@@ -6,6 +6,7 @@
 
 use crate::chunking::{ChunkerConfig, from_config};
 use crate::error::{ErrorCode, FsError};
+use crate::node_map::NodeMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -165,7 +166,7 @@ pub struct Namespace {
     pub default_gid: u32,
     pub umask: u32,
     pub default_chunker: ChunkerConfig,
-    pub nodes: BTreeMap<InodeId, NodeMetadata>,
+    pub nodes: NodeMap,
 }
 
 /// The only namespace representation currently understood by core.
@@ -218,9 +219,7 @@ impl Namespace {
 
         let max_inode = self
             .nodes
-            .keys()
-            .next_back()
-            .copied()
+            .last_key()
             .ok_or_else(|| invalid_namespace("namespace must contain a root node"))?;
         if max_inode == u64::MAX {
             return Err(overflow_namespace(
@@ -363,7 +362,7 @@ fn three_directory_topology(edges: [bool; 9]) -> Namespace {
             version: 1,
             parameters: BTreeMap::from([("chunk_size".to_owned(), 4096)]),
         },
-        nodes,
+        nodes: nodes.into(),
     }
 }
 
@@ -1413,7 +1412,8 @@ mod tests {
                         }])),
                     },
                 ),
-            ]),
+            ])
+            .into(),
         }
     }
 
@@ -1715,7 +1715,7 @@ mod tests {
             default_gid: 0,
             umask: 0o022,
             default_chunker: fixed_chunker(4096),
-            nodes,
+            nodes: nodes.into(),
         }
     }
 

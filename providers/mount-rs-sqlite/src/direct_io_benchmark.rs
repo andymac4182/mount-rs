@@ -218,7 +218,7 @@ fn namespace(ids: &[BlockId]) -> Namespace {
         default_gid: 0,
         umask: 0o022,
         default_chunker: chunker,
-        nodes,
+        nodes: nodes.into(),
     }
 }
 

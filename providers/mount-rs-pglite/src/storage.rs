@@ -1167,7 +1167,7 @@ impl MetadataStore for PgliteMetadataStore {
         if !actual.keys().eq(base.nodes.keys()) {
             return Err(stale());
         }
-        base.nodes = nodes;
+        base.nodes = nodes.into();
         base.validate()?;
         if &actual != expected_inode_revisions {
             return Err(inode_conflict());
@@ -3498,7 +3498,8 @@ mod tests {
                     },
                 ),
                 (root + 1, file),
-            ]),
+            ])
+            .into(),
         };
         namespace.validate().unwrap();
         namespace

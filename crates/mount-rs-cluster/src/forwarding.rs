@@ -12,13 +12,8 @@ use hyper::body::Body;
 use hyper::body::Frame;
 use mount_rs_http::{BoxError, HttpBody};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Weak},
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::{
-    sync::Mutex,
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
@@ -315,7 +310,7 @@ pub struct IngressForwarder {
     client: Arc<PeerClient>,
     options: ForwardOptions,
     routes: Arc<crate::route_cache::RouteCache>,
-    route_lookups: Arc<Mutex<BTreeMap<String, Weak<Mutex<()>>>>>,
+    route_lookups: Arc<crate::coalesce::Coalesce>,
     body_failures: Arc<BodyFailures>,
 }
 impl IngressForwarder {
@@ -398,34 +393,27 @@ impl IngressForwarder {
             timings.route_cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(route);
         }
-        // Coalesce concurrent discovery for one volume without holding the
-        // route map across Redis I/O. Cancellation drops the owned guard; weak
-        // registry entries are pruned on the next miss.
+        // Coalesce concurrent discovery for one volume. Cancellation drops
+        // the caller's turn and its share; neither is held by a lock.
         let lookup_started = Instant::now();
-        let lookup = {
-            let mut lookups = self.route_lookups.lock().await;
-            lookups.retain(|_, value| value.strong_count() != 0);
-            if let Some(lookup) = lookups.get(volume).and_then(Weak::upgrade) {
-                lookup
-            } else {
-                let lookup = Arc::new(Mutex::new(()));
-                lookups.insert(volume.to_owned(), Arc::downgrade(&lookup));
-                lookup
-            }
-        };
+        let lookup = self.route_lookups.join(volume);
         if let Some(trace) = trace {
             trace.record(Stage::LookupMapAdmission, lookup_started);
         }
         timings.route_registry_admission.record(lookup_started);
         let volume_wait_started = Instant::now();
-        let _lookup = if let Some(trace) = trace {
-            let (guard, elapsed) = mount_rs_core::wait_timing::observe(lookup.lock()).await;
-            trace.record(Stage::VolumeAdmission, volume_wait_started);
-            trace.interval(Stage::VolumePending, elapsed.pending_ns);
-            trace.interval(Stage::VolumeNotified, elapsed.notified_ns);
-            guard
-        } else {
-            lookup.lock().await
+        let _turn = match &lookup {
+            None => None,
+            Some(lookup) => Some(if let Some(trace) = trace {
+                let (turn, elapsed) =
+                    mount_rs_core::wait_timing::observe(lookup.turn().lock()).await;
+                trace.record(Stage::VolumeAdmission, volume_wait_started);
+                trace.interval(Stage::VolumePending, elapsed.pending_ns);
+                trace.interval(Stage::VolumeNotified, elapsed.notified_ns);
+                turn
+            } else {
+                lookup.turn().lock().await
+            }),
         };
         timings.route_volume_wait.record(volume_wait_started);
         timings.route_lookup_wait.record(lookup_started);
