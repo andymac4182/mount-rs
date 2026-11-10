@@ -15,9 +15,9 @@
 //! The state is one small entry per key, and keys are `&'static str` labels
 //! the caller chooses from a closed set, so the limiter itself is bounded.
 
+use mount_rs_core::turn_cell::TurnCell;
 use std::{
     collections::HashMap,
-    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -31,7 +31,7 @@ pub const DEFAULT_REFUSAL_LOG_WINDOW: Duration = Duration::from_secs(10);
 pub struct RefusalLogLimiter {
     burst: u32,
     window: Duration,
-    keys: Mutex<HashMap<&'static str, Window>>,
+    keys: TurnCell<HashMap<&'static str, Window>>,
 }
 
 #[derive(Debug)]
@@ -48,7 +48,7 @@ impl RefusalLogLimiter {
         Self {
             burst,
             window,
-            keys: Mutex::new(HashMap::new()),
+            keys: TurnCell::new(HashMap::new()),
         }
     }
 
@@ -68,12 +68,9 @@ impl RefusalLogLimiter {
 
     /// [`RefusalLogLimiter::admit`] against an explicit clock.
     pub fn admit_at(&self, key: &'static str, now: Instant) -> Option<u64> {
-        let mut keys = match self.keys.lock() {
-            Ok(keys) => keys,
-            // A panic elsewhere while holding the lock leaves only counters;
-            // keep limiting rather than logging without a bound.
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // A panic elsewhere while holding the cell leaves only counters;
+        // keep limiting rather than logging without a bound.
+        let mut keys = self.keys.lock_recovered();
         let entry = keys.entry(key).or_insert(Window {
             started: now,
             admitted: 0,

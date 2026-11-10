@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 
 #[cfg(feature = "qlog")]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "qlog")]
@@ -27,7 +27,7 @@ use crate::{
 /// Shareable handle to a single qlog output stream
 #[cfg(feature = "qlog")]
 #[derive(Clone)]
-pub struct QlogStream(pub(crate) Arc<Mutex<QlogStreamer>>);
+pub struct QlogStream(pub(crate) Arc<crate::turn::Turn<QlogStreamer>>);
 
 #[cfg(feature = "qlog")]
 impl QlogStream {
@@ -36,7 +36,7 @@ impl QlogStream {
         let mut event = Event::with_time(0.0, event);
         event.group_id = Some(orig_rem_cid.to_string());
 
-        let mut qlog_streamer = self.0.lock().unwrap();
+        let mut qlog_streamer = self.0.lock();
         if let Err(e) = qlog_streamer.add_event_with_instant(event, now) {
             warn!("could not emit qlog event: {e}");
         }

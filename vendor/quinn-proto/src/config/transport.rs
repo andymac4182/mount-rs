@@ -1,6 +1,9 @@
 use std::{fmt, sync::Arc};
 #[cfg(feature = "qlog")]
-use std::{io, sync::Mutex, time::Instant};
+use std::{io, time::Instant};
+
+#[cfg(feature = "qlog")]
+use crate::turn::Turn;
 
 #[cfg(feature = "qlog")]
 use qlog::streamer::QlogStreamer;
@@ -616,7 +619,7 @@ impl QlogConfig {
         );
 
         match streamer.start_log() {
-            Ok(()) => Some(QlogStream(Arc::new(Mutex::new(streamer)))),
+            Ok(()) => Some(QlogStream(Arc::new(Turn::new(streamer)))),
             Err(e) => {
                 warn!("could not initialize endpoint qlog streamer: {e}");
                 None

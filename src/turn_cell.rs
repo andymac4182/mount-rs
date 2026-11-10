@@ -35,6 +35,13 @@ impl Unwinding {
     }
 }
 
+impl<T> std::fmt::Debug for TurnCell<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Without taking the cell: formatting must not wait or abandon it.
+        formatter.debug_struct("TurnCell").finish_non_exhaustive()
+    }
+}
+
 impl<T: Default> Default for TurnCell<T> {
     fn default() -> Self {
         Self::new(T::default())

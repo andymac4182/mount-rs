@@ -3,14 +3,13 @@ use std::{
     f64::consts::LN_2,
     hash::{BuildHasher, Hasher},
     mem::{size_of, take},
-    sync::Mutex,
 };
 
 use fastbloom::BloomFilter;
 use rustc_hash::FxBuildHasher;
 use tracing::{trace, warn};
 
-use crate::{Duration, SystemTime, TokenLog, TokenReuseError, UNIX_EPOCH};
+use crate::{turn::Turn, Duration, SystemTime, TokenLog, TokenReuseError, UNIX_EPOCH};
 
 /// Bloom filter-based [`TokenLog`]
 ///
@@ -22,7 +21,7 @@ use crate::{Duration, SystemTime, TokenLog, TokenReuseError, UNIX_EPOCH};
 /// each of the two periods currently non-expired tokens could expire in. As such, turns over
 /// filters as time goes on to avoid bloom filter false positive rate increasing infinitely over
 /// time.
-pub struct BloomTokenLog(Mutex<State>);
+pub struct BloomTokenLog(Turn<State>);
 
 impl BloomTokenLog {
     /// Construct with an approximate maximum memory usage and expected number of validation token
@@ -41,7 +40,7 @@ impl BloomTokenLog {
     /// between them and divides the allocation budget of `max_bytes` evenly between them. As such,
     /// each bloom filter will contain `max_bytes * 4` bits.
     pub fn new(max_bytes: usize, k_num: u32) -> Self {
-        Self(Mutex::new(State {
+        Self(Turn::new(State {
             config: FilterConfig {
                 filter_max_bytes: max_bytes / 2,
                 k_num,
@@ -67,7 +66,7 @@ impl TokenLog for BloomTokenLog {
             return Err(TokenReuseError);
         }
 
-        let mut guard = self.0.lock().unwrap();
+        let mut guard = self.0.lock();
         let state = &mut *guard;
 
         // calculate how many periods past period 1 the token expires
@@ -294,7 +293,7 @@ mod test {
             let token = rng.random::<u128>();
             let result = log.check_and_insert(token, issued, lifetime);
             {
-                let filter = &log.0.lock().unwrap().filter_1;
+                let filter = &log.0.lock().filter_1;
                 if let Filter::Set(ref hset) = *filter {
                     assert!(hset.capacity() * size_of::<u64>() <= 800);
                     assert_eq!(hset.len(), i + 1);
@@ -307,7 +306,7 @@ mod test {
         }
 
         assert!(
-            matches!(log.0.get_mut().unwrap().filter_1, Filter::Bloom { .. }),
+            matches!(log.0.get_mut().filter_1, Filter::Bloom { .. }),
             "didn't bloom"
         );
     }

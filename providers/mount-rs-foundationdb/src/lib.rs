@@ -30,6 +30,7 @@ use mount_rs_core::storage::{
     InodeModeState, InodeVersion, LoadedInode, LoadedMetadata, MetadataStore, Namespace, NodeData,
     NodeMetadata, WriterLease, validate_inode_publication,
 };
+use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -38,7 +39,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{
-    Arc, Condvar, Mutex,
+    Arc, LazyLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1326,17 +1327,19 @@ enum ClientNetworkState {
     Stopped,
 }
 
-static CLIENT_NETWORK: Mutex<ClientNetworkState> = Mutex::new(ClientNetworkState::Uninitialized);
-static CLIENT_NETWORK_STOPPED: Condvar = Condvar::new();
+static CLIENT_NETWORK: LazyLock<TurnLock<ClientNetworkState>> =
+    LazyLock::new(|| TurnLock::new(ClientNetworkState::Uninitialized));
+/// Held by the one caller stopping the network, from the moment the state
+/// becomes `Stopping` until it becomes `Stopped`. Other terminal callers
+/// queue on it instead of waiting on a condition variable.
+static CLIENT_NETWORK_STOPPING: LazyLock<TurnLock<()>> = LazyLock::new(|| TurnLock::new(()));
 
-fn client_network_lock() -> Result<std::sync::MutexGuard<'static, ClientNetworkState>> {
-    CLIENT_NETWORK
-        .lock()
-        .map_err(|_| FsError::backend("FoundationDB client network state lock was poisoned"))
+fn client_network_lock() -> TurnLockGuard<'static, ClientNetworkState> {
+    CLIENT_NETWORK.lock_blocking()
 }
 
 fn client_network() -> Result<Arc<NetworkAutoStop>> {
-    let mut state = client_network_lock()?;
+    let mut state = client_network_lock();
     match &*state {
         ClientNetworkState::Running(network) => return Ok(Arc::clone(network)),
         ClientNetworkState::Failed(message) => return Err(FsError::backend(message.clone())),
@@ -1347,6 +1350,11 @@ fn client_network() -> Result<Arc<NetworkAutoStop>> {
         ClientNetworkState::Uninitialized => {}
     }
 
+    // The turn has no poisoning. Record the failure before booting so that a
+    // panic inside the native client leaves the state failed, never retried.
+    *state = ClientNetworkState::Failed(
+        "FoundationDB client network initialization did not complete".to_owned(),
+    );
     let network = FdbApiBuilder::default()
         .build()
         .map_err(|error| format!("FoundationDB client API initialization failed: {error}"))
@@ -1378,15 +1386,17 @@ fn client_network() -> Result<Arc<NetworkAutoStop>> {
 /// opened again in this process. Concurrent shutdown callers wait until the
 /// native network thread has joined.
 pub fn shutdown_client_network() -> Result<()> {
-    let network = {
-        let mut state = client_network_lock()?;
+    let (network, stopping) = {
+        let mut state = client_network_lock();
         loop {
             match &*state {
                 ClientNetworkState::Stopped => return Ok(()),
                 ClientNetworkState::Stopping => {
-                    state = CLIENT_NETWORK_STOPPED.wait(state).map_err(|_| {
-                        FsError::backend("FoundationDB client network state lock was poisoned")
-                    })?;
+                    // Queue behind the stopping caller without holding the
+                    // state, then look again.
+                    drop(state);
+                    drop(CLIENT_NETWORK_STOPPING.lock_blocking());
+                    state = client_network_lock();
                 }
                 ClientNetworkState::Running(network) if Arc::strong_count(network) > 1 => {
                     return Err(FsError::new(ErrorCode::Ebusy).with_message(
@@ -1399,11 +1409,12 @@ pub fn shutdown_client_network() -> Result<()> {
                     else {
                         unreachable!("running client network changed while locked")
                     };
-                    break network;
+                    // A waiter holds this only for an instant and never
+                    // while holding the state, so this cannot deadlock.
+                    break (network, CLIENT_NETWORK_STOPPING.lock_blocking());
                 }
                 ClientNetworkState::Uninitialized | ClientNetworkState::Failed(_) => {
                     *state = ClientNetworkState::Stopped;
-                    CLIENT_NETWORK_STOPPED.notify_all();
                     return Ok(());
                 }
             }
@@ -1417,9 +1428,10 @@ pub fn shutdown_client_network() -> Result<()> {
         std::process::abort();
     }
 
-    let mut state = client_network_lock()?;
+    let mut state = client_network_lock();
     *state = ClientNetworkState::Stopped;
-    CLIENT_NETWORK_STOPPED.notify_all();
+    drop(state);
+    drop(stopping);
     Ok(())
 }
 

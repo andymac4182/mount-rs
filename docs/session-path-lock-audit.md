@@ -497,12 +497,24 @@ replaced. Each was then tried:
 | `LocalCache::disk_io` in the blob cache (`Mutex<()>`, writers) | `TurnLock` taken with the new `lock_blocking`, which parks the calling thread on the gate's lock-free waiter queue. | Tests pass; disk reads unchanged at 118k/s. |
 | `WebdavSession::locks` (`Arc<Mutex<DavLockTable>>`, a public field) | `Arc<TurnCell<DavLockTable>>`. The field's type changes; the one user outside the crate is its own test. | Tests pass, including the one that panics while holding the table. |
 
-What is left outside test code:
+The entries that first stayed here were then tried as well:
 
-| Lock | Why it stays |
-| --- | --- |
-| `CLIENT_NETWORK` in `mount-rs-foundationdb` | A `Mutex` paired with a `Condvar`, behind a feature that needs the native FoundationDB client. It cannot be compiled or run here, so a change to it could not be checked. |
-| `quinn-proto` and `tunnel-transport` under `vendor/` | Third-party code kept in step with its upstream; neither depends on `mount-rs-core`. |
+| Lock | What replaced it | How it was checked |
+| --- | --- | --- |
+| `CLIENT_NETWORK` `Mutex` + `Condvar` in `mount-rs-foundationdb` | Two `TurnLock`s taken with `lock_blocking`. One holds the state. The caller stopping the network holds the other from `Stopping` to `Stopped`, and other terminal callers queue on it instead of waiting on a condition variable. The state is set to `Failed` before the native boot, so a panic there still fails closed without lock poisoning. | Type-checked and linted with `--features foundationdb --lib`. Not run: there is no native client or cluster on this machine. |
+| `vendor/tunnel-transport`: pool writer, log limiter keys, fairness counters, peer identity slot, driver, pin watcher, dial gates, draining set, connection table | `TurnLock` for the locks held across an await, `TurnCell` for the rest, and `ArcSwap` for the identity slot, whose readers no longer take anything. The crate now depends on `mount-rs-core`. | Its own test suite passes. |
+| `vendor/quinn-proto`: `TokenMemoryCache`, `BloomTokenLog`, the qlog stream handle | A compare-and-swap cell local to the vendored copy (`src/turn.rs`), so the manifest and every lockfile are unchanged. Recorded as a second change in `UPSTREAM_PATCH.md`. | The crate's own tests on a copy outside the workspace, with `qlog` and `bloom` on: 303 unit and 3 doc tests pass. |
+
+No `Mutex`, `RwLock` or `Condvar` is left in the workspace or under
+`vendor/` outside tests, examples (which include the mutex baseline the
+benchmarks compare against) and the SQLite benchmark's statement counter.
+
+Checked beyond the workspace gates: the Redis hint and lease test against a
+local Redis server, and the Node binding's test files run one at a time
+(50 of 54 pass; two need `MOUNTX_SOURCE`, two shell out to a `pnpm` shim
+that is broken on this machine). Not exercised here: PGlite, Redis over
+TLS, FoundationDB, kernel NFS/9P/FUSE mounts, and the Linux-only FUSE code,
+which is only type-checked.
 
 ## Kept, with what was measured
 

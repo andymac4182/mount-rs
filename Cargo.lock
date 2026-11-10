@@ -4497,6 +4497,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "mount-rs-core",
  "quinn",
  "rcgen 0.13.2",
  "rustix",

@@ -191,6 +191,12 @@ pub struct TurnLockGuard<'a, T> {
 unsafe impl<T: Send> Send for TurnLockGuard<'_, T> {}
 unsafe impl<T: Send + Sync> Sync for TurnLockGuard<'_, T> {}
 
+impl<T> std::fmt::Debug for TurnLock<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("TurnLock").finish_non_exhaustive()
+    }
+}
+
 impl<T: Default> Default for TurnLock<T> {
     fn default() -> Self {
         Self::new(T::default())
