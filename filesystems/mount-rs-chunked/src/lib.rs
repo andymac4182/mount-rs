@@ -326,6 +326,181 @@ impl ReadLayoutSnapshot {
     }
 }
 
+/// Runtime state behind its mutex, plus a lock-free mirror of the two things
+/// a read-only operation needs from it: the committed namespace and whether
+/// the runtime is in any condition (failed, closed, selected-inode overlays)
+/// that requires the locked path. The mirror is refreshed whenever a guard is
+/// released, so no mutation site can forget to publish it.
+struct StateCell {
+    mutex: Mutex<RuntimeState>,
+    published: arc_swap::ArcSwap<Namespace>,
+    /// True when readers must take the mutex instead of `published`.
+    locked_reads: AtomicBool,
+}
+
+impl StateCell {
+    fn new(state: RuntimeState) -> Self {
+        Self {
+            published: arc_swap::ArcSwap::new(Arc::clone(&state.namespace)),
+            locked_reads: AtomicBool::new(state.needs_locked_reads()),
+            mutex: Mutex::new(state),
+        }
+    }
+
+    fn lock(&self) -> std::result::Result<StateGuard<'_>, ()> {
+        let guard = self.mutex.lock().map_err(|_| ())?;
+        Ok(StateGuard {
+            seen_namespace: Arc::as_ptr(&guard.namespace),
+            seen_locked_reads: guard.needs_locked_reads(),
+            guard,
+            cell: self,
+        })
+    }
+
+    /// The committed namespace without the mutex, or `None` when the caller
+    /// must lock (and so observe the failure, closure or overlay itself).
+    fn shared(&self) -> Option<Arc<Namespace>> {
+        // Load the snapshot before the flag: a failure or close published
+        // after the flag check is concurrent with this read and may be
+        // linearized after it; one published before it is always seen.
+        let namespace = self.published.load_full();
+        (!self.locked_reads.load(Ordering::Acquire)).then_some(namespace)
+    }
+}
+
+/// Reader-writer exclusion between ordinary operations (shared) and the
+/// transitions that must drain them (exclusive): filesystem lifecycle
+/// changes, and cursor moves, mutations and close on one handle.
+///
+/// A tokio `RwLock` takes its internal waiter mutex whenever a read guard is
+/// released, which made every read on every core contend on one mutex. Shared
+/// entry here is one atomic increment while no transition is in progress;
+/// during one, operations queue on the inner lock exactly as before.
+struct DrainGate {
+    lock: tokio::sync::RwLock<()>,
+    /// Operations admitted on the fast path and not yet finished.
+    active: std::sync::atomic::AtomicUsize,
+    /// Set while a transition owns `lock` and is draining or running.
+    draining: AtomicBool,
+    drained: tokio::sync::Notify,
+}
+
+enum DrainShared<'a> {
+    Fast(&'a DrainGate),
+    Queued(#[allow(dead_code)] tokio::sync::RwLockReadGuard<'a, ()>),
+}
+
+struct DrainExclusive<'a> {
+    lifecycle: &'a DrainGate,
+    _lock: tokio::sync::RwLockWriteGuard<'a, ()>,
+}
+
+impl DrainGate {
+    fn new() -> Self {
+        Self {
+            lock: tokio::sync::RwLock::new(()),
+            active: std::sync::atomic::AtomicUsize::new(0),
+            draining: AtomicBool::new(false),
+            drained: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn read(&self) -> DrainShared<'_> {
+        // Announce before checking: a transition sets `draining` and then
+        // reads `active`, so one side always observes the other.
+        self.active.fetch_add(1, Ordering::SeqCst);
+        if !self.draining.load(Ordering::SeqCst) {
+            return DrainShared::Fast(self);
+        }
+        self.leave();
+        DrainShared::Queued(self.lock.read().await)
+    }
+
+    fn leave(&self) {
+        if self.active.fetch_sub(1, Ordering::SeqCst) == 1 && self.draining.load(Ordering::SeqCst) {
+            self.drained.notify_one();
+        }
+    }
+
+    async fn write(&self) -> DrainExclusive<'_> {
+        // The inner lock orders transitions and drains queued operations.
+        let lock = self.lock.write().await;
+        self.draining.store(true, Ordering::SeqCst);
+        // Owning the flag from here makes cancellation re-open the fast path.
+        let exclusive = DrainExclusive {
+            lifecycle: self,
+            _lock: lock,
+        };
+        loop {
+            let drained = self.drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
+            if self.active.load(Ordering::SeqCst) == 0 {
+                return exclusive;
+            }
+            drained.await;
+        }
+    }
+}
+
+impl Drop for DrainShared<'_> {
+    fn drop(&mut self) {
+        if let Self::Fast(lifecycle) = self {
+            lifecycle.leave();
+        }
+    }
+}
+
+impl Drop for DrainExclusive<'_> {
+    fn drop(&mut self) {
+        self.lifecycle.draining.store(false, Ordering::SeqCst);
+    }
+}
+
+struct StateGuard<'a> {
+    guard: MutexGuard<'a, RuntimeState>,
+    cell: &'a StateCell,
+    seen_namespace: *const Namespace,
+    seen_locked_reads: bool,
+}
+
+impl std::ops::Deref for StateGuard<'_> {
+    type Target = RuntimeState;
+    fn deref(&self) -> &RuntimeState {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut RuntimeState {
+        &mut self.guard
+    }
+}
+
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        // Still under the mutex, so mirrors are published in commit order.
+        // Raise the flag before swapping and lower it after, so a reader
+        // never pairs a cleared flag with a namespace that still needs it.
+        let locked_reads = self.guard.needs_locked_reads();
+        if locked_reads && !self.seen_locked_reads {
+            self.cell.locked_reads.store(true, Ordering::Release);
+        }
+        if !std::ptr::eq(Arc::as_ptr(&self.guard.namespace), self.seen_namespace) {
+            self.cell.published.store(Arc::clone(&self.guard.namespace));
+        }
+        if !locked_reads && self.seen_locked_reads {
+            self.cell.locked_reads.store(false, Ordering::Release);
+        }
+    }
+}
+
+impl RuntimeState {
+    fn needs_locked_reads(&self) -> bool {
+        self.failure.is_some() || self.closed || !self.selected_inodes.is_empty()
+    }
+}
+
 fn retain_open_detached(state: &mut RuntimeState, next: &Namespace) {
     let detached: Vec<_> = state
         .open_refs
@@ -412,12 +587,12 @@ struct MutationRunnerGuard<'a> {
 /// outcome unknown. Preserve that uncertainty even when the caller cancels
 /// before the provider returns or the local state records its acknowledgement.
 struct PublicationGuard<'a> {
-    state: &'a Mutex<RuntimeState>,
+    state: &'a StateCell,
     active: bool,
 }
 
 impl<'a> PublicationGuard<'a> {
-    fn new(state: &'a Mutex<RuntimeState>) -> Self {
+    fn new(state: &'a StateCell) -> Self {
         Self {
             state,
             active: true,
@@ -448,13 +623,13 @@ impl Drop for PublicationGuard<'_> {
 /// it. A follower may be canceled after the one-shot send and before polling
 /// its queued response; that dropped caller must preserve the uncertain result.
 struct MutationAcknowledgementGuard<'a> {
-    state: &'a Mutex<RuntimeState>,
+    state: &'a StateCell,
     committed: Arc<AtomicBool>,
     observed: bool,
 }
 
 impl<'a> MutationAcknowledgementGuard<'a> {
-    fn new(state: &'a Mutex<RuntimeState>, committed: Arc<AtomicBool>) -> Self {
+    fn new(state: &'a StateCell, committed: Arc<AtomicBool>) -> Self {
         Self {
             state,
             committed,
@@ -615,8 +790,8 @@ where
     delegation_draining: AtomicBool,
     options: ChunkedOptions,
     gate: AsyncGate,
-    lifecycle: tokio::sync::RwLock<()>,
-    state: Mutex<RuntimeState>,
+    lifecycle: DrainGate,
+    state: StateCell,
     lease: Mutex<Option<WriterLease>>,
     lease_gate: AsyncGate,
     lease_renewed: AtomicBool,
@@ -624,6 +799,8 @@ where
     /// no provider round trip (expiry minus the renewal margin). Zero means
     /// "take the serialized path". Written only while `lease` is updated.
     lease_cached_until_ms: std::sync::atomic::AtomicU64,
+    /// Fence of the lease `lease_cached_until_ms` vouches for; zero if none.
+    lease_fence: std::sync::atomic::AtomicU64,
     preparing_mutations: Arc<AtomicUsize>,
     mutations: Mutex<MutationQueue>,
     /// Optional idle-owner heartbeat; aborted under `lease_gate` on shutdown.
@@ -771,8 +948,8 @@ where
                 delegation_draining: AtomicBool::new(false),
                 options,
                 gate: AsyncGate::new(),
-                lifecycle: tokio::sync::RwLock::new(()),
-                state: Mutex::new(RuntimeState {
+                lifecycle: DrainGate::new(),
+                state: StateCell::new(RuntimeState {
                     inode_revisions: BTreeMap::new(),
                     selected_inodes: HashMap::new(),
                     namespace: Arc::new(namespace),
@@ -790,6 +967,7 @@ where
                 lease_gate: AsyncGate::new(),
                 lease_renewed: AtomicBool::new(false),
                 lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
+                lease_fence: std::sync::atomic::AtomicU64::new(0),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: Mutex::new(MutationQueue::new()),
                 lease_worker: Mutex::new(None),
@@ -1340,8 +1518,8 @@ where
                         delegation_draining: AtomicBool::new(false),
                         options,
                         gate: AsyncGate::new(),
-                        lifecycle: tokio::sync::RwLock::new(()),
-                        state: Mutex::new(RuntimeState {
+                        lifecycle: DrainGate::new(),
+                        state: StateCell::new(RuntimeState {
                             inode_revisions,
                             selected_inodes: HashMap::new(),
                             namespace: Arc::new(namespace),
@@ -1359,6 +1537,7 @@ where
                         lease_gate: AsyncGate::new(),
                         lease_renewed: AtomicBool::new(false),
                         lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
+                        lease_fence: std::sync::atomic::AtomicU64::new(0),
                         preparing_mutations: Arc::new(AtomicUsize::new(0)),
                         mutations: Mutex::new(MutationQueue::new()),
                         lease_worker: Mutex::new(None),
@@ -1426,8 +1605,8 @@ where
                 delegation_draining: AtomicBool::new(false),
                 options,
                 gate: AsyncGate::new(),
-                lifecycle: tokio::sync::RwLock::new(()),
-                state: Mutex::new(RuntimeState {
+                lifecycle: DrainGate::new(),
+                state: StateCell::new(RuntimeState {
                     inode_revisions: BTreeMap::new(),
                     selected_inodes: HashMap::new(),
                     namespace: Arc::new(namespace.clone()),
@@ -1445,6 +1624,7 @@ where
                 lease_gate: AsyncGate::new(),
                 lease_renewed: AtomicBool::new(false),
                 lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
+                lease_fence: std::sync::atomic::AtomicU64::new(0),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: Mutex::new(MutationQueue::new()),
                 lease_worker: Mutex::new(None),
@@ -1524,6 +1704,13 @@ where
         // behind a publication holding the lease gate while the cached lease
         // is still valid.
         self.read_lease(false).await?;
+        if !self.inner.state.locked_reads.load(Ordering::Acquire) {
+            // Zero is never a granted fence; it marks "no cached lease".
+            let fence = self.inner.lease_fence.load(Ordering::Acquire);
+            if fence != 0 && self.lease_is_cached() {
+                return Ok(fence);
+            }
+        }
         {
             let state = self.lock_state()?;
             if let Some(error) = &state.failure {
@@ -1718,7 +1905,7 @@ where
             .unwrap_or(true)
     }
 
-    fn lock_state(&self) -> Result<MutexGuard<'_, RuntimeState>> {
+    fn lock_state(&self) -> Result<StateGuard<'_>> {
         self.inner
             .state
             .lock()
@@ -2462,9 +2649,19 @@ where
         let margin = self.inner.options.lease_ttl.min(LEASE_RENEWAL_MARGIN);
         let margin_ms = u64::try_from(margin.as_millis()).unwrap_or(u64::MAX);
         let deadline = lease.map_or(0, |lease| lease.expires_at_ms.saturating_sub(margin_ms));
+        // Publish the fence before the deadline that vouches for it, and
+        // withdraw the deadline first. Only an expired lease is reacquired
+        // with a new fence, so a reader never pairs a live deadline with a
+        // fence this owner did not hold at that time.
+        if let Some(lease) = lease {
+            self.inner.lease_fence.store(lease.fence, Ordering::Release);
+        }
         self.inner
             .lease_cached_until_ms
             .store(deadline, Ordering::Release);
+        if lease.is_none() {
+            self.inner.lease_fence.store(0, Ordering::Release);
+        }
     }
 
     /// Exactly the cached-lease predicate of `renew_lease_inner(false)`, as
@@ -2504,6 +2701,9 @@ where
     /// copied. Pending read atimes are not folded in: callers that return
     /// stats overlay them with `overlay_atime`.
     fn read_view(&self) -> Result<Arc<Namespace>> {
+        if let Some(namespace) = self.inner.state.shared() {
+            return Ok(namespace);
+        }
         self.read_view_at_revision().map(|(namespace, _)| namespace)
     }
 
@@ -3560,7 +3760,21 @@ where
         position: u64,
     ) -> Result<usize> {
         self.read_lease(false).await?;
-        let (layout, orphan, size) = {
+        let shared = self.inner.state.shared().and_then(|namespace| {
+            let size = match namespace.nodes.get(&inode) {
+                Some(node) if matches!(node.data, NodeData::File(_)) => node.stats.size,
+                // Orphans and non-files are classified under the mutex.
+                _ => return None,
+            };
+            Some((
+                ReadLayoutSnapshot::SharedNamespace { namespace, inode },
+                false,
+                size,
+            ))
+        });
+        let (layout, orphan, size) = if let Some(shared) = shared {
+            shared
+        } else {
             let state = self.lock_state()?;
             if let Some(error) = &state.failure {
                 return Err(error.clone());
@@ -4278,11 +4492,8 @@ where
                 fd,
                 flags,
                 generation: self.inner.delegation_generation.load(Ordering::SeqCst),
-                state: Mutex::new(HandleState {
-                    position: 0,
-                    closed: false,
-                }),
-                gate: tokio::sync::RwLock::new(()),
+                state: HandleState::new(),
+                gate: DrainGate::new(),
             }),
             PathIdentity { dev: 0, ino: inode },
         )))
@@ -4379,6 +4590,15 @@ where
     }
 
     fn stat_inode(&self, inode: InodeId, syscall: &str, path: &str) -> Result<Stats> {
+        // A linked inode is answered from the lock-free snapshot; orphans and
+        // any failed or closed runtime take the mutex below.
+        if let Some(namespace) = self.inner.state.shared()
+            && let Some(node) = namespace.nodes.get(&inode)
+        {
+            let mut stats = node.stats.clone();
+            self.overlay_atime(inode, &mut stats)?;
+            return Ok(stats);
+        }
         let state = self.lock_state()?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
@@ -4785,11 +5005,8 @@ where
                     fd,
                     flags,
                     generation: self.inner.delegation_generation.load(Ordering::SeqCst),
-                    state: Mutex::new(HandleState {
-                        position: 0,
-                        closed: false,
-                    }),
-                    gate: tokio::sync::RwLock::new(()),
+                    state: HandleState::new(),
+                    gate: DrainGate::new(),
                 }),
                 PathIdentity { dev: 0, ino: inode },
             ));
@@ -4820,16 +5037,31 @@ where
     fd: u64,
     flags: OpenFlags,
     generation: u64,
-    state: Mutex<HandleState>,
+    state: HandleState,
     /// Cursor, mutation and close operations are exclusive. Positional reads
     /// share it: they neither move the cursor nor change the inode, so reads
     /// on one handle overlap while close still waits for them.
-    gate: tokio::sync::RwLock<()>,
+    gate: DrainGate,
 }
 
+/// Cursor and lifecycle of one open handle. Writers of either field hold the
+/// handle gate exclusively; positional reads only load `closed`.
 struct HandleState {
-    position: u64,
-    closed: bool,
+    position: std::sync::atomic::AtomicU64,
+    closed: AtomicBool,
+}
+
+impl HandleState {
+    fn new() -> Self {
+        Self {
+            position: std::sync::atomic::AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
 }
 
 impl<M, B> ChunkedHandle<M, B>
@@ -4837,12 +5069,6 @@ where
     M: MetadataStore + 'static,
     B: BlockStore + 'static,
 {
-    fn lock_state(&self) -> Result<MutexGuard<'_, HandleState>> {
-        self.state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("handle state lock poisoned"))
-    }
-
     fn check_generation(&self, syscall: &str) -> Result<()> {
         if self.filesystem.inner.options.delegated
             && self.generation
@@ -4859,11 +5085,10 @@ where
 
     fn check_open(&self, write: bool, syscall: &str) -> Result<u64> {
         self.check_generation(syscall)?;
-        let state = self.lock_state()?;
-        if state.closed || (write && !self.flags.write) || (!write && !self.flags.read) {
+        if self.state.is_closed() || (write && !self.flags.write) || (!write && !self.flags.read) {
             return Err(error_with_path(ErrorCode::Ebadf, syscall, &self.path));
         }
-        Ok(state.position)
+        Ok(self.state.position.load(Ordering::Acquire))
     }
 }
 
@@ -4900,7 +5125,7 @@ where
                         .map_err(|_| error_with_path(ErrorCode::Efbig, "read", &self.path))?,
                 )
                 .ok_or_else(|| error_with_path(ErrorCode::Efbig, "read", &self.path))?;
-            self.lock_state()?.position = next;
+            self.state.position.store(next, Ordering::Release);
         }
         Ok(count)
     }
@@ -4919,17 +5144,14 @@ where
             )
             .await?;
         if position.is_none() || self.flags.append {
-            self.lock_state()?.position = end;
+            self.state.position.store(end, Ordering::Release);
         }
         Ok(count)
     }
 
     async fn stat(&self) -> Result<Stats> {
         self.check_generation("fstat")?;
-        let closed = {
-            let state = self.lock_state()?;
-            state.closed
-        };
+        let closed = self.state.is_closed();
         if closed {
             return Err(error_with_path(ErrorCode::Ebadf, "fstat", &self.path));
         }
@@ -4955,10 +5177,7 @@ where
     async fn sync(&self) -> Result<()> {
         self.check_generation("fsync")?;
         let _gate = self.gate.write().await;
-        let closed = {
-            let state = self.lock_state()?;
-            state.closed
-        };
+        let closed = self.state.is_closed();
         if closed {
             return Err(error_with_path(ErrorCode::Ebadf, "fsync", &self.path));
         }
@@ -4968,10 +5187,7 @@ where
     async fn datasync(&self) -> Result<()> {
         self.check_generation("fdatasync")?;
         let _gate = self.gate.write().await;
-        let closed = {
-            let state = self.lock_state()?;
-            state.closed
-        };
+        let closed = self.state.is_closed();
         if closed {
             return Err(error_with_path(ErrorCode::Ebadf, "fdatasync", &self.path));
         }
@@ -4986,8 +5202,7 @@ where
             // Decide and release under one state lock so the common close
             // never waits behind a publication.
             let mut filesystem = self.filesystem.lock_state()?;
-            let mut state = self.lock_state()?;
-            if state.closed {
+            if self.state.is_closed() {
                 return Ok(());
             }
             let last = filesystem.open_refs.get(&self.inode).copied().unwrap_or(0) <= 1;
@@ -5001,7 +5216,7 @@ where
                         .get(&self.inode)
                         .is_some_and(|node| node.stats.nlink == 0));
             if !reaps {
-                state.closed = true;
+                self.state.closed.store(true, Ordering::Release);
                 if last {
                     filesystem.open_refs.remove(&self.inode);
                     filesystem.orphans.remove(&self.inode);
@@ -5015,11 +5230,10 @@ where
         // is canceled while waiting for either gate, a later close can retry.
         let _filesystem_gate = self.filesystem.inner.gate.lock().await;
         {
-            let mut state = self.lock_state()?;
-            if state.closed {
+            if self.state.is_closed() {
                 return Ok(());
             }
-            state.closed = true;
+            self.state.closed.store(true, Ordering::Release);
         }
         self.filesystem.close_inode_after_gate(self.inode).await
     }
@@ -7701,8 +7915,8 @@ mod tests {
         *blocks.before_get.lock().expect("block get hook") = Some(Box::new(move || {
             assert_eq!(
                 during_get.strong_count(),
-                2,
-                "state and in-flight read own metadata"
+                3,
+                "state, its lock-free mirror and the in-flight read own metadata"
             );
             remote
                 .apply_revision(revision, next)
@@ -8818,6 +9032,43 @@ mod tests {
         block_on(heartbeat).expect("heartbeat renews after the commit");
         assert!(block_on(fs.stat("/directory")).unwrap().is_directory());
         block_on(fs.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_transitions_drain_admitted_operations_and_queue_new_ones() {
+        let lifecycle = DrainGate::new();
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+
+        let admitted = block_on(lifecycle.read());
+        assert!(matches!(admitted, DrainShared::Fast(_)));
+        let mut transition = Box::pin(lifecycle.write());
+        assert!(transition.as_mut().poll(&mut context).is_pending());
+        // An operation arriving during the drain waits for the transition.
+        let mut late = Box::pin(lifecycle.read());
+        assert!(late.as_mut().poll(&mut context).is_pending());
+        drop(admitted);
+        let Poll::Ready(exclusive) = transition.as_mut().poll(&mut context) else {
+            panic!("transition must start once admitted operations finish");
+        };
+        assert!(late.as_mut().poll(&mut context).is_pending());
+        drop(exclusive);
+        let Poll::Ready(queued) = late.as_mut().poll(&mut context) else {
+            panic!("queued operation must run after the transition");
+        };
+        assert!(matches!(queued, DrainShared::Queued(_)));
+        drop(queued);
+        drop(transition);
+
+        // A cancelled transition re-opens the uncontended path.
+        let admitted = block_on(lifecycle.read());
+        let mut cancelled = Box::pin(lifecycle.write());
+        assert!(cancelled.as_mut().poll(&mut context).is_pending());
+        drop(cancelled);
+        assert!(matches!(block_on(lifecycle.read()), DrainShared::Fast(_)));
+        drop(admitted);
+        assert_eq!(lifecycle.active.load(Ordering::SeqCst), 0);
+        drop(block_on(lifecycle.write()));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use mount_rs_sdk::Filesystem;
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex as TableMutex,
+        Arc, RwLock as TableLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -25,7 +25,7 @@ struct State {
 // reservation synchronously; no cleanup task or runtime is needed for an open
 // that has not returned a handle.
 struct PendingOpen<'a> {
-    state: &'a TableMutex<State>,
+    state: &'a TableLock<State>,
     id: u64,
     handle: tokio::sync::OwnedRwLockWriteGuard<Option<Arc<dyn FileHandle>>>,
     committed: bool,
@@ -33,7 +33,7 @@ struct PendingOpen<'a> {
 impl Drop for PendingOpen<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            self.state.lock().unwrap().handles.remove(&self.id);
+            self.state.write().unwrap().handles.remove(&self.id);
         }
     }
 }
@@ -47,7 +47,7 @@ pub struct OwnedHandleSession {
     limit: usize,
     closing: AtomicBool,
     path_operations: tokio::sync::RwLock<()>,
-    state: TableMutex<State>,
+    state: TableLock<State>,
 }
 
 fn error(code: ErrorCode, syscall: &str) -> FsError {
@@ -66,7 +66,7 @@ impl OwnedHandleSession {
             limit,
             closing: AtomicBool::new(false),
             path_operations: tokio::sync::RwLock::new(()),
-            state: TableMutex::new(State {
+            state: TableLock::new(State {
                 next: 1,
                 handles: BTreeMap::new(),
             }),
@@ -114,7 +114,7 @@ impl OwnedHandleSession {
     ) -> Result<u64> {
         self.check("open").await?;
         let mut pending = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.write().unwrap();
             // Serialize admission with close's table snapshot.
             if self.closing.load(Ordering::Acquire) {
                 return Err(error(ErrorCode::Ebadf, "open"));
@@ -151,8 +151,9 @@ impl OwnedHandleSession {
     }
 
     async fn entry(&self, id: u64) -> Result<Entry> {
+        // Lookups share the table: only open, close and cleanup change it.
         self.state
-            .lock()
+            .read()
             .unwrap()
             .handles
             .get(&id)
@@ -240,7 +241,7 @@ impl OwnedHandleSession {
                 *entry = None;
             }
         }
-        self.state.lock().unwrap().handles.remove(&id);
+        self.state.write().unwrap().handles.remove(&id);
         Ok(())
     }
 
@@ -251,7 +252,7 @@ impl OwnedHandleSession {
         let _paths_drained = self.path_operations.write().await;
         let entries: Vec<_> = self
             .state
-            .lock()
+            .read()
             .unwrap()
             .handles
             .values()
@@ -272,7 +273,7 @@ impl OwnedHandleSession {
         if let Some(error) = failure {
             return Err(error);
         }
-        self.state.lock().unwrap().handles.clear();
+        self.state.write().unwrap().handles.clear();
         Ok(())
     }
 }
@@ -452,7 +453,7 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(task.await.unwrap().unwrap_err().code, ErrorCode::Ebadf);
         drain.await.unwrap().unwrap();
-        assert!(session.state.lock().unwrap().handles.is_empty());
+        assert!(session.state.read().unwrap().handles.is_empty());
         fs.shutdown().await.unwrap();
     }
 
@@ -716,7 +717,7 @@ mod tests {
         drop(in_flight);
         assert_eq!(session.stat(id).await.unwrap_err().code, ErrorCode::Ebadf);
         session.close().await.unwrap();
-        assert!(session.state.lock().unwrap().handles.is_empty());
+        assert!(session.state.read().unwrap().handles.is_empty());
         fs.shutdown().await.unwrap();
     }
 

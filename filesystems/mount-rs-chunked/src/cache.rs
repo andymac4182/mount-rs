@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use mount_rs_core::Result;
 use mount_rs_core::storage::{BlockId, BlockStore};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard, Weak};
 use tokio::sync::{Mutex, RwLock};
 
 /// Byte and entry bounds both apply. Zero for either bound disables caching.
@@ -18,14 +19,17 @@ use tokio::sync::{Mutex, RwLock};
 /// Oversized blocks are not retained and therefore cannot share completed data.
 /// Cache misses can overlap immutable puts and flushes. Puts and flushes
 /// serialize with each other; deletion and clearing exclude all backing I/O
-/// to prevent stale repopulation. Hits do not wait for backing I/O.
+/// to prevent stale repopulation. Hits do not wait for backing I/O, and they
+/// share the cache index: a hit records its recency in the entry itself, so
+/// concurrent hits never exclude each other. The LRU order is re-linked lazily
+/// by the writers that need it (insertion and eviction).
 /// Use one wrapper per volume, shared by Arc.
 /// This is RAM caching, not a persistent disk cache.
 pub struct CachedBlockStore<B: ?Sized> {
     backing: Arc<B>,
     max_bytes: usize,
     max_entries: usize,
-    state: Arc<Mutex<State>>,
+    state: Arc<std::sync::RwLock<State>>,
     io_gate: Arc<RwLock<()>>,
     write_gate: Arc<Mutex<()>>,
 }
@@ -58,21 +62,34 @@ pub struct BlockCacheStats {
     pub backing_get_nanoseconds: u64,
 }
 
+struct Entry {
+    bytes: Arc<Vec<u8>>,
+    /// Key under which `recency` currently links this entry. Writers only.
+    linked: u64,
+    /// Sequence of the latest use. Hits advance it under the shared lock.
+    used: AtomicU64,
+}
+
 #[derive(Default)]
 struct State {
     fills: BTreeMap<BlockId, Weak<Mutex<()>>>,
-    entries: BTreeMap<BlockId, (Arc<Vec<u8>>, u64)>,
+    entries: BTreeMap<BlockId, Entry>,
+    /// Eviction order. A key may trail its entry's `used` sequence; eviction
+    /// re-links such entries before choosing a victim, which keeps the order
+    /// exact without making hits write to this map.
     recency: BTreeMap<u64, BlockId>,
-    sequence: u64,
+    sequence: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
     stats: BlockCacheStats,
 }
 impl State {
     fn remove(&mut self, id: &BlockId) -> Option<Arc<Vec<u8>>> {
-        if let Some((bytes, sequence)) = self.entries.remove(id) {
-            self.recency.remove(&sequence);
-            self.stats.resident_bytes -= bytes.len();
+        if let Some(entry) = self.entries.remove(id) {
+            self.recency.remove(&entry.linked);
+            self.stats.resident_bytes -= entry.bytes.len();
             self.stats.resident_entries -= 1;
-            return Some(bytes);
+            return Some(entry.bytes);
         }
         None
     }
@@ -81,26 +98,44 @@ impl State {
         self.recency.clear();
         self.stats.resident_bytes = 0;
         self.stats.resident_entries = 0;
-        self.sequence = 0;
+        *self.sequence.get_mut() = 0;
     }
-    fn next_sequence(&mut self) -> u64 {
-        if self.sequence == u64::MAX {
-            self.clear();
+    fn next_sequence(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::Relaxed) + 1
+    }
+    fn stats(&self) -> BlockCacheStats {
+        BlockCacheStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            ..self.stats
         }
-        self.sequence += 1;
-        self.sequence
     }
-    fn get(&mut self, id: &BlockId, count_hit: bool) -> Option<Arc<Vec<u8>>> {
-        // Allocate the timestamp first, so rollover cannot invalidate a borrow.
-        let sequence = self.next_sequence();
-        let (bytes, old) = self.entries.get_mut(id)?;
-        self.recency.remove(old);
-        *old = sequence;
-        self.recency.insert(sequence, id.clone());
+    /// Shared-lock lookup. Recency is recorded in the entry, not the index.
+    fn get(&self, id: &BlockId, count_hit: bool) -> Option<Arc<Vec<u8>>> {
+        let entry = self.entries.get(id)?;
+        entry.used.store(self.next_sequence(), Ordering::Relaxed);
         if count_hit {
-            self.stats.hits = self.stats.hits.saturating_add(1);
+            self.hits.fetch_add(1, Ordering::Relaxed);
         }
-        Some(bytes.clone())
+        Some(entry.bytes.clone())
+    }
+    /// Removes the least recently used entry, first re-linking entries whose
+    /// recorded use is newer than their position in the eviction order.
+    fn evict_oldest(&mut self) -> Option<Arc<Vec<u8>>> {
+        loop {
+            let (key, id) = self.recency.pop_first()?;
+            let entry = self.entries.get_mut(&id)?;
+            let used = *entry.used.get_mut();
+            if used != key {
+                entry.linked = used;
+                self.recency.insert(used, id);
+                continue;
+            }
+            let entry = self.entries.remove(&id)?;
+            self.stats.resident_bytes -= entry.bytes.len();
+            self.stats.resident_entries -= 1;
+            return Some(entry.bytes);
+        }
     }
     fn insert(
         &mut self,
@@ -112,23 +147,33 @@ impl State {
         if max_entries == 0 || max_bytes == 0 || bytes.len() > max_bytes {
             return vec![bytes];
         }
+        // Sequences only order entries, so restarting them needs an empty cache.
+        if *self.sequence.get_mut() >= u64::MAX / 2 {
+            self.clear();
+        }
         let sequence = self.next_sequence();
         let mut retired = Vec::new();
         retired.extend(self.remove(&id));
         while self.stats.resident_entries >= max_entries
             || self.stats.resident_bytes > max_bytes - bytes.len()
         {
-            let Some((_, oldest)) = self.recency.first_key_value() else {
+            let Some(oldest) = self.evict_oldest() else {
                 break;
             };
-            let oldest = oldest.clone();
-            retired.extend(self.remove(&oldest));
+            retired.push(oldest);
             self.stats.evictions = self.stats.evictions.saturating_add(1);
         }
         self.stats.resident_bytes += bytes.len();
         self.stats.resident_entries += 1;
         self.recency.insert(sequence, id.clone());
-        self.entries.insert(id, (bytes, sequence));
+        self.entries.insert(
+            id,
+            Entry {
+                bytes,
+                linked: sequence,
+                used: AtomicU64::new(sequence),
+            },
+        );
         retired
     }
 }
@@ -143,7 +188,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             backing,
             max_bytes,
             max_entries,
-            state: Arc::new(Mutex::new(State::default())),
+            state: Arc::new(std::sync::RwLock::new(State::default())),
             io_gate: Arc::new(RwLock::new(())),
             write_gate: Arc::new(Mutex::new(())),
         }
@@ -153,13 +198,25 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             .then(|| Arc::new(bytes.to_vec()))
     }
     pub async fn stats(&self) -> BlockCacheStats {
-        self.state.lock().await.stats
+        self.read_state().stats()
     }
-    async fn lookup(&self, id: &BlockId) -> Option<Arc<Vec<u8>>> {
-        let mut state = self.state.lock().await;
+    // The index lock is never held across an await: every critical section
+    // is a bounded in-memory update, and hits only share it.
+    fn read_state(&self) -> RwLockReadGuard<'_, State> {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn write_state(&self) -> RwLockWriteGuard<'_, State> {
+        self.state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn lookup(&self, id: &BlockId) -> Option<Arc<Vec<u8>>> {
+        let state = self.read_state();
         let cached = state.get(id, true);
         if cached.is_none() {
-            state.stats.misses = state.stats.misses.saturating_add(1);
+            state.misses.fetch_add(1, Ordering::Relaxed);
         }
         cached
     }
@@ -170,7 +227,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
         // alive; each miss prunes keys whose fills have completed.
         // Cancellation releases the mutex so a waiter can retry the provider.
         let fill = if self.max_bytes != 0 && self.max_entries != 0 {
-            let mut state = self.state.lock().await;
+            let mut state = self.write_state();
             state.fills.retain(|_, fill| fill.strong_count() != 0);
             if let Some(fill) = state.fills.get(id).and_then(Weak::upgrade) {
                 Some(fill)
@@ -187,7 +244,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             None => None,
         };
         // Another miss or put may have populated this entry while we waited.
-        let cached = { self.state.lock().await.get(id, false) };
+        let cached = self.read_state().get(id, false);
         if let Some(bytes) = cached {
             return Ok(bytes.as_ref().clone());
         }
@@ -198,7 +255,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             .as_ref()
             .ok()
             .and_then(|bytes| self.prepare_entry(bytes));
-        let mut state = self.state.lock().await;
+        let mut state = self.write_state();
         state.stats.backing_gets_completed = state.stats.backing_gets_completed.saturating_add(1);
         state.stats.backing_get_nanoseconds =
             state.stats.backing_get_nanoseconds.saturating_add(elapsed);
@@ -224,7 +281,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
     pub async fn clear(&self) {
         let _io = self.io_gate.write().await;
         let retired = {
-            let mut state = self.state.lock().await;
+            let mut state = self.write_state();
             let retired = (
                 std::mem::take(&mut state.entries),
                 std::mem::take(&mut state.recency),
@@ -251,12 +308,9 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
         drop(_write);
         // Allocate/copy before taking the shared cache-state lock.
         if let Some(cached) = self.prepare_entry(bytes) {
-            let retired = self.state.lock().await.insert(
-                id.clone(),
-                cached,
-                self.max_bytes,
-                self.max_entries,
-            );
+            let retired =
+                self.write_state()
+                    .insert(id.clone(), cached, self.max_bytes, self.max_entries);
             drop(retired);
         }
         Ok(id)
@@ -264,14 +318,14 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
         // Clone only the shared pointer under the cache lock. Potentially large
         // caller-owned byte copies must not serialize other cache hits.
-        if let Some(bytes) = self.lookup(id).await {
+        if let Some(bytes) = self.lookup(id) {
             return Ok(bytes.as_ref().clone());
         }
         self.fill(id).await
     }
     async fn read_into(&self, id: &BlockId, offset: usize, buffer: &mut [u8]) -> Result<()> {
         // A hit copies only the requested range out of the shared block.
-        if let Some(bytes) = self.lookup(id).await {
+        if let Some(bytes) = self.lookup(id) {
             return mount_rs_core::storage::copy_block_range(&bytes, offset, buffer);
         }
         let bytes = self.fill(id).await?;
@@ -286,7 +340,7 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
         let _io = self.io_gate.write().await;
         // No miss/put can repopulate while this operation owns the I/O gate.
         // Evict before awaiting, including for cancellation/unknown outcomes.
-        let retired = self.state.lock().await.remove(id);
+        let retired = self.write_state().remove(id);
         drop(retired);
         self.backing.delete(id).await
     }
@@ -355,14 +409,14 @@ mod tests {
         assert!(weak.upgrade().is_some());
         drop(retired);
         assert!(weak.upgrade().is_none());
-        let old = Arc::downgrade(&state.entries[&second].0);
+        let old = Arc::downgrade(&state.entries[&second].bytes);
         let retired = state.insert(second.clone(), Arc::new(vec![3; 4]), 16, 1);
         assert_eq!(state.stats.resident_bytes, 4);
         assert_eq!(state.stats.evictions, 1);
         assert!(old.upgrade().is_some());
         drop(retired);
         assert!(old.upgrade().is_none());
-        let old = Arc::downgrade(&state.entries[&second].0);
+        let old = Arc::downgrade(&state.entries[&second].bytes);
         let retired = state.remove(&second);
         assert_eq!(state.stats.resident_entries, 0);
         assert_eq!(state.stats.resident_bytes, 0);
@@ -729,9 +783,7 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 loop {
                     if cache
-                        .state
-                        .lock()
-                        .await
+                        .read_state()
                         .fills
                         .get(&id)
                         .is_some_and(|fill| fill.strong_count() == 20)
