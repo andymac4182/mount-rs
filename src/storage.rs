@@ -1254,6 +1254,18 @@ pub trait MetadataStore: Send + Sync {
     async fn flush(&self) -> Result<()>;
 }
 
+/// Copy `buffer.len()` bytes of an immutable block starting at `offset`.
+pub fn copy_block_range(block: &[u8], offset: usize, buffer: &mut [u8]) -> Result<()> {
+    let source = offset
+        .checked_add(buffer.len())
+        .and_then(|end| block.get(offset..end))
+        .ok_or_else(|| {
+            FsError::new(ErrorCode::Eio).with_message("block extent exceeds immutable block length")
+        })?;
+    buffer.copy_from_slice(source);
+    Ok(())
+}
+
 #[async_trait]
 pub trait BlockStore: Send + Sync {
     fn durable(&self) -> bool;
@@ -1273,6 +1285,14 @@ pub trait BlockStore: Send + Sync {
     /// bytes. No caller can overwrite data referenced by an older layout.
     async fn put(&self, bytes: &[u8]) -> Result<BlockId>;
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>>;
+    /// Fill `buffer` from block `id` starting at byte `offset`, failing with
+    /// `EIO` when the range is outside the immutable block. The default
+    /// fetches the whole block; stores that already hold the bytes override
+    /// it so a small read does not allocate and copy an entire chunk.
+    async fn read_into(&self, id: &BlockId, offset: usize, buffer: &mut [u8]) -> Result<()> {
+        let bytes = self.get(id).await?;
+        copy_block_range(&bytes, offset, buffer)
+    }
     /// Barrier covering prior successful puts before metadata publication.
     async fn flush(&self) -> Result<()>;
     /// Only the coordinator may reclaim blocks proven unreachable from every

@@ -597,6 +597,19 @@ impl BlockStore for MemoryBlockStore {
         Ok(bytes.as_ref().clone())
     }
 
+    async fn read_into(&self, id: &BlockId, offset: usize, buffer: &mut [u8]) -> Result<()> {
+        let bytes = {
+            let blocks = self.blocks.read().map_err(|_| {
+                FsError::new(ErrorCode::Eio).with_message("block store lock poisoned")
+            })?;
+            blocks
+                .get(id)
+                .cloned()
+                .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_message("block not found"))?
+        };
+        mount_rs_core::storage::copy_block_range(&bytes, offset, buffer)
+    }
+
     async fn flush(&self) -> Result<()> {
         Ok(())
     }

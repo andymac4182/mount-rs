@@ -330,7 +330,8 @@ pub struct SplitRuntimeOptions {
     pub lease_ttl: Duration,
     pub atime_policy: mount_rs_chunked::AtimePolicy,
     /// Idle-owner heartbeat window; zero disables the heartbeat. Must be at
-    /// least 20 ms and at most a quarter of `lease_ttl`.
+    /// least 20 ms and at most a quarter of `lease_ttl`. While set, stats use
+    /// the cached lease like reads; zero keeps a provider check per stat.
     pub read_lease_cache_window: Duration,
     pub block_cache: Option<BlockCacheOptions>,
     /// Concurrent block gets per read. Only 1 (sequential) is supported.

@@ -155,61 +155,16 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
     pub async fn stats(&self) -> BlockCacheStats {
         self.state.lock().await.stats
     }
-    /// Drops only cached copies; authoritative backing data is untouched.
-    pub async fn clear(&self) {
-        let _io = self.io_gate.write().await;
-        let retired = {
-            let mut state = self.state.lock().await;
-            let retired = (
-                std::mem::take(&mut state.entries),
-                std::mem::take(&mut state.recency),
-            );
-            state.clear();
-            retired
-        };
-        // Free potentially large buffers and tree nodes after releasing the
-        // state mutex. Keep I/O exclusion until invalidation is complete.
-        drop(retired);
-    }
-}
-#[async_trait]
-impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
-    fn durable(&self) -> bool {
-        self.backing.durable()
-    }
-    async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let _io = self.io_gate.read().await;
-        let _write = self.write_gate.lock().await;
-        let id = self.backing.put(bytes).await?;
-        // The durability-ordering gate protects backing put/flush, not cache
-        // allocation or publication. Deletion remains excluded by the I/O gate.
-        drop(_write);
-        // Allocate/copy before taking the shared cache-state lock.
-        if let Some(cached) = self.prepare_entry(bytes) {
-            let retired = self.state.lock().await.insert(
-                id.clone(),
-                cached,
-                self.max_bytes,
-                self.max_entries,
-            );
-            drop(retired);
+    async fn lookup(&self, id: &BlockId) -> Option<Arc<Vec<u8>>> {
+        let mut state = self.state.lock().await;
+        let cached = state.get(id, true);
+        if cached.is_none() {
+            state.stats.misses = state.stats.misses.saturating_add(1);
         }
-        Ok(id)
+        cached
     }
-    async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
-        let cached = {
-            let mut state = self.state.lock().await;
-            let cached = state.get(id, true);
-            if cached.is_none() {
-                state.stats.misses = state.stats.misses.saturating_add(1);
-            }
-            cached
-        };
-        // Clone only the shared pointer under the cache lock. Potentially large
-        // caller-owned byte copies must not serialize other cache hits.
-        if let Some(bytes) = cached {
-            return Ok(bytes.as_ref().clone());
-        }
+    /// Miss path: fetch from the backing store, sharing one fill per block.
+    async fn fill(&self, id: &BlockId) -> Result<Vec<u8>> {
         let _io = self.io_gate.read().await;
         // Share one fill per block. Weak entries cannot keep abandoned tasks
         // alive; each miss prunes keys whose fills have completed.
@@ -265,6 +220,63 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
         drop(retired);
         Ok(bytes)
     }
+    /// Drops only cached copies; authoritative backing data is untouched.
+    pub async fn clear(&self) {
+        let _io = self.io_gate.write().await;
+        let retired = {
+            let mut state = self.state.lock().await;
+            let retired = (
+                std::mem::take(&mut state.entries),
+                std::mem::take(&mut state.recency),
+            );
+            state.clear();
+            retired
+        };
+        // Free potentially large buffers and tree nodes after releasing the
+        // state mutex. Keep I/O exclusion until invalidation is complete.
+        drop(retired);
+    }
+}
+#[async_trait]
+impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
+    fn durable(&self) -> bool {
+        self.backing.durable()
+    }
+    async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
+        let _io = self.io_gate.read().await;
+        let _write = self.write_gate.lock().await;
+        let id = self.backing.put(bytes).await?;
+        // The durability-ordering gate protects backing put/flush, not cache
+        // allocation or publication. Deletion remains excluded by the I/O gate.
+        drop(_write);
+        // Allocate/copy before taking the shared cache-state lock.
+        if let Some(cached) = self.prepare_entry(bytes) {
+            let retired = self.state.lock().await.insert(
+                id.clone(),
+                cached,
+                self.max_bytes,
+                self.max_entries,
+            );
+            drop(retired);
+        }
+        Ok(id)
+    }
+    async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
+        // Clone only the shared pointer under the cache lock. Potentially large
+        // caller-owned byte copies must not serialize other cache hits.
+        if let Some(bytes) = self.lookup(id).await {
+            return Ok(bytes.as_ref().clone());
+        }
+        self.fill(id).await
+    }
+    async fn read_into(&self, id: &BlockId, offset: usize, buffer: &mut [u8]) -> Result<()> {
+        // A hit copies only the requested range out of the shared block.
+        if let Some(bytes) = self.lookup(id).await {
+            return mount_rs_core::storage::copy_block_range(&bytes, offset, buffer);
+        }
+        let bytes = self.fill(id).await?;
+        mount_rs_core::storage::copy_block_range(&bytes, offset, buffer)
+    }
     async fn flush(&self) -> Result<()> {
         let _io = self.io_gate.read().await;
         let _write = self.write_gate.lock().await;
@@ -294,6 +306,37 @@ mod tests {
         stall: Arc<AtomicBool>,
         entered: Arc<tokio::sync::Notify>,
         resume: Arc<tokio::sync::Notify>,
+    }
+
+    #[tokio::test]
+    async fn ranged_reads_copy_only_the_requested_bytes_on_hit_and_miss() {
+        let backing = MemoryBlockStore::new();
+        let id = backing.put(b"0123456789").await.unwrap();
+        let cache = CachedBlockStore::new(backing, 64, 4);
+        let mut bytes = [0; 4];
+        cache.read_into(&id, 3, &mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"3456");
+        let stats = cache.stats().await;
+        assert_eq!(
+            (stats.misses, stats.hits, stats.resident_entries),
+            (1, 0, 1)
+        );
+        cache.read_into(&id, 6, &mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"6789");
+        let stats = cache.stats().await;
+        assert_eq!((stats.misses, stats.hits), (1, 1));
+        assert_eq!(stats.backing_gets_completed, 1);
+        for offset in [7, usize::MAX] {
+            assert_eq!(
+                cache
+                    .read_into(&id, offset, &mut bytes)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Eio
+            );
+        }
+        cache.read_into(&id, 10, &mut []).await.unwrap();
     }
 
     #[tokio::test]
