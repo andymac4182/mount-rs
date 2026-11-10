@@ -13,8 +13,8 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -28,6 +28,8 @@ use mount_rs_core::storage::{
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError,
@@ -711,7 +713,7 @@ pub struct JsDirEntry {
 /// alive until garbage collection. The slot also makes post-shutdown calls
 /// fail closed with EBADF instead of dereferencing a released provider.
 struct DriverSlot {
-    driver: Mutex<Option<Arc<dyn FsDriver>>>,
+    driver: TurnCell<Option<Arc<dyn FsDriver>>>,
     capabilities: Capabilities,
     has_utimens: bool,
 }
@@ -721,7 +723,7 @@ impl DriverSlot {
         let capabilities = driver.capabilities();
         let has_utimens = driver.has_utimens();
         Self {
-            driver: Mutex::new(Some(driver)),
+            driver: TurnCell::new(Some(driver)),
             capabilities,
             has_utimens,
         }
@@ -740,11 +742,14 @@ impl DriverSlot {
     }
 
     fn clear(&self) -> CoreResult<()> {
-        let mut driver = self
+        // Take the provider out and let go of the slot before dropping it:
+        // the drop can close native connections.
+        let driver = self
             .driver
             .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("driver lock poisoned"))?;
-        driver.take();
+            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("driver lock poisoned"))?
+            .take();
+        drop(driver);
         Ok(())
     }
 }
@@ -3042,14 +3047,14 @@ pub struct FileHandle {
     // A closed core handle can still retain the native provider through its
     // filesystem field. Detach it after close so a retained JS wrapper does
     // not keep a process-scoped FoundationDB client guard alive until GC.
-    inner: Arc<Mutex<Option<Arc<dyn CoreFileHandle>>>>,
+    inner: Arc<TurnCell<Option<Arc<dyn CoreFileHandle>>>>,
 }
 
 #[napi]
 impl FileHandle {
     pub(crate) fn from_core(inner: Arc<dyn CoreFileHandle>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Some(inner))),
+            inner: Arc::new(TurnCell::new(Some(inner))),
         }
     }
 
@@ -3186,7 +3191,8 @@ impl FileHandle {
             return Ok(());
         };
         inner.close().await.map_err(to_js_error)?;
-        self.inner
+        let detached = self
+            .inner
             .lock()
             .map_err(|_| {
                 to_js_error(
@@ -3196,6 +3202,7 @@ impl FileHandle {
                 )
             })?
             .take();
+        drop(detached);
         Ok(())
     }
 }
@@ -3212,13 +3219,13 @@ struct ShutdownAttemptState {
 }
 
 struct ShutdownAttempt {
-    state: Mutex<ShutdownAttemptState>,
+    state: TurnCell<ShutdownAttemptState>,
 }
 
 impl ShutdownAttempt {
     fn new() -> Self {
         Self {
-            state: Mutex::new(ShutdownAttemptState {
+            state: TurnCell::new(ShutdownAttemptState {
                 result: None,
                 waiters: Vec::new(),
             }),
@@ -3227,10 +3234,7 @@ impl ShutdownAttempt {
 
     fn finish(&self, result: CoreResult<()>) {
         let waiters = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = self.state.lock_recovered();
             state.result = Some(result);
             std::mem::take(&mut state.waiters)
         };
@@ -3248,11 +3252,7 @@ impl Future for ShutdownWait {
     type Output = CoreResult<()>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self
-            .attempt
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.attempt.state.lock_recovered();
         match &state.result {
             Some(result) => Poll::Ready(result.clone()),
             None => {
@@ -3292,11 +3292,7 @@ impl ShutdownRunGuard {
 
     fn finish_error(&mut self, error: FsError) {
         let callback = self.callback.take();
-        let mut state = self
-            .lifecycle
-            .lifecycle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.lifecycle.lifecycle.lock_recovered();
         *state = ShutdownLifecycle::Open(callback);
         drop(state);
         self.completed = true;
@@ -3311,11 +3307,7 @@ impl ShutdownRunGuard {
         drop(self.callback.take());
         self.completed = true;
         self.attempt.finish(Ok(()));
-        let mut state = self
-            .lifecycle
-            .lifecycle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.lifecycle.lifecycle.lock_recovered();
         *state = ShutdownLifecycle::Closed;
     }
 }
@@ -3331,11 +3323,7 @@ impl Drop for ShutdownRunGuard {
         // guard still publishes a bounded error and restores the callback so
         // a later shutdown call can retry rather than hanging forever.
         let callback = self.callback.take();
-        let mut state = self
-            .lifecycle
-            .lifecycle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.lifecycle.lifecycle.lock_recovered();
         *state = ShutdownLifecycle::Open(callback);
         drop(state);
         self.attempt.finish(Err(shutdown_panic_error()));
@@ -3383,13 +3371,13 @@ enum ShutdownLifecycle {
 }
 
 struct ShutdownState {
-    lifecycle: Mutex<ShutdownLifecycle>,
+    lifecycle: TurnCell<ShutdownLifecycle>,
 }
 
 impl ShutdownState {
     fn new(callback: Option<Arc<ShutdownCallback>>) -> Self {
         Self {
-            lifecycle: Mutex::new(ShutdownLifecycle::Open(callback)),
+            lifecycle: TurnCell::new(ShutdownLifecycle::Open(callback)),
         }
     }
 }
@@ -3533,10 +3521,10 @@ async fn complete_inactive_delegation_mounts(state: &mut DelegatedNativeState) -
 pub struct Filesystem {
     driver: Arc<dyn FsDriver>,
     shutdown: Option<Arc<ShutdownCallback>>,
-    reconcile: Mutex<Option<Arc<ReconcileCallback>>>,
-    delegation: Mutex<Option<ChunkedFs<DynMetadataStore, DynBlockStore>>>,
+    reconcile: TurnCell<Option<Arc<ReconcileCallback>>>,
+    delegation: TurnCell<Option<ChunkedFs<DynMetadataStore, DynBlockStore>>>,
     delegated_ownership: bool,
-    native_delegation_mounts: Arc<tokio::sync::Mutex<DelegatedNativeState>>,
+    native_delegation_mounts: Arc<TurnLock<DelegatedNativeState>>,
 }
 
 #[napi]
@@ -3551,12 +3539,10 @@ impl Filesystem {
         Self {
             driver: slot,
             shutdown: Some(ShutdownController::callback(controller)),
-            reconcile: Mutex::new(reconcile),
-            delegation: Mutex::new(None),
+            reconcile: TurnCell::new(reconcile),
+            delegation: TurnCell::new(None),
             delegated_ownership: false,
-            native_delegation_mounts: Arc::new(tokio::sync::Mutex::new(
-                DelegatedNativeState::default(),
-            )),
+            native_delegation_mounts: Arc::new(TurnLock::new(DelegatedNativeState::default())),
         }
     }
 
@@ -3641,14 +3627,18 @@ impl Filesystem {
         // of DriverSlot. Detach it after the provider shutdown succeeds so
         // durable SQLite files can be removed immediately on Windows rather
         // than waiting for JavaScript garbage collection.
-        self.delegation
+        let delegation = self
+            .delegation
             .lock()
             .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
             .take();
-        self.reconcile
+        drop(delegation);
+        let reconcile = self
+            .reconcile
             .lock()
             .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
             .take();
+        drop(reconcile);
         Ok(())
     }
 
@@ -3663,7 +3653,7 @@ impl Filesystem {
 
     async fn unmounted_delegation_gate(
         &self,
-    ) -> napi::Result<tokio::sync::MutexGuard<'_, DelegatedNativeState>> {
+    ) -> napi::Result<TurnLockGuard<'_, DelegatedNativeState>> {
         let mut mounts = self.native_delegation_mounts.lock().await;
         complete_inactive_delegation_mounts(&mut mounts).await?;
         Ok(mounts)
@@ -4265,7 +4255,7 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
     let delegation = filesystem.clone();
     let mut wrapper =
         Filesystem::from_driver(Arc::new(filesystem), Some(shutdown), Some(reconcile));
-    wrapper.delegation = Mutex::new(Some(delegation));
+    wrapper.delegation = TurnCell::new(Some(delegation));
     wrapper.delegated_ownership = ownership_mode == Some(OwnershipMode::Shared);
     Ok(wrapper)
 }

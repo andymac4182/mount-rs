@@ -19,6 +19,7 @@ use mount_rs_core::storage::{
     MetadataStore, Namespace, NodeMetadata, WriterLease, decode_inode_namespace,
     encode_inode_namespace, validate_inode_publication, validate_node_kind,
 };
+use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
     VersionPublication, VersionedMetadataStore, VolumeId,
@@ -27,7 +28,6 @@ use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
@@ -149,8 +149,8 @@ impl Default for PgliteStorageOptions {
 
 #[derive(Clone)]
 struct Database {
-    client: Arc<Mutex<Option<Client>>>,
-    connection: Arc<Mutex<Option<JoinHandle<()>>>>,
+    client: Arc<TurnLock<Option<Client>>>,
+    connection: Arc<TurnLock<Option<JoinHandle<()>>>>,
     close_gate: CloseGate,
     volume_key: String,
     durable: bool,
@@ -174,8 +174,8 @@ impl Database {
             let _ = connection.await;
         });
         let database = Self {
-            client: Arc::new(Mutex::new(Some(client))),
-            connection: Arc::new(Mutex::new(Some(connection))),
+            client: Arc::new(TurnLock::new(Some(client))),
+            connection: Arc::new(TurnLock::new(Some(connection))),
             close_gate: CloseGate::new(),
             volume_key: options.volume_key,
             durable: options.durable,
@@ -192,7 +192,7 @@ impl Database {
         Ok(database)
     }
 
-    async fn lock_client(&self) -> Result<MutexGuard<'_, Option<Client>>> {
+    async fn lock_client(&self) -> Result<TurnLockGuard<'_, Option<Client>>> {
         if !self.close_gate.is_open() {
             return Err(connection_closed());
         }
@@ -1167,7 +1167,7 @@ impl MetadataStore for PgliteMetadataStore {
         if !actual.keys().eq(base.nodes.keys()) {
             return Err(stale());
         }
-        base.nodes = nodes;
+        base.nodes = nodes.into();
         base.validate()?;
         if &actual != expected_inode_revisions {
             return Err(inode_conflict());
@@ -3498,7 +3498,8 @@ mod tests {
                     },
                 ),
                 (root + 1, file),
-            ]),
+            ])
+            .into(),
         };
         namespace.validate().unwrap();
         namespace

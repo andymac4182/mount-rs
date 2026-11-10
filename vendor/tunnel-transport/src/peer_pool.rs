@@ -2,15 +2,15 @@
 //! are rare and serialized. The writer never waits for a dial or shutdown.
 use super::{ClientConnection, PeerDestination, PeerTransportError};
 use arc_swap::{ArcSwap, ArcSwapOption};
+use mount_rs_core::turn_gate::TurnLock;
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
 
 type Directory = HashMap<PeerDestination, Arc<ArcSwapOption<ClientConnection>>>;
 
 #[derive(Default)]
 pub(super) struct PublishedPool {
     directory: ArcSwap<Directory>,
-    writer: Mutex<()>,
+    writer: TurnLock<()>,
 }
 
 impl PublishedPool {

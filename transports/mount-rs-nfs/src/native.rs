@@ -16,12 +16,13 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use mount_rs_core::FsDriver;
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use tokio::process::Command;
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::server::{NfsServer, NfsServerHooks, NfsServerOptions, create_nfs_server_with_hooks};
 
@@ -660,7 +661,7 @@ struct NativeNfsMountInner {
     stopping: AtomicBool,
     mounted: AtomicBool,
     finished: AtomicBool,
-    unmount_lock: AsyncMutex<()>,
+    unmount_lock: TurnLock<()>,
 }
 
 /// A live host-kernel NFS mount backed by an in-process NFSv3 or NFSv4.1 server.
@@ -826,10 +827,10 @@ enum UnmountOutcome {
     TimedOut,
 }
 
-static LIVE_MOUNTS: OnceLock<Mutex<Vec<Weak<NativeNfsMountInner>>>> = OnceLock::new();
+static LIVE_MOUNTS: OnceLock<TurnCell<Vec<Weak<NativeNfsMountInner>>>> = OnceLock::new();
 
-fn live_registry() -> &'static Mutex<Vec<Weak<NativeNfsMountInner>>> {
-    LIVE_MOUNTS.get_or_init(|| Mutex::new(Vec::new()))
+fn live_registry() -> &'static TurnCell<Vec<Weak<NativeNfsMountInner>>> {
+    LIVE_MOUNTS.get_or_init(|| TurnCell::new(Vec::new()))
 }
 
 fn register_mount(mount: &Arc<NativeNfsMountInner>) {
@@ -997,7 +998,7 @@ where
         stopping: AtomicBool::new(false),
         mounted: AtomicBool::new(true),
         finished: AtomicBool::new(false),
-        unmount_lock: AsyncMutex::new(()),
+        unmount_lock: TurnLock::new(()),
     });
     register_mount(&inner);
     Ok(NativeNfsMount { inner })

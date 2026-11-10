@@ -6,6 +6,7 @@ use mount_rs_core::storage::{
     Namespace, WriterLease,
 };
 use mount_rs_memory::MemoryBlockStore;
+use std::sync::Mutex;
 
 fn anonymous_credentials() -> RpcCredentials {
     RpcCredentials {

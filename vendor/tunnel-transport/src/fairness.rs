@@ -49,10 +49,11 @@
 //! Every value here is a count, a flag or a duration: no address, identifier
 //! or payload is retained.
 
+use mount_rs_core::turn_cell::TurnCell;
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, LazyLock, Mutex, PoisonError,
+        Arc, LazyLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -166,16 +167,11 @@ struct NamedCounters {
 
 static PROCESS_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-static NAMED: LazyLock<Mutex<BTreeMap<&'static str, Arc<NamedCounters>>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+static NAMED: LazyLock<TurnCell<BTreeMap<&'static str, Arc<NamedCounters>>>> =
+    LazyLock::new(|| TurnCell::new(BTreeMap::new()));
 
 fn named(listener: &'static str) -> Arc<NamedCounters> {
-    NAMED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(listener)
-        .or_default()
-        .clone()
+    NAMED.lock_recovered().entry(listener).or_default().clone()
 }
 
 /// Milliseconds since the process epoch, plus one, so zero can mean "never".
@@ -194,8 +190,7 @@ fn window_ms() -> u64 {
 pub fn listener_fairness() -> Vec<ListenerFairnessSnapshot> {
     let now = now_mark();
     NAMED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+        .lock_recovered()
         .iter()
         .map(|(listener, counters)| {
             let last = counters.last_full_ms.load(Ordering::Acquire);
@@ -317,7 +312,7 @@ pub(crate) struct ConnectionTurnover {
     age_budget: Duration,
     pressure: Arc<ListenerPressure>,
     started_ms: u64,
-    counts: Mutex<TurnoverCounts>,
+    counts: TurnCell<TurnoverCounts>,
     /// Cancelled once an HTTP/2 connection is to send GOAWAY.
     pub(crate) goaway: CancellationToken,
 }
@@ -329,14 +324,14 @@ impl ConnectionTurnover {
             age_budget: jittered_age(policy.max_age, random_u64()),
             pressure,
             started_ms: now_mark(),
-            counts: Mutex::new(TurnoverCounts::default()),
+            counts: TurnCell::new(TurnoverCounts::default()),
             goaway: CancellationToken::new(),
         })
     }
 
     /// Count one dispatched request.
     pub(crate) fn on_request(&self) {
-        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut counts = self.counts.lock_recovered();
         counts.requests = counts.requests.saturating_add(1);
     }
 
@@ -347,7 +342,7 @@ impl ConnectionTurnover {
         let Some((episode, episode_start)) = self.pressure.current(now) else {
             return false;
         };
-        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut counts = self.counts.lock_recovered();
         if counts.recycled {
             return false;
         }

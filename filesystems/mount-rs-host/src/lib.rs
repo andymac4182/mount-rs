@@ -17,13 +17,14 @@ mod disk_cache;
 pub use blocks::{LOCAL_MAX_BLOCK_BYTES, LocalBlockStore, LocalWriteBudget};
 pub use disk_cache::{DiskCacheBudget, DiskCacheStats, DiskCachedBlockStore};
 
+use mount_rs_core::turn_gate::TurnLock;
 use std::collections::{HashMap, VecDeque};
 #[cfg(not(windows))]
 use std::fs::Metadata;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use mount_rs_core::path::{normalize_path, split_path};
@@ -1003,7 +1004,7 @@ struct HandleState {
 }
 
 struct HostHandle {
-    state: Arc<Mutex<HandleState>>,
+    state: Arc<TurnLock<HandleState>>,
     path: String,
     fd: Option<u64>,
 }
@@ -1015,13 +1016,11 @@ impl FileHandle for HostHandle {
     }
 
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> Result<usize> {
-        let state = Arc::clone(&self.state);
+        // Waits for the handle's other operations without holding a thread.
+        let mut state = Arc::clone(&self.state).lock_owned().await;
         let path = self.path.clone();
         let length = buffer.len();
         let (bytes, count) = run_blocking(move || {
-            let mut state = state
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("read"))?;
             let file = state.file.as_ref().ok_or_else(|| {
                 FsError::new(ErrorCode::Ebadf)
                     .with_syscall("read")
@@ -1057,13 +1056,11 @@ impl FileHandle for HostHandle {
     }
 
     async fn write(&self, buffer: &[u8], position: Option<u64>) -> Result<usize> {
-        let state = Arc::clone(&self.state);
+        // Waits for the handle's other operations without holding a thread.
+        let mut state = Arc::clone(&self.state).lock_owned().await;
         let path = self.path.clone();
         let bytes = buffer.to_vec();
         run_blocking(move || {
-            let mut state = state
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("write"))?;
             let flags = state.flags;
             if state.file.is_none() {
                 return Err(FsError::new(ErrorCode::Ebadf)
@@ -1128,12 +1125,10 @@ impl FileHandle for HostHandle {
     }
 
     async fn stat(&self) -> Result<Stats> {
-        let state = Arc::clone(&self.state);
+        // Waits for the handle's other operations without holding a thread.
+        let state = Arc::clone(&self.state).lock_owned().await;
         let path = self.path.clone();
         run_blocking(move || {
-            let state = state
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("fstat"))?;
             let file = state.file.as_ref().ok_or_else(|| {
                 FsError::new(ErrorCode::Ebadf)
                     .with_syscall("fstat")
@@ -1145,12 +1140,10 @@ impl FileHandle for HostHandle {
     }
 
     async fn truncate(&self, length: u64) -> Result<()> {
-        let state = Arc::clone(&self.state);
+        // Waits for the handle's other operations without holding a thread.
+        let state = Arc::clone(&self.state).lock_owned().await;
         let path = self.path.clone();
         run_blocking(move || {
-            let state = state
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("ftruncate"))?;
             let file = state.file.as_ref().ok_or_else(|| {
                 FsError::new(ErrorCode::Ebadf)
                     .with_syscall("ftruncate")
@@ -1168,12 +1161,10 @@ impl FileHandle for HostHandle {
     }
 
     async fn sync(&self) -> Result<()> {
-        let state = Arc::clone(&self.state);
+        // Waits for the handle's other operations without holding a thread.
+        let state = Arc::clone(&self.state).lock_owned().await;
         let path = self.path.clone();
         run_blocking(move || {
-            let state = state
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("fsync"))?;
             let file = state.file.as_ref().ok_or_else(|| {
                 FsError::new(ErrorCode::Ebadf)
                     .with_syscall("fsync")
@@ -1186,12 +1177,10 @@ impl FileHandle for HostHandle {
     }
 
     async fn datasync(&self) -> Result<()> {
-        let state = Arc::clone(&self.state);
+        // Waits for the handle's other operations without holding a thread.
+        let state = Arc::clone(&self.state).lock_owned().await;
         let path = self.path.clone();
         run_blocking(move || {
-            let state = state
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("fdatasync"))?;
             let file = state.file.as_ref().ok_or_else(|| {
                 FsError::new(ErrorCode::Ebadf)
                     .with_syscall("fdatasync")
@@ -1204,11 +1193,9 @@ impl FileHandle for HostHandle {
     }
 
     async fn close(&self) -> Result<()> {
-        let state = Arc::clone(&self.state);
+        // Waits for the handle's other operations without holding a thread.
+        let mut state = Arc::clone(&self.state).lock_owned().await;
         run_blocking(move || {
-            let mut state = state
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("close"))?;
             let _ = state.file.take();
             Ok(())
         })
@@ -1311,7 +1298,7 @@ impl FsDriver for HostFs {
             #[cfg(not(unix))]
             let fd = None;
             Ok(Arc::new(HostHandle {
-                state: Arc::new(Mutex::new(HandleState {
+                state: Arc::new(TurnLock::new(HandleState {
                     file: Some(file),
                     flags,
                     position: 0,

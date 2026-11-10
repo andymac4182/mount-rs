@@ -8,13 +8,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use mount_rs_core::driver::{FileHandle, FsDriver};
 use mount_rs_core::error::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_core::handle::{OpenFlags, checked_position};
 use mount_rs_core::path::{basename, dirname, is_path_inside, normalize_path, split_path};
+use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, now_ms,
 };
@@ -132,14 +133,14 @@ struct State {
     next_fd: u64,
     attributes: HashMap<String, Attributes>,
     empty_directories: HashSet<String>,
-    open_files: HashMap<String, Arc<Mutex<OpenFile>>>,
+    open_files: HashMap<String, Arc<TurnCell<OpenFile>>>,
 }
 
 struct Inner<S> {
     store: S,
     options: UnstorageOptions,
     created_ms: i64,
-    state: Mutex<State>,
+    state: TurnCell<State>,
 }
 
 /// A cloneable generic key-value filesystem driver.
@@ -182,7 +183,7 @@ where
             store,
             options,
             created_ms: now_ms(),
-            state: Mutex::new(State {
+            state: TurnCell::new(State {
                 next_ino: 1,
                 next_fd: 3,
                 attributes: HashMap::new(),
@@ -221,10 +222,10 @@ struct HandleState {
 
 struct KvFileHandle<S> {
     inner: Arc<Inner<S>>,
-    entry: Arc<Mutex<OpenFile>>,
+    entry: Arc<TurnCell<OpenFile>>,
     flags: OpenFlags,
     fd: u64,
-    state: Mutex<HandleState>,
+    state: TurnCell<HandleState>,
 }
 
 struct KvDirectoryHandle<S> {
@@ -281,7 +282,7 @@ impl<S> Inner<S>
 where
     S: KeyValueStore,
 {
-    fn lock_state(&self) -> Result<MutexGuard<'_, State>> {
+    fn lock_state(&self) -> Result<TurnCellGuard<'_, State>> {
         self.state
             .lock()
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("key-value state lock poisoned"))
@@ -367,7 +368,7 @@ where
         Ok(self.lock_state()?.open_files.contains_key(path))
     }
 
-    fn open_file(&self, path: &str) -> Result<Option<Arc<Mutex<OpenFile>>>> {
+    fn open_file(&self, path: &str) -> Result<Option<Arc<TurnCell<OpenFile>>>> {
         Ok(self.lock_state()?.open_files.get(path).cloned())
     }
 
@@ -380,7 +381,7 @@ where
         Ok(fd)
     }
 
-    fn remove_open_file_if(&self, path: &str, entry: &Arc<Mutex<OpenFile>>) -> Result<()> {
+    fn remove_open_file_if(&self, path: &str, entry: &Arc<TurnCell<OpenFile>>) -> Result<()> {
         let mut state = self.lock_state()?;
         if state
             .open_files
@@ -403,7 +404,7 @@ where
         Ok(())
     }
 
-    fn remove_closed(&self, entry: &Arc<Mutex<OpenFile>>) -> Result<()> {
+    fn remove_closed(&self, entry: &Arc<TurnCell<OpenFile>>) -> Result<()> {
         let (path, refs, dirty, orphan) = {
             let file = entry.lock().map_err(|_| FsError::new(ErrorCode::Eio))?;
             (file.path.clone(), file.refs, file.dirty, file.orphan)
@@ -1055,7 +1056,7 @@ where
                 entry,
                 flags,
                 fd: self.inner.allocate_fd()?,
-                state: Mutex::new(HandleState {
+                state: TurnCell::new(HandleState {
                     position: 0,
                     closed: false,
                 }),
@@ -1096,7 +1097,7 @@ where
             entry,
             flags,
             fd: self.inner.allocate_fd()?,
-            state: Mutex::new(HandleState {
+            state: TurnCell::new(HandleState {
                 position: 0,
                 closed: false,
             }),
@@ -1578,7 +1579,7 @@ where
         &self,
         path: &str,
         syscall: &str,
-        entry: Option<Arc<Mutex<OpenFile>>>,
+        entry: Option<Arc<TurnCell<OpenFile>>>,
     ) -> Result<Stats> {
         let attributes = self.attributes_of(path)?;
         let mode = S_IFREG | (attributes.mode.unwrap_or(self.options.file_mode) & 0o7777);
@@ -1637,7 +1638,7 @@ where
         path: &str,
         known: Option<Vec<u8>>,
         syscall: &str,
-    ) -> Result<Arc<Mutex<OpenFile>>> {
+    ) -> Result<Arc<TurnCell<OpenFile>>> {
         if let Some(entry) = self.open_file(path)? {
             entry
                 .lock()
@@ -1649,7 +1650,7 @@ where
             Some(data) => data,
             None => self.read_value(path, syscall).await?,
         };
-        let candidate = Arc::new(Mutex::new(OpenFile {
+        let candidate = Arc::new(TurnCell::new(OpenFile {
             path: path.to_owned(),
             data,
             refs: 1,
@@ -1671,7 +1672,7 @@ where
         Ok(candidate)
     }
 
-    async fn flush(&self, entry: &Arc<Mutex<OpenFile>>) -> Result<()> {
+    async fn flush(&self, entry: &Arc<TurnCell<OpenFile>>) -> Result<()> {
         let snapshot = {
             let mut file = entry
                 .lock()
@@ -1691,7 +1692,7 @@ where
         Ok(())
     }
 
-    async fn release(&self, entry: &Arc<Mutex<OpenFile>>) -> Result<()> {
+    async fn release(&self, entry: &Arc<TurnCell<OpenFile>>) -> Result<()> {
         {
             let mut file = entry
                 .lock()

@@ -6,13 +6,15 @@
 //! is evaluated after the peer certificate has been verified and before a
 //! request body is admitted.
 
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use std::{
     collections::HashMap,
     future::Future,
     net::SocketAddr,
     pin::Pin,
     sync::{
-        Arc, Mutex as StdMutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -22,7 +24,7 @@ use bytes::{Buf, Bytes};
 use http::{Request, Response};
 use thiserror::Error;
 use tokio::{
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
     task::{JoinHandle, JoinSet},
     time::{Instant, sleep_until, timeout, timeout_at},
 };
@@ -1761,8 +1763,8 @@ struct ClientConnection {
     /// after every existing stream lease has been returned.  This is kept
     /// separate from `cancel`, which is reserved for emergency/local close.
     planned_remote_closing: CancellationToken,
-    driver: Mutex<Option<JoinHandle<Result<(), PeerTransportError>>>>,
-    pin_watcher: Mutex<Option<JoinHandle<()>>>,
+    driver: TurnLock<Option<JoinHandle<Result<(), PeerTransportError>>>>,
+    pin_watcher: TurnLock<Option<JoinHandle<()>>>,
     /// The local peer identity generation read immediately before this
     /// connection's handshake began (0 when the client has no rotating
     /// identity).  Read *before* the dial, so a rotation racing the handshake
@@ -2234,12 +2236,12 @@ mod peer_pool;
 
 struct PeerPoolState {
     connections: peer_pool::PublishedPool,
-    dial_locks: Mutex<HashMap<PeerDestination, std::sync::Weak<Mutex<()>>>>,
+    dial_locks: TurnLock<HashMap<PeerDestination, std::sync::Weak<TurnLock<()>>>>,
     /// Connections established under a superseded local peer identity that
     /// still carry in-flight streams.  Bounded by
     /// [`MAX_ROTATION_DRAINING_CONNECTIONS`]; each is closed when its streams
     /// finish, at the drain budget, or when its generation is retired.
-    draining: StdMutex<Vec<DrainingConnection>>,
+    draining: TurnCell<Vec<DrainingConnection>>,
 }
 
 struct DrainingConnection {
@@ -2264,11 +2266,11 @@ pub const MAX_ROTATION_DRAINING_CONNECTIONS: usize = 4;
 /// The weak marker lives exactly as long as the dialing caller or its waiters.
 /// Cancelled dials therefore cannot retire a gate that still has a waiter.
 fn acquire_dial_entry(
-    locks: &mut HashMap<PeerDestination, std::sync::Weak<Mutex<()>>>,
+    locks: &mut HashMap<PeerDestination, std::sync::Weak<TurnLock<()>>>,
     pool: &peer_pool::PublishedPool,
     destination: &PeerDestination,
     max_destinations: usize,
-) -> Result<Arc<Mutex<()>>, PeerTransportError> {
+) -> Result<Arc<TurnLock<()>>, PeerTransportError> {
     if let Some(gate) = locks.get(destination).and_then(std::sync::Weak::upgrade) {
         return Ok(gate);
     }
@@ -2278,7 +2280,7 @@ fn acquire_dial_entry(
             return Err(PeerTransportError::Capacity);
         }
     }
-    let gate = Arc::new(Mutex::new(()));
+    let gate = Arc::new(TurnLock::new(()));
     locks.insert(destination.clone(), Arc::downgrade(&gate));
     Ok(gate)
 }
@@ -2323,8 +2325,8 @@ impl PeerClient {
             connections: Arc::new(Semaphore::new(limits.max_connections)),
             state: Arc::new(PeerPoolState {
                 connections: peer_pool::PublishedPool::default(),
-                dial_locks: Mutex::new(HashMap::new()),
-                draining: StdMutex::new(Vec::new()),
+                dial_locks: TurnLock::new(HashMap::new()),
+                draining: TurnCell::new(Vec::new()),
             }),
             cancel: CancellationToken::new(),
             limits,
@@ -2356,10 +2358,7 @@ impl PeerClient {
     /// is full.  A drained connection closes when its last stream lease is
     /// returned, at the drain budget, or when its generation is retired.
     fn begin_rotation_drain(&self, connection: &Arc<ClientConnection>) -> bool {
-        let mut draining = match self.state.draining.lock() {
-            Ok(draining) => draining,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut draining = self.state.draining.lock_recovered();
         draining.retain(|entry| entry.connection.strong_count() > 0);
         if draining
             .iter()
@@ -2402,10 +2401,7 @@ impl PeerClient {
     pub async fn retire_local_generations_before(&self, generation: u64) -> usize {
         let mut retired: Vec<Arc<ClientConnection>> = Vec::new();
         {
-            let mut draining = match self.state.draining.lock() {
-                Ok(draining) => draining,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let mut draining = self.state.draining.lock_recovered();
             draining.retain(|entry| {
                 if entry.local_generation < generation {
                     if let Some(connection) = entry.connection.upgrade() {
@@ -2435,10 +2431,7 @@ impl PeerClient {
     /// peer identity.  Bounded by [`MAX_ROTATION_DRAINING_CONNECTIONS`].
     #[must_use]
     pub fn draining_connection_count(&self) -> usize {
-        let draining = match self.state.draining.lock() {
-            Ok(draining) => draining,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let draining = self.state.draining.lock_recovered();
         draining
             .iter()
             .filter(|entry| entry.connection.strong_count() > 0)
@@ -2774,8 +2767,8 @@ impl PeerClient {
             limits: self.limits.clone(),
             cancel: connection_cancel,
             planned_remote_closing,
-            driver: Mutex::new(Some(driver_task)),
-            pin_watcher: Mutex::new(Some(pin_watcher)),
+            driver: TurnLock::new(Some(driver_task)),
+            pin_watcher: TurnLock::new(Some(pin_watcher)),
             local_generation,
             retired: AtomicBool::new(false),
             _connection_permit: connection_permit,
@@ -3089,7 +3082,7 @@ struct PeerServerConnectionDiagnostics {
 pub struct PeerServerDiagnostics {
     max_connections: usize,
     next_connection_id: AtomicUsize,
-    connections: StdMutex<HashMap<usize, Arc<PeerServerConnectionDiagnostics>>>,
+    connections: TurnCell<HashMap<usize, Arc<PeerServerConnectionDiagnostics>>>,
 }
 
 impl PeerServerDiagnostics {
@@ -3097,7 +3090,7 @@ impl PeerServerDiagnostics {
         Arc::new(Self {
             max_connections,
             next_connection_id: AtomicUsize::new(1),
-            connections: StdMutex::new(HashMap::new()),
+            connections: TurnCell::new(HashMap::new()),
         })
     }
 
@@ -4400,12 +4393,12 @@ mod tests {
         let creator = acquire_dial_entry(&mut locks, &pool, &destination, 1).unwrap();
         let guard = creator.lock_owned().await;
         let waiter = acquire_dial_entry(&mut locks, &pool, &destination, 1).unwrap();
-        assert!(waiter.try_lock().is_err());
+        assert!(waiter.try_lock().is_none());
         drop(guard);
         let next = acquire_dial_entry(&mut locks, &pool, &destination, 1).unwrap();
         assert!(Arc::ptr_eq(&waiter, &next));
         let _guard = waiter.try_lock().unwrap();
-        assert!(next.try_lock().is_err());
+        assert!(next.try_lock().is_none());
     }
 
     #[tokio::test]

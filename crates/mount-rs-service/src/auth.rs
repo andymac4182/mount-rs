@@ -550,7 +550,7 @@ mod proofs {
 /// Production authenticator. Only catalog-pinned policies are contacted.
 pub struct CatalogAuthenticator {
     catalog: std::sync::Arc<dyn crate::catalog::CatalogStore>,
-    cache: tokio::sync::Mutex<std::collections::BTreeMap<String, CachedPolicy>>,
+    cache: mount_rs_core::turn_gate::TurnLock<std::collections::BTreeMap<String, CachedPolicy>>,
     source: std::sync::Arc<dyn OidcKeySource>,
 }
 
@@ -583,7 +583,7 @@ impl CatalogAuthenticator {
         Self {
             catalog,
             source,
-            cache: tokio::sync::Mutex::new(std::collections::BTreeMap::new()),
+            cache: mount_rs_core::turn_gate::TurnLock::new(std::collections::BTreeMap::new()),
         }
     }
 }

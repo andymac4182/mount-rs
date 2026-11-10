@@ -2,24 +2,24 @@
 
 use std::{
     collections::{HashMap, VecDeque, hash_map},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use bytes::Bytes;
 use lru_slab::LruSlab;
 use tracing::trace;
 
-use crate::token::TokenStore;
+use crate::{token::TokenStore, turn::Turn};
 
 /// `TokenStore` implementation that stores up to `N` tokens per server name for up to a
 /// limited number of server names, in-memory
 #[derive(Debug)]
-pub struct TokenMemoryCache(Mutex<State>);
+pub struct TokenMemoryCache(Turn<State>);
 
 impl TokenMemoryCache {
     /// Construct empty
     pub fn new(max_server_names: u32, max_tokens_per_server: usize) -> Self {
-        Self(Mutex::new(State::new(
+        Self(Turn::new(State::new(
             max_server_names,
             max_tokens_per_server,
         )))
@@ -29,11 +29,11 @@ impl TokenMemoryCache {
 impl TokenStore for TokenMemoryCache {
     fn insert(&self, server_name: &str, token: Bytes) {
         trace!(%server_name, "storing token");
-        self.0.lock().unwrap().store(server_name, token)
+        self.0.lock().store(server_name, token)
     }
 
     fn take(&self, server_name: &str) -> Option<Bytes> {
-        let token = self.0.lock().unwrap().take(server_name);
+        let token = self.0.lock().take(server_name);
         trace!(%server_name, found=%token.is_some(), "taking token");
         token
     }

@@ -1,5 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use napi::bindgen_prelude::{Env, Function, JsObjectValue, Object};
 use napi_derive::napi;
@@ -76,11 +78,9 @@ pub fn create_memory_driver(
             root_mode,
         }))),
         shutdown: None,
-        reconcile: Mutex::new(None),
-        delegation: Mutex::new(None),
+        reconcile: TurnCell::new(None),
+        delegation: TurnCell::new(None),
         delegated_ownership: false,
-        native_delegation_mounts: Arc::new(tokio::sync::Mutex::new(
-            super::DelegatedNativeState::default(),
-        )),
+        native_delegation_mounts: Arc::new(TurnLock::new(super::DelegatedNativeState::default())),
     })
 }

@@ -1553,7 +1553,7 @@ impl MetadataStore for TidbMetadataStore {
         if !old.nodes.keys().eq(actual.keys()) {
             return rollback_and(tx, stale()).await;
         }
-        old.nodes = authoritative_nodes;
+        old.nodes = authoritative_nodes.into();
         old.validate()?;
         replace_inode_guards(&mut tx, &self.0.volume_key, next, &namespace).await?;
         tx.exec_drop(
@@ -2374,7 +2374,8 @@ mod tests {
                     stats,
                     data: NodeData::Directory { entries: vec![] },
                 },
-            )]),
+            )])
+            .into(),
         };
         for inode in [root + 1, root + 2] {
             let mut stats = ns.nodes[&root].stats.clone();

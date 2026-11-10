@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,8 @@ use mount_rs_9p::{
     P9SessionOptions as TransportP9SessionOptions, P9TransportError as TransportP9Error,
     P9TransportErrorHook as TransportP9ErrorHook,
 };
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, OpenFlags, Stats};
 use mount_rs_fuse::{
     FuseMountHooks as TransportFuseMountHooks, FuseTransportError as TransportFuseError,
@@ -145,7 +147,7 @@ impl From<TransportS3Error> for TransportErrorEvent {
 /// callback racing with shutdown a no-op; the TSFN's aborted lock closes the
 /// remaining call-versus-release race.
 pub(crate) struct TransportErrorCallback {
-    callback: Mutex<Option<Arc<TransportErrorTsfn>>>,
+    callback: TurnCell<Option<Arc<TransportErrorTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -162,7 +164,7 @@ struct WebdavErrorEvent {
 
 /// Owns the JavaScript callback for request-level WebDAV errors.
 pub(crate) struct WebdavErrorCallback {
-    callback: Mutex<Option<Arc<WebdavErrorTsfn>>>,
+    callback: TurnCell<Option<Arc<WebdavErrorTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -180,7 +182,7 @@ impl WebdavErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -189,10 +191,11 @@ impl WebdavErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned());
         let Some(callback) = callback else {
             return;
         };
@@ -214,10 +217,11 @@ impl WebdavErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -257,7 +261,7 @@ impl TransportErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -266,10 +270,11 @@ impl TransportErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned());
         let Some(callback) = callback else {
             return;
         };
@@ -292,10 +297,11 @@ impl TransportErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -334,7 +340,7 @@ struct NfsErrorEvent {
 
 /// Owns the JavaScript callback for request-level NFS errors.
 pub(crate) struct NfsErrorCallback {
-    callback: Mutex<Option<Arc<NfsErrorTsfn>>>,
+    callback: TurnCell<Option<Arc<NfsErrorTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -352,7 +358,7 @@ impl NfsErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -361,10 +367,11 @@ impl NfsErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned());
         let Some(callback) = callback else {
             return;
         };
@@ -387,10 +394,11 @@ impl NfsErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -470,7 +478,7 @@ fn parse_nfs_clock(value: Unknown<'static>) -> Option<f64> {
 }
 
 pub(crate) struct NfsIdMapNameCallback {
-    callback: Mutex<Option<Arc<NfsIdMapNameTsfn>>>,
+    callback: TurnCell<Option<Arc<NfsIdMapNameTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -482,7 +490,7 @@ impl NfsIdMapNameCallback {
             .callee_handled::<false>()
             .build_callback(|context| Ok(FnArgs::from((context.value.id, context.value.group))))?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -491,10 +499,11 @@ impl NfsIdMapNameCallback {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        }?;
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned())?;
         let (sender, receiver) = sync_channel(1);
         let status = callback.call_with_return_value(
             NfsIdMapNameEvent {
@@ -517,10 +526,11 @@ impl NfsIdMapNameCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -547,7 +557,7 @@ impl Drop for NfsIdMapNameCallback {
 }
 
 pub(crate) struct NfsIdMapIdCallback {
-    callback: Mutex<Option<Arc<NfsIdMapIdTsfn>>>,
+    callback: TurnCell<Option<Arc<NfsIdMapIdTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -561,7 +571,7 @@ impl NfsIdMapIdCallback {
                 Ok(FnArgs::from((context.value.name, context.value.group)))
             })?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -570,10 +580,11 @@ impl NfsIdMapIdCallback {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        }?;
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned())?;
         let (sender, receiver) = sync_channel(1);
         let status = callback.call_with_return_value(
             NfsIdMapIdEvent {
@@ -596,10 +607,11 @@ impl NfsIdMapIdCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -626,7 +638,7 @@ impl Drop for NfsIdMapIdCallback {
 }
 
 pub(crate) struct NfsClockCallback {
-    callback: Mutex<Option<Arc<NfsClockTsfn>>>,
+    callback: TurnCell<Option<Arc<NfsClockTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -638,7 +650,7 @@ impl NfsClockCallback {
             .callee_handled::<false>()
             .build_callback(|_| Ok(()))?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -647,10 +659,11 @@ impl NfsClockCallback {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        }?;
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned())?;
         let (sender, receiver) = sync_channel(1);
         let status = callback.call_with_return_value(
             (),
@@ -670,10 +683,11 @@ impl NfsClockCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -701,54 +715,55 @@ impl Drop for NfsClockCallback {
 
 struct NfsJsClock {
     callback: Arc<NfsClockCallback>,
-    state: Mutex<NfsJsClockState>,
-}
-
-struct NfsJsClockState {
-    epoch_ms: Option<f64>,
+    /// The first value JavaScript reported, in milliseconds.
+    epoch_ms: OnceLock<f64>,
     anchor: Instant,
-    last: Instant,
+    /// The latest instant handed out, as whole milliseconds after `anchor`.
+    /// It only ever grows, and `anchor` plus it is always representable.
+    last_ms: AtomicU64,
 }
 
 impl NfsJsClock {
     fn new(callback: Arc<NfsClockCallback>) -> Arc<Self> {
-        let anchor = Instant::now();
         Arc::new(Self {
             callback,
-            state: Mutex::new(NfsJsClockState {
-                epoch_ms: None,
-                anchor,
-                last: anchor,
-            }),
+            epoch_ms: OnceLock::new(),
+            anchor: Instant::now(),
+            last_ms: AtomicU64::new(0),
         })
     }
 
+    fn last(&self) -> Instant {
+        self.anchor + Duration::from_millis(self.last_ms.load(Ordering::Acquire))
+    }
+
     fn now(&self) -> Instant {
-        let value = self.callback.call();
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let Some(value) = value else {
+        let Some(value) = self.callback.call() else {
             // A callback throw, Promise, invalid number, or a callback that
             // has already been released must not make a monotonic lease clock
             // jump backwards to a fresh process instant.
-            return state.last;
+            return self.last();
         };
-        let Some(epoch_ms) = state.epoch_ms else {
-            state.epoch_ms = Some(value);
-            return state.last;
+        let epoch_ms = match self.epoch_ms.get() {
+            Some(epoch_ms) => *epoch_ms,
+            None => match self.epoch_ms.set(value) {
+                Ok(()) => return self.last(),
+                // Another caller reported the first value in the meantime.
+                Err(_) => *self.epoch_ms.get().expect("epoch was just set"),
+            },
         };
         let delta_ms = value - epoch_ms;
         if delta_ms.is_finite() && delta_ms > 0.0 && delta_ms < u64::MAX as f64 {
-            let duration = Duration::from_millis(delta_ms as u64);
-            if let Some(candidate) = state.anchor.checked_add(duration)
-                && candidate > state.last
+            let delta_ms = delta_ms as u64;
+            if self
+                .anchor
+                .checked_add(Duration::from_millis(delta_ms))
+                .is_some()
             {
-                state.last = candidate;
+                self.last_ms.fetch_max(delta_ms, Ordering::AcqRel);
             }
         }
-        state.last
+        self.last()
     }
 }
 
@@ -792,7 +807,7 @@ struct P9SessionErrorEvent {
 
 /// Owns the JavaScript callback for request-level 9P errors.
 pub(crate) struct P9SessionErrorCallback {
-    callback: Mutex<Option<Arc<P9SessionErrorTsfn>>>,
+    callback: TurnCell<Option<Arc<P9SessionErrorTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -810,7 +825,7 @@ impl P9SessionErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -819,10 +834,11 @@ impl P9SessionErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned());
         let Some(callback) = callback else {
             return;
         };
@@ -840,10 +856,11 @@ impl P9SessionErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -876,7 +893,7 @@ type P9AssertionTsfn =
 
 /// Owns the JavaScript callback for debug-mode 9P assertion failures.
 pub(crate) struct P9AssertionCallback {
-    callback: Mutex<Option<Arc<P9AssertionTsfn>>>,
+    callback: TurnCell<Option<Arc<P9AssertionTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -888,7 +905,7 @@ impl P9AssertionCallback {
             .callee_handled::<false>()
             .build_callback(|context| Ok(FnArgs::from((context.value,))))?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -897,10 +914,11 @@ impl P9AssertionCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned());
         let Some(callback) = callback else {
             return;
         };
@@ -918,10 +936,11 @@ impl P9AssertionCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -951,7 +970,7 @@ pub(crate) type JsS3RequestIdCallback = Function<'static, Unknown<'static>, Unkn
 type S3RequestIdTsfn = ThreadsafeFunction<(), Unknown<'static>, (), Status, false, false>;
 
 struct S3RequestIdCallback {
-    callback: Mutex<Option<Arc<S3RequestIdTsfn>>>,
+    callback: TurnCell<Option<Arc<S3RequestIdTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -963,7 +982,7 @@ impl S3RequestIdCallback {
             .callee_handled::<false>()
             .build_callback(|_| Ok(()))?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -972,10 +991,11 @@ impl S3RequestIdCallback {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        }?;
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned())?;
         let (sender, receiver) = sync_channel(1);
         let status = callback.call_with_return_value(
             (),
@@ -995,10 +1015,11 @@ impl S3RequestIdCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -1036,7 +1057,7 @@ struct S3ErrorEvent {
 }
 
 struct S3ErrorCallback {
-    callback: Mutex<Option<Arc<S3ErrorTsfn>>>,
+    callback: TurnCell<Option<Arc<S3ErrorTsfn>>>,
     closed: AtomicBool,
 }
 
@@ -1054,7 +1075,7 @@ impl S3ErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: Mutex::new(Some(Arc::new(callback))),
+            callback: TurnCell::new(Some(Arc::new(callback))),
             closed: AtomicBool::new(false),
         }))
     }
@@ -1063,10 +1084,11 @@ impl S3ErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(callback) => callback.as_ref().cloned(),
-            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|callback| callback.as_ref().cloned());
         let Some(callback) = callback else {
             return;
         };
@@ -1084,10 +1106,11 @@ impl S3ErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = match self.callback.lock() {
-            Ok(mut callback) => callback.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        let callback = self
+            .callback
+            .lock()
+            .ok()
+            .and_then(|mut callback| callback.take());
         let Some(callback) = callback else {
             return;
         };
@@ -2422,7 +2445,7 @@ pub struct P9StatsLike {
 
 #[derive(Clone)]
 enum P9FidTableTarget {
-    Standalone(Arc<Mutex<TransportP9FidTable>>),
+    Standalone(Arc<TurnCell<TransportP9FidTable>>),
     Session(mount_rs_9p::P9Session),
 }
 
@@ -2893,7 +2916,7 @@ impl P9FidTable {
     #[napi(constructor)]
     pub fn new(options: Option<P9FidTableOptions>) -> Self {
         Self {
-            inner: P9FidTableTarget::Standalone(Arc::new(Mutex::new(TransportP9FidTable::new(
+            inner: P9FidTableTarget::Standalone(Arc::new(TurnCell::new(TransportP9FidTable::new(
                 options
                     .and_then(|options| options.use_driver_ino)
                     .unwrap_or(true),
@@ -3481,7 +3504,7 @@ pub struct P9Server {
     options: TransportP9ServerOptions,
     host: String,
     requested_port: u16,
-    state: Mutex<P9State>,
+    state: TurnCell<P9State>,
     binding: AtomicBool,
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
@@ -3501,7 +3524,7 @@ impl P9Server {
             host: options.host.clone(),
             requested_port: options.port,
             options,
-            state: Mutex::new(P9State {
+            state: TurnCell::new(P9State {
                 server: Some(server),
                 serve_task: None,
             }),
@@ -3763,7 +3786,7 @@ pub fn create_p9_server(
         options,
         host,
         requested_port,
-        state: Mutex::new(P9State {
+        state: TurnCell::new(P9State {
             server: None,
             serve_task: None,
         }),
@@ -4056,7 +4079,7 @@ enum S3ResponseBodyState {
 #[derive(Clone)]
 #[napi]
 pub struct S3BodyStream {
-    inner: Arc<tokio::sync::Mutex<S3ResponseBodyState>>,
+    inner: Arc<TurnLock<S3ResponseBodyState>>,
 }
 
 impl S3BodyStream {
@@ -4066,7 +4089,7 @@ impl S3BodyStream {
             TransportS3StreamBody::Stream(stream) => S3ResponseBodyState::Stream(Some(stream)),
         };
         Self {
-            inner: Arc::new(tokio::sync::Mutex::new(state)),
+            inner: Arc::new(TurnLock::new(state)),
         }
     }
 }
@@ -4157,7 +4180,7 @@ struct S3StreamRequestState {
 /// wrapper has left the N-API call frame.
 #[napi]
 pub struct S3StreamRequest {
-    inner: tokio::sync::Mutex<Option<S3StreamRequestState>>,
+    inner: TurnLock<Option<S3StreamRequestState>>,
 }
 
 #[napi]
@@ -4239,7 +4262,7 @@ impl S3Session {
             .read()
             .map_err(|error| transport_error("S3 request body", error))?;
         Ok(S3StreamRequest {
-            inner: tokio::sync::Mutex::new(Some(S3StreamRequestState {
+            inner: TurnLock::new(Some(S3StreamRequestState {
                 session: Arc::clone(&self.inner),
                 head: transport_s3_head(head),
                 body: Box::pin(NapiS3RequestBody { reader }),
@@ -4333,7 +4356,7 @@ pub struct S3Server {
     host: String,
     requested_port: u16,
     buckets: Vec<String>,
-    running: Mutex<Option<Arc<TransportS3Server>>>,
+    running: TurnCell<Option<Arc<TransportS3Server>>>,
     binding: AtomicBool,
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
@@ -4486,7 +4509,7 @@ pub fn create_s3_server(
         host,
         requested_port,
         buckets,
-        running: Mutex::new(None),
+        running: TurnCell::new(None),
         binding: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         transport_error,
@@ -4722,7 +4745,7 @@ enum WebdavResponseBodyState {
 #[derive(Clone)]
 #[napi]
 pub struct WebdavBodyStream {
-    inner: Arc<tokio::sync::Mutex<WebdavResponseBodyState>>,
+    inner: Arc<TurnLock<WebdavResponseBodyState>>,
 }
 
 impl WebdavBodyStream {
@@ -4737,7 +4760,7 @@ impl WebdavBodyStream {
             },
         };
         Self {
-            inner: Arc::new(tokio::sync::Mutex::new(state)),
+            inner: Arc::new(TurnLock::new(state)),
         }
     }
 
@@ -4883,7 +4906,7 @@ struct WebdavStreamRequestState {
 /// this class's async `run` method, after the non-Send JS wrapper is gone.
 #[napi]
 pub struct WebdavStreamRequest {
-    inner: tokio::sync::Mutex<Option<WebdavStreamRequestState>>,
+    inner: TurnLock<Option<WebdavStreamRequestState>>,
 }
 
 #[napi]
@@ -5002,7 +5025,7 @@ impl WebdavSession {
             .read()
             .map_err(|error| transport_error("WebDAV request body", error))?;
         Ok(WebdavStreamRequest {
-            inner: tokio::sync::Mutex::new(Some(WebdavStreamRequestState {
+            inner: TurnLock::new(Some(WebdavStreamRequestState {
                 session: Arc::clone(&self.inner),
                 head: transport_webdav_head(head),
                 body: NapiWebdavRequestBody { reader },
@@ -5084,7 +5107,7 @@ pub struct WebdavServer {
     inner: Arc<TransportWebdavServer>,
     host: String,
     closed: AtomicBool,
-    lifecycle: tokio::sync::Mutex<()>,
+    lifecycle: TurnLock<()>,
     transport_error: Option<Arc<TransportErrorCallback>>,
     session_error: Option<Arc<WebdavErrorCallback>>,
 }
@@ -5169,7 +5192,7 @@ pub fn create_webdav_server(
         inner: Arc::new(inner),
         host,
         closed: AtomicBool::new(false),
-        lifecycle: tokio::sync::Mutex::new(()),
+        lifecycle: TurnLock::new(()),
         transport_error: transport_error_callback,
         session_error: session_error_callback,
     })

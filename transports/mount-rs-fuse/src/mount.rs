@@ -16,10 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
-use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
@@ -31,6 +28,8 @@ use mount_rs_core::ErrorCode;
 use mount_rs_core::{FsDriver, FsError};
 #[cfg(target_os = "linux")]
 use mount_rs_core::{S_IFDIR, S_IFMT};
+#[cfg(target_os = "linux")]
+use mount_rs_core::{turn_cell::TurnCell, turn_gate::TurnLock};
 #[cfg(target_os = "linux")]
 use tokio::sync::Notify;
 
@@ -571,13 +570,13 @@ struct MountState {
     ready: AtomicBool,
     stop: AtomicBool,
     unmount_started: AtomicBool,
-    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: TurnCell<Option<tokio::task::JoinHandle<()>>>,
     ready_notify: Notify,
     closed_notify: Notify,
     stop_notify: Notify,
     unmount_notify: Notify,
-    unmount_result: Mutex<Option<Result<(), String>>>,
-    transport_error: Mutex<Option<String>>,
+    unmount_result: TurnCell<Option<Result<(), String>>>,
+    transport_error: TurnCell<Option<String>>,
     transport_error_reported: AtomicBool,
     hooks: FuseMountHooks,
 }
@@ -602,13 +601,13 @@ impl MountState {
             ready: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             unmount_started: AtomicBool::new(false),
-            task: Mutex::new(None),
+            task: TurnCell::new(None),
             ready_notify: Notify::new(),
             closed_notify: Notify::new(),
             stop_notify: Notify::new(),
             unmount_notify: Notify::new(),
-            unmount_result: Mutex::new(None),
-            transport_error: Mutex::new(None),
+            unmount_result: TurnCell::new(None),
+            transport_error: TurnCell::new(None),
             transport_error_reported: AtomicBool::new(false),
             hooks,
         }
@@ -939,7 +938,7 @@ type ReadTaskResult = (u64, Result<(), FuseTransportError>);
 #[cfg(target_os = "linux")]
 async fn write_reply_until_stop(
     device: Arc<FuseDevice>,
-    writer: Arc<tokio::sync::Mutex<()>>,
+    writer: Arc<TurnLock<()>>,
     state: Arc<MountState>,
     reply: Vec<u8>,
 ) -> Result<(), FuseTransportError> {
@@ -964,7 +963,7 @@ async fn write_reply_until_stop(
 #[cfg(target_os = "linux")]
 async fn write_terminal_reply(
     device: Arc<FuseDevice>,
-    writer: Arc<tokio::sync::Mutex<()>>,
+    writer: Arc<TurnLock<()>>,
     reply: Vec<u8>,
 ) -> Result<(), FuseTransportError> {
     let _guard = writer.lock().await;
@@ -1020,7 +1019,7 @@ fn spawn_prepared_read(
     prepared: PreparedRead,
     permit: tokio::sync::OwnedSemaphorePermit,
     device: &Arc<FuseDevice>,
-    writer: &Arc<tokio::sync::Mutex<()>>,
+    writer: &Arc<TurnLock<()>>,
     state: &Arc<MountState>,
 ) {
     let unique = prepared.unique();
@@ -1067,7 +1066,7 @@ async fn run_session_loop(
     state: Arc<MountState>,
 ) -> Option<FuseTransportError> {
     let mut failure = None;
-    let writer = Arc::new(tokio::sync::Mutex::new(()));
+    let writer = Arc::new(TurnLock::new(()));
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_READS));
     let mut read_tasks = tokio::task::JoinSet::<ReadTaskResult>::new();
     let mut in_flight: std::collections::HashMap<u64, tokio::task::AbortHandle> =
@@ -2075,6 +2074,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use async_trait::async_trait;
+    #[cfg(target_os = "linux")]
+    use std::sync::Mutex;
 
     #[test]
     fn defaults_are_safe_for_a_single_mount() {

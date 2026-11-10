@@ -302,7 +302,12 @@ opt-in and not yet exposed by the production CLI startup path.
 
 Handle RPC uses authenticated POST JSON controls (open/read/stat/truncate/sync/
 close; 8KiB maximum), and PUT raw writes (64KiB maximum) with `x-mount-handle`
-and optional `x-mount-position`. Both require `x-mount-session`. Reads return raw
+and optional `x-mount-position`. A PUT with `x-mount-write-file` instead (the
+path, percent-encoded; no handle or position header) replaces that file's
+contents with the body in one request through the driver's `write_file`, and
+answers 204; the capabilities reply advertises it as `"write_file": true`, and
+a client must not send it to an owner that does not. All require
+`x-mount-session`. Reads return raw
 binary bytes, at most 64KiB. Bodies must finish within five seconds before any
 operation dispatch. See the remote mount contract for fields and qualification
 limits. No automatic replay or remote FsDriver is supplied yet.

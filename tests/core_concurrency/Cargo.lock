@@ -14,6 +14,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-waker"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -30,6 +51,8 @@ name = "mount-rs-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "atomic-waker",
+ "crossbeam-queue",
  "serde",
  "serde_json",
 ]

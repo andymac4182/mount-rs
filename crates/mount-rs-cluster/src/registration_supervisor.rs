@@ -5,10 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::{
-    sync::{Mutex, watch},
-    task::{JoinHandle, JoinSet},
-};
+use tokio::{sync::watch, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 fn failure() -> FsError {
@@ -35,7 +32,7 @@ pub struct RegistrationSupervisor {
     statuses: Vec<watch::Receiver<RegistrationStatus>>,
     cancel: CancellationToken,
     failed: Arc<AtomicBool>,
-    task: Mutex<Option<JoinHandle<Result<()>>>>,
+    task: crate::join_slot::JoinSlot<Result<()>>,
 }
 impl RegistrationSupervisor {
     pub fn start(
@@ -96,7 +93,7 @@ impl RegistrationSupervisor {
             statuses,
             cancel,
             failed,
-            task: Mutex::new(Some(task)),
+            task: crate::join_slot::JoinSlot::new(task),
         })
     }
     /// Wait for every exact registration before reporting server readiness.
@@ -176,13 +173,11 @@ impl RegistrationSupervisor {
     /// withdrawal on every registry even if joining a worker failed.
     pub async fn shutdown(&self) -> Result<()> {
         self.cancel.cancel();
-        let mut task = self.task.lock().await;
-        let mut first = if let Some(task) = task.as_mut() {
-            task.await.map_err(|_| failure()).and_then(|r| r).err()
-        } else {
-            None
-        };
-        task.take();
+        let mut first = self
+            .task
+            .join()
+            .await
+            .and_then(|joined| joined.map_err(|_| failure()).and_then(|r| r).err());
         for registration in self.registrations.iter() {
             if registration.withdraw().await.is_err() {
                 self.failed.store(true, Ordering::Release);
@@ -195,9 +190,7 @@ impl RegistrationSupervisor {
 impl Drop for RegistrationSupervisor {
     fn drop(&mut self) {
         self.cancel.cancel();
-        if let Some(task) = self.task.get_mut().take() {
-            task.abort();
-        }
+        self.task.abort();
         // Interrupted withdrawal leaves a TTL-bounded hint, never authority.
     }
 }
@@ -356,7 +349,7 @@ mod tests {
         registry.remove(&successor).await.unwrap();
         let aborted = RegistrationSupervisor::start(registrations.clone(), recovery).unwrap();
         wait_ready(&aborted).await;
-        aborted.task.lock().await.as_ref().unwrap().abort();
+        aborted.task.abort();
         tokio::time::timeout(Duration::from_secs(1), async {
             while !aborted.failed() {
                 tokio::task::yield_now().await;

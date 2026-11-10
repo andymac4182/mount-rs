@@ -1,6 +1,7 @@
 use crate::*;
 use async_trait::async_trait;
 use bytes::Bytes;
+use mount_rs_core::turn_gate::TurnLock;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -8,10 +9,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{
-    sync::{Mutex, Semaphore},
-    time::timeout,
-};
+use tokio::{sync::Semaphore, time::timeout};
 const MAX_HEADER_BYTES: usize = 25 + 4 * 1024;
 fn peer_transfer_charge(max: usize) -> Result<u32> {
     max.checked_add(MAX_HEADER_BYTES)
@@ -70,7 +68,7 @@ pub struct QuicPeerTransport {
     endpoint: quinn::Endpoint,
     config: QuicPeerConfig,
     cache: Arc<LocalCache>,
-    connections: BTreeMap<PeerId, Arc<Mutex<Option<quinn::Connection>>>>,
+    connections: BTreeMap<PeerId, Arc<TurnLock<Option<quinn::Connection>>>>,
     permits: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     streams: Arc<Semaphore>,
@@ -158,7 +156,7 @@ impl QuicPeerTransport {
         let connections = config
             .trusted
             .keys()
-            .map(|peer| (peer.clone(), Arc::new(Mutex::new(None))))
+            .map(|peer| (peer.clone(), Arc::new(TurnLock::new(None))))
             .collect();
         let result = Arc::new(Self {
             endpoint,

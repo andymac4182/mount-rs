@@ -7,9 +7,10 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use mount_rs_core::types::FileType;
 use napi::bindgen_prelude::{Function, JsObjectValue, Object, Promise, PromiseRaw};
 use napi::{Env, Error as NapiError, JsError, JsRangeError, Status, Unknown, ValueType};
@@ -474,7 +475,7 @@ pub fn is_special_mode(mode: u32) -> bool {
 
 #[derive(Clone, Default)]
 struct NativePathLock {
-    state: Arc<Mutex<LockState>>,
+    state: Arc<TurnCell<LockState>>,
 }
 
 #[derive(Default)]
@@ -487,8 +488,8 @@ struct LockState {
     waiters: Vec<Waker>,
 }
 
-fn lock_state(lock: &Mutex<LockState>) -> MutexGuard<'_, LockState> {
-    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock_state(lock: &TurnCell<LockState>) -> TurnCellGuard<'_, LockState> {
+    lock.lock_recovered()
 }
 
 fn take_waiters(state: &mut LockState) -> Vec<Waker> {
@@ -496,7 +497,7 @@ fn take_waiters(state: &mut LockState) -> Vec<Waker> {
 }
 
 struct Acquire {
-    lock: Arc<Mutex<LockState>>,
+    lock: Arc<TurnCell<LockState>>,
     write: bool,
     writer_ticket: Option<u64>,
     granted: bool,
@@ -574,7 +575,7 @@ impl Drop for Acquire {
 }
 
 struct LockGuard {
-    lock: Arc<Mutex<LockState>>,
+    lock: Arc<TurnCell<LockState>>,
     write: bool,
 }
 

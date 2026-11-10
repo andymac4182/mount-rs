@@ -350,7 +350,7 @@ struct OwnerService {
     registrations: mount_rs_cluster::RegistrationSupervisor,
     router: mount_rs_cluster::OwnerHttpRouter,
     stop: tokio_util::sync::CancellationToken,
-    task: tokio::sync::Mutex<
+    task: mount_rs_core::turn_gate::TurnLock<
         Option<
             tokio::task::JoinHandle<Result<(), mount_rs_cluster::transport::PeerTransportError>>,
         >,
@@ -362,7 +362,7 @@ impl OwnerService {
             || self
                 .task
                 .try_lock()
-                .is_ok_and(|task| task.as_ref().is_some_and(|task| task.is_finished()))
+                .is_some_and(|task| task.as_ref().is_some_and(|task| task.is_finished()))
     }
     async fn close(&self) -> Result<(), CliError> {
         let registration = self.registrations.shutdown().await;
@@ -496,7 +496,7 @@ pub(crate) async fn start_owner(
         registrations,
         router,
         stop,
-        task: tokio::sync::Mutex::new(Some(task)),
+        task: mount_rs_core::turn_gate::TurnLock::new(Some(task)),
     };
     let drain_timeout = options.drain_timeout;
     match HttpServer::start_with_handler(public, options).await {

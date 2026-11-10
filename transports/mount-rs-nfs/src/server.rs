@@ -11,13 +11,15 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock};
 
 use mount_rs_core::diagnostics::RequestTrace;
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{FsDriver, Loopback};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, oneshot};
+use tokio::sync::{Notify, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, decode_call, frame_record};
@@ -192,14 +194,14 @@ pub struct NfsServer {
     v4_session: Nfs4Session,
     options: NfsServerOptions,
     hooks: NfsServerHooks,
-    address: Arc<Mutex<Option<SocketAddr>>>,
-    shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-    accept_task: Arc<Mutex<Option<JoinHandle<()>>>>,
-    connection_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    clients: Arc<Mutex<HashMap<u64, NfsConnection>>>,
+    address: Arc<OnceLock<SocketAddr>>,
+    shutdown: Arc<TurnCell<Option<oneshot::Sender<()>>>>,
+    accept_task: Arc<TurnCell<Option<JoinHandle<()>>>>,
+    connection_tasks: Arc<TurnCell<Vec<JoinHandle<()>>>>,
+    clients: Arc<TurnCell<HashMap<u64, NfsConnection>>>,
     next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicUsize>,
-    listen_lock: Arc<AsyncMutex<()>>,
+    listen_lock: Arc<TurnLock<()>>,
     closed: AtomicBool,
 }
 
@@ -268,14 +270,14 @@ impl NfsServer {
             v4_session,
             options,
             hooks,
-            address: Arc::new(Mutex::new(None)),
-            shutdown: Arc::new(Mutex::new(None)),
-            accept_task: Arc::new(Mutex::new(None)),
-            connection_tasks: Arc::new(Mutex::new(Vec::new())),
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            address: Arc::new(OnceLock::new()),
+            shutdown: Arc::new(TurnCell::new(None)),
+            accept_task: Arc::new(TurnCell::new(None)),
+            connection_tasks: Arc::new(TurnCell::new(Vec::new())),
+            clients: Arc::new(TurnCell::new(HashMap::new())),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             active_connections: Arc::new(AtomicUsize::new(0)),
-            listen_lock: Arc::new(AsyncMutex::new(())),
+            listen_lock: Arc::new(TurnLock::new(())),
             closed: AtomicBool::new(false),
         }
     }
@@ -305,7 +307,7 @@ impl NfsServer {
     }
 
     pub fn local_addr(&self) -> Option<SocketAddr> {
-        *self.address.lock().expect("NFS server address lock")
+        self.address.get().copied()
     }
 
     pub fn port(&self) -> Option<u16> {
@@ -345,7 +347,7 @@ impl NfsServer {
         }
         let listener = TcpListener::bind(self.options.bind).await?;
         let address = listener.local_addr()?;
-        *self.address.lock().expect("NFS server address lock") = Some(address);
+        let _ = self.address.set(address);
         let (shutdown_sender, mut shutdown_receiver) = oneshot::channel();
         *self.shutdown.lock().expect("NFS shutdown lock") = Some(shutdown_sender);
         let session = self.session.clone();
@@ -530,7 +532,7 @@ struct NfsTcpConnectionRuntime {
 
 struct ConnectionGuard {
     counter: Arc<AtomicUsize>,
-    clients: Arc<Mutex<HashMap<u64, NfsConnection>>>,
+    clients: Arc<TurnCell<HashMap<u64, NfsConnection>>>,
     control: Arc<NfsConnectionControl>,
     id: u64,
 }
@@ -617,7 +619,7 @@ where
     } = runtime;
     let peer_name = peer.ip().to_string();
     let mut reader = reader;
-    let writer = Arc::new(AsyncMutex::new(writer));
+    let writer = Arc::new(TurnLock::new(writer));
     let permits = Arc::new(Semaphore::new(max_in_flight.max(1)));
     let stop = Arc::new(Notify::new());
     let mut workers = JoinSet::new();

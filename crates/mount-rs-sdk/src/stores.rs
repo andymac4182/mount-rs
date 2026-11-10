@@ -669,6 +669,27 @@ impl BlockStore for ErasedBlockStore {
         }
     }
 
+    async fn read_into(&self, id: &BlockId, offset: usize, buffer: &mut [u8]) -> Result<()> {
+        let mut profile = Span::new(Event::BlockGet);
+        profile.set_units(buffer.len() as u64);
+        #[cfg(feature = "observability")]
+        {
+            let length = buffer.len() as u64;
+            self.telemetry
+                .observe_fs(
+                    "provider.blocks",
+                    "get",
+                    None,
+                    self.inner.read_into(id, offset, buffer),
+                )
+                .await?;
+            self.telemetry.record_bytes("read", length);
+            return Ok(());
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.read_into(id, offset, buffer).await
+    }
+
     async fn flush(&self) -> Result<()> {
         let _profile = Span::new(Event::BlockFlush);
         #[cfg(feature = "observability")]
@@ -1087,7 +1108,7 @@ mod tests {
                 version: 1,
                 parameters: BTreeMap::from([("chunk_size".into(), 4096)]),
             },
-            nodes: BTreeMap::new(),
+            nodes: BTreeMap::new().into(),
         };
         assert_eq!(
             erased

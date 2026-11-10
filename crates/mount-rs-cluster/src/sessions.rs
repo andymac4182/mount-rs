@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     sync::{
-        Arc, RwLock,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -48,16 +48,75 @@ struct Record {
     principal: String,
     session: Arc<OwnedHandleSession>,
     created: Instant,
-    touched_ns: AtomicU64,
-    closing: bool,
+    /// Nanoseconds since `created` of the latest admission, shifted left one
+    /// bit, with `CLOSING` in the low bit. Admission and expiry both decide
+    /// with one compare-and-swap on this word, so a request is either admitted
+    /// before the session is retired or refused; neither side needs a lock.
+    life: AtomicU64,
+    #[cfg(test)]
+    backdated_ns: AtomicU64,
 }
+const CLOSING: u64 = 1;
 impl Record {
-    fn expired_at(&self, now_ns: u128, timeout: Duration) -> bool {
-        // Fail closed if the nanosecond counter ever overflows (after ~584
+    fn now_ns(&self) -> u128 {
+        let now = self.created.elapsed().as_nanos();
+        #[cfg(test)]
+        let now = now + self.backdated_ns.load(Ordering::Relaxed) as u128;
+        now
+    }
+    fn expired_at(life: u64, now_ns: u128, timeout: Duration) -> bool {
+        // Fail closed if the nanosecond counter ever overflows (after ~292
         // years). Never wrap or round timestamps at the expiry boundary.
-        now_ns > u64::MAX as u128
-            || now_ns.saturating_sub(self.touched_ns.load(Ordering::Relaxed) as u128)
-                >= timeout.as_nanos()
+        now_ns > (u64::MAX >> 1) as u128
+            || now_ns.saturating_sub((life >> 1) as u128) >= timeout.as_nanos()
+    }
+    /// Admits one request at `now_ns` unless the session is closing or idle
+    /// past `timeout`. Concurrent admissions can finish in reverse timestamp
+    /// order; the maximum keeps an older one from shortening the lifetime.
+    fn admit(&self, now_ns: u128, timeout: Duration) -> bool {
+        let mut life = self.life.load(Ordering::Acquire);
+        loop {
+            if life & CLOSING != 0 || Self::expired_at(life, now_ns, timeout) {
+                return false;
+            }
+            let touched = life.max((now_ns as u64) << 1);
+            if touched == life {
+                return true;
+            }
+            match self.life.compare_exchange_weak(
+                life,
+                touched,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => life = current,
+            }
+        }
+    }
+    /// Retires the session if it is already closing or idle past `timeout`.
+    fn retire_if_idle(&self, now_ns: u128, timeout: Duration) -> bool {
+        let mut life = self.life.load(Ordering::Acquire);
+        loop {
+            if life & CLOSING != 0 {
+                return true;
+            }
+            if !Self::expired_at(life, now_ns, timeout) {
+                return false;
+            }
+            match self.life.compare_exchange_weak(
+                life,
+                life | CLOSING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => life = current,
+            }
+        }
+    }
+    fn retire(&self) {
+        self.life.fetch_or(CLOSING, Ordering::AcqRel);
     }
 }
 /// Share one instance across a server's volume registries to bound admitted
@@ -72,9 +131,19 @@ impl SessionBudget {
         Ok(Self(Arc::new(tokio::sync::Semaphore::new(max_sessions))))
     }
 }
+/// An immutable registry snapshot. Requests read the current one without a
+/// lock; creating or removing a session installs a modified copy.
 struct State {
     closing: bool,
-    sessions: BTreeMap<SessionToken, Record>,
+    sessions: BTreeMap<SessionToken, Arc<Record>>,
+}
+impl State {
+    fn with_sessions(&self, sessions: BTreeMap<SessionToken, Arc<Record>>) -> Arc<Self> {
+        Arc::new(Self {
+            closing: self.closing,
+            sessions,
+        })
+    }
 }
 /// Per-volume bound; a multi-volume server must additionally enforce a global
 /// session/resource budget. Failed or cancelled cleanup keeps its registry slot
@@ -85,7 +154,7 @@ pub struct VolumeSessions {
     handles_per_session: usize,
     idle_timeout: Duration,
     budget: Option<SessionBudget>,
-    state: RwLock<State>,
+    state: arc_swap::ArcSwap<State>,
 }
 fn failure(code: ErrorCode) -> FsError {
     FsError::new(code).with_syscall("session")
@@ -124,7 +193,7 @@ impl VolumeSessions {
             handles_per_session,
             idle_timeout,
             budget: None,
-            state: RwLock::new(State {
+            state: arc_swap::ArcSwap::from_pointee(State {
                 closing: false,
                 sessions: BTreeMap::new(),
             }),
@@ -165,28 +234,37 @@ impl VolumeSessions {
         getrandom::fill(&mut bytes).map_err(|_| failure(ErrorCode::Eio))?;
         let token = SessionToken(bytes);
         let principal = authenticated_principal.to_owned();
-        let mut state = self.state.write().unwrap();
-        if state.closing {
-            return Err(failure(ErrorCode::Ebadf));
+        let record = Arc::new(Record {
+            _budget: permit,
+            principal,
+            session,
+            created: Instant::now(),
+            life: AtomicU64::new(0),
+            #[cfg(test)]
+            backdated_ns: AtomicU64::new(0),
+        });
+        let mut refused = None;
+        self.state.rcu(|state| {
+            refused = if state.closing {
+                Some(ErrorCode::Ebadf)
+            } else if state.sessions.len() >= self.max_sessions {
+                Some(ErrorCode::Enfile)
+            } else if state.sessions.contains_key(&token) {
+                Some(ErrorCode::Eagain)
+            } else {
+                None
+            };
+            if refused.is_some() {
+                return Arc::clone(state);
+            }
+            let mut sessions = state.sessions.clone();
+            sessions.insert(token.clone(), Arc::clone(&record));
+            state.with_sessions(sessions)
+        });
+        match refused {
+            Some(code) => Err(failure(code)),
+            None => Ok(token),
         }
-        if state.sessions.len() >= self.max_sessions {
-            return Err(failure(ErrorCode::Enfile));
-        }
-        if state.sessions.contains_key(&token) {
-            return Err(failure(ErrorCode::Eagain));
-        }
-        state.sessions.insert(
-            token.clone(),
-            Record {
-                _budget: permit,
-                principal,
-                session,
-                created: Instant::now(),
-                touched_ns: AtomicU64::new(0),
-                closing: false,
-            },
-        );
-        Ok(token)
     }
     /// Trusted transport use only: do not retain the returned Arc across client
     /// requests. Every new request must pass through this authorization/expiry
@@ -196,7 +274,7 @@ impl VolumeSessions {
         authenticated_principal: &str,
         token: &SessionToken,
     ) -> Result<Arc<OwnedHandleSession>> {
-        let state = self.state.read().unwrap();
+        let state = self.state.load();
         if state.closing {
             return Err(failure(ErrorCode::Ebadf));
         }
@@ -205,33 +283,30 @@ impl VolumeSessions {
             .get(token)
             .filter(|r| r.principal == authenticated_principal)
             .ok_or_else(|| failure(ErrorCode::Eacces))?;
-        let now = record.created.elapsed().as_nanos();
-        if record.closing || record.expired_at(now, self.idle_timeout) {
+        // A snapshot may still list a session that expiry or close has since
+        // retired; the record itself refuses the admission then.
+        if !record.admit(record.now_ns(), self.idle_timeout) {
             return Err(failure(ErrorCode::Estale));
         }
-        // Shared registry admission excludes expiry/close until publication.
-        // Concurrent admissions can finish in reverse timestamp order; max
-        // prevents an older admission from shortening the idle lifetime.
-        record.touched_ns.fetch_max(now as u64, Ordering::Relaxed);
         Ok(record.session.clone())
     }
     async fn cleanup(&self, token: &SessionToken, session: Arc<OwnedHandleSession>) -> Result<()> {
         session.close().await?;
-        let retired = {
-            let mut state = self.state.write().unwrap();
-            if state
+        // The record, and with it the budget permit, is released once the
+        // last snapshot listing it is dropped: never before it has left the
+        // registry.
+        self.state.rcu(|state| {
+            if !state
                 .sessions
                 .get(token)
                 .is_some_and(|record| Arc::ptr_eq(&record.session, &session))
             {
-                state.sessions.remove(token)
-            } else {
-                None
+                return Arc::clone(state);
             }
-        };
-        // Reclaim the principal/session reference and release shared capacity
-        // outside registry admission. Permit release can wake another task.
-        drop(retired);
+            let mut sessions = state.sessions.clone();
+            sessions.remove(token);
+            state.with_sessions(sessions)
+        });
         Ok(())
     }
     pub async fn close_session(
@@ -240,13 +315,13 @@ impl VolumeSessions {
         token: &SessionToken,
     ) -> Result<()> {
         let session = {
-            let mut state = self.state.write().unwrap();
+            let state = self.state.load();
             let record = state
                 .sessions
-                .get_mut(token)
+                .get(token)
                 .filter(|r| r.principal == authenticated_principal)
                 .ok_or_else(|| failure(ErrorCode::Eacces))?;
-            record.closing = true;
+            record.retire();
             record.session.clone()
         };
         self.cleanup(token, session).await
@@ -255,20 +330,12 @@ impl VolumeSessions {
     /// cannot discard a session that still owns handles.
     pub async fn expire_idle(&self) -> Result<usize> {
         let expired: Vec<_> = {
-            let mut state = self.state.write().unwrap();
+            let state = self.state.load();
             state
                 .sessions
-                .iter_mut()
-                .filter_map(|(token, record)| {
-                    if record.closing
-                        || record.expired_at(record.created.elapsed().as_nanos(), self.idle_timeout)
-                    {
-                        record.closing = true;
-                        Some((token.clone(), record.session.clone()))
-                    } else {
-                        None
-                    }
-                })
+                .iter()
+                .filter(|(_, record)| record.retire_if_idle(record.now_ns(), self.idle_timeout))
+                .map(|(token, record)| (token.clone(), record.session.clone()))
                 .collect()
         };
         let mut completed = 0;
@@ -284,10 +351,16 @@ impl VolumeSessions {
         error.map_or(Ok(completed), Err)
     }
     pub(crate) fn stop_admission(&self) {
-        let mut state = self.state.write().unwrap();
-        state.closing = true;
-        for record in state.sessions.values_mut() {
-            record.closing = true;
+        // Every session is in the snapshot this replaces or was refused by
+        // the closing one, so none escapes retirement.
+        let stopped = self.state.rcu(|state| {
+            Arc::new(State {
+                closing: true,
+                sessions: state.sessions.clone(),
+            })
+        });
+        for record in stopped.sessions.values() {
+            record.retire();
         }
     }
 
@@ -338,20 +411,42 @@ mod tests {
         let sessions = VolumeSessions::new(fs.clone(), limit, 2, Duration::from_secs(60)).unwrap();
         (fs, sessions)
     }
+    impl VolumeSessions {
+        /// Ages one session past the fixture's idle timeout.
+        fn backdate(&self, token: &SessionToken) {
+            self.state
+                .load()
+                .sessions
+                .get(token)
+                .unwrap()
+                .backdated_ns
+                .store(Duration::from_secs(61).as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
     #[tokio::test]
     async fn lookup_overlaps_shared_admission_and_timestamp_never_regresses() {
         let (fs, registry) = fixture(2).await;
         let token = registry.create("alice").await.unwrap();
         {
-            let guard = registry.state.read().unwrap();
+            let guard = registry.state.load();
             let record = guard.sessions.get(&token).unwrap();
             // Explicit boundary and overflow checks do not depend on wall-clock sleeps.
-            record.touched_ns.store(100, Ordering::Relaxed);
-            record.touched_ns.fetch_max(50, Ordering::Relaxed);
-            assert_eq!(record.touched_ns.load(Ordering::Relaxed), 100);
-            assert!(!record.expired_at(109, Duration::from_nanos(10)));
-            assert!(record.expired_at(110, Duration::from_nanos(10)));
-            assert!(record.expired_at(u64::MAX as u128 + 1, Duration::from_secs(60)));
+            let idle = Duration::from_nanos(10);
+            record.life.store(100 << 1, Ordering::Relaxed);
+            assert!(record.admit(50, idle));
+            assert_eq!(record.life.load(Ordering::Relaxed), 100 << 1);
+            assert!(record.admit(109, idle));
+            assert_eq!(record.life.load(Ordering::Relaxed), 109 << 1);
+            assert!(!Record::expired_at(100 << 1, 109, idle));
+            assert!(Record::expired_at(100 << 1, 110, idle));
+            assert!(!record.admit(119, idle));
+            assert!(!record.retire_if_idle(118, idle));
+            assert!(Record::expired_at(
+                0,
+                (u64::MAX >> 1) as u128 + 1,
+                Duration::from_secs(60)
+            ));
+            record.life.store(0, Ordering::Relaxed);
             let (send, receive) = std::sync::mpsc::channel();
             std::thread::scope(|scope| {
                 scope.spawn(|| {
@@ -377,14 +472,7 @@ mod tests {
         let active = registry.create("active").await.unwrap();
         let session = registry.lookup("active", &active).unwrap();
         let id = session.open("/file", "w+", 0o600).await.unwrap();
-        registry
-            .state
-            .write()
-            .unwrap()
-            .sessions
-            .get_mut(&expired)
-            .unwrap()
-            .created = Instant::now() - Duration::from_secs(61);
+        registry.backdate(&expired);
         let stop = tokio_util::sync::CancellationToken::new();
         let worker_stop = stop.clone();
         let worker = registry.clone();
@@ -394,13 +482,7 @@ mod tests {
                 .await
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while registry
-                .state
-                .write()
-                .unwrap()
-                .sessions
-                .contains_key(&expired)
-            {
+            while registry.state.load().sessions.contains_key(&expired) {
                 tokio::task::yield_now().await;
             }
         })
@@ -410,7 +492,7 @@ mod tests {
         stop.cancel();
         task.await.unwrap().unwrap();
         assert_eq!(session.stat(id).await.unwrap_err().code, ErrorCode::Ebadf);
-        assert!(registry.state.write().unwrap().sessions.is_empty());
+        assert!(registry.state.load().sessions.is_empty());
         fs.shutdown().await.unwrap();
     }
 
@@ -420,14 +502,7 @@ mod tests {
         let registry = Arc::new(registry);
         let expired = registry.create("idle").await.unwrap();
         let active = registry.create("active").await.unwrap();
-        registry
-            .state
-            .write()
-            .unwrap()
-            .sessions
-            .get_mut(&expired)
-            .unwrap()
-            .created = Instant::now() - Duration::from_secs(61);
+        registry.backdate(&expired);
         let worker = registry.clone();
         let task = tokio::spawn(async move {
             worker
@@ -438,13 +513,7 @@ mod tests {
                 .await
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while registry
-                .state
-                .write()
-                .unwrap()
-                .sessions
-                .contains_key(&expired)
-            {
+            while registry.state.load().sessions.contains_key(&expired) {
                 tokio::task::yield_now().await;
             }
         })
@@ -457,16 +526,9 @@ mod tests {
             registry.create("new").await.unwrap_err().code,
             ErrorCode::Ebadf
         );
-        assert!(
-            registry
-                .state
-                .write()
-                .unwrap()
-                .sessions
-                .contains_key(&active)
-        );
+        assert!(registry.state.load().sessions.contains_key(&active));
         registry.close().await.unwrap();
-        assert!(registry.state.write().unwrap().sessions.is_empty());
+        assert!(registry.state.load().sessions.is_empty());
         fs.shutdown().await.unwrap();
     }
 
@@ -479,13 +541,20 @@ mod tests {
         };
         struct Probe {
             registry: Arc<VolumeSessions>,
+            token: SessionToken,
             unlocked: AtomicBool,
             woke: AtomicBool,
         }
         impl Wake for Probe {
             fn wake(self: Arc<Self>) {
-                self.unlocked
-                    .store(self.registry.state.try_write().is_ok(), Ordering::SeqCst);
+                // The permit must outlive the session's registry entry.
+                let listed = self
+                    .registry
+                    .state
+                    .load()
+                    .sessions
+                    .contains_key(&self.token);
+                self.unlocked.store(!listed, Ordering::SeqCst);
                 self.woke.store(true, Ordering::SeqCst);
             }
         }
@@ -504,6 +573,7 @@ mod tests {
         let token = registry.create("client").await.unwrap();
         let probe = Arc::new(Probe {
             registry: registry.clone(),
+            token: token.clone(),
             unlocked: AtomicBool::new(false),
             woke: AtomicBool::new(false),
         });
@@ -519,7 +589,7 @@ mod tests {
         assert!(probe.woke.load(Ordering::SeqCst));
         assert!(
             probe.unlocked.load(Ordering::SeqCst),
-            "permit released while registry locked"
+            "permit released while the session was still registered"
         );
         drop(waiting.await.unwrap());
         assert_eq!(budget.0.available_permits(), 1);
@@ -561,14 +631,7 @@ mod tests {
         );
         first.close_session("first", &token).await.unwrap();
         let token = second.create("second").await.unwrap();
-        second
-            .state
-            .write()
-            .unwrap()
-            .sessions
-            .get_mut(&token)
-            .unwrap()
-            .created = Instant::now() - Duration::from_secs(61);
+        second.backdate(&token);
         assert_eq!(second.expire_idle().await.unwrap(), 1);
         assert_eq!(budget.0.available_permits(), 1);
         // Rejection after reserving capacity must not leak that permit.
@@ -635,12 +698,12 @@ mod tests {
         let id = session.open("/file", "w+", 0o600).await.unwrap();
         registry
             .state
-            .write()
-            .unwrap()
+            .load()
             .sessions
-            .get_mut(&token)
+            .get(&token)
             .unwrap()
-            .created = Instant::now() - Duration::from_secs(61);
+            .backdated_ns
+            .store(Duration::from_secs(61).as_nanos() as u64, Ordering::Relaxed);
         assert!(registry.lookup("alice", &token).is_err());
         assert!(registry.lookup("bob", &active).is_ok());
         assert_eq!(registry.expire_idle().await.unwrap(), 1);

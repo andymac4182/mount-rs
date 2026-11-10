@@ -9,6 +9,7 @@ use crate::{
     fuse_codec::{NativeFuseProtocolContext, invalid_argument, protocol_error, usize_value},
 };
 use mount_rs_core::FsError;
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_fuse::constants::{
     FUSE_ATOMIC_O_TRUNC, FUSE_CACHE_SYMLINKS, FUSE_DO_READDIRPLUS, FUSE_EXPORT_SUPPORT,
     FUSE_FLOCK_LOCKS, FUSE_PARALLEL_DIROPS, FUSE_POSIX_LOCKS, FUSE_SETXATTR_EXT,
@@ -381,7 +382,7 @@ fn session_options(options: Option<NativeFuseSessionOptions>) -> napi::Result<Fu
 /// the Rust transport's inode and open-handle state across calls.
 #[napi]
 pub struct FuseSession {
-    inner: tokio::sync::Mutex<RustFuseSession>,
+    inner: TurnLock<RustFuseSession>,
 }
 
 #[napi]
@@ -392,7 +393,7 @@ impl FuseSession {
         options: Option<NativeFuseSessionOptions>,
     ) -> napi::Result<Self> {
         Ok(Self {
-            inner: tokio::sync::Mutex::new(RustFuseSession::with_options(
+            inner: TurnLock::new(RustFuseSession::with_options(
                 filesystem.driver()?,
                 session_options(options)?,
             )),

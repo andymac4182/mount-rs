@@ -23,6 +23,7 @@
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 compile_error!("mount-rs-sqlite-vfs currently supports macOS, Linux, and Windows only");
 
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsString};
 use std::fmt;
@@ -33,7 +34,8 @@ use std::ops::Deref;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Component, Path, PathBuf};
 use std::ptr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -49,6 +51,7 @@ use std::os::windows::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 
+use mount_rs_core::turn_cell::TurnCell;
 use rusqlite::ffi;
 use rusqlite::{Connection, OpenFlags};
 
@@ -457,17 +460,8 @@ impl SqliteVfs {
     pub fn close(&self) -> Result<(), VfsError> {
         let name = self.name().to_owned();
         let state = Arc::clone(&self.registration.app.lifecycle);
-        {
-            let mut lifecycle = state.lock()?;
-            match lifecycle.phase {
-                LifecyclePhase::Closed => return Ok(()),
-                LifecyclePhase::Closing => return Err(VfsError::Busy),
-                LifecyclePhase::Open => {}
-            }
-            if lifecycle.active_operations != 0 || lifecycle.active_files != 0 {
-                return Err(VfsError::Busy);
-            }
-            lifecycle.phase = LifecyclePhase::Closing;
+        if !state.begin_close()? {
+            return Ok(());
         }
 
         let registry = registered_vfs_registry();
@@ -480,8 +474,7 @@ impl SqliteVfs {
             )
         };
         if rc != ffi::SQLITE_OK {
-            let mut lifecycle = state.lock()?;
-            lifecycle.phase = LifecyclePhase::Open;
+            state.abort_close();
             return Err(VfsError::Other(format!(
                 "sqlite3_vfs_unregister failed: {rc}"
             )));
@@ -495,13 +488,7 @@ impl SqliteVfs {
         registry.retired.push(retired);
         drop(registry);
 
-        let backend = {
-            let mut lifecycle = state.lock()?;
-            debug_assert_eq!(lifecycle.phase, LifecyclePhase::Closing);
-            lifecycle.phase = LifecyclePhase::Closed;
-            lifecycle.backend.take()
-        };
-        drop(backend);
+        drop(state.finish_close());
         Ok(())
     }
 
@@ -563,56 +550,96 @@ impl VfsApp {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LifecyclePhase {
-    Open,
-    Closing,
-    Closed,
-}
-
-struct LifecycleInner {
-    phase: LifecyclePhase,
-    active_operations: usize,
-    active_files: usize,
-    backend: Option<Arc<dyn Backend>>,
-}
+/// The lifecycle of one registration, in a single word: the phase in the top
+/// two bits, the count of open SQLite files in the next 31 and the count of
+/// running VFS callbacks in the low 31. Every transition is one
+/// compare-and-swap, so a callback neither takes a lock nor can be poisoned
+/// by a panic that unwinds through another callback.
+const LIFECYCLE_OPERATION: u64 = 1;
+const LIFECYCLE_FILE: u64 = 1 << 31;
+const LIFECYCLE_COUNT_MASK: u64 = (1 << 31) - 1;
+const LIFECYCLE_PHASE_SHIFT: u32 = 62;
+const LIFECYCLE_OPEN: u64 = 0;
+const LIFECYCLE_CLOSING: u64 = 1 << LIFECYCLE_PHASE_SHIFT;
+const LIFECYCLE_CLOSED: u64 = 2 << LIFECYCLE_PHASE_SHIFT;
+const LIFECYCLE_PHASE_MASK: u64 = 3 << LIFECYCLE_PHASE_SHIFT;
 
 struct LifecycleState {
-    inner: Mutex<LifecycleInner>,
+    state: AtomicU64,
+    /// Read (cloned) only by a thread that holds an operation count, which
+    /// pins the phase at open; taken only by the one closer that moved the
+    /// phase to closing, which requires both counts to be zero and admits no
+    /// new ones.
+    backend: UnsafeCell<Option<Arc<dyn Backend>>>,
 }
+
+// SAFETY: `backend` is shared between threads only under the protocol on the
+// field: concurrent shared reads while open, one exclusive take while
+// closing. `Backend` is `Send + Sync`.
+unsafe impl Send for LifecycleState {}
+unsafe impl Sync for LifecycleState {}
 
 impl LifecycleState {
     fn new(backend: Arc<dyn Backend>) -> Arc<Self> {
         Arc::new(Self {
-            inner: Mutex::new(LifecycleInner {
-                phase: LifecyclePhase::Open,
-                active_operations: 0,
-                active_files: 0,
-                backend: Some(backend),
-            }),
+            state: AtomicU64::new(LIFECYCLE_OPEN),
+            backend: UnsafeCell::new(Some(backend)),
         })
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, LifecycleInner>, VfsError> {
-        self.inner
-            .lock()
-            .map_err(|_| VfsError::Other("SQLite VFS lifecycle lock poisoned".to_owned()))
+    /// Add `unit` to the counts if the registration is open.
+    fn acquire(&self, unit: u64) -> Result<(), VfsError> {
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            match current & LIFECYCLE_PHASE_MASK {
+                LIFECYCLE_OPEN => {}
+                LIFECYCLE_CLOSING => return Err(VfsError::Busy),
+                _ => return Err(VfsError::Other("SQLite VFS is closed".to_owned())),
+            }
+            let count = if unit == LIFECYCLE_FILE {
+                (current >> 31) & LIFECYCLE_COUNT_MASK
+            } else {
+                current & LIFECYCLE_COUNT_MASK
+            };
+            if count == LIFECYCLE_COUNT_MASK {
+                return Err(VfsError::Busy);
+            }
+            match self.state.compare_exchange_weak(
+                current,
+                current + unit,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Give back one `unit`, never below zero.
+    fn release(&self, unit: u64) {
+        let released = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let count = if unit == LIFECYCLE_FILE {
+                    (current >> 31) & LIFECYCLE_COUNT_MASK
+                } else {
+                    current & LIFECYCLE_COUNT_MASK
+                };
+                (count != 0).then(|| current - unit)
+            });
+        debug_assert!(released.is_ok());
     }
 
     fn begin_operation(self: &Arc<Self>) -> Result<OperationGuard, VfsError> {
-        let mut lifecycle = self.lock()?;
-        match lifecycle.phase {
-            LifecyclePhase::Open => {}
-            LifecyclePhase::Closing => return Err(VfsError::Busy),
-            LifecyclePhase::Closed => {
-                return Err(VfsError::Other("SQLite VFS is closed".to_owned()));
-            }
-        }
-        let backend = lifecycle
-            .backend
-            .clone()
-            .ok_or_else(|| VfsError::Other("SQLite VFS backend is detached".to_owned()))?;
-        lifecycle.active_operations += 1;
+        self.acquire(LIFECYCLE_OPERATION)?;
+        // SAFETY: the operation count just taken keeps the phase open, and
+        // nothing writes `backend` while it is.
+        let backend = unsafe { (*self.backend.get()).clone() };
+        let Some(backend) = backend else {
+            self.release_operation();
+            return Err(VfsError::Other("SQLite VFS backend is detached".to_owned()));
+        };
         Ok(OperationGuard {
             state: Arc::clone(self),
             backend,
@@ -620,34 +647,51 @@ impl LifecycleState {
     }
 
     fn acquire_file(self: &Arc<Self>) -> Result<FileLease, VfsError> {
-        let mut lifecycle = self.lock()?;
-        if lifecycle.phase != LifecyclePhase::Open {
-            return Err(match lifecycle.phase {
-                LifecyclePhase::Closing => VfsError::Busy,
-                LifecyclePhase::Closed => VfsError::Other("SQLite VFS is closed".to_owned()),
-                LifecyclePhase::Open => unreachable!(),
-            });
-        }
-        lifecycle.active_files += 1;
+        self.acquire(LIFECYCLE_FILE)?;
         Ok(FileLease {
             state: Arc::clone(self),
         })
     }
 
     fn release_operation(&self) {
-        let Ok(mut lifecycle) = self.inner.lock() else {
-            return;
-        };
-        debug_assert!(lifecycle.active_operations > 0);
-        lifecycle.active_operations = lifecycle.active_operations.saturating_sub(1);
+        self.release(LIFECYCLE_OPERATION);
     }
 
     fn release_file(&self) {
-        let Ok(mut lifecycle) = self.inner.lock() else {
-            return;
-        };
-        debug_assert!(lifecycle.active_files > 0);
-        lifecycle.active_files = lifecycle.active_files.saturating_sub(1);
+        self.release(LIFECYCLE_FILE);
+    }
+
+    /// Move an idle open registration to closing. `Ok(false)` if it is
+    /// already closed; `Busy` while it is in use or another close is running.
+    fn begin_close(&self) -> Result<bool, VfsError> {
+        match self.state.compare_exchange(
+            LIFECYCLE_OPEN,
+            LIFECYCLE_CLOSING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(true),
+            Err(observed) if observed & LIFECYCLE_PHASE_MASK == LIFECYCLE_CLOSED => Ok(false),
+            Err(_) => Err(VfsError::Busy),
+        }
+    }
+
+    /// Reopen after `begin_close`, when unregistering failed.
+    fn abort_close(&self) {
+        debug_assert_eq!(self.state.load(Ordering::Acquire), LIFECYCLE_CLOSING);
+        self.state.store(LIFECYCLE_OPEN, Ordering::Release);
+    }
+
+    /// Finish the close started by `begin_close`, handing back the backend
+    /// for the caller to drop.
+    fn finish_close(&self) -> Option<Arc<dyn Backend>> {
+        debug_assert_eq!(self.state.load(Ordering::Acquire), LIFECYCLE_CLOSING);
+        // SAFETY: only the caller that won `begin_close` gets here, and while
+        // the phase is closing no count is held and none can be taken, so no
+        // one else reads `backend`.
+        let backend = unsafe { (*self.backend.get()).take() };
+        self.state.store(LIFECYCLE_CLOSED, Ordering::Release);
+        backend
     }
 }
 
@@ -703,9 +747,9 @@ struct VfsRegistry {
     retired: Vec<Arc<RegisteredVfs>>,
 }
 
-fn registered_vfs_registry() -> &'static Mutex<VfsRegistry> {
-    static REGISTRY: OnceLock<Mutex<VfsRegistry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(VfsRegistry::default()))
+fn registered_vfs_registry() -> &'static TurnCell<VfsRegistry> {
+    static REGISTRY: OnceLock<TurnCell<VfsRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(TurnCell::default)
 }
 
 #[repr(C)]

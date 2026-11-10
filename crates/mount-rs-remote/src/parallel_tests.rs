@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
-#[ignore = "needs concurrent same-handle chunked reads; the branch's lock-free read path was not ported onto main's chunked runtime"]
 async fn remote_positional_reads_reach_backing_service_concurrently() {
     for http2 in [false, true] {
         for headers in [false, true] {
@@ -54,7 +53,19 @@ async fn run_overlap(http2: bool, headers: bool) {
             });
         }
     });
+    // The object-store provider keeps blocks it wrote in a process-local
+    // cache, so seed the file through one owner and serve it from a second,
+    // cold one: only then does a read have to reach the backing service.
+    let root = std::env::temp_dir().join(format!(
+        "mount-rs-parallel-{}-{http2}-{headers}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
     let mut options = mount_rs_sdk::SplitOptions::memory("parallel-public", 4096);
+    options.metadata = mount_rs_sdk::StoreConfig::Sqlite {
+        path: root.join("metadata.sqlite"),
+    };
     options.blocks = mount_rs_sdk::StoreConfig::R2 {
         endpoint,
         bucket: "blocks".into(),
@@ -63,6 +74,12 @@ async fn run_overlap(http2: bool, headers: bool) {
         secret_access_key: "test".into(),
         durable: false,
     };
+    let seed = mount_rs_sdk::Filesystem::split(options.clone())
+        .await
+        .unwrap();
+    seed.driver().write_file("/data", b"data").await.unwrap();
+    seed.shutdown().await.unwrap();
+    assert_eq!(entered.load(Ordering::SeqCst), 0);
     let owner = Arc::new(mount_rs_sdk::Filesystem::split(options).await.unwrap());
     let registry =
         Arc::new(VolumeSessions::new(owner.clone(), 2, 4, Duration::from_secs(60)).unwrap());
@@ -94,8 +111,7 @@ async fn run_overlap(http2: bool, headers: bool) {
     if headers {
         remote.enable_header_reads().await.unwrap();
     }
-    let handle = remote.open("/data", "w+", 0o600).await.unwrap();
-    handle.write(b"data", Some(0)).await.unwrap();
+    let handle = remote.open("/data", "r", 0).await.unwrap();
     let mut reads = tokio::task::JoinSet::new();
     for _ in 0..2 {
         let handle = handle.clone();
@@ -111,7 +127,12 @@ async fn run_overlap(http2: bool, headers: bool) {
         }
     })
     .await
-    .expect("both public reads must reach backing storage before either completes");
+    .unwrap_or_else(|_| {
+        panic!(
+            "both public reads must reach backing storage before either completes: entered={} http2={http2} headers={headers}",
+            entered.load(Ordering::SeqCst)
+        )
+    });
     assert!(
         tokio::time::timeout(Duration::from_millis(20), handle.close())
             .await
@@ -128,4 +149,5 @@ async fn run_overlap(http2: bool, headers: bool) {
     owner.shutdown().await.unwrap();
     storage.abort();
     assert!(storage.await.unwrap_err().is_cancelled());
+    let _ = std::fs::remove_dir_all(&root);
 }

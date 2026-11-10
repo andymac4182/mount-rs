@@ -9,15 +9,17 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 
 use mount_rs_core::FsDriver;
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::constants::{P9_DEFAULT_MAX_FRAME, P9_HDRSZ, P9_TVERSION};
@@ -236,7 +238,7 @@ enum P9Listener {
 
 /// A running or attach-only 9P server.
 pub struct P9Server {
-    listener: Arc<Mutex<Option<P9Listener>>>,
+    listener: Arc<TurnLock<Option<P9Listener>>>,
     driver: Arc<dyn FsDriver>,
     options: P9ServerOptions,
     hooks: P9ServerHooks,
@@ -247,10 +249,10 @@ pub struct P9Server {
     closed: AtomicBool,
     serving: AtomicBool,
     next_id: AtomicU64,
-    connections: Arc<StdMutex<HashMap<u64, P9Connection>>>,
-    tcp_addr: StdMutex<Option<SocketAddr>>,
+    connections: Arc<TurnCell<HashMap<u64, P9Connection>>>,
+    tcp_addr: TurnCell<Option<SocketAddr>>,
     #[cfg(target_os = "linux")]
-    adoption: Mutex<()>,
+    adoption: TurnLock<()>,
 }
 
 impl P9Server {
@@ -300,7 +302,7 @@ impl P9Server {
             .clone()
             .unwrap_or_else(|| P9LockTable::new(Default::default()));
         Self {
-            listener: Arc::new(Mutex::new(None)),
+            listener: Arc::new(TurnLock::new(None)),
             driver,
             options,
             hooks,
@@ -311,10 +313,10 @@ impl P9Server {
             closed: AtomicBool::new(false),
             serving: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
-            connections: Arc::new(StdMutex::new(HashMap::new())),
-            tcp_addr: StdMutex::new(None),
+            connections: Arc::new(TurnCell::new(HashMap::new())),
+            tcp_addr: TurnCell::new(None),
             #[cfg(target_os = "linux")]
-            adoption: Mutex::new(()),
+            adoption: TurnLock::new(()),
         }
     }
 
@@ -578,7 +580,7 @@ impl P9Server {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn adoption_lock(&self) -> &Mutex<()> {
+    pub(crate) fn adoption_lock(&self) -> &TurnLock<()> {
         &self.adoption
     }
 
@@ -805,7 +807,7 @@ struct ConnectionRuntime {
     control: Arc<ConnectionControl>,
     server_shutdown: Arc<Notify>,
     server_shutdown_requested: Arc<AtomicBool>,
-    connections: Arc<StdMutex<HashMap<u64, P9Connection>>>,
+    connections: Arc<TurnCell<HashMap<u64, P9Connection>>>,
     hooks: P9ServerHooks,
     reported: Arc<AtomicBool>,
     own: bool,
@@ -924,7 +926,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
     } = runtime;
     let session = connection.session.clone();
     let (mut reader, writer) = tokio::io::split(stream);
-    let writer = Arc::new(Mutex::new(writer));
+    let writer = Arc::new(TurnLock::new(writer));
     let permits = Arc::new(Semaphore::new(max_in_flight));
     let mut assembler = match P9FrameAssembler::new(max_frame.max(P9_HDRSZ)) {
         Ok(assembler) => assembler,

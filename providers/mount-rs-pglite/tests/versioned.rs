@@ -82,7 +82,8 @@ fn namespace(block: BlockId) -> Namespace {
                     }),
                 },
             ),
-        ]),
+        ])
+        .into(),
     }
 }
 

@@ -149,7 +149,8 @@ async fn root_namespace(uid: u32) -> Namespace {
                 stats,
                 data: NodeData::Directory { entries: vec![] },
             },
-        )]),
+        )])
+        .into(),
     }
 }
 

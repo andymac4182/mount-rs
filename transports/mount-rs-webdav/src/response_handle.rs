@@ -1,4 +1,5 @@
 //! Keep a prepared response's handle alive until explicit close or final drop.
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{FileHandle, Result, Stats};
 use std::sync::{
     Arc,
@@ -8,7 +9,7 @@ use std::sync::{
 pub(crate) struct ResponseHandle {
     inner: Arc<dyn FileHandle>,
     closed: AtomicBool,
-    close_gate: tokio::sync::Mutex<()>,
+    close_gate: TurnLock<()>,
     runtime: Option<tokio::runtime::Handle>,
 }
 impl ResponseHandle {
@@ -16,7 +17,7 @@ impl ResponseHandle {
         Arc::new(Self {
             inner,
             closed: AtomicBool::new(false),
-            close_gate: tokio::sync::Mutex::new(()),
+            close_gate: TurnLock::new(()),
             runtime: tokio::runtime::Handle::try_current().ok(),
         })
     }

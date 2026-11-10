@@ -5,6 +5,7 @@
 use super::MAX_IO;
 use super::RemoteSession;
 use async_trait::async_trait;
+use mount_rs_core::drain_gate::{DrainExclusive, DrainGate, DrainShared};
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, OpenFlags,
     Result, Stats, StatsFs,
@@ -12,7 +13,6 @@ use mount_rs_core::{
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
-use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct RemoteFs {
@@ -119,30 +119,41 @@ fn empty(session: &RemoteSession, bytes: Vec<u8>) -> Result<()> {
         Err(session.protocol_error())
     }
 }
-#[derive(Clone, Copy, PartialEq)]
-enum HandleState {
-    Open,
-    Closing,
-    Closed,
-}
+const OPEN: u8 = 0;
+const CLOSING: u8 = 1;
+const CLOSED: u8 = 2;
 struct RemoteHandle {
     session: Arc<RemoteSession>,
     id: u64,
-    state: RwLock<HandleState>,
+    /// Positional reads and stats share the gate; cursor moves, mutations
+    /// and close hold it exclusively. Shared entry is an atomic counter.
+    gate: DrainGate,
+    /// Written only while holding `gate` exclusively.
+    state: std::sync::atomic::AtomicU8,
 }
 impl RemoteHandle {
-    async fn admitted(&self) -> Result<tokio::sync::RwLockWriteGuard<'_, HandleState>> {
-        let guard = self.state.write().await;
-        if *guard != HandleState::Open {
+    fn new(session: Arc<RemoteSession>, id: u64) -> Self {
+        Self {
+            session,
+            id,
+            gate: DrainGate::new(),
+            state: std::sync::atomic::AtomicU8::new(OPEN),
+        }
+    }
+    fn check_open(&self) -> Result<()> {
+        if self.state.load(std::sync::atomic::Ordering::Acquire) != OPEN {
             return Err(FsError::new(ErrorCode::Ebadf).with_syscall("remote"));
         }
+        Ok(())
+    }
+    async fn admitted(&self) -> Result<DrainExclusive<'_>> {
+        let guard = self.gate.write().await;
+        self.check_open()?;
         Ok(guard)
     }
-    async fn admitted_read(&self) -> Result<tokio::sync::RwLockReadGuard<'_, HandleState>> {
-        let guard = self.state.read().await;
-        if *guard != HandleState::Open {
-            return Err(FsError::new(ErrorCode::Ebadf).with_syscall("remote"));
-        }
+    async fn admitted_read(&self) -> Result<DrainShared<'_>> {
+        let guard = self.gate.read().await;
+        self.check_open()?;
         Ok(guard)
     }
     async fn mutation(&self, operation: Value) -> Result<()> {
@@ -217,11 +228,12 @@ impl FileHandle for RemoteHandle {
             .await
     }
     async fn close(&self) -> Result<()> {
-        let mut state = self.state.write().await;
-        if *state == HandleState::Closed {
+        use std::sync::atomic::Ordering;
+        let _exclusive = self.gate.write().await;
+        if self.state.load(Ordering::Acquire) == CLOSED {
             return Ok(());
         }
-        *state = HandleState::Closing;
+        self.state.store(CLOSING, Ordering::Release);
         match self
             .session
             .control(&json!({"operation":"close","handle":self.id}))
@@ -231,7 +243,7 @@ impl FileHandle for RemoteHandle {
             Err(error) if error.code == ErrorCode::Ebadf => {}
             Err(error) => return Err(error),
         }
-        *state = HandleState::Closed;
+        self.state.store(CLOSED, Ordering::Release);
         Ok(())
     }
 }
@@ -265,11 +277,13 @@ impl FsDriver for RemoteFs {
             .and_then(Value::as_u64)
             .filter(|id| *id > 0)
             .ok_or_else(|| self.session.protocol_error())?;
-        Ok(Arc::new(RemoteHandle {
-            session: self.session.clone(),
-            id,
-            state: RwLock::new(HandleState::Open),
-        }))
+        Ok(Arc::new(RemoteHandle::new(self.session.clone(), id)))
+    }
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        if self.session.write_file(path, data).await? {
+            return Ok(());
+        }
+        mount_rs_core::driver::write_file_through_handle(self, path, data).await
     }
     async fn stat(&self, path: &str) -> Result<Stats> {
         self.metadata(json!({"action":"stat","path":path})).await
@@ -384,11 +398,7 @@ mod tests {
             .await
             .unwrap();
         let opened = remote.open("/data", "w+", 0o600).await.unwrap();
-        let handle = RemoteHandle {
-            session: remote.session.clone(),
-            id: opened.fd().unwrap(),
-            state: RwLock::new(HandleState::Open),
-        };
+        let handle = RemoteHandle::new(remote.session.clone(), opened.fd().unwrap());
         handle.write(b"data", Some(0)).await.unwrap();
         let admitted = handle.admitted_read().await.unwrap();
         let mut bytes = [0; 4];
@@ -583,6 +593,105 @@ mod tests {
         // Explicit cleanup still reaches the server: it returns its denial,
         // rather than the local failed-session admission error.
         assert_eq!(remote.shutdown().await.unwrap_err().code, ErrorCode::Eacces);
+        server.close().await.unwrap();
+        registry.close().await.unwrap();
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn whole_file_writes_take_one_request_and_fall_back_when_they_cannot() {
+        use mount_rs_cluster::{SessionCredentials, SessionHttpHandler, VolumeSessions};
+        let owner = Arc::new(
+            mount_rs_sdk::Filesystem::split(mount_rs_sdk::SplitOptions::memory(
+                "whole-file-test",
+                4096,
+            ))
+            .await
+            .unwrap(),
+        );
+        let registry =
+            Arc::new(VolumeSessions::new(owner.clone(), 2, 8, Duration::from_secs(60)).unwrap());
+        let secret = "w".repeat(32);
+        let handler = SessionHttpHandler::new(
+            "volume",
+            SessionCredentials::new(vec![("client".into(), secret.clone())]).unwrap(),
+            registry.clone(),
+        )
+        .unwrap();
+        let server =
+            mount_rs_http::HttpServer::start_with_handler(Arc::new(handler), Default::default())
+                .await
+                .unwrap();
+        let remote = RemoteFs::connect(&server.url(), "volume", &secret, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let read_back = |path: &'static str, length: usize| {
+            let remote = remote.clone();
+            async move {
+                let handle = remote.open(path, "r", 0).await.unwrap();
+                let mut bytes = vec![0; length + 1];
+                let mut read = 0;
+                loop {
+                    let count = handle
+                        .read(&mut bytes[read..], Some(read as u64))
+                        .await
+                        .unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    read += count;
+                }
+                handle.close().await.unwrap();
+                bytes.truncate(read);
+                bytes
+            }
+        };
+        // The owner offers the request, so a small file is one round trip,
+        // whatever its name contains.
+        let odd = "/a b%\u{fc}\n.txt";
+        assert!(remote.session.write_file(odd, b"first").await.unwrap());
+        remote.write_file(odd, b"second!").await.unwrap();
+        assert_eq!(read_back(odd, 7).await, b"second!");
+        remote.write_file(odd, b"").await.unwrap();
+        assert_eq!(remote.stat(odd).await.unwrap().size, 0);
+        // More than one request can carry: nothing is sent that way, and the
+        // write goes through a handle.
+        let large = vec![b'x'; MAX_IO + 4];
+        assert!(!remote.session.write_file("/large", &large).await.unwrap());
+        assert_eq!(
+            remote.stat("/large").await.unwrap_err().code,
+            ErrorCode::Enoent
+        );
+        remote.write_file("/large", &large).await.unwrap();
+        assert_eq!(read_back("/large", MAX_IO + 4).await, large);
+        // An owner that does not offer it gets the handle sequence too.
+        remote
+            .session
+            .whole_file_writes
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(!remote.session.write_file("/old", b"old").await.unwrap());
+        remote.write_file("/old", b"old owner").await.unwrap();
+        assert_eq!(read_back("/old", 9).await, b"old owner");
+        // Errors come back as the driver's own.
+        remote
+            .session
+            .whole_file_writes
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        remote.mkdir("/dir", MkdirOptions::default()).await.unwrap();
+        assert_eq!(
+            remote.write_file("/dir", b"x").await.unwrap_err().code,
+            ErrorCode::Eisdir
+        );
+        assert_eq!(
+            remote
+                .write_file("/missing/file", b"x")
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Enoent
+        );
+        assert!(remote.stat("/dir").await.unwrap().is_directory());
+        remote.shutdown().await.unwrap();
         server.close().await.unwrap();
         registry.close().await.unwrap();
         owner.shutdown().await.unwrap();

@@ -20,12 +20,13 @@ use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
     LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsError, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const COMMIT_UNKNOWN_SYSCALL: &str = "fault-injection:commit-unknown";
@@ -476,14 +477,14 @@ struct EngineState {
 /// Shared plan state for one explicitly configured wrapper set.
 #[derive(Clone)]
 pub struct FaultInjector {
-    state: Arc<Mutex<EngineState>>,
+    state: Arc<TurnCell<EngineState>>,
 }
 
 impl FaultInjector {
     pub fn new(plan: FaultPlan) -> std::result::Result<Self, PlanError> {
         plan.validate()?;
         Ok(Self {
-            state: Arc::new(Mutex::new(EngineState {
+            state: Arc::new(TurnCell::new(EngineState {
                 plan,
                 occurrences: BTreeMap::new(),
                 fired: 0,

@@ -1813,6 +1813,7 @@ dependencies = [
  "arc-swap",
  "async-io",
  "async-trait",
+ "crossbeam-queue",
  "futures-lite",
  "futures-util",
  "mount-rs-core",
@@ -1899,6 +1900,8 @@ name = "mount-rs-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "atomic-waker",
+ "crossbeam-queue",
  "mount-rs-9p",
  "mount-rs-auto",
  "mount-rs-aws-s3",
@@ -2030,6 +2033,7 @@ dependencies = [
 name = "mount-rs-memory"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "mount-rs-core",
 ]
@@ -2084,7 +2088,9 @@ dependencies = [
 name = "mount-rs-object-store-blocks"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "crossbeam-queue",
  "futures-util",
  "mount-rs-core",
  "object_store 0.12.5",
@@ -2097,6 +2103,7 @@ dependencies = [
 name = "mount-rs-observability"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "http",
  "mount-rs-core",
@@ -2287,6 +2294,7 @@ dependencies = [
 name = "mount-rs-service"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -2334,6 +2342,7 @@ version = "0.1.0"
 dependencies = [
  "async-io",
  "async-trait",
+ "crossbeam-queue",
  "futures-lite",
  "libc",
  "mount-rs-core",
@@ -4488,6 +4497,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "mount-rs-core",
  "quinn",
  "rcgen 0.13.2",
  "rustix",

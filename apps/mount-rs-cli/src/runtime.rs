@@ -183,7 +183,7 @@ enum Backend {
 struct RemoteRuntime {
     filesystem: mount_rs_remote::RemoteFs,
     stop: tokio::sync::watch::Sender<bool>,
-    worker: tokio::sync::Mutex<Option<tokio::task::JoinHandle<FsResult<()>>>>,
+    worker: mount_rs_core::turn_gate::TurnLock<Option<tokio::task::JoinHandle<FsResult<()>>>>,
 }
 
 impl RemoteRuntime {
@@ -194,7 +194,7 @@ impl RemoteRuntime {
         Self {
             filesystem,
             stop,
-            worker: tokio::sync::Mutex::new(Some(worker)),
+            worker: mount_rs_core::turn_gate::TurnLock::new(Some(worker)),
         }
     }
 

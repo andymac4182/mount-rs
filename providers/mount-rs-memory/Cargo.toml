@@ -7,5 +7,6 @@ description = "Volatile independent metadata and immutable block stores for moun
 license = "Apache-2.0"
 
 [dependencies]
+arc-swap = "1.9"
 async-trait = "0.1"
 mount-rs-core = { path = "../.." }

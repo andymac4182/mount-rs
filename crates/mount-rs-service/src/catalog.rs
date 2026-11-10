@@ -3,11 +3,15 @@
 #[cfg(feature = "io-profiling")]
 use mount_rs_core::diagnostics::profile;
 use mount_rs_core::diagnostics::profile::{Event, Span};
+use mount_rs_core::turn_cell::TurnCell;
+#[cfg(unix)]
+use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::Mutex;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -253,11 +257,11 @@ pub struct SqliteCatalog {
 
 struct CatalogConnections {
     path: PathBuf,
-    current: Mutex<Option<CachedSnapshot>>,
+    current: TurnCell<Option<CachedSnapshot>>,
     #[cfg(unix)]
     identity: FileIdentity,
     #[cfg(unix)]
-    connections: Vec<Mutex<Connection>>,
+    connections: Vec<Arc<TurnLock<Connection>>>,
     #[cfg(unix)]
     next: AtomicUsize,
 }
@@ -268,15 +272,19 @@ struct CachedSnapshot {
     snapshot: Arc<CatalogSnapshot>,
 }
 
-// The caller holds the single catalog cache lock while querying its authoritative row.
 // Reuse requires exact document equality as well as the SQL revision: out-of-band
 // edits at an unchanged revision must still be decoded and validated.
+//
+// The cache is held only to compare and to store, never across the decode, so
+// nothing waits on it for longer than a comparison. Concurrent reads of a new
+// revision each decode it; an older read never replaces a newer cached document.
 fn shared_snapshot(
-    current: &mut Option<CachedSnapshot>,
+    current: &TurnCell<Option<CachedSnapshot>>,
     revision: i64,
     document: &[u8],
 ) -> Result<Arc<CatalogSnapshot>, CatalogError> {
-    if let Some(cached) = current.as_ref()
+    let unavailable = |()| CatalogError::Invalid("catalog snapshot unavailable");
+    if let Some(cached) = current.lock().map_err(unavailable)?.as_ref()
         && cached.revision == revision
         && cached.document.as_ref() == document
     {
@@ -285,11 +293,18 @@ fn shared_snapshot(
     let decode_profile = Span::new(Event::CatalogDecode).units(document.len() as u64);
     let snapshot = Arc::new(decode_snapshot(revision, document)?);
     drop(decode_profile);
-    *current = Some(CachedSnapshot {
+    let cached = CachedSnapshot {
         revision,
         document: document.into(),
         snapshot: Arc::clone(&snapshot),
-    });
+    };
+    let mut current = current.lock().map_err(unavailable)?;
+    if current
+        .as_ref()
+        .is_none_or(|newest| newest.revision <= revision)
+    {
+        *current = Some(cached);
+    }
     Ok(snapshot)
 }
 
@@ -329,15 +344,12 @@ impl CatalogConnections {
         Ok(())
     }
 
-    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, CatalogError> {
+    /// One of the pooled connections, waited for without holding a thread:
+    /// the caller takes it before it moves to a blocking thread.
+    async fn connection(&self) -> OwnedTurnLockGuard<Connection> {
         let index = self.next.fetch_add(1, Ordering::Relaxed) % self.connections.len();
-        let wait_profile = Span::new(Event::CatalogPoolWait);
-        let connection = self.connections[index]
-            .lock()
-            .map_err(|_| CatalogError::Invalid("catalog connection unavailable"))?;
-        drop(wait_profile);
-        self.verify_backing()?;
-        Ok(connection)
+        let _wait_profile = Span::new(Event::CatalogPoolWait);
+        Arc::clone(&self.connections[index]).lock_owned().await
     }
 }
 
@@ -369,7 +381,7 @@ impl SqliteCatalog {
                 return Err(CatalogError::Invalid("catalog backing file changed"));
             }
             let mut connections = Vec::with_capacity(CONNECTION_POOL_SIZE);
-            connections.push(Mutex::new(connection));
+            connections.push(Arc::new(TurnLock::new(connection)));
             for _ in 1..CONNECTION_POOL_SIZE {
                 if file_identity(&setup_path)? != identity {
                     return Err(CatalogError::Invalid("catalog backing file changed"));
@@ -378,11 +390,11 @@ impl SqliteCatalog {
                 if file_identity(&setup_path)? != identity {
                     return Err(CatalogError::Invalid("catalog backing file changed"));
                 }
-                connections.push(Mutex::new(connection));
+                connections.push(Arc::new(TurnLock::new(connection)));
             }
             Ok(CatalogConnections {
                 path: setup_path,
-                current: Mutex::new(None),
+                current: TurnCell::new(None),
                 identity,
                 connections,
                 next: AtomicUsize::new(0),
@@ -391,7 +403,7 @@ impl SqliteCatalog {
             #[cfg(not(unix))]
             {
                 drop(connection);
-                Ok(CatalogConnections { path: setup_path, current: Mutex::new(None) })
+                Ok(CatalogConnections { path: setup_path, current: TurnCell::new(None) })
             }
         })
         .await??;
@@ -429,16 +441,16 @@ impl CatalogStore for SqliteCatalog {
         let _load_profile = Span::new(Event::CatalogLoad);
         let queue_profile = Span::new(Event::CatalogQueue);
         let shared = Arc::clone(&self.shared);
+        #[cfg(unix)]
+        let connection = shared.connection().await;
         tokio::task::spawn_blocking(move || {
             drop(queue_profile);
             #[cfg(unix)]
-            let connection = shared.connection()?;
+            shared.verify_backing()?;
             #[cfg(not(unix))]
             let connection = connect(&shared.path)?;
-            // Serialize selection with the query so an older concurrent read cannot
-            // overwrite a newer cached document. The row itself is read every time.
-            let mut current = shared.current.lock()
-                .map_err(|_| CatalogError::Invalid("catalog snapshot unavailable"))?;
+            // The row itself is read every time.
+            let current = &shared.current;
             let mut query_profile = Span::new(Event::CatalogQuery);
             let mut statement = connection.prepare_cached(
                 "SELECT revision, length(document), document FROM service_catalog WHERE singleton = 1",
@@ -456,11 +468,10 @@ impl CatalogStore for SqliteCatalog {
                     return Err(rusqlite::Error::InvalidQuery);
                 }
                 query_profile.set_units(document.len() as u64);
-                Ok(shared_snapshot(&mut current, row.get(0)?, document))
+                Ok(shared_snapshot(current, row.get(0)?, document))
             }).optional()?;
             let result = row.ok_or(CatalogError::Invalid("catalog row missing"))?;
             drop(statement);
-            drop(current);
             drop(query_profile);
             #[cfg(feature = "io-profiling")]
             if profile::enabled() {
@@ -508,9 +519,11 @@ impl CatalogStore for SqliteCatalog {
             return Err(CatalogError::Invalid("catalog document too large"));
         }
         let shared = Arc::clone(&self.shared);
+        #[cfg(unix)]
+        let mut connection = shared.connection().await;
         tokio::task::spawn_blocking(move || {
             #[cfg(unix)]
-            let mut connection = shared.connection()?;
+            shared.verify_backing()?;
             #[cfg(not(unix))]
             let mut connection = connect(&shared.path)?;
             let transaction =
@@ -680,8 +693,8 @@ mod reuse_tests {
             },
         );
         let document = serde_json::to_vec(&snapshot).unwrap();
-        let mut current = None;
-        let first = shared_snapshot(&mut current, 0, &document).unwrap();
+        let current = TurnCell::new(None);
+        let first = shared_snapshot(&current, 0, &document).unwrap();
         // The former owned-snapshot path is a positive control for this counter.
         let owned = crate::dispatch::allocation_tests::count(|| {
             std::hint::black_box((*first).clone());
@@ -689,7 +702,7 @@ mod reuse_tests {
         assert!(owned.0 > 0 && owned.1 > 0);
         let shared = crate::dispatch::allocation_tests::count(|| {
             for _ in 0..32 {
-                let loaded = shared_snapshot(&mut current, 0, &document).unwrap();
+                let loaded = shared_snapshot(&current, 0, &document).unwrap();
                 assert!(Arc::ptr_eq(&first, &loaded));
                 std::hint::black_box(loaded);
             }

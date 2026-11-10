@@ -195,10 +195,12 @@ impl CacheServiceConfig {
 use mount_rs_blob_cache::{
     CachedBlockStore, DistributedRuntime, IntegrityPolicy, LocalCache, ScopeIdentity,
 };
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{Result, storage::BlockStore};
 use mount_rs_sdk::{BlockStoreDecorator, StoreConfig};
-use std::sync::{Arc, Mutex};
-type DriveMetrics = Arc<Mutex<BTreeMap<(String, String), Arc<mount_rs_blob_cache::CacheMetrics>>>>;
+use std::sync::Arc;
+type DriveMetrics =
+    Arc<TurnCell<BTreeMap<(String, String), Arc<mount_rs_blob_cache::CacheMetrics>>>>;
 
 pub(crate) struct DriveCacheDecorator {
     pub cache: Arc<LocalCache>,
@@ -414,7 +416,7 @@ impl ServerCache {
             runtime,
             peers,
             cluster: config.cluster.clone(),
-            metrics: Arc::new(Mutex::new(BTreeMap::new())),
+            metrics: Arc::new(TurnCell::new(BTreeMap::new())),
         })
     }
     pub(crate) fn decorator(&self, partition: &str, drive: &str) -> DriveCacheDecorator {
@@ -433,7 +435,14 @@ impl ServerCache {
         self.runtime.shutdown().await;
         self.peers.shutdown().await;
         self.local.shutdown().await;
-        if let Ok(metrics) = self.metrics.lock() {
+        // Copy the entries out so the cell is not held across stderr writes.
+        let metrics = self.metrics.lock().map(|metrics| {
+            metrics
+                .iter()
+                .map(|(key, metrics)| (key.clone(), Arc::clone(metrics)))
+                .collect::<Vec<_>>()
+        });
+        if let Ok(metrics) = metrics {
             for ((partition, drive), metrics) in metrics.iter() {
                 let stats = metrics.snapshot();
                 eprintln!(
@@ -527,7 +536,7 @@ mod tests {
             DistributedConfig::default(),
         )
         .unwrap();
-        let metrics = Arc::new(Mutex::new(BTreeMap::new()));
+        let metrics = Arc::new(TurnCell::new(BTreeMap::new()));
         let decorator = DriveCacheDecorator {
             cache,
             runtime: runtime.clone(),

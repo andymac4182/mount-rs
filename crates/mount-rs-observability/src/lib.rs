@@ -21,7 +21,7 @@ use mount_rs_core::versioning::VolumeId;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::Instrument;
 use tracing::{Level, Span};
@@ -610,26 +610,21 @@ fn summarize_path_with_limit(path: Option<&str>, max_depth: usize) -> PathSummar
     }
 }
 
-static GLOBAL: OnceLock<RwLock<Telemetry>> = OnceLock::new();
+static GLOBAL: OnceLock<arc_swap::ArcSwap<Telemetry>> = OnceLock::new();
 
-fn global_cell() -> &'static RwLock<Telemetry> {
-    GLOBAL.get_or_init(|| RwLock::new(Telemetry::disabled()))
+fn global_cell() -> &'static arc_swap::ArcSwap<Telemetry> {
+    GLOBAL.get_or_init(|| arc_swap::ArcSwap::from_pointee(Telemetry::disabled()))
 }
 
 /// Read the application-wide handle used by boundary integrations.
 pub fn global() -> Telemetry {
-    global_cell()
-        .read()
-        .map(|telemetry| telemetry.clone())
-        .unwrap_or_else(|_| Telemetry::disabled())
+    Telemetry::clone(&global_cell().load())
 }
 
 /// Replace the application-wide handle. Call this during application startup,
 /// before constructing long-lived sessions or drivers.
 pub fn set_global(telemetry: Telemetry) {
-    if let Ok(mut current) = global_cell().write() {
-        *current = telemetry;
-    }
+    global_cell().store(Arc::new(telemetry));
 }
 
 /// Driver decorator that adds core-operation spans, finite error events, and

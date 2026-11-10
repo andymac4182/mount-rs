@@ -8,14 +8,18 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_core::Stream;
 use md5::{Digest as Md5Digest, Md5};
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
 use mount_rs_core::{
     FileType, FsDriver, MkdirOptions, Stats,
     path::{dirname, normalize_path},
@@ -24,7 +28,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::{
     self, ByteRange, ListObjectsXml, ListPartsXml, ListedObject, ListedPart, MAX_PART_SIZE,
@@ -105,12 +109,12 @@ impl StagingQuota {
 }
 
 struct RequestTicketGuard {
-    inflight: Arc<StdMutex<HashSet<u64>>>,
+    inflight: Arc<TurnCell<HashSet<u64>>>,
     ticket: Option<u64>,
 }
 
 impl RequestTicketGuard {
-    fn new(inflight: Arc<StdMutex<HashSet<u64>>>, ticket: Option<u64>) -> Self {
+    fn new(inflight: Arc<TurnCell<HashSet<u64>>>, ticket: Option<u64>) -> Self {
         Self { inflight, ticket }
     }
 
@@ -124,6 +128,12 @@ impl Drop for RequestTicketGuard {
         let Some(ticket) = self.ticket.take() else {
             return;
         };
+        // A `TurnCell` released while its thread unwinds is abandoned for
+        // good. The ticket of a request that panicked is never looked up
+        // again, so leave it rather than lose the whole set.
+        if std::thread::panicking() {
+            return;
+        }
         if let Ok(mut inflight) = self.inflight.lock() {
             inflight.remove(&ticket);
         }
@@ -131,13 +141,15 @@ impl Drop for RequestTicketGuard {
 }
 
 struct ConditionalPutLockRegistry {
-    locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    // Both guards below reach it from `Drop`, which also runs while a
+    // panicking request unwinds; taking the cell then does not abandon it.
+    locks: TurnCell<HashMap<String, Arc<TurnLock<()>>>>,
 }
 
 impl ConditionalPutLockRegistry {
     fn new() -> Self {
         Self {
-            locks: StdMutex::new(HashMap::new()),
+            locks: TurnCell::new(HashMap::new()),
         }
     }
 
@@ -146,7 +158,7 @@ impl ConditionalPutLockRegistry {
             let mut locks = self.locks.lock().expect("conditional PUT lock registry");
             let lock = locks
                 .entry(key.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .or_insert_with(|| Arc::new(TurnLock::new(())))
                 .clone();
             ConditionalPutLockRegistration {
                 registry: Arc::clone(self),
@@ -168,7 +180,7 @@ impl ConditionalPutLockRegistry {
         }
     }
 
-    fn remove_if_unused(&self, key: &str, lock: &Arc<Mutex<()>>) {
+    fn remove_if_unused(&self, key: &str, lock: &Arc<TurnLock<()>>) {
         let Ok(mut locks) = self.locks.lock() else {
             return;
         };
@@ -185,7 +197,7 @@ impl ConditionalPutLockRegistry {
 struct ConditionalPutLockRegistration {
     registry: Arc<ConditionalPutLockRegistry>,
     key: String,
-    lock: Arc<Mutex<()>>,
+    lock: Arc<TurnLock<()>>,
     active: bool,
 }
 
@@ -206,8 +218,8 @@ impl Drop for ConditionalPutLockRegistration {
 struct ConditionalPutLockGuard {
     registry: Arc<ConditionalPutLockRegistry>,
     key: String,
-    lock: Arc<Mutex<()>>,
-    guard: Option<OwnedMutexGuard<()>>,
+    lock: Arc<TurnLock<()>>,
+    guard: Option<OwnedTurnLockGuard<()>>,
 }
 
 impl Drop for ConditionalPutLockGuard {
@@ -500,11 +512,11 @@ fn classify_error(error: &S3Error) -> S3ErrorClass {
 pub struct S3Session {
     pub buckets: Arc<BTreeMap<String, Arc<dyn FsDriver>>>,
     pub options: S3SessionOptions,
-    stats: Arc<Mutex<S3SessionStats>>,
+    stats: Arc<TurnLock<S3SessionStats>>,
     stream_request_bytes: Arc<AtomicU64>,
     stream_response_bytes: Arc<AtomicU64>,
-    assertions: Arc<StdMutex<Vec<String>>>,
-    inflight: Arc<StdMutex<HashSet<u64>>>,
+    assertions: Arc<TurnCell<Vec<String>>>,
+    inflight: Arc<TurnCell<HashSet<u64>>>,
     next_ticket: Arc<std::sync::atomic::AtomicU64>,
     next_request_id: Arc<AtomicU64>,
     conditional_put_locks: Arc<ConditionalPutLockRegistry>,
@@ -547,11 +559,11 @@ impl S3Session {
         Self {
             buckets: Arc::new(buckets.into_iter().collect()),
             options,
-            stats: Arc::new(Mutex::new(S3SessionStats::default())),
+            stats: Arc::new(TurnLock::new(S3SessionStats::default())),
             stream_request_bytes: Arc::new(AtomicU64::new(0)),
             stream_response_bytes: Arc::new(AtomicU64::new(0)),
-            assertions: Arc::new(StdMutex::new(Vec::new())),
-            inflight: Arc::new(StdMutex::new(HashSet::new())),
+            assertions: Arc::new(TurnCell::new(Vec::new())),
+            inflight: Arc::new(TurnCell::new(HashSet::new())),
             next_ticket: Arc::new(AtomicU64::new(1)),
             next_request_id: Arc::new(AtomicU64::new(1)),
             conditional_put_locks: Arc::new(ConditionalPutLockRegistry::new()),

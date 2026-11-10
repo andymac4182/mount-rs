@@ -6,17 +6,14 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::{
-    sync::Mutex,
-    task::{JoinHandle, JoinSet},
-};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub struct SessionSupervisor {
     registries: Arc<Vec<Arc<VolumeSessions>>>,
     cancel: CancellationToken,
     failed: Arc<AtomicBool>,
-    task: Mutex<Option<JoinHandle<Result<()>>>>,
+    task: crate::join_slot::JoinSlot<Result<()>>,
 }
 fn failure() -> FsError {
     FsError::new(ErrorCode::Eio).with_syscall("session-supervisor")
@@ -102,7 +99,7 @@ impl SessionSupervisor {
             registries,
             cancel,
             failed,
-            task: Mutex::new(Some(task)),
+            task: crate::join_slot::JoinSlot::new(task),
         })
     }
     pub fn failed(&self) -> bool {
@@ -132,16 +129,12 @@ impl SessionSupervisor {
             registry.stop_admission();
         }
         self.cancel.cancel();
-        let mut task = self.task.lock().await;
-        let mut first = if let Some(task) = task.as_mut() {
-            task.await
+        let mut first = self.task.join().await.and_then(|joined| {
+            joined
                 .map_err(|_| failure())
                 .and_then(|result| result)
                 .err()
-        } else {
-            None
-        };
-        task.take();
+        });
         for registry in self.registries.iter() {
             if let Err(error) = registry.close().await {
                 self.failed.store(true, Ordering::Release);
@@ -159,9 +152,7 @@ impl Drop for SessionSupervisor {
             registry.stop_admission();
         }
         self.cancel.cancel();
-        if let Some(task) = self.task.get_mut().take() {
-            task.abort();
-        }
+        self.task.abort();
         // Registry handles stay owned by the caller for retryable cleanup.
     }
 }
@@ -194,7 +185,7 @@ mod tests {
         let handle = session.open("/file", "w+", 0o600).await.unwrap();
         // Hold the join lock to deterministically suspend shutdown at an await
         // boundary without relying on a slow disk or a sleeping backend.
-        let retained = supervisor.task.lock().await;
+        let retained = supervisor.task.turn.lock().await;
         let error = supervisor
             .shutdown_with_timeout(Duration::from_millis(10))
             .await
@@ -202,7 +193,7 @@ mod tests {
         assert_eq!(error.code, ErrorCode::Eagain);
         assert_eq!(error.syscall.as_deref(), Some("session-drain-timeout"));
         assert!(supervisor.failed());
-        assert!(retained.is_some());
+        assert!(!supervisor.task.is_joined());
         assert_eq!(
             registry.create("alice").await.unwrap_err().code,
             ErrorCode::Ebadf
@@ -212,7 +203,7 @@ mod tests {
             .shutdown_with_timeout(Duration::from_secs(1))
             .await
             .unwrap();
-        assert!(supervisor.task.lock().await.is_none());
+        assert!(supervisor.task.is_joined());
         assert_eq!(
             session.stat(handle).await.unwrap_err().code,
             ErrorCode::Ebadf
@@ -238,7 +229,7 @@ mod tests {
             if poll_first {
                 tokio::task::yield_now().await;
             }
-            supervisor.task.lock().await.as_ref().unwrap().abort();
+            supervisor.task.abort();
             tokio::time::timeout(Duration::from_secs(1), async {
                 while !supervisor.failed() {
                     tokio::task::yield_now().await;
@@ -284,7 +275,7 @@ mod tests {
         second.create("bob").await.unwrap();
         supervisor.shutdown().await.unwrap();
         assert!(!supervisor.failed());
-        assert!(supervisor.task.lock().await.is_none());
+        assert!(supervisor.task.is_joined());
         assert_eq!(
             first.create("alice").await.unwrap_err().code,
             ErrorCode::Ebadf

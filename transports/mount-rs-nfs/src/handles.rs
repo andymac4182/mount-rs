@@ -1,9 +1,10 @@
 //! NFSv3 file handles and directory-cookie snapshots.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, GuardedDirectoryEntry, Stats};
 
 use crate::constants::{NFS3_COOKIEVERFSIZE, NFS3_FHSIZE};
@@ -46,11 +47,34 @@ struct HandleState {
     lru: VecDeque<u64>,
 }
 
-#[derive(Debug, Clone)]
+/// Formats a cell the way a mutex formats itself: the value when it is free.
+pub(crate) struct CellDebug<'a, T>(pub(crate) &'a TurnCell<T>);
+
+impl<T: std::fmt::Debug> std::fmt::Debug for CellDebug<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.try_lock() {
+            Some(Ok(value)) => std::fmt::Debug::fmt(&*value, f),
+            Some(Err(())) => f.write_str("<poisoned>"),
+            None => f.write_str("<locked>"),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct FileHandleTable {
-    state: Arc<Mutex<HandleState>>,
+    state: Arc<TurnCell<HandleState>>,
     use_driver_ino: bool,
     max_handles: usize,
+}
+
+impl std::fmt::Debug for FileHandleTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileHandleTable")
+            .field("state", &CellDebug(&self.state))
+            .field("use_driver_ino", &self.use_driver_ino)
+            .field("max_handles", &self.max_handles)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,7 +108,7 @@ impl FileHandleTable {
         let mut by_id = HashMap::new();
         by_id.insert(ROOT_HANDLE_ID, root);
         Self {
-            state: Arc::new(Mutex::new(HandleState {
+            state: Arc::new(TurnCell::new(HandleState {
                 verifier,
                 stable_inode_ids: false,
                 next_id: ROOT_HANDLE_ID + 1,
@@ -638,18 +662,28 @@ pub struct DirectorySnapshot {
     pub verifier: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DirectorySnapshots {
-    inner: Arc<Mutex<HashMap<u64, DirectorySnapshot>>>,
-    order: Arc<Mutex<VecDeque<u64>>>,
+    inner: Arc<TurnCell<HashMap<u64, DirectorySnapshot>>>,
+    order: Arc<TurnCell<VecDeque<u64>>>,
     max: usize,
+}
+
+impl std::fmt::Debug for DirectorySnapshots {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectorySnapshots")
+            .field("inner", &CellDebug(&self.inner))
+            .field("order", &CellDebug(&self.order))
+            .field("max", &self.max)
+            .finish()
+    }
 }
 
 impl DirectorySnapshots {
     pub fn new(max: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-            order: Arc::new(Mutex::new(VecDeque::new())),
+            inner: Arc::new(TurnCell::new(HashMap::new())),
+            order: Arc::new(TurnCell::new(VecDeque::new())),
             max: max.max(1),
         }
     }

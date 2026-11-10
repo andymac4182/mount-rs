@@ -11,9 +11,11 @@ use std::pin::Pin;
 use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FileType, FsDriver, FsError,
     MkdirOptions, OpenFlags, Result as CoreResult, Stats, StatsFs,
@@ -277,13 +279,13 @@ struct CompletionState<T> {
 }
 
 struct Completion<T> {
-    state: Mutex<CompletionState<T>>,
+    state: TurnCell<CompletionState<T>>,
 }
 
 impl<T> Completion<T> {
     fn new() -> Self {
         Self {
-            state: Mutex::new(CompletionState {
+            state: TurnCell::new(CompletionState {
                 result: None,
                 waker: None,
             }),
@@ -291,22 +293,17 @@ impl<T> Completion<T> {
     }
 
     fn finish(&self, result: Result<T, JsDriverError>) {
-        let waker = match self.state.lock() {
-            Ok(mut state) => {
-                if state.result.is_some() {
-                    return;
-                }
-                state.result = Some(result);
-                state.waker.take()
+        // Nothing inside this section can panic: it moves a value into an
+        // empty slot and a waker out of one.
+        let waker = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            if state.result.is_some() {
+                return;
             }
-            Err(poisoned) => {
-                let mut state = poisoned.into_inner();
-                if state.result.is_some() {
-                    return;
-                }
-                state.result = Some(result);
-                state.waker.take()
-            }
+            state.result = Some(result);
+            state.waker.take()
         };
         if let Some(waker) = waker {
             waker.wake();
@@ -323,16 +320,20 @@ where
     type Output = Result<T, JsDriverError>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = match self.0.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
+        // Clone the new waker before, and drop the old one after, the
+        // section, so that it only moves values and cannot panic.
+        let waker = context.waker().clone();
+        let replaced = {
+            let Ok(mut state) = self.0.state.lock() else {
+                return Poll::Ready(Err(JsDriverError::closed()));
+            };
+            if let Some(result) = state.result.take() {
+                return Poll::Ready(result);
+            }
+            state.waker.replace(waker)
         };
-        if let Some(result) = state.result.take() {
-            Poll::Ready(result)
-        } else {
-            state.waker = Some(context.waker().clone());
-            Poll::Pending
-        }
+        drop(replaced);
+        Poll::Pending
     }
 }
 
@@ -350,13 +351,13 @@ where
 }
 
 struct WaiterRegistry {
-    waiters: Mutex<Vec<Weak<dyn CancelWaiter>>>,
+    waiters: TurnCell<Vec<Weak<dyn CancelWaiter>>>,
 }
 
 impl WaiterRegistry {
     fn new() -> Self {
         Self {
-            waiters: Mutex::new(Vec::new()),
+            waiters: TurnCell::new(Vec::new()),
         }
     }
 
@@ -366,18 +367,17 @@ impl WaiterRegistry {
     {
         let erased: Arc<dyn CancelWaiter> = waiter.clone();
         let weak = Arc::downgrade(&erased);
-        let mut waiters = match self.waiters.lock() {
-            Ok(waiters) => waiters,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        waiters.push(weak);
+        if let Ok(mut waiters) = self.waiters.lock() {
+            waiters.push(weak);
+        }
     }
 
     fn cancel_all(&self) {
-        let waiters = match self.waiters.lock() {
-            Ok(mut waiters) => std::mem::take(&mut *waiters),
-            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
-        };
+        let waiters = self
+            .waiters
+            .lock()
+            .map(|mut waiters| std::mem::take(&mut *waiters))
+            .unwrap_or_default();
         for waiter in waiters {
             if let Some(waiter) = waiter.upgrade() {
                 waiter.cancel();
@@ -388,7 +388,7 @@ impl WaiterRegistry {
 
 struct Lifecycle {
     closed: AtomicBool,
-    callbacks: Mutex<Vec<Weak<dyn CallbackControl>>>,
+    callbacks: TurnCell<Vec<Weak<dyn CallbackControl>>>,
     waiters: WaiterRegistry,
 }
 
@@ -396,7 +396,7 @@ impl Lifecycle {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             closed: AtomicBool::new(false),
-            callbacks: Mutex::new(Vec::new()),
+            callbacks: TurnCell::new(Vec::new()),
             waiters: WaiterRegistry::new(),
         })
     }
@@ -411,11 +411,9 @@ impl Lifecycle {
     {
         let erased: Arc<dyn CallbackControl> = callback.clone();
         let weak = Arc::downgrade(&erased);
-        let mut callbacks = match self.callbacks.lock() {
-            Ok(callbacks) => callbacks,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        callbacks.push(weak);
+        if let Ok(mut callbacks) = self.callbacks.lock() {
+            callbacks.push(weak);
+        }
     }
 
     fn shutdown(&self) {
@@ -423,10 +421,11 @@ impl Lifecycle {
             return;
         }
         self.waiters.cancel_all();
-        let callbacks = match self.callbacks.lock() {
-            Ok(mut callbacks) => std::mem::take(&mut *callbacks),
-            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
-        };
+        let callbacks = self
+            .callbacks
+            .lock()
+            .map(|mut callbacks| std::mem::take(&mut *callbacks))
+            .unwrap_or_default();
         for callback in callbacks {
             if let Some(callback) = callback.upgrade() {
                 callback.abort();
@@ -1104,7 +1103,7 @@ fn parse_handle(
     let state = Arc::new(HandleState {
         closed: AtomicBool::new(false),
         closing: AtomicBool::new(false),
-        close_gate: tokio::sync::Mutex::new(()),
+        close_gate: TurnLock::new(()),
         waiters: WaiterRegistry::new(),
     });
     let read = build_callback(object, "read", &lifecycle, true)
@@ -1171,7 +1170,7 @@ impl HandleCallbacks {
 struct HandleState {
     closed: AtomicBool,
     closing: AtomicBool,
-    close_gate: tokio::sync::Mutex<()>,
+    close_gate: TurnLock<()>,
     waiters: WaiterRegistry,
 }
 
@@ -2415,12 +2414,10 @@ pub fn create_driver(driver: Object<'_>) -> napi::Result<super::Filesystem> {
             capabilities,
         })),
         shutdown: Some(shutdown),
-        reconcile: Mutex::new(None),
-        delegation: Mutex::new(None),
+        reconcile: TurnCell::new(None),
+        delegation: TurnCell::new(None),
         delegated_ownership: false,
-        native_delegation_mounts: Arc::new(tokio::sync::Mutex::new(
-            super::DelegatedNativeState::default(),
-        )),
+        native_delegation_mounts: Arc::new(TurnLock::new(super::DelegatedNativeState::default())),
     })
 }
 

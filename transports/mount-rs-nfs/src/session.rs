@@ -9,9 +9,10 @@ use mount_rs_core::diagnostics::{RequestTrace, trace_failure};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{
     ErrorCode, FileHandle, FsDriver, FsError, GuardedDirectoryEntry, GuardedMutation,
     GuardedMutationResult, GuardedRead, GuardedReadResult, GuardedSetattr, Loopback, MkdirOptions,
@@ -415,12 +416,20 @@ pub struct NfsSessionStats {
     pub procedures: HashMap<String, u64>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct SharedStats(pub(crate) Arc<Mutex<NfsSessionStats>>);
+#[derive(Clone)]
+pub(crate) struct SharedStats(pub(crate) Arc<TurnCell<NfsSessionStats>>);
+
+impl fmt::Debug for SharedStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SharedStats")
+            .field(&crate::handles::CellDebug(&self.0))
+            .finish()
+    }
+}
 
 impl Default for SharedStats {
     fn default() -> Self {
-        Self(Arc::new(Mutex::new(NfsSessionStats::default())))
+        Self(Arc::new(TurnCell::new(NfsSessionStats::default())))
     }
 }
 
@@ -433,7 +442,7 @@ impl Default for SharedStats {
 pub(crate) struct SharedNfsState {
     pub(crate) handles: FileHandleTable,
     pub(crate) stats: SharedStats,
-    pub(crate) path_lock: Arc<tokio::sync::RwLock<()>>,
+    pub(crate) path_lock: Arc<mount_rs_core::drain_gate::DrainGate>,
 }
 
 impl SharedNfsState {
@@ -445,7 +454,7 @@ impl SharedNfsState {
                 max_handles: options.max_handles,
             }),
             stats: SharedStats::default(),
-            path_lock: Arc::new(tokio::sync::RwLock::new(())),
+            path_lock: Arc::new(mount_rs_core::drain_gate::DrainGate::new()),
         }
     }
 }
@@ -597,15 +606,15 @@ pub struct Nfs3Session {
     pub handles: FileHandleTable,
     pub write_verifier: [u8; 8],
     snapshots: DirectorySnapshots,
-    mounts: Arc<Mutex<Vec<MountRecord>>>,
-    exclusive_creates: Arc<Mutex<ExclusiveCreates>>,
+    mounts: Arc<TurnCell<Vec<MountRecord>>>,
+    exclusive_creates: Arc<TurnCell<ExclusiveCreates>>,
     /// NFSv3 has no OPEN on the wire. Keep one backend read handle for every
     /// regular filehandle we expose so an unlink can detach the namespace name
     /// without destroying the object a client is still holding.
     retained_handles: Arc<RetainedHandles>,
     stats: SharedStats,
-    destroyed: Arc<Mutex<bool>>,
-    path_lock: Arc<tokio::sync::RwLock<()>>,
+    destroyed: Arc<TurnCell<bool>>,
+    path_lock: Arc<mount_rs_core::drain_gate::DrainGate>,
     hooks: NfsSessionHooks,
 }
 
@@ -641,8 +650,8 @@ struct ProvisionalCloses {
 
 struct RetainedHandles {
     table: FileHandleTable,
-    by_id: Mutex<HashMap<u64, CloseEntry>>,
-    provisional: Mutex<ProvisionalCloses>,
+    by_id: TurnCell<HashMap<u64, CloseEntry>>,
+    provisional: TurnCell<ProvisionalCloses>,
     active: tokio::sync::watch::Sender<usize>,
 }
 
@@ -810,9 +819,8 @@ impl Drop for RetainedHandles {
         // without async destroy. Backend handles still require async close;
         // dropping their Arc alone does not release every backend open ref.
         let retained = std::mem::take(
-            self.by_id
-                .get_mut()
-                .unwrap_or_else(|error| error.into_inner()),
+            // Reached even after a holder panicked.
+            self.by_id.get_mut(),
         );
         for (id, entry) in retained {
             drop(entry);
@@ -985,8 +993,8 @@ impl Nfs3Session {
         let (active, _) = tokio::sync::watch::channel(0usize);
         let retained_handles = Arc::new(RetainedHandles {
             table: handles.clone(),
-            by_id: Mutex::new(HashMap::new()),
-            provisional: Mutex::new(ProvisionalCloses {
+            by_id: TurnCell::new(HashMap::new()),
+            provisional: TurnCell::new(ProvisionalCloses {
                 next_id: 1,
                 by_id: HashMap::new(),
             }),
@@ -998,11 +1006,11 @@ impl Nfs3Session {
             handles,
             write_verifier,
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
-            mounts: Arc::new(Mutex::new(Vec::new())),
-            exclusive_creates: Arc::new(Mutex::new(ExclusiveCreates::default())),
+            mounts: Arc::new(TurnCell::new(Vec::new())),
+            exclusive_creates: Arc::new(TurnCell::new(ExclusiveCreates::default())),
             retained_handles,
             stats: shared.stats.clone(),
-            destroyed: Arc::new(Mutex::new(false)),
+            destroyed: Arc::new(TurnCell::new(false)),
             path_lock: Arc::clone(&shared.path_lock),
             hooks,
         }

@@ -1,5 +1,6 @@
 //! Best-effort persistent cache for one immutable backing-store generation.
 use async_trait::async_trait;
+use mount_rs_core::drain_gate::DrainGate;
 use mount_rs_core::storage::{BlockId, BlockStore};
 use mount_rs_core::{ErrorCode, FsError, Result};
 use sha2::{Digest, Sha256};
@@ -7,9 +8,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio::sync::RwLock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 const MAGIC: &[u8; 8] = b"MNTCACH1";
 const HEADER: usize = 80;
@@ -131,6 +131,13 @@ struct Disk {
     // Sequence ordering is process-local; reopening starts a fresh LRU order.
     entries: BTreeMap<String, (u64, u64)>,
     recency: BTreeMap<u64, String>,
+    /// Space set aside for fills whose files are being written outside the
+    /// mutex. It counts against both bounds until the fill commits or fails.
+    reserved_bytes: u64,
+    reserved_entries: usize,
+    /// Evicted entries whose files are still to be removed. Whoever evicted
+    /// them removes the files after it lets go of the mutex (`with_disk`).
+    evicted: Vec<String>,
     index: Arc<ReadIndex>,
     stats: DiskCacheStats,
 }
@@ -151,24 +158,212 @@ fn regular_options() -> OpenOptions {
     }
     options
 }
-fn with_disk<T>(disk: &Mutex<Disk>, operation: impl FnOnce(&mut Disk) -> T) -> Result<T> {
+/// A change to the index that needs no answer: the second half of a fill.
+type Commit = Box<dyn FnOnce(&mut Disk) + Send>;
+
+struct Queued {
+    commit: Commit,
+    next: *mut Queued,
+}
+
+/// The index and the commits waiting to be applied to it. There is no lock.
+///
+/// One thread at a time has the turn, taken with a compare-and-swap, and
+/// nothing done under it touches a file except the rare removal of a corrupt
+/// entry and the invalidations that already exclude every fill and read. A
+/// commit never waits: it is pushed on a lock-free stack, and its thread
+/// applies the stack if the turn is free; if it is not, whoever has the turn
+/// applies it before or just after leaving. An operation that needs an
+/// answer from the index (admitting a fill, statistics, invalidation) takes
+/// the turn itself, yielding while another thread is inside its update.
+struct Shared {
+    busy: AtomicBool,
+    /// Set when a turn ended in a panic, as a poisoned mutex would be.
+    broken: AtomicBool,
+    disk: std::cell::UnsafeCell<Disk>,
+    commits: AtomicPtr<Queued>,
+}
+
+// SAFETY: `disk` is only reached through `Turn`, of which `busy` admits one
+// at a time, and `Disk` and the queued commits are `Send`.
+unsafe impl Send for Shared {}
+unsafe impl Sync for Shared {}
+
+struct Turn<'a>(&'a Shared);
+
+impl std::ops::Deref for Turn<'_> {
+    type Target = Disk;
+    fn deref(&self) -> &Disk {
+        // SAFETY: this is the only `Turn`; see `Shared::try_turn`.
+        unsafe { &*self.0.disk.get() }
+    }
+}
+
+impl std::ops::DerefMut for Turn<'_> {
+    fn deref_mut(&mut self) -> &mut Disk {
+        // SAFETY: as in `deref`, and `&mut self` excludes other borrows.
+        unsafe { &mut *self.0.disk.get() }
+    }
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.broken.store(true, Ordering::Release);
+        }
+        self.0.busy.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        drop(self.take_commits());
+    }
+}
+
+impl Shared {
+    fn new(disk: Disk) -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+            broken: AtomicBool::new(false),
+            disk: std::cell::UnsafeCell::new(disk),
+            commits: AtomicPtr::new(std::ptr::null_mut()),
+        }
+    }
+
+    fn try_turn(&self) -> Option<Turn<'_>> {
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Turn(self))
+    }
+
+    fn turn(&self) -> Result<Turn<'_>> {
+        let mut attempts = 0_u32;
+        loop {
+            if self.broken.load(Ordering::Acquire) {
+                return Err(error("disk cache index abandoned by a panic"));
+            }
+            if let Some(turn) = self.try_turn() {
+                return Ok(turn);
+            }
+            attempts += 1;
+            if attempts < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    fn push(&self, commit: Commit) {
+        let queued = Box::into_raw(Box::new(Queued {
+            commit,
+            next: std::ptr::null_mut(),
+        }));
+        let mut head = self.commits.load(Ordering::Acquire);
+        loop {
+            // SAFETY: `queued` is not shared until the exchange succeeds.
+            unsafe { (*queued).next = head };
+            match self.commits.compare_exchange_weak(
+                head,
+                queued,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => head = current,
+            }
+        }
+    }
+
+    /// Everything queued, oldest first.
+    fn take_commits(&self) -> Vec<Commit> {
+        let mut head = self.commits.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        let mut commits = Vec::new();
+        while !head.is_null() {
+            // SAFETY: the swap made this thread the only owner of the list,
+            // and every node came from `Box::into_raw` in `push`.
+            let queued = unsafe { Box::from_raw(head) };
+            head = queued.next;
+            commits.push(queued.commit);
+        }
+        commits.reverse();
+        commits
+    }
+
+    /// Ends a turn: counts it, and removes the files of what it evicted now
+    /// that the index is free again.
+    fn finish(&self, mut disk: Turn<'_>, wait: u64, acquired: std::time::Instant) -> Result<()> {
+        let evicted = std::mem::take(&mut disk.evicted);
+        let hold = u64::try_from(acquired.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let stats = &mut disk.stats;
+        stats.lock_sections = stats.lock_sections.saturating_add(1);
+        stats.lock_wait_nanoseconds = stats.lock_wait_nanoseconds.saturating_add(wait);
+        stats.lock_wait_max_nanoseconds = stats.lock_wait_max_nanoseconds.max(wait);
+        stats.lock_hold_nanoseconds = stats.lock_hold_nanoseconds.saturating_add(hold);
+        stats.lock_hold_max_nanoseconds = stats.lock_hold_max_nanoseconds.max(hold);
+        if evicted.is_empty() {
+            return Ok(());
+        }
+        let root = disk.root.clone();
+        drop(disk);
+        if unlink(&root, &evicted).is_err() {
+            self.turn()?.disable();
+        }
+        Ok(())
+    }
+
+    /// Applies queued commits unless another thread has the turn, in which
+    /// case that thread does it: it looks at the queue again after leaving.
+    fn settle(&self) -> Result<()> {
+        while !self.commits.load(Ordering::Acquire).is_null() {
+            let Some(mut disk) = self.try_turn() else {
+                return Ok(());
+            };
+            let acquired = std::time::Instant::now();
+            for commit in self.take_commits() {
+                commit(&mut disk);
+            }
+            self.finish(disk, 0, acquired)?;
+        }
+        Ok(())
+    }
+
+    /// Queues a change that needs no answer. Never waits.
+    fn post(&self, commit: Commit) -> Result<()> {
+        self.push(commit);
+        self.settle()
+    }
+}
+
+fn with_disk<T>(shared: &Shared, operation: impl FnOnce(&mut Disk) -> T) -> Result<T> {
     let waiting = std::time::Instant::now();
-    let mut disk = disk
-        .lock()
-        .map_err(|_| error("disk cache mutex poisoned"))?;
+    let mut disk = shared.turn()?;
     let acquired = std::time::Instant::now();
+    // Earlier commits first: an invalidation must see every fill before it.
+    for commit in shared.take_commits() {
+        commit(&mut disk);
+    }
     let result = operation(&mut disk);
-    let nanos =
-        |duration: std::time::Duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-    let wait = nanos(acquired.duration_since(waiting));
-    let hold = nanos(acquired.elapsed());
-    let stats = &mut disk.stats;
-    stats.lock_sections = stats.lock_sections.saturating_add(1);
-    stats.lock_wait_nanoseconds = stats.lock_wait_nanoseconds.saturating_add(wait);
-    stats.lock_wait_max_nanoseconds = stats.lock_wait_max_nanoseconds.max(wait);
-    stats.lock_hold_nanoseconds = stats.lock_hold_nanoseconds.saturating_add(hold);
-    stats.lock_hold_max_nanoseconds = stats.lock_hold_max_nanoseconds.max(hold);
+    let wait = u64::try_from(acquired.duration_since(waiting).as_nanos()).unwrap_or(u64::MAX);
+    shared.finish(disk, wait, acquired)?;
+    shared.settle()?;
     Ok(result)
+}
+/// Removes the files of evicted entries. Needs no lock: the index stopped
+/// naming them when they were evicted, so nothing opens them, and a fill
+/// that brings one of them back at this moment only loses its file, which
+/// the first read reports and `read_failed` drops as an ordinary miss.
+fn unlink(root: &Path, keys: &[String]) -> std::io::Result<()> {
+    for key in keys {
+        match fs::remove_file(root.join(key)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 // Own the opened file while reading, independent of index eviction/unlink.
 fn read_file(mut file: File, key: &str) -> std::io::Result<Vec<u8>> {
@@ -251,6 +446,9 @@ impl Disk {
             max_entries,
             entries: BTreeMap::new(),
             recency: BTreeMap::new(),
+            reserved_bytes: 0,
+            reserved_entries: 0,
+            evicted: Vec::new(),
             index: Arc::default(),
             stats: DiskCacheStats::default(),
         };
@@ -284,8 +482,11 @@ impl Disk {
                 fs::remove_file(item.path()).map_err(error)?;
                 continue;
             }
-            disk.make_room(size).map_err(error)?;
-            disk.record(name, size);
+            let fits = disk.make_room(size);
+            unlink(&disk.root, &std::mem::take(&mut disk.evicted)).map_err(error)?;
+            if fits {
+                disk.record(name, size);
+            }
         }
         Ok(disk)
     }
@@ -314,17 +515,19 @@ impl Disk {
         self.forget(key);
         Ok(())
     }
-    fn make_room(&mut self, size: u64) -> std::io::Result<()> {
+    /// Evicts until an entry of `size` bytes fits. `false` means it cannot:
+    /// what is left of the budget is reserved by fills still being written.
+    /// Eviction here is the index update alone; the files go once the mutex
+    /// is released, so a directory operation never holds up another fill.
+    fn make_room(&mut self, size: u64) -> bool {
         let cutoff = self.index.sequence.load(Ordering::Relaxed);
-        while self.entries.len() >= self.max_entries
-            || self.stats.resident_bytes > self.max_bytes - size
+        while self.entries.len() + self.reserved_entries >= self.max_entries
+            || self.stats.resident_bytes + self.reserved_bytes > self.max_bytes - size
         {
-            let key = self
-                .recency
-                .first_key_value()
-                .expect("nonempty over-budget cache")
-                .1
-                .clone();
+            let Some((_, key)) = self.recency.first_key_value() else {
+                return false;
+            };
+            let key = key.clone();
             // Hits publish recency without a writer. Repair stale recency order
             // lazily when this entry reaches the eviction frontier.
             let entry = self.entries.get_mut(&key).expect("indexed entry");
@@ -335,10 +538,11 @@ impl Disk {
                 self.recency.insert(touched, key);
                 continue;
             }
-            self.remove(&key)?;
+            self.forget(&key);
+            self.evicted.push(key);
             self.stats.evictions += 1;
         }
-        Ok(())
+        true
     }
     fn disable(&mut self) {
         self.stats.io_failures += 1;
@@ -367,34 +571,113 @@ impl Disk {
             _ => self.disable(),
         }
     }
-    fn insert(&mut self, key: String, bytes: &[u8]) {
-        let size = (HEADER + bytes.len()) as u64;
-        if self.stats.disabled || bytes.len() > MAX_PAYLOAD || size > self.max_bytes {
+    /// First half of a fill: admit an entry of `size` bytes and set its space
+    /// aside, so the file can be written without the mutex and still never
+    /// take the cache over its bounds.
+    fn reserve(&mut self, key: &str, size: u64) -> bool {
+        if self.stats.disabled || size > (HEADER + MAX_PAYLOAD) as u64 || size > self.max_bytes {
             self.stats.admission_rejections += 1;
-            return;
+            return false;
         }
-        let result = (|| -> std::io::Result<()> {
-            self.remove(&key)?;
-            self.make_room(size)?;
-            // Reserve space before creating the sole serialized temporary entry.
-            let mut temp = tempfile::Builder::new()
-                .prefix(".cache-tmp-")
-                .tempfile_in(&self.root)?;
-            let mut header = [0; HEADER];
-            header[..8].copy_from_slice(MAGIC);
-            header[8..40].copy_from_slice(&Sha256::digest(key.as_bytes()));
-            header[40..48].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
-            header[48..].copy_from_slice(&Sha256::digest(bytes));
-            temp.write_all(&header)?;
-            temp.write_all(bytes)?;
-            temp.persist(self.root.join(&key)).map_err(|e| e.error)?;
-            self.record(key, size);
-            Ok(())
-        })();
-        if result.is_err() {
-            self.disable();
+        // A resident copy of this block stops being served, and its file
+        // stays where it is: the fill renames an identical file over it.
+        self.forget(key);
+        if self.make_room(size) {
+            self.reserved_bytes += size;
+            self.reserved_entries += 1;
+            true
+        } else {
+            self.stats.admission_rejections += 1;
+            false
         }
     }
+    /// Both halves of a fill in one step. The tests that use it are Unix-only.
+    #[cfg(all(test, unix))]
+    fn insert(&mut self, key: String, bytes: &[u8]) {
+        let size = (HEADER + bytes.len()) as u64;
+        if self.reserve(&key, size) {
+            let root = self.root.clone();
+            if unlink(&root, &std::mem::take(&mut self.evicted)).is_err() {
+                self.disable();
+            }
+            let written = write_entry(&root, &key, bytes);
+            self.commit(key, size, written);
+        }
+    }
+    /// Second half of a fill: index the file `write_entry` put in place, or
+    /// give the reserved space back.
+    fn commit(&mut self, key: String, size: u64, written: std::io::Result<()>) {
+        self.reserved_bytes -= size;
+        self.reserved_entries -= 1;
+        if self.stats.disabled {
+            return;
+        }
+        match written {
+            Ok(()) => {
+                // Another fill of the same block may have committed
+                // meanwhile; its file is the one just replaced.
+                self.forget(&key);
+                self.record(key, size);
+            }
+            Err(_) => self.disable(),
+        }
+    }
+}
+/// Writes one cache entry and renames it into place under `key`. Needs no
+/// lock. The temporary name is unique, the rename is atomic, and nothing
+/// looks for the file before `Disk::commit` indexes it. Blocks are named by
+/// their content, so two fills of one key rename identical files over each
+/// other. An eviction of the same key between this rename and the commit
+/// removes the file first; the index then names a missing file, which the
+/// first read reports and `read_failed` drops as an ordinary miss.
+fn write_entry(root: &Path, key: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let mut temp = tempfile::Builder::new()
+        .prefix(".cache-tmp-")
+        .tempfile_in(root)?;
+    let mut header = [0; HEADER];
+    header[..8].copy_from_slice(MAGIC);
+    header[8..40].copy_from_slice(&Sha256::digest(key.as_bytes()));
+    header[40..48].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+    header[48..].copy_from_slice(&Sha256::digest(bytes));
+    temp.write_all(&header)?;
+    temp.write_all(bytes)?;
+    temp.persist(root.join(key)).map_err(|e| e.error)?;
+    Ok(())
+}
+/// Caches `bytes` under `key`, taking a turn at the index only to reserve space;
+/// publishing the written file is queued; hashing and writing happen between the two.
+/// `finish` runs in the last critical section this takes.
+fn fill(
+    disk: &Shared,
+    root: &Path,
+    key: String,
+    bytes: Option<&[u8]>,
+    finish: impl FnOnce(&mut Disk) + Send + 'static,
+) -> Result<()> {
+    let mut finish = Some(finish);
+    let size = bytes.map(|bytes| (HEADER + bytes.len()) as u64);
+    let reserved = with_disk(disk, |disk| {
+        let reserved = match size {
+            Some(size) => disk.reserve(&key, size),
+            None => {
+                disk.stats.admission_rejections += 1;
+                false
+            }
+        };
+        if !reserved && let Some(finish) = finish.take() {
+            finish(disk);
+        }
+        reserved
+    })?;
+    let (Some(bytes), Some(size), Some(finish), true) = (bytes, size, finish, reserved) else {
+        return Ok(());
+    };
+    let written = write_entry(root, &key, bytes);
+    // Never waits for the index: see `Shared`.
+    disk.post(Box::new(move |disk| {
+        disk.commit(key, size, written);
+        finish(disk);
+    }))
 }
 
 /// Persistent owner-local cache. `root` is pre-existing and application-owned;
@@ -409,11 +692,14 @@ impl Disk {
 /// process-global limits; providers and concurrent requests own separate buffers.
 pub struct DiskCachedBlockStore<B: ?Sized> {
     backing: Arc<B>,
-    disk: Arc<Mutex<Disk>>,
+    disk: Arc<Shared>,
     index: Arc<ReadIndex>,
     root: Arc<PathBuf>,
-    io: Arc<RwLock<()>>,
-    writes: Arc<tokio::sync::Mutex<()>>,
+    io: Arc<DrainGate>,
+    /// Puts share this gate and flush takes it exclusively, so puts to the
+    /// backing store overlap while a flush still covers every put
+    /// acknowledged before it.
+    writes: Arc<DrainGate>,
     workers: Arc<tokio::sync::Semaphore>,
     fills: Arc<tokio::sync::Semaphore>,
     background_read_fills: bool,
@@ -481,9 +767,9 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
             backing,
             root: Arc::new(disk.root.clone()),
             index: disk.index.clone(),
-            disk: Arc::new(Mutex::new(disk)),
-            io: Arc::new(RwLock::new(())),
-            writes: Arc::new(tokio::sync::Mutex::new(())),
+            disk: Arc::new(Shared::new(disk)),
+            io: Arc::new(DrainGate::new()),
+            writes: Arc::new(DrainGate::new()),
             workers: budget.workers,
             fills: budget.fills,
             background_read_fills: budget.background_read_fills,
@@ -588,12 +874,8 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
         let queued = std::time::Instant::now();
         let permit = self.fills.clone().acquire_owned().await.map_err(error)?;
         let bytes = (bytes.len() <= self.max_payload).then(|| bytes.to_vec());
-        let insert = move |disk: &mut Disk| {
-            let started = std::time::Instant::now();
-            match bytes {
-                Some(bytes) => disk.insert(key, &bytes),
-                None => disk.stats.admission_rejections += 1,
-            }
+        let started = std::sync::OnceLock::new();
+        let finish = move |disk: &mut Disk, started: std::time::Instant| {
             let nanos = |duration: std::time::Duration| {
                 u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
             };
@@ -617,13 +899,25 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
                 .fill_service_nanoseconds
                 .saturating_add(nanos(started.elapsed()));
         };
+        let workers = self.workers.clone();
+        let (disk, root) = (self.disk.clone(), self.root.clone());
+        let work = async move {
+            let worker = workers.acquire_owned().await.map_err(error)?;
+            tokio::task::spawn_blocking(move || {
+                // Held until the worker is done with the cache files.
+                let _held = (guard, permit, worker);
+                let started = *started.get_or_init(std::time::Instant::now);
+                fill(&disk, &root, key, bytes.as_deref(), move |disk| {
+                    finish(disk, started)
+                })
+            })
+            .await
+            .map_err(error)?
+        };
         if self.background_read_fills && backing_get.is_some() {
-            let cache = self.clone();
-            tokio::spawn(async move {
-                let _ = cache.disk((guard, permit), insert).await;
-            });
+            tokio::spawn(work);
         } else {
-            drop(self.disk((guard, permit), insert).await?);
+            work.await?;
         }
         Ok(())
     }
@@ -669,7 +963,7 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
     }
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let guard = self.io.clone().read_owned().await;
-        let _write = self.writes.lock().await;
+        let _write = self.writes.read().await;
         let id = self.backing.put(bytes).await?;
         // Only authoritative put/flush ordering needs this gate. Keep the I/O
         // exclusion guard through cache work, but do not delay backing flush
@@ -693,7 +987,7 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
         Ok(bytes)
     }
     async fn flush(&self) -> Result<()> {
-        let _write = self.writes.lock().await;
+        let _write = self.writes.write().await;
         self.backing.flush().await
     }
     async fn delete(&self, id: &BlockId) -> Result<()> {
@@ -720,6 +1014,7 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     #[derive(Default)]
     struct Backing {
@@ -796,7 +1091,7 @@ mod tests {
             .unwrap();
         assert_eq!(read, b"from provider");
         assert_eq!(cache.fills.available_permits(), 0);
-        assert!(cache.io.try_write().is_err());
+        assert!(cache.io.try_write().is_none());
         drop(worker);
         // Acquiring the sole fill permit waits for insertion to finish.
         let filled = cache.fills.clone().acquire_owned().await.unwrap();
@@ -886,9 +1181,10 @@ mod tests {
         let hit_stats = reopened.stats().await.unwrap();
         let miss_stats = other.stats().await.unwrap();
         // Ordinary probes never acquire the maintenance mutex.
-        // Stats snapshots exclude their own section; misses also fill.
+        // Stats snapshots exclude their own section; misses also fill, which
+        // takes one section to reserve space and one to publish the file.
         assert_eq!(hit_stats.lock_sections, 0);
-        assert_eq!(miss_stats.lock_sections, 1);
+        assert_eq!(miss_stats.lock_sections, 2);
         for stats in [hit_stats, miss_stats] {
             assert!(stats.lock_wait_max_nanoseconds <= stats.lock_wait_nanoseconds);
             assert!(stats.lock_hold_max_nanoseconds <= stats.lock_hold_nanoseconds);
@@ -1035,6 +1331,55 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "release-mode disk cache fill diagnostic"]
+    async fn profile_concurrent_evicting_fills() {
+        let root = tempfile::tempdir().unwrap();
+        let backing = Arc::new(Backing::default());
+        // Room for 64 of the 4000 blocks, so nearly every fill evicts.
+        let cache = DiskCachedBlockStore::open(backing, root.path(), "fills", 1 << 30, 64)
+            .await
+            .unwrap();
+        let mut tasks = tokio::task::JoinSet::new();
+        for client in 0..16_u32 {
+            let cache = cache.clone();
+            tasks.spawn(async move {
+                let mut durations = Vec::with_capacity(250);
+                for block in 0..250_u32 {
+                    let mut bytes = vec![0; 4096];
+                    bytes[..4].copy_from_slice(&client.to_le_bytes());
+                    bytes[4..8].copy_from_slice(&block.to_le_bytes());
+                    let now = std::time::Instant::now();
+                    cache.put(&bytes).await.unwrap();
+                    durations.push(now.elapsed());
+                }
+                durations
+            });
+        }
+        let mut durations = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            durations.extend(result.unwrap());
+        }
+        durations.sort_unstable();
+        let stats = cache.stats().await.unwrap();
+        let percentile = |numerator: usize| {
+            durations[(durations.len() * numerator).div_ceil(10000) - 1].as_secs_f64() * 1000.
+        };
+        println!(
+            "fills={} evictions={} sections={} wait_total_ms={:.2} wait_max_us={:.1} hold_mean_us={:.2} hold_max_us={:.1} p50_ms={:.3} p99_ms={:.3} p99_9_ms={:.3}",
+            durations.len(),
+            stats.evictions,
+            stats.lock_sections,
+            stats.lock_wait_nanoseconds as f64 / 1e6,
+            stats.lock_wait_max_nanoseconds as f64 / 1e3,
+            stats.lock_hold_nanoseconds as f64 / stats.lock_sections as f64 / 1e3,
+            stats.lock_hold_max_nanoseconds as f64 / 1e3,
+            percentile(5000),
+            percentile(9900),
+            percentile(9990),
+        );
+    }
+
     #[test]
     fn opened_reads_survive_eviction_without_resurrecting_or_removing_replacements() {
         let root = tempfile::tempdir().unwrap();
@@ -1107,11 +1452,11 @@ mod tests {
                 .unwrap();
         }
         // Both workers are inside file reading; index access still completes.
-        assert_eq!(cache.disk.try_lock().unwrap().stats.resident_entries, 1);
+        assert_eq!(cache.disk.try_turn().unwrap().stats.resident_entries, 1);
         let first = tasks.remove(0);
         first.abort();
         assert!(first.await.unwrap_err().is_cancelled());
-        assert!(cache.io.try_write().is_err());
+        assert!(cache.io.try_write().is_none());
         assert!(cache.workers.try_acquire().is_err());
         for release in releases {
             release.send(()).unwrap();
@@ -1241,7 +1586,7 @@ mod tests {
         started.notified().await;
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        let excluded = cache.io.try_write().is_err();
+        let excluded = cache.io.try_write().is_none();
         let shared_worker_held = other.workers.try_acquire().is_err();
         release.wait();
         assert!(
@@ -1303,5 +1648,46 @@ mod tests {
         fs::remove_dir(&path).unwrap();
         cache.delete(&id).await.unwrap();
         assert!(backing.get(&id).await.is_err());
+    }
+
+    #[test]
+    fn a_fill_being_written_holds_its_space_against_both_bounds() {
+        let root = tempfile::tempdir().unwrap();
+        let size = (HEADER + 8) as u64;
+        // Room for two entries by count and by bytes.
+        let mut disk = Disk::open(root.path(), "reserve", size * 2, 2).unwrap();
+        let (first, second, third) = (digest(b"1"), digest(b"2"), digest(b"3"));
+        assert!(disk.reserve(&first, size));
+        assert!(disk.reserve(&second, size));
+        // Nothing is resident yet, so there is nothing to evict for a third.
+        assert!(!disk.reserve(&third, size));
+        assert_eq!(disk.stats.admission_rejections, 1);
+        let root = disk.root.clone();
+        disk.commit(first.clone(), size, write_entry(&root, &first, b"11111111"));
+        assert_eq!((disk.stats.resident_entries, disk.reserved_entries), (1, 1));
+        // The committed entry can be evicted; the reserved one cannot.
+        assert!(disk.reserve(&third, size));
+        assert_eq!(disk.stats.evictions, 1);
+        // The file goes once the mutex is released, which is `with_disk`'s job.
+        assert!(root.join(&first).exists());
+        unlink(&root, &std::mem::take(&mut disk.evicted)).unwrap();
+        assert!(!root.join(&first).exists());
+        disk.commit(
+            second.clone(),
+            size,
+            write_entry(&root, &second, b"22222222"),
+        );
+        disk.commit(third.clone(), size, write_entry(&root, &third, b"33333333"));
+        assert_eq!((disk.reserved_bytes, disk.reserved_entries), (0, 0));
+        assert_eq!(disk.stats.resident_bytes, size * 2);
+        // A second fill of a resident block replaces it without counting twice.
+        assert!(disk.reserve(&third, size));
+        disk.commit(third.clone(), size, write_entry(&root, &third, b"33333333"));
+        assert_eq!(
+            (disk.stats.resident_entries, disk.stats.resident_bytes),
+            (2, size * 2)
+        );
+        assert_eq!(disk.stats.evictions, 1);
+        assert!(!disk.stats.disabled);
     }
 }

@@ -1,5 +1,6 @@
 use crate::*;
 use async_trait::async_trait;
+use mount_rs_core::turn_gate::TurnLock;
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -183,7 +184,7 @@ pub struct RedisDiscovery {
     config: RedisConfig,
     fallback: Arc<FixedDiscovery>,
     mode: DiscoveryMode,
-    connection: tokio::sync::Mutex<Option<Box<dyn RedisStream>>>,
+    connection: TurnLock<Option<Box<dyn RedisStream>>>,
 }
 trait RedisStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> RedisStream for T {}
@@ -212,7 +213,7 @@ impl RedisDiscovery {
             config,
             fallback: FixedDiscovery::new_with_mode(peers, max_queries, DiscoveryMode::PeerQuery)?,
             mode,
-            connection: tokio::sync::Mutex::new(None),
+            connection: TurnLock::new(None),
         }))
     }
     fn key(&self, scope: &CacheScope, id: &BlockId, peer: &PeerId) -> String {

@@ -1,7 +1,8 @@
 //! FsDriver adapter over the bounded remote request protocol.
 
+use mount_rs_core::drain_gate::DrainGate;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use mount_rs_core::{
@@ -141,7 +142,10 @@ struct RemoteHandle {
     connection: Arc<RemoteConnection>,
     drive_id: String,
     id: u64,
-    closed: RwLock<bool>,
+    /// Calls share the gate with one atomic increment; close drains them.
+    gate: DrainGate,
+    /// Written only while holding `gate` exclusively.
+    closed: AtomicBool,
 }
 
 impl RemoteHandle {
@@ -150,14 +154,12 @@ impl RemoteHandle {
         name: OperationName,
         mut body: Value,
     ) -> mount_rs_core::Result<T> {
-        let closed = self.closed.read().await;
-        if *closed {
+        let _open = self.gate.read().await;
+        if self.closed.load(Ordering::Acquire) {
             return Err(FsError::new(ErrorCode::Ebadf));
         }
         body["handle"] = json!(self.id);
-        let result = call(&self.connection, &self.drive_id, name, body).await;
-        drop(closed);
-        result
+        call(&self.connection, &self.drive_id, name, body).await
     }
 }
 
@@ -168,8 +170,8 @@ impl FileHandle for RemoteHandle {
     }
 
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> mount_rs_core::Result<usize> {
-        let closed = self.closed.read().await;
-        if *closed {
+        let _open = self.gate.read().await;
+        if self.closed.load(Ordering::Acquire) {
             return Err(FsError::new(ErrorCode::Ebadf));
         }
         let length = buffer.len().min(MAX_IO);
@@ -180,8 +182,8 @@ impl FileHandle for RemoteHandle {
     }
 
     async fn write(&self, buffer: &[u8], position: Option<u64>) -> mount_rs_core::Result<usize> {
-        let closed = self.closed.read().await;
-        if *closed {
+        let _open = self.gate.read().await;
+        if self.closed.load(Ordering::Acquire) {
             return Err(FsError::new(ErrorCode::Ebadf));
         }
         self.connection
@@ -209,11 +211,10 @@ impl FileHandle for RemoteHandle {
         self.call(OperationName::HandleDatasync, json!({})).await
     }
     async fn close(&self) -> mount_rs_core::Result<()> {
-        let mut closed = self.closed.write().await;
-        if *closed {
+        let _draining = self.gate.write().await;
+        if self.closed.swap(true, Ordering::AcqRel) {
             return Err(FsError::new(ErrorCode::Ebadf));
         }
-        *closed = true;
         call(
             &self.connection,
             &self.drive_id,
@@ -284,7 +285,8 @@ impl FsDriver for RemoteFsDriver {
                     connection: Arc::clone(&self.connection),
                     drive_id: self.drive_id.clone(),
                     id,
-                    closed: RwLock::new(false),
+                    gate: DrainGate::new(),
+                    closed: AtomicBool::new(false),
                 });
                 Ok(GuardedMutationResult::Opened { handle, identity })
             }
@@ -339,7 +341,8 @@ impl FsDriver for RemoteFsDriver {
             connection: Arc::clone(&self.connection),
             drive_id: self.drive_id.clone(),
             id,
-            closed: RwLock::new(false),
+            gate: DrainGate::new(),
+            closed: AtomicBool::new(false),
         }))
     }
     async fn open_flags(
@@ -358,7 +361,8 @@ impl FsDriver for RemoteFsDriver {
             connection: Arc::clone(&self.connection),
             drive_id: self.drive_id.clone(),
             id,
-            closed: RwLock::new(false),
+            gate: DrainGate::new(),
+            closed: AtomicBool::new(false),
         }))
     }
     async fn mkdir(

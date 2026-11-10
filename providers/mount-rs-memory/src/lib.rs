@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo,
     VersionPublication, VersionedMetadataStore, VolumeId,
@@ -18,8 +19,9 @@ use mount_rs_core::versioning::{
 use mount_rs_core::{ErrorCode, FsError, Result};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Provider-owned time source used by the metadata lease implementation.
@@ -121,7 +123,7 @@ impl Default for MetadataState {
 /// shared by the handles, while block storage remains entirely separate.
 #[derive(Clone)]
 pub struct MemoryMetadataStore {
-    state: Arc<Mutex<MetadataState>>,
+    state: Arc<TurnCell<MetadataState>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -151,7 +153,7 @@ impl MemoryMetadataStore {
         let volume_id = VolumeId::new(format!("memory-{}-{sequence}", std::process::id()))
             .expect("generated memory volume id is valid");
         Self {
-            state: Arc::new(Mutex::new(MetadataState {
+            state: Arc::new(TurnCell::new(MetadataState {
                 volume_id,
                 ..MetadataState::default()
             })),
@@ -159,10 +161,21 @@ impl MemoryMetadataStore {
         }
     }
 
-    fn lock_state(&self) -> Result<MutexGuard<'_, MetadataState>> {
+    /// Exclusive access for the lease and revision transitions, each of which
+    /// checks and updates several fields as one linearizable step.
+    ///
+    /// There is no lock object: the state is a `TurnCell`, taken with one
+    /// compare-and-swap. Transitions come one at a time from the writer,
+    /// and every use is a short in-memory step.
+    fn lock_state(&self) -> Result<TurnCellGuard<'_, MetadataState>> {
         self.state
             .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("metadata store lock poisoned"))
+            .map_err(|()| FsError::new(ErrorCode::Eio).with_message("metadata store lock poisoned"))
+    }
+
+    /// Access for loads and version lookups.
+    fn read_state(&self) -> Result<TurnCellGuard<'_, MetadataState>> {
+        self.lock_state()
     }
 }
 
@@ -173,7 +186,7 @@ impl MetadataStore for MemoryMetadataStore {
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
-        let state = self.lock_state()?;
+        let state = self.read_state()?;
         Ok(LoadedMetadata {
             revision: state.revision,
             namespace: state.namespace.clone(),
@@ -276,7 +289,7 @@ impl VersionedMetadataStore for MemoryMetadataStore {
     }
 
     async fn version_head(&self) -> Result<Option<VersionHead>> {
-        let state = self.lock_state()?;
+        let state = self.read_state()?;
         let Some(version) = state.head.clone() else {
             return Ok(None);
         };
@@ -298,7 +311,7 @@ impl VersionedMetadataStore for MemoryMetadataStore {
     }
 
     async fn load_version(&self, id: &VersionId) -> Result<VersionInfo> {
-        let state = self.lock_state()?;
+        let state = self.read_state()?;
         if id.volume != state.volume_id {
             return Err(FsError::new(ErrorCode::Enoent)
                 .with_syscall("load version")
@@ -314,7 +327,7 @@ impl VersionedMetadataStore for MemoryMetadataStore {
     }
 
     async fn list_versions(&self) -> Result<Vec<VersionInfo>> {
-        let state = self.lock_state()?;
+        let state = self.read_state()?;
         state
             .versions
             .values()
@@ -327,7 +340,7 @@ impl VersionedMetadataStore for MemoryMetadataStore {
     }
 
     async fn find_publication(&self, operation_id: &PublicationId) -> Result<Option<VersionInfo>> {
-        let state = self.lock_state()?;
+        let state = self.read_state()?;
         let Some(id) = state.operations.get(&operation_id.0) else {
             return Ok(None);
         };
@@ -521,23 +534,162 @@ impl VersionedMetadataStore for MemoryMetadataStore {
     }
 }
 
-type MemoryBlocks = BTreeMap<BlockId, Arc<Vec<u8>>>;
+const BLOCK_GROUPS: usize = 256;
+const GROUP_BUCKETS: usize = 1024;
 
-/// Volatile immutable block store. A clone shares the same block map.
+/// One block in a bucket's chain. Chains are immutable: a change installs a
+/// new head, so a reader that loaded the old one keeps a consistent chain.
+struct BlockNode {
+    id: BlockId,
+    bytes: Arc<Vec<u8>>,
+    next: Option<Arc<BlockNode>>,
+}
+
+type Bucket = arc_swap::ArcSwapOption<BlockNode>;
+
+/// Blocks by id, with no lock on any path: a hash table whose buckets are
+/// atomically replaced immutable chains. A read loads one bucket head and
+/// walks it without taking a reference count; a put or delete swaps in a new
+/// head and retries if another writer got there first. Bucket groups are
+/// allocated on first use, so an empty store costs almost nothing.
+struct MemoryBlocks {
+    groups: [OnceLock<Box<[Bucket]>>; BLOCK_GROUPS],
+    len: AtomicUsize,
+}
+
+impl Default for MemoryBlocks {
+    fn default() -> Self {
+        Self {
+            groups: std::array::from_fn(|_| OnceLock::new()),
+            len: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl fmt::Debug for MemoryBlocks {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MemoryBlocks")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+fn chain_find<'a>(mut node: Option<&'a BlockNode>, id: &BlockId) -> Option<&'a BlockNode> {
+    while let Some(current) = node {
+        if current.id == *id {
+            return Some(current);
+        }
+        node = current.next.as_deref();
+    }
+    None
+}
+
+fn same_head(left: &Option<Arc<BlockNode>>, right: &Option<Arc<BlockNode>>) -> bool {
+    left.as_ref().map(Arc::as_ptr) == right.as_ref().map(Arc::as_ptr)
+}
+
+impl MemoryBlocks {
+    fn position(id: &BlockId) -> (usize, usize) {
+        // Ids are digests, optionally with a collision suffix.
+        let hash = id.0.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        let hash = (hash ^ (hash >> 31)) as usize;
+        (hash % BLOCK_GROUPS, (hash / BLOCK_GROUPS) % GROUP_BUCKETS)
+    }
+
+    fn bucket(&self, id: &BlockId) -> Option<&Bucket> {
+        let (group, bucket) = Self::position(id);
+        self.groups[group].get().map(|buckets| &buckets[bucket])
+    }
+
+    fn bucket_for_insert(&self, id: &BlockId) -> &Bucket {
+        let (group, bucket) = Self::position(id);
+        &self.groups[group].get_or_init(|| {
+            (0..GROUP_BUCKETS)
+                .map(|_| arc_swap::ArcSwapOption::empty())
+                .collect()
+        })[bucket]
+    }
+
+    fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+
+    /// Runs `read` on the block's bytes, if it exists.
+    #[inline]
+    fn read<R>(&self, id: &BlockId, read: impl FnOnce(&Vec<u8>) -> R) -> Option<R> {
+        let head = self.bucket(id)?.load();
+        chain_find(head.as_deref(), id).map(|node| read(&node.bytes))
+    }
+
+    /// Stores `bytes` under `id` unless the id is taken. Never overwrites.
+    fn insert_if_absent(&self, id: &BlockId, bytes: &Arc<Vec<u8>>) -> bool {
+        let bucket = self.bucket_for_insert(id);
+        loop {
+            let head = bucket.load();
+            if chain_find(head.as_deref(), id).is_some() {
+                return false;
+            }
+            let node = Arc::new(BlockNode {
+                id: id.clone(),
+                bytes: Arc::clone(bytes),
+                next: Option::clone(&head),
+            });
+            let previous = bucket.compare_and_swap(&head, Some(node));
+            if same_head(&previous, &head) {
+                self.len.fetch_add(1, Ordering::AcqRel);
+                return true;
+            }
+        }
+    }
+
+    fn remove(&self, id: &BlockId) -> bool {
+        let Some(bucket) = self.bucket(id) else {
+            return false;
+        };
+        loop {
+            let head = bucket.load();
+            let Some(removed) = chain_find(head.as_deref(), id) else {
+                return false;
+            };
+            // Copy the nodes ahead of the removed one; share the rest.
+            let mut ahead = Vec::new();
+            let mut node = head.as_deref();
+            while let Some(current) = node {
+                if std::ptr::eq(current, removed) {
+                    break;
+                }
+                ahead.push(current);
+                node = current.next.as_deref();
+            }
+            let mut chain = removed.next.clone();
+            for current in ahead.into_iter().rev() {
+                chain = Some(Arc::new(BlockNode {
+                    id: current.id.clone(),
+                    bytes: Arc::clone(&current.bytes),
+                    next: chain,
+                }));
+            }
+            let previous = bucket.compare_and_swap(&head, chain);
+            if same_head(&previous, &head) {
+                self.len.fetch_sub(1, Ordering::AcqRel);
+                return true;
+            }
+        }
+    }
+}
+
+/// Volatile content-addressed block store. Cloning shares the blocks.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryBlockStore {
-    blocks: Arc<RwLock<MemoryBlocks>>,
+    blocks: Arc<MemoryBlocks>,
 }
 
 impl MemoryBlockStore {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    fn lock_blocks(&self) -> Result<RwLockWriteGuard<'_, MemoryBlocks>> {
-        self.blocks
-            .write()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("block store lock poisoned"))
     }
 }
 
@@ -553,48 +705,43 @@ impl BlockStore for MemoryBlockStore {
         let mut id = base_id.clone();
         let mut collision = 0_u64;
         loop {
-            let existing = {
-                let blocks = self.blocks.read().map_err(|_| {
-                    FsError::new(ErrorCode::Eio).with_message("block store lock poisoned")
-                })?;
-                blocks.get(&id).cloned()
-            };
-            if let Some(existing) = existing {
-                // Immutable bytes may be compared outside map admission.
-                // An ordinary duplicate put needs no payload allocation.
-                if existing.as_slice() == bytes {
-                    return Ok(id);
+            // Immutable bytes are compared in place; an ordinary duplicate
+            // put needs no payload allocation.
+            match self
+                .blocks
+                .read(&id, |existing| existing.as_slice() == bytes)
+            {
+                Some(true) => return Ok(id),
+                Some(false) => {
+                    collision = collision
+                        .checked_add(1)
+                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                    id = BlockId(format!("{}-{collision}", base_id.0));
+                    continue;
                 }
-                collision = collision
-                    .checked_add(1)
-                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-                id = BlockId(format!("{}-{collision}", base_id.0));
-                continue;
+                None => {}
             }
-            cached.get_or_insert_with(|| Arc::new(bytes.to_vec()));
-            let mut blocks = self.lock_blocks()?;
-            if let std::collections::btree_map::Entry::Vacant(entry) = blocks.entry(id.clone()) {
-                entry.insert(cached.take().expect("prepared immutable payload"));
+            let payload = cached.get_or_insert_with(|| Arc::new(bytes.to_vec()));
+            if self.blocks.insert_if_absent(&id, payload) {
                 return Ok(id);
             }
-            // Another put won publication. Release exclusive admission and
-            // recheck its immutable value; never overwrite a competing block.
+            // Another put won publication. Recheck its immutable value;
+            // never overwrite a competing block.
         }
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
-        let bytes = {
-            let blocks = self.blocks.read().map_err(|_| {
-                FsError::new(ErrorCode::Eio).with_message("block store lock poisoned")
-            })?;
-            blocks
-                .get(id)
-                .cloned()
-                .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_message("block not found"))?
-        };
-        // Retain immutable bytes under shared admission; allocate/copy after
-        // releasing the map so unrelated readers and writers can proceed.
-        Ok(bytes.as_ref().clone())
+        self.blocks
+            .read(id, Vec::clone)
+            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_message("block not found"))
+    }
+
+    async fn read_into(&self, id: &BlockId, offset: usize, buffer: &mut [u8]) -> Result<()> {
+        self.blocks
+            .read(id, |bytes| {
+                mount_rs_core::storage::copy_block_range(bytes, offset, buffer)
+            })
+            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_message("block not found"))?
     }
 
     async fn flush(&self) -> Result<()> {
@@ -602,8 +749,7 @@ impl BlockStore for MemoryBlockStore {
     }
 
     async fn delete(&self, id: &BlockId) -> Result<()> {
-        let removed = { self.lock_blocks()?.remove(id) };
-        if removed.is_some() {
+        if self.blocks.remove(id) {
             Ok(())
         } else {
             Err(FsError::new(ErrorCode::Enoent).with_message("block not found"))
@@ -714,10 +860,11 @@ mod tests {
     fn concurrent_duplicate_publication_preserves_colliding_blocks() {
         let blocks = MemoryBlockStore::new();
         let base = block_id(b"new bytes");
-        blocks
-            .lock_blocks()
-            .unwrap()
-            .insert(base.clone(), Arc::new(b"collision".to_vec()));
+        assert!(
+            blocks
+                .blocks
+                .insert_if_absent(&base, &Arc::new(b"collision".to_vec()))
+        );
         let barrier = Arc::new(std::sync::Barrier::new(8));
         let tasks: Vec<_> = (0..8)
             .map(|_| {
@@ -734,27 +881,42 @@ mod tests {
         assert_ne!(ids[0], base);
         assert_eq!(block_on(blocks.get(&base)).unwrap(), b"collision");
         assert_eq!(block_on(blocks.get(&ids[0])).unwrap(), b"new bytes");
-        assert_eq!(blocks.blocks.read().unwrap().len(), 2);
+        assert_eq!(blocks.blocks.len(), 2);
     }
 
     #[test]
-    fn immutable_block_reads_share_admission_and_own_returned_bytes() {
+    fn blocks_sharing_a_bucket_survive_each_others_removal() {
+        // Find three ids that hash to one bucket.
+        let mut seen = std::collections::HashMap::<(usize, usize), Vec<BlockId>>::new();
+        let colliding = (0_u64..)
+            .find_map(|index| {
+                let id = BlockId(format!("chained-{index}"));
+                let bucket = seen.entry(MemoryBlocks::position(&id)).or_default();
+                bucket.push(id);
+                (bucket.len() == 3).then(|| bucket.clone())
+            })
+            .unwrap();
+        for removed in 0..3 {
+            let blocks = MemoryBlocks::default();
+            for (index, id) in colliding.iter().enumerate() {
+                assert!(blocks.insert_if_absent(id, &Arc::new(vec![index as u8])));
+                assert!(!blocks.insert_if_absent(id, &Arc::new(vec![9])));
+            }
+            assert!(blocks.remove(&colliding[removed]));
+            assert!(!blocks.remove(&colliding[removed]));
+            assert_eq!(blocks.len(), 2);
+            for (index, id) in colliding.iter().enumerate() {
+                let found = blocks.read(id, |bytes| bytes[0]);
+                assert_eq!(found, (index != removed).then_some(index as u8));
+            }
+        }
+    }
+
+    #[test]
+    fn immutable_block_reads_own_returned_bytes() {
         let blocks = MemoryBlockStore::new();
         let id = block_on(blocks.put(&vec![19; 65536])).unwrap();
-        let admitted = blocks.blocks.read().unwrap();
-        let reader = blocks.clone();
-        let read_id = id.clone();
-        let (send, receive) = std::sync::mpsc::channel();
-        let task = std::thread::spawn(move || {
-            send.send(block_on(reader.get(&read_id))).unwrap();
-        });
-        let result = receive.recv_timeout(Duration::from_secs(2));
-        // Always release admission before joining, including a failed assertion.
-        drop(admitted);
-        task.join().unwrap();
-        let mut bytes = result
-            .expect("reader must not require exclusive admission")
-            .unwrap();
+        let mut bytes = block_on(blocks.get(&id)).unwrap();
         bytes[0] = 0;
         assert_eq!(block_on(blocks.get(&id)).unwrap()[0], 19);
         block_on(blocks.delete(&id)).unwrap();
@@ -825,7 +987,7 @@ mod tests {
             default_gid: 1000,
             umask: 0o022,
             default_chunker: FixedSizeChunker::new(4096).unwrap().config(),
-            nodes,
+            nodes: nodes.into(),
         }
     }
 
