@@ -1813,6 +1813,7 @@ dependencies = [
  "arc-swap",
  "async-io",
  "async-trait",
+ "crossbeam-queue",
  "futures-lite",
  "futures-util",
  "mount-rs-core",
@@ -2030,6 +2031,7 @@ dependencies = [
 name = "mount-rs-memory"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "mount-rs-core",
 ]
@@ -2084,6 +2086,7 @@ dependencies = [
 name = "mount-rs-object-store-blocks"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "futures-util",
  "mount-rs-core",

@@ -11,8 +11,8 @@ pub use qualification::{
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -488,12 +488,27 @@ impl ObjectStoreBlockStoreStatsState {
     }
 }
 
-struct CachedObject {
+/// What a hit needs from a cached block. Shared between the index and the
+/// lock-free table in front of it.
+struct HotObject {
+    id: String,
     bytes: Arc<[u8]>,
-    /// Key under which `recency` currently files this entry. Writers only.
-    linked: (u64, u64),
     /// Epoch of the latest hit; written at most once per epoch.
     used: AtomicU64,
+}
+
+impl HotObject {
+    fn touch(&self, epoch: u64) {
+        if self.used.load(Ordering::Relaxed) != epoch {
+            self.used.store(epoch, Ordering::Relaxed);
+        }
+    }
+}
+
+struct CachedObject {
+    hot: Arc<HotObject>,
+    /// Key under which `recency` currently files this entry. Writers only.
+    linked: (u64, u64),
 }
 
 #[derive(Default)]
@@ -504,62 +519,130 @@ struct ObjectStoreBlockCacheState {
     recency: BTreeMap<(u64, u64), String>,
     /// Advances by two per insertion, so the odd epoch a hit records is
     /// newer than every earlier link. Hits only read it.
-    sequence: AtomicU64,
+    sequence: u64,
     bytes: usize,
 }
 
 impl ObjectStoreBlockCacheState {
-    fn next_sequence(&mut self) -> u64 {
-        let sequence = self.sequence.get_mut();
-        *sequence += 2;
-        *sequence
-    }
-
-    fn take(&mut self, id: &str) -> Option<Arc<[u8]>> {
+    fn take(&mut self, id: &str) -> Option<Arc<HotObject>> {
         let entry = self.entries.remove(id)?;
         self.recency.remove(&entry.linked);
-        self.bytes = self.bytes.saturating_sub(entry.bytes.len());
-        Some(entry.bytes)
-    }
-
-    fn evict_oldest(&mut self) -> Option<Arc<[u8]>> {
-        loop {
-            let (key, id) = self.recency.pop_first()?;
-            let used = *self.entries.get_mut(&id)?.used.get_mut();
-            if used > key.0 {
-                let linked = (used, self.next_sequence());
-                self.entries.get_mut(&id)?.linked = linked;
-                self.recency.insert(linked, id);
-                continue;
-            }
-            let entry = self.entries.remove(&id)?;
-            self.bytes = self.bytes.saturating_sub(entry.bytes.len());
-            return Some(entry.bytes);
-        }
+        self.bytes = self.bytes.saturating_sub(entry.hot.bytes.len());
+        Some(entry.hot)
     }
 }
 
-/// Bounded cache of recently written and fetched blocks. Hits share the
-/// index lock and copy from a shared payload after releasing it, so
-/// concurrent reads of cached blocks do not serialize on this cache.
-#[derive(Default)]
+const CACHE_FRONT_SLOTS: usize = (MAX_CACHE_ENTRIES * 4).next_power_of_two();
+const CACHE_FRONT_PROBE: usize = 4;
+
+/// Bounded cache of recently written and fetched blocks.
+///
+/// A hit takes no lock: cached blocks are published in a fixed table of
+/// atomic slots probed from the block id's hash, and a hit loads one slot,
+/// compares the id and copies out of the block it guards, without taking a
+/// reference count. The index behind the lock stays the authority; its
+/// writers publish each entry and retract it before freeing the payload. An
+/// entry whose probe window is full is not published and is read through
+/// the index.
 struct ObjectStoreBlockCache {
     state: RwLock<ObjectStoreBlockCacheState>,
+    front: Box<[arc_swap::ArcSwapOption<HotObject>]>,
+    /// The index's current sequence, for hits to stamp recency with.
+    epoch: AtomicU64,
+}
+
+impl Default for ObjectStoreBlockCache {
+    fn default() -> Self {
+        Self {
+            state: RwLock::default(),
+            front: (0..CACHE_FRONT_SLOTS)
+                .map(|_| arc_swap::ArcSwapOption::empty())
+                .collect(),
+            epoch: AtomicU64::new(0),
+        }
+    }
 }
 
 impl ObjectStoreBlockCache {
-    fn lookup(&self, id: &str) -> Option<Arc<[u8]>> {
-        let state = self.state.read().ok()?;
-        let entry = state.entries.get(id)?;
-        let epoch = state.sequence.load(Ordering::Relaxed) | 1;
-        if entry.used.load(Ordering::Relaxed) != epoch {
-            entry.used.store(epoch, Ordering::Relaxed);
+    fn window(&self, id: &str) -> impl Iterator<Item = &arc_swap::ArcSwapOption<HotObject>> {
+        // Ids are digests: their tail is as good a hash as any.
+        let bytes = id.as_bytes();
+        let tail = &bytes[bytes.len().saturating_sub(16)..];
+        let hash = tail.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        let start = (hash ^ (hash >> 29)) as usize;
+        (0..CACHE_FRONT_PROBE)
+            .map(move |step| &self.front[start.wrapping_add(step) & (CACHE_FRONT_SLOTS - 1)])
+    }
+
+    /// Index writers only.
+    fn publish(&self, hot: &Arc<HotObject>) {
+        if let Some(slot) = self.window(&hot.id).find(|slot| slot.load().is_none()) {
+            slot.store(Some(Arc::clone(hot)));
         }
-        Some(Arc::clone(&entry.bytes))
+    }
+
+    /// Index writers only.
+    fn retract(&self, hot: &Arc<HotObject>) {
+        for slot in self.window(&hot.id) {
+            if slot
+                .load()
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, hot))
+            {
+                slot.store(None);
+            }
+        }
+    }
+
+    fn next_sequence(&self, state: &mut ObjectStoreBlockCacheState) -> u64 {
+        state.sequence += 2;
+        self.epoch.store(state.sequence, Ordering::Relaxed);
+        state.sequence
+    }
+
+    fn evict_oldest(&self, state: &mut ObjectStoreBlockCacheState) -> Option<Arc<HotObject>> {
+        loop {
+            let (key, id) = state.recency.pop_first()?;
+            let used = state.entries.get(&id)?.hot.used.load(Ordering::Relaxed);
+            if used > key.0 {
+                let linked = (used, self.next_sequence(state));
+                state.entries.get_mut(&id)?.linked = linked;
+                state.recency.insert(linked, id);
+                continue;
+            }
+            let entry = state.entries.remove(&id)?;
+            state.bytes = state.bytes.saturating_sub(entry.hot.bytes.len());
+            return Some(entry.hot);
+        }
+    }
+
+    /// Runs `read` on a cached block: from the table when it is published
+    /// there, otherwise through the index.
+    #[inline]
+    fn read<R>(&self, id: &str, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let epoch = self.epoch.load(Ordering::Relaxed) | 1;
+        for slot in self.window(id) {
+            let hot = slot.load();
+            if let Some(hot) = hot.as_deref()
+                && hot.id == id
+            {
+                hot.touch(epoch);
+                return Some(read(&hot.bytes));
+            }
+        }
+        let bytes = {
+            let state = self.state.read().ok()?;
+            let entry = state.entries.get(id)?;
+            entry.hot.touch(epoch);
+            Arc::clone(&entry.hot.bytes)
+        };
+        Some(read(&bytes))
     }
 
     fn get(&self, id: &str) -> Option<Vec<u8>> {
-        self.lookup(id).map(|bytes| bytes.to_vec())
+        self.read(id, <[u8]>::to_vec)
     }
 
     fn insert(&self, id: &str, bytes: &[u8]) {
@@ -577,30 +660,36 @@ impl ObjectStoreBlockCache {
             while state.entries.len() >= MAX_CACHE_ENTRIES
                 || state.bytes.saturating_add(payload.len()) > MAX_CACHE_BYTES
             {
-                let Some(evicted) = state.evict_oldest() else {
+                let Some(evicted) = self.evict_oldest(&mut state) else {
                     break;
                 };
                 retired.push(evicted);
             }
-            let sequence = state.next_sequence();
+            retired.iter().for_each(|hot| self.retract(hot));
+            let sequence = self.next_sequence(&mut state);
             let linked = (sequence, sequence);
             state.bytes = state.bytes.saturating_add(payload.len());
             state.recency.insert(linked, id.to_owned());
-            state.entries.insert(
-                id.to_owned(),
-                CachedObject {
-                    bytes: payload,
-                    linked,
-                    used: AtomicU64::new(sequence),
-                },
-            );
+            let hot = Arc::new(HotObject {
+                id: id.to_owned(),
+                bytes: payload,
+                used: AtomicU64::new(sequence),
+            });
+            self.publish(&hot);
+            state
+                .entries
+                .insert(id.to_owned(), CachedObject { hot, linked });
         }
         drop(retired);
     }
 
     fn remove(&self, id: &str) {
         let retired = match self.state.write() {
-            Ok(mut state) => state.take(id),
+            Ok(mut state) => {
+                let retired = state.take(id);
+                retired.iter().for_each(|hot| self.retract(hot));
+                retired
+            }
             Err(_) => return,
         };
         drop(retired);
@@ -724,14 +813,41 @@ mod verification {
 
 type InFlightPutResult = std::result::Result<(), FsError>;
 
+const INFLIGHT_PUT_SLOTS: usize = 256;
+const INFLIGHT_PUT_PROBE: usize = 8;
+
+/// Uploads in progress, found without a lock: a fixed table of atomic slots
+/// probed from the block id's hash. Blocks are content-addressed, so sharing
+/// an upload only saves a request; a put that finds its probe window full
+/// uploads unshared.
+type InFlightPuts = Arc<[arc_swap::ArcSwapOption<InFlightPut>]>;
+
+fn inflight_put_slots() -> InFlightPuts {
+    (0..INFLIGHT_PUT_SLOTS)
+        .map(|_| arc_swap::ArcSwapOption::empty())
+        .collect()
+}
+
+fn inflight_put_window(id: &str) -> impl Iterator<Item = usize> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    let start = hasher.finish() as usize;
+    (0..INFLIGHT_PUT_PROBE).map(move |step| start.wrapping_add(step) % INFLIGHT_PUT_SLOTS)
+}
+
 struct InFlightPut {
+    id: String,
     result: watch::Sender<Option<InFlightPutResult>>,
 }
 
 impl InFlightPut {
-    fn new() -> Arc<Self> {
+    fn new(id: &str) -> Arc<Self> {
         let (result, _) = watch::channel(None);
-        Arc::new(Self { result })
+        Arc::new(Self {
+            id: id.to_owned(),
+            result,
+        })
     }
 
     fn subscribe(&self) -> watch::Receiver<Option<InFlightPutResult>> {
@@ -749,22 +865,25 @@ enum InFlightPutClaim {
 }
 
 struct InFlightPutGuard {
-    id: String,
     entry: Arc<InFlightPut>,
-    entries: Arc<Mutex<HashMap<String, Arc<InFlightPut>>>>,
+    entries: InFlightPuts,
+    /// Where followers find this upload; `None` when it is not shared.
+    slot: Option<usize>,
     completed: bool,
 }
 
 impl InFlightPutGuard {
     fn remove(&self) {
-        let Ok(mut entries) = self.entries.lock() else {
+        let Some(slot) = self.slot else {
             return;
         };
-        if entries
-            .get(&self.id)
+        let slot = &self.entries[slot];
+        let current = slot.load();
+        if current
+            .as_ref()
             .is_some_and(|entry| Arc::ptr_eq(entry, &self.entry))
         {
-            entries.remove(&self.id);
+            slot.compare_and_swap(&current, None);
         }
     }
 
@@ -903,7 +1022,7 @@ pub struct ObjectStoreBlockStore {
     durable: bool,
     stats: Arc<ObjectStoreBlockStoreStatsState>,
     cache: Arc<ObjectStoreBlockCache>,
-    inflight_puts: Arc<Mutex<HashMap<String, Arc<InFlightPut>>>>,
+    inflight_puts: InFlightPuts,
 }
 
 impl ObjectStoreBlockStore {
@@ -925,7 +1044,7 @@ impl ObjectStoreBlockStore {
             durable,
             stats: Arc::new(ObjectStoreBlockStoreStatsState::default()),
             cache: Arc::new(ObjectStoreBlockCache::default()),
-            inflight_puts: Arc::new(Mutex::new(HashMap::new())),
+            inflight_puts: inflight_put_slots(),
         })
     }
 
@@ -954,25 +1073,43 @@ impl ObjectStoreBlockStore {
     }
 
     fn claim_put(&self, id: &str) -> InFlightPutClaim {
-        let entry = InFlightPut::new();
-        let Ok(mut entries) = self.inflight_puts.lock() else {
-            return InFlightPutClaim::Leader(InFlightPutGuard {
-                id: id.to_owned(),
-                entry,
-                entries: Arc::clone(&self.inflight_puts),
-                completed: false,
-            });
-        };
-        if let Some(existing) = entries.get(id) {
-            return InFlightPutClaim::Follower(existing.subscribe());
+        // A follower that subscribes after the leader finished still reads
+        // the result: the channel keeps its last value.
+        for index in inflight_put_window(id) {
+            if let Some(existing) = &*self.inflight_puts[index].load()
+                && existing.id == id
+            {
+                return InFlightPutClaim::Follower(existing.subscribe());
+            }
         }
-        entries.insert(id.to_owned(), Arc::clone(&entry));
-        InFlightPutClaim::Leader(InFlightPutGuard {
-            id: id.to_owned(),
-            entry,
-            entries: Arc::clone(&self.inflight_puts),
-            completed: false,
-        })
+        let entry = InFlightPut::new(id);
+        let leader = |slot| {
+            InFlightPutClaim::Leader(InFlightPutGuard {
+                entry: Arc::clone(&entry),
+                entries: Arc::clone(&self.inflight_puts),
+                slot,
+                completed: false,
+            })
+        };
+        for index in inflight_put_window(id) {
+            let slot = &self.inflight_puts[index];
+            loop {
+                let current = slot.load();
+                match &*current {
+                    Some(existing) if existing.id == id => {
+                        return InFlightPutClaim::Follower(existing.subscribe());
+                    }
+                    Some(_) => break,
+                    None => {
+                        let previous = slot.compare_and_swap(&current, Some(Arc::clone(&entry)));
+                        if previous.is_none() {
+                            return leader(Some(index));
+                        }
+                    }
+                }
+            }
+        }
+        leader(None)
     }
 
     async fn put_remote(
@@ -1108,11 +1245,17 @@ impl BlockStore for ObjectStoreBlockStore {
     async fn read_into(&self, id: &BlockId, offset: usize, buffer: &mut [u8]) -> Result<()> {
         self.object_path(id)?;
         // A cached block serves the range without copying the whole block.
-        if let Some(bytes) = self.cache.lookup(&id.0) {
+        if let Some((length, copied)) = self.cache.read(&id.0, |bytes| {
+            (
+                bytes.len(),
+                mount_rs_core::storage::copy_block_range(bytes, offset, buffer),
+            )
+        }) {
+            // Counted only on a hit: a miss is counted by `get` below.
             let started = self.stats.start(BlockOperation::Get);
             self.stats.cache_hit();
-            self.stats.success(started, bytes.len() as u64, 0);
-            return mount_rs_core::storage::copy_block_range(&bytes, offset, buffer);
+            self.stats.success(started, length as u64, 0);
+            return copied;
         }
         let bytes = self.get(id).await?;
         mount_rs_core::storage::copy_block_range(&bytes, offset, buffer)

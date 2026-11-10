@@ -7,18 +7,16 @@
 use mount_rs_core::drain_gate::{DrainGate, OwnedDrainExclusive};
 use mount_rs_core::{ErrorCode, FileHandle, FsError, OpenFlags, Result, Stats};
 use mount_rs_sdk::Filesystem;
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc, OnceLock, RwLock as TableLock,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 /// One open handle. Calls share `gate`; cursor moves, mutations and close
 /// take it exclusively. The gate is an atomic counter for shared entry, so
 /// concurrent positional reads on one handle do not meet on a lock.
 struct Slot {
+    id: u64,
     gate: Arc<DrainGate>,
     /// Set once, when the backend open returns.
     handle: OnceLock<Arc<dyn FileHandle>>,
@@ -36,17 +34,101 @@ impl Slot {
     }
 }
 type Entry = Arc<Slot>;
-struct State {
-    next: u64,
-    handles: BTreeMap<u64, Entry>,
+/// The session's open handles, with no lock on any path. A handle lives in
+/// the slot its id selects, so a lookup is one atomic load and an id check.
+/// Ids only grow and are never reused; an id whose slot is still held by an
+/// older handle is skipped.
+struct Table {
+    next: AtomicU64,
+    len: AtomicUsize,
+    slots: Box<[arc_swap::ArcSwapOption<Slot>]>,
+}
+impl Table {
+    fn new(limit: usize) -> Self {
+        Self {
+            next: AtomicU64::new(1),
+            len: AtomicUsize::new(0),
+            slots: (0..limit)
+                .map(|_| arc_swap::ArcSwapOption::empty())
+                .collect(),
+        }
+    }
+    fn slot(&self, id: u64) -> &arc_swap::ArcSwapOption<Slot> {
+        &self.slots[(id % self.slots.len() as u64) as usize]
+    }
+    fn get(&self, id: u64) -> Option<Entry> {
+        self.slot(id).load_full().filter(|entry| entry.id == id)
+    }
+    /// Reserves a slot for a handle that is still opening. The entry's gate
+    /// is held exclusively before it is published, so a drain cannot mistake
+    /// an admitted, pending open for a closed handle.
+    fn reserve(&self) -> Result<(Entry, OwnedDrainExclusive)> {
+        if self.len.fetch_add(1, Ordering::AcqRel) >= self.slots.len() {
+            self.len.fetch_sub(1, Ordering::AcqRel);
+            return Err(error(ErrorCode::Emfile, "open"));
+        }
+        // Fewer handles than slots are reserved, so a free slot exists.
+        loop {
+            let id = self.next.fetch_add(1, Ordering::AcqRel);
+            if id == u64::MAX {
+                self.next.store(u64::MAX, Ordering::Release);
+                self.len.fetch_sub(1, Ordering::AcqRel);
+                return Err(error(ErrorCode::Eoverflow, "open"));
+            }
+            let slot = self.slot(id);
+            let current = slot.load();
+            if current.is_some() {
+                continue;
+            }
+            let entry = Arc::new(Slot {
+                id,
+                gate: Arc::new(DrainGate::new()),
+                handle: OnceLock::new(),
+                closed: AtomicBool::new(false),
+            });
+            let admission = entry.gate.try_write_owned().unwrap();
+            if slot
+                .compare_and_swap(&current, Some(Arc::clone(&entry)))
+                .is_none()
+            {
+                return Ok((entry, admission));
+            }
+        }
+    }
+    fn remove(&self, entry: &Entry) {
+        let slot = self.slot(entry.id);
+        let current = slot.load();
+        if !current
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, entry))
+        {
+            return;
+        }
+        let previous = slot.compare_and_swap(&current, None);
+        if previous
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, entry))
+        {
+            self.len.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    fn entries(&self) -> Vec<Entry> {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.load_full())
+            .collect()
+    }
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.entries().is_empty()
+    }
 }
 
 // Own the pending slot before polling the backend. Cancellation removes the
 // reservation synchronously; no cleanup task or runtime is needed for an open
 // that has not returned a handle.
 struct PendingOpen<'a> {
-    state: &'a TableLock<State>,
-    id: u64,
+    table: &'a Table,
     slot: Entry,
     _admission: OwnedDrainExclusive,
     committed: bool,
@@ -54,7 +136,7 @@ struct PendingOpen<'a> {
 impl Drop for PendingOpen<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            self.state.write().unwrap().handles.remove(&self.id);
+            self.table.remove(&self.slot);
         }
     }
 }
@@ -65,10 +147,9 @@ impl Drop for PendingOpen<'_> {
 pub struct OwnedHandleSession {
     filesystem: Arc<Filesystem>,
     fence: u64,
-    limit: usize,
     closing: AtomicBool,
     path_operations: DrainGate,
-    state: TableLock<State>,
+    table: Table,
 }
 
 fn error(code: ErrorCode, syscall: &str) -> FsError {
@@ -84,13 +165,9 @@ impl OwnedHandleSession {
         Ok(Self {
             filesystem,
             fence,
-            limit,
             closing: AtomicBool::new(false),
             path_operations: DrainGate::new(),
-            state: TableLock::new(State {
-                next: 1,
-                handles: BTreeMap::new(),
-            }),
+            table: Table::new(limit),
         })
     }
 
@@ -134,38 +211,19 @@ impl OwnedHandleSession {
         open: impl std::future::Future<Output = Result<Arc<dyn FileHandle>>>,
     ) -> Result<u64> {
         self.check("open").await?;
-        let mut pending = {
-            let mut state = self.state.write().unwrap();
-            // Serialize admission with close's table snapshot.
-            if self.closing.load(Ordering::Acquire) {
-                return Err(error(ErrorCode::Ebadf, "open"));
-            }
-            if state.handles.len() >= self.limit {
-                return Err(error(ErrorCode::Emfile, "open"));
-            }
-            let next = state
-                .next
-                .checked_add(1)
-                .ok_or_else(|| error(ErrorCode::Eoverflow, "open"))?;
-            let id = state.next;
-            state.next = next;
-            let entry = Arc::new(Slot {
-                gate: Arc::new(DrainGate::new()),
-                handle: OnceLock::new(),
-                closed: AtomicBool::new(false),
-            });
-            // The fresh entry is held exclusively before publication so drain
-            // cannot mistake an admitted, pending open for a closed handle.
-            let admission = entry.gate.try_write_owned().unwrap();
-            state.handles.insert(id, entry.clone());
-            PendingOpen {
-                state: &self.state,
-                id,
-                slot: entry,
-                _admission: admission,
-                committed: false,
-            }
+        let (slot, admission) = self.table.reserve()?;
+        let mut pending = PendingOpen {
+            table: &self.table,
+            slot,
+            _admission: admission,
+            committed: false,
         };
+        // Close raises `closing` before it reads the table and this entry was
+        // published before the check below, so one of the two sees the other:
+        // either close drains this handle or the open is refused here.
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(error(ErrorCode::Ebadf, "open"));
+        }
         let handle = open.await?;
         // Store the returned handle without another suspension point.
         let _ = pending.slot.handle.set(handle);
@@ -173,17 +231,12 @@ impl OwnedHandleSession {
         if self.closing.load(Ordering::Acquire) {
             return Err(error(ErrorCode::Ebadf, "open"));
         }
-        Ok(pending.id)
+        Ok(pending.slot.id)
     }
 
     async fn entry(&self, id: u64) -> Result<Entry> {
-        // Lookups share the table: only open, close and cleanup change it.
-        self.state
-            .read()
-            .unwrap()
-            .handles
-            .get(&id)
-            .cloned()
+        self.table
+            .get(id)
             .ok_or_else(|| error(ErrorCode::Ebadf, "handle"))
     }
 
@@ -245,25 +298,18 @@ impl OwnedHandleSession {
                 entry.closed.store(true, Ordering::Release);
             }
         }
-        self.state.write().unwrap().handles.remove(&id);
+        self.table.remove(&entry);
         Ok(())
     }
 
     /// Stop admission, wait for admitted operations, and close every handle.
     /// Does not release the volume lease; the server does that after all sessions.
     pub async fn close(&self) -> Result<()> {
-        self.closing.store(true, Ordering::Release);
+        self.closing.store(true, Ordering::SeqCst);
         let _paths_drained = self.path_operations.write().await;
-        let entries: Vec<_> = self
-            .state
-            .read()
-            .unwrap()
-            .handles
-            .values()
-            .cloned()
-            .collect();
+        let entries = self.table.entries();
         let mut failure = None;
-        for entry in entries {
+        for entry in &entries {
             let _exclusive = entry.gate.write().await;
             if let Ok(handle) = entry.handle("close") {
                 match handle.close().await {
@@ -277,7 +323,9 @@ impl OwnedHandleSession {
         if let Some(error) = failure {
             return Err(error);
         }
-        self.state.write().unwrap().handles.clear();
+        for entry in &entries {
+            self.table.remove(entry);
+        }
         Ok(())
     }
 }
@@ -457,7 +505,7 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(task.await.unwrap().unwrap_err().code, ErrorCode::Ebadf);
         drain.await.unwrap().unwrap();
-        assert!(session.state.read().unwrap().handles.is_empty());
+        assert!(session.table.is_empty());
         fs.shutdown().await.unwrap();
     }
 
@@ -721,7 +769,7 @@ mod tests {
         drop(in_flight);
         assert_eq!(session.stat(id).await.unwrap_err().code, ErrorCode::Ebadf);
         session.close().await.unwrap();
-        assert!(session.state.read().unwrap().handles.is_empty());
+        assert!(session.table.is_empty());
         fs.shutdown().await.unwrap();
     }
 

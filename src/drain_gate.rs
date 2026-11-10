@@ -8,6 +8,12 @@
 //! decrement while no transition is queued or running; the mutex below is
 //! only touched around transitions.
 //!
+//! A gate that every core enters on every operation can spread its counter
+//! over `N` stripes (`DrainGate<N>`), each on cache lines of its own. A
+//! thread always uses the same stripe, so cores stop passing one counter's
+//! cache line between them; a transition waits for every stripe to empty.
+//! The default is one stripe, which suits a gate with few concurrent users.
+//!
 //! Exclusive entry is first-come-first-served and takes priority: once a
 //! transition is queued, new shared entries wait until every queued
 //! transition has finished. Both futures are cancellation-safe.
@@ -42,10 +48,16 @@ struct Transitions {
 #[repr(align(128))]
 struct Active(AtomicUsize);
 
-#[derive(Default)]
-pub struct DrainGate {
-    /// Shared holders admitted and not yet finished.
-    active: Active,
+static NEXT_THREAD: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Which stripe this thread counts itself in, on every striped gate.
+    static THREAD: usize = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
+}
+
+pub struct DrainGate<const N: usize = 1> {
+    /// Shared holders admitted and not yet finished, by stripe. A holder
+    /// leaves through the stripe it entered, so no stripe goes negative.
+    active: [Active; N],
     /// True while a transition is queued or owns the gate. Written only
     /// under `transitions`.
     draining: AtomicBool,
@@ -53,17 +65,53 @@ pub struct DrainGate {
 }
 
 /// Shared admission; released on drop.
-pub struct DrainShared<'a>(&'a DrainGate);
+pub struct DrainShared<'a, const N: usize = 1>(&'a DrainGate<N>, usize);
 
 /// Exclusive admission; released on drop.
-pub struct DrainExclusive<'a>(&'a DrainGate);
+pub struct DrainExclusive<'a, const N: usize = 1>(&'a DrainGate<N>);
 
 /// Exclusive admission that keeps its gate alive; released on drop.
-pub struct OwnedDrainExclusive(Arc<DrainGate>);
+pub struct OwnedDrainExclusive<const N: usize = 1>(Arc<DrainGate<N>>);
+
+impl<const N: usize> Default for DrainGate<N> {
+    fn default() -> Self {
+        Self {
+            active: std::array::from_fn(|_| Active::default()),
+            draining: AtomicBool::new(false),
+            transitions: Mutex::default(),
+        }
+    }
+}
 
 impl DrainGate {
+    /// A gate with one counter.
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+impl<const N: usize> DrainGate<N> {
+    /// A gate with `N` counters, for one that every core enters constantly.
+    pub fn striped() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    fn stripe() -> usize {
+        if N == 1 {
+            0
+        } else {
+            THREAD.with(|thread| *thread) % N
+        }
+    }
+
+    /// Whether any shared holder remains. Only meaningful while `draining`
+    /// is set, which stops new holders from staying in a stripe already
+    /// seen empty.
+    fn occupied(&self) -> bool {
+        self.active
+            .iter()
+            .any(|stripe| stripe.0.load(Ordering::SeqCst) != 0)
     }
 
     fn transitions(&self) -> MutexGuard<'_, Transitions> {
@@ -75,12 +123,18 @@ impl DrainGate {
 
     /// Enter shared. Resolves immediately unless a transition is in progress.
     #[inline]
-    pub fn read(&self) -> DrainRead<'_> {
+    pub fn read(&self) -> DrainRead<'_, N> {
         DrainRead(self)
     }
 
+    /// Enter shared only if that needs no waiting.
+    #[inline]
+    pub fn try_read(&self) -> Option<DrainShared<'_, N>> {
+        self.try_shared().map(|stripe| DrainShared(self, stripe))
+    }
+
     /// Enter exclusive once earlier transitions and all shared holders are done.
-    pub fn write(&self) -> DrainWrite<'_> {
+    pub fn write(&self) -> DrainWrite<'_, N> {
         DrainWrite {
             gate: self,
             stage: Stage::New,
@@ -88,13 +142,13 @@ impl DrainGate {
     }
 
     /// Enter exclusive only if nothing holds or awaits the gate.
-    pub fn try_write(&self) -> Option<DrainExclusive<'_>> {
+    pub fn try_write(&self) -> Option<DrainExclusive<'_, N>> {
         // Lazily: an unused guard would release a gate it never held.
         self.try_acquire().then(|| DrainExclusive(self))
     }
 
     /// `try_write` for a gate that must outlive the borrow.
-    pub fn try_write_owned(self: &Arc<Self>) -> Option<OwnedDrainExclusive> {
+    pub fn try_write_owned(self: &Arc<Self>) -> Option<OwnedDrainExclusive<N>> {
         self.try_acquire()
             .then(|| OwnedDrainExclusive(Arc::clone(self)))
     }
@@ -105,7 +159,7 @@ impl DrainGate {
             return false;
         }
         self.draining.store(true, Ordering::SeqCst);
-        if self.active.0.load(Ordering::SeqCst) != 0 {
+        if self.occupied() {
             self.draining.store(false, Ordering::SeqCst);
             let waiting = std::mem::take(&mut transitions.shared);
             drop(transitions);
@@ -117,20 +171,24 @@ impl DrainGate {
     }
 
     #[inline]
-    fn try_shared(&self) -> bool {
+    fn try_shared(&self) -> Option<usize> {
         // Announce before checking: a transition sets `draining` and then
-        // reads `active`, so one side always observes the other.
-        self.active.0.fetch_add(1, Ordering::SeqCst);
+        // reads every stripe, so one side always observes the other.
+        let stripe = Self::stripe();
+        self.active[stripe].0.fetch_add(1, Ordering::SeqCst);
         if !self.draining.load(Ordering::SeqCst) {
-            return true;
+            return Some(stripe);
         }
-        self.leave();
-        false
+        self.leave(stripe);
+        None
     }
 
     #[inline]
-    fn leave(&self) {
-        if self.active.0.fetch_sub(1, Ordering::SeqCst) == 1 && self.draining.load(Ordering::SeqCst)
+    fn leave(&self, stripe: usize) {
+        // The last holder of each stripe wakes the transition, which looks
+        // at all of them again.
+        if self.active[stripe].0.fetch_sub(1, Ordering::SeqCst) == 1
+            && self.draining.load(Ordering::SeqCst)
         {
             self.wake_drain();
         }
@@ -166,30 +224,31 @@ impl DrainGate {
     }
 }
 
-pub struct DrainRead<'a>(&'a DrainGate);
+pub struct DrainRead<'a, const N: usize = 1>(&'a DrainGate<N>);
 
-impl<'a> Future for DrainRead<'a> {
-    type Output = DrainShared<'a>;
+impl<'a, const N: usize> Future for DrainRead<'a, N> {
+    type Output = DrainShared<'a, N>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let gate = self.0;
-        if gate.try_shared() {
-            return Poll::Ready(DrainShared(gate));
+        if let Some(stripe) = gate.try_shared() {
+            return Poll::Ready(DrainShared(gate, stripe));
         }
         gate.poll_shared_slow(context)
     }
 }
 
-impl DrainGate {
+impl<const N: usize> DrainGate<N> {
     #[cold]
-    fn poll_shared_slow<'a>(&'a self, context: &mut Context<'_>) -> Poll<DrainShared<'a>> {
+    fn poll_shared_slow<'a>(&'a self, context: &mut Context<'_>) -> Poll<DrainShared<'a, N>> {
         let gate = self;
         let mut transitions = gate.transitions();
         // `draining` only changes under this lock, so the answer is stable.
         if !gate.draining.load(Ordering::SeqCst) {
-            gate.active.0.fetch_add(1, Ordering::SeqCst);
-            return Poll::Ready(DrainShared(gate));
+            let stripe = Self::stripe();
+            gate.active[stripe].0.fetch_add(1, Ordering::SeqCst);
+            return Poll::Ready(DrainShared(gate, stripe));
         }
         transitions.shared.push(context.waker().clone());
         Poll::Pending
@@ -203,13 +262,13 @@ enum Stage {
     Done,
 }
 
-pub struct DrainWrite<'a> {
-    gate: &'a DrainGate,
+pub struct DrainWrite<'a, const N: usize = 1> {
+    gate: &'a DrainGate<N>,
     stage: Stage,
 }
 
-impl<'a> Future for DrainWrite<'a> {
-    type Output = DrainExclusive<'a>;
+impl<'a, const N: usize> Future for DrainWrite<'a, N> {
+    type Output = DrainExclusive<'a, N>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let gate = self.gate;
@@ -242,7 +301,7 @@ impl<'a> Future for DrainWrite<'a> {
         }
         // Register before checking, so a holder leaving now wakes this task.
         transitions.drain = Some(context.waker().clone());
-        if gate.active.0.load(Ordering::SeqCst) != 0 {
+        if gate.occupied() {
             return Poll::Pending;
         }
         transitions.drain = None;
@@ -251,7 +310,7 @@ impl<'a> Future for DrainWrite<'a> {
     }
 }
 
-impl Drop for DrainWrite<'_> {
+impl<const N: usize> Drop for DrainWrite<'_, N> {
     fn drop(&mut self) {
         match self.stage {
             Stage::New | Stage::Done => {}
@@ -267,20 +326,20 @@ impl Drop for DrainWrite<'_> {
     }
 }
 
-impl Drop for DrainShared<'_> {
+impl<const N: usize> Drop for DrainShared<'_, N> {
     #[inline]
     fn drop(&mut self) {
-        self.0.leave();
+        self.0.leave(self.1);
     }
 }
 
-impl Drop for DrainExclusive<'_> {
+impl<const N: usize> Drop for DrainExclusive<'_, N> {
     fn drop(&mut self) {
         self.0.release();
     }
 }
 
-impl Drop for OwnedDrainExclusive {
+impl<const N: usize> Drop for OwnedDrainExclusive<N> {
     fn drop(&mut self) {
         self.0.release();
     }
@@ -329,7 +388,7 @@ mod tests {
         drop(exclusive);
         drop(ready(&mut late));
         drop(transition);
-        assert_eq!(gate.active.0.load(Ordering::SeqCst), 0);
+        assert_eq!(gate.active[0].0.load(Ordering::SeqCst), 0);
         assert!(!gate.draining.load(Ordering::SeqCst));
     }
 
@@ -436,6 +495,62 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        assert_eq!(gate.active.0.load(Ordering::SeqCst), 0);
+        assert_eq!(gate.active[0].0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn striped_gate_drains_holders_from_every_thread() {
+        let gate = Arc::new(DrainGate::<4>::striped());
+        let (entered, wait) = std::sync::mpsc::channel();
+        let (leave, left) = std::sync::mpsc::channel::<()>();
+        let left = Arc::new(Mutex::new(left));
+        let holders: Vec<_> = (0..6)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                let entered = entered.clone();
+                let left = Arc::clone(&left);
+                std::thread::spawn(move || {
+                    let held = gate.try_read().unwrap();
+                    entered.send(()).unwrap();
+                    let _ = left.lock().unwrap().recv();
+                    drop(held);
+                })
+            })
+            .collect();
+        for _ in 0..6 {
+            wait.recv().unwrap();
+        }
+        // Holders sit in several stripes; the transition waits for all.
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&flag));
+        let mut context = Context::from_waker(&waker);
+        let mut write = Box::pin(gate.write());
+        assert!(write.as_mut().poll(&mut context).is_pending());
+        assert!(gate.try_read().is_none());
+        for remaining in (0..6).rev() {
+            leave.send(()).unwrap();
+            while gate
+                .active
+                .iter()
+                .map(|s| s.0.load(Ordering::SeqCst))
+                .sum::<usize>()
+                != remaining
+            {
+                std::thread::yield_now();
+            }
+            if remaining != 0 {
+                assert!(write.as_mut().poll(&mut context).is_pending());
+            }
+        }
+        for holder in holders {
+            holder.join().unwrap();
+        }
+        let exclusive = match write.as_mut().poll(&mut context) {
+            Poll::Ready(exclusive) => exclusive,
+            Poll::Pending => panic!("every stripe is empty"),
+        };
+        assert!(gate.try_read().is_none());
+        drop(exclusive);
+        assert!(gate.try_read().is_some());
     }
 }

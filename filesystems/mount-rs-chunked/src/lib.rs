@@ -46,6 +46,9 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const LEASE_RENEWAL_MARGIN: Duration = Duration::from_secs(5);
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_PENDING_MUTATIONS: usize = 1024;
+/// Every operation enters the lifecycle gate, on every core, so its counter
+/// is striped. Sixteen stripes keep the cores of a typical server apart.
+const LIFECYCLE_STRIPES: usize = 16;
 // Eight continuously active writers can exhaust 32 or 64 quick CAS attempts
 // while other writers keep advancing the shared revision. The timed backoff
 // below caps each delay at 20 ms, so 128 attempts bound retry waiting to at
@@ -298,10 +301,30 @@ struct RuntimeState {
     closed: bool,
 }
 
+/// A namespace a read works from: either a counted reference, or a guard on
+/// the published one. The guard takes no reference count, so readers on
+/// different cores do not write to the namespace's shared count on every
+/// operation.
+enum NamespaceRef {
+    Counted(Arc<Namespace>),
+    Published(arc_swap::Guard<Arc<Namespace>>),
+}
+
+impl std::ops::Deref for NamespaceRef {
+    type Target = Arc<Namespace>;
+
+    fn deref(&self) -> &Arc<Namespace> {
+        match self {
+            Self::Counted(namespace) => namespace,
+            Self::Published(namespace) => namespace,
+        }
+    }
+}
+
 enum ReadLayoutSnapshot {
     Selected(Arc<NodeMetadata>),
     SharedNamespace {
-        namespace: Arc<Namespace>,
+        namespace: NamespaceRef,
         inode: InodeId,
     },
     Owned(FileLayout),
@@ -343,10 +366,147 @@ struct StateCell {
     /// A lock-free open or close is only valid if this was even and did not
     /// move while it ran; otherwise it settles the matter under the mutex.
     handle_seq: std::sync::atomic::AtomicU64,
-    /// True while unlinked inodes are kept for open handles. Their lifetime
-    /// is decided under the mutex, so opens and closes take it meanwhile.
-    locked_handles: AtomicBool,
-    next_fd: std::sync::atomic::AtomicU64,
+    /// One bit per retained inode (see `retained_bit`), set for every inode
+    /// in `RuntimeState::orphans`. A retained inode's lifetime is decided
+    /// under the mutex, and an unlink marks its inode retained before the
+    /// namespace that drops it is installed, so opens and closes of an inode
+    /// whose bit is set take the mutex. Other inodes are unaffected.
+    retained: std::sync::atomic::AtomicU64,
+    /// Written by every open; kept off the lines the fields above share,
+    /// which every operation reads.
+    next_fd: Padded<std::sync::atomic::AtomicU64>,
+    /// Read access times awaiting publication, recorded without the mutex.
+    atimes: PendingAtimes,
+    /// True when `RuntimeState::pending_atime` holds entries the table
+    /// above had no room for.
+    atime_overflow: AtomicBool,
+}
+
+/// Coalesced read access times, one slot per inode.
+///
+/// Recording is a few atomic operations under shared admission. A slot's
+/// inode and time are separate words, so a slot is only ever freed while
+/// recorders are excluded: by a sweep that won exclusive admission, which
+/// only happens under the state mutex. Anyone holding that mutex may
+/// therefore read the table directly; everyone else takes shared admission.
+struct PendingAtimes {
+    gate: mount_rs_core::drain_gate::DrainGate,
+    /// `(inode + 1, access time)`; a zero key is a free slot.
+    slots: Box<[(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicI64)]>,
+}
+
+const ATIME_SLOTS: usize = 1024;
+const ATIME_PROBES: usize = 8;
+const ATIME_EMPTY: i64 = i64::MIN;
+
+impl PendingAtimes {
+    fn new() -> Self {
+        Self {
+            gate: mount_rs_core::drain_gate::DrainGate::new(),
+            slots: (0..ATIME_SLOTS)
+                .map(|_| {
+                    (
+                        std::sync::atomic::AtomicU64::new(0),
+                        std::sync::atomic::AtomicI64::new(ATIME_EMPTY),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn window(
+        &self,
+        inode: InodeId,
+    ) -> impl Iterator<Item = &(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicI64)> {
+        let start = (inode.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize;
+        (0..ATIME_PROBES).map(move |probe| &self.slots[(start + probe) % ATIME_SLOTS])
+    }
+
+    /// Caller holds shared admission or the state mutex.
+    fn record_admitted(&self, inode: InodeId, atime_ms: i64) -> bool {
+        let Some(key) = inode.checked_add(1) else {
+            return false;
+        };
+        for (slot, value) in self.window(inode) {
+            if slot.load(Ordering::SeqCst) == key {
+                value.fetch_max(atime_ms, Ordering::SeqCst);
+                return true;
+            }
+        }
+        for (slot, value) in self.window(inode) {
+            match slot.compare_exchange(0, key, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => {}
+                Err(current) if current == key => {}
+                Err(_) => continue,
+            }
+            value.fetch_max(atime_ms, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+
+    /// Caller holds shared admission or the state mutex.
+    fn get_admitted(&self, inode: InodeId) -> Option<i64> {
+        let key = inode.checked_add(1)?;
+        self.window(inode)
+            .filter(|(slot, _)| slot.load(Ordering::SeqCst) == key)
+            .map(|(_, value)| value.load(Ordering::SeqCst))
+            .filter(|value| *value != ATIME_EMPTY)
+            .max()
+    }
+
+    /// Records without the mutex; `false` means the caller must use it.
+    fn record(&self, inode: InodeId, atime_ms: i64) -> bool {
+        self.gate
+            .try_read()
+            .is_some_and(|_admitted| self.record_admitted(inode, atime_ms))
+    }
+
+    /// `Err` means a sweep is running: retry while holding the state mutex.
+    fn get(&self, inode: InodeId) -> std::result::Result<Option<i64>, ()> {
+        let _admitted = self.gate.try_read().ok_or(())?;
+        Ok(self.get_admitted(inode))
+    }
+
+    /// Caller holds the state mutex.
+    fn entries_locked(&self) -> impl Iterator<Item = (InodeId, i64)> {
+        self.slots.iter().filter_map(|(slot, value)| {
+            let key = slot.load(Ordering::SeqCst);
+            let value = value.load(Ordering::SeqCst);
+            (key != 0 && value != ATIME_EMPTY).then(|| (key - 1, value))
+        })
+    }
+
+    /// Drops every entry `covered` says a publication now carries. Caller
+    /// holds the state mutex. Slots are freed only if no recorder is inside;
+    /// otherwise their times are cleared and the slots are reused or freed by
+    /// a later sweep.
+    fn sweep_locked(&self, covered: impl Fn(InodeId, i64) -> bool) {
+        let exclusive = self.gate.try_write();
+        for (slot, value) in self.slots.iter() {
+            let key = slot.load(Ordering::SeqCst);
+            if key == 0 {
+                continue;
+            }
+            let current = value.load(Ordering::SeqCst);
+            if current != ATIME_EMPTY && !covered(key - 1, current) {
+                continue;
+            }
+            if exclusive.is_some() {
+                value.store(ATIME_EMPTY, Ordering::SeqCst);
+                slot.store(0, Ordering::SeqCst);
+            } else if current != ATIME_EMPTY {
+                // A recorder may be raising this time right now: clear only
+                // the value that was published.
+                let _ = value.compare_exchange(
+                    current,
+                    ATIME_EMPTY,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+            }
+        }
+    }
 }
 
 /// Per-inode open-reference counts updated with single compare-and-swaps.
@@ -356,8 +516,14 @@ struct StateCell {
 /// window of slots; when the window is full, or the inode or count does not
 /// fit, the caller counts the reference under the state mutex instead.
 struct FastRefs {
-    slots: Box<[std::sync::atomic::AtomicU64]>,
+    slots: Box<[Padded<std::sync::atomic::AtomicU64>]>,
 }
+
+/// A value on cache lines of its own, so writes to it do not invalidate
+/// whatever sits next to it for the cores reading that.
+#[derive(Default)]
+#[repr(align(128))]
+struct Padded<T>(T);
 
 const FAST_REF_SLOTS: usize = 1024;
 const FAST_REF_PROBES: usize = 8;
@@ -368,14 +534,14 @@ impl FastRefs {
     fn new() -> Self {
         Self {
             slots: (0..FAST_REF_SLOTS)
-                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .map(|_| Padded(std::sync::atomic::AtomicU64::new(0)))
                 .collect(),
         }
     }
 
     fn window(&self, inode: InodeId) -> impl Iterator<Item = &std::sync::atomic::AtomicU64> {
         let start = (inode.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize;
-        (0..FAST_REF_PROBES).map(move |probe| &self.slots[(start + probe) % FAST_REF_SLOTS])
+        (0..FAST_REF_PROBES).map(move |probe| &self.slots[(start + probe) % FAST_REF_SLOTS].0)
     }
 
     fn key(inode: InodeId) -> Option<u64> {
@@ -441,7 +607,7 @@ impl FastRefs {
     fn inodes(&self) -> impl Iterator<Item = InodeId> {
         self.slots
             .iter()
-            .map(|slot| slot.load(Ordering::SeqCst))
+            .map(|slot| slot.0.load(Ordering::SeqCst))
             .filter(|word| word & FAST_REF_COUNT_MASK != 0)
             .map(|word| word >> FAST_REF_COUNT_BITS)
     }
@@ -454,8 +620,10 @@ impl StateCell {
             locked_reads: AtomicBool::new(state.needs_locked_reads()),
             fast_refs: FastRefs::new(),
             handle_seq: std::sync::atomic::AtomicU64::new(0),
-            locked_handles: AtomicBool::new(!state.orphans.is_empty()),
-            next_fd: std::sync::atomic::AtomicU64::new(3),
+            retained: std::sync::atomic::AtomicU64::new(retained_filter(&state)),
+            next_fd: Padded(std::sync::atomic::AtomicU64::new(3)),
+            atimes: PendingAtimes::new(),
+            atime_overflow: AtomicBool::new(!state.pending_atime.is_empty()),
             mutex: Mutex::new(state),
         }
     }
@@ -464,11 +632,18 @@ impl StateCell {
     /// finishes, or `None` when it has to use the mutex.
     fn handle_epoch(&self) -> Option<u64> {
         let sequence = self.handle_seq.load(Ordering::SeqCst);
-        (sequence & 1 == 0 && !self.locked_handles.load(Ordering::SeqCst)).then_some(sequence)
+        (sequence & 1 == 0).then_some(sequence)
+    }
+
+    /// Whether `inode` may be retained for open handles, in which case its
+    /// opens and closes take the mutex. Read after `handle_epoch`: the
+    /// filter only changes while the sequence is odd.
+    fn may_be_retained(&self, inode: InodeId) -> bool {
+        self.retained.load(Ordering::SeqCst) & retained_bit(inode) != 0
     }
 
     fn allocate_fd(&self) -> Result<u64> {
-        let fd = self.next_fd.fetch_add(1, Ordering::Relaxed);
+        let fd = self.next_fd.0.fetch_add(1, Ordering::Relaxed);
         if fd == u64::MAX {
             return Err(FsError::new(ErrorCode::Emfile).with_message("file descriptor overflow"));
         }
@@ -480,7 +655,8 @@ impl StateCell {
         Ok(StateGuard {
             seen_namespace: Arc::as_ptr(&guard.namespace),
             seen_locked_reads: guard.needs_locked_reads(),
-            seen_orphans: !guard.orphans.is_empty(),
+            seen_atime_overflow: !guard.pending_atime.is_empty(),
+            seen_retained: retained_filter(&guard),
             guard,
             cell: self,
         })
@@ -495,6 +671,14 @@ impl StateCell {
         let namespace = self.published.load_full();
         (!self.locked_reads.load(Ordering::Acquire)).then_some(namespace)
     }
+
+    /// `shared` without taking a reference count: for the per-operation
+    /// paths, which only look at the namespace and let it go.
+    #[inline]
+    fn published(&self) -> Option<arc_swap::Guard<Arc<Namespace>>> {
+        let namespace = self.published.load();
+        (!self.locked_reads.load(Ordering::Acquire)).then_some(namespace)
+    }
 }
 
 struct StateGuard<'a> {
@@ -502,7 +686,8 @@ struct StateGuard<'a> {
     cell: &'a StateCell,
     seen_namespace: *const Namespace,
     seen_locked_reads: bool,
-    seen_orphans: bool,
+    seen_atime_overflow: bool,
+    seen_retained: u64,
 }
 
 impl StateGuard<'_> {
@@ -529,6 +714,50 @@ impl StateGuard<'_> {
             .saturating_add(self.cell.fast_refs.count(inode))
     }
 
+    fn pending_atime_for(&self, inode: InodeId) -> Option<i64> {
+        self.cell
+            .atimes
+            .get_admitted(inode)
+            .max(self.guard.pending_atime.get(&inode).copied())
+    }
+
+    fn has_pending_atime(&self) -> bool {
+        !self.guard.pending_atime.is_empty() || self.cell.atimes.entries_locked().next().is_some()
+    }
+
+    fn record_atime(&mut self, inode: InodeId, atime_ms: i64) {
+        if !self.cell.atimes.record_admitted(inode, atime_ms) {
+            self.guard
+                .pending_atime
+                .entry(inode)
+                .and_modify(|pending| *pending = (*pending).max(atime_ms))
+                .or_insert(atime_ms);
+        }
+    }
+
+    /// Forget the access times the namespace just installed already carries.
+    /// Times recorded since that namespace was prepared stay pending:
+    /// recorders do not wait for publications, so a blanket clear would lose
+    /// them.
+    fn settle_published_atimes(&mut self) {
+        let namespace = Arc::clone(&self.guard.namespace);
+        let covered = |inode: InodeId, atime_ms: i64| {
+            namespace
+                .nodes
+                .get(&inode)
+                .is_none_or(|node| node.stats.atime_ms >= atime_ms)
+        };
+        self.guard
+            .pending_atime
+            .retain(|inode, atime_ms| !covered(*inode, *atime_ms));
+        self.cell.atimes.sweep_locked(covered);
+    }
+
+    fn clear_pending_atimes(&mut self) {
+        self.guard.pending_atime.clear();
+        self.cell.atimes.sweep_locked(|_, _| true);
+    }
+
     fn any_open(&self) -> bool {
         !self.guard.open_refs.is_empty() || self.cell.fast_refs.inodes().next().is_some()
     }
@@ -553,9 +782,9 @@ impl Drop for StateGuard<'_> {
         // Raise the flag before swapping and lower it after, so a reader
         // never pairs a cleared flag with a namespace that still needs it.
         let locked_reads = self.guard.needs_locked_reads();
-        let orphans = !self.guard.orphans.is_empty();
+        let retained = retained_filter(&self.guard);
         let swapped = !std::ptr::eq(Arc::as_ptr(&self.guard.namespace), self.seen_namespace);
-        if swapped || orphans != self.seen_orphans {
+        if swapped || retained != self.seen_retained {
             self.begin_handle_transition();
         }
         if locked_reads && !self.seen_locked_reads {
@@ -567,8 +796,14 @@ impl Drop for StateGuard<'_> {
         if !locked_reads && self.seen_locked_reads {
             self.cell.locked_reads.store(false, Ordering::Release);
         }
-        if orphans != self.seen_orphans {
-            self.cell.locked_handles.store(orphans, Ordering::SeqCst);
+        if retained != self.seen_retained {
+            self.cell.retained.store(retained, Ordering::SeqCst);
+        }
+        let atime_overflow = !self.guard.pending_atime.is_empty();
+        if atime_overflow != self.seen_atime_overflow {
+            self.cell
+                .atime_overflow
+                .store(atime_overflow, Ordering::SeqCst);
         }
         // Every mirror above is in place: let lock-free opens and closes
         // validate against this state again.
@@ -582,6 +817,17 @@ impl RuntimeState {
     fn needs_locked_reads(&self) -> bool {
         self.failure.is_some() || self.closed || !self.selected_inodes.is_empty()
     }
+}
+
+fn retained_bit(inode: InodeId) -> u64 {
+    1 << (inode.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58)
+}
+
+fn retained_filter(state: &RuntimeState) -> u64 {
+    state
+        .orphans
+        .keys()
+        .fold(0, |filter, inode| filter | retained_bit(*inode))
 }
 
 fn retain_open_detached(state: &mut StateGuard<'_>, next: &Namespace) {
@@ -654,22 +900,65 @@ impl MutationRequest {
     }
 }
 
+/// Prepared metadata mutations waiting for the batch runner.
+///
+/// Nothing here is a lock: producers push onto a lock-free queue and then try
+/// to claim `running`; whoever claims it drains the queue. A runner that finds
+/// the queue empty releases `running` and looks once more, so a request pushed
+/// between its last drain and the release is always picked up by one side.
 struct MutationQueue {
-    pending: Vec<MutationRequest>,
-    running: bool,
+    pending: crossbeam_queue::SegQueue<MutationRequest>,
+    /// Admitted requests, counted before the push so the capacity bound holds
+    /// without a lock.
+    len: AtomicUsize,
+    running: AtomicBool,
 }
 
 impl MutationQueue {
     fn new() -> Self {
         Self {
-            pending: Vec::new(),
-            running: false,
+            pending: crossbeam_queue::SegQueue::new(),
+            len: AtomicUsize::new(0),
+            running: AtomicBool::new(false),
         }
+    }
+
+    /// Admits one request, or hands it back when the queue is full. Returns
+    /// whether the caller claimed the runner role.
+    fn push(&self, request: MutationRequest) -> std::result::Result<bool, MutationRequest> {
+        if self.len.fetch_add(1, Ordering::AcqRel) >= MAX_PENDING_MUTATIONS {
+            self.len.fetch_sub(1, Ordering::AcqRel);
+            return Err(request);
+        }
+        self.pending.push(request);
+        Ok(self.claim())
+    }
+
+    fn claim(&self) -> bool {
+        self.running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn drain(&self) -> Vec<MutationRequest> {
+        let mut requests = Vec::new();
+        while let Some(request) = self.pending.pop() {
+            self.len.fetch_sub(1, Ordering::AcqRel);
+            requests.push(request);
+        }
+        requests
+    }
+
+    /// Releases the runner role. Returns true when a request arrived in the
+    /// meantime and this caller claimed the role back.
+    fn release(&self) -> bool {
+        self.running.store(false, Ordering::SeqCst);
+        !self.pending.is_empty() && self.claim()
     }
 }
 
 struct MutationRunnerGuard<'a> {
-    queue: &'a Mutex<MutationQueue>,
+    queue: &'a MutationQueue,
     active: bool,
 }
 
@@ -773,7 +1062,7 @@ impl Drop for MutationPreparationGuard {
 }
 
 impl<'a> MutationRunnerGuard<'a> {
-    fn new(queue: &'a Mutex<MutationQueue>) -> Self {
+    fn new(queue: &'a MutationQueue) -> Self {
         Self {
             queue,
             active: true,
@@ -790,12 +1079,10 @@ impl Drop for MutationRunnerGuard<'_> {
         if !self.active {
             return;
         }
-        let Ok(mut queue) = self.queue.lock() else {
-            return;
-        };
-        queue.running = false;
-        let pending = std::mem::take(&mut queue.pending);
-        drop(queue);
+        // Release before draining: a producer that pushes after the drain
+        // then finds the role free instead of stranding its request.
+        self.queue.running.store(false, Ordering::SeqCst);
+        let pending = self.queue.drain();
         let error = FsError::new(ErrorCode::Eio).with_message("mutation batch runner canceled");
         for request in pending {
             mutation_reply(request, Err(error.clone()));
@@ -874,15 +1161,16 @@ where
     metadata: Arc<M>,
     blocks: Arc<B>,
     concurrent_backing: Option<ConcurrentBackingId>,
-    delegation: Mutex<Option<DirectoryGrant>>,
+    delegation: arc_swap::ArcSwapOption<DirectoryGrant>,
     delegation_generation: std::sync::atomic::AtomicU64,
-    pending_checkout: Mutex<Option<CheckoutRequest>>,
+    pending_checkout: arc_swap::ArcSwapOption<CheckoutRequest>,
     delegation_draining: AtomicBool,
     options: ChunkedOptions,
     gate: AsyncGate,
-    lifecycle: mount_rs_core::drain_gate::DrainGate,
+    lifecycle: mount_rs_core::drain_gate::DrainGate<LIFECYCLE_STRIPES>,
     state: StateCell,
-    lease: Mutex<Option<WriterLease>>,
+    /// Replaced only under `lease_gate`; read without any lock.
+    lease: arc_swap::ArcSwapOption<WriterLease>,
     lease_gate: AsyncGate,
     lease_renewed: AtomicBool,
     /// Wall-clock millisecond before which the cached exclusive lease needs
@@ -892,9 +1180,9 @@ where
     /// Fence of the lease `lease_cached_until_ms` vouches for; zero if none.
     lease_fence: std::sync::atomic::AtomicU64,
     preparing_mutations: Arc<AtomicUsize>,
-    mutations: Mutex<MutationQueue>,
+    mutations: MutationQueue,
     /// Optional idle-owner heartbeat; aborted under `lease_gate` on shutdown.
-    lease_worker: Mutex<Option<tokio::task::AbortHandle>>,
+    lease_worker: arc_swap::ArcSwapOption<tokio::task::AbortHandle>,
 }
 
 /// Optional proof, checked before a reopened volume is exposed, that the
@@ -1032,13 +1320,13 @@ where
                 metadata: Arc::new(metadata),
                 blocks: Arc::new(blocks),
                 concurrent_backing: Some(backing),
-                delegation: Mutex::new(None),
+                delegation: arc_swap::ArcSwapOption::empty(),
                 delegation_generation: std::sync::atomic::AtomicU64::new(0),
-                pending_checkout: Mutex::new(None),
+                pending_checkout: arc_swap::ArcSwapOption::empty(),
                 delegation_draining: AtomicBool::new(false),
                 options,
                 gate: AsyncGate::new(),
-                lifecycle: mount_rs_core::drain_gate::DrainGate::new(),
+                lifecycle: mount_rs_core::drain_gate::DrainGate::striped(),
                 state: StateCell::new(RuntimeState {
                     inode_revisions: BTreeMap::new(),
                     selected_inodes: HashMap::new(),
@@ -1052,14 +1340,14 @@ where
                     failure: None,
                     closed: false,
                 }),
-                lease: Mutex::new(None),
+                lease: arc_swap::ArcSwapOption::empty(),
                 lease_gate: AsyncGate::new(),
                 lease_renewed: AtomicBool::new(false),
                 lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
                 lease_fence: std::sync::atomic::AtomicU64::new(0),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
-                mutations: Mutex::new(MutationQueue::new()),
-                lease_worker: Mutex::new(None),
+                mutations: MutationQueue::new(),
+                lease_worker: arc_swap::ArcSwapOption::empty(),
             }),
         };
         if let Some(path) = checkout {
@@ -1069,11 +1357,7 @@ where
     }
 
     fn local_grant(&self) -> Result<Option<DirectoryGrant>> {
-        self.inner
-            .delegation
-            .lock()
-            .map(|grant| grant.clone())
-            .map_err(|_| FsError::backend("directory authority lock poisoned"))
+        Ok(self.inner.delegation.load().as_deref().cloned())
     }
 
     async fn refresh_delegation(&self) -> Result<()> {
@@ -1097,12 +1381,7 @@ where
                             .with_message("directory authority was retired"),
                     )
                 })?;
-            *self
-                .inner
-                .delegation
-                .lock()
-                .map_err(|_| FsError::backend("directory authority lock poisoned"))? =
-                Some(actual.clone());
+            self.inner.delegation.store(Some(Arc::new(actual.clone())));
         }
         Ok(())
     }
@@ -1152,29 +1431,31 @@ where
         let nonce_a = std::collections::hash_map::RandomState::new().hash_one(sequence);
         let nonce_b = std::collections::hash_map::RandomState::new().hash_one(sequence);
         let owner = format!("{}-{nonce_a:016x}{nonce_b:016x}", self.inner.options.owner);
-        let request = {
-            let mut pending = self
-                .inner
-                .pending_checkout
-                .lock()
-                .map_err(|_| FsError::backend("checkout lock poisoned"))?;
-            if let Some(request) = &*pending {
+        // A retry reuses the pending request; the first caller to install
+        // one wins and every other caller checks out with that same request.
+        let request = loop {
+            let pending = self.inner.pending_checkout.load();
+            if let Some(request) = pending.as_deref() {
                 if request.root != root {
                     return Err(FsError::new(ErrorCode::Ebusy)
                         .with_message("retry pending checkout with original scope"));
                 }
-                request.clone()
-            } else {
-                let request = CheckoutRequest {
-                    backing: self
-                        .inner
-                        .concurrent_backing
-                        .ok_or_else(|| FsError::new(ErrorCode::Estale))?,
-                    root,
-                    owner,
-                };
-                *pending = Some(request.clone());
-                request
+                break request.clone();
+            }
+            let request = CheckoutRequest {
+                backing: self
+                    .inner
+                    .concurrent_backing
+                    .ok_or_else(|| FsError::new(ErrorCode::Estale))?,
+                root,
+                owner: owner.clone(),
+            };
+            let previous = self
+                .inner
+                .pending_checkout
+                .compare_and_swap(&pending, Some(Arc::new(request.clone())));
+            if previous.is_none() {
+                break request;
             }
         };
         let grant = match self.inner.metadata.checkout(&request).await {
@@ -1219,26 +1500,13 @@ where
                             | ErrorCode::Eoverflow
                     )
                 {
-                    self.inner
-                        .pending_checkout
-                        .lock()
-                        .map_err(|_| FsError::backend("checkout lock poisoned"))?
-                        .take();
+                    self.inner.pending_checkout.store(None);
                 }
                 return Err(error);
             }
         };
-        self.inner
-            .pending_checkout
-            .lock()
-            .map_err(|_| FsError::backend("checkout lock poisoned"))?
-            .take();
-        *self
-            .inner
-            .delegation
-            .lock()
-            .map_err(|_| FsError::backend("directory authority lock poisoned"))? =
-            Some(grant.clone());
+        self.inner.pending_checkout.store(None);
+        self.inner.delegation.store(Some(Arc::new(grant.clone())));
         self.inner
             .delegation_generation
             .store(generation, Ordering::SeqCst);
@@ -1340,14 +1608,10 @@ where
         self.inner
             .delegation_generation
             .store(generation, Ordering::SeqCst);
-        *self
-            .inner
-            .delegation
-            .lock()
-            .map_err(|_| FsError::backend("directory authority lock poisoned"))? = None;
+        self.inner.delegation.store(None);
         let mut state = self.lock_state()?;
         state.orphans.clear();
-        state.pending_atime.clear();
+        state.clear_pending_atimes();
         state.namespace = Arc::new(
             loaded
                 .namespace
@@ -1601,13 +1865,13 @@ where
                         metadata,
                         blocks,
                         concurrent_backing: Some(backing),
-                        delegation: Mutex::new(None),
+                        delegation: arc_swap::ArcSwapOption::empty(),
                         delegation_generation: std::sync::atomic::AtomicU64::new(0),
-                        pending_checkout: Mutex::new(None),
+                        pending_checkout: arc_swap::ArcSwapOption::empty(),
                         delegation_draining: AtomicBool::new(false),
                         options,
                         gate: AsyncGate::new(),
-                        lifecycle: mount_rs_core::drain_gate::DrainGate::new(),
+                        lifecycle: mount_rs_core::drain_gate::DrainGate::striped(),
                         state: StateCell::new(RuntimeState {
                             inode_revisions,
                             selected_inodes: HashMap::new(),
@@ -1621,14 +1885,14 @@ where
                             failure: None,
                             closed: false,
                         }),
-                        lease: Mutex::new(None),
+                        lease: arc_swap::ArcSwapOption::empty(),
                         lease_gate: AsyncGate::new(),
                         lease_renewed: AtomicBool::new(false),
                         lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
                         lease_fence: std::sync::atomic::AtomicU64::new(0),
                         preparing_mutations: Arc::new(AtomicUsize::new(0)),
-                        mutations: Mutex::new(MutationQueue::new()),
-                        lease_worker: Mutex::new(None),
+                        mutations: MutationQueue::new(),
+                        lease_worker: arc_swap::ArcSwapOption::empty(),
                     }),
                 });
             }
@@ -1687,13 +1951,13 @@ where
                 metadata,
                 blocks,
                 concurrent_backing: None,
-                delegation: Mutex::new(None),
+                delegation: arc_swap::ArcSwapOption::empty(),
                 delegation_generation: std::sync::atomic::AtomicU64::new(0),
-                pending_checkout: Mutex::new(None),
+                pending_checkout: arc_swap::ArcSwapOption::empty(),
                 delegation_draining: AtomicBool::new(false),
                 options,
                 gate: AsyncGate::new(),
-                lifecycle: mount_rs_core::drain_gate::DrainGate::new(),
+                lifecycle: mount_rs_core::drain_gate::DrainGate::striped(),
                 state: StateCell::new(RuntimeState {
                     inode_revisions: BTreeMap::new(),
                     selected_inodes: HashMap::new(),
@@ -1707,14 +1971,14 @@ where
                     failure: None,
                     closed: false,
                 }),
-                lease: Mutex::new(Some(lease.clone())),
+                lease: arc_swap::ArcSwapOption::from_pointee(lease.clone()),
                 lease_gate: AsyncGate::new(),
                 lease_renewed: AtomicBool::new(false),
                 lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
                 lease_fence: std::sync::atomic::AtomicU64::new(0),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
-                mutations: Mutex::new(MutationQueue::new()),
-                lease_worker: Mutex::new(None),
+                mutations: MutationQueue::new(),
+                lease_worker: arc_swap::ArcSwapOption::empty(),
             }),
         };
 
@@ -1726,7 +1990,7 @@ where
             // publish_namespace may have renewed the lease before the
             // publication or metadata barrier failed. Release the exact
             // latest token, not the acquisition token.
-            let latest = filesystem.lock_lease().ok().and_then(|lease| lease.clone());
+            let latest = filesystem.current_lease();
             if let Some(latest) = latest {
                 let _ = filesystem.inner.metadata.release_writer(&latest).await;
             }
@@ -1773,9 +2037,9 @@ where
                 }
             }
         });
-        if let Ok(mut worker) = self.inner.lease_worker.lock() {
-            *worker = Some(task.abort_handle());
-        }
+        self.inner
+            .lease_worker
+            .store(Some(Arc::new(task.abort_handle())));
     }
 
     /// Validate current owner permission and return its fencing generation.
@@ -1807,8 +2071,7 @@ where
                 return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
             }
         }
-        self.lock_lease()?
-            .as_ref()
+        self.current_lease()
             .map(|lease| lease.fence)
             .ok_or_else(|| FsError::new(ErrorCode::Estale).with_message("no active writer lease"))
     }
@@ -1870,13 +2133,7 @@ where
         // renewal is never abandoned with an unknown outcome.
         {
             let _lease_gate = self.inner.lease_gate.lock().await;
-            if let Some(worker) = self
-                .inner
-                .lease_worker
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio))?
-                .take()
-            {
+            if let Some(worker) = self.inner.lease_worker.swap(None) {
                 worker.abort();
             }
         }
@@ -1909,7 +2166,7 @@ where
         // last operation was slow. `renew_lease` safely reacquires the next
         // fence when our lease expired without another owner publishing a
         // revision; a fenced instance still fails closed.
-        let refresh = if !already_closed && self.lock_lease()?.is_some() {
+        let refresh = if !already_closed && self.current_lease().is_some() {
             self.validate_lease().await
         } else {
             Ok(())
@@ -1922,8 +2179,7 @@ where
         // return an ambiguous error. Keep the exact token for a later retry
         // until the provider acknowledges release. A failed refresh does not
         // prevent an attempt to release a still-valid cached token.
-        let lease = self.lock_lease()?.clone();
-        let Some(lease) = lease else {
+        let Some(lease) = self.current_lease() else {
             return refresh;
         };
         // No operation may trust the cached lease once its release is sent.
@@ -1931,7 +2187,7 @@ where
         match self.inner.metadata.release_writer(&lease).await {
             Ok(()) => {
                 self.cache_lease_deadline(None);
-                self.lock_lease()?.take();
+                self.set_lease(None);
                 refresh
             }
             Err(error) => Err(self.fail_closed(with_context(error, "lease-release", None))),
@@ -1999,11 +2255,12 @@ where
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("chunked state lock poisoned"))
     }
 
-    fn lock_lease(&self) -> Result<MutexGuard<'_, Option<WriterLease>>> {
-        self.inner
-            .lease
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("lease lock poisoned"))
+    fn current_lease(&self) -> Option<WriterLease> {
+        self.inner.lease.load().as_deref().cloned()
+    }
+
+    fn set_lease(&self, lease: Option<WriterLease>) {
+        self.inner.lease.store(lease.map(Arc::new));
     }
 
     fn snapshot(&self) -> Result<(Namespace, u64)> {
@@ -2029,6 +2286,7 @@ where
                     .pending_atime
                     .iter()
                     .map(|(inode, atime_ms)| (*inode, *atime_ms))
+                    .chain(state.cell.atimes.entries_locked())
                     .collect::<Vec<_>>(),
                 state.revision,
             )
@@ -2719,7 +2977,7 @@ where
             state.namespace = Arc::new(namespace);
             state.revision = revision;
             state.persisted_revision = revision;
-            state.pending_atime.clear();
+            state.clear_pending_atimes();
         }
         Ok(())
     }
@@ -2821,8 +3079,13 @@ where
         if self.inner.options.atime_policy == AtimePolicy::NoAtime {
             return Ok(());
         }
-        if let Some(atime_ms) = self.lock_state()?.pending_atime.get(&inode) {
-            stats.atime_ms = stats.atime_ms.max(*atime_ms);
+        let cell = &self.inner.state;
+        let pending = match cell.atimes.get(inode) {
+            Ok(pending) if !cell.atime_overflow.load(Ordering::SeqCst) => pending,
+            _ => self.lock_state()?.pending_atime_for(inode),
+        };
+        if let Some(atime_ms) = pending {
+            stats.atime_ms = stats.atime_ms.max(atime_ms);
         }
         Ok(())
     }
@@ -2858,8 +3121,7 @@ where
 
     async fn renew_lease_inner(&self, force: bool) -> Result<WriterLease> {
         let current = self
-            .lock_lease()?
-            .clone()
+            .current_lease()
             .ok_or_else(|| FsError::new(ErrorCode::Ebadf).with_message("writer lease released"))?;
         // A provider renewal is a serialized metadata transaction. Avoid
         // paying that round trip for every read and optimistic block
@@ -2890,7 +3152,7 @@ where
                 return Err(self.fail_closed(with_context(error, "lease-renew", None)));
             }
         };
-        *self.lock_lease()? = Some(renewed.clone());
+        self.set_lease(Some(renewed.clone()));
         self.inner.lease_renewed.store(true, Ordering::Release);
         self.cache_lease_deadline(Some(&renewed));
         Ok(renewed)
@@ -2978,15 +3240,9 @@ where
                     .with_message("metadata changed while the writer lease was expired"),
             ));
         }
-        if let Ok(mut lease) = self.lock_lease() {
-            *lease = Some(acquired.clone());
-            self.inner.lease_renewed.store(true, Ordering::Release);
-            self.cache_lease_deadline(Some(&acquired));
-        } else {
-            let error = FsError::new(ErrorCode::Eio).with_message("lease lock poisoned");
-            let _ = self.inner.metadata.release_writer(&acquired).await;
-            return Err(self.fail_closed(error));
-        }
+        self.set_lease(Some(acquired.clone()));
+        self.inner.lease_renewed.store(true, Ordering::Release);
+        self.cache_lease_deadline(Some(&acquired));
         Ok(acquired)
     }
 
@@ -3037,7 +3293,7 @@ where
         state.namespace = Arc::new(namespace);
         state.revision = generation;
         state.pending_namespace = true;
-        state.pending_atime.clear();
+        state.settle_published_atimes();
         Ok(generation)
     }
 
@@ -3048,7 +3304,7 @@ where
         let (namespace, generation) = self.snapshot()?;
         let persisted = {
             let state = self.lock_state()?;
-            if !state.pending_namespace && state.pending_atime.is_empty() {
+            if !state.pending_namespace && !state.has_pending_atime() {
                 return Ok(false);
             }
             state.persisted_revision
@@ -3246,7 +3502,7 @@ where
                 state.namespace = Arc::new(namespace);
                 state.revision = revision;
                 state.persisted_revision = revision;
-                state.pending_atime.clear();
+                state.settle_published_atimes();
             }
             publication.disarm();
             drop(state);
@@ -3293,7 +3549,7 @@ where
             state.revision = revision;
         }
         state.persisted_revision = revision;
-        state.pending_atime.clear();
+        state.settle_published_atimes();
         publication.disarm();
         drop(state);
         off_worker(previous.nodes.len(), || drop(previous));
@@ -3308,7 +3564,7 @@ where
         if self.inner.options.concurrent_writes {
             return Ok(());
         }
-        let has_pending = !self.lock_state()?.pending_atime.is_empty();
+        let has_pending = self.lock_state()?.has_pending_atime();
         if !has_pending {
             return Ok(());
         }
@@ -3383,22 +3639,10 @@ where
     }
 
     async fn enqueue_mutation(&self, request: MutationRequest) -> Result<()> {
-        let run = {
-            let mut queue = self.inner.mutations.lock().map_err(|_| {
-                FsError::new(ErrorCode::Eio).with_message("mutation queue poisoned")
-            })?;
-            if queue.pending.len() >= MAX_PENDING_MUTATIONS {
-                return Err(
-                    FsError::new(ErrorCode::Eagain).with_message("mutation queue is at capacity")
-                );
-            }
-            queue.pending.push(request);
-            if queue.running {
-                false
-            } else {
-                queue.running = true;
-                true
-            }
+        let Ok(run) = self.inner.mutations.push(request) else {
+            return Err(
+                FsError::new(ErrorCode::Eagain).with_message("mutation queue is at capacity")
+            );
         };
         if run {
             self.run_mutation_batches().await;
@@ -3418,10 +3662,7 @@ where
             let mut idle_rounds = 0;
             for round in 0..MUTATION_BATCH_MAX_YIELD_ROUNDS {
                 cooperative_yield().await;
-                let pending = match self.inner.mutations.lock() {
-                    Ok(queue) => queue.pending.len(),
-                    Err(_) => break,
-                };
+                let pending = self.inner.mutations.len.load(Ordering::Acquire);
                 if pending >= MUTATION_BATCH_REQUEST_TARGET {
                     break;
                 }
@@ -3439,21 +3680,14 @@ where
                 }
             }
 
-            let requests = {
-                let mut queue = match self.inner.mutations.lock() {
-                    Ok(queue) => queue,
-                    Err(_) => {
-                        runner.finish();
-                        return;
-                    }
-                };
-                if queue.pending.is_empty() {
-                    queue.running = false;
-                    runner.finish();
-                    return;
+            let requests = self.inner.mutations.drain();
+            if requests.is_empty() {
+                if self.inner.mutations.release() {
+                    continue;
                 }
-                std::mem::take(&mut queue.pending)
-            };
+                runner.finish();
+                return;
+            }
             self.apply_mutation_batch(requests).await;
         }
     }
@@ -3735,7 +3969,7 @@ where
                             ReadLayoutSnapshot::Owned(layout.clone())
                         } else {
                             ReadLayoutSnapshot::SharedNamespace {
-                                namespace: Arc::clone(&state.namespace),
+                                namespace: NamespaceRef::Counted(Arc::clone(&state.namespace)),
                                 inode,
                             }
                         }
@@ -3850,14 +4084,17 @@ where
         position: u64,
     ) -> Result<usize> {
         self.read_lease(false).await?;
-        let shared = self.inner.state.shared().and_then(|namespace| {
+        let shared = self.inner.state.published().and_then(|namespace| {
             let size = match namespace.nodes.get(&inode) {
                 Some(node) if matches!(node.data, NodeData::File(_)) => node.stats.size,
                 // Orphans and non-files are classified under the mutex.
                 _ => return None,
             };
             Some((
-                ReadLayoutSnapshot::SharedNamespace { namespace, inode },
+                ReadLayoutSnapshot::SharedNamespace {
+                    namespace: NamespaceRef::Published(namespace),
+                    inode,
+                },
                 false,
                 size,
             ))
@@ -3886,7 +4123,7 @@ where
             let layout = match &node.data {
                 NodeData::File(layout) if orphan => ReadLayoutSnapshot::Owned(layout.clone()),
                 NodeData::File(_) => ReadLayoutSnapshot::SharedNamespace {
-                    namespace: Arc::clone(&state.namespace),
+                    namespace: NamespaceRef::Counted(Arc::clone(&state.namespace)),
                     inode,
                 },
                 NodeData::Directory { .. } => {
@@ -3924,12 +4161,24 @@ where
         if self.inner.options.atime_policy == AtimePolicy::NoAtime || count == 0 {
             return Ok(count);
         }
-        // Atime bookkeeping is folded into the next publication, which clears
-        // it under the operation gate; record it under the same gate so a
-        // concurrent publication cannot drop the update.
-        let gate_profile = Span::new(Event::GateWait);
-        let _gate = self.inner.gate.lock().await;
-        drop(gate_profile);
+        // The access is recorded for the next publication to fold in. That
+        // publication only forgets times it actually carried, so recording
+        // neither waits for one in progress nor needs the state mutex.
+        if !orphan
+            && let ReadLayoutSnapshot::SharedNamespace { namespace, .. } = &layout
+            && let Some(original) = namespace.nodes.get(&inode)
+            && let Some(current) = self.inner.state.published()
+            // Record the access only if the bytes returned still describe the
+            // file: a concurrent rewrite owns the newer timestamps.
+            && (Arc::ptr_eq(namespace, &current)
+                || current
+                    .nodes
+                    .get(&inode)
+                    .is_some_and(|node| write_base_unchanged(node, original)))
+            && self.inner.state.atimes.record(inode, now_ms())
+        {
+            return Ok(count);
+        }
         let mut state = self.lock_state()?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
@@ -3949,8 +4198,6 @@ where
         let Some(original) = namespace.nodes.get(&inode) else {
             return Ok(count);
         };
-        // Record the access only if the bytes returned still describe the
-        // file: a concurrent rewrite owns the newer timestamps.
         if Arc::ptr_eq(namespace, &state.namespace)
             || state
                 .namespace
@@ -3958,12 +4205,7 @@ where
                 .get(&inode)
                 .is_some_and(|node| write_base_unchanged(node, original))
         {
-            let atime_ms = now_ms();
-            state
-                .pending_atime
-                .entry(inode)
-                .and_modify(|pending| *pending = (*pending).max(atime_ms))
-                .or_insert(atime_ms);
+            state.record_atime(inode, now_ms());
         } else if let Some(node) = state.orphans.get_mut(&inode)
             && write_base_unchanged(node, original)
         {
@@ -4552,10 +4794,9 @@ where
         let cell = &self.inner.state;
         // Read the sequence before the snapshot it must vouch for.
         let epoch = cell.handle_epoch();
-        let shared = epoch.and_then(|_| cell.shared());
-        let namespace = match &shared {
-            Some(namespace) => Arc::clone(namespace),
-            None => self.read_view()?,
+        let (namespace, shared) = match epoch.and_then(|_| cell.published()) {
+            Some(namespace) => (NamespaceRef::Published(namespace), true),
+            None => (NamespaceRef::Counted(self.read_view()?), false),
         };
         let entry = walk(&namespace, normalized, true, "open", 0)?;
         let Some(inode) = entry.node else {
@@ -4576,7 +4817,7 @@ where
         // inode's fate in between. If the sequence is unchanged, `namespace`
         // was the committed one throughout and every later decision sees the
         // reference.
-        let fast = shared.is_some() && cell.fast_refs.acquire(inode);
+        let fast = shared && !cell.may_be_retained(inode) && cell.fast_refs.acquire(inode);
         let settled = fast && epoch == Some(cell.handle_seq.load(Ordering::SeqCst));
         let fd = if settled {
             cell.allocate_fd()?
@@ -4717,7 +4958,7 @@ where
     fn stat_inode(&self, inode: InodeId, syscall: &str, path: &str) -> Result<Stats> {
         // A linked inode is answered from the lock-free snapshot; orphans and
         // any failed or closed runtime take the mutex below.
-        if let Some(namespace) = self.inner.state.shared()
+        if let Some(namespace) = self.inner.state.published()
             && let Some(node) = namespace.nodes.get(&inode)
         {
             let mut stats = node.stats.clone();
@@ -4738,8 +4979,8 @@ where
             .or_else(|| state.orphans.get(&inode))
             .map(|node| node.stats.clone())
             .ok_or_else(|| error_with_path(ErrorCode::Estale, syscall, path))?;
-        if let Some(atime_ms) = state.pending_atime.get(&inode) {
-            stats.atime_ms = stats.atime_ms.max(*atime_ms);
+        if let Some(atime_ms) = state.pending_atime_for(inode) {
+            stats.atime_ms = stats.atime_ms.max(atime_ms);
         }
         Ok(stats)
     }
@@ -5343,7 +5584,8 @@ where
             let cell = &self.filesystem.inner.state;
             if self.state.fast_ref.load(Ordering::Acquire)
                 && let Some(epoch) = cell.handle_epoch()
-                && cell.shared().is_some_and(|namespace| {
+                && !cell.may_be_retained(self.inode)
+                && cell.published().is_some_and(|namespace| {
                     namespace
                         .nodes
                         .get(&self.inode)
@@ -5447,7 +5689,7 @@ where
         // Guarded results carry stats for many inodes; when read atimes are
         // pending, fold them in through the full snapshot instead.
         let namespace = if self.inner.options.atime_policy == AtimePolicy::NoAtime
-            || self.lock_state()?.pending_atime.is_empty()
+            || !self.lock_state()?.has_pending_atime()
         {
             self.read_view()?
         } else {
@@ -9236,9 +9478,13 @@ mod tests {
         let inode = handle.stat().await.unwrap().ino;
         fs.unlink("/churn").await.unwrap();
         assert!(fs.lock_state().unwrap().orphans.contains_key(&inode));
-        // While it is retained, other handles settle under the mutex.
+        // A retained inode does not send other handles to the mutex.
         let other = fs.open("/stable", "r", 0).await.unwrap();
+        let stable = other.stat().await.unwrap().ino;
+        assert_eq!(fs.inner.state.fast_refs.count(stable), 1);
+        assert!(!fs.lock_state().unwrap().open_refs.contains_key(&stable));
         other.close().await.unwrap();
+        assert_eq!(fs.inner.state.fast_refs.count(stable), 0);
         assert_eq!(fs.lock_state().unwrap().open_count(inode), 1);
         let mut bytes = [0; 8];
         assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 5);
@@ -9254,6 +9500,11 @@ mod tests {
 
         // Opens and closes racing unlinks must agree with them: every handle
         // reads its file, and nothing stays retained once all are closed.
+        // One unlinked file stays open throughout, so the race runs with an
+        // inode retained the whole time.
+        fs.write_file("/held", b"held").await.unwrap();
+        let held = fs.open("/held", "r", 0).await.unwrap();
+        fs.unlink("/held").await.unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let mut openers = Vec::new();
         for index in 0..6 {
@@ -9291,10 +9542,64 @@ mod tests {
         for opener in openers {
             assert!(opener.await.unwrap() > 0);
         }
+        let mut bytes = [0; 8];
+        assert_eq!(held.read(&mut bytes, Some(0)).await.unwrap(), 4);
+        assert_eq!(&bytes[..4], b"held");
+        assert_eq!(fs.lock_state().unwrap().orphans.len(), 1);
+        held.close().await.unwrap();
         let state = fs.lock_state().unwrap();
         assert!(!state.any_open());
         assert!(state.orphans.is_empty());
         assert_eq!(fs.inner.state.handle_seq.load(Ordering::SeqCst) & 1, 0);
+    }
+
+    #[test]
+    fn strict_atime_reads_skip_the_gate_and_keep_times_a_publication_missed() {
+        let metadata = MemoryMetadataStore::new();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("lock-free-atime"),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/file", b"abcd")).unwrap();
+        let handle = block_on(fs.open("/file", "r", 0)).unwrap();
+        let before = block_on(handle.stat()).unwrap();
+        let inode = before.ino;
+
+        // A mutation in progress owns the operation gate; the read still
+        // completes and records its access without the state mutex's map.
+        let operation_gate = block_on(fs.inner.gate.lock());
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        let mut bytes = [0; 4];
+        {
+            let mut read = Box::pin(handle.read(&mut bytes, Some(0)));
+            assert!(matches!(
+                Future::poll(read.as_mut(), &mut context),
+                Poll::Ready(Ok(4))
+            ));
+        }
+        drop(operation_gate);
+        assert!(fs.lock_state().unwrap().pending_atime.is_empty());
+        let recorded = fs.inner.state.atimes.get(inode).unwrap().unwrap();
+        assert!(recorded >= before.atime_ms);
+        assert_eq!(block_on(handle.stat()).unwrap().atime_ms, recorded);
+
+        // A publication prepared before a later access must not forget it.
+        let (candidate, revision) = fs.snapshot().unwrap();
+        let later = recorded + 60_000;
+        assert!(fs.inner.state.atimes.record(inode, later));
+        block_on(fs.publish_namespace(revision, candidate, false)).unwrap();
+        assert_eq!(fs.inner.state.atimes.get(inode), Ok(Some(later)));
+        assert_eq!(block_on(fs.stat("/file")).unwrap().atime_ms, later);
+
+        // The next durability boundary publishes it and frees the slot.
+        block_on(fs.syncfs()).unwrap();
+        assert_eq!(fs.inner.state.atimes.get(inode), Ok(None));
+        assert!(!fs.lock_state().unwrap().has_pending_atime());
+        let persisted = block_on(metadata.load()).unwrap().namespace.unwrap();
+        assert_eq!(persisted.nodes[&inode].stats.atime_ms, later);
     }
 
     #[test]
@@ -9644,7 +9949,7 @@ mod tests {
                 Future::poll(canceled.as_mut(), &mut context),
                 Poll::Pending
             ));
-            let running = filesystem.inner.mutations.lock().unwrap().running;
+            let running = filesystem.inner.mutations.running.load(Ordering::SeqCst);
             if running {
                 break;
             }
