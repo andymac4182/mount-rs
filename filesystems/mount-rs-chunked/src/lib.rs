@@ -582,6 +582,25 @@ async fn concurrent_cas_backoff(attempt: usize, owner: &str) {
     async_io::Timer::after(delay).await;
 }
 
+/// Namespaces at least this large are copied and freed off the async worker.
+const OFF_WORKER_NAMESPACE_NODES: usize = 2048;
+
+/// Run CPU work proportional to the namespace without stalling the tasks
+/// queued behind this one. On a multi-threaded Tokio runtime the worker hands
+/// its queue to another thread for the duration; anywhere else (no runtime,
+/// a current-thread runtime, small namespaces) the work simply runs inline.
+fn off_worker<R>(nodes: usize, work: impl FnOnce() -> R) -> R {
+    let multi_threaded = nodes >= OFF_WORKER_NAMESPACE_NODES
+        && tokio::runtime::Handle::try_current().is_ok_and(|runtime| {
+            runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        });
+    if multi_threaded {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
+    }
+}
+
 struct ChunkedInner<M, B>
 where
     M: MetadataStore,
@@ -1741,7 +1760,7 @@ where
             )
         };
         let _profile = Span::new(Event::Snapshot).units(shared.nodes.len() as u64);
-        let mut namespace = shared.as_ref().clone();
+        let mut namespace = off_worker(shared.nodes.len(), || shared.as_ref().clone());
         // Full snapshots are reserved for namespace operations. Fold selected
         // inode acknowledgements into that candidate without copying the
         // namespace on ordinary handle reads or writes.
@@ -2485,6 +2504,12 @@ where
     /// copied. Pending read atimes are not folded in: callers that return
     /// stats overlay them with `overlay_atime`.
     fn read_view(&self) -> Result<Arc<Namespace>> {
+        self.read_view_at_revision().map(|(namespace, _)| namespace)
+    }
+
+    /// `read_view` plus the local revision it was captured at, for an
+    /// optimistic mutation that only reads while it prepares.
+    fn read_view_at_revision(&self) -> Result<(Arc<Namespace>, u64)> {
         let state = self.lock_state()?;
         if let Some(error) = &state.failure {
             return Err(error.clone());
@@ -2493,7 +2518,7 @@ where
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
         if state.selected_inodes.is_empty() {
-            return Ok(Arc::clone(&state.namespace));
+            return Ok((Arc::clone(&state.namespace), state.revision));
         }
         let _profile = Span::new(Event::Snapshot).units(state.namespace.nodes.len() as u64);
         let mut namespace = state.namespace.as_ref().clone();
@@ -2502,7 +2527,7 @@ where
                 namespace.nodes.insert(*inode, (**node).clone());
             }
         }
-        Ok(Arc::new(namespace))
+        Ok((Arc::new(namespace), state.revision))
     }
 
     fn overlay_atime(&self, inode: InodeId, stats: &mut Stats) -> Result<()> {
@@ -2951,10 +2976,11 @@ where
         let _lease_gate = self.inner.lease_gate.lock().await;
         let lease = self.renew_lease_inner(false).await?;
         let mut publication = PublicationGuard::new(&self.inner.state);
+        let candidate = off_worker(namespace.nodes.len(), || namespace.clone());
         let revision = match self
             .inner
             .metadata
-            .publish(expected_revision, &lease, namespace.clone())
+            .publish(expected_revision, &lease, candidate)
             .await
         {
             Ok(revision) => revision,
@@ -2980,7 +3006,7 @@ where
         state.pending_atime.clear();
         publication.disarm();
         drop(state);
-        drop(previous);
+        off_worker(previous.nodes.len(), || drop(previous));
         trace.finish(format_args!("revision={revision}"));
         Ok(revision)
     }
@@ -3661,7 +3687,7 @@ where
             let _gate = self.inner.gate.lock().await;
             drop(gate_profile);
             self.ensure_operation_lease().await?;
-            let (namespace, _) = self.snapshot()?;
+            let (namespace, _) = self.read_view_at_revision()?;
             let (node, orphan) = self.node_snapshot(&namespace, inode, "write", path)?;
             let layout = match &node.data {
                 NodeData::File(layout) => layout.clone(),
@@ -3868,7 +3894,9 @@ where
         // its own gate because it may perform a provider mutation.
         self.ensure_operation_lease().await?;
         let (layout, original, inode, expected_revision, new_inode) = {
-            let (namespace, revision) = self.snapshot()?;
+            // Preparation only reads: share the snapshot rather than copy a
+            // namespace that the batch runner will copy again to publish.
+            let (namespace, revision) = self.read_view_at_revision()?;
             let entry = walk(&namespace, &normalized, true, "open", 0)?;
             self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;
             if let Some(inode) = entry.node {

@@ -258,6 +258,7 @@ fn main() -> Result<(), Failure> {
     let (owner, registry, http, url) = server.block_on(async {
         let owner = Arc::new(Filesystem::split_with_runtime(options, runtime).await?);
         let driver = owner.driver();
+        let populate = Instant::now();
         for directory in ["/fill", "/listing", "/data"] {
             driver.mkdir(directory, MkdirOptions::default()).await?;
         }
@@ -278,6 +279,11 @@ fn main() -> Result<(), Failure> {
                 .await?;
         }
         driver.syncfs().await?;
+        println!(
+            "populate: {} whole-file writes in {:.2}s",
+            files + directory_entries + clients.max(1),
+            populate.elapsed().as_secs_f64()
+        );
         let registry = Arc::new(VolumeSessions::new(
             owner.clone(),
             64,
