@@ -3,11 +3,17 @@
 //! The metadata row holds the namespace as one JSON document, so writing it
 //! costs time proportional to the volume: every inode is encoded again and
 //! SQLite writes every page of it again. A publication that follows the
-//! previous one instead appends the inodes it changed to
-//! `mount_rs_namespace_changes`, and the current namespace is the stored
-//! document with those rows applied in revision order. The log is folded
-//! back into the document once it has grown to the document's size, so a
-//! fold's cost is spread over at least that many bytes of changes.
+//! previous one instead stores the inodes it changed, one row each, in
+//! `mount_rs_namespace_nodes`, and the namespace's few scalar fields in the
+//! single row of `mount_rs_namespace_changes`, which also carries the
+//! revision. The current namespace is the stored document with those rows
+//! laid over it.
+//!
+//! A row replaces the inode's earlier row, so the overlay never holds more
+//! rows than inodes were touched, and a volume whose files are rewritten in
+//! place never has to rewrite the document. Only removed inodes accumulate
+//! (their rows stay, empty); the overlay is folded back into the document
+//! when it has outgrown the namespace.
 use mount_rs_core::chunking::ChunkerConfig;
 use mount_rs_core::storage::{InodeId, Namespace, NodeMetadata};
 use mount_rs_core::{Result, backend_error};
@@ -20,24 +26,27 @@ pub(crate) struct Published {
     pub namespace: Namespace,
     /// Size of the stored document.
     pub base_bytes: usize,
-    /// Size and number of the change rows on top of it.
-    pub pending_bytes: usize,
-    pub pending_rows: usize,
+    /// `None` when the store holds the plain document. Otherwise an upper
+    /// bound on the overlay's rows: each publication adds the inodes it
+    /// changed, without knowing which already had a row.
+    pub overlay: Option<usize>,
 }
 
-/// A log smaller than this is never folded for its size alone.
-const FOLD_AFTER_BYTES: usize = 64 * 1024;
+/// An overlay smaller than this is never folded.
 const FOLD_AFTER_ROWS: usize = 4096;
 
 impl Published {
-    /// Whether a change record of `bytes` should be appended, as opposed to
-    /// storing the whole document again.
-    pub fn appends(&self, bytes: usize) -> bool {
-        // A record that is a large part of the document saves little, and
-        // keeps small volumes in the plain single-document form.
-        bytes.saturating_mul(4) <= self.base_bytes
-            && self.pending_rows < FOLD_AFTER_ROWS
-            && self.pending_bytes.saturating_add(bytes) <= self.base_bytes.max(FOLD_AFTER_BYTES)
+    /// Whether a change is small enough beside the document to be worth
+    /// storing as rows. A change that is a large part of the document saves
+    /// little, and this keeps small volumes in the plain form.
+    pub fn worth_rows(&self, change: &Change) -> bool {
+        change.bytes.saturating_mul(4) <= self.base_bytes
+    }
+
+    /// Whether an overlay of `rows` rows still has room for `change`.
+    pub fn has_room(rows: usize, change: &Change, after: &Namespace) -> bool {
+        rows.saturating_add(change.nodes.len())
+            <= after.nodes.len().saturating_mul(2).max(FOLD_AFTER_ROWS)
     }
 }
 
@@ -74,24 +83,23 @@ impl Drop for Slot {
     }
 }
 
-/// The stored form of one publication's changes: the namespace's scalar
-/// fields, then every changed inode with its new metadata, or `null` for an
-/// inode that was removed.
-type Record = (
-    u32,
-    InodeId,
-    InodeId,
-    u32,
-    u32,
-    u32,
-    ChunkerConfig,
-    Vec<(InodeId, Option<NodeMetadata>)>,
-);
+/// The namespace's scalar fields, as stored in the overlay's header row.
+type Header = (u32, InodeId, InodeId, u32, u32, u32, ChunkerConfig);
+
+/// What one publication changed.
+pub(crate) struct Change {
+    pub header: String,
+    /// Every changed inode with its new metadata, or `None` for an inode
+    /// that was removed.
+    pub nodes: Vec<(i64, Option<String>)>,
+    /// Size of all of it.
+    pub bytes: usize,
+}
 
 /// Encodes what turns `before` into `after`, or `None` when so much changed
 /// that the whole document should be stored. The cost follows the number of
 /// changed inodes when `after` was made from `before`.
-pub(crate) fn encode(before: &Namespace, after: &Namespace) -> Result<Option<String>> {
+pub(crate) fn encode(before: &Namespace, after: &Namespace) -> Result<Option<Change>> {
     let limit = (before.nodes.len() / 8).max(4);
     let mut changed = Vec::new();
     let complete = before.nodes.differences(&after.nodes, |inode, old, new| {
@@ -107,11 +115,7 @@ pub(crate) fn encode(before: &Namespace, after: &Namespace) -> Result<Option<Str
     if !complete {
         return Ok(None);
     }
-    let nodes: Vec<(InodeId, Option<&NodeMetadata>)> = changed
-        .into_iter()
-        .map(|inode| (inode, after.nodes.get(&inode)))
-        .collect();
-    serde_json::to_string(&(
+    let header = serde_json::to_string(&(
         after.format_version,
         after.root,
         after.next_inode,
@@ -119,16 +123,35 @@ pub(crate) fn encode(before: &Namespace, after: &Namespace) -> Result<Option<Str
         after.default_gid,
         after.umask,
         &after.default_chunker,
-        nodes,
     ))
-    .map(Some)
-    .map_err(backend_error)
+    .map_err(backend_error)?;
+    let mut bytes = header.len();
+    let mut nodes = Vec::with_capacity(changed.len());
+    for inode in changed {
+        // SQLite keys are signed; an inode past that is stored the long way.
+        let Ok(key) = i64::try_from(inode) else {
+            return Ok(None);
+        };
+        let node = after
+            .nodes
+            .get(&inode)
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(backend_error)?;
+        bytes += 8 + node.as_ref().map_or(0, String::len);
+        nodes.push((key, node));
+    }
+    Ok(Some(Change {
+        header,
+        nodes,
+        bytes,
+    }))
 }
 
-/// Applies one stored change record.
-pub(crate) fn apply(namespace: &mut Namespace, record: &str) -> Result<()> {
-    let (format_version, root, next_inode, default_uid, default_gid, umask, chunker, nodes): Record =
-        serde_json::from_str(record).map_err(backend_error)?;
+/// Applies the overlay's header row.
+pub(crate) fn apply_header(namespace: &mut Namespace, header: &str) -> Result<()> {
+    let (format_version, root, next_inode, default_uid, default_gid, umask, chunker): Header =
+        serde_json::from_str(header).map_err(backend_error)?;
     namespace.format_version = format_version;
     namespace.root = root;
     namespace.next_inode = next_inode;
@@ -136,14 +159,19 @@ pub(crate) fn apply(namespace: &mut Namespace, record: &str) -> Result<()> {
     namespace.default_gid = default_gid;
     namespace.umask = umask;
     namespace.default_chunker = chunker;
-    for (inode, node) in nodes {
-        match node {
-            Some(node) => {
-                namespace.nodes.insert(inode, node);
-            }
-            None => {
-                namespace.nodes.remove(&inode);
-            }
+    Ok(())
+}
+
+/// Applies one overlay row.
+pub(crate) fn apply_node(namespace: &mut Namespace, inode: i64, node: Option<&str>) -> Result<()> {
+    let inode = InodeId::try_from(inode).map_err(backend_error)?;
+    match node {
+        Some(node) => {
+            let node: NodeMetadata = serde_json::from_str(node).map_err(backend_error)?;
+            namespace.nodes.insert(inode, node);
+        }
+        None => {
+            namespace.nodes.remove(&inode);
         }
     }
     Ok(())

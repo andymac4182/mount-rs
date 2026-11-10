@@ -288,27 +288,126 @@ under 15 ms in 8 of 8.
   same binaries: it comes from the machine (Docker and another agent were
   running), not from a lock.
 
+## Fifth pass
+
+The fourth pass left four locks in place on the strength of counts and
+reasoning. This pass replaced each of them and measured the result, removed
+the fold from the SQLite write path, and explained the two anomalies. Numbers
+are p50 / p99 / p99.9 in ms; "before" is `d1654401`.
+
+There is now no mutex or reader-writer lock on the session path in these
+crates. What took their place is one of three things, all in
+`mount-rs-core`: a `TurnGate` (asynchronous turn, lock-free queue of
+waiters) where callers genuinely have to wait for each other; a `TurnCell`
+(one compare-and-swap, spin then yield) where they are already serialized
+and a mutex was taken without ever being waited for; and a lock-free queue
+of work that whoever has the turn carries out, where the caller needs no
+answer.
+
+| Was | Now | Measured |
+| --- | --- | --- |
+| Block cache index mutex, taken by every miss (three times), delete and statistics call | No lock. Every cached block is published in the lock-free table, so a lookup that finds nothing there is a miss without consulting the index (a full probe window now evicts its least recently used block instead of leaving the new one unpublished). Counters are atomics. A completed miss queues its entry as a put does. One thread at a time has the index's turn, taken with a compare-and-swap and never waited for; it files at most 4 queued entries per turn. Delete and clear hold the I/O gate exclusively, which keeps out every other thread that takes the turn. | 8 threads reading blocks that are almost never cached (`profile_concurrent_misses`): 121k to 2.3M reads/s; 0.052 / 0.247 / 0.346 to 0.0026 / 0.023 / 0.030. Hits unchanged (remote read 0.187 / 0.312 / 0.405 to 0.187 / 0.310 / 0.376). |
+| In-flight fill table: `ArcSwap` slots, one allocation and two `ArcSwap` stores per miss | A fixed table of counted slots matched by hash; joining or leaving a fill is one atomic update. | Part of the row above: `arc_swap`'s store (`Debt::pay_all`, which visits every thread's debt list) was 64% of the miss path's CPU, four stores per miss; this removes two of them. |
+| Disk cache index mutex | No lock. The second half of a fill (indexing the written file) is pushed on a lock-free stack and applied by whoever has the turn; admitting a fill takes the turn itself. | 4000 fills into a 64-entry cache from 16 tasks: total wait 13 to 18 ms to 5 to 7 ms, put p99 3.4 to 4.6 ms to 3.0 to 3.2 ms. Worst single wait rose from 0.07 to 0.08 ms to 0.10 to 0.39 ms, since a waiter now yields. |
+| State mutex (`StateCell`) | `TurnCell`. | No change, as the count of contended acquisitions (zero) predicted: remote write 0.275 / 0.496 / 0.575 to 0.275 / 0.496 / 0.567, direct write 0.120 / 0.199 / 0.247 to 0.118 / 0.211 / 0.281, and open and mixed with a background writer within run-to-run spread. |
+| SQLite connection mutex, blocks: a read arriving during a commit blocked its worker thread on the mutex until the commit finished. With four server threads, reads waiting there stopped metadata requests that needed no block at all. | Reads take the same asynchronous turn as puts, so they wait without holding a thread. A read leaves its request in a queue, and whoever has the turn answers every queued read before it starts a commit and after it finishes one; a read is woken as soon as it is answered (`TurnGate::lock_unless`). The connection itself is a `TurnCell`: nothing waits for it. | SQLite blocks, no RAM cache, all five operations, 16 clients: stat 0.33 / 0.89 / 1.2 to 0.11 / 0.25 / 0.33; readdir 0.41 / 0.95 / 1.3 to 0.15 / 0.27 / 0.35; open 0.72 / 1.31 / 1.7 to 0.21 / 0.36 / 0.48; write 1.39 / 2.3 / 5.0 to 1.42 / 2.0 / 2.7; read 0.60 / 1.50 / 2.3 to 0.71 / 1.09 / 1.5; 4490 to 6005 ops/s per operation. Read p50 is higher because 33% more commits are in progress for a read to wait out. |
+| SQLite connection mutex, metadata | `TurnCell`. | Wait was already 0.0 to 0.1 µs mean. |
+| SQLite change rows folded into the document every 4096 publications | A per-inode overlay that is never folded while files are rewritten in place. See below. | One writer, 8000 files: maximum 26 to 32 ms in every run (and 1.9 s in one of eight) to 1.8 to 9 ms; 0.281 / 0.436 / 1.0 to 0.302 / 0.440 / 0.87. 20000 files: maximum 56 to 107 ms to 5 to 9 ms; p99.9 1.2 to 1.7 to 0.75 to 0.83. 16 writers, 2000 files: 0.46 / 1.14 / 2.9 at 27.5k ops/s to 0.68 / 1.55 / 2.8 at 19.7k ops/s (the cost; see below). |
+| Object-store provider's cache index mutex, `MemoryMetadataStore`'s `RwLock` | `TurnCell`. | Not waited for before or after. |
+| `RemoteFs` built its HTTP client with the default root store for every server | For a plain-HTTP server (loopback only, and redirects are off) the root store is not loaded. | Client construction in a release build that links the system root store: 131 to 163 ms to 8 µs. An HTTPS mount still pays it once. |
+
+Default configuration (memory metadata and blocks), remote, all five
+operations, 16 clients, for reference: read 0.185 / 0.319 / 0.394 to
+0.181 / 0.308 / 0.368; stat 0.190 / 0.328 / 0.414 to 0.187 / 0.317 / 0.370;
+readdir 0.218 / 0.365 / 0.448 to 0.211 / 0.347 / 0.406; open
+0.371 / 0.555 / 0.666 to 0.365 / 0.532 / 0.604; write 0.225 / 0.399 / 0.504
+to 0.220 / 0.382 / 0.458.
+
+### SQLite overlay
+
+The fourth pass appended one row per publication and rewrote the document
+when the rows had grown to its size. That rewrite ran on a publication, cost
+26 ms at 8000 files and 56 to 107 ms at 20000, and grows with the volume.
+The overlay replaces the rows:
+
+- `mount_rs_namespace_nodes` holds one row per changed inode (empty for a
+  removed one), and a publication upserts the inodes it changed. A row
+  replaces the inode's earlier row, so the overlay has at most as many rows
+  as inodes were touched and never needs folding for a volume whose files
+  are rewritten in place.
+- `mount_rs_namespace_changes` holds a single header row: the namespace's
+  scalar fields and the revision the overlay makes current. Its presence is
+  what the fences of the fourth pass key on, unchanged: the schema version
+  trigger that makes older builds refuse the database, and the trigger that
+  aborts an update of the document underneath the overlay.
+- A publication is one transaction: the fenced conditional insert of the
+  header decides it, exactly as the conditional update does for a document.
+- Only removed inodes accumulate. The overlay is folded into the document
+  when it holds more than twice the namespace's inodes (and more than 4096
+  rows). The publication keeps an upper bound on the row count and counts
+  the rows only when the bound says there is no room.
+- Everything else is as before: `publish`, `load` and `load_if_changed`
+  understand the overlay, every other operation folds first, acquiring the
+  writer lease folds, and a change more than a quarter of the document's
+  size is stored as a document, so small volumes stay in the plain form.
+- An overlay that is not exactly one header, for a revision after the
+  document's, over a stored document is refused.
+
+What it costs: a publication now writes one b-tree leaf per changed inode,
+where an appended row was one page whatever it held. A single writer changes
+one inode per publication and pays 20 µs (p50 0.281 to 0.302). Sixteen
+writers batch sixteen inodes into a publication, which touches about fifteen
+leaves: `pwrite` time per commit roughly tripled in the profile, and
+throughput fell from 27.5k to 19.7k writes/s with p50 0.46 to 0.68. The
+append-and-fold form bought that throughput by deferring the page writes
+into one sequential rewrite, which is the stall this removes; batching the
+upserts instead only moves the same leaf writes into a periodic stall whose
+size grows with the volume. The tail is the target here, so the steady cost
+was taken.
+
+### The two anomalies, explained
+
+- The HTTP integration test that timed out in full runs: see the fourth
+  pass. It was `reqwest::Client::new()` loading the system root store, which
+  a `--workspace` build links through feature unification.
+- The 6 to 10 ms stall that some 4 s runs show on every operation at once is
+  the machine. A separate single-threaded busy loop, with no benchmark
+  running, was descheduled for 5.6 ms in one of six 4 s runs (0.04 to
+  0.26 ms in the others). Both builds show it at the same rate.
+
+### What an attempt showed should stay
+
+| Tried | Result |
+| --- | --- |
+| A second, read-only SQLite connection for block reads (fourth pass) | Worse: read p99 1.03 to 12.1 ms. Reverted; the turn-served reads above are what replaced it. |
+| Bounding how many queued entries one thread files into the block cache index per turn: 32, 8, 4 | 32: p99 0.007, p99.9 0.155 ms. 8: 0.038 / 0.046. 4: 0.023 / 0.030, and the highest throughput. 4 was kept; unbounded let one reader file for the other seven indefinitely. |
+| `TurnCell` for the SQLite connection without routing reads through the turn first | Not built: a reader would spin for the length of a commit (over a millisecond). The cell is only used where the callers are already serialized. |
+
 ## Kept, with what was measured
 
-| Lock | Taken by | Measured | Why it stays |
-| --- | --- | --- | --- |
-| State mutex (`StateCell::mutex`) | the batch runner and publications; handle writes and closes of written handles; readers only while the filesystem is failed, closed or has uncommitted per-inode overlays; opens and closes only for a retained inode, or across a publication that removes or unlinks one | No contended acquisition in any workload after the fourth pass (see above). | It makes a mutation's multi-field update (namespace, revision, orphans, references, failure) one step, and with one batch runner nothing waits for it. |
-| Block cache index (mutex) | misses, deletes, statistics; puts only when it is free | Puts never wait (fourth pass). 460 acquisitions in 3 s of reads. | Eviction order and the byte budget span every entry. The object-store provider's cache index works the same way. |
-| `MemoryMetadataStore` (`RwLock`) | lease and revision transitions take it exclusively | Never contended in any run: publications are already serialized by the operation gate. | Each is a check and an update of several fields that must be one linearizable step; that is the provider's contract. |
-| SQLite providers' connection mutex | metadata and block I/O on SQLite | Metadata: never waited for. Blocks: 27 to 64% of acquisitions waited before group commit; reads still queue behind a commit. | A SQLite connection is not usable from two threads at once, and a second connection was measured to be worse (fourth pass). |
-| Disk cache index mutex (`mount-rs-host`) | fills, deletes, clears; never hits | 6 to 7 µs mean hold, 0.06 to 0.19 ms worst wait under 16 concurrent evicting fills. | Eviction and the byte budget, as for the block cache. Neither file writes nor unlinks happen under it. |
-| Session budget semaphore, HTTP `connection_permits`, disk cache worker and fill semaphores | session creation, connection accept, disk cache fills | | Admission limits; not per request on the session path. |
-| hyper header-read timer, reqwest request timer, hyper-util connection pool, tokio's timer wheel | one registration per request on each side | About 1% of active samples in the remote write profile. | Inside third-party crates. They are where the remaining mutex waits in the remote profile come from. |
+No mutex or reader-writer lock remains on the session path in these crates
+(`mount-rs-core`, `mount-rs-chunked`, `mount-rs-cluster`, `mount-rs-remote`,
+`mount-rs-http`'s request path, and the SQLite, object-store and memory
+providers). What remains is exclusion that is still needed, in a form that
+is not a lock, and locks that are off the path:
+
+| What | Where | Why it stays |
+| --- | --- | --- |
+| `TurnCell` (compare-and-swap, never waited for in any measured workload) | runtime state; SQLite connections; block cache, disk cache and object-store cache indexes; `MemoryMetadataStore` | Each guards a multi-field update that must be one step. Their callers are serialized before they arrive (batch runner, `TurnGate`, exclusive I/O gate), or carry out each other's queued work instead of waiting. |
+| `TurnGate` on the SQLite block connection | puts, reads, deletes | A SQLite connection runs one statement at a time and a commit is a durable flush. Waiters hold no thread, puts share a commit, and reads are answered by the holder. |
+| Session budget semaphore, HTTP `connection_permits`, disk cache worker and fill semaphores | session creation, connection accept, disk cache fills | Admission limits; not per request on the session path. |
+| hyper header-read timer, reqwest request timer, hyper-util connection pool, tokio's timer wheel | one registration per request on each side | Inside third-party crates. About 1% of active samples in the remote write profile. |
+| `Mutex` in `HttpServer` (`close_outcome`, `task`) | start and close of a listener | Lifecycle only. |
+| `Mutex` in `mount-rs-host`'s `HandleState`, in `SqliteStore` (`mount-rs-sqlite/src/lib.rs`), and in the SQLite I/O diagnostics | the host passthrough driver, the single-table state store, opt-in counters | Not on the session path (RemoteFs to session to ChunkedFs to blocks). |
 
 ## Still open
 
-1. **A fold of the SQLite change rows runs on the publication that triggers
-   it**, so that one write pays for the whole document, and on a 4 MB
-   document its commit sometimes takes tenths of a second (see the fourth
-   pass). Moving the fold off the publication does not avoid that: SQLite has
-   one writer at a time, so a fold on a second connection stalls publications
-   for as long. Not having a document to rewrite would, which means storing
-   each inode as its own row; that is a different on-disk format.
+1. **A publication that changes many inodes writes one SQLite page per
+   inode** (fifth pass). Sixteen writers batching into one publication pay
+   for it in throughput. A layout that keeps one publication's rows on one
+   page and still never rewrites the document would need the rows keyed by
+   something other than the inode, and then a way to drop superseded ones
+   that is not a periodic stall.
 2. **A directory is one node**, so creating or removing a file rewrites its
    parent's whole entry list in the change row (and in memory). At 64 entries
    that is about 4 KB per create; it is what the populate phase of the SQLite

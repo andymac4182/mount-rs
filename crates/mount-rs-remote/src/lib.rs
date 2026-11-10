@@ -250,6 +250,14 @@ impl RemoteSession {
         } else {
             builder
         };
+        // A plain-HTTP server (loopback only) never verifies a certificate,
+        // and redirects are off, so the root store is not loaded for it:
+        // with the system store linked that load is 130-160 ms per mount.
+        let builder = if lifecycle.scheme() == "http" {
+            builder.tls_built_in_root_certs(false)
+        } else {
+            builder
+        };
         let client = builder.build().map_err(|_| invalid())?;
         let response = client
             .post(lifecycle.clone())

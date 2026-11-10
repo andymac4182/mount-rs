@@ -73,76 +73,82 @@ type Recency = BTreeMap<(u64, u64), BlockId>;
 const FILL_SLOTS: usize = 256;
 const FILL_PROBE: usize = 8;
 
-/// One in-flight backing read that concurrent misses for a block share.
+/// One slot of the fill table: an in-flight backing read that concurrent
+/// misses for a block share.
+#[derive(Default)]
 struct Fill {
-    id: BlockId,
+    /// Hash of the block the slot's current sharers are reading.
+    key: AtomicU64,
     /// Held exclusively by whichever miss is reading the backing store; the
     /// others queue here and find the block cached when their turn comes.
     turn: DrainGate,
-    /// Misses currently sharing this fill. The one that takes it to zero
-    /// frees the slot.
+    /// Misses currently using this slot. Zero means the slot is free.
     sharers: std::sync::atomic::AtomicUsize,
 }
 
-/// In-flight fills, found without a lock: a fixed table of atomic slots
-/// probed from the block's hash. A miss never touches the cache index to
-/// register itself, so cold reads do not stall hits on other blocks.
+/// In-flight fills, found without a lock: a fixed table of slots probed
+/// from the block's hash. Joining or leaving a fill is one atomic update of
+/// the slot's count and allocates nothing. A miss never touches the cache
+/// index to register itself, so cold reads do not stall hits on other blocks.
 ///
 /// Sharing a fill is an optimisation, not an invariant. A miss that finds
 /// its probe window full reads the backing store unshared, and two misses
-/// racing a completing fill may each read once.
+/// racing a completing fill may each read once. A slot is matched by hash
+/// and can change hands between a miss's look and its join, so two misses
+/// for different blocks can end up taking turns in one slot; each still
+/// looks for, and reads, its own block.
 struct Fills {
-    slots: Box<[arc_swap::ArcSwapOption<Fill>]>,
+    slots: Box<[Fill]>,
 }
 
 impl Fills {
     fn new() -> Self {
         Self {
-            slots: (0..FILL_SLOTS)
-                .map(|_| arc_swap::ArcSwapOption::empty())
-                .collect(),
+            slots: (0..FILL_SLOTS).map(|_| Fill::default()).collect(),
         }
     }
 
-    fn window(&self, id: &BlockId) -> impl Iterator<Item = &arc_swap::ArcSwapOption<Fill>> {
+    fn key(id: &BlockId) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         id.0.hash(&mut hasher);
-        let start = hasher.finish() as usize;
+        hasher.finish()
+    }
+
+    fn window(&self, key: u64) -> impl Iterator<Item = &Fill> {
+        let start = key as usize;
         (0..FILL_PROBE).map(move |step| &self.slots[start.wrapping_add(step) % FILL_SLOTS])
     }
 
     fn join(&self, id: &BlockId) -> Option<FillRef<'_>> {
-        for slot in self.window(id) {
-            if let Some(fill) = slot.load_full()
-                && fill.id == *id
-            {
-                return Some(FillRef::new(slot, fill));
+        let key = Self::key(id);
+        // A fill for this block that still has sharers.
+        for fill in self.window(key) {
+            if fill.key.load(Ordering::Acquire) != key {
+                continue;
+            }
+            let mut sharers = fill.sharers.load(Ordering::Acquire);
+            while sharers != 0 {
+                match fill.sharers.compare_exchange_weak(
+                    sharers,
+                    sharers + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Some(FillRef { fill }),
+                    Err(current) => sharers = current,
+                }
             }
         }
-        let mut mine: Option<Arc<Fill>> = None;
-        for slot in self.window(id) {
-            loop {
-                let current = slot.load();
-                match &*current {
-                    Some(fill) if fill.id == *id => {
-                        return Some(FillRef::new(slot, Arc::clone(fill)));
-                    }
-                    Some(_) => break,
-                    None => {
-                        let fill = Arc::clone(mine.get_or_insert_with(|| {
-                            Arc::new(Fill {
-                                id: id.clone(),
-                                turn: DrainGate::new(),
-                                sharers: std::sync::atomic::AtomicUsize::new(0),
-                            })
-                        }));
-                        let previous = slot.compare_and_swap(&current, Some(Arc::clone(&fill)));
-                        if previous.is_none() {
-                            return Some(FillRef::new(slot, fill));
-                        }
-                    }
-                }
+        // Otherwise a free slot.
+        for fill in self.window(key) {
+            if fill
+                .sharers
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                fill.key.store(key, Ordering::Release);
+                return Some(FillRef { fill });
             }
         }
         None
@@ -150,41 +156,22 @@ impl Fills {
 
     #[cfg(test)]
     fn sharers(&self, id: &BlockId) -> usize {
-        self.window(id)
-            .filter_map(|slot| slot.load_full())
-            .find(|fill| fill.id == *id)
+        let key = Self::key(id);
+        self.window(key)
+            .find(|fill| fill.key.load(Ordering::Acquire) == key)
             .map_or(0, |fill| fill.sharers.load(Ordering::Acquire))
     }
 }
 
 /// One miss's share of a fill. The last sharer to leave frees the slot; a
-/// cancelled leader leaves it in place for the misses still queued behind it.
+/// cancelled leader leaves it in use for the misses still queued behind it.
 struct FillRef<'a> {
-    slot: &'a arc_swap::ArcSwapOption<Fill>,
-    fill: Arc<Fill>,
-}
-
-impl<'a> FillRef<'a> {
-    fn new(slot: &'a arc_swap::ArcSwapOption<Fill>, fill: Arc<Fill>) -> Self {
-        fill.sharers.fetch_add(1, Ordering::AcqRel);
-        Self { slot, fill }
-    }
+    fill: &'a Fill,
 }
 
 impl Drop for FillRef<'_> {
     fn drop(&mut self) {
-        // A miss that joins after this count reaches zero keeps its own
-        // reference and simply stops being shared with.
-        if self.fill.sharers.fetch_sub(1, Ordering::AcqRel) != 1 {
-            return;
-        }
-        let current = self.slot.load();
-        if current
-            .as_ref()
-            .is_some_and(|fill| Arc::ptr_eq(fill, &self.fill))
-        {
-            self.slot.compare_and_swap(&current, None);
-        }
+        self.fill.sharers.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -217,21 +204,36 @@ struct Entry {
     linked: (u64, u64),
 }
 
-const FRONT_PROBE: usize = 4;
+const FRONT_PROBE: usize = 8;
 
 /// Cached blocks, findable without the index lock: a fixed table of atomic
 /// slots probed from the block id's hash. A hit loads one slot, compares the
 /// id and copies out of the block it guards; it takes no lock and no
 /// reference count, so hits on different cores share nothing they write.
 ///
-/// The index stays the authority. Its writers, who hold the index lock,
-/// publish each entry here and retract it before releasing its payload. An
-/// entry whose probe window is full is simply not published; its hits use
-/// the index.
+/// Every cached block is published here, so a lookup that finds nothing in
+/// its probe window is a miss and never consults the index. The index keeps
+/// the bounds and the eviction order; whoever has the index's turn publishes
+/// each entry here and retracts it before releasing its payload. When a
+/// block's probe window is full, the index evicts the least recently used
+/// block in that window to make room.
+///
+/// The counters are here for the same reason: `stats` reads them without
+/// taking the index's turn.
 struct Front {
     slots: Box<[arc_swap::ArcSwapOption<Hot>]>,
     /// The index's current sequence, for hits to stamp recency with.
     epoch: AtomicU64,
+    misses: AtomicU64,
+    /// Written by the index after each turn.
+    retired_hits: AtomicU64,
+    evictions: AtomicU64,
+    resident_bytes: AtomicU64,
+    resident_entries: AtomicU64,
+    backing_gets_completed: AtomicU64,
+    backing_gets_failed: AtomicU64,
+    backing_read_bytes: AtomicU64,
+    backing_get_nanoseconds: AtomicU64,
 }
 
 impl Default for Front {
@@ -252,6 +254,41 @@ impl Front {
                 .map(|_| arc_swap::ArcSwapOption::empty())
                 .collect(),
             epoch: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            retired_hits: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+            resident_bytes: AtomicU64::new(0),
+            resident_entries: AtomicU64::new(0),
+            backing_gets_completed: AtomicU64::new(0),
+            backing_gets_failed: AtomicU64::new(0),
+            backing_read_bytes: AtomicU64::new(0),
+            backing_get_nanoseconds: AtomicU64::new(0),
+        }
+    }
+
+    fn stats(&self) -> BlockCacheStats {
+        // Retired hits first: an entry retired during the scan is then left
+        // out for this reading, not counted twice.
+        let retired_hits = self.retired_hits.load(Ordering::Relaxed);
+        let resident_hits: u64 = self
+            .slots
+            .iter()
+            .filter_map(|slot| {
+                slot.load()
+                    .as_deref()
+                    .map(|hot| hot.hits.load(Ordering::Relaxed))
+            })
+            .sum();
+        BlockCacheStats {
+            hits: retired_hits.saturating_add(resident_hits),
+            misses: self.misses.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            resident_bytes: self.resident_bytes.load(Ordering::Relaxed) as usize,
+            resident_entries: self.resident_entries.load(Ordering::Relaxed) as usize,
+            backing_gets_completed: self.backing_gets_completed.load(Ordering::Relaxed),
+            backing_gets_failed: self.backing_gets_failed.load(Ordering::Relaxed),
+            backing_read_bytes: self.backing_read_bytes.load(Ordering::Relaxed),
+            backing_get_nanoseconds: self.backing_get_nanoseconds.load(Ordering::Relaxed),
         }
     }
 
@@ -269,20 +306,35 @@ impl Front {
 
     /// Runs `read` on the cached block, if it is published here.
     #[inline]
-    fn hit<R>(&self, id: &BlockId, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    fn hit<R>(&self, id: &BlockId, count_hit: bool, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
         for slot in self.window(id) {
             let hot = slot.load();
             if let Some(hot) = hot.as_deref()
                 && hot.id == *id
             {
-                hot.touch(self.epoch.load(Ordering::Relaxed) | 1, true);
+                hot.touch(self.epoch.load(Ordering::Relaxed) | 1, count_hit);
                 return Some(read(&hot.bytes));
             }
         }
         None
     }
 
-    /// Index writers only.
+    /// Index only. When the block's probe window has no free slot, returns
+    /// the least recently used block in it, which the index evicts.
+    fn crowded(&self, id: &BlockId) -> Option<BlockId> {
+        let mut oldest: Option<(u64, BlockId)> = None;
+        for slot in self.window(id) {
+            let hot = slot.load();
+            let hot = hot.as_deref()?;
+            let used = hot.used.load(Ordering::Relaxed);
+            if oldest.as_ref().is_none_or(|(least, _)| used < *least) {
+                oldest = Some((used, hot.id.clone()));
+            }
+        }
+        oldest.map(|(_, id)| id)
+    }
+
+    /// Index only, after `crowded` returned `None` for this block.
     fn publish(&self, hot: &Arc<Hot>) {
         if let Some(slot) = self.window(&hot.id).find(|slot| slot.load().is_none()) {
             slot.store(Some(Arc::clone(hot)));
@@ -315,7 +367,8 @@ struct State {
     /// always newer than every link made before it. Hits only read it:
     /// nothing every hit writes is shared between blocks.
     sequence: AtomicU64,
-    misses: AtomicU64,
+    /// Hits of retired entries, evictions and residency; the rest of the
+    /// statistics are counted in `front`.
     stats: BlockCacheStats,
 }
 impl State {
@@ -356,25 +409,19 @@ impl State {
         self.front.epoch.store(*sequence, Ordering::Relaxed);
         *sequence
     }
-    fn stats(&self) -> BlockCacheStats {
-        let resident_hits: u64 = self
-            .entries
-            .values()
-            .map(|entry| entry.hot.hits.load(Ordering::Relaxed))
-            .sum();
-        BlockCacheStats {
-            hits: self.stats.hits.saturating_add(resident_hits),
-            misses: self.misses.load(Ordering::Relaxed),
-            ..self.stats
-        }
-    }
-    /// Shared-lock lookup. Recency is recorded in the entry, not the index.
-    fn get(&self, id: &BlockId, count_hit: bool) -> Option<Arc<Vec<u8>>> {
-        let entry = self.entries.get(id)?;
-        entry
-            .hot
-            .touch(self.sequence.load(Ordering::Relaxed) | 1, count_hit);
-        Some(entry.hot.bytes.clone())
+    /// Makes this turn's totals visible to `Front::stats`.
+    fn publish_counts(&self) {
+        let front = &self.front;
+        front.retired_hits.store(self.stats.hits, Ordering::Relaxed);
+        front
+            .evictions
+            .store(self.stats.evictions, Ordering::Relaxed);
+        front
+            .resident_bytes
+            .store(self.stats.resident_bytes as u64, Ordering::Relaxed);
+        front
+            .resident_entries
+            .store(self.stats.resident_entries as u64, Ordering::Relaxed);
     }
     /// Removes the least recently used entry, first re-linking entries that
     /// were hit in a later epoch than the one they are filed under.
@@ -418,6 +465,13 @@ impl State {
             retired.push(oldest);
             self.stats.evictions = self.stats.evictions.saturating_add(1);
         }
+        while let Some(crowding) = self.front.crowded(&id) {
+            let Some(evicted) = self.remove(&crowding) else {
+                break;
+            };
+            retired.push(evicted);
+            self.stats.evictions = self.stats.evictions.saturating_add(1);
+        }
         self.stats.resident_bytes += bytes.len();
         self.stats.resident_entries += 1;
         let linked = (sequence, sequence);
@@ -435,39 +489,93 @@ impl State {
 }
 /// The index and the entries waiting to be filed in it.
 ///
-/// A put never waits for the index. It queues its entry and tries to take
-/// the index; if another thread has it, that thread files the entry before
-/// it leaves (it looks at the queue again after letting go, so an entry
-/// queued at the last moment is not stranded). The operations that need an
-/// answer from the index (a miss, a delete, statistics) do wait for it.
+/// Nothing waits for the index. One thread at a time has its turn, taken
+/// with a single compare-and-swap. A put or a completed miss queues its
+/// entry and tries for the turn; if another thread has it, that thread files
+/// the entry before it leaves (it looks at the queue again after giving the
+/// turn up, so an entry queued at the last moment is not stranded). Lookups
+/// and statistics read `Front` and never take the turn. A delete or a clear
+/// needs the index changed before it returns, and it holds the I/O gate
+/// exclusively, which keeps out every put and miss, the only other threads
+/// that take the turn: it always finds the turn free.
+const SETTLE_LIMIT: usize = 4;
+
 struct Index {
-    state: std::sync::Mutex<State>,
+    busy: std::sync::atomic::AtomicBool,
+    state: std::cell::UnsafeCell<State>,
     arriving: crossbeam_queue::SegQueue<(BlockId, Arc<Vec<u8>>)>,
     max_bytes: usize,
     max_entries: usize,
 }
 
+// SAFETY: `state` is only reached through `Turn`, and `busy` admits one
+// `Turn` at a time; `State` itself is `Send`.
+unsafe impl Sync for Index {}
+
+/// The index, for the one thread whose turn it is.
+struct Turn<'a>(&'a Index);
+
+impl std::ops::Deref for Turn<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        // SAFETY: this `Turn` is the only one; see `Index::try_turn`.
+        unsafe { &*self.0.state.get() }
+    }
+}
+
+impl std::ops::DerefMut for Turn<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        // SAFETY: as in `deref`, and `&mut self` excludes other borrows.
+        unsafe { &mut *self.0.state.get() }
+    }
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        self.publish_counts();
+        self.0.busy.store(false, Ordering::Release);
+    }
+}
+
 impl Index {
-    /// Files everything queued. Returns what the caller should free once it
-    /// has released the index.
-    fn file_arrivals(&self, state: &mut State) -> Vec<Arc<Vec<u8>>> {
-        let mut retired = Vec::new();
-        while let Some((id, bytes)) = self.arriving.pop() {
-            retired.extend(state.insert(id, bytes, self.max_bytes, self.max_entries));
-        }
-        retired
+    fn try_turn(&self) -> Option<Turn<'_>> {
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Turn(self))
     }
 
-    /// Files queued entries unless another thread holds the index, in which
+    /// Files up to `limit` queued entries. Returns how many it filed and
+    /// what the caller should free once it has given the turn up.
+    fn file_arrivals(&self, state: &mut State, limit: usize) -> (usize, Vec<Arc<Vec<u8>>>) {
+        let mut retired = Vec::new();
+        let mut filed = 0;
+        while filed < limit
+            && let Some((id, bytes)) = self.arriving.pop()
+        {
+            retired.extend(state.insert(id, bytes, self.max_bytes, self.max_entries));
+            filed += 1;
+        }
+        (filed, retired)
+    }
+
+    /// Files queued entries unless another thread has the turn, in which
     /// case that thread does it.
+    ///
+    /// One call files at most `SETTLE_LIMIT` entries, so a thread is not
+    /// kept filing for as long as others keep queueing. Entries it leaves
+    /// behind are filed by the next arrival, which is why they are there.
     fn settle(&self) {
         while !self.arriving.is_empty() {
-            let Ok(mut state) = self.state.try_lock() else {
+            let Some(mut state) = self.try_turn() else {
                 return;
             };
-            let retired = self.file_arrivals(&mut state);
+            let (filed, retired) = self.file_arrivals(&mut state, SETTLE_LIMIT);
             drop(state);
             drop(retired);
+            if filed == SETTLE_LIMIT {
+                return;
+            }
         }
     }
 
@@ -476,14 +584,18 @@ impl Index {
         self.settle();
     }
 
-    /// Runs `work` on the index with every queued entry filed first. Never
-    /// held across an await: each use is a bounded in-memory update.
-    fn with<R>(&self, work: impl FnOnce(&mut State) -> R) -> R {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let retired = self.file_arrivals(&mut state);
+    /// Runs `work` on the index with every queued entry filed first. Only
+    /// for callers that hold the I/O gate exclusively, for whom the turn is
+    /// free; the loop is there so that a mistake in that reasoning costs a
+    /// retry and not a second thread in the index.
+    fn exclusive<R>(&self, work: impl FnOnce(&mut State) -> R) -> R {
+        let mut state = loop {
+            if let Some(state) = self.try_turn() {
+                break state;
+            }
+            std::thread::yield_now();
+        };
+        let (_, retired) = self.file_arrivals(&mut state, usize::MAX);
         let result = work(&mut state);
         drop(state);
         drop(retired);
@@ -505,7 +617,8 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             max_bytes,
             max_entries,
             index: Arc::new(Index {
-                state: std::sync::Mutex::new(State {
+                busy: std::sync::atomic::AtomicBool::new(false),
+                state: std::cell::UnsafeCell::new(State {
                     front: Arc::clone(&front),
                     ..State::default()
                 }),
@@ -524,24 +637,17 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             .then(|| Arc::new(bytes.to_vec()))
     }
     pub async fn stats(&self) -> BlockCacheStats {
-        self.index.with(|state| state.stats())
+        self.front.stats()
     }
-    /// Runs `read` on a cached block. A published block is read without
-    /// the index lock; the rest, and every miss, go through the index.
+    /// Runs `read` on a cached block. Neither a hit nor a miss touches the
+    /// index.
     #[inline]
     fn lookup<R>(&self, id: &BlockId, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
-        let mut read = Some(read);
-        if let Some(result) = self.front.hit(id, |bytes| (read.take().unwrap())(bytes)) {
-            return Some(result);
+        let result = self.front.hit(id, true, read);
+        if result.is_none() {
+            self.front.misses.fetch_add(1, Ordering::Relaxed);
         }
-        let cached = self.index.with(|state| {
-            let cached = state.get(id, true);
-            if cached.is_none() {
-                state.misses.fetch_add(1, Ordering::Relaxed);
-            }
-            cached
-        });
-        cached.map(|bytes| (read.take().unwrap())(&bytes))
+        result
     }
     /// Miss path: fetch from the backing store, sharing one fill per block.
     async fn fill(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -554,13 +660,12 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             None
         };
         let _turn = match &fill {
-            Some(fill) => Some(fill.fill.turn.write().await),
+            Some(share) => Some(share.fill.turn.write().await),
             None => None,
         };
         // Another miss or put may have populated this entry while we waited.
-        let cached = self.index.with(|state| state.get(id, false));
-        if let Some(bytes) = cached {
-            return Ok(bytes.as_ref().clone());
+        if let Some(bytes) = self.front.hit(id, false, <[u8]>::to_vec) {
+            return Ok(bytes);
         }
         let started = std::time::Instant::now();
         let result = self.backing.get(id).await;
@@ -570,26 +675,26 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             .ok()
             .and_then(|bytes| self.prepare_entry(bytes));
         let read = result.as_ref().map(|bytes| bytes.len() as u64).ok();
-        let retired = self.index.with(|state| {
-            let stats = &mut state.stats;
-            stats.backing_gets_completed = stats.backing_gets_completed.saturating_add(1);
-            stats.backing_get_nanoseconds = stats.backing_get_nanoseconds.saturating_add(elapsed);
-            match read {
-                Some(read) => {
-                    stats.backing_read_bytes = stats.backing_read_bytes.saturating_add(read);
-                }
-                None => stats.backing_gets_failed = stats.backing_gets_failed.saturating_add(1),
-            }
-            cached.map(|cached| state.insert(id.clone(), cached, self.max_bytes, self.max_entries))
-        });
-        // Evicted payload destruction must not serialize unrelated hits.
-        drop(retired);
+        let front = &self.front;
+        front.backing_gets_completed.fetch_add(1, Ordering::Relaxed);
+        front
+            .backing_get_nanoseconds
+            .fetch_add(elapsed, Ordering::Relaxed);
+        match read {
+            Some(read) => front.backing_read_bytes.fetch_add(read, Ordering::Relaxed),
+            None => front.backing_gets_failed.fetch_add(1, Ordering::Relaxed),
+        };
+        // Never waits, like a put. The fill's turn is still held, so the
+        // misses sharing it look for the block only after it is queued.
+        if let Some(cached) = cached {
+            self.index.insert(id.clone(), cached);
+        }
         result
     }
     /// Drops only cached copies; authoritative backing data is untouched.
     pub async fn clear(&self) {
         let _io = self.io_gate.write().await;
-        let retired = self.index.with(State::clear);
+        let retired = self.index.exclusive(State::clear);
         // Free potentially large buffers and tree nodes after releasing the
         // state mutex. Keep I/O exclusion until invalidation is complete.
         drop(retired);
@@ -642,7 +747,7 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
         let _io = self.io_gate.write().await;
         // No miss/put can repopulate while this operation owns the I/O gate.
         // Evict before awaiting, including for cancellation/unknown outcomes.
-        let retired = self.index.with(|state| state.remove(id));
+        let retired = self.index.exclusive(|state| state.remove(id));
         drop(retired);
         self.backing.delete(id).await
     }
@@ -701,7 +806,7 @@ mod tests {
         let first = cache.put(b"first").await.unwrap();
         let second = cache.put(b"second").await.unwrap();
         // Published blocks are read from the table, with no index access.
-        assert_eq!(cache.front.hit(&first, <[u8]>::len), Some(5));
+        assert_eq!(cache.front.hit(&first, true, <[u8]>::len), Some(5));
         let mut bytes = [0; 3];
         cache.read_into(&second, 1, &mut bytes).await.unwrap();
         assert_eq!(&bytes, b"eco");
@@ -710,12 +815,12 @@ mod tests {
         // Eviction and deletion retract a block before its payload is freed.
         let payload = cache
             .index
-            .with(|state| Arc::downgrade(&state.entries[&second].hot.bytes));
+            .exclusive(|state| Arc::downgrade(&state.entries[&second].hot.bytes));
         let third = cache.put(b"third").await.unwrap();
-        assert!(cache.front.hit(&first, <[u8]>::len).is_none());
-        assert_eq!(cache.front.hit(&third, <[u8]>::len), Some(5));
+        assert!(cache.front.hit(&first, false, <[u8]>::len).is_none());
+        assert_eq!(cache.front.hit(&third, false, <[u8]>::len), Some(5));
         cache.delete(&second).await.unwrap();
-        assert!(cache.front.hit(&second, <[u8]>::len).is_none());
+        assert!(cache.front.hit(&second, false, <[u8]>::len).is_none());
         assert!(payload.upgrade().is_none());
         // The evicted block is still readable, through a miss.
         cache.read_into(&first, 0, &mut bytes).await.unwrap();
@@ -1341,5 +1446,67 @@ mod tests {
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(cache.get(&id).await.unwrap_err().code, ErrorCode::Enoent);
         assert_eq!(cache.stats().await.resident_entries, 0);
+    }
+}
+
+#[cfg(test)]
+mod miss_profile {
+    use super::*;
+    use mount_rs_memory::MemoryBlockStore;
+
+    /// Diagnostic: eight threads reading blocks that are almost never
+    /// cached, each from its own random sequence.
+    #[test]
+    #[ignore = "diagnostic; prints timings"]
+    fn profile_concurrent_misses() {
+        let cache = Arc::new(CachedBlockStore::new(MemoryBlockStore::new(), 1 << 20, 64));
+        let ids: Vec<BlockId> = (0..4096_u32)
+            .map(|index| {
+                futures_lite::future::block_on(cache.put(&index.to_le_bytes().repeat(256))).unwrap()
+            })
+            .collect();
+        let ids = Arc::new(ids);
+        let started = std::time::Instant::now();
+        let threads: Vec<_> = (0..8_u64)
+            .map(|thread| {
+                let (cache, ids) = (cache.clone(), ids.clone());
+                std::thread::spawn(move || {
+                    let mut times = Vec::with_capacity(200_000);
+                    let mut buffer = [0_u8; 64];
+                    let mut random = 0x9e37_79b9_7f4a_7c15_u64.wrapping_mul(thread + 1);
+                    for _ in 0..200_000 {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        let id = &ids[random as usize % ids.len()];
+                        let began = std::time::Instant::now();
+                        futures_lite::future::block_on(cache.read_into(id, 0, &mut buffer))
+                            .unwrap();
+                        times.push(began.elapsed());
+                    }
+                    times
+                })
+            })
+            .collect();
+        let mut times: Vec<_> = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect();
+        let elapsed = started.elapsed();
+        times.sort_unstable();
+        let at = |fraction: f64| times[((times.len() - 1) as f64 * fraction) as usize];
+        let stats = futures_lite::future::block_on(cache.stats());
+        eprintln!(
+            "MISSES {:.0} reads/s p50 {:?} p99 {:?} p99.9 {:?} max {:?}, hits {} misses {} resident {}",
+            times.len() as f64 / elapsed.as_secs_f64(),
+            at(0.5),
+            at(0.99),
+            at(0.999),
+            at(1.0),
+            stats.hits,
+            stats.misses,
+            stats.resident_entries
+        );
+        assert!(stats.resident_entries <= 64);
     }
 }

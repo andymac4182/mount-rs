@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo,
     VersionPublication, VersionedMetadataStore, VolumeId,
@@ -20,7 +21,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Provider-owned time source used by the metadata lease implementation.
@@ -122,7 +123,7 @@ impl Default for MetadataState {
 /// shared by the handles, while block storage remains entirely separate.
 #[derive(Clone)]
 pub struct MemoryMetadataStore {
-    state: Arc<RwLock<MetadataState>>,
+    state: Arc<TurnCell<MetadataState>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -152,7 +153,7 @@ impl MemoryMetadataStore {
         let volume_id = VolumeId::new(format!("memory-{}-{sequence}", std::process::id()))
             .expect("generated memory volume id is valid");
         Self {
-            state: Arc::new(RwLock::new(MetadataState {
+            state: Arc::new(TurnCell::new(MetadataState {
                 volume_id,
                 ..MetadataState::default()
             })),
@@ -162,18 +163,19 @@ impl MemoryMetadataStore {
 
     /// Exclusive access for the lease and revision transitions, each of which
     /// checks and updates several fields as one linearizable step.
-    fn lock_state(&self) -> Result<RwLockWriteGuard<'_, MetadataState>> {
+    ///
+    /// There is no lock object: the state is a `TurnCell`, taken with one
+    /// compare-and-swap. Transitions come one at a time from the writer,
+    /// and every use is a short in-memory step.
+    fn lock_state(&self) -> Result<TurnCellGuard<'_, MetadataState>> {
         self.state
-            .write()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("metadata store lock poisoned"))
+            .lock()
+            .map_err(|()| FsError::new(ErrorCode::Eio).with_message("metadata store lock poisoned"))
     }
 
-    /// Shared access for loads and version lookups, which do not exclude
-    /// each other.
-    fn read_state(&self) -> Result<RwLockReadGuard<'_, MetadataState>> {
-        self.state
-            .read()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("metadata store lock poisoned"))
+    /// Access for loads and version lookups.
+    fn read_state(&self) -> Result<TurnCellGuard<'_, MetadataState>> {
+        self.lock_state()
     }
 }
 
@@ -281,7 +283,7 @@ impl MetadataStore for MemoryMetadataStore {
 impl VersionedMetadataStore for MemoryMetadataStore {
     fn volume_id(&self) -> VolumeId {
         self.state
-            .read()
+            .lock()
             .map(|state| state.volume_id.clone())
             .unwrap_or_else(|_| VolumeId("memory-poisoned".to_owned()))
     }
@@ -1105,7 +1107,7 @@ mod tests {
             ErrorCode::Estale,
         );
 
-        store.state.write().unwrap().head =
+        store.state.lock().unwrap().head =
             Some(VersionId::new(store.volume_id(), version.id.sequence + 1).unwrap());
         assert_error(block_on(store.version_head()), ErrorCode::Eio);
     }

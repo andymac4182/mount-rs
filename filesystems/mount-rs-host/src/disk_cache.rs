@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 const MAGIC: &[u8; 8] = b"MNTCACH1";
 const HEADER: usize = 80;
@@ -158,32 +158,197 @@ fn regular_options() -> OpenOptions {
     }
     options
 }
-fn with_disk<T>(disk_ref: &Mutex<Disk>, operation: impl FnOnce(&mut Disk) -> T) -> Result<T> {
+/// A change to the index that needs no answer: the second half of a fill.
+type Commit = Box<dyn FnOnce(&mut Disk) + Send>;
+
+struct Queued {
+    commit: Commit,
+    next: *mut Queued,
+}
+
+/// The index and the commits waiting to be applied to it. There is no lock.
+///
+/// One thread at a time has the turn, taken with a compare-and-swap, and
+/// nothing done under it touches a file except the rare removal of a corrupt
+/// entry and the invalidations that already exclude every fill and read. A
+/// commit never waits: it is pushed on a lock-free stack, and its thread
+/// applies the stack if the turn is free; if it is not, whoever has the turn
+/// applies it before or just after leaving. An operation that needs an
+/// answer from the index (admitting a fill, statistics, invalidation) takes
+/// the turn itself, yielding while another thread is inside its update.
+struct Shared {
+    busy: AtomicBool,
+    /// Set when a turn ended in a panic, as a poisoned mutex would be.
+    broken: AtomicBool,
+    disk: std::cell::UnsafeCell<Disk>,
+    commits: AtomicPtr<Queued>,
+}
+
+// SAFETY: `disk` is only reached through `Turn`, of which `busy` admits one
+// at a time, and `Disk` and the queued commits are `Send`.
+unsafe impl Send for Shared {}
+unsafe impl Sync for Shared {}
+
+struct Turn<'a>(&'a Shared);
+
+impl std::ops::Deref for Turn<'_> {
+    type Target = Disk;
+    fn deref(&self) -> &Disk {
+        // SAFETY: this is the only `Turn`; see `Shared::try_turn`.
+        unsafe { &*self.0.disk.get() }
+    }
+}
+
+impl std::ops::DerefMut for Turn<'_> {
+    fn deref_mut(&mut self) -> &mut Disk {
+        // SAFETY: as in `deref`, and `&mut self` excludes other borrows.
+        unsafe { &mut *self.0.disk.get() }
+    }
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.broken.store(true, Ordering::Release);
+        }
+        self.0.busy.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        drop(self.take_commits());
+    }
+}
+
+impl Shared {
+    fn new(disk: Disk) -> Self {
+        Self {
+            busy: AtomicBool::new(false),
+            broken: AtomicBool::new(false),
+            disk: std::cell::UnsafeCell::new(disk),
+            commits: AtomicPtr::new(std::ptr::null_mut()),
+        }
+    }
+
+    fn try_turn(&self) -> Option<Turn<'_>> {
+        self.busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Turn(self))
+    }
+
+    fn turn(&self) -> Result<Turn<'_>> {
+        let mut attempts = 0_u32;
+        loop {
+            if self.broken.load(Ordering::Acquire) {
+                return Err(error("disk cache index abandoned by a panic"));
+            }
+            if let Some(turn) = self.try_turn() {
+                return Ok(turn);
+            }
+            attempts += 1;
+            if attempts < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    fn push(&self, commit: Commit) {
+        let queued = Box::into_raw(Box::new(Queued {
+            commit,
+            next: std::ptr::null_mut(),
+        }));
+        let mut head = self.commits.load(Ordering::Acquire);
+        loop {
+            // SAFETY: `queued` is not shared until the exchange succeeds.
+            unsafe { (*queued).next = head };
+            match self.commits.compare_exchange_weak(
+                head,
+                queued,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => head = current,
+            }
+        }
+    }
+
+    /// Everything queued, oldest first.
+    fn take_commits(&self) -> Vec<Commit> {
+        let mut head = self.commits.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        let mut commits = Vec::new();
+        while !head.is_null() {
+            // SAFETY: the swap made this thread the only owner of the list,
+            // and every node came from `Box::into_raw` in `push`.
+            let queued = unsafe { Box::from_raw(head) };
+            head = queued.next;
+            commits.push(queued.commit);
+        }
+        commits.reverse();
+        commits
+    }
+
+    /// Ends a turn: counts it, and removes the files of what it evicted now
+    /// that the index is free again.
+    fn finish(&self, mut disk: Turn<'_>, wait: u64, acquired: std::time::Instant) -> Result<()> {
+        let evicted = std::mem::take(&mut disk.evicted);
+        let hold = u64::try_from(acquired.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let stats = &mut disk.stats;
+        stats.lock_sections = stats.lock_sections.saturating_add(1);
+        stats.lock_wait_nanoseconds = stats.lock_wait_nanoseconds.saturating_add(wait);
+        stats.lock_wait_max_nanoseconds = stats.lock_wait_max_nanoseconds.max(wait);
+        stats.lock_hold_nanoseconds = stats.lock_hold_nanoseconds.saturating_add(hold);
+        stats.lock_hold_max_nanoseconds = stats.lock_hold_max_nanoseconds.max(hold);
+        if evicted.is_empty() {
+            return Ok(());
+        }
+        let root = disk.root.clone();
+        drop(disk);
+        if unlink(&root, &evicted).is_err() {
+            self.turn()?.disable();
+        }
+        Ok(())
+    }
+
+    /// Applies queued commits unless another thread has the turn, in which
+    /// case that thread does it: it looks at the queue again after leaving.
+    fn settle(&self) -> Result<()> {
+        while !self.commits.load(Ordering::Acquire).is_null() {
+            let Some(mut disk) = self.try_turn() else {
+                return Ok(());
+            };
+            let acquired = std::time::Instant::now();
+            for commit in self.take_commits() {
+                commit(&mut disk);
+            }
+            self.finish(disk, 0, acquired)?;
+        }
+        Ok(())
+    }
+
+    /// Queues a change that needs no answer. Never waits.
+    fn post(&self, commit: Commit) -> Result<()> {
+        self.push(commit);
+        self.settle()
+    }
+}
+
+fn with_disk<T>(shared: &Shared, operation: impl FnOnce(&mut Disk) -> T) -> Result<T> {
     let waiting = std::time::Instant::now();
-    let mut disk = disk_ref
-        .lock()
-        .map_err(|_| error("disk cache mutex poisoned"))?;
+    let mut disk = shared.turn()?;
     let acquired = std::time::Instant::now();
+    // Earlier commits first: an invalidation must see every fill before it.
+    for commit in shared.take_commits() {
+        commit(&mut disk);
+    }
     let result = operation(&mut disk);
-    let evicted = std::mem::take(&mut disk.evicted);
-    let nanos =
-        |duration: std::time::Duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-    let wait = nanos(acquired.duration_since(waiting));
-    let hold = nanos(acquired.elapsed());
-    let stats = &mut disk.stats;
-    stats.lock_sections = stats.lock_sections.saturating_add(1);
-    stats.lock_wait_nanoseconds = stats.lock_wait_nanoseconds.saturating_add(wait);
-    stats.lock_wait_max_nanoseconds = stats.lock_wait_max_nanoseconds.max(wait);
-    stats.lock_hold_nanoseconds = stats.lock_hold_nanoseconds.saturating_add(hold);
-    stats.lock_hold_max_nanoseconds = stats.lock_hold_max_nanoseconds.max(hold);
-    if evicted.is_empty() {
-        return Ok(result);
-    }
-    let root = disk.root.clone();
-    drop(disk);
-    if unlink(&root, &evicted).is_err() {
-        self::disable(disk_ref)?;
-    }
+    let wait = u64::try_from(acquired.duration_since(waiting).as_nanos()).unwrap_or(u64::MAX);
+    shared.finish(disk, wait, acquired)?;
+    shared.settle()?;
     Ok(result)
 }
 /// Removes the files of evicted entries. Needs no lock: the index stopped
@@ -198,12 +363,6 @@ fn unlink(root: &Path, keys: &[String]) -> std::io::Result<()> {
             Err(e) => return Err(e),
         }
     }
-    Ok(())
-}
-fn disable(disk: &Mutex<Disk>) -> Result<()> {
-    disk.lock()
-        .map_err(|_| error("disk cache mutex poisoned"))?
-        .disable();
     Ok(())
 }
 // Own the opened file while reading, independent of index eviction/unlink.
@@ -485,15 +644,15 @@ fn write_entry(root: &Path, key: &str, bytes: &[u8]) -> std::io::Result<()> {
     temp.persist(root.join(key)).map_err(|e| e.error)?;
     Ok(())
 }
-/// Caches `bytes` under `key`, holding the mutex only to reserve space and to
-/// publish the written file; hashing and writing happen between the two.
+/// Caches `bytes` under `key`, taking a turn at the index only to reserve space;
+/// publishing the written file is queued; hashing and writing happen between the two.
 /// `finish` runs in the last critical section this takes.
 fn fill(
-    disk: &Mutex<Disk>,
+    disk: &Shared,
     root: &Path,
     key: String,
     bytes: Option<&[u8]>,
-    finish: impl FnOnce(&mut Disk),
+    finish: impl FnOnce(&mut Disk) + Send + 'static,
 ) -> Result<()> {
     let mut finish = Some(finish);
     let size = bytes.map(|bytes| (HEADER + bytes.len()) as u64);
@@ -514,10 +673,11 @@ fn fill(
         return Ok(());
     };
     let written = write_entry(root, &key, bytes);
-    with_disk(disk, |disk| {
+    // Never waits for the index: see `Shared`.
+    disk.post(Box::new(move |disk| {
         disk.commit(key, size, written);
         finish(disk);
-    })
+    }))
 }
 
 /// Persistent owner-local cache. `root` is pre-existing and application-owned;
@@ -532,7 +692,7 @@ fn fill(
 /// process-global limits; providers and concurrent requests own separate buffers.
 pub struct DiskCachedBlockStore<B: ?Sized> {
     backing: Arc<B>,
-    disk: Arc<Mutex<Disk>>,
+    disk: Arc<Shared>,
     index: Arc<ReadIndex>,
     root: Arc<PathBuf>,
     io: Arc<DrainGate>,
@@ -607,7 +767,7 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
             backing,
             root: Arc::new(disk.root.clone()),
             index: disk.index.clone(),
-            disk: Arc::new(Mutex::new(disk)),
+            disk: Arc::new(Shared::new(disk)),
             io: Arc::new(DrainGate::new()),
             writes: Arc::new(DrainGate::new()),
             workers: budget.workers,
@@ -747,7 +907,7 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
                 // Held until the worker is done with the cache files.
                 let _held = (guard, permit, worker);
                 let started = *started.get_or_init(std::time::Instant::now);
-                fill(&disk, &root, key, bytes.as_deref(), |disk| {
+                fill(&disk, &root, key, bytes.as_deref(), move |disk| {
                     finish(disk, started)
                 })
             })
@@ -854,6 +1014,7 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     #[derive(Default)]
     struct Backing {
@@ -1291,7 +1452,7 @@ mod tests {
                 .unwrap();
         }
         // Both workers are inside file reading; index access still completes.
-        assert_eq!(cache.disk.try_lock().unwrap().stats.resident_entries, 1);
+        assert_eq!(cache.disk.try_turn().unwrap().stats.resident_entries, 1);
         let first = tasks.remove(0);
         first.abort();
         assert!(first.await.unwrap_err().is_cancelled());

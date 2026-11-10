@@ -11,13 +11,13 @@ pub use qualification::{
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId};
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
@@ -550,7 +550,9 @@ const CACHE_FRONT_PROBE: usize = 4;
 /// block before it leaves, and looks at the queue again after letting go so
 /// that a block queued at the last moment is not stranded.
 struct ObjectStoreBlockCache {
-    state: Mutex<ObjectStoreBlockCacheState>,
+    /// Taken with one compare-and-swap and held only for in-memory index
+    /// updates; see `TurnCell`.
+    state: TurnCell<ObjectStoreBlockCacheState>,
     arriving: crossbeam_queue::SegQueue<(String, Arc<[u8]>)>,
     front: Box<[arc_swap::ArcSwapOption<HotObject>]>,
     /// The index's current sequence, for hits to stamp recency with.
@@ -560,7 +562,7 @@ struct ObjectStoreBlockCache {
 impl Default for ObjectStoreBlockCache {
     fn default() -> Self {
         Self {
-            state: Mutex::default(),
+            state: TurnCell::new(ObjectStoreBlockCacheState::default()),
             arriving: crossbeam_queue::SegQueue::new(),
             front: (0..CACHE_FRONT_SLOTS)
                 .map(|_| arc_swap::ArcSwapOption::empty())
@@ -704,7 +706,7 @@ impl ObjectStoreBlockCache {
     /// case that thread does it.
     fn settle(&self) {
         while !self.arriving.is_empty() {
-            let Ok(mut state) = self.state.try_lock() else {
+            let Some(Ok(mut state)) = self.state.try_lock() else {
                 return;
             };
             let retired = self.file_arrivals(&mut state);

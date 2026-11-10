@@ -4,6 +4,7 @@ use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
 use mount_rs_core::storage::{BlockExtent, DirectoryEntry, FileLayout, NodeData, NodeMetadata};
 use mount_rs_memfs::MemoryFs;
 use rusqlite::ffi;
+use std::sync::Mutex;
 use std::{
     collections::BTreeMap,
     ffi::{CStr, c_void},

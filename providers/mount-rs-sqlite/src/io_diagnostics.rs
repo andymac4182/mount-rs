@@ -1,4 +1,5 @@
 //! Optional SQLite engine counters. These are pager operations, not device IOPS.
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{Result, backend_error};
 use rusqlite::{Connection, ffi};
 use std::{
@@ -16,7 +17,7 @@ pub(crate) struct Counts {
 }
 struct Entry {
     id: u64,
-    connection: Weak<Mutex<Connection>>,
+    connection: Weak<TurnCell<Connection>>,
     counts: Weak<Counts>,
 }
 static REGISTRY: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
@@ -59,7 +60,7 @@ unsafe extern "C" fn trace(
     }
     0
 }
-pub(crate) fn register(connection: &Arc<Mutex<Connection>>) -> Result<Option<Arc<Counts>>> {
+pub(crate) fn register(connection: &Arc<TurnCell<Connection>>) -> Result<Option<Arc<Counts>>> {
     if std::env::var("MOUNT_RS_PROFILE_IO").as_deref() != Ok("1") {
         return Ok(None);
     }
@@ -72,7 +73,9 @@ pub(crate) fn register(connection: &Arc<Mutex<Connection>>) -> Result<Option<Arc
     registry
         .retain(|entry| entry.connection.strong_count() != 0 && entry.counts.strong_count() != 0);
     {
-        let connection = connection.lock().map_err(backend_error)?;
+        let connection = connection
+            .lock()
+            .map_err(|()| backend_error("SQLite storage lock poisoned"))?;
         let rc = unsafe {
             ffi::sqlite3_trace_v2(
                 connection.handle(),

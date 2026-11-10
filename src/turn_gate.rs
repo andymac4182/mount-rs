@@ -169,6 +169,60 @@ impl Drop for Turn<'_> {
     }
 }
 
+/// Set once by whoever did a waiter's work for it, so the waiter can stop
+/// waiting for its own turn. See `TurnGate::lock_unless`.
+#[derive(Default)]
+pub struct Served {
+    done: AtomicBool,
+    waker: AtomicWaker,
+}
+
+impl Served {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn mark(&self) {
+        self.done.store(true, Ordering::SeqCst);
+        self.waker.wake();
+    }
+
+    pub fn is_marked(&self) -> bool {
+        self.done.load(Ordering::SeqCst)
+    }
+}
+
+impl TurnGate {
+    /// Take the gate, or stop waiting as soon as `served` is marked: `None`
+    /// means it was marked and the gate was not taken.
+    pub fn lock_unless<'a>(&'a self, served: &'a Served) -> TurnUnless<'a> {
+        TurnUnless {
+            wait: self.lock(),
+            served,
+        }
+    }
+}
+
+pub struct TurnUnless<'a> {
+    wait: TurnWait<'a>,
+    served: &'a Served,
+}
+
+impl<'a> Future for TurnUnless<'a> {
+    type Output = Option<Turn<'a>>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // Register before checking, so a mark made now wakes this task.
+        self.served.waker.register(context.waker());
+        if self.served.is_marked() {
+            // Dropping `wait` gives up its place, or passes the gate on if
+            // it had just been handed over.
+            return Poll::Ready(None);
+        }
+        Pin::new(&mut self.wait).poll(context).map(Some)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +243,43 @@ mod tests {
 
     fn wakes() -> Arc<Count> {
         Arc::new(Count(AtomicUsize::new(0)))
+    }
+
+    #[test]
+    fn a_served_waiter_stops_waiting_and_passes_the_gate_on() {
+        let gate = TurnGate::new();
+        let held = gate.try_lock().unwrap();
+        let (served, unserved) = (Served::new(), Served::new());
+        let (first_wakes, second_wakes) = (wakes(), wakes());
+        let mut first = gate.lock_unless(&served);
+        let mut second = gate.lock_unless(&unserved);
+        assert!(poll(&mut first, &first_wakes).is_pending());
+        assert!(poll(&mut second, &second_wakes).is_pending());
+        served.mark();
+        assert_eq!(first_wakes.0.load(Ordering::SeqCst), 1);
+        assert!(matches!(poll(&mut first, &first_wakes), Poll::Ready(None)));
+        drop(first);
+        drop(held);
+        // The served waiter's place went to the next one.
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
+        let Poll::Ready(Some(turn)) = poll(&mut second, &second_wakes) else {
+            panic!("the second waiter gets the gate");
+        };
+        drop(turn);
+        assert!(gate.try_lock().is_some());
+        // Marked after being handed the gate: the gate is passed on.
+        let held = gate.try_lock().unwrap();
+        let late = Served::new();
+        let mut waiting = gate.lock_unless(&late);
+        assert!(poll(&mut waiting, &first_wakes).is_pending());
+        drop(held);
+        late.mark();
+        assert!(matches!(
+            poll(&mut waiting, &first_wakes),
+            Poll::Ready(None)
+        ));
+        drop(waiting);
+        assert!(gate.try_lock().is_some());
     }
 
     #[test]

@@ -35,8 +35,8 @@ use mount_rs_core::types::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -354,7 +354,7 @@ impl ReadLayoutSnapshot {
 /// that requires the locked path. The mirror is refreshed whenever a guard is
 /// released, so no mutation site can forget to publish it.
 struct StateCell {
-    mutex: Mutex<RuntimeState>,
+    mutex: mount_rs_core::turn_cell::TurnCell<RuntimeState>,
     published: arc_swap::ArcSwap<Namespace>,
     /// `RuntimeState::revision` as of the last mutex release. It is stored
     /// separately from `published`, so the two are only a matched pair for a
@@ -720,7 +720,7 @@ impl StateCell {
             next_fd: Padded(std::sync::atomic::AtomicU64::new(3)),
             atimes: PendingAtimes::new(),
             atime_overflow: AtomicBool::new(!state.pending_atime.is_empty()),
-            mutex: Mutex::new(state),
+            mutex: mount_rs_core::turn_cell::TurnCell::new(state),
         }
     }
 
@@ -779,7 +779,7 @@ impl StateCell {
 }
 
 struct StateGuard<'a> {
-    guard: MutexGuard<'a, RuntimeState>,
+    guard: mount_rs_core::turn_cell::TurnCellGuard<'a, RuntimeState>,
     cell: &'a StateCell,
     seen_namespace: *const Namespace,
     seen_locked_reads: bool,
@@ -7988,6 +7988,7 @@ mod tests {
     use mount_rs_core::storage::{LoadedMetadata, MetadataStore, NodeData, WriterLease};
     use mount_rs_memory::{ManualClock, MemoryBlockStore, MemoryMetadataStore};
     use std::future::Future;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
