@@ -17,6 +17,7 @@ use hyper::header;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
 #[cfg(feature = "observability")]
 use mount_rs_observability::Telemetry;
@@ -25,7 +26,7 @@ use mount_rs_observability::extract_headers;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore};
 
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -326,8 +327,11 @@ pub struct HttpServer {
     closing: Arc<AtomicUsize>,
     drained: Arc<Notify>,
     state_changed: Notify,
-    close_outcome: Mutex<Option<CloseOutcome>>,
-    task: Mutex<Option<ListenerState>>,
+    /// Set once, by the close that finishes draining.
+    close_outcome: std::sync::OnceLock<CloseOutcome>,
+    /// Held across the wait for the listener, so concurrent closes queue
+    /// here; an asynchronous turn, not a mutex.
+    task: TurnLock<Option<ListenerState>>,
     connections: Arc<AtomicUsize>,
     connection_permits: Arc<Semaphore>,
 }
@@ -402,8 +406,8 @@ impl HttpServer {
             closing,
             drained,
             state_changed: Notify::new(),
-            close_outcome: Mutex::new(None),
-            task: Mutex::new(None),
+            close_outcome: std::sync::OnceLock::new(),
+            task: TurnLock::new(None),
             connections: Arc::new(AtomicUsize::new(0)),
             connection_permits: Arc::new(Semaphore::new(options.max_connections.max(1))),
         }
@@ -414,7 +418,7 @@ impl HttpServer {
     pub fn unbound(registry: DriveRegistry, options: HttpServerOptions) -> Self {
         let mut server = Self::new(registry, options);
         // There is deliberately no listener task to await during close.
-        server.task = Mutex::new(Some(ListenerState::Finished(CloseOutcome::Success)));
+        server.task = TurnLock::new(Some(ListenerState::Finished(CloseOutcome::Success)));
         server
     }
 
@@ -589,21 +593,21 @@ impl HttpServer {
     /// Report an accept task that terminated before shutdown was requested.
     /// Checking the join handle leaves it available for the normal drain path.
     pub fn listener_failed(&self) -> bool {
-        self.task.try_lock().is_ok_and(|slot| {
+        self.task.try_lock().is_some_and(|slot| {
             matches!(slot.as_ref(), Some(ListenerState::Running(task)) if task.is_finished())
                 && self.closing.load(Ordering::Acquire) == 0
         })
     }
 
     pub async fn close(&self) -> Result<(), HttpServerError> {
-        if let Some(outcome) = self.close_outcome.lock().await.clone() {
+        if let Some(outcome) = self.close_outcome.get() {
             return outcome.result();
         }
         self.closing
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
             .ok();
         self.shutdown.notify_waiters();
-        if let Some(outcome) = self.close_outcome.lock().await.clone() {
+        if let Some(outcome) = self.close_outcome.get() {
             return outcome.result();
         }
         match tokio::time::timeout(self.drain_timeout, self.complete_close()).await {
@@ -619,14 +623,17 @@ impl HttpServer {
         let drained = Arc::clone(&self.drained);
         wait_for_drain(connections, background_tasks, drained).await;
 
-        let mut outcome_slot = self.close_outcome.lock().await;
-        if let Some(outcome) = outcome_slot.as_ref() {
-            return outcome.result();
+        // The first close to get here decides the outcome for all of them.
+        let mut first = false;
+        let outcome = self.close_outcome.get_or_init(|| {
+            first = true;
+            listener_outcome
+        });
+        if first {
+            self.closing.store(2, Ordering::Release);
+            self.state_changed.notify_waiters();
         }
-        *outcome_slot = Some(listener_outcome.clone());
-        self.closing.store(2, Ordering::Release);
-        self.state_changed.notify_waiters();
-        listener_outcome.result()
+        outcome.result()
     }
 
     async fn await_listener(&self) -> CloseOutcome {
@@ -665,7 +672,7 @@ impl Drop for HttpServer {
     fn drop(&mut self) {
         self.closing.store(1, Ordering::Release);
         self.shutdown.notify_waiters();
-        if let Ok(mut task) = self.task.try_lock()
+        if let Some(mut task) = self.task.try_lock()
             && let Some(ListenerState::Running(task)) = task.as_mut()
         {
             task.abort();
@@ -2818,7 +2825,7 @@ mod tests {
             .expect("listener task did not start");
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if server.task.try_lock().is_err() {
+                if server.task.try_lock().is_none() {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -2903,7 +2910,7 @@ mod tests {
         let first_close = tokio::spawn(async move { first_server.close().await });
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if server.task.try_lock().is_err() {
+                if server.task.try_lock().is_none() {
                     break;
                 }
                 tokio::task::yield_now().await;

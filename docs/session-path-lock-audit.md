@@ -383,6 +383,73 @@ was taken.
 | Bounding how many queued entries one thread files into the block cache index per turn: 32, 8, 4 | 32: p99 0.007, p99.9 0.155 ms. 8: 0.038 / 0.046. 4: 0.023 / 0.030, and the highest throughput. 4 was kept; unbounded let one reader file for the other seven indefinitely. |
 | `TurnCell` for the SQLite connection without routing reads through the turn first | Not built: a reader would spin for the length of a commit (over a millisecond). The cell is only used where the callers are already serialized. |
 
+## Sixth pass
+
+The fifth pass left three things: mutexes it called off the path without
+trying to remove them, the 16-writer cost of the SQLite overlay, and the
+rest of the workspace. Numbers are p50 / p99 / p99.9 in ms.
+
+### Mutexes the fifth pass kept by argument
+
+| Was | Now | Result |
+| --- | --- | --- |
+| `HttpServer::close_outcome` (`Mutex<Option<CloseOutcome>>`) | `OnceLock`: the first close records the outcome, later ones read it. | Tests pass; no lock. |
+| `HttpServer::task` (`tokio::sync::Mutex`) | `TurnLock`, an asynchronous mutex over `TurnGate` added to `mount-rs-core` (lock-free waiter queue, `lock`, `try_lock`, `lock_owned`, `get_mut`). | Tests pass. |
+| `HandleState` in `mount-rs-host` (`Arc<Mutex<_>>`, locked on a blocking thread) | `Arc<TurnLock<_>>`, taken with `lock_owned` before the blocking call, so a second caller on one handle waits without holding a blocking thread. | Host tests pass. |
+| `SqliteStore`'s `Mutex<Connection>` | `TurnLock<Connection>`. | Tests pass. |
+| SQLite I/O diagnostics (`Mutex<BTreeMap>`, registry `Mutex<Vec>`) | `TurnCell`. | Tests pass. |
+
+### SQLite rows, third form: a log that is cleaned and never folded
+
+Three forms were built and measured on the direct surface (SQLite metadata,
+memory blocks, whole-file writes):
+
+| Form | 1 writer, 8000 files | 1 writer, 20000 files | 16 writers, 2000 files |
+| --- | --- | --- | --- |
+| Appended rows, folded into the document when they reach its size (fourth pass) | 0.281 / 0.422 / 0.73, max 26 | 0.294 / 0.452 / 1.29, max 55 | 0.47 / 1.36 / 3.2, max 11, 26.8k/s |
+| Per-inode overlay (fifth pass) | 0.305 / 0.474 / 1.09, max 3 | 0.328 / 0.498 / 1.19, max 8 | 0.66 / 1.53 / 2.3, max 9, 19.6k/s |
+| Cleaned log (this pass) | 0.301 / 0.533 / 1.38, max 8 | 0.293 / 0.528 / 0.82, max 3 | 0.51 / 1.20 / 2.1, max 5, 26.0k/s |
+
+The overlay wrote a b-tree leaf per changed inode, which is what cost the
+16-writer case a quarter of its throughput. The cleaned log goes back to one
+appended row per publication (`mount_rs_namespace_changes`; the
+`mount_rs_namespace_nodes` table is gone) and removes the fold a different
+way, the way a log-structured store cleans segments (`changes.rs`):
+
+- An entry is garbage once a newer row sets the same inode. A row that is
+  all garbage is dead; dead rows are deleted sixteen at a time, in the
+  transaction of the publication that finds sixteen.
+- A row that is at least half garbage (by bytes) is cleaned: the next
+  publication stores its remaining inodes again, which kills the row. A
+  publication may clean as many bytes as it and its predecessors changed, so
+  a publication writes at most about twice what it changed and the rows hold
+  at most about twice the inodes they cover.
+- A large inode that never changes is therefore written again only after as
+  much has been written around it. An earlier version of this pass carried a
+  fixed number of entries forward from the oldest row instead, and rewrote
+  the benchmark's 650 KB directory node every 65 publications (p99 0.75 to
+  2.0 ms for one writer); that version was dropped.
+- A removed inode keeps an empty entry so it stays removed. For an inode the
+  document never had, the entry is forgotten as soon as no other stored row
+  mentions the inode, so creating and removing files leaves nothing behind
+  (6000 create-and-remove publications: the row count does not grow).
+- The fences are those of the fourth pass. In addition the conditional
+  insert requires the document to be the one the rows were counted against;
+  if another connection folded them in the meantime the publication stores a
+  whole document instead.
+- The document is rewritten only if the rows exceed eight times its size
+  plus 1 MiB, which cleaning keeps them from reaching; and by anything that
+  reads the namespace column, as before.
+
+Against the original (`d1654401`): one writer has the same median, p99
+0.45 to 0.53 (a delete of sixteen rows rides on one publication in
+sixteen), and the maximum falls from 26 to 55 ms, growing with the volume,
+to 3 to 8 ms. Sixteen writers: 27.5k to 26.0k writes/s (noise is about
+3%), p99 1.23 to 1.20, p99.9 2.9 to 2.1. Sweeping the cleaning threshold
+(half, three quarters, never) and the delete batch (4, 16, 64) moved the
+16-writer figure by no more than the noise, so the remaining 5% is the
+deletes and encoding entries one at a time, not the cleaning.
+
 ## Kept, with what was measured
 
 No mutex or reader-writer lock remains on the session path in these crates
@@ -397,17 +464,12 @@ is not a lock, and locks that are off the path:
 | `TurnGate` on the SQLite block connection | puts, reads, deletes | A SQLite connection runs one statement at a time and a commit is a durable flush. Waiters hold no thread, puts share a commit, and reads are answered by the holder. |
 | Session budget semaphore, HTTP `connection_permits`, disk cache worker and fill semaphores | session creation, connection accept, disk cache fills | Admission limits; not per request on the session path. |
 | hyper header-read timer, reqwest request timer, hyper-util connection pool, tokio's timer wheel | one registration per request on each side | Inside third-party crates. About 1% of active samples in the remote write profile. |
-| `Mutex` in `HttpServer` (`close_outcome`, `task`) | start and close of a listener | Lifecycle only. |
-| `Mutex` in `mount-rs-host`'s `HandleState`, in `SqliteStore` (`mount-rs-sqlite/src/lib.rs`), and in the SQLite I/O diagnostics | the host passthrough driver, the single-table state store, opt-in counters | Not on the session path (RemoteFs to session to ChunkedFs to blocks). |
 
 ## Still open
 
-1. **A publication that changes many inodes writes one SQLite page per
-   inode** (fifth pass). Sixteen writers batching into one publication pay
-   for it in throughput. A layout that keeps one publication's rows on one
-   page and still never rewrites the document would need the rows keyed by
-   something other than the inode, and then a way to drop superseded ones
-   that is not a periodic stall.
+1. **A publication of the SQLite metadata store deletes superseded rows**
+   (sixth pass), sixteen at a time. That is the one part of its cost that is
+   not an append, and it shows as p99 0.45 to 0.53 ms for a single writer.
 2. **A directory is one node**, so creating or removing a file rewrites its
    parent's whole entry list in the change row (and in memory). At 64 entries
    that is about 4 KB per create; it is what the populate phase of the SQLite

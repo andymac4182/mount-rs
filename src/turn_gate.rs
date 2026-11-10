@@ -169,6 +169,112 @@ impl Drop for Turn<'_> {
     }
 }
 
+/// A value behind a `TurnGate`: an asynchronous mutex with no lock inside
+/// it. The guard may be held across an await; waiters hold no thread and are
+/// served in arrival order.
+pub struct TurnLock<T> {
+    gate: TurnGate,
+    value: std::cell::UnsafeCell<T>,
+}
+
+// SAFETY: `value` is only reached through `TurnLockGuard`, and the gate
+// admits one guard at a time.
+unsafe impl<T: Send> Send for TurnLock<T> {}
+unsafe impl<T: Send> Sync for TurnLock<T> {}
+
+pub struct TurnLockGuard<'a, T> {
+    lock: &'a TurnLock<T>,
+    _turn: Turn<'a>,
+}
+
+// SAFETY: the guard is exclusive access to a `T`, like `&mut T`.
+unsafe impl<T: Send> Send for TurnLockGuard<'_, T> {}
+unsafe impl<T: Send + Sync> Sync for TurnLockGuard<'_, T> {}
+
+impl<T: Default> Default for TurnLock<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T> TurnLock<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            gate: TurnGate::new(),
+            value: std::cell::UnsafeCell::new(value),
+        }
+    }
+
+    pub async fn lock(&self) -> TurnLockGuard<'_, T> {
+        let turn = self.gate.lock().await;
+        TurnLockGuard {
+            lock: self,
+            _turn: turn,
+        }
+    }
+
+    pub fn try_lock(&self) -> Option<TurnLockGuard<'_, T>> {
+        self.gate.try_lock().map(|turn| TurnLockGuard {
+            lock: self,
+            _turn: turn,
+        })
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    /// `lock`, with a guard that owns its share of the lock and can move to
+    /// another thread, such as a blocking worker.
+    pub async fn lock_owned(self: Arc<Self>) -> OwnedTurnLockGuard<T> {
+        std::mem::forget(self.gate.lock().await);
+        OwnedTurnLockGuard(self)
+    }
+}
+
+/// Holds the gate, which it gives up on drop.
+pub struct OwnedTurnLockGuard<T>(Arc<TurnLock<T>>);
+
+// SAFETY: the guard is exclusive access to a `T`, like `&mut T`.
+unsafe impl<T: Send> Send for OwnedTurnLockGuard<T> {}
+unsafe impl<T: Send + Sync> Sync for OwnedTurnLockGuard<T> {}
+
+impl<T> std::ops::Deref for OwnedTurnLockGuard<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: this guard holds the gate, so it is the only one.
+        unsafe { &*self.0.value.get() }
+    }
+}
+
+impl<T> std::ops::DerefMut for OwnedTurnLockGuard<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `deref`, and `&mut self` excludes other borrows.
+        unsafe { &mut *self.0.value.get() }
+    }
+}
+
+impl<T> Drop for OwnedTurnLockGuard<T> {
+    fn drop(&mut self) {
+        self.0.gate.release();
+    }
+}
+
+impl<T> std::ops::Deref for TurnLockGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: this guard holds the gate, so it is the only one.
+        unsafe { &*self.lock.value.get() }
+    }
+}
+
+impl<T> std::ops::DerefMut for TurnLockGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `deref`, and `&mut self` excludes other borrows.
+        unsafe { &mut *self.lock.value.get() }
+    }
+}
+
 /// Set once by whoever did a waiter's work for it, so the waiter can stop
 /// waiting for its own turn. See `TurnGate::lock_unless`.
 #[derive(Default)]
@@ -243,6 +349,36 @@ mod tests {
 
     fn wakes() -> Arc<Count> {
         Arc::new(Count(AtomicUsize::new(0)))
+    }
+
+    #[test]
+    fn a_turn_lock_gives_one_holder_at_a_time_the_value() {
+        let lock = TurnLock::new(1_u32);
+        let mut held = lock.try_lock().unwrap();
+        *held += 1;
+        assert!(lock.try_lock().is_none());
+        let waiting_wakes = wakes();
+        let mut waiting = Box::pin(lock.lock());
+        assert!(poll(&mut waiting, &waiting_wakes).is_pending());
+        drop(held);
+        assert_eq!(waiting_wakes.0.load(Ordering::SeqCst), 1);
+        let Poll::Ready(mut next) = poll(&mut waiting, &waiting_wakes) else {
+            panic!("the waiter gets the value");
+        };
+        assert_eq!(*next, 2);
+        *next = 5;
+        drop(next);
+        assert_eq!(*lock.try_lock().unwrap(), 5);
+
+        // An owned guard holds the gate wherever it goes.
+        let lock = Arc::new(TurnLock::new(1_u32));
+        let mut owned = Box::pin(Arc::clone(&lock).lock_owned());
+        let Poll::Ready(mut owned) = poll(&mut owned, &wakes()) else {
+            panic!("the lock is free");
+        };
+        assert!(lock.try_lock().is_none());
+        std::thread::spawn(move || *owned = 9).join().unwrap();
+        assert_eq!(*lock.try_lock().unwrap(), 9);
     }
 
     #[test]

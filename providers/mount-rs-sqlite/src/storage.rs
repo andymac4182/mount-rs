@@ -679,8 +679,6 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_metadata (
  (id, revision, namespace, owner, fence, expires) VALUES(1,0,NULL,NULL,0,0);
  CREATE TABLE IF NOT EXISTS mount_rs_namespace_changes (
  revision INTEGER PRIMARY KEY NOT NULL CHECK(revision>0), changes TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS mount_rs_namespace_nodes (
- inode INTEGER PRIMARY KEY NOT NULL, node TEXT);
  CREATE TRIGGER IF NOT EXISTS mount_rs_namespace_change_recorded
  AFTER INSERT ON mount_rs_namespace_changes BEGIN
   UPDATE mount_rs_schema_versions SET schema_version=schema_version+3
@@ -691,38 +689,38 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_metadata (
  WHEN EXISTS(SELECT 1 FROM mount_rs_namespace_changes) BEGIN
   SELECT RAISE(ABORT,'namespace changes are not folded');
  END;";
-// The overlay on the stored document (see `changes`): one row per changed
-// inode in `mount_rs_namespace_nodes`, and one header row in
-// `mount_rs_namespace_changes` with the namespace's scalar fields and the
-// revision the overlay makes current. The metadata row keeps the revision of
-// the document. (Moving the revision there too would rewrite that row,
-// document and all.) The current revision is therefore the header row's, or
-// the metadata row's when there is none; `CURRENT_REVISION` is that as an
-// expression.
+// The rows on top of the stored document (see `changes`): each is one
+// publication, keyed by the revision it made current, and holds the inodes
+// it set. The metadata row keeps the revision of the document. (Moving the
+// revision there too would rewrite that row, document and all.) The current
+// revision is therefore the last row's, or the metadata row's when there is
+// none; `CURRENT_REVISION` is that as an expression. Rows that no longer
+// hold the newest state of any inode are deleted as they are superseded, so
+// the revisions of the rows have gaps.
 //
-// A store with an overlay cannot be read through the namespace column
-// alone, which is all a build from before it knows to do. While the header
-// row exists the versioning schema version is raised past what such a build
-// accepts (by the first trigger above), so it refuses the database instead
-// of reading a namespace that is behind its revision. Folding the overlay
-// away lowers the version again, and a database at rest in the folded form
-// opens in older builds as before. The second trigger stops anything that
-// has not folded first from replacing the document underneath the overlay.
+// A store with rows cannot be read through the namespace column alone,
+// which is all a build from before them knows to do. While a row exists the
+// versioning schema version is raised past what such a build accepts (by
+// the first trigger above), so it refuses the database instead of reading a
+// namespace that is behind its revision. Folding the rows away lowers the
+// version again, and a database at rest in the folded form opens in older
+// builds as before. The second trigger stops anything that has not folded
+// first from replacing the document underneath the rows.
 const CURRENT_REVISION: &str =
     "coalesce((SELECT max(revision) FROM mount_rs_namespace_changes), revision)";
-const CLEAR_NAMESPACE_CHANGES: &str = "DELETE FROM mount_rs_namespace_nodes;
- DELETE FROM mount_rs_namespace_changes;
+const CLEAR_NAMESPACE_CHANGES: &str = "DELETE FROM mount_rs_namespace_changes;
  UPDATE mount_rs_schema_versions SET schema_version=schema_version-3
   WHERE schema_name='mount-rs-versioning' AND schema_version>2;";
 
-/// The namespace as stored: the document and the overlay on top of it.
+/// The namespace as stored: the document and the rows on top of it.
 struct StoredNamespace {
     revision: u64,
+    /// The revision of the document, which the rows follow.
+    base: u64,
     mode: Option<String>,
     document: Option<String>,
-    /// The overlay's header row, when there is an overlay.
-    header: Option<String>,
-    nodes: Vec<(i64, Option<String>)>,
+    /// The rows, oldest first.
+    rows: Vec<(u64, String)>,
 }
 
 impl StoredNamespace {
@@ -750,42 +748,31 @@ impl StoredNamespace {
                 .map_err(backend_error)?;
         let mut stored = Self {
             revision,
+            base,
             mode,
             document,
-            header: None,
-            nodes: Vec::new(),
+            rows: Vec::new(),
         };
         if known.is_some_and(|known| revision != 0 && u64::try_from(known) == Ok(revision)) {
             return Ok(stored);
         }
         let mut statement = connection
-            .prepare_cached("SELECT revision, changes FROM mount_rs_namespace_changes")
+            .prepare_cached(
+                "SELECT revision, changes FROM mount_rs_namespace_changes ORDER BY revision",
+            )
             .map_err(backend_error)?;
         let mut rows = statement.query([]).map_err(backend_error)?;
         while let Some(row) = rows.next().map_err(backend_error)? {
             let at: u64 = row.get(0).map_err(backend_error)?;
-            // One header, for a revision after the document's.
-            if stored.header.is_some() || at <= base {
+            // Every row is for a revision after the document's.
+            if at <= base {
                 return Err(incompatible_schema(
                     "namespace changes do not follow the stored namespace",
                 ));
             }
-            stored.header = Some(row.get(1).map_err(backend_error)?);
+            stored.rows.push((at, row.get(1).map_err(backend_error)?));
         }
-        let mut statement = connection
-            .prepare_cached("SELECT inode, node FROM mount_rs_namespace_nodes")
-            .map_err(backend_error)?;
-        let mut rows = statement.query([]).map_err(backend_error)?;
-        while let Some(row) = rows.next().map_err(backend_error)? {
-            stored.nodes.push((
-                row.get(0).map_err(backend_error)?,
-                row.get(1).map_err(backend_error)?,
-            ));
-        }
-        let overlaid = stored.header.is_some();
-        if (overlaid && (stored.mode.is_some() || stored.document.is_none()))
-            || (!overlaid && !stored.nodes.is_empty())
-        {
+        if !stored.rows.is_empty() && (stored.mode.is_some() || stored.document.is_none()) {
             return Err(incompatible_schema(
                 "namespace changes do not belong to the stored namespace",
             ));
@@ -797,27 +784,30 @@ impl StoredNamespace {
         self.document.as_ref().map_or(0, String::len)
     }
 
-    fn decode(&self) -> Result<Option<Namespace>> {
+    fn decode(&self) -> Result<Option<(Namespace, super::changes::Log)>> {
         let Some(document) = &self.document else {
             return Ok(None);
         };
         let mut namespace: Namespace = serde_json::from_str(document).map_err(backend_error)?;
-        if let Some(header) = &self.header {
-            super::changes::apply_header(&mut namespace, header)?;
+        let mut log = super::changes::Log::new(&namespace);
+        for (revision, row) in &self.rows {
+            super::changes::apply(&mut namespace, &mut log, *revision, row)?;
         }
-        for (inode, node) in &self.nodes {
-            super::changes::apply_node(&mut namespace, *inode, node.as_deref())?;
-        }
-        Ok(Some(namespace))
+        Ok(Some((namespace, log)))
     }
 
     /// What the next plain publication can be compared with.
-    fn published(&self, namespace: &Namespace) -> Option<super::changes::Published> {
+    fn published(
+        &self,
+        namespace: &Namespace,
+        log: super::changes::Log,
+    ) -> Option<super::changes::Published> {
         self.mode.is_none().then(|| super::changes::Published {
             revision: self.revision,
             namespace: namespace.clone(),
+            base_revision: self.base,
             base_bytes: self.bytes(),
-            overlay: self.header.as_ref().map(|_| self.nodes.len()),
+            log,
         })
     }
 }
@@ -843,10 +833,7 @@ fn in_savepoint<T>(connection: &Connection, work: impl FnOnce() -> Result<T>) ->
 /// whole documents, costs one indexed existence check.
 fn fold_namespace_changes(connection: &Connection) -> Result<()> {
     let pending: bool = connection
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM mount_rs_namespace_changes)
-                 OR EXISTS(SELECT 1 FROM mount_rs_namespace_nodes)",
-        )
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM mount_rs_namespace_changes)")
         .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
         .map_err(backend_error)?;
     if !pending {
@@ -854,7 +841,7 @@ fn fold_namespace_changes(connection: &Connection) -> Result<()> {
     }
     in_savepoint(connection, || {
         let stored = StoredNamespace::read(connection, None)?;
-        let namespace = stored.decode()?.ok_or_else(|| {
+        let (namespace, _) = stored.decode()?.ok_or_else(|| {
             incompatible_schema("namespace change rows without a stored namespace")
         })?;
         let document = serde_json::to_string(&namespace).map_err(backend_error)?;
@@ -1710,10 +1697,11 @@ impl SqliteMetadataStore {
         if stored.document.is_some() {
             profile::add(Event::NamespaceReturned, stored.bytes() as u64);
         }
-        let namespace = stored.decode()?;
+        let (namespace, log) = stored.decode()?.unzip();
         match namespace
             .as_ref()
-            .and_then(|namespace| stored.published(namespace))
+            .zip(log)
+            .and_then(|(namespace, log)| stored.published(namespace, log))
         {
             Some(published) => self.0.published.put(published),
             None => drop(self.0.published.take()),
@@ -3164,96 +3152,85 @@ impl MetadataStore for SqliteMetadataStore {
         let mut connection = self.0.lock_unfolded()?;
         // What this connection stored or loaded at the expected revision, if
         // it did: the publication is then the difference from it.
-        let prior = self
+        let mut prior = self
             .0
             .published
             .take()
             .filter(|prior| prior.revision == expected_revision);
-        let change = match &prior {
-            Some(prior) => super::changes::encode(&prior.namespace, &namespace)?
-                .filter(|change| prior.worth_rows(change)),
+        let append = match &prior {
+            Some(prior) => super::changes::encode(prior, &namespace)?
+                .filter(|append| prior.appends(append.row.len())),
             None => None,
         };
-        // The overlay has room, by the bound kept here or, when that says
-        // no, by counting the rows: the bound counts an inode once for every
-        // publication that changed it.
-        let room = |connection: &Connection, prior: &super::changes::Published, change| {
-            use super::changes::Published;
-            let bound = prior.overlay.unwrap_or(0);
-            if Published::has_room(bound, change, &namespace) {
-                return Ok(Some(bound));
-            }
-            let rows: usize = connection
-                .query_row("SELECT count(*) FROM mount_rs_namespace_nodes", [], |row| {
-                    row.get(0)
-                })
-                .map_err(backend_error)?;
-            Ok::<_, FsError>(Published::has_room(rows, change, &namespace).then_some(rows))
-        };
-        let rows = match (&prior, &change) {
-            (Some(prior), Some(change)) => room(&connection, prior, change)?,
-            _ => None,
-        };
-        if let (Some(prior), Some(change), Some(rows)) = (&prior, &change, rows) {
-            profile::add(Event::NamespaceSerialized, change.bytes as u64);
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(backend_error)?;
+        if let Some(append) = append {
+            profile::add(Event::NamespaceSerialized, append.row.len() as u64);
+            let base = prior.as_ref().map(|prior| prior.base_revision as i64);
             // The fenced conditional INSERT decides the publication, as the
             // conditional UPDATE does for a whole document. The covering
             // index answers the fence without touching the row that holds
-            // the document.
-            let changed = transaction
-                .prepare_cached(&format!(
-                    "INSERT INTO mount_rs_namespace_changes(revision, changes)
-                     SELECT ?1, ?2 FROM mount_rs_metadata INDEXED BY mount_rs_inode_authority
-                     WHERE id=1 AND write_mode IS NULL AND {CURRENT_REVISION}=?3 AND owner=?4
-                       AND fence=?5 AND expires=?6 AND expires>{NOW}"
-                ))
-                .and_then(|mut statement| {
-                    statement.execute(params![
-                        next,
-                        change.header,
-                        expected,
-                        lease.owner,
-                        fence,
-                        expires
-                    ])
-                })
-                .map_err(backend_error)?;
-            if changed != 1 {
-                drop(transaction);
-                return Err(publish_refusal(
-                    &mut connection,
-                    lease,
-                    fence,
-                    expires,
-                    expected,
-                ));
-            }
-            transaction
-                .prepare_cached("DELETE FROM mount_rs_namespace_changes WHERE revision<>?1")
-                .and_then(|mut statement| statement.execute(params![next]))
-                .map_err(backend_error)?;
-            {
-                let mut store = transaction
-                    .prepare_cached(
-                        "INSERT INTO mount_rs_namespace_nodes(inode, node) VALUES(?1, ?2)
-                         ON CONFLICT(inode) DO UPDATE SET node=excluded.node",
-                    )
+            // the document. The document must also be the one the rows kept
+            // here were counted against: another connection may have folded
+            // them into it since.
+            let insert = |connection: &Connection| {
+                connection
+                    .prepare_cached(&format!(
+                        "INSERT INTO mount_rs_namespace_changes(revision, changes)
+                         SELECT ?1, ?2 FROM mount_rs_metadata INDEXED BY mount_rs_inode_authority
+                         WHERE id=1 AND write_mode IS NULL AND {CURRENT_REVISION}=?3 AND owner=?4
+                           AND fence=?5 AND expires=?6 AND expires>{NOW} AND revision=?7"
+                    ))
+                    .and_then(|mut statement| {
+                        statement.execute(params![
+                            next,
+                            append.row,
+                            expected,
+                            lease.owner,
+                            fence,
+                            expires,
+                            base
+                        ])
+                    })
+                    .map_err(backend_error)
+            };
+            let changed = if append.dead.is_empty() {
+                // One autocommit statement, as for a whole document.
+                insert(&connection)?
+            } else {
+                // The rows this one supersedes go in the same transaction.
+                let transaction = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(backend_error)?;
-                for (inode, node) in &change.nodes {
-                    store.execute(params![inode, node]).map_err(backend_error)?;
+                let changed = insert(&transaction)?;
+                if changed == 1 {
+                    {
+                        let mut delete = transaction
+                            .prepare_cached(
+                                "DELETE FROM mount_rs_namespace_changes WHERE revision=?1",
+                            )
+                            .map_err(backend_error)?;
+                        for revision in &append.dead {
+                            delete
+                                .execute(params![*revision as i64])
+                                .map_err(backend_error)?;
+                        }
+                    }
+                    transaction.commit().map_err(backend_error)?;
                 }
+                changed
+            };
+            if changed == 1
+                && let Some(mut prior) = prior.take()
+            {
+                prior.log.stored(next as u64, append);
+                prior.revision = next as u64;
+                prior.namespace = namespace;
+                self.0.published.put(prior);
+                return Ok(next as u64);
             }
-            transaction.commit().map_err(backend_error)?;
-            self.0.published.put(super::changes::Published {
-                revision: next as u64,
-                namespace,
-                base_bytes: prior.base_bytes,
-                overlay: Some(rows + change.nodes.len()),
-            });
-            return Ok(next as u64);
+            // Refused. The whole-document path below finds out why, and
+            // stores the document if the only reason is that the rows are
+            // not the ones known here.
+            prior = None;
         }
         let document = serde_json::to_string(&namespace).map_err(backend_error)?;
         profile::add(Event::NamespaceSerialized, document.len() as u64);
@@ -3271,7 +3248,7 @@ impl MetadataStore for SqliteMetadataStore {
                 })
                 .map_err(backend_error)
         };
-        let changed = if prior.as_ref().is_some_and(|prior| prior.overlay.is_none()) {
+        let changed = if prior.as_ref().is_some_and(|prior| prior.log.is_empty()) {
             // The successful publication path is one fenced conditional UPDATE.
             // SQLite makes a single autocommit statement atomic and durable under
             // the configured synchronous policy, so avoid opening and committing
@@ -3324,9 +3301,10 @@ impl MetadataStore for SqliteMetadataStore {
         }
         self.0.published.put(super::changes::Published {
             revision: next as u64,
-            namespace,
+            base_revision: next as u64,
             base_bytes: document.len(),
-            overlay: None,
+            log: super::changes::Log::new(&namespace),
+            namespace,
         });
         Ok(next as u64)
     }
@@ -8932,17 +8910,6 @@ mod tests {
             .unwrap()
     }
 
-    fn overlay_rows(store: &SqliteMetadataStore) -> i64 {
-        store
-            .0
-            .lock_unfolded()
-            .unwrap()
-            .query_row("SELECT count(*) FROM mount_rs_namespace_nodes", [], |row| {
-                row.get(0)
-            })
-            .unwrap()
-    }
-
     fn versioning_schema(store: &SqliteMetadataStore) -> i64 {
         store
             .0
@@ -8989,7 +8956,7 @@ mod tests {
             .insert(added, first.nodes[&(first.root + 1)].clone());
         second.next_inode = added + 1;
         assert_eq!(run(store.publish(1, &lease, second.clone())).unwrap(), 2);
-        assert_eq!((change_rows(&store), overlay_rows(&store)), (1, 3));
+        assert_eq!(change_rows(&store), 1);
         // The document is the first publication still; the rows carry the rest.
         assert_eq!(stored_document(&store).nodes, first.nodes);
         // A build that reads the document alone must refuse this database.
@@ -8998,9 +8965,9 @@ mod tests {
         let mut third = second.clone();
         third.nodes.get_mut(&added).unwrap().stats.size = 9;
         assert_eq!(run(store.publish(2, &lease, third.clone())).unwrap(), 3);
-        // One header whatever the number of publications, and the inode
-        // changed again keeps its one row.
-        assert_eq!((change_rows(&store), overlay_rows(&store)), (1, 3));
+        // The new row carries the other two inodes of the first forward, so
+        // the first holds nothing current. It is deleted with others later.
+        assert_eq!(change_rows(&store), 2);
 
         // This store, another connection and a conditional load all see it.
         let same = |loaded: LoadedMetadata| {
@@ -9013,39 +8980,44 @@ mod tests {
         let reader = SqliteMetadataStore::open(&path).unwrap();
         // Opening folded the rows away: plain document, old schema version.
         assert_eq!((change_rows(&reader), versioning_schema(&reader)), (0, 1));
-        assert_eq!(overlay_rows(&reader), 0);
         assert_eq!(stored_document(&reader).nodes, third.nodes);
         same(run(reader.load()).unwrap());
         assert!(run(reader.load_if_changed(3)).unwrap().is_none());
         same(run(reader.load_if_changed(2)).unwrap().unwrap());
 
-        // The writer carries on from the folded document, in rows again.
+        // The writer's rows were folded away underneath it, so what it knows
+        // of them no longer holds: it stores a whole document, then rows.
         let mut fourth = third.clone();
         fourth.nodes.get_mut(&touched).unwrap().stats.size = 78;
         assert_eq!(run(store.publish(3, &lease, fourth.clone())).unwrap(), 4);
+        assert_eq!(change_rows(&store), 0);
+        assert_eq!(stored_document(&store).nodes, fourth.nodes);
+        let mut fifth = fourth.clone();
+        fifth.nodes.get_mut(&touched).unwrap().stats.size = 79;
+        assert_eq!(run(store.publish(4, &lease, fifth.clone())).unwrap(), 5);
         assert_eq!(change_rows(&store), 1);
         // A reader that only loads applies the rows and writes nothing.
-        let loaded = run(reader.load_if_changed(3)).unwrap().unwrap();
-        assert_eq!(loaded.revision, 4);
-        assert_eq!(loaded.namespace.unwrap().nodes, fourth.nodes);
+        let loaded = run(reader.load_if_changed(4)).unwrap().unwrap();
+        assert_eq!(loaded.revision, 5);
+        assert_eq!(loaded.namespace.unwrap().nodes, fifth.nodes);
         assert_eq!(change_rows(&store), 1);
 
         // Any operation that reads the namespace column folds first.
         assert!(run(store.version_head()).unwrap().is_none());
         assert_eq!((change_rows(&store), versioning_schema(&store)), (0, 1));
-        assert_eq!(stored_document(&store).nodes, fourth.nodes);
+        assert_eq!(stored_document(&store).nodes, fifth.nodes);
         // After which the next publication is a whole document, then rows.
-        assert_eq!(run(store.publish(4, &lease, fourth.clone())).unwrap(), 5);
+        assert_eq!(run(store.publish(5, &lease, fifth.clone())).unwrap(), 6);
         assert_eq!(change_rows(&store), 0);
-        let mut sixth = fourth.clone();
+        let mut sixth = fifth.clone();
         sixth.nodes.remove(&touched);
-        assert_eq!(run(store.publish(5, &lease, sixth.clone())).unwrap(), 6);
+        assert_eq!(run(store.publish(6, &lease, sixth.clone())).unwrap(), 7);
         assert_eq!(change_rows(&store), 1);
         drop(store);
         drop(reader);
         let reopened = SqliteMetadataStore::open(&path).unwrap();
         let loaded = run(reopened.load()).unwrap();
-        assert_eq!(loaded.revision, 6);
+        assert_eq!(loaded.revision, 7);
         assert_eq!(loaded.namespace.unwrap().nodes, sixth.nodes);
         drop(reopened);
         std::fs::remove_file(path).unwrap();
@@ -9098,18 +9070,18 @@ mod tests {
         assert_eq!((change_rows(&store), versioning_schema(&store)), (0, 1));
         assert_eq!(stored_document(&store).nodes, small.nodes);
 
-        // An overlay that is not one header over the stored document is
-        // refused, not applied: a second header here.
+        // A row that does not come after the stored document is refused,
+        // not applied.
         run(store.publish(3, &lease, first.clone())).unwrap();
         run(store.publish(4, &lease, second.clone())).unwrap();
-        assert_eq!((change_rows(&store), overlay_rows(&store)), (1, 1));
+        assert_eq!(change_rows(&store), 1);
         store
             .0
             .lock_unfolded()
             .unwrap()
             .execute(
                 "INSERT INTO mount_rs_namespace_changes(revision, changes)
-                 SELECT revision+1, changes FROM mount_rs_namespace_changes",
+                 SELECT 1, changes FROM mount_rs_namespace_changes",
                 [],
             )
             .unwrap();
@@ -9122,31 +9094,34 @@ mod tests {
     }
 
     #[test]
-    fn rewriting_inodes_never_folds_and_removed_inodes_eventually_do() {
+    fn the_rows_stay_bounded_and_the_document_is_never_written_again() {
         let store = SqliteMetadataStore::in_memory().unwrap();
         let lease = run(store.acquire_writer("writer", Duration::from_secs(60))).unwrap();
         let first = wide_namespace(512);
         let mut current = first.clone();
         run(store.publish(0, &lease, current.clone())).unwrap();
-        // Every file rewritten many times over: one row per file, and the
-        // document is never written again.
+        // Every file rewritten many times over: a row for each file's newest
+        // state, and the superseded ones waiting to be deleted together.
         let mut revision = 1;
+        let mut most = 0;
         while revision < 6000_u64 {
-            let inode = current.root + 1 + revision % 512;
+            let inode = current.root + 1 + (revision * 7) % 512;
             current.nodes.get_mut(&inode).unwrap().stats.size = revision;
             run(store.publish(revision, &lease, current.clone())).unwrap();
             revision += 1;
+            most = most.max(change_rows(&store));
         }
-        assert_eq!((change_rows(&store), overlay_rows(&store)), (1, 512));
+        assert!((512..=530).contains(&most), "most={most}");
         assert_eq!(stored_document(&store).nodes, first.nodes);
         let loaded = run(store.load()).unwrap();
         assert_eq!(loaded.revision, revision);
         assert_eq!(loaded.namespace.unwrap().nodes, current.nodes);
 
-        // Files created and removed leave a row each. Once those outnumber
-        // what the namespace could account for, the overlay is folded away.
+        // Files created and removed. A removed file the document never had
+        // needs no row once nothing older mentions it, so these leave
+        // nothing behind either.
         let template = current.nodes[&(current.root + 1)].clone();
-        let (mut most, mut folds) = (0, 0);
+        let mut most = 0;
         for _ in 0..6000 {
             let inode = current.next_inode;
             current.nodes.insert(inode, template.clone());
@@ -9154,20 +9129,23 @@ mod tests {
             current.next_inode = inode + 1;
             run(store.publish(revision, &lease, current.clone())).unwrap();
             revision += 1;
-            let rows = overlay_rows(&store);
-            if rows == 0 {
-                folds += 1;
-                assert_eq!(change_rows(&store), 0);
-                assert_eq!(stored_document(&store).nodes, current.nodes);
-            }
-            most = most.max(rows);
+            most = most.max(change_rows(&store));
         }
-        assert!(
-            folds >= 1 && (4000..=4200).contains(&most),
-            "folds={folds} most={most}"
-        );
+        assert!((512..=540).contains(&most), "most={most}");
+        assert_eq!(stored_document(&store).nodes, first.nodes);
         let loaded = run(store.load()).unwrap();
         assert_eq!(loaded.revision, revision);
+        assert_eq!(loaded.namespace.unwrap().nodes, current.nodes);
+        // The rows left are the ones accounted for here: after a load, which
+        // counts them afresh, publications carry on the same.
+        for _ in 0..600 {
+            let inode = current.root + 1 + revision % 500;
+            current.nodes.get_mut(&inode).unwrap().stats.size = revision;
+            run(store.publish(revision, &lease, current.clone())).unwrap();
+            revision += 1;
+        }
+        assert!(change_rows(&store) <= 540);
+        let loaded = run(store.load()).unwrap();
         assert_eq!(loaded.namespace.unwrap().nodes, current.nodes);
 
         // A small volume stays in the plain single-document form.

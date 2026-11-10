@@ -23,6 +23,12 @@ unsafe impl<T: Send> Sync for TurnCell<T> {}
 
 pub struct TurnCellGuard<'a, T>(&'a TurnCell<T>);
 
+impl<T: Default> Default for TurnCell<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
 impl<T> TurnCell<T> {
     pub fn new(value: T) -> Self {
         Self {

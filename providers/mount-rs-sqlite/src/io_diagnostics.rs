@@ -6,21 +6,21 @@ use std::{
     collections::BTreeMap,
     ffi::{CStr, c_void},
     sync::{
-        Arc, Mutex, OnceLock, Weak,
+        Arc, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
 };
 
 #[derive(Default)]
 pub(crate) struct Counts {
-    sql: Mutex<BTreeMap<&'static str, u64>>,
+    sql: TurnCell<BTreeMap<&'static str, u64>>,
 }
 struct Entry {
     id: u64,
     connection: Weak<TurnCell<Connection>>,
     counts: Weak<Counts>,
 }
-static REGISTRY: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
+static REGISTRY: OnceLock<TurnCell<Vec<Entry>>> = OnceLock::new();
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 unsafe extern "C" fn trace(
     mask: u32,
@@ -66,9 +66,9 @@ pub(crate) fn register(connection: &Arc<TurnCell<Connection>>) -> Result<Option<
     }
     let counts = Arc::new(Counts::default());
     let mut registry = REGISTRY
-        .get_or_init(Mutex::default)
+        .get_or_init(TurnCell::default)
         .lock()
-        .map_err(backend_error)?;
+        .map_err(|()| backend_error("SQLite diagnostic registry poisoned"))?;
     // Registration must stay bounded even when diagnostics are never sampled.
     registry
         .retain(|entry| entry.connection.strong_count() != 0 && entry.counts.strong_count() != 0);

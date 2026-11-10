@@ -6,8 +6,9 @@ mod storage;
 pub use io_diagnostics::{connection_page_diagnostics, sqlite_io_diagnostics};
 pub use storage::{SqliteBlockStore, SqliteMetadataStore};
 
+use mount_rs_core::turn_gate::TurnLock;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -32,7 +33,7 @@ fn ensure_parent_directory(path: &Path) -> Result<()> {
 
 #[derive(Clone)]
 pub struct SqliteStore {
-    connection: Arc<Mutex<Connection>>,
+    connection: Arc<TurnLock<Connection>>,
 }
 
 impl SqliteStore {
@@ -86,7 +87,7 @@ impl SqliteStore {
                 .map_err(backend_error)?;
         }
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: Arc::new(TurnLock::new(connection)),
         })
     }
 }
@@ -98,10 +99,8 @@ impl StateStore for SqliteStore {
     }
 
     async fn load_versioned(&self) -> Result<LoadedSnapshot> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| backend_error("SQLite connection lock poisoned"))?;
+        // An asynchronous turn: a caller waiting out a commit holds no thread.
+        let connection = self.connection.lock().await;
         let mut statement = connection
             .prepare("SELECT revision, snapshot FROM mount_rs_state WHERE id = 1")
             .map_err(backend_error)?;
@@ -122,10 +121,8 @@ impl StateStore for SqliteStore {
     }
 
     async fn save(&self, snapshot: Vec<u8>) -> Result<()> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| backend_error("SQLite connection lock poisoned"))?;
+        // An asynchronous turn: a caller waiting out a commit holds no thread.
+        let connection = self.connection.lock().await;
         connection
             .execute(
                 "INSERT INTO mount_rs_state (id, revision, snapshot) VALUES (1, 1, ?1)
@@ -148,10 +145,8 @@ impl StateStore for SqliteStore {
         let next = expected
             .checked_add(1)
             .ok_or_else(|| backend_error("SQLite snapshot revision overflow"))?;
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| backend_error("SQLite connection lock poisoned"))?;
+        // An asynchronous turn: a caller waiting out a commit holds no thread.
+        let connection = self.connection.lock().await;
         let changed = if expected == 0 {
             connection
                 .execute(
