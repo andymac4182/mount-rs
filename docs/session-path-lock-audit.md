@@ -474,13 +474,24 @@ a panic that starts while the cell is held abandons it. `lock_recovered`
 gives the value regardless, for state that is valid whatever its holder was
 doing, and `get_mut` gives it through exclusive access.
 
+The blob cache's disk reads were the one place this found a lock that cost
+latency. `LocalCache::disk_io` put every disk operation of the cache in one
+line, reads included. A read now takes no disk lock: a file is published by
+rename and checked against its recorded size and digest, and the index
+generation is compared again after the read, so a read that raced a
+replacement or an eviction is discarded. Only the removal of a file found to
+be bad waits with the writers. Eight threads reading 256 blocks of 4 KiB
+that are too large for the RAM tier (`profile_disk_reads`): 32.5k to 116k
+reads/s; p50 0.030 to 0.067 ms (the reads now overlap in the filesystem),
+p99 5.3 to 0.11 ms, p99.9 16 to 22 ms to 0.13 to 0.20 ms.
+
 What is left outside test code, and why each stays:
 
 | Lock | Why it stays |
 | --- | --- |
 | `path_lock` in the NFS v3/v4 and 9P sessions (`tokio::sync::RwLock<()>`) | Nearly every request takes it as a reader and holds it across the driver's I/O; a few take it as a writer. Any exclusive replacement would run one request at a time on a session. |
 | `HistoricalFileHandle::state` in `mount-rs-versioned`, `CachedBlockStore::write_gate` in `mount-rs-blob-cache` (`tokio::sync::RwLock`) | The same shape: positional reads, and puts, overlap across block-store I/O on the read side; close and flush are the writers. |
-| `LocalCache::disk_io` in `mount-rs-blob-cache` (`Mutex<()>`) | Held across blocking disk I/O in a synchronous public API, so a cell would spin for the length of a read. Recorded under "Still open": it puts all of that cache's disk I/O in one line. |
+| `LocalCache::disk_io` in `mount-rs-blob-cache` (`Mutex<()>`), for writers only | Admission, eviction and invalidation are multi-step changes to files and the index that must not interleave, and they block on disk I/O in a synchronous public API. Reads no longer take it (below). |
 | `MemoryFs::inner` in `mount-rs-memfs` | The whole tree, held for work proportional to the data (a snapshot copies every file under it). |
 | `StorageVolume::state` in `mount-rs-sqlite-vfs` | Held across the provider round trips it exists to serialize (lease acquire, renew, release, commit), from SQLite's synchronous VFS callbacks. |
 | `WebdavSession::locks` | A public field of type `Arc<Mutex<DavLockTable>>`; changing it changes the crate's API. |
@@ -506,11 +517,9 @@ is not a lock, and locks that are off the path:
 1. **A publication of the SQLite metadata store deletes superseded rows**
    (sixth pass), sixteen at a time. That is the one part of its cost that is
    not an append, and it shows as p99 0.45 to 0.53 ms for a single writer.
-2. **The blob cache serializes all of its disk I/O** behind one lock
-   (`LocalCache::disk_io`). Reads of different blocks wait for each other.
-   Removing it needs the disk operations to be safe against each other per
-   key (they already write to a temporary name and rename) and the public
-   functions that take it to become asynchronous.
+2. **The blob cache still serializes its disk writes** behind one lock
+   (`LocalCache::disk_io`): admissions, evictions and invalidations. Reads
+   were taken off it in the sixth pass.
 3. **A directory is one node**, so creating or removing a file rewrites its
    parent's whole entry list in the change row (and in memory). At 64 entries
    that is about 4 KB per create; it is what the populate phase of the SQLite

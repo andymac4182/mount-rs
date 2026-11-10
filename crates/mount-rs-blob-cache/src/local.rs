@@ -333,7 +333,11 @@ impl LocalCache {
         policy: IntegrityPolicy,
     ) -> Option<Vec<u8>> {
         let key = Self::key(scope, id);
-        let _disk = self.disk_io.lock().ok()?;
+        // Reads take no disk lock, so reads of different blocks (and of the
+        // same block) overlap. A file is published by rename and checked
+        // against its recorded size and digest, and the index generation is
+        // compared again below, so a read that raced a replacement or an
+        // eviction is discarded rather than believed.
         let (size, generation) = {
             let mut state = self.state.lock().ok()?;
             state.tick = state.tick.wrapping_add(1);
@@ -359,6 +363,19 @@ impl LocalCache {
         if let Some(bytes) = &bytes {
             self.admit_shared(&mut state, &key, Arc::from(bytes.as_slice()));
         } else {
+            // The file is bad. Removing it is a disk change like any other,
+            // so it waits its turn with the writers, and looks again: a
+            // writer may have replaced the entry in the meantime.
+            drop(state);
+            let _disk = self.disk_io.lock().ok()?;
+            let mut state = self.state.lock().ok()?;
+            if state
+                .entries
+                .get(&key)
+                .is_none_or(|entry| entry.generation != generation)
+            {
+                return None;
+            }
             let remove = self.remove_index(&mut state, &key);
             drop(state);
             if let Some(charge) = remove {
@@ -926,6 +943,62 @@ mod tests {
         assert_eq!(
             result.expect("RAM lookup blocked behind disk IO"),
             Some(b"fast".to_vec())
+        );
+    }
+    /// Not a test: disk reads of blocks too large for RAM, from 8 threads.
+    /// `cargo test -p mount-rs-blob-cache --release profile_disk_reads -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn profile_disk_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LocalCache::new(LocalCacheConfig {
+            directory: dir.path().to_path_buf(),
+            memory_bytes: 4,
+            disk_bytes: 64 * 1024 * 1024,
+            max_entries: 4096,
+            max_blob_bytes: 8192,
+        })
+        .unwrap();
+        let s = scope("reads");
+        let ids: Vec<BlockId> = (0..256_u32)
+            .map(|n| BlockId(format!("block-{n}")))
+            .collect();
+        for id in &ids {
+            cache
+                .insert(&s, id, &[7_u8; 4096], IntegrityPolicy::Opaque)
+                .unwrap();
+        }
+        let started = std::time::Instant::now();
+        let mut waits: Vec<u64> = std::thread::scope(|threads| {
+            let handles: Vec<_> = (0..8_usize)
+                .map(|thread| {
+                    let (cache, s, ids) = (&cache, &s, &ids);
+                    threads.spawn(move || {
+                        let mut waits = Vec::with_capacity(20_000);
+                        for n in 0..20_000_usize {
+                            let id = &ids[(n * 31 + thread * 17) % ids.len()];
+                            let began = std::time::Instant::now();
+                            assert!(cache.get_disk(s, id, IntegrityPolicy::Opaque).is_some());
+                            waits.push(began.elapsed().as_nanos() as u64);
+                        }
+                        waits
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let seconds = started.elapsed().as_secs_f64();
+        waits.sort_unstable();
+        let at = |q: f64| waits[((waits.len() - 1) as f64 * q) as usize] as f64 / 1e6;
+        println!(
+            "disk reads: {:.0}/s p50={:.4} p99={:.4} p99.9={:.4} ms",
+            waits.len() as f64 / seconds,
+            at(0.5),
+            at(0.99),
+            at(0.999)
         );
     }
     #[test]
