@@ -9,10 +9,10 @@ pub use qualification::{
     PrivateQualificationPrefix, generate_private_qualification_prefix, prove_two_configured_clients,
 };
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -488,68 +488,122 @@ impl ObjectStoreBlockStoreStatsState {
     }
 }
 
+struct CachedObject {
+    bytes: Arc<[u8]>,
+    /// Key under which `recency` currently files this entry. Writers only.
+    linked: (u64, u64),
+    /// Epoch of the latest hit; written at most once per epoch.
+    used: AtomicU64,
+}
+
 #[derive(Default)]
 struct ObjectStoreBlockCacheState {
-    entries: HashMap<String, Vec<u8>>,
-    order: VecDeque<String>,
+    entries: HashMap<String, CachedObject>,
+    /// Eviction order by (epoch of last known use, link sequence). Hits do
+    /// not write here; eviction re-files entries hit since they were linked.
+    recency: BTreeMap<(u64, u64), String>,
+    /// Advances by two per insertion, so the odd epoch a hit records is
+    /// newer than every earlier link. Hits only read it.
+    sequence: AtomicU64,
     bytes: usize,
 }
 
+impl ObjectStoreBlockCacheState {
+    fn next_sequence(&mut self) -> u64 {
+        let sequence = self.sequence.get_mut();
+        *sequence += 2;
+        *sequence
+    }
+
+    fn take(&mut self, id: &str) -> Option<Arc<[u8]>> {
+        let entry = self.entries.remove(id)?;
+        self.recency.remove(&entry.linked);
+        self.bytes = self.bytes.saturating_sub(entry.bytes.len());
+        Some(entry.bytes)
+    }
+
+    fn evict_oldest(&mut self) -> Option<Arc<[u8]>> {
+        loop {
+            let (key, id) = self.recency.pop_first()?;
+            let used = *self.entries.get_mut(&id)?.used.get_mut();
+            if used > key.0 {
+                let linked = (used, self.next_sequence());
+                self.entries.get_mut(&id)?.linked = linked;
+                self.recency.insert(linked, id);
+                continue;
+            }
+            let entry = self.entries.remove(&id)?;
+            self.bytes = self.bytes.saturating_sub(entry.bytes.len());
+            return Some(entry.bytes);
+        }
+    }
+}
+
+/// Bounded cache of recently written and fetched blocks. Hits share the
+/// index lock and copy from a shared payload after releasing it, so
+/// concurrent reads of cached blocks do not serialize on this cache.
 #[derive(Default)]
 struct ObjectStoreBlockCache {
-    state: Mutex<ObjectStoreBlockCacheState>,
+    state: RwLock<ObjectStoreBlockCacheState>,
 }
 
 impl ObjectStoreBlockCache {
-    fn get(&self, id: &str) -> Option<Vec<u8>> {
-        let mut state = self.state.lock().ok()?;
-        let bytes = state.entries.get(id)?.clone();
-        if let Some(position) = state.order.iter().position(|entry| entry == id) {
-            state.order.remove(position);
+    fn lookup(&self, id: &str) -> Option<Arc<[u8]>> {
+        let state = self.state.read().ok()?;
+        let entry = state.entries.get(id)?;
+        let epoch = state.sequence.load(Ordering::Relaxed) | 1;
+        if entry.used.load(Ordering::Relaxed) != epoch {
+            entry.used.store(epoch, Ordering::Relaxed);
         }
-        state.order.push_back(id.to_owned());
-        Some(bytes)
+        Some(Arc::clone(&entry.bytes))
+    }
+
+    fn get(&self, id: &str) -> Option<Vec<u8>> {
+        self.lookup(id).map(|bytes| bytes.to_vec())
     }
 
     fn insert(&self, id: &str, bytes: &[u8]) {
         if bytes.len() > MAX_CACHE_BYTES {
             return;
         }
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if let Some(previous) = state.entries.remove(id) {
-            state.bytes = state.bytes.saturating_sub(previous.len());
-            if let Some(position) = state.order.iter().position(|entry| entry == id) {
-                state.order.remove(position);
-            }
-        }
-        while (state.entries.len() >= MAX_CACHE_ENTRIES
-            || state.bytes.saturating_add(bytes.len()) > MAX_CACHE_BYTES)
-            && !state.order.is_empty()
+        // Copy before locking and free evicted payloads after unlocking.
+        let payload: Arc<[u8]> = Arc::from(bytes);
+        let mut retired = Vec::new();
         {
-            let Some(evicted) = state.order.pop_front() else {
-                break;
+            let Ok(mut state) = self.state.write() else {
+                return;
             };
-            if let Some(previous) = state.entries.remove(&evicted) {
-                state.bytes = state.bytes.saturating_sub(previous.len());
+            retired.extend(state.take(id));
+            while state.entries.len() >= MAX_CACHE_ENTRIES
+                || state.bytes.saturating_add(payload.len()) > MAX_CACHE_BYTES
+            {
+                let Some(evicted) = state.evict_oldest() else {
+                    break;
+                };
+                retired.push(evicted);
             }
+            let sequence = state.next_sequence();
+            let linked = (sequence, sequence);
+            state.bytes = state.bytes.saturating_add(payload.len());
+            state.recency.insert(linked, id.to_owned());
+            state.entries.insert(
+                id.to_owned(),
+                CachedObject {
+                    bytes: payload,
+                    linked,
+                    used: AtomicU64::new(sequence),
+                },
+            );
         }
-        state.bytes = state.bytes.saturating_add(bytes.len());
-        state.entries.insert(id.to_owned(), bytes.to_vec());
-        state.order.push_back(id.to_owned());
+        drop(retired);
     }
 
     fn remove(&self, id: &str) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
+        let retired = match self.state.write() {
+            Ok(mut state) => state.take(id),
+            Err(_) => return,
         };
-        if let Some(previous) = state.entries.remove(id) {
-            state.bytes = state.bytes.saturating_sub(previous.len());
-        }
-        if let Some(position) = state.order.iter().position(|entry| entry == id) {
-            state.order.remove(position);
-        }
+        drop(retired);
     }
 }
 
@@ -1049,6 +1103,19 @@ impl BlockStore for ObjectStoreBlockStore {
                 }
             }
         }
+    }
+
+    async fn read_into(&self, id: &BlockId, offset: usize, buffer: &mut [u8]) -> Result<()> {
+        self.object_path(id)?;
+        // A cached block serves the range without copying the whole block.
+        if let Some(bytes) = self.cache.lookup(&id.0) {
+            let started = self.stats.start(BlockOperation::Get);
+            self.stats.cache_hit();
+            self.stats.success(started, bytes.len() as u64, 0);
+            return mount_rs_core::storage::copy_block_range(&bytes, offset, buffer);
+        }
+        let bytes = self.get(id).await?;
+        mount_rs_core::storage::copy_block_range(&bytes, offset, buffer)
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -2273,6 +2340,39 @@ mod tests {
         assert!(first.get(&id).await.unwrap_err().is(ErrorCode::Enoent));
         assert!(second.get(&id).await.unwrap_err().is(ErrorCode::Enoent));
         assert!(first.delete(&id).await.unwrap_err().is(ErrorCode::Enoent));
+    }
+
+    #[tokio::test]
+    async fn cached_blocks_serve_ranges_and_keep_recently_hit_entries() {
+        let (store, _, _) = stores().await;
+        let id = store.put(b"0123456789").await.unwrap();
+        let mut range = [0; 4];
+        store.read_into(&id, 3, &mut range).await.unwrap();
+        assert_eq!(&range, b"3456");
+        assert_eq!(store.stats().cache_hits, 1);
+        // Past the end of the block is an error, cached or not.
+        assert!(store.read_into(&id, 8, &mut range).await.is_err());
+        store.cache.remove(&id.0);
+        store.read_into(&id, 6, &mut range).await.unwrap();
+        assert_eq!(&range, b"6789");
+
+        // A hit moves an entry behind everything linked before it, so the
+        // entry evicted at capacity is the oldest one never read since.
+        let cache = ObjectStoreBlockCache::default();
+        for index in 0..MAX_CACHE_ENTRIES {
+            cache.insert(&format!("b{index}"), b"x");
+        }
+        assert_eq!(cache.get("b0").unwrap(), b"x");
+        cache.insert("overflow", b"y");
+        assert!(cache.get("b0").is_some());
+        assert!(cache.get("b1").is_none());
+        assert!(cache.get("overflow").is_some());
+        cache.insert("overflow", b"replaced");
+        assert_eq!(cache.get("overflow").unwrap(), b"replaced");
+        let state = cache.state.read().unwrap();
+        assert_eq!(state.entries.len(), MAX_CACHE_ENTRIES);
+        assert_eq!(state.recency.len(), MAX_CACHE_ENTRIES);
+        assert_eq!(state.bytes, MAX_CACHE_ENTRIES - 1 + b"replaced".len());
     }
 
     #[tokio::test]

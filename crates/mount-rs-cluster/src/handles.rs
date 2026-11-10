@@ -4,18 +4,38 @@
 //! are session-local references, not bearer credentials. This module does not
 //! expose HTTP routes or implement reconnect/replay. The server must retain the
 //! session until `close` succeeds, including after a client disconnect.
+use mount_rs_core::drain_gate::{DrainGate, OwnedDrainExclusive};
 use mount_rs_core::{ErrorCode, FileHandle, FsError, OpenFlags, Result, Stats};
 use mount_rs_sdk::Filesystem;
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, RwLock as TableLock,
+        Arc, OnceLock, RwLock as TableLock,
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::RwLock;
 
-type Entry = Arc<RwLock<Option<Arc<dyn FileHandle>>>>;
+/// One open handle. Calls share `gate`; cursor moves, mutations and close
+/// take it exclusively. The gate is an atomic counter for shared entry, so
+/// concurrent positional reads on one handle do not meet on a lock.
+struct Slot {
+    gate: Arc<DrainGate>,
+    /// Set once, when the backend open returns.
+    handle: OnceLock<Arc<dyn FileHandle>>,
+    /// Written only while holding `gate` exclusively.
+    closed: AtomicBool,
+}
+impl Slot {
+    fn handle(&self, syscall: &str) -> Result<&Arc<dyn FileHandle>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(error(ErrorCode::Ebadf, syscall));
+        }
+        self.handle
+            .get()
+            .ok_or_else(|| error(ErrorCode::Ebadf, syscall))
+    }
+}
+type Entry = Arc<Slot>;
 struct State {
     next: u64,
     handles: BTreeMap<u64, Entry>,
@@ -27,7 +47,8 @@ struct State {
 struct PendingOpen<'a> {
     state: &'a TableLock<State>,
     id: u64,
-    handle: tokio::sync::OwnedRwLockWriteGuard<Option<Arc<dyn FileHandle>>>,
+    slot: Entry,
+    _admission: OwnedDrainExclusive,
     committed: bool,
 }
 impl Drop for PendingOpen<'_> {
@@ -46,7 +67,7 @@ pub struct OwnedHandleSession {
     fence: u64,
     limit: usize,
     closing: AtomicBool,
-    path_operations: tokio::sync::RwLock<()>,
+    path_operations: DrainGate,
     state: TableLock<State>,
 }
 
@@ -65,7 +86,7 @@ impl OwnedHandleSession {
             fence,
             limit,
             closing: AtomicBool::new(false),
-            path_operations: tokio::sync::RwLock::new(()),
+            path_operations: DrainGate::new(),
             state: TableLock::new(State {
                 next: 1,
                 handles: BTreeMap::new(),
@@ -128,21 +149,26 @@ impl OwnedHandleSession {
                 .ok_or_else(|| error(ErrorCode::Eoverflow, "open"))?;
             let id = state.next;
             state.next = next;
-            let entry = Arc::new(RwLock::new(None));
-            // The fresh entry is locked before publication so drain cannot
-            // mistake an admitted, pending open for an already-closed handle.
-            let handle = entry.clone().try_write_owned().unwrap();
-            state.handles.insert(id, entry);
+            let entry = Arc::new(Slot {
+                gate: Arc::new(DrainGate::new()),
+                handle: OnceLock::new(),
+                closed: AtomicBool::new(false),
+            });
+            // The fresh entry is held exclusively before publication so drain
+            // cannot mistake an admitted, pending open for a closed handle.
+            let admission = entry.gate.try_write_owned().unwrap();
+            state.handles.insert(id, entry.clone());
             PendingOpen {
                 state: &self.state,
                 id,
-                handle,
+                slot: entry,
+                _admission: admission,
                 committed: false,
             }
         };
         let handle = open.await?;
         // Store the returned handle without another suspension point.
-        *pending.handle = Some(handle);
+        let _ = pending.slot.handle.set(handle);
         pending.committed = true;
         if self.closing.load(Ordering::Acquire) {
             return Err(error(ErrorCode::Ebadf, "open"));
@@ -166,63 +192,41 @@ impl OwnedHandleSession {
         // Positional reads do not mutate the cursor. Shared admission still
         // keeps close and mutations excluded until the provider call finishes.
         if position.is_some() {
-            let entry = entry.read().await;
+            let _admitted = entry.gate.read().await;
             self.check("read").await?;
-            return entry
-                .as_ref()
-                .ok_or_else(|| error(ErrorCode::Ebadf, "read"))?
-                .read(buffer, position)
-                .await;
+            return entry.handle("read")?.read(buffer, position).await;
         }
-        let entry = entry.write().await;
+        let _admitted = entry.gate.write().await;
         self.check("read").await?;
-        entry
-            .as_ref()
-            .ok_or_else(|| error(ErrorCode::Ebadf, "read"))?
-            .read(buffer, position)
-            .await
+        entry.handle("read")?.read(buffer, position).await
     }
 
     pub async fn write(&self, id: u64, buffer: &[u8], position: Option<u64>) -> Result<usize> {
         let entry = self.entry(id).await?;
-        let entry = entry.write().await;
+        let _admitted = entry.gate.write().await;
         self.check("write").await?;
-        entry
-            .as_ref()
-            .ok_or_else(|| error(ErrorCode::Ebadf, "write"))?
-            .write(buffer, position)
-            .await
+        entry.handle("write")?.write(buffer, position).await
     }
 
     pub async fn stat(&self, id: u64) -> Result<Stats> {
         let entry = self.entry(id).await?;
-        let entry = entry.read().await;
+        let _admitted = entry.gate.read().await;
         self.check("fstat").await?;
-        entry
-            .as_ref()
-            .ok_or_else(|| error(ErrorCode::Ebadf, "fstat"))?
-            .stat()
-            .await
+        entry.handle("fstat")?.stat().await
     }
 
     pub async fn truncate(&self, id: u64, length: u64) -> Result<()> {
         let entry = self.entry(id).await?;
-        let entry = entry.write().await;
+        let _admitted = entry.gate.write().await;
         self.check("ftruncate").await?;
-        entry
-            .as_ref()
-            .ok_or_else(|| error(ErrorCode::Ebadf, "ftruncate"))?
-            .truncate(length)
-            .await
+        entry.handle("ftruncate")?.truncate(length).await
     }
 
     pub async fn sync(&self, id: u64, data_only: bool) -> Result<()> {
         let entry = self.entry(id).await?;
-        let entry = entry.write().await;
+        let _admitted = entry.gate.write().await;
         self.check("fsync").await?;
-        let handle = entry
-            .as_ref()
-            .ok_or_else(|| error(ErrorCode::Ebadf, "fsync"))?;
+        let handle = entry.handle("fsync")?;
         if data_only {
             handle.datasync().await
         } else {
@@ -235,10 +239,10 @@ impl OwnedHandleSession {
     pub async fn close_handle(&self, id: u64) -> Result<()> {
         let entry = self.entry(id).await?;
         {
-            let mut entry = entry.write().await;
-            if let Some(handle) = entry.as_ref() {
+            let _exclusive = entry.gate.write().await;
+            if let Ok(handle) = entry.handle("close") {
                 handle.close().await?;
-                *entry = None;
+                entry.closed.store(true, Ordering::Release);
             }
         }
         self.state.write().unwrap().handles.remove(&id);
@@ -260,10 +264,10 @@ impl OwnedHandleSession {
             .collect();
         let mut failure = None;
         for entry in entries {
-            let mut entry = entry.write().await;
-            if let Some(handle) = entry.as_ref() {
+            let _exclusive = entry.gate.write().await;
+            if let Ok(handle) = entry.handle("close") {
                 match handle.close().await {
-                    Ok(()) => *entry = None,
+                    Ok(()) => entry.closed.store(true, Ordering::Release),
                     Err(error) => {
                         failure.get_or_insert(error);
                     }
@@ -289,7 +293,7 @@ mod tests {
         session.write(id, b"data", Some(0)).await.unwrap();
         let entry = session.entry(id).await.unwrap();
         // Hold the admission a positional provider call owns while in flight.
-        let admitted = entry.read().await;
+        let admitted = entry.gate.read().await;
         let mut bytes = [0; 4];
         let count = tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -702,7 +706,7 @@ mod tests {
         let (fs, session) = fixture(1).await;
         let id = session.open("/file", "w+", 0o600).await.unwrap();
         let entry = session.entry(id).await.unwrap();
-        let in_flight = entry.write().await;
+        let in_flight = entry.gate.write().await;
         let closing = session.clone();
         let task = tokio::spawn(async move { closing.close().await });
         tokio::time::timeout(std::time::Duration::from_secs(1), async {

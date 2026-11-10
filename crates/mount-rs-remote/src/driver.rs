@@ -5,6 +5,7 @@
 use super::MAX_IO;
 use super::RemoteSession;
 use async_trait::async_trait;
+use mount_rs_core::drain_gate::{DrainExclusive, DrainGate, DrainShared};
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, OpenFlags,
     Result, Stats, StatsFs,
@@ -12,7 +13,6 @@ use mount_rs_core::{
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
-use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct RemoteFs {
@@ -119,30 +119,41 @@ fn empty(session: &RemoteSession, bytes: Vec<u8>) -> Result<()> {
         Err(session.protocol_error())
     }
 }
-#[derive(Clone, Copy, PartialEq)]
-enum HandleState {
-    Open,
-    Closing,
-    Closed,
-}
+const OPEN: u8 = 0;
+const CLOSING: u8 = 1;
+const CLOSED: u8 = 2;
 struct RemoteHandle {
     session: Arc<RemoteSession>,
     id: u64,
-    state: RwLock<HandleState>,
+    /// Positional reads and stats share the gate; cursor moves, mutations
+    /// and close hold it exclusively. Shared entry is an atomic counter.
+    gate: DrainGate,
+    /// Written only while holding `gate` exclusively.
+    state: std::sync::atomic::AtomicU8,
 }
 impl RemoteHandle {
-    async fn admitted(&self) -> Result<tokio::sync::RwLockWriteGuard<'_, HandleState>> {
-        let guard = self.state.write().await;
-        if *guard != HandleState::Open {
+    fn new(session: Arc<RemoteSession>, id: u64) -> Self {
+        Self {
+            session,
+            id,
+            gate: DrainGate::new(),
+            state: std::sync::atomic::AtomicU8::new(OPEN),
+        }
+    }
+    fn check_open(&self) -> Result<()> {
+        if self.state.load(std::sync::atomic::Ordering::Acquire) != OPEN {
             return Err(FsError::new(ErrorCode::Ebadf).with_syscall("remote"));
         }
+        Ok(())
+    }
+    async fn admitted(&self) -> Result<DrainExclusive<'_>> {
+        let guard = self.gate.write().await;
+        self.check_open()?;
         Ok(guard)
     }
-    async fn admitted_read(&self) -> Result<tokio::sync::RwLockReadGuard<'_, HandleState>> {
-        let guard = self.state.read().await;
-        if *guard != HandleState::Open {
-            return Err(FsError::new(ErrorCode::Ebadf).with_syscall("remote"));
-        }
+    async fn admitted_read(&self) -> Result<DrainShared<'_>> {
+        let guard = self.gate.read().await;
+        self.check_open()?;
         Ok(guard)
     }
     async fn mutation(&self, operation: Value) -> Result<()> {
@@ -217,11 +228,12 @@ impl FileHandle for RemoteHandle {
             .await
     }
     async fn close(&self) -> Result<()> {
-        let mut state = self.state.write().await;
-        if *state == HandleState::Closed {
+        use std::sync::atomic::Ordering;
+        let _exclusive = self.gate.write().await;
+        if self.state.load(Ordering::Acquire) == CLOSED {
             return Ok(());
         }
-        *state = HandleState::Closing;
+        self.state.store(CLOSING, Ordering::Release);
         match self
             .session
             .control(&json!({"operation":"close","handle":self.id}))
@@ -231,7 +243,7 @@ impl FileHandle for RemoteHandle {
             Err(error) if error.code == ErrorCode::Ebadf => {}
             Err(error) => return Err(error),
         }
-        *state = HandleState::Closed;
+        self.state.store(CLOSED, Ordering::Release);
         Ok(())
     }
 }
@@ -265,11 +277,7 @@ impl FsDriver for RemoteFs {
             .and_then(Value::as_u64)
             .filter(|id| *id > 0)
             .ok_or_else(|| self.session.protocol_error())?;
-        Ok(Arc::new(RemoteHandle {
-            session: self.session.clone(),
-            id,
-            state: RwLock::new(HandleState::Open),
-        }))
+        Ok(Arc::new(RemoteHandle::new(self.session.clone(), id)))
     }
     async fn stat(&self, path: &str) -> Result<Stats> {
         self.metadata(json!({"action":"stat","path":path})).await
@@ -384,11 +392,7 @@ mod tests {
             .await
             .unwrap();
         let opened = remote.open("/data", "w+", 0o600).await.unwrap();
-        let handle = RemoteHandle {
-            session: remote.session.clone(),
-            id: opened.fd().unwrap(),
-            state: RwLock::new(HandleState::Open),
-        };
+        let handle = RemoteHandle::new(remote.session.clone(), opened.fd().unwrap());
         handle.write(b"data", Some(0)).await.unwrap();
         let admitted = handle.admitted_read().await.unwrap();
         let mut bytes = [0; 4];

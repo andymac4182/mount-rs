@@ -7,6 +7,7 @@ pub mod chunking;
 pub mod delegation;
 #[doc(hidden)]
 pub mod diagnostics;
+pub mod drain_gate;
 pub mod driver;
 pub mod error;
 pub mod handle;

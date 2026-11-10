@@ -1,11 +1,12 @@
 //! Bounded process-local cache for immutable blocks.
 use async_trait::async_trait;
 use mount_rs_core::Result;
+use mount_rs_core::drain_gate::DrainGate;
 use mount_rs_core::storage::{BlockId, BlockStore};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard, Weak};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 /// Byte and entry bounds both apply. Zero for either bound disables caching.
 /// Writes are acknowledged by the backing store before entering the cache;
@@ -17,8 +18,10 @@ use tokio::sync::{Mutex, RwLock};
 /// Concurrent misses for one block share a fill when the result fits the cache.
 /// Cancellation releases fill ownership; failures are retried by waiting callers.
 /// Oversized blocks are not retained and therefore cannot share completed data.
-/// Cache misses can overlap immutable puts and flushes. Puts and flushes
-/// serialize with each other; deletion and clearing exclude all backing I/O
+/// Cache misses can overlap immutable puts and flushes. Puts run
+/// concurrently with each other, as they do against an uncached store; a
+/// flush waits for the puts in flight and holds back new ones, so it covers
+/// every put acknowledged before it. Deletion and clearing exclude all backing I/O
 /// to prevent stale repopulation. Hits do not wait for backing I/O, and they
 /// share the cache index: a hit records its recency in the entry itself, so
 /// concurrent hits never exclude each other. The LRU order is re-linked lazily
@@ -30,8 +33,8 @@ pub struct CachedBlockStore<B: ?Sized> {
     max_bytes: usize,
     max_entries: usize,
     state: Arc<std::sync::RwLock<State>>,
-    io_gate: Arc<RwLock<()>>,
-    write_gate: Arc<Mutex<()>>,
+    io_gate: Arc<DrainGate>,
+    write_gate: Arc<DrainGate>,
 }
 
 impl<B: ?Sized> Clone for CachedBlockStore<B> {
@@ -62,50 +65,72 @@ pub struct BlockCacheStats {
     pub backing_get_nanoseconds: u64,
 }
 
+type Recency = BTreeMap<(u64, u64), BlockId>;
+
 struct Entry {
     bytes: Arc<Vec<u8>>,
     /// Key under which `recency` currently links this entry. Writers only.
-    linked: u64,
-    /// Sequence of the latest use. Hits advance it under the shared lock.
+    linked: (u64, u64),
+    /// Epoch of the latest hit. Written at most once per epoch, so repeated
+    /// hits on a hot block share its cache line without bouncing it.
     used: AtomicU64,
+    /// Hits since this entry was cached; folded into the totals on removal.
+    hits: AtomicU64,
 }
 
 #[derive(Default)]
 struct State {
     fills: BTreeMap<BlockId, Weak<Mutex<()>>>,
     entries: BTreeMap<BlockId, Entry>,
-    /// Eviction order. A key may trail its entry's `used` sequence; eviction
-    /// re-links such entries before choosing a victim, which keeps the order
-    /// exact without making hits write to this map.
-    recency: BTreeMap<u64, BlockId>,
+    /// Eviction order by (epoch of last known use, link sequence). A key may
+    /// trail its entry's `used` epoch; eviction re-links such entries before
+    /// choosing a victim, so hits never write to this map.
+    recency: Recency,
+    /// Advances by two on each insertion, so the odd value a hit records is
+    /// always newer than every link made before it. Hits only read it:
+    /// nothing every hit writes is shared between blocks.
     sequence: AtomicU64,
-    hits: AtomicU64,
     misses: AtomicU64,
     stats: BlockCacheStats,
 }
 impl State {
+    fn retire(&mut self, entry: Entry) -> Arc<Vec<u8>> {
+        self.stats.hits = self
+            .stats
+            .hits
+            .saturating_add(entry.hits.load(Ordering::Relaxed));
+        self.stats.resident_bytes -= entry.bytes.len();
+        self.stats.resident_entries -= 1;
+        entry.bytes
+    }
     fn remove(&mut self, id: &BlockId) -> Option<Arc<Vec<u8>>> {
-        if let Some(entry) = self.entries.remove(id) {
-            self.recency.remove(&entry.linked);
-            self.stats.resident_bytes -= entry.bytes.len();
-            self.stats.resident_entries -= 1;
-            return Some(entry.bytes);
-        }
-        None
+        let entry = self.entries.remove(id)?;
+        self.recency.remove(&entry.linked);
+        Some(self.retire(entry))
     }
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.recency.clear();
-        self.stats.resident_bytes = 0;
-        self.stats.resident_entries = 0;
+    /// Empties the cache, returning what the caller should free once it
+    /// has released the index lock.
+    fn clear(&mut self) -> (Vec<Arc<Vec<u8>>>, Recency) {
+        let payloads = std::mem::take(&mut self.entries)
+            .into_values()
+            .map(|entry| self.retire(entry))
+            .collect();
         *self.sequence.get_mut() = 0;
+        (payloads, std::mem::take(&mut self.recency))
     }
-    fn next_sequence(&self) -> u64 {
-        self.sequence.fetch_add(1, Ordering::Relaxed) + 1
+    fn next_sequence(&mut self) -> u64 {
+        let sequence = self.sequence.get_mut();
+        *sequence += 2;
+        *sequence
     }
     fn stats(&self) -> BlockCacheStats {
+        let resident_hits: u64 = self
+            .entries
+            .values()
+            .map(|entry| entry.hits.load(Ordering::Relaxed))
+            .sum();
         BlockCacheStats {
-            hits: self.hits.load(Ordering::Relaxed),
+            hits: self.stats.hits.saturating_add(resident_hits),
             misses: self.misses.load(Ordering::Relaxed),
             ..self.stats
         }
@@ -113,28 +138,29 @@ impl State {
     /// Shared-lock lookup. Recency is recorded in the entry, not the index.
     fn get(&self, id: &BlockId, count_hit: bool) -> Option<Arc<Vec<u8>>> {
         let entry = self.entries.get(id)?;
-        entry.used.store(self.next_sequence(), Ordering::Relaxed);
+        let epoch = self.sequence.load(Ordering::Relaxed) | 1;
+        if entry.used.load(Ordering::Relaxed) != epoch {
+            entry.used.store(epoch, Ordering::Relaxed);
+        }
         if count_hit {
-            self.hits.fetch_add(1, Ordering::Relaxed);
+            entry.hits.fetch_add(1, Ordering::Relaxed);
         }
         Some(entry.bytes.clone())
     }
-    /// Removes the least recently used entry, first re-linking entries whose
-    /// recorded use is newer than their position in the eviction order.
+    /// Removes the least recently used entry, first re-linking entries that
+    /// were hit in a later epoch than the one they are filed under.
     fn evict_oldest(&mut self) -> Option<Arc<Vec<u8>>> {
         loop {
             let (key, id) = self.recency.pop_first()?;
-            let entry = self.entries.get_mut(&id)?;
-            let used = *entry.used.get_mut();
-            if used != key {
-                entry.linked = used;
-                self.recency.insert(used, id);
+            let used = *self.entries.get_mut(&id)?.used.get_mut();
+            if used > key.0 {
+                let linked = (used, self.next_sequence());
+                self.entries.get_mut(&id)?.linked = linked;
+                self.recency.insert(linked, id);
                 continue;
             }
             let entry = self.entries.remove(&id)?;
-            self.stats.resident_bytes -= entry.bytes.len();
-            self.stats.resident_entries -= 1;
-            return Some(entry.bytes);
+            return Some(self.retire(entry));
         }
     }
     fn insert(
@@ -148,11 +174,11 @@ impl State {
             return vec![bytes];
         }
         // Sequences only order entries, so restarting them needs an empty cache.
+        let mut retired = Vec::new();
         if *self.sequence.get_mut() >= u64::MAX / 2 {
-            self.clear();
+            retired = self.clear().0;
         }
         let sequence = self.next_sequence();
-        let mut retired = Vec::new();
         retired.extend(self.remove(&id));
         while self.stats.resident_entries >= max_entries
             || self.stats.resident_bytes > max_bytes - bytes.len()
@@ -165,13 +191,15 @@ impl State {
         }
         self.stats.resident_bytes += bytes.len();
         self.stats.resident_entries += 1;
-        self.recency.insert(sequence, id.clone());
+        let linked = (sequence, sequence);
+        self.recency.insert(linked, id.clone());
         self.entries.insert(
             id,
             Entry {
                 bytes,
-                linked: sequence,
+                linked,
                 used: AtomicU64::new(sequence),
+                hits: AtomicU64::new(0),
             },
         );
         retired
@@ -189,8 +217,8 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             max_bytes,
             max_entries,
             state: Arc::new(std::sync::RwLock::new(State::default())),
-            io_gate: Arc::new(RwLock::new(())),
-            write_gate: Arc::new(Mutex::new(())),
+            io_gate: Arc::new(DrainGate::new()),
+            write_gate: Arc::new(DrainGate::new()),
         }
     }
     fn prepare_entry(&self, bytes: &[u8]) -> Option<Arc<Vec<u8>>> {
@@ -280,15 +308,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
     /// Drops only cached copies; authoritative backing data is untouched.
     pub async fn clear(&self) {
         let _io = self.io_gate.write().await;
-        let retired = {
-            let mut state = self.write_state();
-            let retired = (
-                std::mem::take(&mut state.entries),
-                std::mem::take(&mut state.recency),
-            );
-            state.clear();
-            retired
-        };
+        let retired = self.write_state().clear();
         // Free potentially large buffers and tree nodes after releasing the
         // state mutex. Keep I/O exclusion until invalidation is complete.
         drop(retired);
@@ -301,7 +321,7 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
     }
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let _io = self.io_gate.read().await;
-        let _write = self.write_gate.lock().await;
+        let _write = self.write_gate.read().await;
         let id = self.backing.put(bytes).await?;
         // The durability-ordering gate protects backing put/flush, not cache
         // allocation or publication. Deletion remains excluded by the I/O gate.
@@ -333,7 +353,7 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
     }
     async fn flush(&self) -> Result<()> {
         let _io = self.io_gate.read().await;
-        let _write = self.write_gate.lock().await;
+        let _write = self.write_gate.write().await;
         self.backing.flush().await
     }
     async fn delete(&self, id: &BlockId) -> Result<()> {
@@ -716,6 +736,51 @@ mod tests {
             resume.notify_one();
             task.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn puts_overlap_each_other_and_flush_waits_for_them() {
+        use std::time::Duration;
+        let stall = Arc::new(AtomicBool::new(true));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let cache = CachedBlockStore::new(
+            StalledIo {
+                inner: MemoryBlockStore::new(),
+                stall: stall.clone(),
+                entered: entered.clone(),
+                resume: resume.clone(),
+            },
+            1024,
+            16,
+        );
+        let mut puts = Vec::new();
+        for bytes in [b"one", b"two"] {
+            let worker = cache.clone();
+            puts.push(tokio::spawn(async move { worker.put(bytes).await }));
+            // Each put reaches the backing store while the other is in flight.
+            tokio::time::timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .expect("puts must not serialize behind each other");
+        }
+        let worker = cache.clone();
+        let flush = tokio::spawn(async move { worker.flush().await });
+        // A flush must cover the puts already in flight, so it waits for them.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), entered.notified())
+                .await
+                .is_err()
+        );
+        resume.notify_one();
+        resume.notify_one();
+        for put in puts {
+            put.await.unwrap().unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("flush runs once the puts finish");
+        resume.notify_one();
+        flush.await.unwrap().unwrap();
     }
 
     #[tokio::test]
