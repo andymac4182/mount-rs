@@ -39,7 +39,8 @@ fn empty_namespace() -> Namespace {
                 stats,
                 data: NodeData::Directory { entries: vec![] },
             },
-        )]),
+        )])
+        .into(),
     }
 }
 

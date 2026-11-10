@@ -591,8 +591,8 @@ impl Disk {
             false
         }
     }
-    /// Both halves of a fill in one step.
-    #[cfg(test)]
+    /// Both halves of a fill in one step. The tests that use it are Unix-only.
+    #[cfg(all(test, unix))]
     fn insert(&mut self, key: String, bytes: &[u8]) {
         let size = (HEADER + bytes.len()) as u64;
         if self.reserve(&key, size) {
