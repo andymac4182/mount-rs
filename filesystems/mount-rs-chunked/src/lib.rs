@@ -753,6 +753,7 @@ impl StateCell {
             seen_locked_reads: guard.needs_locked_reads(),
             seen_atime_overflow: !guard.pending_atime.is_empty(),
             seen_retained: retained_filter(&guard),
+            quiet_swap: false,
             guard,
             cell: self,
         })
@@ -784,6 +785,10 @@ struct StateGuard<'a> {
     seen_locked_reads: bool,
     seen_atime_overflow: bool,
     seen_retained: u64,
+    /// Set by `retain_open_detached` when the namespace about to be swapped
+    /// in settles no open inode's fate, so lock-free opens and closes can
+    /// carry on across the swap.
+    quiet_swap: bool,
 }
 
 impl StateGuard<'_> {
@@ -880,7 +885,7 @@ impl Drop for StateGuard<'_> {
         let locked_reads = self.guard.needs_locked_reads();
         let retained = retained_filter(&self.guard);
         let swapped = !std::ptr::eq(Arc::as_ptr(&self.guard.namespace), self.seen_namespace);
-        if swapped || retained != self.seen_retained {
+        if (swapped && !self.quiet_swap) || retained != self.seen_retained {
             self.begin_handle_transition();
         }
         if locked_reads && !self.seen_locked_reads {
@@ -929,7 +934,39 @@ fn retained_filter(state: &RuntimeState) -> u64 {
         .fold(0, |filter, inode| filter | retained_bit(*inode))
 }
 
+/// How many changed inodes `settles_handle_fate` looks at before it gives
+/// the conservative answer. A batch of ordinary writes stays well below it.
+const HANDLE_FATE_SCAN: usize = 256;
+
+/// Whether replacing `current` with `next` can matter to an open handle:
+/// an inode goes away, or loses its last link. Every other publication
+/// (new files, new contents, new times) leaves each inode a lock-free open
+/// or close has looked at exactly as usable as it was.
+///
+/// `next` is nearly always made from `current`, and then this looks at the
+/// changed inodes only.
+fn settles_handle_fate(current: &Namespace, next: &Namespace) -> bool {
+    let mut left = HANDLE_FATE_SCAN;
+    !current.nodes.differences(&next.nodes, |_, before, after| {
+        left -= 1;
+        left > 0
+            && match (before, after) {
+                (Some(_), None) => false,
+                (Some(before), Some(after)) => before.stats.nlink == 0 || after.stats.nlink > 0,
+                (None, _) => true,
+            }
+    })
+}
+
 fn retain_open_detached(state: &mut StateGuard<'_>, next: &Namespace) {
+    if !settles_handle_fate(&state.namespace, next) {
+        // Nothing an open handle refers to is removed or unlinked: there is
+        // nothing to keep for one, and nothing for an open or a close in
+        // flight to be told about.
+        state.quiet_swap = true;
+        return;
+    }
+    state.quiet_swap = false;
     state.begin_handle_transition();
     let open: Vec<InodeId> = state
         .open_refs
@@ -9695,6 +9732,60 @@ mod tests {
         // through a handle, so no handle was ever opened for writing.
         assert!(!fs.lock_state().unwrap().any_open());
         fs.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn only_publications_that_remove_or_unlink_interrupt_lock_free_opens() {
+        let fs = block_on(ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            MemoryBlockStore::new(),
+            options("quiet-publications"),
+        ))
+        .unwrap();
+        let sequence = || fs.inner.state.handle_seq.load(Ordering::SeqCst);
+        block_on(fs.write_file("/kept", b"one")).unwrap();
+        block_on(fs.write_file("/gone", b"one")).unwrap();
+        let kept = block_on(fs.open("/kept", "r", 0)).unwrap();
+        let gone = block_on(fs.open("/gone", "r", 0)).unwrap();
+
+        // New contents, new files and new directories settle nothing for a
+        // handle, so the sequence opens and closes validate against stays put.
+        let before = sequence();
+        block_on(fs.write_file("/kept", b"two")).unwrap();
+        block_on(fs.write_file("/new", b"new")).unwrap();
+        block_on(fs.mkdir("/dir", MkdirOptions::default())).unwrap();
+        assert_eq!(sequence(), before);
+        let mut bytes = [0; 3];
+        assert_eq!(block_on(kept.read(&mut bytes, Some(0))).unwrap(), 3);
+        assert_eq!(&bytes, b"two");
+
+        // An unlink does: the open handle keeps the file's bytes.
+        block_on(fs.unlink("/gone")).unwrap();
+        let after = sequence();
+        assert!(after > before && after & 1 == 0);
+        assert_eq!(block_on(gone.read(&mut bytes, Some(0))).unwrap(), 3);
+        assert_eq!(&bytes, b"one");
+        block_on(gone.close()).unwrap();
+        block_on(kept.close()).unwrap();
+
+        let (old, mut new) = {
+            let state = fs.lock_state().unwrap();
+            ((*state.namespace).clone(), (*state.namespace).clone())
+        };
+        assert!(!settles_handle_fate(&old, &new));
+        let inode = *new.nodes.keys().last().unwrap();
+        new.nodes.get_mut(&inode).unwrap().stats.nlink = 0;
+        assert!(settles_handle_fate(&old, &new));
+        assert!(!settles_handle_fate(&new, &old));
+        new.nodes.remove(&inode);
+        assert!(settles_handle_fate(&old, &new));
+        // Too many changes to look at: answer as if one of them mattered.
+        let mut busy = old.clone();
+        for extra in 0..HANDLE_FATE_SCAN as u64 {
+            busy.nodes
+                .insert(1_000_000 + extra, old.nodes[&inode].clone());
+        }
+        assert!(settles_handle_fate(&old, &busy));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

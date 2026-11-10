@@ -4,8 +4,8 @@ use mount_rs_core::Result;
 use mount_rs_core::drain_gate::DrainGate;
 use mount_rs_core::storage::{BlockId, BlockStore};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 
 /// Byte and entry bounds both apply. Zero for either bound disables caching.
 /// Writes are acknowledged by the backing store before entering the cache;
@@ -31,7 +31,7 @@ pub struct CachedBlockStore<B: ?Sized> {
     backing: Arc<B>,
     max_bytes: usize,
     max_entries: usize,
-    state: Arc<std::sync::RwLock<State>>,
+    index: Arc<Index>,
     io_gate: Arc<DrainGate>,
     fills: Arc<Fills>,
     front: Arc<Front>,
@@ -44,7 +44,7 @@ impl<B: ?Sized> Clone for CachedBlockStore<B> {
             backing: self.backing.clone(),
             max_bytes: self.max_bytes,
             max_entries: self.max_entries,
-            state: self.state.clone(),
+            index: self.index.clone(),
             io_gate: self.io_gate.clone(),
             fills: self.fills.clone(),
             front: self.front.clone(),
@@ -433,6 +433,65 @@ impl State {
         retired
     }
 }
+/// The index and the entries waiting to be filed in it.
+///
+/// A put never waits for the index. It queues its entry and tries to take
+/// the index; if another thread has it, that thread files the entry before
+/// it leaves (it looks at the queue again after letting go, so an entry
+/// queued at the last moment is not stranded). The operations that need an
+/// answer from the index (a miss, a delete, statistics) do wait for it.
+struct Index {
+    state: std::sync::Mutex<State>,
+    arriving: crossbeam_queue::SegQueue<(BlockId, Arc<Vec<u8>>)>,
+    max_bytes: usize,
+    max_entries: usize,
+}
+
+impl Index {
+    /// Files everything queued. Returns what the caller should free once it
+    /// has released the index.
+    fn file_arrivals(&self, state: &mut State) -> Vec<Arc<Vec<u8>>> {
+        let mut retired = Vec::new();
+        while let Some((id, bytes)) = self.arriving.pop() {
+            retired.extend(state.insert(id, bytes, self.max_bytes, self.max_entries));
+        }
+        retired
+    }
+
+    /// Files queued entries unless another thread holds the index, in which
+    /// case that thread does it.
+    fn settle(&self) {
+        while !self.arriving.is_empty() {
+            let Ok(mut state) = self.state.try_lock() else {
+                return;
+            };
+            let retired = self.file_arrivals(&mut state);
+            drop(state);
+            drop(retired);
+        }
+    }
+
+    fn insert(&self, id: BlockId, bytes: Arc<Vec<u8>>) {
+        self.arriving.push((id, bytes));
+        self.settle();
+    }
+
+    /// Runs `work` on the index with every queued entry filed first. Never
+    /// held across an await: each use is a bounded in-memory update.
+    fn with<R>(&self, work: impl FnOnce(&mut State) -> R) -> R {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let retired = self.file_arrivals(&mut state);
+        let result = work(&mut state);
+        drop(state);
+        drop(retired);
+        self.settle();
+        result
+    }
+}
+
 impl<B: BlockStore> CachedBlockStore<B> {
     pub fn new(backing: B, max_bytes: usize, max_entries: usize) -> Self {
         Self::from_shared(Arc::new(backing), max_bytes, max_entries)
@@ -445,10 +504,15 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             backing,
             max_bytes,
             max_entries,
-            state: Arc::new(std::sync::RwLock::new(State {
-                front: Arc::clone(&front),
-                ..State::default()
-            })),
+            index: Arc::new(Index {
+                state: std::sync::Mutex::new(State {
+                    front: Arc::clone(&front),
+                    ..State::default()
+                }),
+                arriving: crossbeam_queue::SegQueue::new(),
+                max_bytes,
+                max_entries,
+            }),
             front,
             io_gate: Arc::new(DrainGate::new()),
             fills: Arc::new(Fills::new()),
@@ -460,19 +524,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             .then(|| Arc::new(bytes.to_vec()))
     }
     pub async fn stats(&self) -> BlockCacheStats {
-        self.read_state().stats()
-    }
-    // The index lock is never held across an await: every critical section
-    // is a bounded in-memory update, and hits only share it.
-    fn read_state(&self) -> RwLockReadGuard<'_, State> {
-        self.state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-    fn write_state(&self) -> RwLockWriteGuard<'_, State> {
-        self.state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.index.with(|state| state.stats())
     }
     /// Runs `read` on a cached block. A published block is read without
     /// the index lock; the rest, and every miss, go through the index.
@@ -482,14 +534,13 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
         if let Some(result) = self.front.hit(id, |bytes| (read.take().unwrap())(bytes)) {
             return Some(result);
         }
-        let cached = {
-            let state = self.read_state();
+        let cached = self.index.with(|state| {
             let cached = state.get(id, true);
             if cached.is_none() {
                 state.misses.fetch_add(1, Ordering::Relaxed);
             }
             cached
-        };
+        });
         cached.map(|bytes| (read.take().unwrap())(&bytes))
     }
     /// Miss path: fetch from the backing store, sharing one fill per block.
@@ -507,7 +558,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             None => None,
         };
         // Another miss or put may have populated this entry while we waited.
-        let cached = self.read_state().get(id, false);
+        let cached = self.index.with(|state| state.get(id, false));
         if let Some(bytes) = cached {
             return Ok(bytes.as_ref().clone());
         }
@@ -518,32 +569,27 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             .as_ref()
             .ok()
             .and_then(|bytes| self.prepare_entry(bytes));
-        let mut state = self.write_state();
-        state.stats.backing_gets_completed = state.stats.backing_gets_completed.saturating_add(1);
-        state.stats.backing_get_nanoseconds =
-            state.stats.backing_get_nanoseconds.saturating_add(elapsed);
-        let bytes = match result {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                state.stats.backing_gets_failed = state.stats.backing_gets_failed.saturating_add(1);
-                return Err(error);
+        let read = result.as_ref().map(|bytes| bytes.len() as u64).ok();
+        let retired = self.index.with(|state| {
+            let stats = &mut state.stats;
+            stats.backing_gets_completed = stats.backing_gets_completed.saturating_add(1);
+            stats.backing_get_nanoseconds = stats.backing_get_nanoseconds.saturating_add(elapsed);
+            match read {
+                Some(read) => {
+                    stats.backing_read_bytes = stats.backing_read_bytes.saturating_add(read);
+                }
+                None => stats.backing_gets_failed = stats.backing_gets_failed.saturating_add(1),
             }
-        };
-        state.stats.backing_read_bytes = state
-            .stats
-            .backing_read_bytes
-            .saturating_add(bytes.len() as u64);
-        let retired =
-            cached.map(|cached| state.insert(id.clone(), cached, self.max_bytes, self.max_entries));
-        drop(state);
+            cached.map(|cached| state.insert(id.clone(), cached, self.max_bytes, self.max_entries))
+        });
         // Evicted payload destruction must not serialize unrelated hits.
         drop(retired);
-        Ok(bytes)
+        result
     }
     /// Drops only cached copies; authoritative backing data is untouched.
     pub async fn clear(&self) {
         let _io = self.io_gate.write().await;
-        let retired = self.write_state().clear();
+        let retired = self.index.with(State::clear);
         // Free potentially large buffers and tree nodes after releasing the
         // state mutex. Keep I/O exclusion until invalidation is complete.
         drop(retired);
@@ -563,10 +609,9 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
         drop(_write);
         // Allocate/copy before taking the shared cache-state lock.
         if let Some(cached) = self.prepare_entry(bytes) {
-            let retired =
-                self.write_state()
-                    .insert(id.clone(), cached, self.max_bytes, self.max_entries);
-            drop(retired);
+            // Never waits: if another thread is in the index, it files this
+            // entry on its way out.
+            self.index.insert(id.clone(), cached);
         }
         Ok(id)
     }
@@ -597,7 +642,7 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
         let _io = self.io_gate.write().await;
         // No miss/put can repopulate while this operation owns the I/O gate.
         // Evict before awaiting, including for cancellation/unknown outcomes.
-        let retired = self.write_state().remove(id);
+        let retired = self.index.with(|state| state.remove(id));
         drop(retired);
         self.backing.delete(id).await
     }
@@ -663,7 +708,9 @@ mod tests {
         assert_eq!(cache.stats().await.hits, 2);
 
         // Eviction and deletion retract a block before its payload is freed.
-        let payload = Arc::downgrade(&cache.read_state().entries[&second].hot.bytes);
+        let payload = cache
+            .index
+            .with(|state| Arc::downgrade(&state.entries[&second].hot.bytes));
         let third = cache.put(b"third").await.unwrap();
         assert!(cache.front.hit(&first, <[u8]>::len).is_none());
         assert_eq!(cache.front.hit(&third, <[u8]>::len), Some(5));

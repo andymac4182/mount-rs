@@ -4,6 +4,7 @@ use super::*;
 use mount_rs_core::OpenFlags;
 use serde::Deserialize;
 const MAX_IO: usize = 65536;
+const WRITE_FILE_HEADER: &str = "x-mount-write-file";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Flags {
@@ -274,6 +275,33 @@ fn number(headers: &http::HeaderMap, name: &str) -> Result<Option<u64>> {
     }
     value.parse().map(Some).map_err(|_| invalid())
 }
+/// The target of a whole-file write: the path, percent-encoded so that any
+/// path fits in a header value.
+fn write_file_path(headers: &http::HeaderMap) -> Result<Option<String>> {
+    let mut values = headers.get_all(WRITE_FILE_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(invalid());
+    }
+    let encoded = value.as_bytes();
+    let mut path = Vec::with_capacity(encoded.len());
+    let mut index = 0;
+    while index < encoded.len() {
+        let byte = encoded[index];
+        if byte == b'%' {
+            let digits = encoded.get(index + 1..index + 3).ok_or_else(invalid)?;
+            let digits = std::str::from_utf8(digits).map_err(|_| invalid())?;
+            path.push(u8::from_str_radix(digits, 16).map_err(|_| invalid())?);
+            index += 3;
+        } else {
+            path.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(path).map(Some).map_err(|_| invalid())
+}
 async fn body(mut body: HttpBody, limit: usize) -> Result<Vec<u8>> {
     tokio::time::timeout(Duration::from_secs(5), async move {
         let mut bytes = Vec::new();
@@ -352,6 +380,28 @@ async fn execute(
     }
     let token = token(request.headers())?;
     let session = registry.lookup(principal, &token)?;
+    if request.method() == Method::PUT
+        && let Some(path) = write_file_path(request.headers())?
+    {
+        // A whole-file write: one request that reaches the driver's own
+        // `write_file`, instead of an open, a write and a close that each
+        // publish on their own.
+        if request.headers().contains_key("x-mount-handle")
+            || request.headers().contains_key("x-mount-position")
+        {
+            return Err(invalid());
+        }
+        valid_path(&path)?;
+        let bytes = body(request.into_body(), MAX_IO.min(max_request_bytes)).await?;
+        let started = timings.map(|_| tokio::time::Instant::now());
+        session
+            .with_driver(|driver| async move { driver.write_file(&path, &bytes).await })
+            .await?;
+        if let Some((counters, start)) = timings.zip(started) {
+            counters.write.record(start);
+        }
+        return Ok(response(StatusCode::NO_CONTENT, Bytes::new()));
+    }
     if request.method() == Method::PUT {
         let handle = number(request.headers(), "x-mount-handle")?.ok_or_else(invalid)?;
         let position = number(request.headers(), "x-mount-position")?;
@@ -404,7 +454,7 @@ async fn execute(
     let measurement = counter.map(|counter| (counter, tokio::time::Instant::now()));
     let result = match operation {
         Operation::Capabilities => session.with_driver(|driver| async move {
-            json(serde_json::json!({"capabilities":driver.capabilities(), "utimens":driver.has_utimens(), "max_io_bytes":MAX_IO.min(max_request_bytes),"positional_read_headers":true}))
+            json(serde_json::json!({"capabilities":driver.capabilities(), "utimens":driver.has_utimens(), "max_io_bytes":MAX_IO.min(max_request_bytes),"positional_read_headers":true,"write_file":true}))
         }).await,
         Operation::Path { request } => session.with_driver(|driver| request.execute(driver)).await,
         Operation::Open { path, flags, mode } => {

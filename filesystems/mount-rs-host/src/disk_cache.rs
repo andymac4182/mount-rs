@@ -135,6 +135,9 @@ struct Disk {
     /// mutex. It counts against both bounds until the fill commits or fails.
     reserved_bytes: u64,
     reserved_entries: usize,
+    /// Evicted entries whose files are still to be removed. Whoever evicted
+    /// them removes the files after it lets go of the mutex (`with_disk`).
+    evicted: Vec<String>,
     index: Arc<ReadIndex>,
     stats: DiskCacheStats,
 }
@@ -155,13 +158,14 @@ fn regular_options() -> OpenOptions {
     }
     options
 }
-fn with_disk<T>(disk: &Mutex<Disk>, operation: impl FnOnce(&mut Disk) -> T) -> Result<T> {
+fn with_disk<T>(disk_ref: &Mutex<Disk>, operation: impl FnOnce(&mut Disk) -> T) -> Result<T> {
     let waiting = std::time::Instant::now();
-    let mut disk = disk
+    let mut disk = disk_ref
         .lock()
         .map_err(|_| error("disk cache mutex poisoned"))?;
     let acquired = std::time::Instant::now();
     let result = operation(&mut disk);
+    let evicted = std::mem::take(&mut disk.evicted);
     let nanos =
         |duration: std::time::Duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
     let wait = nanos(acquired.duration_since(waiting));
@@ -172,7 +176,35 @@ fn with_disk<T>(disk: &Mutex<Disk>, operation: impl FnOnce(&mut Disk) -> T) -> R
     stats.lock_wait_max_nanoseconds = stats.lock_wait_max_nanoseconds.max(wait);
     stats.lock_hold_nanoseconds = stats.lock_hold_nanoseconds.saturating_add(hold);
     stats.lock_hold_max_nanoseconds = stats.lock_hold_max_nanoseconds.max(hold);
+    if evicted.is_empty() {
+        return Ok(result);
+    }
+    let root = disk.root.clone();
+    drop(disk);
+    if unlink(&root, &evicted).is_err() {
+        self::disable(disk_ref)?;
+    }
     Ok(result)
+}
+/// Removes the files of evicted entries. Needs no lock: the index stopped
+/// naming them when they were evicted, so nothing opens them, and a fill
+/// that brings one of them back at this moment only loses its file, which
+/// the first read reports and `read_failed` drops as an ordinary miss.
+fn unlink(root: &Path, keys: &[String]) -> std::io::Result<()> {
+    for key in keys {
+        match fs::remove_file(root.join(key)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+fn disable(disk: &Mutex<Disk>) -> Result<()> {
+    disk.lock()
+        .map_err(|_| error("disk cache mutex poisoned"))?
+        .disable();
+    Ok(())
 }
 // Own the opened file while reading, independent of index eviction/unlink.
 fn read_file(mut file: File, key: &str) -> std::io::Result<Vec<u8>> {
@@ -257,6 +289,7 @@ impl Disk {
             recency: BTreeMap::new(),
             reserved_bytes: 0,
             reserved_entries: 0,
+            evicted: Vec::new(),
             index: Arc::default(),
             stats: DiskCacheStats::default(),
         };
@@ -290,7 +323,9 @@ impl Disk {
                 fs::remove_file(item.path()).map_err(error)?;
                 continue;
             }
-            if disk.make_room(size).map_err(error)? {
+            let fits = disk.make_room(size);
+            unlink(&disk.root, &std::mem::take(&mut disk.evicted)).map_err(error)?;
+            if fits {
                 disk.record(name, size);
             }
         }
@@ -323,13 +358,15 @@ impl Disk {
     }
     /// Evicts until an entry of `size` bytes fits. `false` means it cannot:
     /// what is left of the budget is reserved by fills still being written.
-    fn make_room(&mut self, size: u64) -> std::io::Result<bool> {
+    /// Eviction here is the index update alone; the files go once the mutex
+    /// is released, so a directory operation never holds up another fill.
+    fn make_room(&mut self, size: u64) -> bool {
         let cutoff = self.index.sequence.load(Ordering::Relaxed);
         while self.entries.len() + self.reserved_entries >= self.max_entries
             || self.stats.resident_bytes + self.reserved_bytes > self.max_bytes - size
         {
             let Some((_, key)) = self.recency.first_key_value() else {
-                return Ok(false);
+                return false;
             };
             let key = key.clone();
             // Hits publish recency without a writer. Repair stale recency order
@@ -342,10 +379,11 @@ impl Disk {
                 self.recency.insert(touched, key);
                 continue;
             }
-            self.remove(&key)?;
+            self.forget(&key);
+            self.evicted.push(key);
             self.stats.evictions += 1;
         }
-        Ok(true)
+        true
     }
     fn disable(&mut self) {
         self.stats.io_failures += 1;
@@ -382,28 +420,16 @@ impl Disk {
             self.stats.admission_rejections += 1;
             return false;
         }
-        // Every file in the directory is indexed (see `open`), so only an
-        // indexed key has a file to remove; an unlink that finds nothing is
-        // still a directory operation, and this is the serialized section.
-        let replaced = if self.entries.contains_key(key) {
-            self.remove(key)
+        // A resident copy of this block stops being served, and its file
+        // stays where it is: the fill renames an identical file over it.
+        self.forget(key);
+        if self.make_room(size) {
+            self.reserved_bytes += size;
+            self.reserved_entries += 1;
+            true
         } else {
-            Ok(())
-        };
-        match replaced.and_then(|()| self.make_room(size)) {
-            Ok(true) => {
-                self.reserved_bytes += size;
-                self.reserved_entries += 1;
-                true
-            }
-            Ok(false) => {
-                self.stats.admission_rejections += 1;
-                false
-            }
-            Err(_) => {
-                self.disable();
-                false
-            }
+            self.stats.admission_rejections += 1;
+            false
         }
     }
     /// Both halves of a fill in one step.
@@ -411,7 +437,11 @@ impl Disk {
     fn insert(&mut self, key: String, bytes: &[u8]) {
         let size = (HEADER + bytes.len()) as u64;
         if self.reserve(&key, size) {
-            let written = write_entry(&self.root.clone(), &key, bytes);
+            let root = self.root.clone();
+            if unlink(&root, &std::mem::take(&mut self.evicted)).is_err() {
+                self.disable();
+            }
+            let written = write_entry(&root, &key, bytes);
             self.commit(key, size, written);
         }
     }
@@ -1140,6 +1170,55 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "release-mode disk cache fill diagnostic"]
+    async fn profile_concurrent_evicting_fills() {
+        let root = tempfile::tempdir().unwrap();
+        let backing = Arc::new(Backing::default());
+        // Room for 64 of the 4000 blocks, so nearly every fill evicts.
+        let cache = DiskCachedBlockStore::open(backing, root.path(), "fills", 1 << 30, 64)
+            .await
+            .unwrap();
+        let mut tasks = tokio::task::JoinSet::new();
+        for client in 0..16_u32 {
+            let cache = cache.clone();
+            tasks.spawn(async move {
+                let mut durations = Vec::with_capacity(250);
+                for block in 0..250_u32 {
+                    let mut bytes = vec![0; 4096];
+                    bytes[..4].copy_from_slice(&client.to_le_bytes());
+                    bytes[4..8].copy_from_slice(&block.to_le_bytes());
+                    let now = std::time::Instant::now();
+                    cache.put(&bytes).await.unwrap();
+                    durations.push(now.elapsed());
+                }
+                durations
+            });
+        }
+        let mut durations = Vec::new();
+        while let Some(result) = tasks.join_next().await {
+            durations.extend(result.unwrap());
+        }
+        durations.sort_unstable();
+        let stats = cache.stats().await.unwrap();
+        let percentile = |numerator: usize| {
+            durations[(durations.len() * numerator).div_ceil(10000) - 1].as_secs_f64() * 1000.
+        };
+        println!(
+            "fills={} evictions={} sections={} wait_total_ms={:.2} wait_max_us={:.1} hold_mean_us={:.2} hold_max_us={:.1} p50_ms={:.3} p99_ms={:.3} p99_9_ms={:.3}",
+            durations.len(),
+            stats.evictions,
+            stats.lock_sections,
+            stats.lock_wait_nanoseconds as f64 / 1e6,
+            stats.lock_wait_max_nanoseconds as f64 / 1e3,
+            stats.lock_hold_nanoseconds as f64 / stats.lock_sections as f64 / 1e3,
+            stats.lock_hold_max_nanoseconds as f64 / 1e3,
+            percentile(5000),
+            percentile(9900),
+            percentile(9990),
+        );
+    }
+
     #[test]
     fn opened_reads_survive_eviction_without_resurrecting_or_removing_replacements() {
         let root = tempfile::tempdir().unwrap();
@@ -1428,6 +1507,9 @@ mod tests {
         // The committed entry can be evicted; the reserved one cannot.
         assert!(disk.reserve(&third, size));
         assert_eq!(disk.stats.evictions, 1);
+        // The file goes once the mutex is released, which is `with_disk`'s job.
+        assert!(root.join(&first).exists());
+        unlink(&root, &std::mem::take(&mut disk.evicted)).unwrap();
         assert!(!root.join(&first).exists());
         disk.commit(
             second.clone(),

@@ -273,6 +273,12 @@ fn require_local_concurrent_backing(
 #[derive(Clone)]
 struct Database {
     connection: Arc<Mutex<Connection>>,
+    /// Set for the metadata database: its namespace can have change rows on
+    /// top of the stored document (see `changes`).
+    namespace_changes: bool,
+    /// The namespace last stored or loaded here. Used only with the
+    /// connection locked.
+    published: Arc<super::changes::Slot>,
     // Kept alive after the connection field drops, so trace callback contexts
     // remain valid throughout connection closure. Never installed by default.
     _io_diagnostics: Option<Arc<super::io_diagnostics::Counts>>,
@@ -505,6 +511,8 @@ impl Database {
         let diagnostics = super::io_diagnostics::register(&connection)?;
         Ok(Self {
             connection,
+            namespace_changes: schema == METADATA_SCHEMA,
+            published: Arc::new(super::changes::Slot::new()),
             _io_diagnostics: diagnostics,
             durable,
             #[cfg(unix)]
@@ -597,7 +605,25 @@ impl Database {
         Ok(())
     }
 
+    /// The connection, with the namespace in its plain single-document
+    /// form: change rows are folded into the document first. Everything
+    /// that reads or replaces the namespace column relies on that, and may
+    /// change the namespace, so the copy kept for comparison is dropped.
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        let connection = self.lock_unfolded()?;
+        if self.namespace_changes {
+            self.published.take();
+            fold_namespace_changes(&connection)?;
+        }
+        Ok(connection)
+    }
+
+    /// The connection as it is. For the operations that understand change
+    /// rows (`publish`, `load`, `load_if_changed`) and the ones that never
+    /// look at the namespace or its revision (renewing and releasing the
+    /// writer lease, `flush`). Acquiring the lease folds: a new writer then
+    /// starts from a store without rows, and only the lease holder adds any.
+    fn lock_unfolded(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection
             .lock()
             .map_err(|_| backend_error("SQLite storage lock poisoned"))
@@ -630,7 +656,7 @@ impl Database {
     fn flush(&self) -> Result<()> {
         // Every modifying statement is an autocommit transaction with FULL
         // synchronous durability. There are no deferred writes to flush.
-        let connection = self.lock()?;
+        let connection = self.lock_unfolded()?;
         if !connection.is_autocommit() {
             return Err(backend_error(
                 "SQLite storage has an unfinished transaction",
@@ -645,7 +671,181 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_metadata (
  revision INTEGER NOT NULL CHECK(revision>=0), namespace TEXT,
  owner TEXT, fence INTEGER NOT NULL CHECK(fence>=0), expires INTEGER NOT NULL);
  INSERT OR IGNORE INTO mount_rs_metadata
- (id, revision, namespace, owner, fence, expires) VALUES(1,0,NULL,NULL,0,0);";
+ (id, revision, namespace, owner, fence, expires) VALUES(1,0,NULL,NULL,0,0);
+ CREATE TABLE IF NOT EXISTS mount_rs_namespace_changes (
+ revision INTEGER PRIMARY KEY NOT NULL CHECK(revision>0), changes TEXT NOT NULL);
+ CREATE TRIGGER IF NOT EXISTS mount_rs_namespace_change_recorded
+ AFTER INSERT ON mount_rs_namespace_changes BEGIN
+  UPDATE mount_rs_schema_versions SET schema_version=schema_version+3
+   WHERE schema_name='mount-rs-versioning' AND schema_version<=2;
+ END;
+ CREATE TRIGGER IF NOT EXISTS mount_rs_namespace_changes_unfolded
+ BEFORE UPDATE OF namespace ON mount_rs_metadata
+ WHEN EXISTS(SELECT 1 FROM mount_rs_namespace_changes) BEGIN
+  SELECT RAISE(ABORT,'namespace changes are not folded');
+ END;";
+// A change row is a whole publication: it carries the revision it makes
+// current, and the metadata row keeps the revision of the document. (Moving
+// the revision there too would rewrite that row, document and all.) The
+// current revision is therefore the last row's, or the metadata row's when
+// there are no rows; `CURRENT_REVISION` is that as an expression.
+//
+// A store with change rows cannot be read through the namespace column
+// alone, which is all a build from before them knows to do. While any row
+// exists the versioning schema version is raised past what such a build
+// accepts (by the first trigger above), so it refuses the database instead
+// of reading a namespace that is behind its revision. Folding the rows away
+// lowers the version again, and a database at rest in the folded form opens
+// in older builds as before. The second trigger stops anything that has not
+// folded first from replacing the document underneath the rows.
+const CURRENT_REVISION: &str =
+    "coalesce((SELECT max(revision) FROM mount_rs_namespace_changes), revision)";
+const CLEAR_NAMESPACE_CHANGES: &str = "DELETE FROM mount_rs_namespace_changes;
+ UPDATE mount_rs_schema_versions SET schema_version=schema_version-3
+  WHERE schema_name='mount-rs-versioning' AND schema_version>2;";
+
+/// The namespace as stored: the document and the change rows on top of it.
+struct StoredNamespace {
+    revision: u64,
+    mode: Option<String>,
+    document: Option<String>,
+    changes: Vec<String>,
+}
+
+impl StoredNamespace {
+    /// Reads the stored namespace. `known` skips the document when the
+    /// revision still equals it, as `load_if_changed` wants; the caller must
+    /// provide a consistent view (a transaction or a savepoint).
+    fn read(connection: &Connection, known: Option<i64>) -> Result<Self> {
+        // One statement observes a coherent revision/payload pair. SQLite's
+        // lazy CASE skips the namespace column on an exact integer match,
+        // avoiding both materializing the JSON and reading its overflow pages.
+        let (base, revision, document, mode): (u64, u64, Option<String>, Option<String>) =
+            connection
+                .prepare_cached(&format!(
+                    "SELECT revision, {CURRENT_REVISION}, CASE
+                         WHEN typeof(revision)='integer' AND {CURRENT_REVISION}>0
+                              AND {CURRENT_REVISION}=?1
+                         THEN NULL ELSE namespace END, write_mode
+                     FROM mount_rs_metadata WHERE id=1"
+                ))
+                .and_then(|mut statement| {
+                    statement.query_row(params![known], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })
+                })
+                .map_err(backend_error)?;
+        let mut stored = Self {
+            revision,
+            mode,
+            document,
+            changes: Vec::new(),
+        };
+        if known.is_some_and(|known| revision != 0 && u64::try_from(known) == Ok(revision)) {
+            return Ok(stored);
+        }
+        let mut statement = connection
+            .prepare_cached(
+                "SELECT revision, changes FROM mount_rs_namespace_changes ORDER BY revision",
+            )
+            .map_err(backend_error)?;
+        let mut rows = statement.query([]).map_err(backend_error)?;
+        // Each row is one publication, so the rows count up from the
+        // document's revision without a gap.
+        let mut last = base;
+        while let Some(row) = rows.next().map_err(backend_error)? {
+            let at: u64 = row.get(0).map_err(backend_error)?;
+            if last.checked_add(1) != Some(at) {
+                return Err(incompatible_schema(
+                    "namespace change rows do not follow the stored namespace",
+                ));
+            }
+            last = at;
+            stored.changes.push(row.get(1).map_err(backend_error)?);
+        }
+        if !stored.changes.is_empty() && (stored.mode.is_some() || stored.document.is_none()) {
+            return Err(incompatible_schema(
+                "namespace change rows do not belong to the stored namespace",
+            ));
+        }
+        Ok(stored)
+    }
+
+    fn bytes(&self) -> usize {
+        self.document.as_ref().map_or(0, String::len)
+    }
+
+    fn decode(&self) -> Result<Option<Namespace>> {
+        let Some(document) = &self.document else {
+            return Ok(None);
+        };
+        let mut namespace: Namespace = serde_json::from_str(document).map_err(backend_error)?;
+        for record in &self.changes {
+            super::changes::apply(&mut namespace, record)?;
+        }
+        Ok(Some(namespace))
+    }
+
+    /// What the next plain publication can be compared with.
+    fn published(&self, namespace: &Namespace) -> Option<super::changes::Published> {
+        self.mode.is_none().then(|| super::changes::Published {
+            revision: self.revision,
+            namespace: namespace.clone(),
+            base_bytes: self.bytes(),
+            pending_bytes: self.changes.iter().map(String::len).sum(),
+            pending_rows: self.changes.len(),
+        })
+    }
+}
+
+/// Runs `work` in a savepoint, which nests inside a transaction and is one
+/// on its own outside.
+fn in_savepoint<T>(connection: &Connection, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    connection
+        .execute_batch("SAVEPOINT mount_rs_namespace")
+        .map_err(backend_error)?;
+    let result = work();
+    let finish = if result.is_ok() {
+        "RELEASE mount_rs_namespace"
+    } else {
+        "ROLLBACK TO mount_rs_namespace; RELEASE mount_rs_namespace"
+    };
+    let finished = connection.execute_batch(finish).map_err(backend_error);
+    result.and_then(|value| finished.map(|()| value))
+}
+
+/// Puts the namespace back into its single-document form if it has change
+/// rows. A row-less store, which is every store that only ever published
+/// whole documents, costs one indexed existence check.
+fn fold_namespace_changes(connection: &Connection) -> Result<()> {
+    let pending: bool = connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM mount_rs_namespace_changes)")
+        .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
+        .map_err(backend_error)?;
+    if !pending {
+        return Ok(());
+    }
+    in_savepoint(connection, || {
+        let stored = StoredNamespace::read(connection, None)?;
+        let namespace = stored.decode()?.ok_or_else(|| {
+            incompatible_schema("namespace change rows without a stored namespace")
+        })?;
+        let document = serde_json::to_string(&namespace).map_err(backend_error)?;
+        connection
+            .execute_batch(CLEAR_NAMESPACE_CHANGES)
+            .map_err(backend_error)?;
+        let changed = connection
+            .execute(
+                "UPDATE mount_rs_metadata SET namespace=?1, revision=?2 WHERE id=1",
+                params![document, stored.revision],
+            )
+            .map_err(backend_error)?;
+        if changed != 1 {
+            return Err(incompatible_schema("the metadata row is missing"));
+        }
+        Ok(())
+    })
+}
 const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_blocks (
  id TEXT PRIMARY KEY NOT NULL, bytes BLOB NOT NULL);
  CREATE TABLE IF NOT EXISTS mount_rs_block_authority (
@@ -1463,11 +1663,62 @@ impl SqliteMetadataStore {
         let volume_id = load_volume_id(&database)?;
         Ok(Self(database, volume_id))
     }
+
+    /// The current namespace, or `None` when its revision is still `known`.
+    /// Reads the document and its change rows in one transaction and keeps a
+    /// copy for the next publication to be compared with.
+    fn load_stored(&self, known: Option<i64>) -> Result<Option<LoadedMetadata>> {
+        let connection = self.0.lock_unfolded()?;
+        let transaction = connection.unchecked_transaction().map_err(backend_error)?;
+        let stored = StoredNamespace::read(&transaction, known)?;
+        drop(transaction);
+        if stored.mode.as_deref() == Some(INODE_WRITE_MODE) {
+            return Err(stale());
+        }
+        if known.is_some_and(|known| {
+            stored.revision != 0 && u64::try_from(known) == Ok(stored.revision)
+        }) {
+            return Ok(None);
+        }
+        if stored.document.is_some() {
+            profile::add(Event::NamespaceReturned, stored.bytes() as u64);
+        }
+        let namespace = stored.decode()?;
+        match namespace
+            .as_ref()
+            .and_then(|namespace| stored.published(namespace))
+        {
+            Some(published) => self.0.published.put(published),
+            None => drop(self.0.published.take()),
+        }
+        Ok(Some(LoadedMetadata {
+            revision: stored.revision,
+            namespace,
+        }))
+    }
 }
 
 /// Immutable blocks, independently configurable from the metadata database.
 #[derive(Clone)]
-pub struct SqliteBlockStore(Database);
+pub struct SqliteBlockStore(Database, Arc<PutGroup>);
+
+/// Puts waiting to share a transaction.
+///
+/// Every put is durable when it returns, which costs a commit, and commits
+/// on one connection run one at a time. A put that finds another in progress
+/// therefore queues its bytes and waits its turn without holding a thread;
+/// whoever gets the turn commits everything queued in one transaction, and
+/// the others find their block already stored when their turn comes.
+#[derive(Default)]
+struct PutGroup {
+    turn: mount_rs_core::turn_gate::TurnGate,
+    waiting: crossbeam_queue::SegQueue<Arc<WaitingPut>>,
+}
+
+struct WaitingPut {
+    bytes: Vec<u8>,
+    stored: std::sync::OnceLock<Result<BlockId>>,
+}
 
 impl SqliteBlockStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -1479,16 +1730,37 @@ impl SqliteBlockStore {
 
     fn from_database(database: Database) -> Result<Self> {
         initialize_block_schema(&database)?;
-        Ok(Self(database))
+        Ok(Self(database, Arc::default()))
     }
 
-    fn put_once(&self, bytes: &[u8]) -> Result<BlockId> {
+    /// One block in its own transaction, retried while SQLite reports that
+    /// another writer kept it from committing.
+    async fn put_alone(&self, bytes: &[u8]) -> Result<BlockId> {
+        let started = Instant::now();
+        for attempt in 0..MAX_SQLITE_BUSY_RETRIES {
+            match self.put_once(&[bytes]) {
+                Ok(mut ids) => return Ok(ids.remove(0)),
+                Err(error) if error.code == ErrorCode::Eagain => {
+                    if attempt + 1 == MAX_SQLITE_BUSY_RETRIES
+                        || started.elapsed() >= SQLITE_BUSY_RETRY_BUDGET
+                    {
+                        return Err(error.with_message(
+                            "SQLite block writer remained busy after bounded retries",
+                        ));
+                    }
+                    // Each put_once releases the SQLite connection lock before
+                    // yielding, so another writer can finish its transaction.
+                    sqlite_busy_backoff(attempt).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("bounded SQLite block retry loop always returns")
+    }
+
+    /// Stores `blocks` in one transaction: all of them, or none.
+    fn put_once(&self, blocks: &[&[u8]]) -> Result<Vec<BlockId>> {
         let mut connection = self.0.lock()?;
-        // Database-generated random identities avoid accidental aliasing when
-        // namespaces use distinct block databases. Collisions fail, never overwrite.
-        let id: String = connection
-            .query_row("SELECT lower(hex(randomblob(32)))", [], |row| row.get(0))
-            .map_err(backend_error)?;
         let was_autocommit = connection.is_autocommit();
         let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
         {
@@ -1500,16 +1772,24 @@ impl SqliteBlockStore {
                 );
             }
         };
-        let inserted = transaction
-            .execute(
-                "INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)",
-                params![id, bytes],
-            )
-            .map_err(backend_error)?;
-        if inserted != 1 {
-            return Err(FsError::new(ErrorCode::Eio)
-                .with_syscall("put block")
-                .with_message("SQLite block insert was not applied"));
+        let mut ids = Vec::with_capacity(blocks.len());
+        for bytes in blocks {
+            // Database-generated random identities avoid accidental aliasing when
+            // namespaces use distinct block databases. Collisions fail, never overwrite.
+            let id: String = transaction
+                .prepare_cached("SELECT lower(hex(randomblob(32)))")
+                .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
+                .map_err(backend_error)?;
+            let inserted = transaction
+                .prepare_cached("INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)")
+                .and_then(|mut statement| statement.execute(params![id, bytes]))
+                .map_err(backend_error)?;
+            if inserted != 1 {
+                return Err(FsError::new(ErrorCode::Eio)
+                    .with_syscall("put block")
+                    .with_message("SQLite block insert was not applied"));
+            }
+            ids.push(BlockId(id));
         }
         if let Err(error) = transaction.commit() {
             return Err(sqlite_busy_known_noncommit(
@@ -1519,7 +1799,7 @@ impl SqliteBlockStore {
             )
             .unwrap_or_else(|| backend_error(error)));
         }
-        Ok(BlockId(id))
+        Ok(ids)
     }
 }
 
@@ -1539,6 +1819,41 @@ fn lease_numbers(lease: &WriterLease) -> Result<(i64, i64)> {
 }
 fn stale() -> FsError {
     FsError::new(ErrorCode::Estale).with_syscall("metadata lease")
+}
+
+/// Why a plain publication's conditional statement changed nothing. The
+/// statement is the successful-path CAS; only this exceptional path needs a
+/// read, to tell a lost lease from a revision conflict.
+fn publish_refusal(
+    connection: &mut Connection,
+    lease: &WriterLease,
+    fence: i64,
+    expires: i64,
+    expected: i64,
+) -> FsError {
+    let mut classify = || -> Result<FsError> {
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(backend_error)?;
+        let (valid, actual_revision): (bool, i64) = tx
+            .query_row(
+                &format!(
+                    "SELECT write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW},
+                            {CURRENT_REVISION}
+                     FROM mount_rs_metadata WHERE id=1"
+                ),
+                params![lease.owner, fence, expires],
+                |row| Ok((row.get::<_, Option<bool>>(0)?.unwrap_or(false), row.get(1)?)),
+            )
+            .map_err(backend_error)?;
+        if valid && actual_revision != expected {
+            return Ok(FsError::new(ErrorCode::Eagain).with_syscall("publish metadata"));
+        }
+        // Either the lease is gone, or the row was still valid and at the
+        // expected revision, and an unexplained zero-row CAS fails closed.
+        Ok(stale())
+    };
+    classify().unwrap_or_else(|error| error)
 }
 
 struct PinRenewalIdentity {
@@ -1965,27 +2280,9 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
-        let connection = self.0.lock()?;
-        let (revision, namespace, mode): (u64, Option<String>, Option<String>) = connection
-            .query_row(
-                "SELECT revision, namespace, write_mode FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(backend_error)?;
-        if mode.as_deref() == Some(INODE_WRITE_MODE) {
-            return Err(stale());
-        }
-        if let Some(json) = &namespace {
-            profile::add(Event::NamespaceReturned, json.len() as u64);
-        }
-        Ok(LoadedMetadata {
-            revision,
-            namespace: namespace
-                .map(|json| serde_json::from_str(&json))
-                .transpose()
-                .map_err(backend_error)?,
-        })
+        Ok(self
+            .load_stored(None)?
+            .expect("a load without a known revision returns the namespace"))
     }
 
     async fn delegation_state(&self) -> Result<Option<DelegationState>> {
@@ -2183,38 +2480,8 @@ impl MetadataStore for SqliteMetadataStore {
     }
 
     async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
-        let connection = self.0.lock()?;
-        // One statement observes a coherent revision/payload pair. SQLite's
-        // lazy CASE skips the namespace column on an exact integer match,
-        // avoiding both materializing the JSON and reading its overflow pages.
         // Out-of-range caller revisions cannot match SQLite's integer domain.
-        let known = i64::try_from(known_revision).ok();
-        let (revision, namespace, mode): (u64, Option<String>, Option<String>) = connection
-            .query_row(
-                "SELECT revision, CASE
-                     WHEN typeof(revision)='integer' AND revision>0 AND revision=?1
-                     THEN NULL ELSE namespace END, write_mode
-                 FROM mount_rs_metadata WHERE id=1",
-                params![known],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(backend_error)?;
-        if mode.as_deref() == Some(INODE_WRITE_MODE) {
-            return Err(stale());
-        }
-        if revision != 0 && revision == known_revision {
-            return Ok(None);
-        }
-        if let Some(json) = &namespace {
-            profile::add(Event::NamespaceReturned, json.len() as u64);
-        }
-        Ok(Some(LoadedMetadata {
-            revision,
-            namespace: namespace
-                .map(|json| serde_json::from_str(&json))
-                .transpose()
-                .map_err(backend_error)?,
-        }))
+        self.load_stored(Some(i64::try_from(known_revision).unwrap_or(-1)))
     }
 
     async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
@@ -2760,7 +3027,7 @@ impl MetadataStore for SqliteMetadataStore {
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
         let ttl = ttl_ms(ttl)?;
         let (fence, expires) = lease_numbers(lease)?;
-        let mut connection = self.0.lock()?;
+        let mut connection = self.0.lock_unfolded()?;
         let sql = format!(
             "UPDATE mount_rs_metadata SET expires={NOW}+?4
             WHERE id=1 AND write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
@@ -2797,7 +3064,7 @@ impl MetadataStore for SqliteMetadataStore {
 
     async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
         let (fence, expires) = lease_numbers(lease)?;
-        let connection = self.0.lock()?;
+        let connection = self.0.lock_unfolded()?;
         let changed = connection
             .execute(
                 &format!(
@@ -2825,52 +3092,135 @@ impl MetadataStore for SqliteMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let (fence, expires) = lease_numbers(lease)?;
-        let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
-        profile::add(Event::NamespaceSerialized, namespace.len() as u64);
-        let mut connection = self.0.lock()?;
-        // The successful publication path is one fenced conditional UPDATE.
-        // SQLite makes a single autocommit statement atomic and durable under
-        // the configured synchronous policy, so avoid opening and committing
-        // a second explicit transaction for the common case. A zero-row
-        // result opens the Immediate transaction only for the locked
-        // stale/revision classification below.
-        let changed = connection
-            .execute(
-                &format!(
+        let mut connection = self.0.lock_unfolded()?;
+        // What this connection stored or loaded at the expected revision, if
+        // it did: the publication is then the difference from it.
+        let prior = self
+            .0
+            .published
+            .take()
+            .filter(|prior| prior.revision == expected_revision);
+        let changes = match &prior {
+            Some(prior) => super::changes::encode(&prior.namespace, &namespace)?
+                .filter(|changes| prior.appends(changes.len())),
+            None => None,
+        };
+        if let (Some(prior), Some(changes)) = (&prior, &changes) {
+            // One fenced conditional INSERT, so a single atomic autocommit
+            // statement like the whole-document publication below. The
+            // covering index answers the fence without touching the row
+            // that holds the document.
+            profile::add(Event::NamespaceSerialized, changes.len() as u64);
+            let changed = connection
+                .prepare_cached(&format!(
+                    "INSERT INTO mount_rs_namespace_changes(revision, changes)
+                     SELECT ?1, ?2 FROM mount_rs_metadata INDEXED BY mount_rs_inode_authority
+                     WHERE id=1 AND write_mode IS NULL AND {CURRENT_REVISION}=?3 AND owner=?4
+                       AND fence=?5 AND expires=?6 AND expires>{NOW}"
+                ))
+                .and_then(|mut statement| {
+                    statement.execute(params![
+                        next,
+                        changes,
+                        expected,
+                        lease.owner,
+                        fence,
+                        expires
+                    ])
+                })
+                .map_err(backend_error)?;
+            if changed != 1 {
+                return Err(publish_refusal(
+                    &mut connection,
+                    lease,
+                    fence,
+                    expires,
+                    expected,
+                ));
+            }
+            self.0.published.put(super::changes::Published {
+                revision: next as u64,
+                namespace,
+                base_bytes: prior.base_bytes,
+                pending_bytes: prior.pending_bytes + changes.len(),
+                pending_rows: prior.pending_rows + 1,
+            });
+            return Ok(next as u64);
+        }
+        let document = serde_json::to_string(&namespace).map_err(backend_error)?;
+        profile::add(Event::NamespaceSerialized, document.len() as u64);
+        // `at` is the revision the metadata row holds, which is the
+        // document's.
+        let publish = |connection: &Connection, at: i64| {
+            connection
+                .prepare_cached(&format!(
                     "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
                      WHERE id=1 AND write_mode IS NULL AND revision=?3 AND owner=?4 AND fence=?5
                        AND expires=?6 AND expires>{NOW}"
-                ),
-                params![next, namespace, expected, lease.owner, fence, expires],
-            )
-            .map_err(backend_error)?;
-        if changed != 1 {
-            // The conditional update is the successful-path CAS. Only the
-            // exceptional path needs a read to preserve the stale-versus-
-            // revision-conflict classification of the former lease preflight.
-            let tx = connection
+                ))
+                .and_then(|mut statement| {
+                    statement.execute(params![next, document, at, lease.owner, fence, expires])
+                })
+                .map_err(backend_error)
+        };
+        let changed = if prior.as_ref().is_some_and(|prior| prior.pending_rows == 0) {
+            // The successful publication path is one fenced conditional UPDATE.
+            // SQLite makes a single autocommit statement atomic and durable under
+            // the configured synchronous policy, so avoid opening and committing
+            // a second explicit transaction for the common case. A zero-row
+            // result opens the Immediate transaction only for the locked
+            // stale/revision classification below.
+            publish(&connection, expected)?
+        } else {
+            // There are change rows, or there may be (this connection has
+            // not seen the stored namespace at this revision). The document
+            // replaces them, in one transaction.
+            let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(backend_error)?;
-            let (valid, actual_revision): (bool, i64) = tx
+            // With rows, the current revision is the last row's and the
+            // metadata row still holds the document's. Compare the first
+            // here, and let the conditional statement match the second once
+            // the rows are gone: nothing else can write in between.
+            let (document_revision, current): (i64, i64) = transaction
                 .query_row(
                     &format!(
-                        "SELECT write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}, revision
-                         FROM mount_rs_metadata WHERE id=1"
+                        "SELECT revision, {CURRENT_REVISION} FROM mount_rs_metadata
+                         INDEXED BY mount_rs_inode_authority WHERE id=1"
                     ),
-                    params![lease.owner, fence, expires],
-                    |row| Ok((row.get::<_, Option<bool>>(0)?.unwrap_or(false), row.get(1)?)),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(backend_error)?;
-            if !valid {
-                return Err(stale());
+            let changed = if current == expected {
+                transaction
+                    .execute_batch(CLEAR_NAMESPACE_CHANGES)
+                    .map_err(backend_error)?;
+                publish(&transaction, document_revision)?
+            } else {
+                0
+            };
+            if changed == 1 {
+                transaction.commit().map_err(backend_error)?;
             }
-            if actual_revision != expected {
-                return Err(FsError::new(ErrorCode::Eagain).with_syscall("publish metadata"));
-            }
-            // The row was still valid and at the expected revision, so an
-            // unexplained zero-row CAS fails closed.
-            return Err(stale());
+            changed
+        };
+        if changed != 1 {
+            return Err(publish_refusal(
+                &mut connection,
+                lease,
+                fence,
+                expires,
+                expected,
+            ));
         }
+        self.0.published.put(super::changes::Published {
+            revision: next as u64,
+            namespace,
+            base_bytes: document.len(),
+            pending_bytes: 0,
+            pending_rows: 0,
+        });
         Ok(next as u64)
     }
 
@@ -3990,26 +4340,55 @@ impl BlockStore for SqliteBlockStore {
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let started = Instant::now();
-        for attempt in 0..MAX_SQLITE_BUSY_RETRIES {
-            match self.put_once(bytes) {
-                Ok(id) => return Ok(id),
-                Err(error) if error.code == ErrorCode::Eagain => {
-                    if attempt + 1 == MAX_SQLITE_BUSY_RETRIES
-                        || started.elapsed() >= SQLITE_BUSY_RETRY_BUDGET
-                    {
-                        return Err(error.with_message(
-                            "SQLite block writer remained busy after bounded retries",
-                        ));
-                    }
-                    // Each put_once releases the SQLite connection lock before
-                    // yielding, so another writer can finish its transaction.
-                    sqlite_busy_backoff(attempt).await;
+        let group = &self.1;
+        // Nothing in progress: there is nothing to share a transaction
+        // with, and no reason to copy the block.
+        if let Some(_turn) = group.turn.try_lock() {
+            return self.put_alone(bytes).await;
+        }
+        let mine = Arc::new(WaitingPut {
+            bytes: bytes.to_vec(),
+            stored: std::sync::OnceLock::new(),
+        });
+        group.waiting.push(Arc::clone(&mine));
+        let _turn = group.turn.lock().await;
+        if let Some(stored) = mine.stored.get() {
+            return stored.clone();
+        }
+        // This put's turn: commit everything queued behind the last one.
+        let mut batch = Vec::new();
+        while let Some(waiting) = group.waiting.pop() {
+            batch.push(waiting);
+        }
+        // A put that gave up while it had the turn leaves the ones it had
+        // taken off the queue unanswered. They store their own block here.
+        if !batch.iter().any(|waiting| Arc::ptr_eq(waiting, &mine)) {
+            batch.push(Arc::clone(&mine));
+        }
+        let blocks: Vec<&[u8]> = batch.iter().map(|waiting| &*waiting.bytes).collect();
+        match self.put_once(&blocks) {
+            Ok(ids) => {
+                for (waiting, id) in batch.iter().zip(ids) {
+                    let _ = waiting.stored.set(Ok(id));
                 }
-                Err(error) => return Err(error),
+            }
+            // Known not to have committed: each block goes on its own, with
+            // the ordinary bounded retries.
+            Err(error) if error.code == ErrorCode::Eagain => {
+                for waiting in &batch {
+                    let _ = waiting.stored.set(self.put_alone(&waiting.bytes).await);
+                }
+            }
+            Err(error) => {
+                for waiting in &batch {
+                    let _ = waiting.stored.set(Err(error.clone()));
+                }
             }
         }
-        unreachable!("bounded SQLite block retry loop always returns")
+        mine.stored
+            .get()
+            .cloned()
+            .expect("this put's block was in the batch")
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -8386,5 +8765,335 @@ mod tests {
         drop(reopened_blocks);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(block_path).unwrap();
+    }
+
+    /// A namespace big enough for a one-inode change to be worth a row.
+    fn wide_namespace(files: u64) -> Namespace {
+        let mut ns = namespace();
+        for inode in ns.root + 1..=ns.root + files {
+            let mut stats = ns.nodes[&ns.root].stats.clone();
+            stats.ino = inode;
+            stats.mode = mount_rs_core::S_IFREG | 0o644;
+            stats.nlink = 1;
+            ns.nodes.insert(
+                inode,
+                NodeMetadata {
+                    stats,
+                    data: NodeData::File(mount_rs_core::storage::FileLayout {
+                        chunker: ns.default_chunker.clone(),
+                        extents: vec![],
+                    }),
+                },
+            );
+        }
+        ns.next_inode = ns.root + files + 1;
+        ns
+    }
+
+    fn change_rows(store: &SqliteMetadataStore) -> i64 {
+        store
+            .0
+            .lock_unfolded()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM mount_rs_namespace_changes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn versioning_schema(store: &SqliteMetadataStore) -> i64 {
+        store
+            .0
+            .lock_unfolded()
+            .unwrap()
+            .query_row(
+                "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
+                params![VERSION_SCHEMA_NAME],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn stored_document(store: &SqliteMetadataStore) -> Namespace {
+        let json: String = store
+            .0
+            .lock_unfolded()
+            .unwrap()
+            .query_row(
+                "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn a_publication_stores_what_changed_and_every_reader_sees_the_whole() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        let lease = run(store.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let first = wide_namespace(64);
+        assert_eq!(run(store.publish(0, &lease, first.clone())).unwrap(), 1);
+        assert_eq!((change_rows(&store), versioning_schema(&store)), (0, 1));
+
+        // Change one inode, remove one, add one, and move a scalar field.
+        let mut second = first.clone();
+        let (touched, removed, added) = (first.root + 3, first.root + 5, first.root + 100);
+        second.nodes.get_mut(&touched).unwrap().stats.size = 77;
+        second.nodes.remove(&removed);
+        second
+            .nodes
+            .insert(added, first.nodes[&(first.root + 1)].clone());
+        second.next_inode = added + 1;
+        assert_eq!(run(store.publish(1, &lease, second.clone())).unwrap(), 2);
+        assert_eq!(change_rows(&store), 1);
+        // The document is the first publication still; the row carries the rest.
+        assert_eq!(stored_document(&store).nodes, first.nodes);
+        // A build that reads the document alone must refuse this database.
+        assert!(versioning_schema(&store) > VERSION_SCHEMA_VERSION);
+
+        let mut third = second.clone();
+        third.nodes.get_mut(&added).unwrap().stats.size = 9;
+        assert_eq!(run(store.publish(2, &lease, third.clone())).unwrap(), 3);
+        assert_eq!(change_rows(&store), 2);
+
+        // This store, another connection and a conditional load all see it.
+        let same = |loaded: LoadedMetadata| {
+            let namespace = loaded.namespace.unwrap();
+            assert_eq!(loaded.revision, 3);
+            assert_eq!(namespace.nodes, third.nodes);
+            assert_eq!(namespace.next_inode, third.next_inode);
+        };
+        same(run(store.load()).unwrap());
+        let reader = SqliteMetadataStore::open(&path).unwrap();
+        // Opening folded the rows away: plain document, old schema version.
+        assert_eq!((change_rows(&reader), versioning_schema(&reader)), (0, 1));
+        assert_eq!(stored_document(&reader).nodes, third.nodes);
+        same(run(reader.load()).unwrap());
+        assert!(run(reader.load_if_changed(3)).unwrap().is_none());
+        same(run(reader.load_if_changed(2)).unwrap().unwrap());
+
+        // The writer carries on from the folded document, in rows again.
+        let mut fourth = third.clone();
+        fourth.nodes.get_mut(&touched).unwrap().stats.size = 78;
+        assert_eq!(run(store.publish(3, &lease, fourth.clone())).unwrap(), 4);
+        assert_eq!(change_rows(&store), 1);
+        // A reader that only loads applies the rows and writes nothing.
+        let loaded = run(reader.load_if_changed(3)).unwrap().unwrap();
+        assert_eq!(loaded.revision, 4);
+        assert_eq!(loaded.namespace.unwrap().nodes, fourth.nodes);
+        assert_eq!(change_rows(&store), 1);
+
+        // Any operation that reads the namespace column folds first.
+        assert!(run(store.version_head()).unwrap().is_none());
+        assert_eq!((change_rows(&store), versioning_schema(&store)), (0, 1));
+        assert_eq!(stored_document(&store).nodes, fourth.nodes);
+        // After which the next publication is a whole document, then rows.
+        assert_eq!(run(store.publish(4, &lease, fourth.clone())).unwrap(), 5);
+        assert_eq!(change_rows(&store), 0);
+        let mut sixth = fourth.clone();
+        sixth.nodes.remove(&touched);
+        assert_eq!(run(store.publish(5, &lease, sixth.clone())).unwrap(), 6);
+        assert_eq!(change_rows(&store), 1);
+        drop(store);
+        drop(reader);
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        let loaded = run(reopened.load()).unwrap();
+        assert_eq!(loaded.revision, 6);
+        assert_eq!(loaded.namespace.unwrap().nodes, sixth.nodes);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn change_rows_keep_the_publication_fences_and_fail_closed() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        let lease = run(store.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let first = wide_namespace(64);
+        run(store.publish(0, &lease, first.clone())).unwrap();
+        let mut second = first.clone();
+        second.nodes.get_mut(&(first.root + 1)).unwrap().stats.size = 1;
+        run(store.publish(1, &lease, second.clone())).unwrap();
+        assert_eq!(change_rows(&store), 1);
+
+        // A wrong revision and a lost lease are told apart as before, and
+        // neither leaves a row behind.
+        let mut third = second.clone();
+        third.nodes.get_mut(&(first.root + 2)).unwrap().stats.size = 2;
+        assert!(
+            run(store.publish(1, &lease, third.clone()))
+                .unwrap_err()
+                .is(ErrorCode::Eagain)
+        );
+        let stale_lease = WriterLease {
+            fence: lease.fence + 1,
+            ..lease.clone()
+        };
+        run(store.load()).unwrap();
+        assert!(
+            run(store.publish(2, &stale_lease, third.clone()))
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        assert_eq!(change_rows(&store), 1);
+        assert_eq!(run(store.load()).unwrap().revision, 2);
+
+        // Nothing may replace the document underneath the rows.
+        let replaced = store.0.lock_unfolded().unwrap().execute(
+            "UPDATE mount_rs_metadata SET revision=3, namespace='{}' WHERE id=1",
+            [],
+        );
+        assert!(replaced.unwrap_err().to_string().contains("not folded"));
+        assert_eq!(run(store.load()).unwrap().revision, 2);
+
+        // A whole-document publication by this writer replaces the rows.
+        let small = namespace();
+        run(store.publish(2, &lease, small.clone())).unwrap();
+        assert_eq!((change_rows(&store), versioning_schema(&store)), (0, 1));
+        assert_eq!(stored_document(&store).nodes, small.nodes);
+
+        // Rows that do not lead to the stored revision are refused, not
+        // applied.
+        run(store.publish(3, &lease, first.clone())).unwrap();
+        run(store.publish(4, &lease, second.clone())).unwrap();
+        assert_eq!(change_rows(&store), 1);
+        store
+            .0
+            .lock_unfolded()
+            .unwrap()
+            .execute(
+                "UPDATE mount_rs_namespace_changes SET revision=revision+4",
+                [],
+            )
+            .unwrap();
+        assert!(run(store.load()).unwrap_err().is(ErrorCode::Enotsup));
+        assert!(
+            run(store.version_head())
+                .unwrap_err()
+                .is(ErrorCode::Enotsup)
+        );
+    }
+
+    #[test]
+    fn change_rows_are_folded_once_they_outgrow_the_document() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        let lease = run(store.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let mut current = wide_namespace(512);
+        run(store.publish(0, &lease, current.clone())).unwrap();
+        let document = serde_json::to_string(&current).unwrap().len();
+        assert!(document > 64 * 1024);
+        let (mut most, mut folds, mut written) = (0, 0, 0_usize);
+        for revision in 1..2000_u64 {
+            let inode = current.root + 1 + revision % 512;
+            current.nodes.get_mut(&inode).unwrap().stats.size = revision;
+            run(store.publish(revision, &lease, current.clone())).unwrap();
+            let rows = change_rows(&store);
+            if rows == 0 {
+                folds += 1;
+                // A fold comes only after about a document of rows.
+                assert!(written + 2048 > document, "folded after {written} bytes");
+                written = 0;
+            } else {
+                written = store
+                    .0
+                    .lock_unfolded()
+                    .unwrap()
+                    .query_row(
+                        "SELECT sum(length(changes)) FROM mount_rs_namespace_changes",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap() as usize;
+                assert!(written <= document);
+            }
+            most = most.max(rows);
+        }
+        assert!(folds >= 1 && most > 64, "folds={folds} most={most}");
+        let loaded = run(store.load()).unwrap();
+        assert_eq!(loaded.revision, 2000);
+        assert_eq!(loaded.namespace.unwrap().nodes, current.nodes);
+
+        // A small volume stays in the plain single-document form.
+        let small = SqliteMetadataStore::in_memory().unwrap();
+        let lease = run(small.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let mut current = wide_namespace(2);
+        for revision in 0..8_u64 {
+            current
+                .nodes
+                .get_mut(&(current.root + 1))
+                .unwrap()
+                .stats
+                .size = revision;
+            run(small.publish(revision, &lease, current.clone())).unwrap();
+            assert_eq!(change_rows(&small), 0);
+            assert_eq!(stored_document(&small).nodes, current.nodes);
+        }
+    }
+
+    #[test]
+    fn concurrent_puts_each_get_their_own_block_even_after_an_abandoned_turn() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteBlockStore::open(&path).unwrap();
+        let (writers, each) = (8_u8, 40_u8);
+        let stored: Vec<(BlockId, Vec<u8>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..writers)
+                .map(|writer| {
+                    let store = store.clone();
+                    scope.spawn(move || {
+                        (0..each)
+                            .map(|block| {
+                                let bytes = vec![writer, block, 7];
+                                // A put that waits its turn is pending meanwhile.
+                                let id = futures_lite::future::block_on(store.put(&bytes));
+                                (id.unwrap(), bytes)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let total = usize::from(writers) * usize::from(each);
+        assert_eq!(stored.len(), total);
+        let ids: BTreeSet<&String> = stored.iter().map(|(id, _)| &id.0).collect();
+        assert_eq!(ids.len(), total);
+        for (id, bytes) in &stored {
+            assert_eq!(&run(store.get(id)).unwrap(), bytes);
+        }
+        assert!(store.1.waiting.is_empty());
+
+        // A put that gives up while it holds the turn leaves the puts it
+        // had taken unanswered; they store their own blocks.
+        let orphan = Arc::new(WaitingPut {
+            bytes: vec![9, 9, 9],
+            stored: std::sync::OnceLock::new(),
+        });
+        let turn = store.1.turn.try_lock().unwrap();
+        let waiter = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                futures_lite::future::block_on(store.put(&[1, 2, 3])).unwrap()
+            })
+        };
+        while store.1.waiting.is_empty() {
+            std::thread::yield_now();
+        }
+        // Take the waiter's entry off the queue, as an abandoned turn would.
+        let taken = store.1.waiting.pop().unwrap();
+        store.1.waiting.push(Arc::clone(&orphan));
+        drop(turn);
+        let id = waiter.join().unwrap();
+        assert_eq!(run(store.get(&id)).unwrap(), [1, 2, 3]);
+        assert_eq!(taken.stored.get().unwrap().as_ref().unwrap(), &id);
+        let other = orphan.stored.get().unwrap().clone().unwrap();
+        assert_eq!(run(store.get(&other)).unwrap(), [9, 9, 9]);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 }

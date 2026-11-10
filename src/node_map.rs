@@ -187,6 +187,59 @@ impl NodeMap {
         Some(unshare(removed))
     }
 
+    /// Calls `visit(inode, before, after)` for every inode that may differ
+    /// between `self` (before) and `newer` (after), in ascending order, and
+    /// stops early when `visit` returns `false`. The return value says
+    /// whether the walk finished.
+    ///
+    /// Subtrees the two maps share are skipped without being looked at, so
+    /// when one map was made from the other the cost follows the number of
+    /// changed inodes and not the size of the volume. An inode that was
+    /// borrowed mutably and left as it was is still reported.
+    pub fn differences(
+        &self,
+        newer: &Self,
+        mut visit: impl FnMut(InodeId, Option<&NodeMetadata>, Option<&NodeMetadata>) -> bool,
+    ) -> bool {
+        // Bring both roots to the same height: a taller map keeps the
+        // shorter one's range under its first child.
+        let empty = Arc::<Branch>::default();
+        let (mut before, mut after) = (&self.root, &newer.root);
+        let (mut before_levels, mut after_levels) = (self.levels, newer.levels);
+        let mut skipped = Vec::new();
+        while before_levels != after_levels {
+            let (tall, levels, is_before) = if before_levels > after_levels {
+                (&mut before, &mut before_levels, true)
+            } else {
+                (&mut after, &mut after_levels, false)
+            };
+            // Everything beside the first child exists on one side only.
+            // Those inodes are larger than any shared one, so they are
+            // visited last; the shallowest level holds the smallest of them.
+            skipped.push((&***tall, *levels, is_before));
+            *tall = match tall.get(0) {
+                Some(Slot::Branch(child)) => child,
+                _ => &empty,
+            };
+            *levels -= 1;
+        }
+        if !Arc::ptr_eq(before, after) && !differ(Some(before), Some(after), 0, &mut visit) {
+            return false;
+        }
+        for (branch, _, is_before) in skipped.into_iter().rev() {
+            let (before, after) = if is_before {
+                (Some(branch), None)
+            } else {
+                (None, Some(branch))
+            };
+            // Index 0 was compared above.
+            if !differ(before, after, 1, &mut visit) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// The largest inode number present.
     pub fn last_key(&self) -> Option<InodeId> {
         let mut branch = &*self.root;
@@ -211,6 +264,52 @@ impl NodeMap {
 
     pub fn values(&self) -> impl Iterator<Item = &NodeMetadata> {
         self.iter().map(|(_, value)| value)
+    }
+}
+
+type Visit<'a> = dyn FnMut(InodeId, Option<&NodeMetadata>, Option<&NodeMetadata>) -> bool + 'a;
+
+/// Compares two branches at the same position, from index `from` up.
+fn differ(
+    before: Option<&Branch>,
+    after: Option<&Branch>,
+    from: u64,
+    visit: &mut Visit<'_>,
+) -> bool {
+    let occupied = |branch: Option<&Branch>| branch.map_or(0, |branch| branch.occupied);
+    let mut indexes = (occupied(before) | occupied(after)) & (u64::MAX << from);
+    while indexes != 0 {
+        let index = u64::from(indexes.trailing_zeros());
+        indexes &= indexes - 1;
+        let finished = match (slot_at(before, index), slot_at(after, index)) {
+            (Some(Slot::Leaf(old)), Some(Slot::Leaf(new))) => {
+                Arc::ptr_eq(old, new) || visit(old.0, Some(&old.1), Some(&new.1))
+            }
+            (Some(Slot::Branch(old)), Some(Slot::Branch(new))) => {
+                Arc::ptr_eq(old, new) || differ(Some(old), Some(new), 0, visit)
+            }
+            // Present on one side only. (A leaf never shares a position with
+            // a branch: the level decides which one a slot holds.)
+            (old, new) => one_sided(old, true, visit) && one_sided(new, false, visit),
+        };
+        if !finished {
+            return false;
+        }
+    }
+    true
+}
+
+fn slot_at(branch: Option<&Branch>, index: u64) -> Option<&Slot> {
+    branch.and_then(|branch| branch.get(index))
+}
+
+fn one_sided(slot: Option<&Slot>, is_before: bool, visit: &mut Visit<'_>) -> bool {
+    match slot {
+        None => true,
+        Some(Slot::Leaf(entry)) if is_before => visit(entry.0, Some(&entry.1), None),
+        Some(Slot::Leaf(entry)) => visit(entry.0, None, Some(&entry.1)),
+        Some(Slot::Branch(branch)) if is_before => differ(Some(branch), None, 0, visit),
+        Some(Slot::Branch(branch)) => differ(None, Some(branch), 0, visit),
     }
 }
 
@@ -477,6 +576,70 @@ mod tests {
         assert!(reader.get_mut(&999_999).is_none());
         assert!(reader.remove(&999_999).is_none());
         assert!(Arc::ptr_eq(&original.root, &reader.root));
+    }
+
+    #[test]
+    fn differences_report_every_change_and_skip_what_is_shared() {
+        let changes = |before: &NodeMap, after: &NodeMap| {
+            let mut seen = Vec::new();
+            assert!(before.differences(after, |inode, old, new| {
+                seen.push((inode, old.map(|n| n.stats.size), new.map(|n| n.stats.size)));
+                true
+            }));
+            seen
+        };
+        let expected = |before: &NodeMap, after: &NodeMap| {
+            let mut all: Vec<InodeId> = before.keys().chain(after.keys()).copied().collect();
+            all.sort_unstable();
+            all.dedup();
+            all.into_iter()
+                .map(|inode| {
+                    let size = |map: &NodeMap| map.get(&inode).map(|n| n.stats.size);
+                    (inode, size(before), size(after))
+                })
+                .filter(|(_, old, new)| old != new)
+                .collect::<Vec<_>>()
+        };
+        // Unrelated maps of different heights, both ways, and an empty one.
+        let small: NodeMap = (0..70).map(|key| (key, node(key))).collect();
+        let large: NodeMap = keys().into_iter().map(|key| (key, node(key ^ 1))).collect();
+        for (before, after) in [
+            (&small, &large),
+            (&large, &small),
+            (&NodeMap::new(), &large),
+            (&large, &NodeMap::new()),
+        ] {
+            assert_eq!(changes(before, after), expected(before, after));
+        }
+        // A map made from another reports exactly what was done to it.
+        let mut edited = large.clone();
+        assert!(changes(&large, &edited).is_empty());
+        edited.get_mut(&4096).unwrap().stats.size = 1;
+        edited.remove(&7);
+        edited.remove(&u64::MAX);
+        edited.insert(1 << 50, node(2));
+        edited.insert(12, node(3));
+        assert_eq!(changes(&large, &edited), expected(&large, &edited));
+        assert_eq!(changes(&edited, &large), expected(&edited, &large));
+        assert_eq!(changes(&large, &edited).len(), 5);
+        // It visits the changed inodes only, however large the map is.
+        let mut visited = 0;
+        assert!(large.differences(&edited, |_, _, _| {
+            visited += 1;
+            true
+        }));
+        assert_eq!(visited, 5);
+        // The walk stops when asked to.
+        let mut visited = 0;
+        assert!(!large.differences(&edited, |_, _, _| {
+            visited += 1;
+            visited < 2
+        }));
+        assert_eq!(visited, 2);
+        // Growing a level leaves the old range shared.
+        let mut grown = small.clone();
+        grown.insert(1 << 30, node(9));
+        assert_eq!(changes(&small, &grown), vec![(1 << 30, None, Some(9))]);
     }
 
     #[test]

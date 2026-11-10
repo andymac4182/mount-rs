@@ -12,6 +12,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 [dependencies]
 async-io = "2.6"
 async-trait = "0.1"
+crossbeam-queue = "0.3"
 mount-rs-core = { path = "../.." }
 mount-rs-persist = { path = "../../filesystems/mount-rs-persist" }
 rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }

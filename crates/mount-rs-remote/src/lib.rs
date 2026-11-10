@@ -43,6 +43,8 @@ fn elapsed_nanoseconds(start: Instant) -> u64 {
 pub struct RemoteSession {
     counters: RemoteCounters,
     header_reads: AtomicBool,
+    /// The owner accepts a whole-file write as one request.
+    whole_file_writes: AtomicBool,
     max_io_bytes: AtomicUsize,
     client: Client,
     lifecycle: Url,
@@ -291,6 +293,7 @@ impl RemoteSession {
             max_io_bytes: AtomicUsize::new(MAX_IO),
             counters: RemoteCounters::default(),
             header_reads: AtomicBool::new(false),
+            whole_file_writes: AtomicBool::new(false),
             client,
             lifecycle,
             handles,
@@ -522,6 +525,35 @@ impl RemoteSession {
             }
         }
     }
+    /// Replaces a file's contents in one request. `Ok(false)` means the
+    /// owner does not offer that, or the bytes do not fit in one request, and
+    /// nothing was sent: the caller writes through a handle instead.
+    pub async fn write_file(&self, path: &str, bytes: &[u8]) -> Result<bool> {
+        if !self.whole_file_writes.load(Ordering::Relaxed) || bytes.len() > self.max_io_bytes() {
+            return Ok(false);
+        }
+        self.admitted()?;
+        // Percent-encode everything a header value or a decoder could trip on.
+        let mut encoded = String::with_capacity(path.len());
+        for byte in path.bytes() {
+            if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+                encoded.push(char::from(byte));
+            } else {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        let request = self
+            .client
+            .put(self.handles.clone())
+            .header("x-mount-session", self.token.clone())
+            .header("x-mount-write-file", encoded)
+            .body(bytes.to_vec());
+        let reply = self.send(request, &[204]).await?;
+        if !reply.is_empty() {
+            return Err(self.protocol_error());
+        }
+        Ok(true)
+    }
     pub(crate) fn max_io_bytes(&self) -> usize {
         self.max_io_bytes.load(Ordering::Relaxed)
     }
@@ -548,6 +580,10 @@ impl RemoteSession {
             .and_then(|v| v.as_bool())
             .ok_or_else(|| self.protocol_error())?;
         self.max_io_bytes.store(max_io_bytes, Ordering::Relaxed);
+        self.whole_file_writes.store(
+            value.get("write_file").and_then(|v| v.as_bool()) == Some(true),
+            Ordering::Relaxed,
+        );
         Ok((capabilities, utimens))
     }
     /// Explicit cleanup remains possible after an uncertain request. No failed

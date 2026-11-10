@@ -282,23 +282,7 @@ pub trait FsDriver: Send + Sync {
     /// must acknowledge only after immutable bytes are durable and the
     /// namespace publication is fenced and durable.
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
-        let handle = self.open(path, "w", 0o666).await?;
-        let operation = async {
-            let mut written = 0;
-            while written < data.len() {
-                let count = handle.write(&data[written..], Some(written as u64)).await?;
-                if count == 0 || count > data.len() - written {
-                    return Err(crate::error::FsError::new(crate::error::ErrorCode::Eio)
-                        .with_syscall("write")
-                        .with_path(path));
-                }
-                written += count;
-            }
-            Ok(())
-        }
-        .await;
-        handle.close().await?;
-        operation
+        write_file_through_handle(self, path, data).await
     }
 
     /// Creates a directory, returning the first created path for recursive
@@ -565,4 +549,31 @@ impl Loopback {
     pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
         self.driver.write_file(&normalize_path(path), data).await
     }
+}
+
+/// Replaces a file's contents by opening, writing and closing it: what
+/// `FsDriver::write_file` does unless a driver has something better. A driver
+/// that overrides `write_file` can still fall back to this.
+pub async fn write_file_through_handle<D: FsDriver + ?Sized>(
+    driver: &D,
+    path: &str,
+    data: &[u8],
+) -> Result<()> {
+    let handle = driver.open(path, "w", 0o666).await?;
+    let operation = async {
+        let mut written = 0;
+        while written < data.len() {
+            let count = handle.write(&data[written..], Some(written as u64)).await?;
+            if count == 0 || count > data.len() - written {
+                return Err(crate::error::FsError::new(crate::error::ErrorCode::Eio)
+                    .with_syscall("write")
+                    .with_path(path));
+            }
+            written += count;
+        }
+        Ok(())
+    }
+    .await;
+    handle.close().await?;
+    operation
 }

@@ -1303,6 +1303,10 @@ async fn get_headers_and_ranges_use_open_inode_after_path_replacement() {
 
 #[tokio::test]
 async fn rejected_range_closes_the_handle_opened_for_representation_metadata() {
+    // Built outside the deadline: in a workspace-wide build feature
+    // unification gives reqwest the native root store, and loading the
+    // system keychain has been measured at 0.4-5.2 s on macOS.
+    let client = reqwest::Client::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         for range in ["bytes=2-3", "not-a-range"] {
             let closed = Arc::new(AtomicUsize::new(0));
@@ -1323,7 +1327,7 @@ async fn rejected_range_closes_the_handle_opened_for_representation_metadata() {
             let server = HttpServer::start(registry, HttpServerOptions::default())
                 .await
                 .unwrap();
-            let response = reqwest::Client::new()
+            let response = client
                 .get(format!("{}/v1/drives/range/fs/file", server.url()))
                 .bearer_auth(MEMORY_TOKEN)
                 .header(RANGE, range)

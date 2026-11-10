@@ -11,7 +11,7 @@ pub use qualification::{
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -544,8 +544,14 @@ const CACHE_FRONT_PROBE: usize = 4;
 /// writers publish each entry and retract it before freeing the payload. An
 /// entry whose probe window is full is not published and is read through
 /// the index.
+///
+/// An insert never waits for the index either. It queues its block and
+/// tries the index once; if another thread is in it, that thread files the
+/// block before it leaves, and looks at the queue again after letting go so
+/// that a block queued at the last moment is not stranded.
 struct ObjectStoreBlockCache {
-    state: RwLock<ObjectStoreBlockCacheState>,
+    state: Mutex<ObjectStoreBlockCacheState>,
+    arriving: crossbeam_queue::SegQueue<(String, Arc<[u8]>)>,
     front: Box<[arc_swap::ArcSwapOption<HotObject>]>,
     /// The index's current sequence, for hits to stamp recency with.
     epoch: AtomicU64,
@@ -554,7 +560,8 @@ struct ObjectStoreBlockCache {
 impl Default for ObjectStoreBlockCache {
     fn default() -> Self {
         Self {
-            state: RwLock::default(),
+            state: Mutex::default(),
+            arriving: crossbeam_queue::SegQueue::new(),
             front: (0..CACHE_FRONT_SLOTS)
                 .map(|_| arc_swap::ArcSwapOption::empty())
                 .collect(),
@@ -632,12 +639,11 @@ impl ObjectStoreBlockCache {
                 return Some(read(&hot.bytes));
             }
         }
-        let bytes = {
-            let state = self.state.read().ok()?;
+        let bytes = self.with(|state| {
             let entry = state.entries.get(id)?;
             entry.hot.touch(epoch);
-            Arc::clone(&entry.hot.bytes)
-        };
+            Some(Arc::clone(&entry.hot.bytes))
+        })??;
         Some(read(&bytes))
     }
 
@@ -649,49 +655,81 @@ impl ObjectStoreBlockCache {
         if bytes.len() > MAX_CACHE_BYTES {
             return;
         }
-        // Copy before locking and free evicted payloads after unlocking.
-        let payload: Arc<[u8]> = Arc::from(bytes);
+        // Copy before the index is involved at all.
+        self.arriving.push((id.to_owned(), Arc::from(bytes)));
+        self.settle();
+    }
+
+    /// Files one block. Returns what the caller frees after unlocking.
+    fn file(
+        &self,
+        state: &mut ObjectStoreBlockCacheState,
+        id: String,
+        payload: Arc<[u8]>,
+    ) -> Vec<Arc<HotObject>> {
         let mut retired = Vec::new();
+        retired.extend(state.take(&id));
+        while state.entries.len() >= MAX_CACHE_ENTRIES
+            || state.bytes.saturating_add(payload.len()) > MAX_CACHE_BYTES
         {
-            let Ok(mut state) = self.state.write() else {
+            let Some(evicted) = self.evict_oldest(state) else {
+                break;
+            };
+            retired.push(evicted);
+        }
+        retired.iter().for_each(|hot| self.retract(hot));
+        let sequence = self.next_sequence(state);
+        let linked = (sequence, sequence);
+        state.bytes = state.bytes.saturating_add(payload.len());
+        state.recency.insert(linked, id.clone());
+        let hot = Arc::new(HotObject {
+            id: id.clone(),
+            bytes: payload,
+            used: AtomicU64::new(sequence),
+        });
+        self.publish(&hot);
+        state.entries.insert(id, CachedObject { hot, linked });
+        retired
+    }
+
+    fn file_arrivals(&self, state: &mut ObjectStoreBlockCacheState) -> Vec<Arc<HotObject>> {
+        let mut retired = Vec::new();
+        while let Some((id, payload)) = self.arriving.pop() {
+            retired.extend(self.file(state, id, payload));
+        }
+        retired
+    }
+
+    /// Files queued blocks unless another thread holds the index, in which
+    /// case that thread does it.
+    fn settle(&self) {
+        while !self.arriving.is_empty() {
+            let Ok(mut state) = self.state.try_lock() else {
                 return;
             };
-            retired.extend(state.take(id));
-            while state.entries.len() >= MAX_CACHE_ENTRIES
-                || state.bytes.saturating_add(payload.len()) > MAX_CACHE_BYTES
-            {
-                let Some(evicted) = self.evict_oldest(&mut state) else {
-                    break;
-                };
-                retired.push(evicted);
-            }
-            retired.iter().for_each(|hot| self.retract(hot));
-            let sequence = self.next_sequence(&mut state);
-            let linked = (sequence, sequence);
-            state.bytes = state.bytes.saturating_add(payload.len());
-            state.recency.insert(linked, id.to_owned());
-            let hot = Arc::new(HotObject {
-                id: id.to_owned(),
-                bytes: payload,
-                used: AtomicU64::new(sequence),
-            });
-            self.publish(&hot);
-            state
-                .entries
-                .insert(id.to_owned(), CachedObject { hot, linked });
+            let retired = self.file_arrivals(&mut state);
+            drop(state);
+            drop(retired);
         }
+    }
+
+    /// Runs `work` on the index with every queued block filed first.
+    fn with<R>(&self, work: impl FnOnce(&mut ObjectStoreBlockCacheState) -> R) -> Option<R> {
+        let mut state = self.state.lock().ok()?;
+        let retired = self.file_arrivals(&mut state);
+        let result = work(&mut state);
+        drop(state);
         drop(retired);
+        self.settle();
+        Some(result)
     }
 
     fn remove(&self, id: &str) {
-        let retired = match self.state.write() {
-            Ok(mut state) => {
-                let retired = state.take(id);
-                retired.iter().for_each(|hot| self.retract(hot));
-                retired
-            }
-            Err(_) => return,
-        };
+        let retired = self.with(|state| {
+            let retired = state.take(id);
+            retired.iter().for_each(|hot| self.retract(hot));
+            retired
+        });
         drop(retired);
     }
 }
@@ -2512,7 +2550,7 @@ mod tests {
         assert!(cache.get("overflow").is_some());
         cache.insert("overflow", b"replaced");
         assert_eq!(cache.get("overflow").unwrap(), b"replaced");
-        let state = cache.state.read().unwrap();
+        let state = cache.state.lock().unwrap();
         assert_eq!(state.entries.len(), MAX_CACHE_ENTRIES);
         assert_eq!(state.recency.len(), MAX_CACHE_ENTRIES);
         assert_eq!(state.bytes, MAX_CACHE_ENTRIES - 1 + b"replaced".len());

@@ -977,6 +977,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "crossbeam-queue",
  "futures-util",
  "mount-rs-core",
  "object_store",
@@ -1042,6 +1043,7 @@ version = "0.1.0"
 dependencies = [
  "async-io",
  "async-trait",
+ "crossbeam-queue",
  "libc",
  "mount-rs-core",
  "mount-rs-persist",

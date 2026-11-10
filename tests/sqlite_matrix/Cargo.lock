@@ -321,6 +321,7 @@ version = "0.1.0"
 dependencies = [
  "async-io",
  "async-trait",
+ "crossbeam-queue",
  "libc",
  "mount-rs-core",
  "mount-rs-persist",

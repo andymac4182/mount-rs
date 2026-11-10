@@ -435,6 +435,48 @@ mod tests {
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
         oversized.bytes().await.unwrap();
         assert_eq!(session.stat(id).await.unwrap().size, 8);
+        // A whole-file write is one request naming a percent-encoded path.
+        let whole = |path: &'static str, body: Vec<u8>| {
+            client
+                .put(&handles_url)
+                .bearer_auth(&alice)
+                .header(SESSION_HEADER, token)
+                .header("x-mount-write-file", path)
+                .body(body)
+        };
+        let written = whole("/whole%20file%C3%BC", b"whole".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(written.status(), StatusCode::NO_CONTENT);
+        assert_eq!(fs.driver().stat("/whole file\u{fc}").await.unwrap().size, 5);
+        let replaced = whole("/whole%20file%C3%BC", b"new".to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replaced.status(), StatusCode::NO_CONTENT);
+        assert_eq!(fs.driver().stat("/whole file\u{fc}").await.unwrap().size, 3);
+        for rejected in [
+            whole("/bad%2", b"x".to_vec()),
+            whole("/bad%zz", b"x".to_vec()),
+            whole("/not%FFutf8", b"x".to_vec()),
+            whole("relative", b"x".to_vec()),
+            whole("/with-handle", b"x".to_vec()).header("x-mount-handle", id),
+            whole("/with-position", b"x".to_vec()).header("x-mount-position", 0),
+        ] {
+            let rejected = rejected.send().await.unwrap();
+            assert!(rejected.status().is_client_error(), "{}", rejected.status());
+            rejected.bytes().await.unwrap();
+        }
+        let too_large = whole("/too-large", vec![b'x'; 65537]).send().await.unwrap();
+        assert_eq!(too_large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        too_large.bytes().await.unwrap();
+        for absent in ["/bad", "/with-handle", "/with-position", "/too-large"] {
+            assert_eq!(
+                fs.driver().stat(absent).await.unwrap_err().code,
+                ErrorCode::Enoent
+            );
+        }
         for operation in [
             serde_json::json!({"operation":"sync","handle":id,"data_only":true}),
             serde_json::json!({"operation":"truncate","handle":id,"length":4}),

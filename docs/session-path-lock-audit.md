@@ -196,39 +196,123 @@ read 6.7M to 6.8M ops/s, stat 0.94M to 1.05M, readdir 0.64M to 0.94M (p99
 build. Remote mixed p99.9 went from 0.71 to 0.43 ms for read and from 1.44 to
 0.74 ms for open.
 
+## Fourth pass
+
+Each lock the third pass kept was either replaced or put through an
+experiment, and the two items the third pass left open were done. Numbers are
+p50 / p99 / p99.9 in ms, 16 clients and 2000 files unless stated; "before" is
+`688e8cc3`.
+
+| Was | Now | Measured |
+| --- | --- | --- |
+| Remote whole-file write: open, write and close over HTTP, each through the handle path and its own publication | One `PUT` carrying the bytes and an `x-mount-write-file` path header, which the owner runs as `write_file` on the batched path. `RemoteFs` uses it when the server's capabilities advertise `write_file` and the file fits one request, and falls back to the three calls otherwise. | Remote write 0.768 / 0.964 / 1.045 (20.8k ops/s) to 0.285 / 0.500 / 0.568 (54.6k ops/s); one client p50 0.157 to 0.059. |
+| State mutex taken by every open and close that overlapped any publication. Every publication raised the handle sequence, so 1 to 3% of opens and closes fell back to the mutex and queued there behind each other and the publisher. | A publication raises the sequence only if it removes an inode or takes its last link, which is all an open handle can care about. `NodeMap::differences` finds that out from the changed inodes alone (shared subtrees are skipped by pointer). | Contended acquisitions, 4 s runs with a background writer: direct all operations 614 to 736 of 62k to 68k (4 to 7 µs each) to 0 of 64k; remote all operations 1876 to 1952 of 90k (15 µs each) to 0 of 86k; remote mixed 65 to 87 of 2.8k to 0 of 2.7k. Latency moved inside run-to-run noise, as expected from waits that small. |
+| Block cache index, and the object-store provider's cache index of the same shape: `RwLock`, write-locked by every put | A plain mutex plus a lock-free queue of entries to file. A put queues its entry and tries the index once; if another thread is in it, that thread files the entry on its way out. Puts never wait. Misses, deletes and statistics still take the index and file anything queued first. | Before, 7 to 10% of puts waited 1.5 to 2.5 µs. Direct writes 0.124 / 0.206 / 0.244 to 0.123 / 0.200 / 0.229, reads unchanged at 6.7M ops/s. |
+| Disk cache index mutex held across every eviction's `unlink` | Eviction under the mutex is the index update alone; the files are removed after it is released. A refill of a resident block no longer unlinks at all (the rename replaces the file). | 4000 fills into a 64-entry cache from 16 tasks: total wait 253 to 303 ms to 12 to 17 ms, mean hold 61 to 65 µs to 6 to 7 µs, worst wait 1.4 to 15.8 ms to 0.06 to 0.19 ms. Fill latency itself is unchanged (2.5 ms p50): it is worker admission and file I/O. |
+| SQLite metadata: every publication encoded the whole namespace and rewrote the row holding it. Measured split at 1 MB of namespace: 1.0 ms encoding, 0.5 ms in SQLite; both grow with the volume. | A publication that follows the previous one appends one row with the inodes it changed (`mount_rs_namespace_changes`); the namespace is the stored document plus those rows. See below. | One writer, by volume size: 100 files 0.402 / 0.551 / 0.835 to 0.269 / 0.496 / 1.020; 2000 files 1.392 / 1.662 / 3.260 to 0.279 / 0.439 / 1.089; 8000 files 6.380 / 7.186 / 11.714 to 0.283 / 0.413 / 0.549; 20000 files 17.6 / 22.8 / 31.3 to 0.293 / 0.734 / 8.779. Sixteen writers: 2000 files 1.793 / 4.006 / 5.858 to 0.448 / 1.091 / 3.097; 8000 files 14.3 / 16.8 / 22.0 to 0.517 / 1.184 / 10.67. |
+| SQLite blocks: every put its own durable transaction under the connection mutex. With 16 writers 27 to 64% of acquisitions of that mutex waited, 0.4 to 0.7 ms each, on an async worker thread. | Group commit. A put that finds another in progress queues its bytes and waits its turn on a `TurnGate`; the put whose turn it is commits everything queued in one transaction. An uncontended put is unchanged. | SQLite metadata and blocks, 16 writers: 5.326 / 12.638 / 17.864 (2770 ops/s) to 1.874 / 3.457 / 5.221 (8287 ops/s). In the all-operations mix, writes 7.6 / 12.3 / 18.5 to 2.5 / 5.4 / 11.5. |
+
+### SQLite change rows
+
+The change log keeps the existing single-document form as the form at rest:
+
+- The document is rewritten (a "fold") when the rows have grown to its size
+  (never below 64 KiB), so a fold's cost is spread over at least as many bytes
+  of changes. A change that is more than a quarter of the document is stored
+  as a document; small volumes therefore never have rows.
+- A row carries the revision it makes current. The metadata row keeps the
+  document's revision: updating it too rewrites the row with the document in
+  it, which is what the first version of this did and why it still took
+  2.6 ms at 8000 files.
+- `publish`, `load` and `load_if_changed` understand rows. Every other
+  operation on the store folds first and then sees the plain document, so
+  delegated mode, bound mode, inode mode, versions and the migrations between
+  them are unchanged. Acquiring the writer lease folds, so only the lease
+  holder ever adds rows.
+- While rows exist, a trigger keeps the versioning schema version above what
+  a build without this change accepts, so such a build refuses the database
+  instead of reading a document that is behind. A fold lowers it again, and this build folds whenever
+  it opens the database; a database in the folded form, which includes every
+  small volume, opens in older builds as before. A second trigger aborts any
+  update of the document while rows exist, which is what stops an older
+  build that already had the database open from publishing over them.
+- Rows that do not count up from the document's revision are refused.
+
+What it costs: the publication at which a fold happens pays for the whole
+document. At 8000 files (4 MB) that is one publication in 4096, and it
+normally takes 7 ms (4 ms to encode, 3 ms in SQLite), 25 ms when the database
+file has to grow. That sets the maximum of those runs (25 to 30 ms), not the
+p99.9.
+
+In about a quarter of the 4 s runs at 8000 files the maximum is 50 to 380 ms
+instead, which the previous build never showed (its maximum was 11 to 17 ms,
+with every write at 6 ms). Timing the steps of each slow publication put all
+of it in SQLite's commit: of the fold's transaction (7 of 13 slow
+publications), in its `UPDATE` (2), or of the first small row insert after a
+fold (4). Encoding, the diff and clearing the rows took their usual
+few milliseconds every time. So it is the durable flush of an occasional
+multi-megabyte write, sometimes landing on the next commit, and it was not
+taken further than that. One earlier cluster of second-long row inserts (two
+consecutive runs, up to 2.4 s) did not recur in 27 later runs at that size.
+Runs at 2000 files, which fold just as often with a 1 MB document, stayed
+under 15 ms in 8 of 8.
+
+### Experiments that kept a lock
+
+| Lock | Experiment | Result |
+| --- | --- | --- |
+| SQLite block connection mutex, for reads | A second, read-only connection for `get`, so a read does not queue behind a commit. | Worse. All-operations mix: read p99 1.03 to 12.1 ms, write p50 2.4 to 5.8 ms. In rollback-journal mode a reader and a committing writer exclude each other in SQLite itself, and its busy handler sleeps in millisecond steps where the mutex hands over in microseconds. Reverted. Only WAL mode would let readers pass a commit, and the journal mode is part of the provider's durability contract. |
+| SQLite metadata connection mutex | Timed the wait in `publish`. | 0.0 to 0.1 µs mean over 8000 publications: publications are already serialized by the batch runner, and nothing else uses that connection on the session path. |
+| State mutex, for the batch runner and publications | Counted contended acquisitions by call site after the change above. | None in any workload (direct and remote; writes, all operations, mixed with a background writer): 0 of 57k to 98k acquisitions per 4 s run. It is taken and not waited for, so replacing it would change no measurement here. |
+| Block cache index, for misses and deletes | They need an answer from the index, so they cannot hand their work to whoever holds it the way a put now does. | Left as a mutex: 460 acquisitions in 3 s of the read workload against 20 million reads. |
+
+### Two things that were looked into and are not from this code
+
+- `rejected_range_closes_the_handle_opened_for_representation_metadata`
+  (`transports/mount-rs-http`) timed out in three full test runs and never
+  when its package was tested alone. Timing marks in the test put the whole
+  5 s between entering the test and `reqwest::Client::new()` returning; no
+  request had been sent. The cause is feature unification: the package asks
+  reqwest for `rustls-tls` (bundled roots, about 100 µs to build a client),
+  but a `--workspace` build also turns on `rustls-tls-native-roots`, and the
+  client then loads the macOS keychain trust store. Running the workspace-built
+  test binary by itself measured 0.39, 0.59, 1.4, 1.6 and 5.2 s for that one
+  call, and the last failed the test the same way. The test built its client
+  inside its 5 s deadline; it now builds it before. The same cost is paid
+  once per `RemoteFs` (one client per mount, never per operation) in any
+  binary that links the native root store, which the CLI does.
+- Some 4 s benchmark runs show one stall of 6 to 9 ms that hits every
+  operation in flight at once (it appears as the maximum of read, stat,
+  readdir and open together). The build from the previous commit shows it at
+  the same rate, with and without a writer, and it was absent earlier on the
+  same binaries: it comes from the machine (Docker and another agent were
+  running), not from a lock.
+
 ## Kept, with what was measured
 
 | Lock | Taken by | Measured | Why it stays |
 | --- | --- | --- | --- |
-| State mutex (`StateCell::mutex`) | the batch runner and publications; handle writes and closes of written handles; readers only while the filesystem is failed, closed or has uncommitted per-inode overlays; opens and closes only for an inode that is retained or raced a publication | Direct, 16 clients, all operations: 44k acquisitions in 3 s for 1.3M operations, 1.7% contended. Remote, same mix: 187k acquisitions, 5.1% contended, before the publication scans above were removed. | It makes a mutation's multi-field update (namespace, revision, orphans, references, failure) one step. Everything a read-only operation or a write's preparation needs from it is mirrored in atomics. What still contends on the remote surface is the handle path that remote whole-file writes use (see below). |
-| Block cache index (`RwLock`) | misses, puts, deletes, eviction; never hits | One write acquisition per put. With 16 writers, 7 to 10% of them wait, 1.5 to 2.5 µs each: about 0.2 µs per write on average. Read acquisitions: 460 in 3 s. | Eviction order and the byte budget span every entry. Replacing it means a different eviction policy, not a different lock; the measured cost does not justify that. The object-store provider's cache index has the same shape, behind network puts. |
+| State mutex (`StateCell::mutex`) | the batch runner and publications; handle writes and closes of written handles; readers only while the filesystem is failed, closed or has uncommitted per-inode overlays; opens and closes only for a retained inode, or across a publication that removes or unlinks one | No contended acquisition in any workload after the fourth pass (see above). | It makes a mutation's multi-field update (namespace, revision, orphans, references, failure) one step, and with one batch runner nothing waits for it. |
+| Block cache index (mutex) | misses, deletes, statistics; puts only when it is free | Puts never wait (fourth pass). 460 acquisitions in 3 s of reads. | Eviction order and the byte budget span every entry. The object-store provider's cache index works the same way. |
 | `MemoryMetadataStore` (`RwLock`) | lease and revision transitions take it exclusively | Never contended in any run: publications are already serialized by the operation gate. | Each is a check and an update of several fields that must be one linearizable step; that is the provider's contract. |
-| SQLite providers' connection mutex | metadata and block I/O on SQLite | Not measured: not reachable with the memory providers the benchmark uses. | A SQLite connection is not usable from two threads at once. |
-| Disk cache index mutex (`mount-rs-host`) | fills, deletes, clears; never hits | 7 µs mean hold, 0.09 ms worst wait under 16 concurrent fills. | Eviction and the byte budget, as for the block cache. File I/O no longer happens under it. |
+| SQLite providers' connection mutex | metadata and block I/O on SQLite | Metadata: never waited for. Blocks: 27 to 64% of acquisitions waited before group commit; reads still queue behind a commit. | A SQLite connection is not usable from two threads at once, and a second connection was measured to be worse (fourth pass). |
+| Disk cache index mutex (`mount-rs-host`) | fills, deletes, clears; never hits | 6 to 7 µs mean hold, 0.06 to 0.19 ms worst wait under 16 concurrent evicting fills. | Eviction and the byte budget, as for the block cache. Neither file writes nor unlinks happen under it. |
 | Session budget semaphore, HTTP `connection_permits`, disk cache worker and fill semaphores | session creation, connection accept, disk cache fills | | Admission limits; not per request on the session path. |
 | hyper header-read timer, reqwest request timer, hyper-util connection pool, tokio's timer wheel | one registration per request on each side | About 1% of active samples in the remote write profile. | Inside third-party crates. They are where the remaining mutex waits in the remote profile come from. |
 
 ## Still open
 
-1. **Remote whole-file writes take three round trips.** `RemoteFs` has no
-   whole-file write operation, so `write_file` is open, write and close over
-   HTTP, and on the owner each of those goes through the handle path and its
-   own publication rather than the batch runner. That is why a remote write
-   costs 0.77 ms against 0.19 ms for a remote read. A single session operation
-   carrying the bytes would put remote writes on the batched path. It is a
-   wire-protocol addition and was left for its own change.
-2. **Providers still receive the whole namespace.** Copies inside the process
-   are now O(1), but `MetadataStore::publish` takes a full `Namespace`, and a
-   provider that serializes it does work proportional to the volume on every
-   publication. The memory provider used above does not. The SQLite provider
-   encodes the namespace as one JSON document per publication: a single
-   writer's p50 is 0.45 ms at 100 files, 1.45 ms at 2000 and 6.5 ms at 8000
-   (`BENCH_METADATA=sqlite`), almost all of it in `serde_json`. This pass still
-   helped it (2.63 to 1.51 ms with one writer at 2000 files, 185 to 2.3 ms with
-   sixteen, because they now share publications), but writes on a large volume
-   stay above 10 ms until that provider stores changed inodes only. `NodeMap`
-   makes the change set cheap to find: two versions share every subtree that
-   did not change, so a walk can skip them by pointer.
+1. **A fold of the SQLite change rows runs on the publication that triggers
+   it**, so that one write pays for the whole document, and on a 4 MB
+   document its commit sometimes takes tenths of a second (see the fourth
+   pass). Moving the fold off the publication does not avoid that: SQLite has
+   one writer at a time, so a fold on a second connection stalls publications
+   for as long. Not having a document to rewrite would, which means storing
+   each inode as its own row; that is a different on-disk format.
+2. **A directory is one node**, so creating or removing a file rewrites its
+   parent's whole entry list in the change row (and in memory). At 64 entries
+   that is about 4 KB per create; it is what the populate phase of the SQLite
+   benchmark spends its time on.
 3. **The batch runner yields at least eight times per batch** to let other
    writers' requests gather. That costs a single writer a few microseconds and
    was left alone: it is what coalesces publications against a slow provider,
