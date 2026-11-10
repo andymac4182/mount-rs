@@ -19,14 +19,15 @@
 //! compatible implementation of this Linux FUSE transport, and macOS has no
 //! native v9fs client.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use mount_rs_core::FsDriver;
+use mount_rs_core::turn_cell::TurnCell;
 
 pub use mount_rs_9p::{
     P9ClientProbe, P9Mount, P9MountOptions, P9MountTransport, P9Platform, P9ServerHooks,
@@ -316,40 +317,43 @@ impl AutoMount {
     }
 }
 
-static LOADED: OnceLock<Mutex<BTreeSet<Transport>>> = OnceLock::new();
-static LIVE: OnceLock<Mutex<Vec<AutoMount>>> = OnceLock::new();
+/// One bit per transport this facade has dispatched to.
+static LOADED: AtomicU8 = AtomicU8::new(0);
+static LIVE: OnceLock<TurnCell<Vec<AutoMount>>> = OnceLock::new();
 
-fn loaded_registry() -> &'static Mutex<BTreeSet<Transport>> {
-    LOADED.get_or_init(|| Mutex::new(BTreeSet::new()))
+const TRANSPORTS: [Transport; 3] = [Transport::Fuse, Transport::P9, Transport::Nfs];
+
+fn transport_bit(transport: Transport) -> u8 {
+    match transport {
+        Transport::Fuse => 1,
+        Transport::P9 => 2,
+        Transport::Nfs => 4,
+    }
 }
 
-fn live_registry() -> &'static Mutex<Vec<AutoMount>> {
-    LIVE.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Run `f` on the live-mount registry. The critical sections only push,
+/// filter and clone the list, so it is usable even if one panicked.
+fn with_live<R>(f: impl FnOnce(&mut Vec<AutoMount>) -> R) -> R {
+    f(&mut LIVE.get_or_init(TurnCell::default).lock_recovered())
 }
 
 fn mark_loaded(transport: Transport) {
-    lock_recover(loaded_registry()).insert(transport);
+    LOADED.fetch_or(transport_bit(transport), Ordering::AcqRel);
 }
 
 /// Transports this facade has dispatched to. Rust links the transport crates
 /// statically, so this means “attempted through this facade”, not a dynamic
 /// module-import event.
 pub fn loaded_transports() -> Vec<Transport> {
-    lock_recover(loaded_registry()).iter().copied().collect()
+    TRANSPORTS.into_iter().filter(|t| loaded(*t)).collect()
 }
 
 fn register_mount(mount: AutoMount) {
-    lock_recover(live_registry()).push(mount);
+    with_live(|mounts| mounts.push(mount));
 }
 
 fn unregister_mountpoint(mountpoint: &Path) {
-    lock_recover(live_registry()).retain(|mount| mount.mountpoint() != mountpoint);
+    with_live(|mounts| mounts.retain(|mount| mount.mountpoint() != mountpoint));
 }
 
 /// Facade-created live FUSE/9P mounts, plus all live NFS mounts once this
@@ -357,10 +361,10 @@ fn unregister_mountpoint(mountpoint: &Path) {
 /// no process-wide registry, so direct mounts made through those crates remain
 /// intentionally outside this result rather than being misreported.
 pub fn live_mounts() -> Vec<AutoMount> {
-    let mut local = lock_recover(live_registry());
-    local.retain(AutoMount::active);
-    let mut mounts = local.clone();
-    drop(local);
+    let mut mounts = with_live(|local| {
+        local.retain(AutoMount::active);
+        local.clone()
+    });
 
     if loaded(Transport::Nfs) {
         for mount in mount_rs_nfs::live_nfs_mounts() {
@@ -377,7 +381,7 @@ pub fn live_mounts() -> Vec<AutoMount> {
 }
 
 fn loaded(transport: Transport) -> bool {
-    lock_recover(loaded_registry()).contains(&transport)
+    LOADED.load(Ordering::Acquire) & transport_bit(transport) != 0
 }
 
 /// Unmount every mount visible to this facade. This never rejects: each
@@ -395,7 +399,7 @@ pub async fn unmount_all() -> Vec<AutoMountError> {
         );
     }
 
-    let mounts = lock_recover(live_registry()).clone();
+    let mounts = with_live(|mounts| mounts.clone());
     for mount in mounts {
         if mount.transport() == Transport::Nfs && loaded(Transport::Nfs) {
             continue;
@@ -404,7 +408,7 @@ pub async fn unmount_all() -> Vec<AutoMountError> {
             failures.push(error);
         }
     }
-    lock_recover(live_registry()).retain(AutoMount::active);
+    with_live(|mounts| mounts.retain(AutoMount::active));
     failures
 }
 

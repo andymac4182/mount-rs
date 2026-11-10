@@ -14,6 +14,7 @@ use mount_rs_core::path::{normalize_path, split_path};
 use mount_rs_core::storage::{
     BlockId, BlockStore, FileLayout, MetadataStore, Namespace, NodeData, NodeMetadata, WriterLease,
 };
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::types::{Capabilities, DirEntry, MkdirOptions, Stats, StatsFs};
 use mount_rs_core::versioning::{
     BlockStoreId, PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo,
@@ -24,7 +25,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 const MAX_SYMLINK_DEPTH: usize = 40;
 const BLOCK_SIZE: u64 = 4096;
@@ -564,7 +565,7 @@ where
 {
     metadata: M,
     default_ttl: Duration,
-    state: Mutex<ViewState>,
+    state: TurnLock<ViewState>,
     invalidated: AtomicBool,
     operations: AtomicUsize,
 }
@@ -577,7 +578,7 @@ where
         Self {
             metadata,
             default_ttl,
-            state: Mutex::new(ViewState {
+            state: TurnLock::new(ViewState {
                 pin: Some(pin),
                 closed: false,
                 handles: 0,

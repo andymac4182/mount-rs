@@ -10,9 +10,11 @@ use std::os::raw::c_void;
 use std::pin::Pin;
 use std::ptr;
 use std::slice;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_kv::{KeyValueMetadata, KeyValueStore, UnstorageOptions};
 use napi::bindgen_prelude::{
     Either, FnArgs, FromNapiValue, Function, JsObjectValue, JsValuesTupleIntoVec, Object, Promise,
@@ -396,7 +398,7 @@ struct Callbacks {
 }
 
 struct CallbackSet {
-    callbacks: Mutex<Option<Callbacks>>,
+    callbacks: TurnCell<Option<Callbacks>>,
     closed: AtomicBool,
 }
 
@@ -418,7 +420,7 @@ impl CallbackSet {
             None
         };
         Ok(Self {
-            callbacks: Mutex::new(Some(Callbacks {
+            callbacks: TurnCell::new(Some(Callbacks {
                 has_item: Arc::new(build_callback(store, "hasItem")?),
                 get_item_raw: Arc::new(build_callback(store, "getItemRaw")?),
                 set_item_raw: Arc::new(build_callback(store, "setItemRaw")?),
@@ -433,10 +435,14 @@ impl CallbackSet {
 
     fn release(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        match self.callbacks.lock() {
-            Ok(mut callbacks) => drop(callbacks.take()),
-            Err(poisoned) => drop(poisoned.into_inner().take()),
-        }
+        // Take the callbacks out and let go of the cell before dropping
+        // them. Once `closed` is set nothing reads the cell again.
+        let callbacks = self
+            .callbacks
+            .lock()
+            .ok()
+            .and_then(|mut callbacks| callbacks.take());
+        drop(callbacks);
     }
 
     fn callback<T>(&self, get: impl FnOnce(&Callbacks) -> T) -> Result<T, JsStoreError> {
@@ -695,11 +701,9 @@ pub fn create_unstorage_driver(
     Ok(super::Filesystem {
         driver: super::instrument_driver(Arc::new(filesystem)),
         shutdown: Some(shutdown),
-        reconcile: Mutex::new(None),
-        delegation: Mutex::new(None),
+        reconcile: TurnCell::new(None),
+        delegation: TurnCell::new(None),
         delegated_ownership: false,
-        native_delegation_mounts: Arc::new(tokio::sync::Mutex::new(
-            super::DelegatedNativeState::default(),
-        )),
+        native_delegation_mounts: Arc::new(TurnLock::new(super::DelegatedNativeState::default())),
     })
 }

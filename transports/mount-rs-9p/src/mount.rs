@@ -13,9 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use mount_rs_core::FsDriver;
+use mount_rs_core::turn_gate::TurnLock;
 #[cfg(target_os = "linux")]
 use tokio::process::Command;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 #[cfg(target_os = "linux")]
 use tokio::time::timeout;
@@ -206,13 +207,13 @@ pub struct P9Mount {
 struct MountState {
     stopping: AtomicBool,
     teardown_started: AtomicBool,
-    unmount_lock: Mutex<()>,
+    unmount_lock: TurnLock<()>,
     done: AtomicBool,
     complete: Notify,
-    failure: Mutex<Option<String>>,
+    failure: TurnLock<Option<String>>,
     server: Arc<P9Server>,
     socket_dir: Option<PathBuf>,
-    serve_task: Mutex<Option<JoinHandle<io::Result<()>>>>,
+    serve_task: TurnLock<Option<JoinHandle<io::Result<()>>>>,
     timeout: Option<Duration>,
 }
 
@@ -649,13 +650,13 @@ where
     let state = Arc::new(MountState {
         stopping: AtomicBool::new(false),
         teardown_started: AtomicBool::new(false),
-        unmount_lock: Mutex::new(()),
+        unmount_lock: TurnLock::new(()),
         done: AtomicBool::new(false),
         complete: Notify::new(),
-        failure: Mutex::new(None),
+        failure: TurnLock::new(None),
         server: Arc::clone(&server),
         socket_dir,
-        serve_task: Mutex::new(serve_task),
+        serve_task: TurnLock::new(serve_task),
         timeout: options.unmount_timeout,
     });
     let monitor_state = Arc::clone(&state);

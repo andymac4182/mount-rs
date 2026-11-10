@@ -1,6 +1,7 @@
 //! In-memory filesystem driver for mount-rs.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -802,10 +803,10 @@ impl MemoryFs {
             flags: parsed,
             path: normalized,
             fd,
-            state: Mutex::new(HandleState {
-                position: 0,
-                closed: false,
-            }),
+            state: HandleState {
+                position: AtomicU64::new(0),
+                closed: AtomicBool::new(false),
+            },
         });
         Ok((handle, PathIdentity { dev: 0, ino: node }))
     }
@@ -976,9 +977,12 @@ impl MemoryFs {
     }
 }
 
+/// A handle's own state. `position` is only read and advanced under the
+/// filesystem lock, which is what orders offset reads and writes that share
+/// a handle.
 struct HandleState {
-    position: u64,
-    closed: bool,
+    position: AtomicU64,
+    closed: AtomicBool,
 }
 
 struct MemoryHandle {
@@ -987,16 +991,15 @@ struct MemoryHandle {
     flags: OpenFlags,
     path: String,
     fd: u64,
-    state: Mutex<HandleState>,
+    state: HandleState,
 }
 
 impl MemoryHandle {
-    fn begin(&self, write: bool, syscall: &str) -> Result<std::sync::MutexGuard<'_, HandleState>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio))?;
-        if state.closed || (write && !self.flags.write) || (!write && !self.flags.read) {
+    fn begin(&self, write: bool, syscall: &str) -> Result<()> {
+        if self.state.closed.load(Ordering::Acquire)
+            || (write && !self.flags.write)
+            || (!write && !self.flags.read)
+        {
             return Err(FsError::new(ErrorCode::Ebadf)
                 .with_syscall(syscall)
                 .with_path(&self.path));
@@ -1018,7 +1021,7 @@ impl MemoryHandle {
                 .with_path(&self.path));
         }
         drop(fs);
-        Ok(state)
+        Ok(())
     }
 }
 
@@ -1029,14 +1032,15 @@ impl FileHandle for MemoryHandle {
     }
 
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> Result<usize> {
-        let mut handle_state = self.begin(false, "read")?;
+        self.begin(false, "read")?;
         let mut fs = self.fs.lock()?;
+        let handle_position = self.state.position.load(Ordering::Relaxed);
         let node = fs.nodes.get_mut(&self.node).ok_or_else(|| {
             FsError::new(ErrorCode::Estale)
                 .with_syscall("read")
                 .with_path(&self.path)
         })?;
-        let from = position.unwrap_or(handle_state.position);
+        let from = position.unwrap_or(handle_position);
         let from = usize::try_from(from).unwrap_or(usize::MAX);
         let count = if from >= node.data.len() {
             0
@@ -1047,15 +1051,19 @@ impl FileHandle for MemoryHandle {
             buffer[..count].copy_from_slice(&node.data[from..from + count]);
         }
         if position.is_none() {
-            handle_state.position = handle_state.position.saturating_add(count as u64);
+            self.state.position.store(
+                handle_position.saturating_add(count as u64),
+                Ordering::Relaxed,
+            );
         }
         node.atime_ms = now_ms();
         Ok(count)
     }
 
     async fn write(&self, buffer: &[u8], position: Option<u64>) -> Result<usize> {
-        let mut handle_state = self.begin(true, "write")?;
+        self.begin(true, "write")?;
         let mut fs = self.fs.lock()?;
+        let handle_position = self.state.position.load(Ordering::Relaxed);
         let from = if self.flags.append {
             fs.nodes
                 .get(&self.node)
@@ -1063,7 +1071,7 @@ impl FileHandle for MemoryHandle {
                 .data
                 .len() as u64
         } else {
-            position.unwrap_or(handle_state.position)
+            position.unwrap_or(handle_position)
         };
         let end = from.checked_add(buffer.len() as u64).ok_or_else(|| {
             FsError::new(ErrorCode::Efbig)
@@ -1086,7 +1094,7 @@ impl FileHandle for MemoryHandle {
         let start = checked_position(from)?;
         node.data[start..start + buffer.len()].copy_from_slice(buffer);
         if self.flags.append || position.is_none() {
-            handle_state.position = end;
+            self.state.position.store(end, Ordering::Relaxed);
         }
         node.mtime_ms = now_ms();
         node.ctime_ms = node.mtime_ms;
@@ -1094,11 +1102,7 @@ impl FileHandle for MemoryHandle {
     }
 
     async fn stat(&self) -> Result<Stats> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio))?;
-        if state.closed {
+        if self.state.closed.load(Ordering::Acquire) {
             return Err(FsError::new(ErrorCode::Ebadf)
                 .with_syscall("fstat")
                 .with_path(&self.path));
@@ -1108,7 +1112,7 @@ impl FileHandle for MemoryHandle {
     }
 
     async fn truncate(&self, length: u64) -> Result<()> {
-        let _state = self.begin(true, "ftruncate")?;
+        self.begin(true, "ftruncate")?;
         let mut fs = self.fs.lock()?;
         MemoryFs::resize(&mut fs, self.node, length, "ftruncate")?;
         let node = fs
@@ -1121,11 +1125,7 @@ impl FileHandle for MemoryHandle {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio))?;
-        state.closed = true;
+        self.state.closed.store(true, Ordering::Release);
         Ok(())
     }
 }

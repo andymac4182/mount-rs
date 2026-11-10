@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
 
 use mount_rs_core::path::join_path;
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{
     ErrorCode, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, Result as FsResult, S_IFMT,
     S_IFREG, Stats,
@@ -111,7 +112,7 @@ struct SessionState {
 }
 
 struct Pending {
-    result: tokio::sync::Mutex<Option<Vec<u8>>>,
+    completed: AtomicBool,
     cancelled: AtomicBool,
     notify: Notify,
 }
@@ -119,13 +120,13 @@ struct Pending {
 struct SessionInner {
     driver: Loopback,
     options: P9SessionOptions,
-    state: Mutex<SessionState>,
-    inflight: Mutex<HashMap<u16, Arc<Pending>>>,
+    state: TurnCell<SessionState>,
+    inflight: TurnCell<HashMap<u16, Arc<Pending>>>,
     path_lock: RwLock<()>,
     locks: P9LockClient,
-    stats: Mutex<P9SessionStats>,
+    stats: TurnCell<P9SessionStats>,
     hooks: P9SessionHooks,
-    assertions: Mutex<Vec<String>>,
+    assertions: TurnCell<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -168,7 +169,7 @@ impl P9Session {
         Self {
             inner: Arc::new(SessionInner {
                 driver: Loopback::from_arc(driver),
-                state: Mutex::new(SessionState {
+                state: TurnCell::new(SessionState {
                     msize: None,
                     generation: 0,
                     destroyed: false,
@@ -176,12 +177,12 @@ impl P9Session {
                     users: HashMap::new(),
                 }),
                 options,
-                inflight: Mutex::new(HashMap::new()),
+                inflight: TurnCell::new(HashMap::new()),
                 path_lock: RwLock::new(()),
                 locks,
-                stats: Mutex::new(P9SessionStats::default()),
+                stats: TurnCell::new(P9SessionStats::default()),
                 hooks,
-                assertions: Mutex::new(Vec::new()),
+                assertions: TurnCell::new(Vec::new()),
             }),
         }
     }
@@ -477,7 +478,7 @@ impl P9Session {
         }
 
         let pending = Arc::new(Pending {
-            result: tokio::sync::Mutex::new(None),
+            completed: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
             notify: Notify::new(),
         });
@@ -525,10 +526,7 @@ impl P9Session {
 
         let generation = self.generation();
         let reply = self.run(header, body, generation).await;
-        {
-            let mut result = pending.result.lock().await;
-            *result = Some(reply.clone());
-        }
+        pending.completed.store(true, Ordering::Release);
         pending.notify.notify_waiters();
         let mut inflight = self
             .inner
@@ -842,7 +840,7 @@ impl P9Session {
                 // completion use notify_waiters(), which does not retain a
                 // permit for a future created after the notification.
                 notified.as_mut().enable();
-                if pending.result.lock().await.is_some()
+                if pending.completed.load(Ordering::Acquire)
                     || pending.cancelled.load(Ordering::Acquire)
                 {
                     break;
@@ -1934,7 +1932,11 @@ fn child_of(parent: &str, name: &str, syscall: &str) -> FsResult<String> {
 mod tests {
     use super::*;
     use mount_rs_memfs::MemoryFs;
-    use std::{future::Future, pin::Pin, sync::Arc};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
     use tokio::sync::Notify;
     use tokio::time::{Duration, timeout};
 
@@ -2089,7 +2091,7 @@ mod tests {
             .insert(
                 41,
                 Arc::new(Pending {
-                    result: tokio::sync::Mutex::new(None),
+                    completed: AtomicBool::new(false),
                     cancelled: AtomicBool::new(false),
                     notify: Notify::new(),
                 }),
@@ -2163,7 +2165,7 @@ mod tests {
             .insert(
                 7,
                 Arc::new(Pending {
-                    result: tokio::sync::Mutex::new(None),
+                    completed: AtomicBool::new(false),
                     cancelled: AtomicBool::new(false),
                     notify: Notify::new(),
                 }),

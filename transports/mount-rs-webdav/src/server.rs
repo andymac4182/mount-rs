@@ -10,8 +10,8 @@ use std::fmt;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use mount_rs_core::FsDriver;
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
@@ -162,7 +164,9 @@ struct StreamControl {
 struct ConnectionRegistry {
     active: AtomicUsize,
     next_id: AtomicUsize,
-    tasks: Mutex<HashMap<usize, tokio::task::AbortHandle>>,
+    // `ConnectionGuard::drop` takes it while a panicking connection task
+    // unwinds; taking the cell then does not abandon it.
+    tasks: TurnCell<HashMap<usize, tokio::task::AbortHandle>>,
 }
 
 impl Default for ConnectionRegistry {
@@ -170,7 +174,7 @@ impl Default for ConnectionRegistry {
         Self {
             active: AtomicUsize::new(0),
             next_id: AtomicUsize::new(0),
-            tasks: Mutex::new(HashMap::new()),
+            tasks: TurnCell::new(HashMap::new()),
         }
     }
 }
@@ -191,19 +195,13 @@ impl ConnectionRegistry {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let mut tasks = self
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tasks = self.tasks.lock_recovered();
         let task = tokio::spawn(future);
         tasks.insert(id, task.abort_handle());
     }
 
     fn abort_all(&self) {
-        let tasks = self
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tasks = self.tasks.lock_recovered();
         let handles = tasks.values().cloned().collect::<Vec<_>>();
         drop(tasks);
         for task in handles {
@@ -224,8 +222,8 @@ pub struct WebdavServer {
     closing: Arc<AtomicUsize>,
     drained: Arc<Notify>,
     background_tasks: Arc<AtomicUsize>,
-    lifecycle: tokio::sync::Mutex<()>,
-    state: Mutex<ServerState>,
+    lifecycle: TurnLock<()>,
+    state: TurnCell<ServerState>,
     connections: Arc<ConnectionRegistry>,
     hooks: WebdavServerHooks,
 }
@@ -262,8 +260,8 @@ impl WebdavServer {
             closing: Arc::new(AtomicUsize::new(0)),
             drained: Arc::new(Notify::new()),
             background_tasks: Arc::new(AtomicUsize::new(0)),
-            lifecycle: tokio::sync::Mutex::new(()),
-            state: Mutex::new(ServerState { task: None }),
+            lifecycle: TurnLock::new(()),
+            state: TurnCell::new(ServerState { task: None }),
             connections: Arc::new(ConnectionRegistry::default()),
             hooks,
         }
@@ -495,11 +493,7 @@ struct ConnectionGuard {
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.connections.active.fetch_sub(1, Ordering::AcqRel);
-        let mut tasks = self
-            .connections
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tasks = self.connections.tasks.lock_recovered();
         tasks.remove(&self.id);
         self.drained.notify_waiters();
     }

@@ -21,7 +21,19 @@ pub struct TurnCell<T> {
 unsafe impl<T: Send> Send for TurnCell<T> {}
 unsafe impl<T: Send> Sync for TurnCell<T> {}
 
-pub struct TurnCellGuard<'a, T>(&'a TurnCell<T>);
+pub struct TurnCellGuard<'a, T>(&'a TurnCell<T>, Unwinding);
+
+/// Whether the thread was already unwinding when it took the cell. A holder
+/// abandons the cell only if a panic started while it had it, as with a
+/// mutex: a `Drop` that runs during an unwind may take and release the cell
+/// without harm.
+struct Unwinding(bool);
+
+impl Unwinding {
+    fn now() -> Self {
+        Self(std::thread::panicking())
+    }
+}
 
 impl<T: Default> Default for TurnCell<T> {
     fn default() -> Self {
@@ -48,7 +60,24 @@ impl<T> TurnCell<T> {
             self.busy.store(false, Ordering::Release);
             return Some(Err(()));
         }
-        Some(Ok(TurnCellGuard(self)))
+        Some(Ok(TurnCellGuard(self, Unwinding::now())))
+    }
+
+    /// The value even after a holder panicked, for state that is valid
+    /// whatever a holder was doing (what `PoisonError::into_inner` is for).
+    pub fn lock_recovered(&self) -> TurnCellGuard<'_, T> {
+        loop {
+            match self.lock() {
+                Ok(guard) => return guard,
+                Err(()) => self.abandoned.store(false, Ordering::Release),
+            }
+        }
+    }
+
+    /// The value, through exclusive access to the cell: no turn is taken,
+    /// and it is there whether or not a holder panicked.
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
     }
 
     /// `Err` once a holder has panicked.
@@ -65,7 +94,7 @@ impl<T> TurnCell<T> {
                     self.busy.store(false, Ordering::Release);
                     return Err(());
                 }
-                return Ok(TurnCellGuard(self));
+                return Ok(TurnCellGuard(self, Unwinding::now()));
             }
             attempts += 1;
             if attempts < 64 {
@@ -94,7 +123,7 @@ impl<T> std::ops::DerefMut for TurnCellGuard<'_, T> {
 
 impl<T> Drop for TurnCellGuard<'_, T> {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if !self.1.0 && std::thread::panicking() {
             self.0.abandoned.store(true, Ordering::Release);
         }
         self.0.busy.store(false, Ordering::Release);
@@ -139,5 +168,34 @@ mod tests {
         .join();
         assert!(cell.lock().is_err());
         assert!(matches!(cell.try_lock(), Some(Err(()))));
+    }
+
+    #[test]
+    fn a_drop_during_an_unwind_does_not_abandon_and_recovery_reaches_the_value() {
+        struct Touches(Arc<TurnCell<u32>>);
+        impl Drop for Touches {
+            fn drop(&mut self) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+        let cell = Arc::new(TurnCell::new(0));
+        let touched = Arc::clone(&cell);
+        let unwound = std::thread::spawn(move || {
+            let _touches = Touches(touched);
+            panic!("unwinding");
+        })
+        .join();
+        assert!(unwound.is_err());
+        assert_eq!(*cell.lock().unwrap(), 1);
+
+        let held = Arc::clone(&cell);
+        let abandoned = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("abandon");
+        })
+        .join();
+        assert!(abandoned.is_err() && cell.lock().is_err());
+        *cell.lock_recovered() += 1;
+        assert_eq!(*cell.lock().unwrap(), 2);
     }
 }

@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use mount_rs_core::{
     ErrorCode, FsError, LoadedSnapshot, Result, StateStore, backend_error, snapshot_conflict,
 };
 use mount_rs_persist::PersistedFs;
-use tokio::sync::{Mutex, MutexGuard, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
@@ -90,8 +91,8 @@ impl CloseGate {
 
 #[derive(Clone)]
 pub struct PgliteStore {
-    client: Arc<Mutex<Option<Client>>>,
-    connection: Arc<Mutex<Option<JoinHandle<()>>>>,
+    client: Arc<TurnLock<Option<Client>>>,
+    connection: Arc<TurnLock<Option<JoinHandle<()>>>>,
     close_gate: CloseGate,
     state_key: String,
 }
@@ -112,8 +113,8 @@ impl PgliteStore {
             let _ = connection.await;
         });
         let store = Self {
-            client: Arc::new(Mutex::new(Some(client))),
-            connection: Arc::new(Mutex::new(Some(connection))),
+            client: Arc::new(TurnLock::new(Some(client))),
+            connection: Arc::new(TurnLock::new(Some(connection))),
             close_gate: CloseGate::new(),
             state_key: state_key.into(),
         };
@@ -121,7 +122,7 @@ impl PgliteStore {
         Ok(store)
     }
 
-    async fn lock_client(&self) -> Result<MutexGuard<'_, Option<Client>>> {
+    async fn lock_client(&self) -> Result<TurnLockGuard<'_, Option<Client>>> {
         if !self.close_gate.is_open() {
             return Err(connection_closed());
         }

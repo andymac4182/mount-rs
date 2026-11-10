@@ -450,6 +450,42 @@ to 3 to 8 ms. Sixteen writers: 27.5k to 26.0k writes/s (noise is about
 16-writer figure by no more than the noise, so the remaining 5% is the
 deletes and encoding entries one at a time, not the cleaning.
 
+### The rest of the workspace
+
+The earlier passes covered the session path. This one went through every
+other crate in the workspace (not the vendored `quinn-proto` and
+`tunnel-transport`, which are third-party code) and replaced each `Mutex`
+and `RwLock` outside test code that could be replaced: about 135, with
+`TurnCell` (short sections that never block), `TurnLock` (asynchronous
+mutexes), an atomic, or `OnceLock`.
+
+| Crates | Replaced | Notes |
+| --- | --- | --- |
+| `mount-rs-napi`, `mount-rs-sqlite-vfs` | 52 | The VFS lifecycle state taken twice per VFS callback is one atomic word. The NFS clock is a `OnceLock` and an atomic maximum. |
+| `mount-rs-nfs`, `mount-rs-9p` | 35 | A 9P pending reply was a tokio mutex around a value only tested for presence; it is an atomic flag, which also removes a copy of every reply. |
+| `mount-rs-s3`, `mount-rs-webdav`, `mount-rs-fuse`, `mount-rs-auto`, `mount-rs-fskit` | 22 | The loaded-transports set is an atomic bit mask. |
+| `mount-rs-kv`, `mount-rs-memfs`, `mount-rs-persist`, `mount-rs-versioned`, `mount-rs-blob-cache`, `mount-rs-fault-injection` | 20 | `mount-rs-persist`'s hand-written save gate (a mutex, a waiter queue, a future and a guard, about 120 lines) is a `TurnLock`. |
+| `mount-rs-pglite`, `mount-rs-slatedb`, `mount-rs-cli`, `mount-rs-service` | 11 | The service catalog's connection pool was a `Vec<Mutex<Connection>>` locked on a blocking thread, so a request that drew a busy connection held a blocking thread while it waited. Each connection is now a `TurnLock` taken before the request moves to a blocking thread. The catalog's snapshot cache was held across the row read and the decode of a document of up to 8 MiB; it is now held only to compare and to store. |
+
+`TurnCell` changed to make this possible. It abandoned itself whenever its
+guard was released on a panicking thread, so a `Drop` that ran during an
+unwind and took a cell killed the cell. It now does what a mutex does: only
+a panic that starts while the cell is held abandons it. `lock_recovered`
+gives the value regardless, for state that is valid whatever its holder was
+doing, and `get_mut` gives it through exclusive access.
+
+What is left outside test code, and why each stays:
+
+| Lock | Why it stays |
+| --- | --- |
+| `path_lock` in the NFS v3/v4 and 9P sessions (`tokio::sync::RwLock<()>`) | Nearly every request takes it as a reader and holds it across the driver's I/O; a few take it as a writer. Any exclusive replacement would run one request at a time on a session. |
+| `HistoricalFileHandle::state` in `mount-rs-versioned`, `CachedBlockStore::write_gate` in `mount-rs-blob-cache` (`tokio::sync::RwLock`) | The same shape: positional reads, and puts, overlap across block-store I/O on the read side; close and flush are the writers. |
+| `LocalCache::disk_io` in `mount-rs-blob-cache` (`Mutex<()>`) | Held across blocking disk I/O in a synchronous public API, so a cell would spin for the length of a read. Recorded under "Still open": it puts all of that cache's disk I/O in one line. |
+| `MemoryFs::inner` in `mount-rs-memfs` | The whole tree, held for work proportional to the data (a snapshot copies every file under it). |
+| `StorageVolume::state` in `mount-rs-sqlite-vfs` | Held across the provider round trips it exists to serialize (lease acquire, renew, release, commit), from SQLite's synchronous VFS callbacks. |
+| `WebdavSession::locks` | A public field of type `Arc<Mutex<DavLockTable>>`; changing it changes the crate's API. |
+| `CLIENT_NETWORK` in `mount-rs-foundationdb` | Paired with a `Condvar`, behind a feature that needs the native client and is not built here. |
+
 ## Kept, with what was measured
 
 No mutex or reader-writer lock remains on the session path in these crates
@@ -470,28 +506,33 @@ is not a lock, and locks that are off the path:
 1. **A publication of the SQLite metadata store deletes superseded rows**
    (sixth pass), sixteen at a time. That is the one part of its cost that is
    not an append, and it shows as p99 0.45 to 0.53 ms for a single writer.
-2. **A directory is one node**, so creating or removing a file rewrites its
+2. **The blob cache serializes all of its disk I/O** behind one lock
+   (`LocalCache::disk_io`). Reads of different blocks wait for each other.
+   Removing it needs the disk operations to be safe against each other per
+   key (they already write to a temporary name and rename) and the public
+   functions that take it to become asynchronous.
+3. **A directory is one node**, so creating or removing a file rewrites its
    parent's whole entry list in the change row (and in memory). At 64 entries
    that is about 4 KB per create; it is what the populate phase of the SQLite
    benchmark spends its time on.
-3. **The batch runner yields at least eight times per batch** to let other
+4. **The batch runner yields at least eight times per batch** to let other
    writers' requests gather. That costs a single writer a few microseconds and
    was left alone: it is what coalesces publications against a slow provider,
    and nothing here measures one.
-4. **HTTP/2 on one connection** runs at about half the HTTP/1.1 throughput
+5. **HTTP/2 on one connection** runs at about half the HTTP/1.1 throughput
    because every stream shares h2's connection mutex. The CLI uses HTTP/1.1.
-5. **Directory entries are scanned linearly** in `walk`; fine at 64 entries,
+6. **Directory entries are scanned linearly** in `walk`; fine at 64 entries,
    visible in profiles for very large directories.
-6. **`read_parallelism` is still 1.** A 4 KiB read touches one block, so it does
+7. **`read_parallelism` is still 1.** A 4 KiB read touches one block, so it does
    not affect the target above; multi-block reads against a remote object store
    would benefit.
-7. **Per-operation statistics** in the object-store provider are shared atomic
+8. **Per-operation statistics** in the object-store provider are shared atomic
    counters written on every block read. They are not locks, but they are the
    next shared cache lines on that provider's hit path.
-8. **Per-session and per-handle gates have one stripe.** Many cores working
+9. **Per-session and per-handle gates have one stripe.** Many cores working
    one session's path operations, or one shared handle, still pass that
    counter between them. Striping them costs two kilobytes per gate.
-9. **A cache hit still writes the block's own hit counter**, so cores reading
+10. **A cache hit still writes the block's own hit counter**, so cores reading
    the same block share that line. Different blocks share nothing.
-10. **Strict-atime reads were not benchmarked**; the benchmark has no switch
+11. **Strict-atime reads were not benchmarked**; the benchmark has no switch
    for the policy. A test covers that they skip the gate and the mutex.

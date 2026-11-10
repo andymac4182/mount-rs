@@ -10,10 +10,11 @@
 use std::cmp::Ordering as SeqidOrdering;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{
     ErrorCode, FileHandle, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, S_IFBLK, S_IFCHR,
     S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats, StatsFs,
@@ -659,7 +660,7 @@ struct SessionState {
 }
 
 struct InFlightSlot {
-    state: Arc<Mutex<V4State>>,
+    state: Arc<TurnCell<V4State>>,
     sessionid: [u8; NFS4_SESSIONID_SIZE],
     slot: usize,
     sequence: u32,
@@ -1713,8 +1714,8 @@ pub struct Nfs4Session {
     owns_handle_table: bool,
     stats: SharedStats,
     snapshots: DirectorySnapshots,
-    state: Arc<Mutex<V4State>>,
-    destroyed: Arc<Mutex<bool>>,
+    state: Arc<TurnCell<V4State>>,
+    destroyed: Arc<AtomicBool>,
     path_lock: Arc<tokio::sync::RwLock<()>>,
     hooks: NfsSessionHooks,
 }
@@ -1782,14 +1783,14 @@ impl Nfs4Session {
             owns_handle_table: false,
             stats: shared.stats.clone(),
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
-            state: Arc::new(Mutex::new(V4State {
+            state: Arc::new(TurnCell::new(V4State {
                 seed: options.nfs4.seed,
                 next_clientid: 1,
                 next_session: 1,
                 next_stateid: 1,
                 ..V4State::default()
             })),
-            destroyed: Arc::new(Mutex::new(false)),
+            destroyed: Arc::new(AtomicBool::new(false)),
             path_lock: Arc::clone(&shared.path_lock),
             hooks,
         }
@@ -1800,7 +1801,7 @@ impl Nfs4Session {
     }
 
     pub fn destroyed(&self) -> bool {
-        *self.destroyed.lock().expect("NFSv4 destroyed lock")
+        self.destroyed.load(Ordering::Acquire)
     }
 
     fn report_error(&self, error: NfsSessionError, call: Option<crate::rpc::RpcCall>) {
@@ -1908,7 +1909,7 @@ impl Nfs4Session {
 
     pub async fn destroy(&self) {
         let _guard = self.path_lock.write().await;
-        *self.destroyed.lock().expect("NFSv4 destroyed lock") = true;
+        self.destroyed.store(true, Ordering::Release);
         if self.owns_handle_table {
             self.handles.clear();
         }

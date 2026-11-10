@@ -1,8 +1,9 @@
 //! Shared POSIX-style byte-range locks for 9P `Tlock`/`Tgetlock`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{ErrorCode, FsError, Result};
 
 use crate::constants::{
@@ -89,14 +90,14 @@ struct LockState {
 
 #[derive(Clone)]
 pub struct P9LockTable {
-    state: Arc<Mutex<LockState>>,
+    state: Arc<TurnCell<LockState>>,
     max_locks_per_file: usize,
 }
 
 impl P9LockTable {
     pub fn new(options: P9LockTableOptions) -> Self {
         Self {
-            state: Arc::new(Mutex::new(LockState::default())),
+            state: Arc::new(TurnCell::new(LockState::default())),
             max_locks_per_file: options.max_locks_per_file.max(1),
         }
     }

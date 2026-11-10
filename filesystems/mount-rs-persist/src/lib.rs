@@ -4,13 +4,11 @@
 //! `StateStore` implementation, while this crate keeps the filesystem model
 //! and all driver operations identical across those stores.
 
-use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, OpenFlags,
     Result, Stats, StatsFs,
@@ -29,134 +27,20 @@ use mount_rs_memfs::MemoryFs;
 /// a particular async runtime.
 #[derive(Clone)]
 struct SaveGate {
-    state: Arc<Mutex<SaveGateState>>,
+    lock: Arc<TurnLock<()>>,
 }
 
-struct SaveGateState {
-    held: bool,
-    next_waiter_id: u64,
-    waiters: VecDeque<SaveGateWaiter>,
-}
-
-struct SaveGateWaiter {
-    id: u64,
-    waker: Waker,
-}
-
-struct SaveGateFuture {
-    state: Arc<Mutex<SaveGateState>>,
-    queued_id: Option<u64>,
-}
-
-struct SaveGateGuard {
-    state: Arc<Mutex<SaveGateState>>,
-}
+type SaveGateGuard = OwnedTurnLockGuard<()>;
 
 impl SaveGate {
     fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(SaveGateState {
-                held: false,
-                next_waiter_id: 0,
-                waiters: VecDeque::new(),
-            })),
+            lock: Arc::new(TurnLock::new(())),
         }
     }
 
     async fn lock(&self) -> SaveGateGuard {
-        SaveGateFuture {
-            state: Arc::clone(&self.state),
-            queued_id: None,
-        }
-        .await
-    }
-}
-
-impl Future for SaveGateFuture {
-    type Output = SaveGateGuard;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let mut state = this
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Keep the front waiter queued until it polls; a new caller cannot
-        // take the free gate ahead of a waiter that has already been woken.
-        let owns_next_turn = !state.held
-            && match this.queued_id {
-                Some(id) => state.waiters.front().is_some_and(|waiter| waiter.id == id),
-                None => state.waiters.is_empty(),
-            };
-        if owns_next_turn {
-            if this.queued_id.take().is_some() {
-                state.waiters.pop_front();
-            }
-            state.held = true;
-            return Poll::Ready(SaveGateGuard {
-                state: Arc::clone(&this.state),
-            });
-        }
-
-        if let Some(id) = this.queued_id {
-            let waiter = state
-                .waiters
-                .iter_mut()
-                .find(|waiter| waiter.id == id)
-                .expect("polled save-gate waiter is still queued");
-            waiter.waker = context.waker().clone();
-        } else {
-            let id = state.next_waiter_id;
-            state.next_waiter_id = id.checked_add(1).expect("save-gate waiter IDs exhausted");
-            state.waiters.push_back(SaveGateWaiter {
-                id,
-                waker: context.waker().clone(),
-            });
-            this.queued_id = Some(id);
-        }
-        Poll::Pending
-    }
-}
-
-impl Drop for SaveGateFuture {
-    fn drop(&mut self) {
-        let Some(id) = self.queued_id.take() else {
-            return;
-        };
-        let next = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let position = state
-                .waiters
-                .iter()
-                .position(|waiter| waiter.id == id)
-                .expect("dropped save-gate waiter is still queued");
-            state.waiters.remove(position);
-            (position == 0 && !state.held)
-                .then(|| state.waiters.front().map(|waiter| waiter.waker.clone()))
-                .flatten()
-        };
-        if let Some(waker) = next {
-            waker.wake();
-        }
-    }
-}
-
-impl Drop for SaveGateGuard {
-    fn drop(&mut self) {
-        let waiter = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            state.held = false;
-            state.waiters.front().map(|waiter| waiter.waker.clone())
-        };
-        if let Some(waker) = waiter {
-            waker.wake();
-        }
+        Arc::clone(&self.lock).lock_owned().await
     }
 }
 
@@ -166,7 +50,7 @@ pub struct PersistedFs<S: StateStore> {
     core: MemoryFs,
     store: Arc<S>,
     save_gate: SaveGate,
-    snapshot_version: Arc<Mutex<String>>,
+    snapshot_version: Arc<TurnCell<String>>,
 }
 
 impl<S: StateStore> Clone for PersistedFs<S> {
@@ -193,7 +77,7 @@ impl<S: StateStore> PersistedFs<S> {
             core,
             store,
             save_gate: SaveGate::new(),
-            snapshot_version: Arc::new(Mutex::new(loaded.version)),
+            snapshot_version: Arc::new(TurnCell::new(loaded.version)),
         };
         if !has_snapshot {
             filesystem.persist().await?;
@@ -406,8 +290,10 @@ mod tests {
     use mount_rs_memfs::MemoryFs;
     use std::collections::VecDeque;
     use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::task::Wake;
+    use std::task::{Context, Poll, Wake, Waker};
     use std::thread;
     use std::time::Duration;
 
@@ -622,7 +508,6 @@ mod tests {
                             .poll(&mut Context::from_waker(&wakers[repolled])),
                         Poll::Pending
                     ));
-                    assert_eq!(gate.state.lock().unwrap().waiters.len(), 3);
 
                     if !cancel_after_unlock {
                         waiters[cancelled].take();

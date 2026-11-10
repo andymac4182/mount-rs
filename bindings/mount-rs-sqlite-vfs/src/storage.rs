@@ -20,6 +20,7 @@ use mount_rs_core::storage::{
     BlockExtent, BlockStore, DirectoryEntry, FileLayout, InodeId, LoadedMetadata, MetadataStore,
     NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata, WriterLease,
 };
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::types::{S_IFDIR, S_IFREG, Stats, now_ms};
 use mount_rs_core::{ErrorCode, FsError};
 use rusqlite::ffi;
@@ -241,7 +242,7 @@ where
                 options,
                 state: Mutex::new(VolumeState::default()),
                 next_handle: AtomicU64::new(1),
-                wal_regions: Mutex::new(HashMap::new()),
+                wal_regions: TurnCell::new(HashMap::new()),
             }),
         })
     }
@@ -361,7 +362,7 @@ where
     options: StorageOptions,
     state: Mutex<VolumeState>,
     next_handle: AtomicU64,
-    wal_regions: Mutex<HashMap<Vec<u8>, Arc<ProcessWalRegion>>>,
+    wal_regions: TurnCell<HashMap<Vec<u8>, Arc<ProcessWalRegion>>>,
 }
 
 #[derive(Default)]
@@ -397,7 +398,7 @@ struct ProcessWalState {
 }
 
 struct ProcessWalRegion {
-    state: Mutex<ProcessWalState>,
+    state: TurnCell<ProcessWalState>,
 }
 
 struct ProcessWalConnection {
@@ -409,7 +410,7 @@ struct ProcessWalConnection {
 impl ProcessWalRegion {
     fn new() -> Self {
         Self {
-            state: Mutex::new(ProcessWalState {
+            state: TurnCell::new(ProcessWalState {
                 region_size: None,
                 regions: Vec::new(),
                 slots: std::array::from_fn(|_| ProcessShmSlot::default()),

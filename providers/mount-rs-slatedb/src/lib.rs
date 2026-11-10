@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use mount_rs_core::storage::{LoadedMetadata, MetadataStore, Namespace, WriterLease};
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{ErrorCode, FsError, Result as FsResult, backend_error};
 use mount_rs_kv::KeyValueStore;
 use mount_rs_rustfs::RustFsConfig;
@@ -15,7 +16,6 @@ use slatedb::object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use slatedb::{Db, Error};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct SlateDbStore {
@@ -130,7 +130,7 @@ struct MetadataState {
 #[derive(Clone)]
 pub struct SlateDbMetadataStore {
     db: Arc<Db>,
-    state: Arc<Mutex<MetadataState>>,
+    state: Arc<TurnLock<MetadataState>>,
     durable: bool,
 }
 
@@ -158,7 +158,7 @@ impl SlateDbMetadataStore {
         .validate()?;
         Ok(Self {
             db: Arc::new(db),
-            state: Arc::new(Mutex::new(MetadataState {
+            state: Arc::new(TurnLock::new(MetadataState {
                 persisted,
                 lease: None,
                 failed: false,

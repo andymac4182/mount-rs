@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{FileHandle, FsDriver, MkdirOptions};
 use mount_rs_remote_protocol::binary::{IoRequest, IoResult};
 use mount_rs_remote_protocol::{Operation, OperationName, WireError};
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 use crate::auth::authorize_drive;
 use crate::catalog::{CatalogStore, Permission};
@@ -29,7 +29,7 @@ pub struct SessionIdentity {
 
 #[derive(Default)]
 pub struct SessionHandles {
-    state: Mutex<HandleState>,
+    state: TurnLock<HandleState>,
 }
 
 #[derive(Default)]

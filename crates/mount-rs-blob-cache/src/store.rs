@@ -1,10 +1,12 @@
 use crate::*;
 use async_trait::async_trait;
 use mount_rs_core::storage::{BlockReconcileReport, BlockStore};
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -68,10 +70,10 @@ pub struct DistributedRuntime {
     advertisements: mpsc::Sender<Advertisement>,
     advertisement_period: Option<Duration>,
     misses: Arc<Semaphore>,
-    flights: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    flights: TurnCell<BTreeMap<String, Weak<TurnLock<()>>>>,
     stopping: AtomicBool,
     stop: tokio::sync::watch::Sender<bool>,
-    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    worker: TurnCell<Option<tokio::task::JoinHandle<()>>>,
 }
 impl DistributedRuntime {
     pub fn new(
@@ -148,14 +150,14 @@ impl DistributedRuntime {
             transport,
             local,
             misses: Arc::new(Semaphore::new(config.max_inflight_misses)),
-            flights: Mutex::new(BTreeMap::new()),
+            flights: TurnCell::new(BTreeMap::new()),
             config,
             queue,
             advertisements,
             advertisement_period,
             stopping: AtomicBool::new(false),
             stop,
-            worker: Mutex::new(Some(worker)),
+            worker: TurnCell::new(Some(worker)),
         }))
     }
     fn touch(&self, cache: &LocalCache, scope: &Arc<CacheScope>, id: &BlockId, key: &CacheKey) {
@@ -212,13 +214,13 @@ impl DistributedRuntime {
             metrics.maintenance_dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
-    fn flight(&self, key: String) -> Result<Arc<tokio::sync::Mutex<()>>> {
+    fn flight(&self, key: String) -> Result<Arc<TurnLock<()>>> {
         let mut flights = self.flights.lock().map_err(|_| error())?;
         flights.retain(|_, f| f.strong_count() > 0);
         if let Some(f) = flights.get(&key).and_then(Weak::upgrade) {
             return Ok(f);
         }
-        let f = Arc::new(tokio::sync::Mutex::new(()));
+        let f = Arc::new(TurnLock::new(()));
         flights.insert(key, Arc::downgrade(&f));
         Ok(f)
     }
@@ -257,11 +259,11 @@ pub struct CachedBlockStore {
     cache: Arc<LocalCache>,
     identity: ScopeIdentity,
     policy: IntegrityPolicy,
-    scope: Mutex<Option<(Arc<CacheScope>, CacheKey)>>,
+    scope: TurnCell<Option<(Arc<CacheScope>, CacheKey)>>,
     distributed: Option<Arc<DistributedRuntime>>,
     metrics: Arc<CacheMetrics>,
-    pending: Mutex<Vec<PendingBlob>>,
-    flush_gate: tokio::sync::Mutex<()>,
+    pending: TurnCell<Vec<PendingBlob>>,
+    flush_gate: TurnLock<()>,
     write_gate: tokio::sync::RwLock<()>,
     dirty: AtomicBool,
 }
@@ -277,11 +279,11 @@ impl CachedBlockStore {
             cache,
             identity,
             policy,
-            scope: Mutex::new(None),
+            scope: TurnCell::new(None),
             distributed: None,
             metrics: Arc::new(CacheMetrics::default()),
-            pending: Mutex::new(Vec::new()),
-            flush_gate: tokio::sync::Mutex::new(()),
+            pending: TurnCell::new(Vec::new()),
+            flush_gate: TurnLock::new(()),
             write_gate: tokio::sync::RwLock::new(()),
             dirty: AtomicBool::new(false),
         }
@@ -688,6 +690,7 @@ impl BlockStore for CachedBlockStore {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     struct Backing {
         bytes: Mutex<BTreeMap<BlockId, Vec<u8>>>,

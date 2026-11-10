@@ -13,10 +13,11 @@ use std::convert::TryFrom;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{
     Capabilities, DirEntry, FileHandle, FsDriver, FsError, MkdirOptions, Stats, StatsFs,
 };
@@ -812,7 +813,7 @@ type DriverShutdown =
 
 pub struct DriverWorker {
     driver: Arc<dyn FsDriver>,
-    handles: Mutex<HashMap<u64, Arc<dyn FileHandle>>>,
+    handles: TurnCell<HashMap<u64, Arc<dyn FileHandle>>>,
     next_handle: AtomicU64,
     read_only: AtomicBool,
     configured_read_only: bool,
@@ -824,7 +825,7 @@ impl DriverWorker {
     pub fn new(driver: Arc<dyn FsDriver>, read_only: bool) -> Self {
         Self {
             driver,
-            handles: Mutex::new(HashMap::new()),
+            handles: TurnCell::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
             read_only: AtomicBool::new(read_only),
             configured_read_only: read_only,
@@ -840,7 +841,7 @@ impl DriverWorker {
     ) -> Self {
         Self {
             driver,
-            handles: Mutex::new(HashMap::new()),
+            handles: TurnCell::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
             read_only: AtomicBool::new(read_only),
             configured_read_only: read_only,

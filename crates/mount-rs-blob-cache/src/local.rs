@@ -1,4 +1,5 @@
 use crate::*;
+use mount_rs_core::turn_cell::TurnCell;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -55,7 +56,7 @@ impl Drop for PendingReservation {
 /// of the RAM index; no filesystem operation holds the index mutex.
 pub struct LocalCache {
     config: LocalCacheConfig,
-    state: Mutex<State>,
+    state: TurnCell<State>,
     disk_io: Mutex<()>,
     root: File,
     _lock: File,
@@ -172,7 +173,7 @@ impl LocalCache {
         }
         Ok(Arc::new(Self {
             config,
-            state: Mutex::new(state),
+            state: TurnCell::new(state),
             disk_io: Mutex::new(()),
             root,
             _lock: lock,

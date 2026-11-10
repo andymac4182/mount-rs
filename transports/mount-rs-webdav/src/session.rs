@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
 
 use crate::constants::{
@@ -275,8 +276,8 @@ pub struct WebdavSession {
     pub locks: Arc<Mutex<DavLockTable>>,
     pub options: WebdavSessionOptions,
     hooks: WebdavSessionHooks,
-    stats: Mutex<WebdavSessionStats>,
-    assertions: Mutex<Vec<String>>,
+    stats: TurnCell<WebdavSessionStats>,
+    assertions: TurnCell<Vec<String>>,
 }
 
 impl std::fmt::Debug for WebdavSession {
@@ -302,8 +303,8 @@ impl WebdavSession {
             locks: Arc::new(Mutex::new(DavLockTable::new(options.locks.clone()))),
             options,
             hooks,
-            stats: Mutex::new(WebdavSessionStats::default()),
-            assertions: Mutex::new(Vec::new()),
+            stats: TurnCell::new(WebdavSessionStats::default()),
+            assertions: TurnCell::new(Vec::new()),
         }
     }
 

@@ -11,7 +11,7 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -25,11 +25,13 @@ use axum::{
     serve::Listener,
 };
 use futures_core::Stream;
+use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_gate::TurnLock;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
-    sync::{Mutex, oneshot},
+    sync::oneshot,
     task::JoinHandle,
 };
 
@@ -101,8 +103,8 @@ pub struct S3Server {
     drain_timeout: Duration,
     active_connections: Arc<AtomicUsize>,
     connection_shutdowns: Arc<ConnectionShutdowns>,
-    shutdown: Mutex<Option<oneshot::Sender<()>>>,
-    task: Mutex<Option<JoinHandle<Result<(), std::io::Error>>>>,
+    shutdown: TurnLock<Option<oneshot::Sender<()>>>,
+    task: TurnLock<Option<JoinHandle<Result<(), std::io::Error>>>>,
 }
 
 #[derive(Clone)]
@@ -114,7 +116,7 @@ struct HttpState {
 #[derive(Default)]
 struct ConnectionShutdown {
     cancelled: AtomicBool,
-    waker: StdMutex<Option<std::task::Waker>>,
+    waker: TurnCell<Option<std::task::Waker>>,
 }
 
 impl ConnectionShutdown {
@@ -144,7 +146,7 @@ impl ConnectionShutdown {
 
 #[derive(Default)]
 struct ConnectionShutdowns {
-    entries: StdMutex<Vec<Weak<ConnectionShutdown>>>,
+    entries: TurnCell<Vec<Weak<ConnectionShutdown>>>,
 }
 
 impl ConnectionShutdowns {
@@ -234,8 +236,8 @@ impl S3Server {
             drain_timeout: options.drain_timeout,
             active_connections,
             connection_shutdowns,
-            shutdown: Mutex::new(Some(shutdown_tx)),
-            task: Mutex::new(Some(task)),
+            shutdown: TurnLock::new(Some(shutdown_tx)),
+            task: TurnLock::new(Some(task)),
         })
     }
 
