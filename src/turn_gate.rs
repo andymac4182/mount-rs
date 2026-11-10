@@ -224,6 +224,31 @@ impl<T> TurnLock<T> {
         self.value.get_mut()
     }
 
+    /// `lock` from a thread that may block, such as a blocking worker: the
+    /// thread parks until its turn, in arrival order with everyone else.
+    /// For exclusion that is held across blocking work, where a caller with
+    /// no runtime to wait on would otherwise need a mutex.
+    pub fn lock_blocking(&self) -> TurnLockGuard<'_, T> {
+        struct Unpark(std::thread::Thread);
+        impl std::task::Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut waiting = std::pin::pin!(self.lock());
+        loop {
+            if let std::task::Poll::Ready(guard) =
+                std::future::Future::poll(waiting.as_mut(), &mut context)
+            {
+                return guard;
+            }
+            // A wake that arrived before this makes `park` return at once.
+            std::thread::park();
+        }
+    }
+
     /// `lock`, with a guard that owns its share of the lock and can move to
     /// another thread, such as a blocking worker.
     pub async fn lock_owned(self: Arc<Self>) -> OwnedTurnLockGuard<T> {
@@ -349,6 +374,29 @@ mod tests {
 
     fn wakes() -> Arc<Count> {
         Arc::new(Count(AtomicUsize::new(0)))
+    }
+
+    #[test]
+    fn blocked_threads_take_the_turn_lock_one_at_a_time() {
+        let lock = Arc::new(TurnLock::new(0_u64));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let lock = Arc::clone(&lock);
+                std::thread::spawn(move || {
+                    for _ in 0..2_000 {
+                        let mut value = lock.lock_blocking();
+                        let seen = *value;
+                        // Long enough that others find it taken and park.
+                        std::thread::yield_now();
+                        *value = seen + 1;
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(*lock.lock_blocking(), 16_000);
     }
 
     #[test]

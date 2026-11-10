@@ -264,7 +264,7 @@ pub struct CachedBlockStore {
     metrics: Arc<CacheMetrics>,
     pending: TurnCell<Vec<PendingBlob>>,
     flush_gate: TurnLock<()>,
-    write_gate: tokio::sync::RwLock<()>,
+    write_gate: mount_rs_core::drain_gate::DrainGate,
     dirty: AtomicBool,
 }
 impl CachedBlockStore {
@@ -284,7 +284,7 @@ impl CachedBlockStore {
             metrics: Arc::new(CacheMetrics::default()),
             pending: TurnCell::new(Vec::new()),
             flush_gate: TurnLock::new(()),
-            write_gate: tokio::sync::RwLock::new(()),
+            write_gate: mount_rs_core::drain_gate::DrainGate::new(),
             dirty: AtomicBool::new(false),
         }
     }

@@ -6,7 +6,7 @@ use std::{
     io::Read,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -57,7 +57,8 @@ impl Drop for PendingReservation {
 pub struct LocalCache {
     config: LocalCacheConfig,
     state: TurnCell<State>,
-    disk_io: Mutex<()>,
+    /// Held across disk I/O by threads that may block, which park for it.
+    disk_io: mount_rs_core::turn_gate::TurnLock<()>,
     root: File,
     _lock: File,
     pending: Arc<AtomicUsize>,
@@ -174,7 +175,7 @@ impl LocalCache {
         Ok(Arc::new(Self {
             config,
             state: TurnCell::new(state),
-            disk_io: Mutex::new(()),
+            disk_io: mount_rs_core::turn_gate::TurnLock::new(()),
             root,
             _lock: lock,
             pending: Arc::new(AtomicUsize::new(0)),
@@ -367,7 +368,7 @@ impl LocalCache {
             // so it waits its turn with the writers, and looks again: a
             // writer may have replaced the entry in the meantime.
             drop(state);
-            let _disk = self.disk_io.lock().ok()?;
+            let _disk = self.disk_io.lock_blocking();
             let mut state = self.state.lock().ok()?;
             if state
                 .entries
@@ -502,7 +503,7 @@ impl LocalCache {
         let key = Self::key(scope, id);
         let disk_bytes = bytes.len().checked_add(32).ok_or_else(error)?;
         let memory = bytes.len() <= self.config.memory_bytes;
-        let _disk = self.disk_io.lock().map_err(|_| error())?;
+        let _disk = self.disk_io.lock_blocking();
         self.retry_quarantine();
         let disk = disk_bytes <= self.config.disk_bytes
             && self
@@ -688,7 +689,8 @@ impl LocalCache {
     }
     pub fn invalidate(&self, scope: &CacheScope, id: &BlockId) {
         let key = Self::key(scope, id);
-        if let Ok(_disk) = self.disk_io.lock() {
+        {
+            let _disk = self.disk_io.lock_blocking();
             let remove = self
                 .state
                 .lock()
@@ -700,7 +702,8 @@ impl LocalCache {
         }
     }
     pub fn invalidate_scope(&self, scope: &CacheScope) {
-        if let Ok(_disk) = self.disk_io.lock() {
+        {
+            let _disk = self.disk_io.lock_blocking();
             let hash = Self::scope_hash(scope);
             let unlink = if let Ok(mut state) = self.state.lock() {
                 let keys = state
@@ -1012,7 +1015,7 @@ mod tests {
     fn memory_only_admission_does_not_wait_for_disk_mutex() {
         let dir = tempfile::tempdir().unwrap();
         let cache = LocalCache::new(cfg(dir.path())).unwrap();
-        let _disk = cache.disk_io.lock().unwrap();
+        let _disk = cache.disk_io.lock_blocking();
         let s = scope("ram");
         let id = BlockId("id".into());
         cache

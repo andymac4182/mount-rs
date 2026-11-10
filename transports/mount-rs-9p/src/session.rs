@@ -6,13 +6,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use mount_rs_core::drain_gate::DrainGate;
 use mount_rs_core::path::join_path;
 use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{
     ErrorCode, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, Result as FsResult, S_IFMT,
     S_IFREG, Stats,
 };
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::Notify;
 
 use crate::constants::*;
 use crate::fids::{DirCursor, FidOpenState, FidTable, FidView, qid_version, walk_step};
@@ -122,7 +123,7 @@ struct SessionInner {
     options: P9SessionOptions,
     state: TurnCell<SessionState>,
     inflight: TurnCell<HashMap<u16, Arc<Pending>>>,
-    path_lock: RwLock<()>,
+    path_lock: DrainGate,
     locks: P9LockClient,
     stats: TurnCell<P9SessionStats>,
     hooks: P9SessionHooks,
@@ -178,7 +179,7 @@ impl P9Session {
                 }),
                 options,
                 inflight: TurnCell::new(HashMap::new()),
-                path_lock: RwLock::new(()),
+                path_lock: DrainGate::new(),
                 locks,
                 stats: TurnCell::new(P9SessionStats::default()),
                 hooks,

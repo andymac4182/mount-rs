@@ -25,7 +25,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
 
 const MAX_SYMLINK_DEPTH: usize = 40;
 const BLOCK_SIZE: u64 = 4096;
@@ -1248,10 +1247,11 @@ where
             blocks: self.blocks.clone(),
             inode,
             path: normalized,
-            state: RwLock::new(HandleState {
-                position: 0,
-                closed: false,
-            }),
+            admission: mount_rs_core::drain_gate::DrainGate::new(),
+            state: HandleState {
+                position: std::sync::atomic::AtomicU64::new(0),
+                closed: std::sync::atomic::AtomicBool::new(false),
+            },
         }) as Arc<dyn FileHandle>)
     }
 
@@ -1335,9 +1335,12 @@ where
     }
 }
 
+/// A historical handle's cursor and whether it is closed. Both are read
+/// and written only while `HistoricalFileHandle::admission` is held: shared
+/// to read them, exclusive to change them.
 struct HandleState {
-    position: u64,
-    closed: bool,
+    position: std::sync::atomic::AtomicU64,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 struct HistoricalFileHandle<M, B>
@@ -1350,7 +1353,10 @@ where
     blocks: B,
     inode: u64,
     path: String,
-    state: RwLock<HandleState>,
+    /// Shared for positional reads and stat, which overlap; exclusive for
+    /// cursor reads and close.
+    admission: mount_rs_core::drain_gate::DrainGate,
+    state: HandleState,
 }
 
 #[async_trait]
@@ -1363,26 +1369,23 @@ where
         // Retain admission through finish so close cannot release this handle's
         // pin while I/O is in flight. Only implicit-position reads mutate the
         // cursor; positional reads may overlap each other and stat.
-        let mut cursor = if position.is_none() {
-            Some(self.state.write().await)
+        use std::sync::atomic::Ordering;
+        let cursor = if position.is_none() {
+            Some(self.admission.write().await)
         } else {
             None
         };
-        let positional = if position.is_some() {
-            Some(self.state.read().await)
+        let _positional = if position.is_some() {
+            Some(self.admission.read().await)
         } else {
             None
         };
-        let state = match (&cursor, &positional) {
-            (Some(state), _) => &**state,
-            (_, Some(state)) => &**state,
-            _ => unreachable!("read must hold handle admission"),
-        };
-        if state.closed {
+        let state = &self.state;
+        if state.closed.load(Ordering::Acquire) {
             return Err(error_with_path(ErrorCode::Ebadf, "read", &self.path));
         }
         let operation = self.lifetime.begin(true, "read").await?;
-        let start = position.unwrap_or(state.position);
+        let start = position.unwrap_or_else(|| state.position.load(Ordering::Acquire));
         let result = async {
             let node = self
                 .namespace
@@ -1415,10 +1418,11 @@ where
                 count
             }
         };
-        if let Some(state) = cursor.as_mut() {
-            state.position = start
+        if cursor.is_some() {
+            let next = start
                 .checked_add(u64::try_from(count).map_err(|_| FsError::new(ErrorCode::Eoverflow))?)
                 .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+            state.position.store(next, Ordering::Release);
         }
         Ok(count)
     }
@@ -1428,8 +1432,8 @@ where
     }
 
     async fn stat(&self) -> Result<Stats> {
-        let state = self.state.read().await;
-        if state.closed {
+        let _admission = self.admission.read().await;
+        if self.state.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(error_with_path(ErrorCode::Ebadf, "fstat", &self.path));
         }
         let operation = self.lifetime.begin(true, "fstat").await?;
@@ -1457,12 +1461,13 @@ where
         // Keep exclusive handle admission until provider cleanup succeeds. This
         // serializes concurrent close calls and leaves `closed == false` on a
         // retryable provider failure.
-        let mut state = self.state.write().await;
-        if state.closed {
+        use std::sync::atomic::Ordering;
+        let _admission = self.admission.write().await;
+        if self.state.closed.load(Ordering::Acquire) {
             return Ok(());
         }
         self.lifetime.release_handle().await?;
-        state.closed = true;
+        self.state.closed.store(true, Ordering::Release);
         Ok(())
     }
 }

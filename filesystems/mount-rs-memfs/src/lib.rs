@@ -1,8 +1,9 @@
 //! In-memory filesystem driver for mount-rs.
 
+use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -196,7 +197,7 @@ struct SnapshotNode {
 
 #[derive(Clone)]
 pub struct MemoryFs {
-    inner: Arc<Mutex<MemoryState>>,
+    inner: Arc<TurnCell<MemoryState>>,
 }
 
 fn validate_snapshot(snapshot: &Snapshot) -> Result<()> {
@@ -294,7 +295,7 @@ impl MemoryFs {
         let mut nodes = HashMap::new();
         nodes.insert(1, root);
         Self {
-            inner: Arc::new(Mutex::new(MemoryState {
+            inner: Arc::new(TurnCell::new(MemoryState {
                 root: 1,
                 next_ino: 2,
                 next_fd: 3,
@@ -386,7 +387,7 @@ impl MemoryFs {
             nodes.insert(restored.ino, restored);
         }
         Ok(Self {
-            inner: Arc::new(Mutex::new(MemoryState {
+            inner: Arc::new(TurnCell::new(MemoryState {
                 root: snapshot.root,
                 next_ino: snapshot.next_ino.max(2),
                 next_fd: 3,
@@ -400,7 +401,7 @@ impl MemoryFs {
         })
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, MemoryState>> {
+    fn lock(&self) -> Result<TurnCellGuard<'_, MemoryState>> {
         self.inner
             .lock()
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("filesystem lock poisoned"))

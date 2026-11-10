@@ -3,11 +3,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
 
 use crate::constants::{
@@ -141,12 +141,12 @@ impl Drop for MutationFileCloseGuard {
 /// Lock table cleanup is synchronous, so dropping a cancelled future removes
 /// the grant before another request can observe it.
 struct LockGrantGuard {
-    locks: Arc<Mutex<DavLockTable>>,
+    locks: Arc<TurnCell<DavLockTable>>,
     token: Option<String>,
 }
 
 impl LockGrantGuard {
-    fn new(locks: Arc<Mutex<DavLockTable>>, token: String) -> Self {
+    fn new(locks: Arc<TurnCell<DavLockTable>>, token: String) -> Self {
         Self {
             locks,
             token: Some(token),
@@ -163,7 +163,7 @@ impl Drop for LockGrantGuard {
         let Some(token) = self.token.take() else {
             return;
         };
-        let mut locks = self.locks.lock().unwrap_or_else(|error| error.into_inner());
+        let mut locks = self.locks.lock_recovered();
         locks.remove(&token);
     }
 }
@@ -273,7 +273,7 @@ struct PropertyOutcome {
 /// connection for a server, so its lock table is the share's lock table.
 pub struct WebdavSession {
     pub driver: Arc<dyn FsDriver>,
-    pub locks: Arc<Mutex<DavLockTable>>,
+    pub locks: Arc<TurnCell<DavLockTable>>,
     pub options: WebdavSessionOptions,
     hooks: WebdavSessionHooks,
     stats: TurnCell<WebdavSessionStats>,
@@ -300,7 +300,7 @@ impl WebdavSession {
     ) -> Self {
         Self {
             driver,
-            locks: Arc::new(Mutex::new(DavLockTable::new(options.locks.clone()))),
+            locks: Arc::new(TurnCell::new(DavLockTable::new(options.locks.clone()))),
             options,
             hooks,
             stats: TurnCell::new(WebdavSessionStats::default()),
@@ -322,7 +322,7 @@ impl WebdavSession {
             .unwrap_or_default()
     }
 
-    fn lock_table(&self) -> Result<MutexGuard<'_, DavLockTable>, WebdavError> {
+    fn lock_table(&self) -> Result<TurnCellGuard<'_, DavLockTable>, WebdavError> {
         self.locks
             .lock()
             .map_err(|_| WebdavError::Body("lock table poisoned".to_owned()))
@@ -330,10 +330,7 @@ impl WebdavSession {
 
     pub fn lock_count(&self) -> usize {
         let now = self.now();
-        let mut locks = match self.locks.lock() {
-            Ok(locks) => locks,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut locks = self.locks.lock_recovered();
         locks.size(now)
     }
 
@@ -343,10 +340,7 @@ impl WebdavSession {
     /// parity inspection.
     pub fn lock_records(&self) -> Vec<DavLock> {
         let now = self.now();
-        let mut locks = match self.locks.lock() {
-            Ok(locks) => locks,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut locks = self.locks.lock_recovered();
         locks.all(now)
     }
 

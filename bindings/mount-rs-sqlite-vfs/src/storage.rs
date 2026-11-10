@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::os::raw::{c_int, c_void};
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mount_rs_core::chunking::ChunkerConfig;
@@ -240,7 +240,7 @@ where
                 blocks: Arc::new(blocks),
                 executor,
                 options,
-                state: Mutex::new(VolumeState::default()),
+                state: mount_rs_core::turn_gate::TurnLock::new(VolumeState::default()),
                 next_handle: AtomicU64::new(1),
                 wal_regions: TurnCell::new(HashMap::new()),
             }),
@@ -360,7 +360,7 @@ where
     blocks: Arc<B>,
     executor: E,
     options: StorageOptions,
-    state: Mutex<VolumeState>,
+    state: mount_rs_core::turn_gate::TurnLock<VolumeState>,
     next_handle: AtomicU64,
     wal_regions: TurnCell<HashMap<Vec<u8>, Arc<ProcessWalRegion>>>,
 }
@@ -1004,10 +1004,14 @@ where
         Ok(format!("/mount-rs-sqlite-tmp-{}-{id}", std::process::id()).into_bytes())
     }
 
-    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, VolumeState>, VfsError> {
-        self.state
-            .lock()
-            .map_err(|_| VfsError::Other("storage bridge state lock poisoned".to_owned()))
+    /// The volume state, one caller at a time. The state is held across the
+    /// provider round trips it orders (lease, load, commit), so a caller that
+    /// finds it taken waits on the executor, parked, like any other provider
+    /// future.
+    fn lock_state(
+        &self,
+    ) -> Result<mount_rs_core::turn_gate::TurnLockGuard<'_, VolumeState>, VfsError> {
+        Ok(self.executor.block_on(self.state.lock()))
     }
 }
 

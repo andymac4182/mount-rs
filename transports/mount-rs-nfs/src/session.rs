@@ -442,7 +442,7 @@ impl Default for SharedStats {
 pub(crate) struct SharedNfsState {
     pub(crate) handles: FileHandleTable,
     pub(crate) stats: SharedStats,
-    pub(crate) path_lock: Arc<tokio::sync::RwLock<()>>,
+    pub(crate) path_lock: Arc<mount_rs_core::drain_gate::DrainGate>,
 }
 
 impl SharedNfsState {
@@ -454,7 +454,7 @@ impl SharedNfsState {
                 max_handles: options.max_handles,
             }),
             stats: SharedStats::default(),
-            path_lock: Arc::new(tokio::sync::RwLock::new(())),
+            path_lock: Arc::new(mount_rs_core::drain_gate::DrainGate::new()),
         }
     }
 }
@@ -614,7 +614,7 @@ pub struct Nfs3Session {
     retained_handles: Arc<RetainedHandles>,
     stats: SharedStats,
     destroyed: Arc<TurnCell<bool>>,
-    path_lock: Arc<tokio::sync::RwLock<()>>,
+    path_lock: Arc<mount_rs_core::drain_gate::DrainGate>,
     hooks: NfsSessionHooks,
 }
 

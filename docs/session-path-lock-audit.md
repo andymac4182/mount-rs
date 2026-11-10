@@ -485,17 +485,24 @@ that are too large for the RAM tier (`profile_disk_reads`): 32.5k to 116k
 reads/s; p50 0.030 to 0.067 ms (the reads now overlap in the filesystem),
 p99 5.3 to 0.11 ms, p99.9 16 to 22 ms to 0.13 to 0.20 ms.
 
-What is left outside test code, and why each stays:
+A first sweep kept eight locks on the argument that they could not be
+replaced. Each was then tried:
+
+| Lock | Replaced with | Result |
+| --- | --- | --- |
+| `path_lock` in the NFS v3/v4 and 9P sessions, `CachedBlockStore::write_gate` in the blob cache (`tokio::sync::RwLock<()>`) | `DrainGate`, the shared/exclusive gate the session path already uses: readers enter with one atomic update and overlap as before. | Tests pass. |
+| `HistoricalFileHandle::state` in `mount-rs-versioned` (`tokio::sync::RwLock`) | A `DrainGate` for admission and two atomics for the cursor and the closed flag. | Tests pass. |
+| `MemoryFs::inner`, the whole memfs tree (`Mutex`) | `TurnCell`. It was kept at first because some sections copy data. | 8 threads, open/read/close and stat on 64 files (`profile_contended_reads_and_stats`): 293k to 680k ops/s; p50 10.5 to 4.1 µs, p99 166 to 84 µs, p99.9 265 to 158 µs. The same with one write in eight. |
+| `StorageVolume::state` in `mount-rs-sqlite-vfs` (`Mutex`, held across provider round trips) | `TurnLock`, waited for on the bridge's executor like any provider future, so a waiting VFS callback parks instead of spinning. | Tests pass. |
+| `LocalCache::disk_io` in the blob cache (`Mutex<()>`, writers) | `TurnLock` taken with the new `lock_blocking`, which parks the calling thread on the gate's lock-free waiter queue. | Tests pass; disk reads unchanged at 118k/s. |
+| `WebdavSession::locks` (`Arc<Mutex<DavLockTable>>`, a public field) | `Arc<TurnCell<DavLockTable>>`. The field's type changes; the one user outside the crate is its own test. | Tests pass, including the one that panics while holding the table. |
+
+What is left outside test code:
 
 | Lock | Why it stays |
 | --- | --- |
-| `path_lock` in the NFS v3/v4 and 9P sessions (`tokio::sync::RwLock<()>`) | Nearly every request takes it as a reader and holds it across the driver's I/O; a few take it as a writer. Any exclusive replacement would run one request at a time on a session. |
-| `HistoricalFileHandle::state` in `mount-rs-versioned`, `CachedBlockStore::write_gate` in `mount-rs-blob-cache` (`tokio::sync::RwLock`) | The same shape: positional reads, and puts, overlap across block-store I/O on the read side; close and flush are the writers. |
-| `LocalCache::disk_io` in `mount-rs-blob-cache` (`Mutex<()>`), for writers only | Admission, eviction and invalidation are multi-step changes to files and the index that must not interleave, and they block on disk I/O in a synchronous public API. Reads no longer take it (below). |
-| `MemoryFs::inner` in `mount-rs-memfs` | The whole tree, held for work proportional to the data (a snapshot copies every file under it). |
-| `StorageVolume::state` in `mount-rs-sqlite-vfs` | Held across the provider round trips it exists to serialize (lease acquire, renew, release, commit), from SQLite's synchronous VFS callbacks. |
-| `WebdavSession::locks` | A public field of type `Arc<Mutex<DavLockTable>>`; changing it changes the crate's API. |
-| `CLIENT_NETWORK` in `mount-rs-foundationdb` | Paired with a `Condvar`, behind a feature that needs the native client and is not built here. |
+| `CLIENT_NETWORK` in `mount-rs-foundationdb` | A `Mutex` paired with a `Condvar`, behind a feature that needs the native FoundationDB client. It cannot be compiled or run here, so a change to it could not be checked. |
+| `quinn-proto` and `tunnel-transport` under `vendor/` | Third-party code kept in step with its upstream; neither depends on `mount-rs-core`. |
 
 ## Kept, with what was measured
 
@@ -517,8 +524,8 @@ is not a lock, and locks that are off the path:
 1. **A publication of the SQLite metadata store deletes superseded rows**
    (sixth pass), sixteen at a time. That is the one part of its cost that is
    not an append, and it shows as p99 0.45 to 0.53 ms for a single writer.
-2. **The blob cache still serializes its disk writes** behind one lock
-   (`LocalCache::disk_io`): admissions, evictions and invalidations. Reads
+2. **The blob cache still serializes its disk writes** (admissions,
+   evictions and invalidations take turns on `LocalCache::disk_io`). Reads
    were taken off it in the sixth pass.
 3. **A directory is one node**, so creating or removing a file rewrites its
    parent's whole entry list in the change row (and in memory). At 64 entries

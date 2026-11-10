@@ -1716,7 +1716,7 @@ pub struct Nfs4Session {
     snapshots: DirectorySnapshots,
     state: Arc<TurnCell<V4State>>,
     destroyed: Arc<AtomicBool>,
-    path_lock: Arc<tokio::sync::RwLock<()>>,
+    path_lock: Arc<mount_rs_core::drain_gate::DrainGate>,
     hooks: NfsSessionHooks,
 }
 
