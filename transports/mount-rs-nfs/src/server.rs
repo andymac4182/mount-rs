@@ -364,18 +364,13 @@ impl NfsServer {
             loop {
                 tokio::select! {
                     _ = &mut shutdown_receiver => break,
-                    result = listener.accept() => {
-                        let (stream, peer) = match result {
-                            Ok(accepted) => accepted,
-                            Err(error) => {
-                                report(&hooks, NfsTransportError::from_io(
-                                    NfsTransportErrorKind::Accept,
-                                    None,
-                                    &error,
-                                ));
-                                break;
-                            }
-                        };
+                    (stream, peer) = accept_next(|| listener.accept(), |error| {
+                        report(&hooks, NfsTransportError::from_io(
+                            NfsTransportErrorKind::Accept,
+                            None,
+                            error,
+                        ));
+                    }) => {
                         let session = session.clone();
                         let v4_session = v4_session.clone();
                         let hooks = hooks.clone();
@@ -807,6 +802,31 @@ where
     }
 }
 
+/// Wait for the next connection, outliving failed accepts.
+///
+/// An accept fails for reasons that pass: the process is briefly out of file
+/// descriptors, or a client gave up before it was accepted. Ending the
+/// listener on one of those leaves a mount whose server looks alive but
+/// never answers the client's next reconnect. Each failure is reported, and
+/// the pause keeps a persistent one from spinning.
+async fn accept_next<T, F, Fut>(mut accept: F, mut failed: impl FnMut(&std::io::Error)) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    let mut pause = std::time::Duration::from_millis(10);
+    loop {
+        match accept().await {
+            Ok(accepted) => return accepted,
+            Err(error) => {
+                failed(&error);
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(std::time::Duration::from_secs(1));
+            }
+        }
+    }
+}
+
 fn report(hooks: &NfsServerHooks, error: NfsTransportError) {
     if let Some(hook) = &hooks.on_transport_error {
         hook(error);
@@ -873,6 +893,30 @@ mod tests {
         timeout(Duration::from_secs(1), control.wait())
             .await
             .expect("late NFS close waiter sees completion");
+    }
+
+    #[tokio::test]
+    async fn a_failed_accept_is_reported_and_the_listener_keeps_accepting() {
+        let attempts = std::cell::Cell::new(0);
+        let reported = std::cell::RefCell::new(Vec::new());
+        let accepted = super::accept_next(
+            || {
+                attempts.set(attempts.get() + 1);
+                let attempt = attempts.get();
+                async move {
+                    if attempt < 4 {
+                        // EMFILE: the process is out of file descriptors.
+                        Err(std::io::Error::from_raw_os_error(24))
+                    } else {
+                        Ok(attempt)
+                    }
+                }
+            },
+            |error| reported.borrow_mut().push(error.raw_os_error()),
+        )
+        .await;
+        assert_eq!(accepted, 4);
+        assert_eq!(*reported.borrow(), vec![Some(24); 3]);
     }
 
     #[tokio::test]
