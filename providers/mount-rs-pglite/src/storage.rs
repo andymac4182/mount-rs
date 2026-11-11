@@ -4820,7 +4820,9 @@ mod tests {
             let (conversion, old_acquire) =
                 (conversion.await.unwrap(), old_acquire.await.unwrap());
             match (conversion, old_acquire) {
-                (Ok(()), Err(error)) if error.is(ErrorCode::Eagain) => {
+                // A legacy writer that loses to the conversion is refused for
+                // good, not asked to retry.
+                (Ok(()), Err(error)) if error.is(ErrorCode::Ebusy) => {
                     metadata.prepare_bound_concurrent_mode(backing).await.unwrap();
                 }
                 (Err(error), Ok(lease)) if error.is(ErrorCode::Ebusy) => {

@@ -1,4 +1,5 @@
 //! Optional SQLite engine counters. These are pager operations, not device IOPS.
+use arc_swap::ArcSwap;
 use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{Result, backend_error};
 use rusqlite::{Connection, ffi};
@@ -6,7 +7,7 @@ use std::{
     collections::BTreeMap,
     ffi::{CStr, c_void},
     sync::{
-        Arc, OnceLock, Weak,
+        Arc, LazyLock, Weak,
         atomic::{AtomicU16, AtomicU64, Ordering},
     },
 };
@@ -27,12 +28,15 @@ pub(crate) struct Counts {
     /// reported once seen, even at a count of zero.
     seen: AtomicU16,
 }
+#[derive(Clone)]
 struct Entry {
     id: u64,
     connection: Weak<TurnCell<Connection>>,
     counts: Weak<Counts>,
 }
-static REGISTRY: OnceLock<TurnCell<Vec<Entry>>> = OnceLock::new();
+// Connections register rarely and only when profiling is on, so each change
+// replaces the list with a copy and the sampler reads it without waiting.
+static REGISTRY: LazyLock<ArcSwap<Vec<Entry>>> = LazyLock::new(ArcSwap::default);
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 unsafe extern "C" fn trace(
     mask: u32,
@@ -64,18 +68,19 @@ unsafe extern "C" fn trace(
     counts.seen.fetch_or(1 << category, Ordering::Relaxed);
     0
 }
+/// The entries whose connection and counters are both still alive.
+fn live_entries(entries: &[Entry]) -> Vec<Entry> {
+    entries
+        .iter()
+        .filter(|entry| entry.connection.strong_count() != 0 && entry.counts.strong_count() != 0)
+        .cloned()
+        .collect()
+}
 pub(crate) fn register(connection: &Arc<TurnCell<Connection>>) -> Result<Option<Arc<Counts>>> {
     if std::env::var("MOUNT_RS_PROFILE_IO").as_deref() != Ok("1") {
         return Ok(None);
     }
     let counts = Arc::new(Counts::default());
-    let mut registry = REGISTRY
-        .get_or_init(TurnCell::default)
-        .lock()
-        .map_err(|()| backend_error("SQLite diagnostic registry poisoned"))?;
-    // Registration must stay bounded even when diagnostics are never sampled.
-    registry
-        .retain(|entry| entry.connection.strong_count() != 0 && entry.counts.strong_count() != 0);
     {
         let connection = connection
             .lock()
@@ -94,10 +99,16 @@ pub(crate) fn register(connection: &Arc<TurnCell<Connection>>) -> Result<Option<
             )));
         }
     }
-    registry.push(Entry {
+    let entry = Entry {
         id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
         connection: Arc::downgrade(connection),
         counts: Arc::downgrade(&counts),
+    };
+    // Registration must stay bounded even when diagnostics are never sampled.
+    REGISTRY.rcu(|entries| {
+        let mut entries = live_entries(entries);
+        entries.push(entry.clone());
+        entries
     });
     Ok(Some(counts))
 }
@@ -144,52 +155,55 @@ pub fn connection_page_diagnostics(
 /// Match connection_id across snapshots; aggregate totals can decrease when
 /// connections close. Missing end IDs cannot provide complete stage attribution.
 pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
-    let Some(registry) = REGISTRY.get() else {
-        return serde_json::json!({"connections":[],"sql_statements":0});
-    };
-    let Ok(mut entries) = registry.lock() else {
-        return serde_json::json!({"error":"SQLite diagnostic registry poisoned"});
-    };
+    let entries = REGISTRY.load_full();
     let mut samples = Vec::new();
-    entries.retain(|entry| {
-        let (Some(connection), Some(counts)) = (entry.connection.upgrade(), entry.counts.upgrade())
-        else {
-            return false;
-        };
-        let Ok(connection) = connection.lock() else {
-            samples.push(serde_json::json!({"error":"SQLite connection poisoned"}));
-            return true;
-        };
-        let sample = connection_page_diagnostics(&connection, reset);
-        let seen = counts.seen.load(Ordering::Relaxed);
-        // Exclude the observer's own PRAGMA page_size statement.
-        if sample.is_ok() && seen & (1 << PRAGMA) != 0 {
-            let count = counts.sql[PRAGMA].load(Ordering::Relaxed);
-            counts.sql[PRAGMA].store(count.saturating_sub(1), Ordering::Relaxed);
-        }
-        let sql: BTreeMap<&'static str, u64> = CATEGORIES
-            .iter()
-            .zip(&counts.sql)
-            .enumerate()
-            .filter(|(category, _)| seen & (1 << category) != 0)
-            .map(|(_, (name, count))| (*name, count.load(Ordering::Relaxed)))
-            .collect();
-        let mut value = match sample {
-            Ok(value) => value,
-            Err(error) => serde_json::json!({"error":error.to_string()}),
-        };
-        value["sql_statements"] = serde_json::json!(sql.values().sum::<u64>());
-        value["connection_id"] = serde_json::json!(entry.id);
-        value["sql_categories"] = serde_json::json!(sql);
-        if reset {
-            for count in &counts.sql {
-                count.store(0, Ordering::Relaxed);
+    let mut closed = false;
+    for entry in entries.iter() {
+        let mut sample_entry = || {
+            let (Some(connection), Some(counts)) =
+                (entry.connection.upgrade(), entry.counts.upgrade())
+            else {
+                return false;
+            };
+            let Ok(connection) = connection.lock() else {
+                samples.push(serde_json::json!({"error":"SQLite connection poisoned"}));
+                return true;
+            };
+            let sample = connection_page_diagnostics(&connection, reset);
+            let seen = counts.seen.load(Ordering::Relaxed);
+            // Exclude the observer's own PRAGMA page_size statement.
+            if sample.is_ok() && seen & (1 << PRAGMA) != 0 {
+                let count = counts.sql[PRAGMA].load(Ordering::Relaxed);
+                counts.sql[PRAGMA].store(count.saturating_sub(1), Ordering::Relaxed);
             }
-            counts.seen.store(0, Ordering::Relaxed);
-        }
-        samples.push(value);
-        true
-    });
+            let sql: BTreeMap<&'static str, u64> = CATEGORIES
+                .iter()
+                .zip(&counts.sql)
+                .enumerate()
+                .filter(|(category, _)| seen & (1 << category) != 0)
+                .map(|(_, (name, count))| (*name, count.load(Ordering::Relaxed)))
+                .collect();
+            let mut value = match sample {
+                Ok(value) => value,
+                Err(error) => serde_json::json!({"error":error.to_string()}),
+            };
+            value["sql_statements"] = serde_json::json!(sql.values().sum::<u64>());
+            value["connection_id"] = serde_json::json!(entry.id);
+            value["sql_categories"] = serde_json::json!(sql);
+            if reset {
+                for count in &counts.sql {
+                    count.store(0, Ordering::Relaxed);
+                }
+                counts.seen.store(0, Ordering::Relaxed);
+            }
+            samples.push(value);
+            true
+        };
+        closed |= !sample_entry();
+    }
+    if closed {
+        REGISTRY.rcu(|entries| live_entries(entries));
+    }
     let total: u64 = samples
         .iter()
         .filter_map(|v| v["sql_statements"].as_u64())
@@ -257,7 +271,7 @@ mod tests {
         // between samples; checking the raw registry avoids snapshot pruning.
         for _ in 0..64 {
             let transient = SqliteBlockStore::in_memory().unwrap();
-            assert_eq!(REGISTRY.get().unwrap().lock().unwrap().len(), 1);
+            assert_eq!(REGISTRY.load().len(), 1);
             drop(transient);
         }
     }

@@ -118,9 +118,17 @@ tables or the Node bindings in depth.
 ## Locks
 
 Production code holds no `std::sync::Mutex` or `RwLock`. Exclusion is done
-by two in-house types: `TurnCell` (a waiter spins, then yields; only for
-short sections) and `TurnLock` (a waiter queues; may be held across an
-await). Every field of either type was audited, and each one that guarded
+by in-house types:
+
+- `TurnCell`: a waiter spins, then yields; only for short sections.
+- `TurnLock`: a waiter queues; may be held across an await.
+- `TurnGate`: the queue of a `TurnLock` with no value inside it.
+- `DrainGate`: many shared holders or one exclusive holder, which waits
+  for the shared ones to leave.
+- Three one-off guards: `Turn` in the vendored `quinn-proto`, and the
+  try-turn on the chunked block cache index and on the host disk cache.
+
+Every field of every one of these was audited, and each one that guarded
 nothing a cheaper primitive could not guard was removed.
 
 | Removed | Replaced by |
@@ -148,16 +156,20 @@ nothing a cheaper primitive could not guard was removed.
 | 9P and S3 assertion logs | `AppendLog`, a push-only list read without a lock |
 | Blob-cache flush gate | Nothing: the write gate already orders flushes, and cache fills are keyed by a content-checked id |
 | PGlite state-store client | An atomic pointer; closing swaps it out and waits for the connection to end |
+| S3 connection shutdown list, Node open-handle callback list | `AppendLog`; shutdown reads a snapshot, and one added after it is missed exactly as it was when a lock ordered the two |
+| Live-mount registries (automatic transport, native NFS), SQLite trace registry, CLI drive metrics map | An atomic pointer to a list or map replaced whole |
+| Chunked block cache per-block fill turn (`DrainGate` that never had a shared holder) | `TurnGate`; the exclusion stays, the unused shared half goes |
 
 Fixed keys mean a client can no longer grow a counter map: undefined NFS and
 MOUNT procedure numbers are counted as `unknown`, and WebDAV counts at most
 64 distinct method names before using `OTHER`.
 
 **Every lock that remains** was then re-read, access site by access site,
-by two independent reviews told to look for a replacement first. What they
-found removable is in the table above, including four that were first kept
-as a matter of judgment. Each lock left is listed here with the reason it
-must stay:
+by two independent reviews told to look for a replacement first, and the
+merged result was swept a third time, including every `TurnGate` and
+`DrainGate` field. What they found removable is in the table above,
+including four that were first kept as a matter of judgment. Each lock left
+is listed here with the reason it must stay:
 
 - **S**: several values change together and must agree.
 - **C**: a collection where a check and the change must be one step.
@@ -168,9 +180,7 @@ must stay:
 | Crate | Lock | Why | Evidence |
 |-------|------|-----|----------|
 | apps/mount-rs-cli | `OwnerService.task`, `RemoteRuntime.worker` | A | Held across the join, so a second close waits and a cancelled close leaves the handle to abort or retry |
-| apps/mount-rs-cli | `DriveMetrics` map | C | Concurrent inserts, read once at shutdown |
 | bindings/mount-rs-napi | `FuseSession.inner` | A | Session used through `&mut` across each request, in order |
-| bindings/mount-rs-napi | `Lifecycle.callbacks` | C | List pushed per opened handle, drained at shutdown |
 | bindings/mount-rs-napi | `HandleState.close_gate` | A | Held across the JavaScript close call |
 | bindings/mount-rs-napi | `native_delegation_mounts` | A | Held across mount and unmount; two fields change around them |
 | bindings/mount-rs-napi | 9P fid table (`Standalone`), `P9Server.state` | S | Fid table; server and serve task set and taken as a pair with the closed check |
@@ -202,18 +212,16 @@ must stay:
 | providers/mount-rs-pglite | storage `client` | R | Transactions need exclusive use of the one connection |
 | providers/mount-rs-slatedb | `state` | A | Held across the persisted write |
 | providers/mount-rs-sqlite | both `connection`s | R | SQLite connection |
-| providers/mount-rs-sqlite | trace `REGISTRY` | C | Pushed and pruned by registrations, walked by the sampler |
 | transports/mount-rs-9p | `P9LockTable.state`, `SessionInner.state` | S | Byte-range locks per path; fid table and users against the generation |
 | transports/mount-rs-9p | `SessionInner.inflight`, server `connections` | C | Duplicate-tag check and insert; insert rechecks closed |
 | transports/mount-rs-9p | `unmount_lock`, `release`, `adoption` | A | Unmount and rollback; server close and task join; the client-set comparison around the mount command |
-| transports/mount-rs-auto | `LIVE` | C | Registry of live mounts |
 | transports/mount-rs-fskit | `handles` | C | Handle table |
-| transports/mount-rs-fuse | reply `writer` | A | Held across the frame write so replies do not interleave |
+| transports/mount-rs-fuse | reply `writer` | A | Held across the frame write so replies do not interleave. The public `from_owned_fd` path writes a frame in a loop of partial writes, so one write call is not one frame |
 | transports/mount-rs-http | `HttpServer.task` | A | Held across the join so the outcome is cached with the handle |
 | transports/mount-rs-nfs | `FileHandleTable.state`, `DirectorySnapshots.state`, `exclusive_creates`, `provisional`, NFSv4 `state` | S | Tables whose maps, order lists and counters must agree |
-| transports/mount-rs-nfs | `clients`, `mounts`, `by_id`, `LIVE_MOUNTS` | C | Inserted and removed by concurrent connections and calls |
+| transports/mount-rs-nfs | `clients`, `mounts`, `by_id` | C | Inserted and removed by concurrent connections and calls |
 | transports/mount-rs-nfs | `listen_lock`, native `unmount_lock`, connection reply writer | A | Bind against close; unmount; record frames must not interleave |
-| transports/mount-rs-s3 | `ConnectionShutdowns.entries`, conditional-put `locks` | C | A registration is either seen by cancel-all or added after it; get-or-insert and remove-if-unused |
+| transports/mount-rs-s3 | conditional-put `locks` | C | Get-or-insert and remove-if-unused |
 | transports/mount-rs-s3 | per-key conditional-put gate | A | Held for the whole check-then-write |
 | transports/mount-rs-webdav | `close_gate`, `lifecycle` | A | Held across close; listen against close |
 | transports/mount-rs-webdav | `ConnectionRegistry.tasks`, `methods` | C | Spawn and insert together so abort-all cannot miss one; the key cap check and insert |
@@ -222,6 +230,35 @@ must stay:
 | vendor/tunnel-transport | `dial_locks`, `draining`, server `connections` | C | Check-then-insert with a bound |
 | vendor/tunnel-transport | per-destination dial gate, `PublishedPool.writer` | A, S | One dial per destination; directory and slot writes must not interleave |
 | vendor/quinn-proto | `TokenMemoryCache`, `BloomTokenLog`, `QlogStream` | S, R | Map with its order list; two filters with their period; a writer used through `&mut` |
+
+The gates, each held across an await on purpose (**A**). "Shared" callers
+overlap each other; an "exclusive" caller waits for them.
+
+| Crate | Gate | Type | Evidence |
+|-------|------|------|----------|
+| crates/mount-rs-cluster | `Slot.gate` | `DrainGate` | Positional reads and stats share; cursor moves, writes and close wait for them. A pending open holds it so a session close cannot count the handle as closed |
+| crates/mount-rs-cluster | `path_operations` | `DrainGate` | Path calls share across the driver call; close waits for them. The closing flag only stops new entry |
+| crates/mount-rs-cluster | `JoinSlot.turn` | `TurnGate` | One joiner across the task join; a second shutdown waits, or inherits the handle if the first is cancelled |
+| crates/mount-rs-cluster | coalesce `Entry.turn` | `TurnGate` | One registry lookup per volume; waiters re-check the route cache |
+| crates/mount-rs-remote-client | `renew_lock` | `TurnGate` | One renewal across the credential fetch and exchange, with the expiry re-checked inside |
+| crates/mount-rs-remote-client, crates/mount-rs-remote | `RemoteHandle.gate` | `DrainGate` | Calls share across the round trip; close (and, on the server, cursor reads and mutations) wait for them |
+| crates/mount-rs-blob-cache | `write_gate` | `DrainGate` | Flush waits for in-flight puts, or a put could have its dirty mark cleared while its block is unflushed |
+| filesystems/mount-rs-versioned | handle `admission` | `DrainGate` | Close waits for in-flight reads before releasing the view pin; cursor reads serialise the position |
+| filesystems/mount-rs-chunked | cache `io_gate`, `write_gate` | `DrainGate` | Delete and clear wait for misses and puts so nothing re-caches an evicted block; flush waits for in-flight puts |
+| filesystems/mount-rs-chunked | cache `Fill.turn` | `TurnGate` | One backing read per block; the others find it cached |
+| filesystems/mount-rs-chunked | `PendingAtimes.gate` | `DrainGate` | A slot is two words; the sweep frees it only when no recorder is inside. Never awaited |
+| filesystems/mount-rs-chunked | `gate`, `lease_gate` | `TurnGate` | One namespace change across the lease check and publish; one lease renewal or publication, so the heartbeat cannot swap the token in between |
+| filesystems/mount-rs-chunked | `lifecycle` | `DrainGate` | Block I/O runs shared without `gate`; shutdown, syncfs, checkout and reconcile wait for it |
+| filesystems/mount-rs-chunked | `ChunkedHandle.gate` | `DrainGate` | Positional reads share; cursor, mutation and close are exclusive |
+| filesystems/mount-rs-host | disk cache `io`, `writes` | `DrainGate` | Delete and clear wait for gets and puts running on blocking threads; flush waits for in-flight puts |
+| transports/mount-rs-nfs | `path_lock` | `DrainGate` | Ordinary calls share; remove, rename, client expiry and destroy wait so an unlinked path cannot be rebound |
+| transports/mount-rs-9p | `path_lock` | `DrainGate` | Path requests share; rename waits so fid paths are rewritten with no walk in flight |
+| providers/mount-rs-sqlite | `PutGroup.turn` | `TurnGate` | Group commit: one commit at a time, with queued puts and reads answered by the turn holder |
+
+One gap from the replacements: the S3 connection shutdown list and the Node
+open-handle callback list are now push-only. They hold a weak pointer per
+connection or handle and are freed only when the server or driver is
+dropped, so a very long-lived server grows them slowly.
 
 **Spinning locks held for too long** (found by the audit, not fixed):
 
