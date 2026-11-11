@@ -3,6 +3,7 @@
 //! Providers and filesystem implementations live in separate workspace crates.
 //! This crate defines the path/error/types, driver, and storage contracts.
 
+pub mod append_log;
 pub mod chunking;
 pub mod delegation;
 #[doc(hidden)]

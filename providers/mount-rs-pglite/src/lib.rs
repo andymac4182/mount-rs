@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
-use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use mount_rs_core::{
     ErrorCode, FsError, LoadedSnapshot, Result, StateStore, backend_error, snapshot_conflict,
 };
@@ -119,7 +118,9 @@ impl CloseGate {
 
 #[derive(Clone)]
 pub struct PgliteStore {
-    client: Arc<TurnLock<Option<Client>>>,
+    /// Statements share the client; closing swaps it out, and the connection
+    /// ends once the last statement holding it finishes.
+    client: Arc<ArcSwapOption<Client>>,
     connection: Arc<ArcSwapOption<JoinHandle<()>>>,
     close_gate: CloseGate,
     state_key: String,
@@ -142,7 +143,7 @@ impl PgliteStore {
             let _ = connection.await;
         });
         let store = Self {
-            client: Arc::new(TurnLock::new(Some(client))),
+            client: Arc::new(ArcSwapOption::from_pointee(client)),
             connection: Arc::new(ArcSwapOption::from_pointee(connection)),
             close_gate: CloseGate::new(),
             state_key: state_key.into(),
@@ -151,11 +152,8 @@ impl PgliteStore {
         Ok(store)
     }
 
-    async fn lock_client(&self) -> Result<TurnLockGuard<'_, Option<Client>>> {
-        if !self.close_gate.is_open() {
-            return Err(connection_closed());
-        }
-        let client = self.client.lock().await;
+    async fn current_client(&self) -> Result<Option<Arc<Client>>> {
+        let client = self.client.load_full();
         if client.is_none() || !self.close_gate.is_open() {
             return Err(connection_closed());
         }
@@ -179,8 +177,7 @@ impl PgliteStore {
     }
 
     async fn finish_close(&self) {
-        let client = self.client.lock().await.take();
-        drop(client);
+        drop(self.client.swap(None));
         // Only this one teardown ever reaches the handle, so the swapped-out
         // pointer is the last one.
         let connection = self.connection.swap(None).and_then(Arc::into_inner);
@@ -191,7 +188,7 @@ impl PgliteStore {
     }
 
     async fn init(&self) -> Result<()> {
-        let client = self.lock_client().await?;
+        let client = self.current_client().await?;
         client
             .as_ref()
             .ok_or_else(connection_closed)?
@@ -224,7 +221,7 @@ impl StateStore for PgliteStore {
     }
 
     async fn load_versioned(&self) -> Result<LoadedSnapshot> {
-        let client = self.lock_client().await?;
+        let client = self.current_client().await?;
         let row = client
             .as_ref()
             .ok_or_else(connection_closed)?
@@ -247,7 +244,7 @@ impl StateStore for PgliteStore {
     }
 
     async fn save(&self, snapshot: Vec<u8>) -> Result<()> {
-        let client = self.lock_client().await?;
+        let client = self.current_client().await?;
         client
             .as_ref()
             .ok_or_else(connection_closed)?
@@ -274,7 +271,7 @@ impl StateStore for PgliteStore {
             .checked_add(1)
             .ok_or_else(|| backend_error("PGlite snapshot revision overflow"))?;
         let changed = if expected == 0 {
-            let client = self.lock_client().await?;
+            let client = self.current_client().await?;
             client
                 .as_ref()
                 .ok_or_else(connection_closed)?
@@ -289,7 +286,7 @@ impl StateStore for PgliteStore {
                 .await
                 .map_err(postgres_error)?
         } else {
-            let client = self.lock_client().await?;
+            let client = self.current_client().await?;
             client
                 .as_ref()
                 .ok_or_else(connection_closed)?
@@ -423,7 +420,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let client_guard = store.client.lock().await;
+            let client_guard = store.client.load_full();
             let canceled = tokio::spawn({
                 let store = store.clone();
                 async move { store.close().await }

@@ -18,6 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_core::Stream;
 use md5::{Digest as Md5Digest, Md5};
+use mount_rs_core::append_log::AppendLog;
 use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
 use mount_rs_core::{
@@ -561,7 +562,7 @@ pub struct S3Session {
     stats: Arc<StatCounters>,
     stream_request_bytes: Arc<AtomicU64>,
     stream_response_bytes: Arc<AtomicU64>,
-    assertions: Arc<TurnCell<Vec<String>>>,
+    assertions: Arc<AppendLog<String>>,
     next_request_id: Arc<AtomicU64>,
     conditional_put_locks: Arc<ConditionalPutLockRegistry>,
 }
@@ -606,7 +607,7 @@ impl S3Session {
             stats: Arc::new(StatCounters::new()),
             stream_request_bytes: Arc::new(AtomicU64::new(0)),
             stream_response_bytes: Arc::new(AtomicU64::new(0)),
-            assertions: Arc::new(TurnCell::new(Vec::new())),
+            assertions: Arc::new(AppendLog::new()),
             next_request_id: Arc::new(AtomicU64::new(1)),
             conditional_put_locks: Arc::new(ConditionalPutLockRegistry::new()),
         }
@@ -624,10 +625,7 @@ impl S3Session {
     }
 
     pub fn assertions(&self) -> Vec<String> {
-        self.assertions
-            .lock()
-            .map(|assertions| assertions.clone())
-            .unwrap_or_default()
+        self.assertions.snapshot()
     }
 
     pub fn bucket_names(&self) -> Vec<String> {
@@ -754,9 +752,7 @@ impl S3Session {
         let answered_before = ticket.answered.swap(true, Ordering::AcqRel);
         if answered_before {
             let message = format!("{} {} was answered twice", head.method, head.target);
-            if let Ok(mut assertions) = self.assertions.lock() {
-                assertions.push(message.clone());
-            }
+            self.assertions.push(message.clone());
             if let Some(hook) = &self.options.hooks.on_assertion {
                 hook(message);
             }
