@@ -9,13 +9,19 @@ anything that stops CI being a trustworthy gate.
 ## CI as a gate
 
 Four jobs failed on every run of `main`, so no pull request could be judged
-by its checks. PR #50 addresses them.
+by its checks. #50 and #57 address them.
+
+**These fixes are not yet proven.** #49 to #57 were merged on 2026-11-11
+without waiting for their checks, at the owner's instruction. Before the
+merge, #50's own runs had passed every job they reached except the ones
+noted under "Flaky jobs" below and the Intel macOS job. Whether `main` is
+green is decided by its CI run after these merges, not by this document.
 
 | Job | Cause | Resolution |
 |-----|-------|------------|
 | `rust (windows-latest)` | Dead code in the cluster HTTP/3 test off Unix | Unix-only items gated |
 | `Observability qualification (windows-latest)` | A delegated SQLite hand-off test needs concurrent local backing, which is Unix-only; then the disk cache report test, because the disk cache refuses to open off Unix | Quarantined on non-Unix, with the reason at each test |
-| `node (macos-latest)`, `node (macos-15-intel)` | The provider matrix compiled the CLI inside a 120 s test case; on Intel macOS the enclosing step's 10-minute limit then expired during that build | The CLI is built once before the timed cases, and the step limit is 25 minutes |
+| `node (macos-latest)`, `node (macos-15-intel)` | The provider matrix compiled the CLI inside a 120 s test case. On Intel macOS the enclosing step's 10-minute limit then expired during that build, and the NFS conformance suite's 3-minute fixture build also ran over | The CLI is built once before the timed cases; the step limit is 25 minutes; the fixture build limit is 20 minutes (#57) |
 | `w26-ozone-evidence` | The TiDB job wrote its log into the checkout, and the evidence step refuses a dirty checkout | Log and artifact moved to the runner's temp directory |
 
 The quarantines hide no behaviour that is supported on those platforms: the
@@ -41,7 +47,9 @@ by design.
 
 Every Rust change was preceded by
 `./scripts/cargo-shared test --workspace --all-targets --locked` and clippy
-with `-D warnings` on macOS.
+with `-D warnings` on macOS. #52 and #53 shared one such run, as did #54,
+#55 and #56, with the changes together in the tree. The same run was
+repeated on `main` after all of them were merged.
 
 ## Checked and left alone
 
