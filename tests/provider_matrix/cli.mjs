@@ -74,6 +74,23 @@ await commandCase(
   ["examples/node-cli/index.mjs", "--driver", "memory", "--sdk-self-test"],
 );
 
+// Build the Rust CLI before the cases that run it. Each case has a two-minute
+// limit meant for the command itself; on a runner where the binary is not
+// built yet, compiling it inside that limit reported a build as a test timeout.
+{
+  const build = await run(
+    cargoShared,
+    ["build", "--quiet", "--offline", "--locked", "-p", "mount-rs-cli"],
+    45 * 60_000,
+  );
+  if (build.ok) {
+    console.log("PASS cli case=rust-cli-build");
+  } else {
+    failures.push("rust-cli-build");
+    console.log("FAIL cli case=rust-cli-build reason=" + build.reason);
+  }
+}
+
 // Run the actual Rust CLI binary through its public-SDK self-test command.
 // The command is mount-free, so this remains portable while proving that the
 // process-level CLI—not only private runtime tests—constructs a Rust SDK
