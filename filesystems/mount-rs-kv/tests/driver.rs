@@ -13,10 +13,12 @@ struct MemoryStore {
     lexical_listing: Arc<Mutex<bool>>,
     fail_next_set: Arc<Mutex<bool>>,
     held_set: Arc<HeldSet>,
+    held_get: Arc<HeldSet>,
 }
 
 /// Holds the next `set_item_raw` before it reaches the values, so a later
-/// one can be issued while it is in flight.
+/// one can be issued while it is in flight. For `get_item_raw` it holds
+/// the answer after the value was read, so the value can change meanwhile.
 #[derive(Default)]
 struct HeldSet {
     armed: std::sync::atomic::AtomicBool,
@@ -42,7 +44,16 @@ impl KeyValueStore for MemoryStore {
     }
 
     async fn get_item_raw(&self, key: &str) -> Result<Option<Vec<u8>>, Self::Error> {
-        Ok(self.values.lock().expect("values lock").get(key).cloned())
+        let value = self.values.lock().expect("values lock").get(key).cloned();
+        if self
+            .held_get
+            .armed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.held_get.entered.notify_one();
+            self.held_get.resume.notified().await;
+        }
+        Ok(value)
     }
 
     async fn set_item_raw(&self, key: &str, value: Vec<u8>) -> Result<(), Self::Error> {
@@ -815,4 +826,357 @@ async fn an_open_never_lands_on_a_buffer_the_last_close_dropped() {
             task.await.expect("join");
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_first_stats_agree_on_one_inode_per_path() {
+    const TASKS: usize = 8;
+    const PATHS: usize = 200;
+    let (store, fs) = setup();
+    for index in 0..PATHS {
+        store.put(&format!("f{index}"), b"x");
+    }
+    let fs = Arc::new(fs);
+    let start = Arc::new(tokio::sync::Barrier::new(TASKS));
+    let mut tasks = Vec::new();
+    for task in 0..TASKS {
+        let (fs, start) = (Arc::clone(&fs), Arc::clone(&start));
+        tasks.push(tokio::spawn(async move {
+            start.wait().await;
+            let mut seen = vec![0; PATHS];
+            // Every task meets the others on a different path first.
+            for step in 0..PATHS {
+                let index = (step + task * PATHS / TASKS) % PATHS;
+                seen[index] = fs.stat(&format!("/f{index}")).await.expect("stat").ino;
+            }
+            seen
+        }));
+    }
+    let mut seen = Vec::new();
+    for task in tasks {
+        seen.push(task.await.expect("join"));
+    }
+    for other in &seen[1..] {
+        assert_eq!(other, &seen[0], "two inode numbers for one path");
+    }
+    let distinct = seen[0]
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert_eq!(distinct, PATHS, "one inode number for two paths");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_attribute_updates_are_applied_whole_and_none_is_lost() {
+    const ROUNDS: i64 = 20_000;
+    let (store, fs) = setup();
+    store.put("f", b"x");
+    let fs = Arc::new(fs);
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // One task sets both times to one value, another only the mode.
+    let times = {
+        let fs = Arc::clone(&fs);
+        tokio::spawn(async move {
+            for round in 1..=ROUNDS {
+                fs.utimes("/f", round, round).await.expect("utimes");
+                // Only this task sets the times: a mode change working
+                // from an older copy must not put the old ones back.
+                let stats = fs.stat("/f").await.expect("stat");
+                assert_eq!((stats.atime_ms, stats.mtime_ms), (round, round));
+            }
+        })
+    };
+    let modes = {
+        let fs = Arc::clone(&fs);
+        tokio::spawn(async move {
+            for round in 1..=ROUNDS {
+                let mode = 0o400 | (round as u32 % 0o100);
+                fs.chmod("/f", mode).await.expect("chmod");
+                // Only this task sets the mode.
+                let stats = fs.stat("/f").await.expect("stat");
+                assert_eq!(stats.mode & 0o777, mode, "a mode change was lost");
+            }
+        })
+    };
+    let reader = {
+        let (fs, done) = (Arc::clone(&fs), Arc::clone(&done));
+        tokio::spawn(async move {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let stats = fs.stat("/f").await.expect("stat");
+                assert_eq!(
+                    stats.atime_ms, stats.mtime_ms,
+                    "a stat saw half of one utimes"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    let times = times.await;
+    let modes = modes.await;
+    // Stop the reader before reporting, or a failure would leave it
+    // running.
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    reader.await.expect("join reader");
+    times.expect("join times");
+    modes.expect("join modes");
+
+    // Neither task's last update was overwritten by the other's.
+    let stats = fs.stat("/f").await.expect("stat");
+    assert_eq!((stats.atime_ms, stats.mtime_ms), (ROUNDS, ROUNDS));
+    assert_eq!(stats.mode & 0o777, 0o400 | (ROUNDS as u32 % 0o100));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn renames_racing_other_table_changes_lose_nothing() {
+    const NESTED: usize = 20;
+    const CHURN_TASKS: usize = 3;
+    const CHURN: usize = 300;
+    const RENAMES: usize = 100;
+    let (store, fs) = setup();
+    let fs = Arc::new(fs);
+    fs.mkdir("/a", Default::default()).await.expect("mkdir");
+    let mut before = Vec::new();
+    for index in 0..NESTED {
+        let path = format!("/a/n{index}");
+        let mode = 0o700 | index as u32;
+        fs.mkdir(
+            &path,
+            MkdirOptions {
+                recursive: false,
+                mode: Some(mode),
+            },
+        )
+        .await
+        .expect("mkdir nested");
+        before.push((fs.stat(&path).await.expect("stat nested").ino, mode));
+    }
+    fs.write_file("/a/file", b"1234").await.expect("write");
+    let handle = fs.open("/a/file", "r+", 0).await.expect("open");
+    handle.write(b"56", Some(4)).await.expect("grow");
+
+    let mut tasks = Vec::new();
+    {
+        let fs = Arc::clone(&fs);
+        tasks.push(tokio::spawn(async move {
+            for _ in 0..RENAMES {
+                fs.rename("/a", "/b").await.expect("rename there");
+                fs.rename("/b", "/a").await.expect("rename back");
+            }
+        }));
+    }
+    for task in 0..CHURN_TASKS {
+        let fs = Arc::clone(&fs);
+        tasks.push(tokio::spawn(async move {
+            for index in 0..CHURN {
+                // Each of these changes a table the rename is moving
+                // paths in.
+                let directory = format!("/other{task}x{index}");
+                let mode = 0o500 | (index as u32 % 0o100);
+                fs.mkdir(
+                    &directory,
+                    MkdirOptions {
+                        recursive: false,
+                        mode: Some(mode),
+                    },
+                )
+                .await
+                .expect("mkdir other");
+                let file = format!("/file{task}x{index}");
+                let handle = fs.open(&file, "w", 0o640).await.expect("create");
+                handle.write(b"x", None).await.expect("write");
+                handle.close().await.expect("close");
+                if index % 3 == 0 {
+                    fs.unlink(&file).await.expect("unlink");
+                }
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("join");
+    }
+
+    for task in 0..CHURN_TASKS {
+        for index in 0..CHURN {
+            let stats = fs
+                .stat(&format!("/other{task}x{index}"))
+                .await
+                .expect("a directory made during the renames is gone");
+            assert_eq!(stats.mode & 0o777, 0o500 | (index as u32 % 0o100));
+            let file = fs.stat(&format!("/file{task}x{index}")).await;
+            if index % 3 == 0 {
+                assert_eq!(file.expect_err("unlinked").code, ErrorCode::Enoent);
+            } else {
+                assert_eq!(file.expect("file").mode & 0o777, 0o640);
+            }
+        }
+    }
+    // The renamed tree kept its inode numbers and modes under its name.
+    for (index, (ino, mode)) in before.into_iter().enumerate() {
+        let stats = fs.stat(&format!("/a/n{index}")).await.expect("nested");
+        assert_eq!((stats.ino, stats.mode & 0o777), (ino, mode));
+    }
+    assert_eq!(
+        fs.stat("/b").await.expect_err("old name").code,
+        ErrorCode::Enoent
+    );
+    // The open file followed every rename with its unsaved bytes.
+    assert_eq!(fs.stat("/a/file").await.expect("stat open").size, 6);
+    handle.close().await.expect("close");
+    assert_eq!(store.bytes("a:file"), Some(b"123456".to_vec()));
+    assert_eq!(store.bytes("b:file"), None);
+}
+
+#[tokio::test]
+async fn rename_moves_what_is_inside_and_leaves_lookalike_siblings() {
+    let (_store, fs) = setup();
+    let mut inodes = HashMap::new();
+    for path in [
+        "/a", "/a/x", "/a/x/y", "/a-x", "/a.x", "/a0", "/ab", "/ab/x",
+    ] {
+        fs.mkdir(path, Default::default()).await.expect("mkdir");
+        inodes.insert(path, fs.stat(path).await.expect("stat").ino);
+    }
+    fs.rename("/a", "/z").await.expect("rename");
+    for (old, new) in [("/a", "/z"), ("/a/x", "/z/x"), ("/a/x/y", "/z/x/y")] {
+        assert_eq!(
+            fs.stat(old).await.expect_err("moved away").code,
+            ErrorCode::Enoent
+        );
+        let stats = fs.stat(new).await.expect("moved");
+        assert!(stats.is_directory());
+        assert_eq!(stats.ino, inodes[old], "{old} was renumbered");
+    }
+    for sibling in ["/a-x", "/a.x", "/a0", "/ab", "/ab/x"] {
+        let stats = fs.stat(sibling).await.expect("sibling stays");
+        assert!(stats.is_directory());
+        assert_eq!(stats.ino, inodes[sibling], "{sibling} was renumbered");
+    }
+    let mut names = fs
+        .readdir("/")
+        .await
+        .expect("readdir")
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["a-x", "a.x", "a0", "ab", "z"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_files_open_at_once_each_keep_one_buffer() {
+    const TASKS: usize = 4;
+    // More files than the open-file table has buckets.
+    const FILES: usize = 600;
+    let (store, fs) = setup();
+    let fs = Arc::new(fs);
+    let mut tasks = Vec::new();
+    for task in 0..TASKS {
+        let fs = Arc::clone(&fs);
+        tasks.push(tokio::spawn(async move {
+            let mut handles = Vec::new();
+            for index in 0..FILES {
+                let path = format!("/t{task}x{index}");
+                let handle = fs.open(&path, "w+", 0o644).await.expect("create");
+                let tag = format!("{task}:{index}");
+                handle.write(tag.as_bytes(), Some(0)).await.expect("write");
+                handles.push((path, tag, handle));
+            }
+            for (path, tag, handle) in handles {
+                // A second open shares the buffer, so it reads bytes the
+                // store has not been given.
+                let again = fs.open(&path, "r", 0).await.expect("open again");
+                assert_eq!(read_handle(&again, tag.len()).await, tag.as_bytes());
+                again.close().await.expect("close again");
+                handle.close().await.expect("close");
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("join");
+    }
+    for task in 0..TASKS {
+        for index in 0..FILES {
+            assert_eq!(
+                store.bytes(&format!("t{task}x{index}")),
+                Some(format!("{task}:{index}").into_bytes())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn writes_through_a_handle_stamp_the_file_under_its_current_name() {
+    let (_store, fs) = setup();
+    fs.write_file("/f", b"aaaa").await.expect("write");
+    let ino = fs.stat("/f").await.expect("stat").ino;
+    let handle = fs.open("/f", "r+", 0).await.expect("open");
+    handle.write(b"b", Some(0)).await.expect("first write");
+
+    // Attributes set by path are the ones the handle keeps stamping.
+    fs.chmod("/f", 0o600).await.expect("chmod");
+    fs.utimes("/f", 1000, 2000).await.expect("utimes");
+    handle.write(b"c", Some(1)).await.expect("second write");
+    let stats = fs.stat("/f").await.expect("stat");
+    assert_eq!((stats.ino, stats.mode & 0o777), (ino, 0o600));
+    assert_eq!(stats.atime_ms, 1000);
+    assert!(stats.mtime_ms > 2000 && stats.ctime_ms == stats.mtime_ms);
+
+    // After a rename the handle stamps the new name, not the old one.
+    fs.rename("/f", "/g").await.expect("rename");
+    fs.utimes("/g", 3000, 4000).await.expect("utimes renamed");
+    handle.write(b"d", Some(2)).await.expect("third write");
+    let stats = fs.stat("/g").await.expect("stat renamed");
+    assert_eq!((stats.ino, stats.mode & 0o777), (ino, 0o600));
+    assert_eq!(stats.atime_ms, 3000);
+    assert!(stats.mtime_ms > 4000);
+    assert_eq!(
+        fs.stat("/f").await.expect_err("old name").code,
+        ErrorCode::Enoent
+    );
+
+    // A file created over an unlinked name starts with its own attributes.
+    fs.unlink("/g").await.expect("unlink");
+    fs.write_file("/g", b"new").await.expect("recreate");
+    let recreated = fs.stat("/g").await.expect("stat recreated");
+    assert_ne!(recreated.ino, ino);
+    assert_ne!(recreated.mode & 0o777, 0o600);
+    handle.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn an_open_does_not_keep_contents_read_before_another_buffer_was_saved() {
+    let (store, fs) = setup();
+    let fs = Arc::new(fs);
+    fs.write_file("/f", &[0, 0]).await.expect("write");
+
+    // The first open finds no buffer and reads the store; its answer is
+    // on the way back.
+    store
+        .held_get
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let opening = {
+        let fs = Arc::clone(&fs);
+        tokio::spawn(async move { fs.open("/f", "r+", 0).await })
+    };
+    store.held_get.entered.notified().await;
+
+    // Meanwhile the file is opened, written, saved and closed: its buffer
+    // has come and gone.
+    let other = fs.open("/f", "r+", 0).await.expect("open other");
+    other.write(&[1], Some(0)).await.expect("write other");
+    other.close().await.expect("close other");
+    assert_eq!(store.bytes("f"), Some(vec![1, 0]));
+
+    // The first open must not build its buffer from what it read.
+    store.held_get.resume.notify_one();
+    let first = opening.await.expect("join").expect("open first");
+    first.write(&[1], Some(1)).await.expect("write first");
+    first.close().await.expect("close first");
+    assert_eq!(
+        store.bytes("f"),
+        Some(vec![1, 1]),
+        "a saved write was undone"
+    );
 }

@@ -7,9 +7,9 @@
 use crate::{
     Filesystem,
     fuse_codec::{NativeFuseProtocolContext, invalid_argument, protocol_error, usize_value},
+    serial,
 };
 use mount_rs_core::FsError;
-use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_fuse::constants::{
     FUSE_ATOMIC_O_TRUNC, FUSE_CACHE_SYMLINKS, FUSE_DO_READDIRPLUS, FUSE_EXPORT_SUPPORT,
     FUSE_FLOCK_LOCKS, FUSE_PARALLEL_DIROPS, FUSE_POSIX_LOCKS, FUSE_SETXATTR_EXT,
@@ -18,8 +18,9 @@ use mount_rs_fuse::constants::{
 use mount_rs_fuse::session::{
     FuseFlushMechanism, FuseSession as RustFuseSession, FuseSessionOptions,
 };
-use napi::bindgen_prelude::{BigInt, Buffer};
+use napi::bindgen_prelude::{BigInt, Buffer, Env, PromiseRaw, ToNapiValue};
 use napi_derive::napi;
+use tokio::sync::{mpsc, oneshot};
 
 #[napi(object)]
 pub struct NativeFuseInitPreferences {
@@ -377,12 +378,93 @@ fn session_options(options: Option<NativeFuseSessionOptions>) -> napi::Result<Fu
     })
 }
 
+/// The reply to one frame and the structured error behind a negative reply.
+type HandleReply = (napi::Result<Option<Vec<u8>>>, Option<FsError>);
+
+/// One call on the session, with the channel its answer goes back through.
+enum SessionRequest {
+    Handle(Buffer, oneshot::Sender<HandleReply>),
+    State(oneshot::Sender<NativeFuseSessionState>),
+    Destroy(oneshot::Sender<()>),
+}
+
+impl SessionRequest {
+    /// The caller is gone (its promise could not be made, or the runtime is
+    /// being torn down), so the request is not run.
+    fn abandoned(&self) -> bool {
+        match self {
+            Self::Handle(_, reply) => reply.is_closed(),
+            Self::State(reply) => reply.is_closed(),
+            Self::Destroy(reply) => reply.is_closed(),
+        }
+    }
+}
+
+/// The task that owns the session. Requests are sent to it synchronously
+/// from the JavaScript thread, so it receives them in the order JavaScript
+/// made the calls and runs them one at a time in that order. The structured
+/// error of a frame is read before the next request is received, so it is
+/// always the error of that frame. The task ends, dropping the session, when
+/// the JavaScript object is collected.
+async fn own_session(
+    mut session: RustFuseSession,
+    mut requests: mpsc::UnboundedReceiver<SessionRequest>,
+) {
+    while let Some(request) = requests.recv().await {
+        if request.abandoned() {
+            continue;
+        }
+        // A request that panics answers nobody: its reply channel is dropped
+        // and its caller sees the request as cancelled. The session stays
+        // with this task for the requests behind it.
+        let _ = serial::caught(async {
+            match request {
+                SessionRequest::Handle(bytes, reply) => {
+                    let result = session.handle(bytes.as_ref()).await;
+                    let error = session.take_last_error();
+                    let _ = reply.send((result.map_err(protocol_error), error));
+                }
+                SessionRequest::State(reply) => {
+                    let _ = reply.send(session_state(&session));
+                }
+                SessionRequest::Destroy(reply) => {
+                    session.destroy().await;
+                    let _ = reply.send(());
+                }
+            }
+        })
+        .await;
+    }
+}
+
 /// A serialized FUSE request/reply session backed by a mount-rs filesystem
-/// driver. Requests are handled in order behind an async mutex, preserving
-/// the Rust transport's inode and open-handle state across calls.
+/// driver. One task owns the Rust session; each call is sent to it at the
+/// moment JavaScript makes the call, and the calls run one at a time in that
+/// order, preserving the Rust transport's inode and open-handle state across
+/// calls.
 #[napi]
 pub struct FuseSession {
-    inner: TurnLock<RustFuseSession>,
+    requests: mpsc::UnboundedSender<SessionRequest>,
+}
+
+impl FuseSession {
+    /// Send a request to the owner and return the promise for its answer.
+    fn call<R, V>(
+        &self,
+        env: Env,
+        request: impl FnOnce(oneshot::Sender<R>) -> SessionRequest,
+        settle: impl FnOnce(R) -> napi::Result<V> + Send + 'static,
+    ) -> napi::Result<PromiseRaw<'static, V>>
+    where
+        R: Send + 'static,
+        V: ToNapiValue + Send + 'static,
+    {
+        let (reply, answer) = oneshot::channel();
+        // A send only fails once the owner is gone, which drops the reply
+        // channel and so reports the request as cancelled.
+        let _ = self.requests.send(request(reply));
+        serial::promise(env, async move { answer.await.ok() }, settle)
+    }
 }
 
 #[napi]
@@ -392,56 +474,66 @@ impl FuseSession {
         filesystem: &Filesystem,
         options: Option<NativeFuseSessionOptions>,
     ) -> napi::Result<Self> {
-        Ok(Self {
-            inner: TurnLock::new(RustFuseSession::with_options(
-                filesystem.driver()?,
-                session_options(options)?,
-            )),
-        })
+        let session =
+            RustFuseSession::with_options(filesystem.driver()?, session_options(options)?);
+        let (requests, inbox) = mpsc::unbounded_channel();
+        napi::bindgen_prelude::spawn(own_session(session, inbox));
+        Ok(Self { requests })
     }
 
     /// Handle one complete FUSE request frame. `null` is returned for
     /// protocol no-reply operations such as FORGET and BATCH_FORGET.
-    #[napi]
-    pub async fn handle(&self, bytes: Buffer) -> napi::Result<Option<Buffer>> {
-        let mut session = self.inner.lock().await;
-        session
-            .handle(bytes.as_ref())
-            .await
-            .map(|reply| reply.map(Buffer::from))
-            .map_err(protocol_error)
+    #[napi(ts_return_type = "Promise<Buffer | null>")]
+    pub fn handle(
+        &self,
+        env: Env,
+        bytes: Buffer,
+    ) -> napi::Result<PromiseRaw<'static, Option<Buffer>>> {
+        self.call(
+            env,
+            |reply| SessionRequest::Handle(bytes, reply),
+            |(result, _error): HandleReply| result.map(|reply| reply.map(Buffer::from)),
+        )
     }
 
     /// Internal observed form used by the JavaScript facade to preserve the
     /// structured error that produced a negative FUSE reply.
-    #[napi(js_name = "__handleObserved")]
-    pub async fn handle_observed(
+    #[napi(
+        js_name = "__handleObserved",
+        ts_return_type = "Promise<NativeFuseSessionObservation>"
+    )]
+    pub fn handle_observed(
         &self,
+        env: Env,
         bytes: Buffer,
-    ) -> napi::Result<NativeFuseSessionObservation> {
-        let mut session = self.inner.lock().await;
-        let result = session.handle(bytes.as_ref()).await;
-        let error = session.take_last_error().map(Into::into);
-        result
-            .map(|reply| NativeFuseSessionObservation {
-                reply: reply.map(Buffer::from),
-                error,
-            })
-            .map_err(protocol_error)
+    ) -> napi::Result<PromiseRaw<'static, NativeFuseSessionObservation>> {
+        self.call(
+            env,
+            |reply| SessionRequest::Handle(bytes, reply),
+            |(result, error): HandleReply| {
+                result.map(|reply| NativeFuseSessionObservation {
+                    reply: reply.map(Buffer::from),
+                    error: error.map(Into::into),
+                })
+            },
+        )
     }
 
     /// Internal lifecycle readback used by the JavaScript facade's public
-    /// session getters. It observes the same locked Rust session as `handle`.
-    #[napi(js_name = "__state")]
-    pub async fn state(&self) -> NativeFuseSessionState {
-        let session = self.inner.lock().await;
-        session_state(&session)
+    /// session getters. It takes its turn with `handle`, so it observes the
+    /// session between requests.
+    #[napi(
+        js_name = "__state",
+        ts_return_type = "Promise<NativeFuseSessionState>"
+    )]
+    pub fn state(&self, env: Env) -> napi::Result<PromiseRaw<'static, NativeFuseSessionState>> {
+        self.call(env, SessionRequest::State, Ok)
     }
 
     /// Release all session-owned handles and inode state. This remains
     /// separate from `Filesystem.shutdown()`, which owns the provider.
-    #[napi]
-    pub async fn destroy(&self) {
-        self.inner.lock().await.destroy().await;
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn destroy(&self, env: Env) -> napi::Result<PromiseRaw<'static, ()>> {
+        self.call(env, SessionRequest::Destroy, Ok)
     }
 }

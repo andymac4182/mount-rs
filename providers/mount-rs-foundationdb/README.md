@@ -50,8 +50,8 @@ let storage = mount_rs_foundationdb::FoundationDbStorage::connect(
 At process shutdown, drop all providers, database handles, in-flight work, and
 application runtimes, then call `shutdown_client_network()` before exiting.
 The call stops and joins the native FoundationDB network thread. It returns
-`EBUSY` while a managed provider handle remains alive; the application can
-finish draining it and retry. This is a terminal process operation: subsequent
+`EBUSY` while a managed provider handle remains alive or a managed `connect`
+is still in progress; the application can finish draining and retry. This is a terminal process operation: subsequent
 managed `connect` calls fail because FoundationDB cannot restart its client
 network in the same process.
 

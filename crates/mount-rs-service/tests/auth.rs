@@ -645,14 +645,22 @@ async fn a_stalled_key_fetch_delays_only_the_requests_that_need_it() {
         catalog,
         source.clone(),
     ));
-    // Paused time jumps to the deadline as soon as nothing can run, so this
-    // fails at once if the request is stuck behind the stalled fetch.
+    // The catalog answers from its own thread, and paused time would jump
+    // to a tokio deadline while the runtime waits for it. The bound is
+    // therefore real time, kept by a thread: a request stuck behind the
+    // stalled fetch fails after five seconds.
     let prompt = |token: String| {
         let auth = Arc::clone(&auth);
         async move {
-            tokio::time::timeout(Duration::from_secs(5), auth.authenticate(&token, "red"))
-                .await
-                .expect("queued behind another request's key fetch")
+            let (expired, deadline) = tokio::sync::oneshot::channel::<()>();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(5));
+                let _ = expired.send(());
+            });
+            tokio::select! {
+                answer = auth.authenticate(&token, "red") => answer,
+                _ = deadline => panic!("queued behind another request's key fetch"),
+            }
         }
     };
 

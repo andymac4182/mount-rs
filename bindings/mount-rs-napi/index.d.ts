@@ -99,8 +99,10 @@ export declare class Filesystem {
 
 /**
  * A serialized FUSE request/reply session backed by a mount-rs filesystem
- * driver. Requests are handled in order behind an async mutex, preserving
- * the Rust transport's inode and open-handle state across calls.
+ * driver. One task owns the Rust session; each call is sent to it at the
+ * moment JavaScript makes the call, and the calls run one at a time in that
+ * order, preserving the Rust transport's inode and open-handle state across
+ * calls.
  */
 export declare class FuseSession {
   constructor(filesystem: Filesystem, options?: FuseSessionOptions | undefined | null)
@@ -724,8 +726,10 @@ export declare class PathLock {
  */
 export declare class S3BodyStream {
   /**
-   * Read one response chunk, or `null` after EOF. A single mutex prevents
-   * concurrent JavaScript pulls from advancing the transport stream twice.
+   * Read one response chunk, or `null` after EOF. Pulls and closes take
+   * their place in the order JavaScript calls them and run one at a time:
+   * two pulls made at once get consecutive chunks in call order, and a
+   * close runs after every pull made before it.
    */
   readChunk(): Promise<Buffer | null>
   /**
@@ -804,8 +808,11 @@ export declare class S3StreamResponse {
  */
 export declare class WebdavBodyStream {
   /**
-   * Read one response chunk, or `null` after EOF. A single mutex protects
-   * the positional file read and makes concurrent JavaScript pulls safe.
+   * Read one response chunk, or `null` after EOF. Pulls and closes take
+   * their place in the order JavaScript calls them and run one at a time:
+   * two pulls made at once get consecutive chunks in call order (the
+   * position advances by what the earlier pull actually read), and a
+   * close runs after every pull made before it.
    */
   readChunk(): Promise<Buffer | null>
   /**

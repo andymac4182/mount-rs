@@ -23,3 +23,5 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 mount-rs-versioned = { path = "../../filesystems/mount-rs-versioned" }
+# The benchmark compares the current-thread and multi-thread runtimes.
+tokio = { version = "1", features = ["rt-multi-thread"] }

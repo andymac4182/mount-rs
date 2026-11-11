@@ -1114,6 +1114,143 @@ mod tests {
             at(0.999)
         );
     }
+    /// Not a test: disk-backed inserts of blocks too large for RAM, from one
+    /// thread and then from 8. Every insert after a thread's first pass over
+    /// its ids replaces a file (unlink, write, rename). This is the measure
+    /// that keeps `disk_io` a lock: with one disk-writer thread in its place
+    /// the single inserter's median was about a fifth slower in every run.
+    /// `cargo test -p mount-rs-blob-cache --release profile_disk_inserts -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn profile_disk_inserts() {
+        for threads in [1_usize, 8] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = LocalCache::new(LocalCacheConfig {
+                directory: dir.path().to_path_buf(),
+                memory_bytes: 4,
+                disk_bytes: 256 * 1024 * 1024,
+                max_entries: 8192,
+                max_blob_bytes: 8192,
+            })
+            .unwrap();
+            let s = scope("inserts");
+            let per_thread = 24_000 / threads;
+            let block: Arc<[u8]> = Arc::from(vec![7_u8; 4096]);
+            let started = std::time::Instant::now();
+            let mut waits: Vec<u64> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|thread| {
+                        let (cache, s, block) = (&cache, &s, &block);
+                        scope.spawn(move || {
+                            let ids: Vec<BlockId> = (0..256_u32)
+                                .map(|n| BlockId(format!("block-{thread}-{n}")))
+                                .collect();
+                            let mut waits = Vec::with_capacity(per_thread);
+                            for n in 0..per_thread {
+                                let id = &ids[n % ids.len()];
+                                let began = std::time::Instant::now();
+                                cache
+                                    .insert_shared(s, id, block.clone(), IntegrityPolicy::Opaque)
+                                    .unwrap();
+                                waits.push(began.elapsed().as_nanos() as u64);
+                            }
+                            waits
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().unwrap())
+                    .collect()
+            });
+            let seconds = started.elapsed().as_secs_f64();
+            waits.sort_unstable();
+            let at = |q: f64| waits[((waits.len() - 1) as f64 * q) as usize] as f64 / 1e6;
+            println!(
+                "disk inserts x{threads}: {:.0}/s p50={:.4} p99={:.4} p99.9={:.4} ms",
+                waits.len() as f64 / seconds,
+                at(0.5),
+                at(0.99),
+                at(0.999)
+            );
+        }
+    }
+    #[test]
+    fn racing_inserts_and_invalidations_leave_no_file_the_index_does_not_know() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = LocalCacheConfig {
+            directory: dir.path().to_path_buf(),
+            memory_bytes: 64,
+            // Room for 12 of the 16 blocks, so inserts also evict.
+            disk_bytes: 12 * (48 + 32),
+            max_entries: 14,
+            max_blob_bytes: 64,
+        };
+        let cache = LocalCache::new(config.clone()).unwrap();
+        let scopes = [scope("left"), scope("right")];
+        let ids: Vec<BlockId> = (0..8).map(|n| BlockId(format!("block-{n}"))).collect();
+        let check = |cache: &LocalCache| {
+            let state = cache.state.lock().unwrap();
+            assert!(state.quarantined.is_empty());
+            let mut files = BTreeMap::new();
+            for entry in fs::read_dir(dir.path()).unwrap() {
+                let entry = entry.unwrap();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                assert!(!name.ends_with(".tmp"), "temporary file {name} left behind");
+                if let Some(key) = parse_key(&name) {
+                    files.insert(key, entry.metadata().unwrap().len() as usize);
+                }
+            }
+            let indexed: BTreeMap<CacheKey, usize> = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.disk)
+                .map(|(key, entry)| (*key, entry.size + 32))
+                .collect();
+            assert_eq!(files, indexed, "the directory and the index disagree");
+            assert_eq!(state.disk, indexed.values().sum::<usize>());
+            assert!(state.disk <= config.disk_bytes);
+            assert!(state.entries.len() <= config.max_entries);
+        };
+        for round in 0..4 {
+            std::thread::scope(|threads| {
+                for thread in 0..8_usize {
+                    let (cache, scopes, ids) = (&cache, &scopes, &ids);
+                    threads.spawn(move || {
+                        for n in 0..400_usize {
+                            let turn = n * 7 + thread * 13 + round;
+                            let s = &scopes[turn % 2];
+                            let id = &ids[(turn / 2) % ids.len()];
+                            // The same bytes for a block every time: a
+                            // different RAM copy would refuse the insert.
+                            let block = [id.0.as_bytes()[6]; 48];
+                            match (n + thread) % 8 {
+                                0..=3 => cache
+                                    .insert(s, id, &block, IntegrityPolicy::Opaque)
+                                    .unwrap(),
+                                4 | 5 => cache.invalidate(s, id),
+                                6 if n % 64 == 6 => cache.invalidate_scope(s),
+                                _ => {
+                                    if let Some(read) = cache.get(s, id, IntegrityPolicy::Opaque) {
+                                        assert_eq!(read, block);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            // Nothing is in flight: every change was made before its caller
+            // returned.
+            check(&cache);
+        }
+        // A restart reads the directory and finds what the index held.
+        let before = cache.usage();
+        drop(cache);
+        let cache = LocalCache::new(config.clone()).unwrap();
+        assert_eq!((cache.usage().1, cache.usage().2), (before.1, before.2));
+        check(&cache);
+    }
     #[test]
     fn rejects_overflow_prone_public_configurations() {
         let dir = tempfile::tempdir().unwrap();

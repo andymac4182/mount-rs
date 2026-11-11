@@ -6,16 +6,20 @@
 //! handles, buffering, and process-local metadata overlay. It is not a
 //! replacement for the independent metadata/block-store integrations.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasher, RandomState};
+use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
+use im::{HashMap as SharedMap, OrdSet};
 use mount_rs_core::driver::{FileHandle, FsDriver};
 use mount_rs_core::error::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_core::handle::{OpenFlags, checked_position};
-use mount_rs_core::park_cell::{ParkCell, ParkCellGuard};
+use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::path::{basename, dirname, is_path_inside, normalize_path, split_path};
 use mount_rs_core::turn_gate::TurnGate;
 use mount_rs_core::types::{
@@ -110,15 +114,77 @@ impl Default for UnstorageOptions {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Attributes {
-    ino: u64,
+/// What `chmod`, `chown`, `utimes` and writes have set on a path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Overlay {
     mode: Option<u32>,
     uid: Option<u32>,
     gid: Option<u32>,
     atime_ms: Option<i64>,
     mtime_ms: Option<i64>,
     ctime_ms: Option<i64>,
+}
+
+/// One path's entry in the attribute table. The entry is shared: a write
+/// replaces its overlay in place, so the table itself changes only when a
+/// path is added, removed or renamed.
+struct PathAttributes {
+    ino: u64,
+    overlay: ArcSwap<Overlay>,
+    /// Set once the entry has left the table (unlink, rmdir, a rename over
+    /// it). An open file that remembers the entry looks its path up again.
+    removed: AtomicBool,
+}
+
+impl PathAttributes {
+    fn new(ino: u64, overlay: Overlay) -> Arc<Self> {
+        Arc::new(Self {
+            ino,
+            overlay: ArcSwap::from_pointee(overlay),
+            removed: AtomicBool::new(false),
+        })
+    }
+
+    /// Applies `update` to the overlay as one step: a reader sees all of it
+    /// or none of it, and two updates never mix their fields. An update
+    /// that changes nothing (a write in the millisecond of the last one)
+    /// stores nothing and allocates nothing.
+    fn update(&self, update: &impl Fn(&mut Overlay)) {
+        let mut current = self.overlay.load();
+        loop {
+            let mut next = **current;
+            update(&mut next);
+            if next == **current {
+                return;
+            }
+            let previous = self.overlay.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return;
+            }
+            current = previous;
+        }
+    }
+
+    fn snapshot(&self) -> Attributes {
+        Attributes {
+            ino: self.ino,
+            overlay: **self.overlay.load(),
+        }
+    }
+}
+
+/// A path's attributes at one moment.
+#[derive(Debug, Clone, Copy)]
+struct Attributes {
+    ino: u64,
+    overlay: Overlay,
+}
+
+impl std::ops::Deref for Attributes {
+    type Target = Overlay;
+    fn deref(&self) -> &Overlay {
+        &self.overlay
+    }
 }
 
 struct OpenFile {
@@ -134,6 +200,11 @@ struct OpenFile {
     /// a second buffer for the same file and one of their saves would be
     /// lost. It looks the path up again instead.
     detached: bool,
+    /// The attribute entry of `path`, remembered so a write stamps it
+    /// without a lookup. It is the table's entry for `path` for as long as
+    /// it is not marked removed: a rename moves the entry with the path and
+    /// clears this, and an orphan never uses it.
+    attributes: Option<Arc<PathAttributes>>,
 }
 
 /// An open file's buffer, with the turn its saves take.
@@ -152,19 +223,270 @@ impl std::ops::Deref for OpenEntry {
     }
 }
 
-struct State {
-    next_ino: u64,
-    next_fd: u64,
-    attributes: HashMap<String, Attributes>,
-    empty_directories: HashSet<String>,
-    open_files: HashMap<String, Arc<OpenEntry>>,
+/// The attribute and empty-directory tables, as one immutable value. A
+/// change builds the next value (sharing all but the touched branches with
+/// the last) and publishes it with a compare-and-swap, so a rename moves a
+/// path in both in one step and a reader never sees it half moved.
+///
+/// The attributes are found by hash. Their paths are also kept in order,
+/// as the empty directories are, so everything below a directory is one
+/// contiguous range: a rename visits what it moves, not every path.
+#[derive(Clone, Default)]
+struct Tables {
+    attributes: SharedMap<Arc<str>, Arc<PathAttributes>>,
+    /// The keys of `attributes`.
+    attribute_paths: OrdSet<Arc<str>>,
+    empty_directories: OrdSet<Arc<str>>,
+}
+
+const OPEN_BUCKETS: usize = 1024;
+
+type OpenSlot = (Arc<str>, Arc<OpenEntry>);
+
+/// One bucket's files, with how many have ever been taken out of it.
+#[derive(Default)]
+struct OpenBucket {
+    /// An open that found no buffer for its path reads the store and then
+    /// puts its own buffer in. The store may only be trusted if no buffer
+    /// for the path came and went in between, saving newer contents after
+    /// the read: this count is how the open knows. It never goes back, so
+    /// a bucket that is empty again is still not the bucket it was.
+    removals: u64,
+    slots: Vec<OpenSlot>,
+}
+
+/// What became of an attempt to put a new buffer in the table.
+enum Inserted {
+    Done,
+    /// The path has an open buffer already.
+    Existing(Arc<OpenEntry>),
+    /// A buffer left the bucket since the caller looked: what the caller
+    /// read from the store may be older than what that buffer saved.
+    Stale,
+}
+
+/// The open files by path: a fixed array of buckets, each an immutable
+/// list replaced whole by a compare-and-swap. An open or a close copies
+/// one bucket, which holds one file in every thousand open, and waits for
+/// nobody.
+struct OpenTable {
+    hasher: RandomState,
+    buckets: Box<[ArcSwapOption<OpenBucket>]>,
+}
+
+impl OpenTable {
+    fn new() -> Self {
+        Self {
+            hasher: RandomState::new(),
+            buckets: (0..OPEN_BUCKETS).map(|_| ArcSwapOption::empty()).collect(),
+        }
+    }
+
+    fn bucket(&self, path: &str) -> &ArcSwapOption<OpenBucket> {
+        &self.buckets[(self.hasher.hash_one(path) % OPEN_BUCKETS as u64) as usize]
+    }
+
+    /// The file open under `path`, and the bucket's removal count as of
+    /// the same moment.
+    fn find(&self, path: &str) -> (Option<Arc<OpenEntry>>, u64) {
+        let bucket = self.bucket(path).load();
+        let Some(bucket) = bucket.as_ref() else {
+            return (None, 0);
+        };
+        let entry = bucket
+            .slots
+            .iter()
+            .find(|(held, _)| &**held == path)
+            .map(|(_, entry)| Arc::clone(entry));
+        (entry, bucket.removals)
+    }
+
+    fn get(&self, path: &str) -> Option<Arc<OpenEntry>> {
+        self.find(path).0
+    }
+
+    fn contains(&self, path: &str) -> bool {
+        let bucket = self.bucket(path).load();
+        bucket
+            .as_ref()
+            .is_some_and(|bucket| bucket.slots.iter().any(|(held, _)| &**held == path))
+    }
+
+    /// Replaces the bucket of `path` with what `decide` makes of it, or
+    /// leaves it when `decide` says `Err`. `decide` runs again whenever
+    /// another change to the bucket was published first, so it must only
+    /// compute.
+    fn change<R>(
+        &self,
+        path: &str,
+        decide: impl Fn(&OpenBucket) -> std::result::Result<(OpenBucket, R), R>,
+    ) -> R {
+        let empty = OpenBucket::default();
+        let bucket = self.bucket(path);
+        let mut current = bucket.load();
+        loop {
+            let (next, result) = match decide(current.as_deref().unwrap_or(&empty)) {
+                Ok(change) => change,
+                Err(result) => return result,
+            };
+            let previous = bucket.compare_and_swap(&current, Some(Arc::new(next)));
+            let published = match (&*previous, &*current) {
+                (None, None) => true,
+                (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
+                _ => false,
+            };
+            if published {
+                return result;
+            }
+            current = previous;
+        }
+    }
+
+    /// Puts `entry` under `path`, unless a file is already open there or a
+    /// buffer has left the bucket since the caller saw `removals`.
+    fn insert_if_absent(&self, path: &str, entry: &Arc<OpenEntry>, removals: u64) -> Inserted {
+        let slot: OpenSlot = (Arc::from(path), Arc::clone(entry));
+        self.change(path, |bucket| {
+            if let Some((_, existing)) = bucket.slots.iter().find(|(held, _)| &**held == path) {
+                return Err(Inserted::Existing(Arc::clone(existing)));
+            }
+            if bucket.removals != removals {
+                return Err(Inserted::Stale);
+            }
+            let mut slots = Vec::with_capacity(bucket.slots.len() + 1);
+            slots.extend_from_slice(&bucket.slots);
+            slots.push(slot.clone());
+            Ok((OpenBucket { removals, slots }, Inserted::Done))
+        })
+    }
+
+    /// Puts `entry` under `path`, in place of whatever was open there.
+    fn insert(&self, path: &str, entry: &Arc<OpenEntry>) {
+        let slot: OpenSlot = (Arc::from(path), Arc::clone(entry));
+        self.change(path, |bucket| {
+            let mut slots = Vec::with_capacity(bucket.slots.len() + 1);
+            slots.extend(
+                bucket
+                    .slots
+                    .iter()
+                    .filter(|(held, _)| &**held != path)
+                    .cloned(),
+            );
+            let replaced = (slots.len() != bucket.slots.len()) as u64;
+            slots.push(slot.clone());
+            let removals = bucket.removals.wrapping_add(replaced);
+            Ok((OpenBucket { removals, slots }, ()))
+        });
+    }
+
+    /// The bucket without the slots `leaving` picks.
+    fn without(bucket: &OpenBucket, leaving: impl Fn(&OpenSlot) -> bool) -> OpenBucket {
+        OpenBucket {
+            removals: bucket.removals.wrapping_add(1),
+            slots: bucket
+                .slots
+                .iter()
+                .filter(|slot| !leaving(slot))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// Takes out whatever is open under `path`.
+    fn remove(&self, path: &str) -> Option<Arc<OpenEntry>> {
+        self.change(path, |bucket| {
+            let Some((_, removed)) = bucket.slots.iter().find(|(held, _)| &**held == path) else {
+                return Err(None);
+            };
+            let next = Self::without(bucket, |(held, _)| &**held == path);
+            Ok((next, Some(Arc::clone(removed))))
+        })
+    }
+
+    /// Whether the table held `entry` under `path` and no longer does.
+    fn remove_entry(&self, path: &str, entry: &Arc<OpenEntry>) -> bool {
+        self.change(path, |bucket| {
+            let held = |(held, current): &OpenSlot| &**held == path && Arc::ptr_eq(current, entry);
+            if !bucket.slots.iter().any(held) {
+                return Err(false);
+            }
+            Ok((Self::without(bucket, held), true))
+        })
+    }
+
+    /// The files open at `from` or below it, as seen bucket by bucket.
+    fn inside(&self, from: &str) -> Vec<OpenSlot> {
+        let below = below(from);
+        let mut inside = Vec::new();
+        for bucket in self.buckets.iter() {
+            let bucket = bucket.load();
+            let Some(bucket) = bucket.as_ref() else {
+                continue;
+            };
+            inside.extend(
+                bucket
+                    .slots
+                    .iter()
+                    .filter(|(path, _)| match &below {
+                        None => true,
+                        Some((prefix, _)) => &**path == from || path.starts_with(prefix.as_str()),
+                    })
+                    .cloned(),
+            );
+        }
+        inside
+    }
+}
+
+/// What one attempt at a change decided, given the tables it looked at.
+enum Step<R> {
+    /// Nothing to publish.
+    Keep(R),
+    /// Publish these tables; decide again if another change got in first.
+    Swap(Tables, R),
+}
+
+/// The bounds of the paths strictly below `parent`: those starting with
+/// `parent/`. `None` for the root, which everything else is below.
+fn below(parent: &str) -> Option<(String, String)> {
+    // '0' is the byte after '/', so this is every string with that prefix.
+    (parent != "/").then(|| (format!("{parent}/"), format!("{parent}0")))
+}
+
+/// The members of `set` at `from` or below it.
+fn members_inside(set: &OrdSet<Arc<str>>, from: &str) -> Vec<Arc<str>> {
+    let mut inside = Vec::new();
+    inside.extend(lookup(set, from).cloned());
+    inside.extend(members_below(set, from));
+    inside
+}
+
+/// The member of `set` equal to `path`.
+fn lookup<'a>(set: &'a OrdSet<Arc<str>>, path: &str) -> Option<&'a Arc<str>> {
+    let bounds = (Bound::Included(path), Bound::Included(path));
+    set.range::<_, str>(bounds).next()
+}
+
+/// The members of `set` strictly below `parent`.
+fn members_below(set: &OrdSet<Arc<str>>, parent: &str) -> Vec<Arc<str>> {
+    let Some((low, high)) = below(parent) else {
+        return set.iter().filter(|path| &***path != "/").cloned().collect();
+    };
+    let bounds = (
+        Bound::Included(low.as_str()),
+        Bound::Excluded(high.as_str()),
+    );
+    set.range::<_, str>(bounds).cloned().collect()
 }
 
 struct Inner<S> {
     store: S,
     options: UnstorageOptions,
     created_ms: i64,
-    state: ParkCell<State>,
+    next_ino: AtomicU64,
+    next_fd: AtomicU64,
+    tables: ArcSwap<Tables>,
+    open_files: OpenTable,
 }
 
 /// A cloneable generic key-value filesystem driver.
@@ -207,13 +529,10 @@ where
             store,
             options,
             created_ms: now_ms(),
-            state: ParkCell::new(State {
-                next_ino: 1,
-                next_fd: 3,
-                attributes: HashMap::new(),
-                empty_directories: HashSet::new(),
-                open_files: HashMap::new(),
-            }),
+            next_ino: AtomicU64::new(1),
+            next_fd: AtomicU64::new(3),
+            tables: ArcSwap::from_pointee(Tables::default()),
+            open_files: OpenTable::new(),
         }),
     }
 }
@@ -304,10 +623,32 @@ impl<S> Inner<S>
 where
     S: KeyValueStore,
 {
-    fn lock_state(&self) -> Result<ParkCellGuard<'_, State>> {
-        self.state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("key-value state lock poisoned"))
+    /// Changes the tables: `decide` looks at the current ones and says
+    /// what to publish. It runs again whenever another change was published
+    /// first, so it must only compute: ids are allocated and entries built
+    /// before the call.
+    fn change<R>(&self, decide: impl Fn(&Tables) -> Step<R>) -> R {
+        let mut current = self.tables.load_full();
+        loop {
+            match decide(&current) {
+                Step::Keep(result) => return result,
+                Step::Swap(next, result) => {
+                    let previous = self.tables.compare_and_swap(&current, Arc::new(next));
+                    if Arc::ptr_eq(&previous, &current) {
+                        return result;
+                    }
+                    current = arc_swap::Guard::into_inner(previous);
+                }
+            }
+        }
+    }
+
+    fn allocate(counter: &AtomicU64, syscall: &str) -> Result<u64> {
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map_err(|_| FsError::new(ErrorCode::Eoverflow).with_syscall(syscall))
     }
 
     fn store_error<E: fmt::Display>(&self, error: E, syscall: &str, path: &str) -> FsError {
@@ -316,104 +657,117 @@ where
             .with_path(normalize_path(path))
     }
 
+    /// The attribute entry of `path`, which is `candidate` unless the path
+    /// already had one. The flag says whether `candidate` went in.
+    fn attributes_or_insert(
+        &self,
+        path: &str,
+        candidate: Arc<PathAttributes>,
+    ) -> (Arc<PathAttributes>, bool) {
+        let key: Arc<str> = Arc::from(path);
+        self.change(|tables| match tables.attributes.get(path) {
+            Some(existing) => Step::Keep((Arc::clone(existing), false)),
+            None => {
+                let mut next = tables.clone();
+                next.attributes
+                    .insert(Arc::clone(&key), Arc::clone(&candidate));
+                next.attribute_paths.insert(Arc::clone(&key));
+                Step::Swap(next, (Arc::clone(&candidate), true))
+            }
+        })
+    }
+
     fn attributes_of(&self, path: &str) -> Result<Attributes> {
-        let mut state = self.lock_state()?;
-        if let Some(attributes) = state.attributes.get(path) {
-            return Ok(attributes.clone());
+        if let Some(attributes) = self.tables.load().attributes.get(path) {
+            return Ok(attributes.snapshot());
         }
-        let ino = state.next_ino;
-        state.next_ino = ino
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow).with_syscall("stat"))?;
-        let attributes = Attributes {
-            ino,
-            mode: None,
-            uid: None,
-            gid: None,
-            atime_ms: None,
-            mtime_ms: None,
-            ctime_ms: None,
-        };
-        state.attributes.insert(path.to_owned(), attributes.clone());
-        Ok(attributes)
+        // Allocated before the insert is attempted: an attempt that loses
+        // to another caller's entry leaves a gap in the numbering.
+        let ino = Self::allocate(&self.next_ino, "stat")?;
+        let candidate = PathAttributes::new(ino, Overlay::default());
+        Ok(self.attributes_or_insert(path, candidate).0.snapshot())
     }
 
     fn update_attributes<F>(&self, path: &str, syscall: &str, update: F) -> Result<()>
     where
-        F: FnOnce(&mut Attributes),
+        F: Fn(&mut Overlay),
     {
-        let mut state = self.lock_state()?;
-        if !state.attributes.contains_key(path) {
-            let ino = state.next_ino;
-            state.next_ino = ino
-                .checked_add(1)
-                .ok_or_else(|| FsError::new(ErrorCode::Eoverflow).with_syscall(syscall))?;
-            state.attributes.insert(
-                path.to_owned(),
-                Attributes {
-                    ino,
-                    mode: None,
-                    uid: None,
-                    gid: None,
-                    atime_ms: None,
-                    mtime_ms: None,
-                    ctime_ms: None,
-                },
-            );
+        self.updated_attributes(path, syscall, update).map(drop)
+    }
+
+    /// Applies `update` to the attributes of `path` and returns its entry.
+    fn updated_attributes<F>(
+        &self,
+        path: &str,
+        syscall: &str,
+        update: F,
+    ) -> Result<Arc<PathAttributes>>
+    where
+        F: Fn(&mut Overlay),
+    {
+        if let Some(attributes) = self.tables.load().attributes.get(path) {
+            attributes.update(&update);
+            return Ok(Arc::clone(attributes));
         }
-        if let Some(attributes) = state.attributes.get_mut(path) {
-            update(attributes);
+        // A new entry goes in with the update already applied, so no reader
+        // sees the path numbered but not yet updated.
+        let ino = Self::allocate(&self.next_ino, syscall)?;
+        let mut overlay = Overlay::default();
+        update(&mut overlay);
+        let (attributes, inserted) =
+            self.attributes_or_insert(path, PathAttributes::new(ino, overlay));
+        if !inserted {
+            attributes.update(&update);
         }
-        Ok(())
+        Ok(attributes)
     }
 
-    fn remove_attributes(&self, path: &str) -> Result<()> {
-        self.lock_state()?.attributes.remove(path);
-        Ok(())
-    }
-
-    fn set_empty_directory(&self, path: &str, present: bool) -> Result<()> {
-        let mut state = self.lock_state()?;
-        if present {
-            state.empty_directories.insert(path.to_owned());
-        } else {
-            state.empty_directories.remove(path);
+    fn remove_attributes(&self, path: &str) {
+        let removed = self.change(|tables| {
+            let Some(removed) = tables.attributes.get(path) else {
+                return Step::Keep(None);
+            };
+            let removed = Arc::clone(removed);
+            let mut next = tables.clone();
+            next.attributes.remove(path);
+            next.attribute_paths.remove(path);
+            Step::Swap(next, Some(removed))
+        });
+        if let Some(removed) = removed {
+            removed.removed.store(true, Ordering::SeqCst);
         }
-        Ok(())
     }
 
-    fn has_empty_directory(&self, path: &str) -> Result<bool> {
-        Ok(self.lock_state()?.empty_directories.contains(path))
+    fn set_empty_directory(&self, path: &str, present: bool) {
+        let key: Arc<str> = Arc::from(path);
+        self.change(|tables| {
+            if tables.empty_directories.contains(path) == present {
+                return Step::Keep(());
+            }
+            let mut next = tables.clone();
+            if present {
+                next.empty_directories.insert(Arc::clone(&key));
+            } else {
+                next.empty_directories.remove(path);
+            }
+            Step::Swap(next, ())
+        });
     }
 
-    fn has_open_file(&self, path: &str) -> Result<bool> {
-        Ok(self.lock_state()?.open_files.contains_key(path))
+    fn has_empty_directory(&self, path: &str) -> bool {
+        self.tables.load().empty_directories.contains(path)
     }
 
-    fn open_file(&self, path: &str) -> Result<Option<Arc<OpenEntry>>> {
-        Ok(self.lock_state()?.open_files.get(path).cloned())
+    fn has_open_file(&self, path: &str) -> bool {
+        self.open_files.contains(path)
+    }
+
+    fn open_file(&self, path: &str) -> Option<Arc<OpenEntry>> {
+        self.open_files.get(path)
     }
 
     fn allocate_fd(&self) -> Result<u64> {
-        let mut state = self.lock_state()?;
-        let fd = state.next_fd;
-        state.next_fd = fd
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow).with_syscall("open"))?;
-        Ok(fd)
-    }
-
-    /// Whether the table held `entry` under `path` and no longer does.
-    fn remove_open_file_if(&self, path: &str, entry: &Arc<OpenEntry>) -> Result<bool> {
-        let mut state = self.lock_state()?;
-        let held = state
-            .open_files
-            .get(path)
-            .is_some_and(|current| Arc::ptr_eq(current, entry));
-        if held {
-            state.open_files.remove(path);
-        }
-        Ok(held)
+        Self::allocate(&self.next_fd, "open")
     }
 
     /// Counts one more handle on an entry found in the open-file table.
@@ -431,8 +785,7 @@ where
     }
 
     fn mark_orphan(&self, path: &str) -> Result<()> {
-        let entry = self.lock_state()?.open_files.remove(path);
-        if let Some(entry) = entry {
+        if let Some(entry) = self.open_files.remove(path) {
             entry
                 .lock()
                 .map_err(|_| FsError::new(ErrorCode::Eio))?
@@ -442,15 +795,19 @@ where
     }
 
     fn remove_closed(&self, entry: &Arc<OpenEntry>) -> Result<()> {
-        // The count is read, the entry leaves the table and it is marked
-        // detached all under the entry's lock, which an open must take to
-        // count itself: it either is counted before this looks, and the
-        // entry stays, or finds the mark. Nothing takes this lock while
-        // holding the table's, so nesting them in this order cannot deadlock.
+        // The caller holds the entry's saving turn, so a clean buffer here
+        // is one the store already holds. The count is read, the entry
+        // leaves the table and it is marked detached all under the entry's
+        // lock, which an open must take to count itself: it either is
+        // counted before this looks, and the entry stays, or finds the
+        // mark. The table has no lock of its own: leaving it is a
+        // compare-and-swap that waits for nobody, and a table that no
+        // longer holds this entry under this path (unlinked, replaced) is
+        // left as it is.
         let mut file = entry.lock().map_err(|_| FsError::new(ErrorCode::Eio))?;
         if file.refs == 0
             && (!file.dirty || file.orphan)
-            && self.remove_open_file_if(&file.path, entry)?
+            && self.open_files.remove_entry(&file.path, entry)
         {
             file.detached = true;
         }
@@ -458,52 +815,58 @@ where
     }
 
     fn move_paths(&self, from: &str, to: &str) -> Result<()> {
-        let mut moved_open = Vec::new();
-        {
-            let mut state = self.lock_state()?;
-
-            let attributes = state
-                .attributes
-                .keys()
-                .filter(|path| is_path_inside(path, from))
-                .cloned()
-                .collect::<Vec<_>>();
-            for path in attributes {
-                if let Some(value) = state.attributes.remove(&path) {
-                    let destination = remap_path(from, to, &path);
-                    state.attributes.insert(destination, value);
-                }
+        // The open files move first, one at a time, each under its own
+        // lock: an open or a last close of that file waits, and afterwards
+        // finds the table and the file's own path agreeing on the new name.
+        // Until the attributes follow, a stat of the new name numbers the
+        // path afresh and the move below replaces that entry, which is what
+        // a stat between the store's move and this one has always done.
+        for (path, entry) in self.open_files.inside(from) {
+            let mut file = entry.lock().map_err(|_| FsError::new(ErrorCode::Eio))?;
+            // Closed or unlinked since the scan: it is no longer this
+            // path's open file.
+            if !self.open_files.remove_entry(&path, &entry) {
+                continue;
             }
-
-            let directories = state
-                .empty_directories
-                .iter()
-                .filter(|path| is_path_inside(path, from))
-                .cloned()
-                .collect::<Vec<_>>();
-            for path in directories {
-                state.empty_directories.remove(&path);
-                state.empty_directories.insert(remap_path(from, to, &path));
-            }
-
-            let open = state
-                .open_files
-                .keys()
-                .filter(|path| is_path_inside(path, from))
-                .cloned()
-                .collect::<Vec<_>>();
-            for path in open {
-                if let Some(entry) = state.open_files.remove(&path) {
-                    let destination = remap_path(from, to, &path);
-                    state
-                        .open_files
-                        .insert(destination.clone(), Arc::clone(&entry));
-                    moved_open.push((entry, destination));
-                }
-            }
+            let destination = remap_path(from, to, &path);
+            self.open_files.insert(&destination, &entry);
+            file.path = destination;
+            // What a write remembered was found under the old name.
+            file.attributes = None;
         }
-        for (entry, destination) in moved_open {
-            entry.lock().map_err(|_| FsError::new(ErrorCode::Eio))?.path = destination;
+
+        // One published value moves the path in both tables. The attribute
+        // entries themselves move, so an update in flight on a moved path
+        // lands on the entry under its new name.
+        let replaced = self.change(|tables| {
+            let attributes = members_inside(&tables.attribute_paths, from);
+            let directories = members_inside(&tables.empty_directories, from);
+            if attributes.is_empty() && directories.is_empty() {
+                return Step::Keep(Vec::new());
+            }
+            let mut next = tables.clone();
+            let mut moved = Vec::with_capacity(attributes.len());
+            for path in &attributes {
+                next.attribute_paths.remove(path);
+                moved.extend(next.attributes.remove(path).map(|value| (path, value)));
+            }
+            let mut replaced = Vec::new();
+            for (path, value) in moved {
+                let destination: Arc<str> = Arc::from(remap_path(from, to, path));
+                next.attribute_paths.insert(Arc::clone(&destination));
+                replaced.extend(next.attributes.insert(destination, value));
+            }
+            for path in &directories {
+                next.empty_directories.remove(path);
+            }
+            for path in directories {
+                next.empty_directories
+                    .insert(Arc::from(remap_path(from, to, &path)));
+            }
+            Step::Swap(next, replaced)
+        });
+        for replaced in replaced {
+            replaced.removed.store(true, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -631,6 +994,48 @@ where
             attributes.ctime_ms = Some(timestamp);
         })
     }
+
+    /// [`Self::touch`] for an open file whose lock the caller holds, in
+    /// two steps so the stamp itself is made after the lock is released.
+    /// This one returns the attribute entry the file remembers, which is
+    /// the one a lookup of its path would find, so a write does no lookup;
+    /// the caller passes it to [`stamp`] once the lock is released. When
+    /// the file remembers none it is found by path, stamped here and
+    /// remembered.
+    fn touch_open(
+        &self,
+        file: &mut OpenFile,
+        syscall: &str,
+    ) -> Result<Option<Arc<PathAttributes>>> {
+        if file.orphan {
+            // The path may belong to another file by now. Whatever is
+            // there is stamped, as it always was.
+            self.touch(&file.path, syscall)?;
+            return Ok(None);
+        }
+        if let Some(attributes) = &file.attributes
+            && !attributes.removed.load(Ordering::SeqCst)
+        {
+            return Ok(Some(Arc::clone(attributes)));
+        }
+        let timestamp = now_ms();
+        file.attributes = Some(self.updated_attributes(&file.path, syscall, |attributes| {
+            attributes.mtime_ms = Some(timestamp);
+            attributes.ctime_ms = Some(timestamp);
+        })?);
+        Ok(None)
+    }
+}
+
+/// Marks the attributes [`Inner::touch_open`] returned as modified now.
+fn stamp(attributes: Option<Arc<PathAttributes>>) {
+    if let Some(attributes) = attributes {
+        let timestamp = now_ms();
+        attributes.update(&|attributes: &mut Overlay| {
+            attributes.mtime_ms = Some(timestamp);
+            attributes.ctime_ms = Some(timestamp);
+        });
+    }
 }
 
 impl<S> KvFileHandle<S>
@@ -731,8 +1136,9 @@ where
             self.position.store(end, Ordering::Relaxed);
         }
         file.dirty = true;
+        let attributes = self.inner.touch_open(&mut file, "write")?;
         drop(file);
-        self.inner.touch(&path, "write")?;
+        stamp(attributes);
         Ok(buffer.len())
     }
 
@@ -744,16 +1150,17 @@ where
     }
 
     async fn truncate(&self, length: u64) -> Result<()> {
-        let path = self.begin(true, "ftruncate")?;
-        {
+        let _path = self.begin(true, "ftruncate")?;
+        let attributes = {
             let mut file = self
                 .entry
                 .lock()
                 .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("ftruncate"))?;
             resize_bytes(&mut file.data, length, "ftruncate")?;
             file.dirty = true;
-        }
-        self.inner.touch(&path, "ftruncate")?;
+            self.inner.touch_open(&mut file, "ftruncate")?
+        };
+        stamp(attributes);
         Ok(())
     }
 
@@ -896,16 +1303,13 @@ where
             }
         }
 
-        let empty_directories = self
-            .inner
-            .lock_state()?
-            .empty_directories
+        let empty_directories =
+            members_below(&self.inner.tables.load().empty_directories, &parent_path);
+        for directory in empty_directories
             .iter()
-            .filter(|directory| dirname(directory) == parent_path && **directory != parent_path)
-            .cloned()
-            .collect::<Vec<_>>();
-        for directory in empty_directories {
-            let name = basename(&directory);
+            .filter(|directory| dirname(directory) == parent_path)
+        {
+            let name = basename(directory);
             if !entries.iter().any(|(entry, _)| entry == &name) {
                 entries.push((name, true));
             }
@@ -1000,11 +1404,11 @@ where
             }
         }
 
-        let state = self.inner.lock_state()?;
-        for directory in state
-            .empty_directories
+        let empty_directories =
+            members_below(&self.inner.tables.load().empty_directories, &parent_path);
+        for directory in empty_directories
             .iter()
-            .filter(|directory| dirname(directory) == parent_path && **directory != parent_path)
+            .filter(|directory| dirname(directory) == parent_path)
         {
             let name = basename(directory);
             if entries.iter().any(|(entry, _)| entry == &name) {
@@ -1131,7 +1535,7 @@ where
                 current.push_str(segment);
                 match self.inner.classify(&current, "mkdir", &mut scope).await? {
                     Kind::Missing => {
-                        self.inner.set_empty_directory(&current, true)?;
+                        self.inner.set_empty_directory(&current, true);
                         self.inner
                             .update_attributes(&current, "mkdir", |attributes| {
                                 attributes.mode = Some(mode);
@@ -1159,7 +1563,7 @@ where
                 .with_syscall("mkdir")
                 .with_path(&path));
         }
-        self.inner.set_empty_directory(&path, true)?;
+        self.inner.set_empty_directory(&path, true);
         self.inner.update_attributes(&path, "mkdir", |attributes| {
             attributes.mode = Some(mode);
         })?;
@@ -1193,8 +1597,9 @@ where
                 .with_syscall("rmdir")
                 .with_path(&path));
         }
-        self.inner.set_empty_directory(&path, false)?;
-        self.inner.remove_attributes(&path)
+        self.inner.set_empty_directory(&path, false);
+        self.inner.remove_attributes(&path);
+        Ok(())
     }
 
     async fn unlink(&self, path: &str) -> Result<()> {
@@ -1216,8 +1621,9 @@ where
         }
         self.inner.remove_value(&path, "unlink").await?;
         self.inner.mark_orphan(&path)?;
-        self.inner.set_empty_directory(&path, false)?;
-        self.inner.remove_attributes(&path)
+        self.inner.set_empty_directory(&path, false);
+        self.inner.remove_attributes(&path);
+        Ok(())
     }
 
     async fn rename(&self, old_path: &str, new_path: &str) -> Result<()> {
@@ -1272,8 +1678,8 @@ where
 
         if destination != Kind::Missing {
             self.inner.mark_orphan(&to)?;
-            self.inner.remove_attributes(&to)?;
-            self.inner.set_empty_directory(&to, false)?;
+            self.inner.remove_attributes(&to);
+            self.inner.set_empty_directory(&to, false);
         }
 
         if directory {
@@ -1296,7 +1702,7 @@ where
         }
         self.inner.move_paths(&from, &to)?;
         if directory {
-            self.inner.set_empty_directory(&to, true)?;
+            self.inner.set_empty_directory(&to, true);
         }
         self.inner.touch(&to, "rename")
     }
@@ -1308,7 +1714,7 @@ where
         self.inner
             .resolve_file(&path, "truncate", &mut scope)
             .await?;
-        if let Some(entry) = self.inner.open_file(&path)? {
+        if let Some(entry) = self.inner.open_file(&path) {
             {
                 let mut file = entry
                     .lock()
@@ -1322,9 +1728,7 @@ where
                 .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("truncate"))?
                 .refs;
             if refs == 0 {
-                let result = self.inner.flush(&entry).await;
-                let cleanup = self.inner.remove_closed(&entry);
-                return result.and(cleanup);
+                return self.inner.flush_and_remove_closed(&entry).await;
             }
             return Ok(());
         }
@@ -1402,14 +1806,14 @@ where
         if path == "/" {
             return Ok(Kind::Directory);
         }
-        if self.has_open_file(path)? {
+        if self.has_open_file(path) {
             return Ok(Kind::File);
         }
         let key = key_of(path, syscall)?;
         if self.has_key(&key, scope, syscall, path).await? {
             return Ok(Kind::File);
         }
-        if self.has_empty_directory(path)? {
+        if self.has_empty_directory(path) {
             return Ok(Kind::Directory);
         }
         Ok(
@@ -1474,7 +1878,7 @@ where
         }
 
         for (component_path, component_key) in paths.iter().zip(keys.iter()) {
-            if self.has_open_file(component_path)?
+            if self.has_open_file(component_path)
                 || self
                     .has_key(component_key, scope, syscall, reported)
                     .await?
@@ -1485,7 +1889,7 @@ where
             }
         }
         let deepest = paths.last().expect("non-root path has a component");
-        if self.has_empty_directory(deepest)? {
+        if self.has_empty_directory(deepest) {
             return Ok(());
         }
         if self
@@ -1525,15 +1929,7 @@ where
         {
             return Ok(true);
         }
-        let directories = self
-            .lock_state()?
-            .empty_directories
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        Ok(directories
-            .into_iter()
-            .any(|directory| directory != path && is_path_inside(&directory, path)))
+        Ok(!members_below(&self.tables.load().empty_directories, path).is_empty())
     }
 
     fn mutable(&self, syscall: &str, path: &str) -> Result<()> {
@@ -1547,18 +1943,17 @@ where
 
     fn make_stats(
         &self,
-        path: &str,
+        attributes: Attributes,
         mode: u32,
         size: u64,
         metadata: KeyValueMetadata,
-    ) -> Result<Stats> {
-        let attributes = self.attributes_of(path)?;
+    ) -> Stats {
         let kind = mode & S_IFMT;
         let mtime_ms = attributes
             .mtime_ms
             .or(metadata.mtime_ms)
             .unwrap_or(self.created_ms);
-        Ok(Stats {
+        Stats {
             dev: 0,
             ino: attributes.ino,
             mode,
@@ -1579,13 +1974,13 @@ where
                 .or(metadata.ctime_ms)
                 .unwrap_or(mtime_ms),
             birthtime_ms: metadata.birthtime_ms.unwrap_or(mtime_ms),
-        })
+        }
     }
 
     fn directory_stats(&self, path: &str) -> Result<Stats> {
         let attributes = self.attributes_of(path)?;
         let mode = S_IFDIR | (attributes.mode.unwrap_or(self.options.dir_mode) & 0o7777);
-        self.make_stats(path, mode, BLOCK_SIZE, KeyValueMetadata::default())
+        Ok(self.make_stats(attributes, mode, BLOCK_SIZE, KeyValueMetadata::default()))
     }
 
     async fn file_stats(
@@ -1605,12 +2000,12 @@ where
             (false, None)
         };
         if orphan {
-            return self.make_stats(
-                path,
+            return Ok(self.make_stats(
+                attributes,
                 mode,
                 open_size.unwrap_or(0),
                 KeyValueMetadata::default(),
-            );
+            ));
         }
         let key = key_of(path, syscall)?;
         let metadata = self
@@ -1625,7 +2020,7 @@ where
         } else {
             self.read_value(path, syscall).await?.len() as u64
         };
-        self.make_stats(path, mode, size, metadata)
+        Ok(self.make_stats(attributes, mode, size, metadata))
     }
 
     async fn stat_of(&self, path: &str, syscall: &str, scope: &mut Scope) -> Result<Stats> {
@@ -1634,7 +2029,7 @@ where
             Kind::File => {
                 // An open buffer is the file's contents until its last close,
                 // including writes that have not reached the store yet.
-                self.file_stats(path, syscall, self.open_file(path)?).await
+                self.file_stats(path, syscall, self.open_file(path)).await
             }
             Kind::Missing => Err(FsError::new(ErrorCode::Enoent)
                 .with_syscall(syscall)
@@ -1653,7 +2048,8 @@ where
         syscall: &str,
     ) -> Result<Arc<OpenEntry>> {
         loop {
-            if let Some(entry) = self.open_file(path)? {
+            let (existing, removals) = self.open_files.find(path);
+            if let Some(entry) = existing {
                 if self.join_open_file(&entry, syscall)? {
                     return Ok(entry);
                 }
@@ -1674,30 +2070,51 @@ where
                     dirty: false,
                     orphan: false,
                     detached: false,
+                    attributes: None,
                 }),
                 saving: TurnGate::new(),
             });
-            let mut state = self.lock_state()?;
-            if let Some(entry) = state.open_files.get(path).cloned() {
-                drop(state);
-                if self.join_open_file(&entry, syscall)? {
-                    return Ok(entry);
+            // The candidate already counts its one handle and nobody can
+            // reach it until the table holds it. It goes in only if no
+            // buffer has left the bucket since the look above: one for
+            // this path that was opened, written, saved and dropped during
+            // the read would leave this one holding contents older than
+            // the store's, and its save would undo that write.
+            match self.open_files.insert_if_absent(path, &candidate, removals) {
+                Inserted::Done => return Ok(candidate),
+                Inserted::Existing(entry) => {
+                    if self.join_open_file(&entry, syscall)? {
+                        return Ok(entry);
+                    }
                 }
-                continue;
+                Inserted::Stale => {}
             }
-            state
-                .open_files
-                .insert(path.to_owned(), Arc::clone(&candidate));
-            return Ok(candidate);
         }
     }
 
     async fn flush(&self, entry: &Arc<OpenEntry>) -> Result<()> {
         // Taken before looking at the buffer, even a clean one: a save in
         // flight has already marked it clean, and whoever sees it clean
-        // (the last close, about to drop the buffer) must find the store
-        // already holding it.
+        // must find the store already holding it.
         let _saving = entry.saving.lock().await;
+        self.save(entry).await
+    }
+
+    /// Saves the buffer, then drops it from the open-file table if its
+    /// last handle is closed. Both happen in one turn of the entry's
+    /// saves: the buffer is dropped for being clean, and it is marked
+    /// clean when a save starts, so a save by a later handle still on its
+    /// way to the store would otherwise let the next open read the store
+    /// too early and build its buffer without that save.
+    async fn flush_and_remove_closed(&self, entry: &Arc<OpenEntry>) -> Result<()> {
+        let _saving = entry.saving.lock().await;
+        let result = self.save(entry).await;
+        let cleanup = self.remove_closed(entry);
+        result.and(cleanup)
+    }
+
+    /// The body of a save. The caller holds the entry's saving turn.
+    async fn save(&self, entry: &Arc<OpenEntry>) -> Result<()> {
         let snapshot = {
             let mut file = entry
                 .lock()
@@ -1724,8 +2141,6 @@ where
                 .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("close"))?;
             file.refs = file.refs.saturating_sub(1);
         }
-        let result = self.flush(entry).await;
-        let cleanup = self.remove_closed(entry);
-        result.and(cleanup)
+        self.flush_and_remove_closed(entry).await
     }
 }

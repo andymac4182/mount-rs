@@ -17,6 +17,8 @@ QUINN_TURN = re.compile(r"\bTurn<")
 FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+):\s*(.+?),?\s*(?://.*)?$")
 STATIC = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?static\s+(\w+):\s*(.+?)\s*=")
 ALIAS = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?type\s+(\w+)(?:<[^>]*>)?\s*=\s*(.+?);")
+# An enum variant that carries a lock, such as `Stream(Box<TurnLock<()>>),`.
+VARIANT = re.compile(r"^\s+(\w+)\(([^()]*(?:\([^()]*\)[^()]*)*)\),\s*(?://.*)?$")
 STRUCT = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+(\w+)(?:<[^>]*>)?(\(.*\);)?")
 TEST_MOD = re.compile(r"^\s*#\[cfg\((?:all\()?test\b")
 
@@ -27,7 +29,6 @@ HANDLES = {
     ("bindings/mount-rs-napi", "Acquire.lock"): "NativePathLock state",
     ("bindings/mount-rs-napi", "LockGuard.lock"): "NativePathLock state",
     ("filesystems/mount-rs-chunked", "AsyncGate.state"): "the TurnGate inside gate and lease_gate",
-    ("filesystems/mount-rs-kv", "State.open_files"): "each OpenFile",
     ("filesystems/mount-rs-kv", "KvFileHandle.entry"): "each OpenFile",
     ("transports/mount-rs-nfs", "CellDebug.0"): "a borrowed cell, for formatting",
     ("transports/mount-rs-s3", "ConditionalPutLockRegistration.lock"): "per-key conditional-put gate",
@@ -104,6 +105,10 @@ def fields():
                     if found:
                         if lock_type(path, found.group(2)):
                             yield crate_of(path), path, number, "type", found.group(1), found.group(2)
+                        continue
+                    found = VARIANT.match(line)
+                    if found and found.group(1)[0].isupper() and lock_type(path, found.group(2)):
+                        yield crate_of(path), path, number, "variant", found.group(1), found.group(2)
                         continue
                     found = STATIC.match(line)
                     holder = "static"

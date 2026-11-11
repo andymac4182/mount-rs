@@ -1,11 +1,12 @@
 use crate::*;
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
-use mount_rs_core::turn_gate::TurnLock;
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    time::timeout,
+    sync::{mpsc, oneshot},
+    time::{Instant, timeout_at},
 };
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PeerId(pub String);
@@ -181,13 +182,108 @@ impl std::fmt::Debug for RedisConfig {
     }
 }
 pub struct RedisDiscovery {
-    config: RedisConfig,
+    config: Arc<RedisConfig>,
     fallback: Arc<FixedDiscovery>,
     mode: DiscoveryMode,
-    connection: TurnLock<Option<Box<dyn RedisStream>>>,
+    /// The way to the task that owns the connection. Empty until the first
+    /// command, which starts the task on the runtime it is called from; the
+    /// task ends, and closes the connection, when this sender is dropped.
+    owner: ArcSwapOption<mpsc::UnboundedSender<Exchange>>,
 }
 trait RedisStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> RedisStream for T {}
+/// One command and where its reply goes.
+struct Exchange {
+    args: Vec<String>,
+    /// When the caller stops waiting, counted from when it asked.
+    deadline: Instant,
+    reply: oneshot::Sender<Result<Reply>>,
+}
+/// Owns the connection: one exchange at a time, in the order they were sent,
+/// so a reply is only ever read by the command that asked for it. The stream
+/// is kept only after a complete exchange. One that fails, runs out of time,
+/// or whose caller stops waiting part way is dropped with its stream, and
+/// the next connects again.
+async fn own_connection(config: Arc<RedisConfig>, mut jobs: mpsc::UnboundedReceiver<Exchange>) {
+    let mut kept: Option<Box<dyn RedisStream>> = None;
+    while let Some(Exchange {
+        args,
+        deadline,
+        mut reply,
+    }) = jobs.recv().await
+    {
+        // The caller gave up while this waited its turn.
+        if reply.is_closed() {
+            continue;
+        }
+        let outcome = tokio::select! {
+            biased;
+            _ = reply.closed() => None,
+            outcome = timeout_at(deadline, exchange(&config, kept.take(), &args)) => {
+                Some(outcome.unwrap_or_else(|_| Err(error())))
+            }
+        };
+        let Some(outcome) = outcome else { continue };
+        let _ = reply.send(outcome.map(|(response, stream)| {
+            kept = Some(stream);
+            response
+        }));
+    }
+}
+async fn connect(config: &RedisConfig) -> Result<Box<dyn RedisStream>> {
+    let tcp = TcpStream::connect(&config.address)
+        .await
+        .map_err(|_| error())?;
+    tcp.set_nodelay(true).map_err(|_| error())?;
+    let mut stream: Box<dyn RedisStream> = if let Some(tls) = &config.tls {
+        let client = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|_| error())?
+        .with_root_certificates(tls.roots.clone())
+        .with_no_client_auth();
+        let name = rustls::pki_types::ServerName::try_from(tls.server_name.clone())
+            .map_err(|_| error())?;
+        Box::new(
+            tokio_rustls::TlsConnector::from(Arc::new(client))
+                .connect(name, tcp)
+                .await
+                .map_err(|_| error())?,
+        )
+    } else {
+        if !tcp.peer_addr().map_err(|_| error())?.ip().is_loopback() {
+            return Err(error());
+        }
+        Box::new(tcp)
+    };
+    if let Some(password) = &config.password {
+        let mut auth = vec!["AUTH".to_owned()];
+        if let Some(user) = &config.username {
+            auth.push(user.clone());
+        }
+        auth.push(password.clone());
+        send(&mut *stream, &auth).await?;
+        if !matches!(reply(&mut *stream,config.max_reply_bytes).await?,Reply::Text(v) if v=="OK") {
+            return Err(error());
+        }
+    }
+    Ok(stream)
+}
+/// Takes the stream and gives it back only with a complete reply.
+async fn exchange(
+    config: &RedisConfig,
+    stream: Option<Box<dyn RedisStream>>,
+    args: &[String],
+) -> Result<(Reply, Box<dyn RedisStream>)> {
+    let mut stream = match stream {
+        Some(stream) => stream,
+        None => connect(config).await?,
+    };
+    send(&mut *stream, args).await?;
+    let response = reply(&mut *stream, config.max_reply_bytes).await?;
+    Ok((response, stream))
+}
 impl RedisDiscovery {
     pub fn new(
         config: RedisConfig,
@@ -210,10 +306,10 @@ impl RedisDiscovery {
             return Err(error());
         }
         Ok(Arc::new(Self {
-            config,
+            config: Arc::new(config),
             fallback: FixedDiscovery::new_with_mode(peers, max_queries, DiscoveryMode::PeerQuery)?,
             mode,
-            connection: TurnLock::new(None),
+            owner: ArcSwapOption::empty(),
         }))
     }
     fn key(&self, scope: &CacheScope, id: &BlockId, peer: &PeerId) -> String {
@@ -233,23 +329,46 @@ impl RedisDiscovery {
         )
     }
     async fn command(&self, args: Vec<String>) -> Result<Reply> {
-        timeout(self.config.deadline,async {
-            let mut slot=self.connection.lock().await;
-            // The socket belongs to this command until the complete response is
-            // consumed. Dropping the future closes it and leaves the pool empty.
-            let mut stream=match slot.take(){Some(stream)=>stream,None=>{
-                let tcp=TcpStream::connect(&self.config.address).await.map_err(|_|error())?;tcp.set_nodelay(true).map_err(|_|error())?;
-                let mut stream:Box<dyn RedisStream>=if let Some(tls)=&self.config.tls {
-                    let config=rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().map_err(|_|error())?.with_root_certificates(tls.roots.clone()).with_no_client_auth();
-                    let name=rustls::pki_types::ServerName::try_from(tls.server_name.clone()).map_err(|_|error())?;
-                    Box::new(tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name,tcp).await.map_err(|_|error())?)
-                }else{if !tcp.peer_addr().map_err(|_|error())?.ip().is_loopback(){return Err(error());}Box::new(tcp)};
-                if let Some(password)=&self.config.password{let mut auth=vec!["AUTH".to_owned()];if let Some(user)=&self.config.username{auth.push(user.clone());}auth.push(password.clone());send(&mut *stream,&auth).await?;if !matches!(reply(&mut *stream,self.config.max_reply_bytes).await?,Reply::Text(v) if v=="OK"){return Err(error());}}
-                stream
-            }};
-            send(&mut *stream,&args).await?;let response=reply(&mut *stream,self.config.max_reply_bytes).await?;
-            *slot=Some(stream);Ok(response)
-        }).await.map_err(|_|error())?
+        let deadline = Instant::now() + self.config.deadline;
+        let (reply, answer) = oneshot::channel();
+        self.submit(Exchange {
+            args,
+            deadline,
+            reply,
+        });
+        // Dropping `answer`, here or with this future, is what tells the
+        // owner to abandon the exchange and its stream.
+        match timeout_at(deadline, answer).await {
+            Ok(Ok(outcome)) => outcome,
+            _ => Err(error()),
+        }
+    }
+    /// Hands the exchange to the owner task, starting one if there is none
+    /// or if the last one went away with the runtime it ran on. An exchange
+    /// that cannot be handed over is dropped, which its caller sees as an
+    /// error.
+    fn submit(&self, mut job: Exchange) {
+        for _ in 0..2 {
+            let current = self.owner.load();
+            if let Some(owner) = &*current {
+                match owner.send(job) {
+                    Ok(()) => return,
+                    Err(refused) => job = refused.0,
+                }
+            }
+            let (sender, jobs) = mpsc::unbounded_channel();
+            let previous = self
+                .owner
+                .compare_and_swap(&*current, Some(Arc::new(sender)));
+            // Losing the exchange means another caller installed an owner;
+            // `jobs` is dropped and no second task starts.
+            if previous.as_ref().map(Arc::as_ptr) == current.as_ref().map(Arc::as_ptr) {
+                tokio::spawn(own_connection(self.config.clone(), jobs));
+            }
+        }
+        if let Some(owner) = &*self.owner.load() {
+            let _ = owner.send(job);
+        }
     }
     fn trusted(&self, p: &PeerId) -> bool {
         self.fallback.peers.contains(p)
@@ -425,6 +544,7 @@ pub(crate) fn unique(peers: Vec<PeerId>, local: &PeerId, max: usize) -> Vec<Peer
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::time::timeout;
     fn scope() -> CacheScope {
         CacheScope {
             identity: ScopeIdentity {
@@ -481,6 +601,322 @@ mod tests {
             2,
             "cancelled stream must be dropped before another command"
         );
+    }
+    fn loopback(address: String, deadline: Duration) -> RedisConfig {
+        RedisConfig {
+            address,
+            username: None,
+            password: None,
+            namespace: "owner".into(),
+            ttl: Duration::from_secs(1),
+            deadline,
+            max_reply_bytes: 1024,
+            tls: None,
+        }
+    }
+    /// A loopback server that answers each command with its last argument,
+    /// after a pause when the argument starts with `slow`, and that hangs up
+    /// instead when it starts with `drop`. Counts connections accepted and
+    /// connections that ended.
+    async fn echo_server() -> (String, Arc<[std::sync::atomic::AtomicUsize; 2]>) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let counts = Arc::new([const { std::sync::atomic::AtomicUsize::new(0) }; 2]);
+        let counted = counts.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counted[0].fetch_add(1, SeqCst);
+                let counted = counted.clone();
+                tokio::spawn(async move {
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    let mut budget = usize::MAX;
+                    while let Ok(head) = line(&mut stream, &mut budget).await {
+                        let count: usize = head[1..].parse().unwrap();
+                        let mut last = Vec::new();
+                        for _ in 0..count {
+                            let size: usize = line(&mut stream, &mut budget).await.unwrap()[1..]
+                                .parse()
+                                .unwrap();
+                            last = vec![0; size + 2];
+                            stream.read_exact(&mut last).await.unwrap();
+                        }
+                        if last.starts_with(b"drop") {
+                            break;
+                        }
+                        if last.starts_with(b"slow") {
+                            tokio::time::sleep(Duration::from_millis(2)).await;
+                        }
+                        let mut answer = format!("${}\r\n", last.len() - 2).into_bytes();
+                        answer.extend_from_slice(&last);
+                        // In two writes, so a reader can be caught between them.
+                        let (first, second) = answer.split_at(answer.len() / 2);
+                        if stream.get_mut().write_all(first).await.is_err() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                        if stream.get_mut().write_all(second).await.is_err() {
+                            break;
+                        }
+                    }
+                    counted[1].fetch_add(1, SeqCst);
+                });
+            }
+        });
+        (address, counts)
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_redis_commands_each_read_their_own_reply() {
+        let (address, _) = echo_server().await;
+        let d = RedisDiscovery::new(
+            loopback(address, Duration::from_secs(10)),
+            vec![PeerId("peer".into())],
+            1,
+            DiscoveryMode::Directory,
+        )
+        .unwrap();
+        // Callers that are cancelled part way, that run out of time, and
+        // whose connection is closed under them, among callers that must
+        // each still get the answer to their own question.
+        let mut callers = Vec::new();
+        for task in 0..16_usize {
+            let d = d.clone();
+            callers.push(tokio::spawn(async move {
+                let mut answered = 0_usize;
+                for n in 0..300_usize {
+                    let asked = match (task + n) % 23 {
+                        0 => format!("drop-{task}-{n}"),
+                        7 | 15 => format!("slow-{task}-{n}"),
+                        _ => format!("echo-{task}-{n}"),
+                    };
+                    let command = d.command(vec!["ECHO".into(), asked.clone()]);
+                    let outcome = if (task + n) % 11 == 3 {
+                        // Dropped after a moment: often mid-exchange.
+                        match timeout(Duration::from_micros(((task * n) % 400) as u64), command)
+                            .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(_) => continue,
+                        }
+                    } else {
+                        command.await
+                    };
+                    match outcome {
+                        Ok(Reply::Text(got)) => {
+                            assert_eq!(got, asked, "a command read another command's reply");
+                            answered += 1;
+                        }
+                        Ok(other) => panic!("unexpected reply {other:?}"),
+                        // A closed connection fails that command, and may
+                        // fail none other: the next one connects again.
+                        Err(_) => assert!(asked.starts_with("drop"), "{asked} failed"),
+                    }
+                }
+                answered
+            }));
+        }
+        let mut answered = 0;
+        for caller in callers {
+            answered += caller.await.unwrap();
+        }
+        assert!(answered > 16 * 300 * 3 / 4, "only {answered} answered");
+    }
+    #[tokio::test]
+    async fn redis_command_deadline_counts_the_wait_behind_other_commands() {
+        let (address, _) = echo_server().await;
+        // Each slow command takes 2 ms; 100 of them queue for 200 ms, which
+        // the last ones do not have.
+        let d = RedisDiscovery::new(
+            loopback(address, Duration::from_millis(60)),
+            vec![PeerId("peer".into())],
+            1,
+            DiscoveryMode::Directory,
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let commands: Vec<_> = (0..100)
+            .map(|n| {
+                let d = d.clone();
+                tokio::spawn(async move {
+                    let asked = format!("slow-{n}");
+                    match d.command(vec!["ECHO".into(), asked.clone()]).await {
+                        Ok(Reply::Text(got)) => {
+                            assert_eq!(got, asked);
+                            true
+                        }
+                        Ok(other) => panic!("unexpected reply {other:?}"),
+                        Err(_) => false,
+                    }
+                })
+            })
+            .collect();
+        let mut answered = 0;
+        for command in commands {
+            answered += usize::from(command.await.unwrap());
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "every caller is released by its own deadline"
+        );
+        assert!((1..100).contains(&answered), "{answered} answered");
+        // What timed out left nothing behind for the next command to read.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            matches!(d.command(vec!["ECHO".into(), "after".into()]).await, Ok(Reply::Text(got)) if got == "after")
+        );
+    }
+    #[test]
+    fn redis_owner_task_ends_with_the_discovery_and_restarts_on_a_new_runtime() {
+        use std::sync::atomic::Ordering::SeqCst;
+        // The server outlives the runtimes that the discovery is used from.
+        let server = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (address, counts) = server.block_on(echo_server());
+        // Built with no runtime around it.
+        let d = RedisDiscovery::new(
+            loopback(address, Duration::from_secs(5)),
+            vec![PeerId("peer".into())],
+            1,
+            DiscoveryMode::Directory,
+        )
+        .unwrap();
+        let ask = |d: Arc<RedisDiscovery>, text: &'static str| async move {
+            matches!(d.command(vec!["ECHO".into(), text.into()]).await, Ok(Reply::Text(got)) if got == text)
+        };
+        let closed = |n: usize| {
+            let began = std::time::Instant::now();
+            while counts[1].load(SeqCst) != n {
+                assert!(
+                    began.elapsed() < Duration::from_secs(5),
+                    "connection {n} stayed open"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let first = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(first.block_on(ask(d.clone(), "one")));
+        assert!(first.block_on(ask(d.clone(), "two")));
+        assert_eq!(counts[0].load(SeqCst), 1, "one connection is reused");
+        // The runtime takes the owner task with it; the next command, on
+        // another runtime, starts a new one.
+        drop(first);
+        closed(1);
+        let second = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(second.block_on(ask(d.clone(), "three")));
+        assert!(second.block_on(ask(d.clone(), "four")));
+        assert_eq!(counts[0].load(SeqCst), 2);
+        // Dropping the discovery ends the task and closes its connection
+        // while the runtime it ran on is still alive.
+        drop(d);
+        second.block_on(async {
+            for _ in 0..1000 {
+                if counts[1].load(SeqCst) == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        closed(2);
+    }
+    /// A loopback server that answers every complete RESP command with `+OK`.
+    async fn ok_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    stream.set_nodelay(true).unwrap();
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    let mut budget = usize::MAX;
+                    loop {
+                        let Ok(head) = line(&mut stream, &mut budget).await else {
+                            return;
+                        };
+                        let count: usize = head[1..].parse().unwrap();
+                        for _ in 0..count {
+                            let size: usize = line(&mut stream, &mut budget).await.unwrap()[1..]
+                                .parse()
+                                .unwrap();
+                            let mut body = vec![0; size + 2];
+                            stream.read_exact(&mut body).await.unwrap();
+                        }
+                        if stream.get_mut().write_all(b"+OK\r\n").await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        address
+    }
+    /// Not a test: heartbeats over one loopback connection, from one task
+    /// and then from 8.
+    /// `cargo test -p mount-rs-blob-cache --release profile_redis_commands -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn profile_redis_commands() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cfg = RedisConfig {
+                address: ok_server().await,
+                username: None,
+                password: None,
+                namespace: "profile".into(),
+                ttl: Duration::from_secs(1),
+                deadline: Duration::from_secs(5),
+                max_reply_bytes: 1024,
+                tls: None,
+            };
+            let peer = PeerId("peer".into());
+            let d =
+                RedisDiscovery::new(cfg, vec![peer.clone()], 1, DiscoveryMode::Directory).unwrap();
+            d.heartbeat(&peer).await.unwrap();
+            for tasks in [1_usize, 8] {
+                let each = 40_000 / tasks;
+                let started = std::time::Instant::now();
+                let handles: Vec<_> = (0..tasks)
+                    .map(|_| {
+                        let (d, peer) = (d.clone(), peer.clone());
+                        tokio::spawn(async move {
+                            let mut waits = Vec::with_capacity(each);
+                            for _ in 0..each {
+                                let began = std::time::Instant::now();
+                                d.heartbeat(&peer).await.unwrap();
+                                waits.push(began.elapsed().as_nanos() as u64);
+                            }
+                            waits
+                        })
+                    })
+                    .collect();
+                let mut waits = Vec::new();
+                for handle in handles {
+                    waits.extend(handle.await.unwrap());
+                }
+                let seconds = started.elapsed().as_secs_f64();
+                waits.sort_unstable();
+                let at = |q: f64| waits[((waits.len() - 1) as f64 * q) as usize] as f64 / 1e6;
+                println!(
+                    "redis commands x{tasks}: {:.0}/s p50={:.4} p99={:.4} p99.9={:.4} ms",
+                    waits.len() as f64 / seconds,
+                    at(0.5),
+                    at(0.99),
+                    at(0.999)
+                );
+            }
+        });
     }
     #[test]
     fn public_redis_config_requires_a_finite_nonzero_deadline() {
