@@ -110,7 +110,6 @@ listed first. The rest have not been verified further or started.
 | A remote mount rejects every operation after one transport error, and the CLI never checks its keepalive worker | A network blip leaves the mount attached and returning `EIO`, with no log or exit | Medium |
 | `/readyz` ignores drive health | A load balancer keeps routing to a drive that has failed closed | Medium |
 | The mount CLI wires no transport error hooks | A filesystem that failed closed shows up only as `EIO` to applications | Medium |
-| NFS per-connection task handles are drained only on close | Reconnect churn grows the list for the server's lifetime | Low |
 | The S3 server buffers up to 512 MiB per non-streamable request with no concurrency limit | A few concurrent oversized bodies exhaust memory | Low |
 
 The survey did not examine 9P fid tables, the FUSE inode table, WebDAV lock
@@ -122,19 +121,25 @@ Production code holds no `std::sync::Mutex` or `RwLock`. Exclusion is done
 by two in-house types: `TurnCell` (a waiter spins, then yields; only for
 short sections) and `TurnLock` (a waiter queues; may be held across an
 await). Every field of either type was audited, and each one that guarded
-nothing a cheaper primitive could not guard was removed: 36 of 135.
+nothing a cheaper primitive could not guard was removed: 48 of 135. None
+that is left is known to be removable.
 
 | Removed | Replaced by |
 |---------|-------------|
 | Node binding: driver slot, file handle, ten server callbacks, key-value callbacks, reconcile and delegation slots | An atomic pointer swap |
 | Node binding: the list of pending JavaScript calls, which grew by one entry per call and was never pruned | A generation counter that every pending call watches |
 | Request and error counters in the NFS, 9P, S3 and WebDAV sessions and the SQLite statement trace | Atomic counters over a fixed set of keys |
-| Task and shutdown handles taken once at close (NFS, S3, FUSE, PGlite, blob cache) | An atomic take |
+| Task and shutdown handles taken once at close (NFS, S3, FUSE, PGlite, blob cache, peer transport) | An atomic take |
 | 9P listen address, FUSE first transport error | A write-once cell |
 | Catalog snapshot cache | An atomic pointer, replaced only by a newer revision |
 | Key-value file handle position and closed flag | Atomics ordered by the entry lock already held |
 | Persisted snapshot version, 9P serve task, WebDAV accept task | Moved inside the lock that was always held around them |
 | NFS directory snapshot map and its eviction order (two cells that could disagree) | One cell |
+| Node stream request holders (run once; the body stream is not `Sync`) | `TakeCell`, a take-once atomic pointer |
+| Node S3 server slot, NFS `destroyed` flag | An atomic, with each side writing its own flag before reading the other's |
+| Node shutdown attempt result and its waiter list | A watched value |
+| NFS per-connection task list, which grew for the server's lifetime | A task set owned by the accept loop, which forgets each connection as it ends |
+| S3 debug in-flight table | A flag carried by the request |
 
 Fixed keys mean a client can no longer grow a counter map: undefined NFS and
 MOUNT procedure numbers are counted as `unknown`, and WebDAV counts at most
@@ -143,13 +148,6 @@ MOUNT procedure numbers are counted as `unknown`, and WebDAV counts at most
 **Kept, because the data needs exclusion**: session and connection tables,
 lifecycle and unmount gates, database connections, the SQLite VFS registry
 and WAL state, WebDAV lock table, shutdown and completion state.
-
-**Kept, though removable with a restructure** (each needs a reordering
-whose races would have to be re-proven, for a lock that is not contended):
-the Node `S3Server.running` flag, `ShutdownAttempt.state`, the NFS
-`destroyed` flag and `connection_tasks` list, the S3 `inflight` table, and
-the two run-once Node stream request holders (their body stream is not
-`Sync`, so an atomic pointer cannot hold it).
 
 **Spinning locks held for too long** (found by the audit, not fixed):
 

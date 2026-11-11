@@ -30,6 +30,7 @@ use mount_rs_9p::{
     P9SessionOptions as TransportP9SessionOptions, P9TransportError as TransportP9Error,
     P9TransportErrorHook as TransportP9ErrorHook,
 };
+use mount_rs_core::take_cell::TakeCell;
 use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, OpenFlags, Stats};
@@ -4112,7 +4113,7 @@ struct S3StreamRequestState {
 /// wrapper has left the N-API call frame.
 #[napi]
 pub struct S3StreamRequest {
-    inner: TurnLock<Option<S3StreamRequestState>>,
+    inner: TakeCell<S3StreamRequestState>,
 }
 
 #[napi]
@@ -4121,8 +4122,6 @@ impl S3StreamRequest {
     pub async fn run(&self) -> napi::Result<S3StreamResponse> {
         let request = self
             .inner
-            .lock()
-            .await
             .take()
             .ok_or_else(|| transport_error("S3 request stream", "request already run"))?;
         let response = request
@@ -4194,11 +4193,11 @@ impl S3Session {
             .read()
             .map_err(|error| transport_error("S3 request body", error))?;
         Ok(S3StreamRequest {
-            inner: TurnLock::new(Some(S3StreamRequestState {
+            inner: TakeCell::new(S3StreamRequestState {
                 session: Arc::clone(&self.inner),
                 head: transport_s3_head(head),
                 body: Box::pin(NapiS3RequestBody { reader }),
-            })),
+            }),
         })
     }
 
@@ -4288,7 +4287,7 @@ pub struct S3Server {
     host: String,
     requested_port: u16,
     buckets: Vec<String>,
-    running: TurnCell<Option<Arc<TransportS3Server>>>,
+    running: ArcSwapOption<TransportS3Server>,
     binding: AtomicBool,
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
@@ -4311,8 +4310,8 @@ impl S3Server {
 
     #[napi(getter)]
     pub fn port(&self) -> u32 {
-        let running = self.running.lock().expect("S3 server lock");
-        running
+        self.running
+            .load()
             .as_ref()
             .map_or(self.requested_port, |server| server.address().port()) as u32
     }
@@ -4320,8 +4319,7 @@ impl S3Server {
     #[napi(getter)]
     pub fn connections(&self) -> u32 {
         self.running
-            .lock()
-            .expect("S3 server lock")
+            .load()
             .as_ref()
             .map_or(0, |server| server.connections()) as u32
     }
@@ -4341,11 +4339,8 @@ impl S3Server {
         if self.closed.load(Ordering::Acquire) {
             return Err(transport_error("S3 listen", "server is closed"));
         }
-        {
-            let running = self.running.lock().expect("S3 server lock");
-            if running.is_some() {
-                return Ok(());
-            }
+        if self.running.load().is_some() {
+            return Ok(());
         }
         if self
             .binding
@@ -4364,24 +4359,22 @@ impl S3Server {
         .map_err(|error| transport_error("S3 listen", error));
         match result {
             Ok(server) => {
-                // `close` sets `closed` and takes the server under this same
-                // lock, so a close cannot slip between the check and the
-                // store and leave a listener nothing will ever close.
-                let closed_while_binding = {
-                    let mut running = self.running.lock().expect("S3 server lock");
-                    if self.closed.load(Ordering::Acquire) {
-                        Some(server)
-                    } else {
-                        *running = Some(server);
-                        None
-                    }
-                };
+                // This stores the server and then reads `closed`; `close`
+                // sets `closed` and then takes the server. Whichever order
+                // the two run in, one of them sees the other's write, so a
+                // close cannot leave a listener nothing will ever close.
+                self.running.store(Some(server));
+                let closed_while_binding = self.closed.load(Ordering::SeqCst);
                 self.binding.store(false, Ordering::Release);
-                if let Some(server) = closed_while_binding {
-                    server
-                        .close()
-                        .await
-                        .map_err(|error| transport_error("S3 close", error))?;
+                if closed_while_binding {
+                    // `close` may have taken the server already, in which
+                    // case it is the one closing it.
+                    if let Some(server) = self.running.swap(None) {
+                        server
+                            .close()
+                            .await
+                            .map_err(|error| transport_error("S3 close", error))?;
+                    }
                     return Err(transport_error(
                         "S3 listen",
                         "server was closed while binding",
@@ -4398,11 +4391,8 @@ impl S3Server {
 
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
-        let running = {
-            let mut running = self.running.lock().expect("S3 server lock");
-            self.closed.store(true, Ordering::Release);
-            running.take()
-        };
+        self.closed.store(true, Ordering::SeqCst);
+        let running = self.running.swap(None);
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
@@ -4410,7 +4400,7 @@ impl S3Server {
         if let Some(server) = running {
             if let Err(error) = server.close().await {
                 // Keep the server so a later close can try again.
-                *self.running.lock().expect("S3 server lock") = Some(server);
+                self.running.store(Some(server));
                 return Err(transport_error("S3 close", error));
             }
         } else {
@@ -4455,7 +4445,7 @@ pub fn create_s3_server(
         host,
         requested_port,
         buckets,
-        running: TurnCell::new(None),
+        running: ArcSwapOption::empty(),
         binding: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         transport_error,
@@ -4852,7 +4842,7 @@ struct WebdavStreamRequestState {
 /// this class's async `run` method, after the non-Send JS wrapper is gone.
 #[napi]
 pub struct WebdavStreamRequest {
-    inner: TurnLock<Option<WebdavStreamRequestState>>,
+    inner: TakeCell<WebdavStreamRequestState>,
 }
 
 #[napi]
@@ -4861,8 +4851,6 @@ impl WebdavStreamRequest {
     pub async fn run(&self) -> napi::Result<WebdavStreamResponse> {
         let request = self
             .inner
-            .lock()
-            .await
             .take()
             .ok_or_else(|| transport_error("WebDAV request stream", "request already run"))?;
         let response = request
@@ -4971,11 +4959,11 @@ impl WebdavSession {
             .read()
             .map_err(|error| transport_error("WebDAV request body", error))?;
         Ok(WebdavStreamRequest {
-            inner: TurnLock::new(Some(WebdavStreamRequestState {
+            inner: TakeCell::new(WebdavStreamRequestState {
                 session: Arc::clone(&self.inner),
                 head: transport_webdav_head(head),
                 body: NapiWebdavRequestBody { reader },
-            })),
+            }),
         })
     }
 

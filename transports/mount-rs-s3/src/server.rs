@@ -27,8 +27,8 @@ use axum::{
     serve::Listener,
 };
 use futures_core::Stream;
+use mount_rs_core::take_cell::TakeCell;
 use mount_rs_core::turn_cell::TurnCell;
-use mount_rs_core::turn_gate::TurnLock;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -107,7 +107,8 @@ pub struct S3Server {
     connection_shutdowns: Arc<ConnectionShutdowns>,
     /// Taken once, by `close` or `Drop`; nothing reads it in place.
     shutdown: ArcSwapOption<oneshot::Sender<()>>,
-    task: TurnLock<Option<JoinHandle<Result<(), std::io::Error>>>>,
+    /// Taken once, by `close` or `Drop`.
+    task: TakeCell<JoinHandle<Result<(), std::io::Error>>>,
 }
 
 #[derive(Clone)]
@@ -236,7 +237,7 @@ impl S3Server {
             active_connections,
             connection_shutdowns,
             shutdown: ArcSwapOption::from_pointee(shutdown_tx),
-            task: TurnLock::new(Some(task)),
+            task: TakeCell::new(task),
         })
     }
 
@@ -274,7 +275,7 @@ impl S3Server {
         if let Some(sender) = self.shutdown.swap(None).and_then(Arc::into_inner) {
             let _ = sender.send(());
         }
-        if let Some(mut task) = self.task.lock().await.take() {
+        if let Some(mut task) = self.task.take() {
             match tokio::time::timeout(self.drain_timeout, &mut task).await {
                 Ok(Ok(Ok(()))) => {}
                 Ok(Ok(Err(error))) => {
@@ -306,7 +307,7 @@ impl Drop for S3Server {
         if let Some(sender) = self.shutdown.swap(None).and_then(Arc::into_inner) {
             let _ = sender.send(());
         }
-        if let Some(task) = self.task.get_mut().take() {
+        if let Some(task) = self.task.take() {
             task.abort();
         }
     }

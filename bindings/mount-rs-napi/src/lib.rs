@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
@@ -3176,60 +3176,40 @@ type ShutdownCallback = dyn Fn() -> ShutdownFuture + Send + Sync;
 type ReconcileFuture = Pin<Box<dyn Future<Output = CoreResult<BlockReconcileReport>> + Send>>;
 type ReconcileCallback = dyn Fn(Duration) -> ReconcileFuture + Send + Sync;
 
-struct ShutdownAttemptState {
-    result: Option<CoreResult<()>>,
-    waiters: Vec<Waker>,
-}
-
+/// One run of the shutdown callback. Every caller that arrives while it is
+/// running waits on the same result.
 struct ShutdownAttempt {
-    state: TurnCell<ShutdownAttemptState>,
+    result: tokio::sync::watch::Sender<Option<CoreResult<()>>>,
 }
 
 impl ShutdownAttempt {
     fn new() -> Self {
         Self {
-            state: TurnCell::new(ShutdownAttemptState {
-                result: None,
-                waiters: Vec::new(),
-            }),
+            result: tokio::sync::watch::Sender::new(None),
         }
     }
 
     fn finish(&self, result: CoreResult<()>) {
-        let waiters = {
-            let mut state = self.state.lock_recovered();
-            state.result = Some(result);
-            std::mem::take(&mut state.waiters)
-        };
-        for waiter in waiters {
-            waiter.wake();
-        }
+        // Publishing wakes every waiter before this returns.
+        self.result.send_replace(Some(result));
+    }
+
+    #[cfg(test)]
+    fn result(&self) -> Option<CoreResult<()>> {
+        self.result.borrow().clone()
     }
 }
 
-struct ShutdownWait {
-    attempt: Arc<ShutdownAttempt>,
-}
-
-impl Future for ShutdownWait {
-    type Output = CoreResult<()>;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.attempt.state.lock_recovered();
-        match &state.result {
-            Some(result) => Poll::Ready(result.clone()),
-            None => {
-                if !state
-                    .waiters
-                    .iter()
-                    .any(|waiter| waiter.will_wake(context.waker()))
-                {
-                    state.waiters.push(context.waker().clone());
-                }
-                Poll::Pending
-            }
-        }
-    }
+/// Resolves with the attempt's result. Dropping it leaves the attempt
+/// running.
+async fn shutdown_wait(attempt: Arc<ShutdownAttempt>) -> CoreResult<()> {
+    let mut result = attempt.result.subscribe();
+    let finished = match result.wait_for(Option::is_some).await {
+        Ok(finished) => finished.clone(),
+        // The sender is `attempt`, which this future holds.
+        Err(_) => None,
+    };
+    finished.unwrap_or_else(|| Err(shutdown_panic_error()))
 }
 
 struct ShutdownRunGuard {
@@ -3394,7 +3374,7 @@ impl ShutdownController {
                 callback,
             ));
         }
-        ShutdownWait { attempt }.await
+        shutdown_wait(attempt).await
     }
 }
 
@@ -5182,35 +5162,22 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_wait_deduplicates_wakers_after_cancellation() {
+    fn shutdown_wait_can_be_dropped_without_cancelling_the_attempt() {
         let attempt = Arc::new(ShutdownAttempt::new());
         let waker = Waker::from(Arc::new(NoopWaker));
         let mut context = Context::from_waker(&waker);
-        let mut wait = Box::pin(ShutdownWait {
-            attempt: Arc::clone(&attempt),
-        });
+        let mut wait = Box::pin(shutdown_wait(Arc::clone(&attempt)));
 
         for _ in 0..32 {
             assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
         }
-        assert_eq!(
-            attempt
-                .state
-                .lock()
-                .expect("shutdown attempt lock")
-                .waiters
-                .len(),
-            1
-        );
+        assert_eq!(attempt.result.receiver_count(), 1);
 
         // Dropping the caller's wait must not cancel the detached shutdown
         // attempt or make its completion path panic on the stale waker.
         drop(wait);
         attempt.finish(Ok(()));
-        assert!(matches!(
-            attempt.state.lock().expect("shutdown attempt lock").result,
-            Some(Ok(()))
-        ));
+        assert!(matches!(attempt.result(), Some(Ok(()))));
     }
 
     #[test]
@@ -5252,12 +5219,8 @@ mod tests {
             observed_running: Arc::clone(&observed_running),
         }));
         let mut context = Context::from_waker(&waker);
-        let mut first = Box::pin(ShutdownWait {
-            attempt: Arc::clone(&attempt),
-        });
-        let mut second = Box::pin(ShutdownWait {
-            attempt: Arc::clone(&attempt),
-        });
+        let mut first = Box::pin(shutdown_wait(Arc::clone(&attempt)));
+        let mut second = Box::pin(shutdown_wait(Arc::clone(&attempt)));
         assert!(matches!(first.as_mut().poll(&mut context), Poll::Pending));
         assert!(matches!(second.as_mut().poll(&mut context), Poll::Pending));
 
@@ -5271,10 +5234,7 @@ mod tests {
             &*lifecycle.lifecycle.lock().expect("shutdown lifecycle lock"),
             ShutdownLifecycle::Closed
         ));
-        assert!(matches!(
-            attempt.state.lock().expect("shutdown attempt lock").result,
-            Some(Ok(()))
-        ));
+        assert!(matches!(attempt.result(), Some(Ok(()))));
         assert_eq!(block_on(first).expect("first shutdown waiter"), ());
         assert_eq!(block_on(second).expect("second shutdown waiter"), ());
     }
@@ -5314,11 +5274,7 @@ mod tests {
             callback,
         ));
         assert!(matches!(
-            attempt
-                .state
-                .lock()
-                .expect("shutdown attempt lock")
-                .result,
+            attempt.result(),
             Some(Err(ref error)) if error.code == ErrorCode::Eio
         ));
         assert!(matches!(
@@ -5343,13 +5299,6 @@ mod tests {
             retry_callback,
         ));
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
-        assert!(matches!(
-            retry_attempt
-                .state
-                .lock()
-                .expect("shutdown attempt lock")
-                .result,
-            Some(Ok(()))
-        ));
+        assert!(matches!(retry_attempt.result(), Some(Ok(()))));
     }
 }

@@ -15,6 +15,7 @@ pub mod node_map;
 pub mod path;
 pub mod snapshot;
 pub mod storage;
+pub mod take_cell;
 pub mod turn_cell;
 pub mod turn_gate;
 pub mod types;
