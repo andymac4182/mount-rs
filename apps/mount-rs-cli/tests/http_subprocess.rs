@@ -1151,6 +1151,12 @@ async fn tidb_remote_sessions_recover_rustfs_after_process_kill_and_lease_expiry
 }
 
 #[test]
+// The disk cache needs directory synchronization, which it only has on Unix;
+// elsewhere it refuses to open and the CLI exits before it is ready.
+#[cfg_attr(
+    not(unix),
+    ignore = "the disk cache is supported on Unix only (ENOTSUP elsewhere)"
+)]
 fn cache_report_exposes_per_drive_read_tiers() {
     let root = temporary_root();
     let path = write_http_config(&root);
