@@ -6,6 +6,7 @@
 //! is evaluated after the peer certificate has been verified and before a
 //! request body is admitted.
 
+use mount_rs_core::take_cell::TakeCell;
 use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::TurnLock;
 use std::{
@@ -1763,8 +1764,9 @@ struct ClientConnection {
     /// after every existing stream lease has been returned.  This is kept
     /// separate from `cancel`, which is reserved for emergency/local close.
     planned_remote_closing: CancellationToken,
-    driver: TurnLock<Option<JoinHandle<Result<(), PeerTransportError>>>>,
-    pin_watcher: TurnLock<Option<JoinHandle<()>>>,
+    // Each is taken once, by shutdown or `Drop`.
+    driver: TakeCell<JoinHandle<Result<(), PeerTransportError>>>,
+    pin_watcher: TakeCell<JoinHandle<()>>,
     /// The local peer identity generation read immediately before this
     /// connection's handshake began (0 when the client has no rotating
     /// identity).  Read *before* the dial, so a rotation racing the handshake
@@ -1933,8 +1935,8 @@ impl ClientConnection {
         self.cancel.cancel();
         self.connection
             .close(quinn::VarInt::from_u32(0), b"shutdown");
-        let driver = self.driver.lock().await.take();
-        let watcher = self.pin_watcher.lock().await.take();
+        let driver = self.driver.take();
+        let watcher = self.pin_watcher.take();
         let mut first_error = None;
         if let Some(driver) = driver {
             match join_handle_until(driver, deadline).await {
@@ -2133,10 +2135,10 @@ impl Drop for ClientConnection {
         self.cancel.cancel();
         self.connection
             .close(quinn::VarInt::from_u32(0), b"connection dropped");
-        if let Some(driver) = self.driver.get_mut().take() {
+        if let Some(driver) = self.driver.take() {
             driver.abort();
         }
-        if let Some(watcher) = self.pin_watcher.get_mut().take() {
+        if let Some(watcher) = self.pin_watcher.take() {
             watcher.abort();
         }
     }
@@ -2767,8 +2769,8 @@ impl PeerClient {
             limits: self.limits.clone(),
             cancel: connection_cancel,
             planned_remote_closing,
-            driver: TurnLock::new(Some(driver_task)),
-            pin_watcher: TurnLock::new(Some(pin_watcher)),
+            driver: TakeCell::new(driver_task),
+            pin_watcher: TakeCell::new(pin_watcher),
             local_generation,
             retired: AtomicBool::new(false),
             _connection_permit: connection_permit,

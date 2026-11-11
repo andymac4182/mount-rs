@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::turn_cell::TurnCell;
@@ -733,7 +733,7 @@ pub struct Nfs3Session {
     /// without destroying the object a client is still holding.
     retained_handles: Arc<RetainedHandles>,
     stats: SharedStats,
-    destroyed: Arc<TurnCell<bool>>,
+    destroyed: Arc<AtomicBool>,
     path_lock: Arc<mount_rs_core::drain_gate::DrainGate>,
     hooks: NfsSessionHooks,
 }
@@ -1130,7 +1130,7 @@ impl Nfs3Session {
             exclusive_creates: Arc::new(TurnCell::new(ExclusiveCreates::default())),
             retained_handles,
             stats: shared.stats.clone(),
-            destroyed: Arc::new(TurnCell::new(false)),
+            destroyed: Arc::new(AtomicBool::new(false)),
             path_lock: Arc::clone(&shared.path_lock),
             hooks,
         }
@@ -1163,7 +1163,7 @@ impl Nfs3Session {
     }
 
     pub fn destroyed(&self) -> bool {
-        *self.destroyed.lock().expect("NFS destroyed lock")
+        self.destroyed.load(Ordering::SeqCst)
     }
 
     /// Returns `true` after all retained and provisional descriptors close
@@ -1172,10 +1172,11 @@ impl Nfs3Session {
     /// Tokio runtime remain live. New RPCs are rejected after the first call.
     pub async fn destroy(&self) -> bool {
         let _path_guard = self.path_lock.write().await;
-        *self.destroyed.lock().expect("NFS destroyed lock") = true;
-        // Retention begins under the same destroyed lock. Wait for every
-        // in-flight opener to register its descriptor or provisional close
-        // before taking a snapshot of work to close.
+        self.destroyed.store(true, Ordering::SeqCst);
+        // An opener counts itself active and then reads this flag, so every
+        // opener that read it as unset is already counted. Wait for each to
+        // register its descriptor or provisional close before taking a
+        // snapshot of work to close.
         self.retained_handles.await_active_zero().await;
         let current_runtime = tokio::runtime::Handle::try_current().ok();
         let fallback_runtime = if current_runtime.is_none() {
@@ -1429,11 +1430,13 @@ impl Nfs3Session {
     }
 
     fn begin_retention(&self) -> FsResult<ActiveRetention> {
-        let destroyed = self.destroyed.lock().expect("NFS destroyed lock");
-        if *destroyed {
+        // Count first, then read the flag: `destroy` sets the flag and then
+        // waits for the count to reach zero, so it cannot miss this opener.
+        let active = self.retained_handles.begin();
+        if self.destroyed() {
             return Err(FsError::new(ErrorCode::Estale).with_message("NFS session was destroyed"));
         }
-        Ok(self.retained_handles.begin())
+        Ok(active)
     }
 
     async fn retained_attributes(&self, entry: Option<&HandleEntry>) -> Option<FsResult<Fattr3>> {
@@ -1493,7 +1496,7 @@ impl Nfs3Session {
                 .map(|entry| Arc::clone(&entry.handle))
             {
                 Ok(Some(existing))
-            } else if *self.destroyed.lock().expect("NFS destroyed lock") {
+            } else if self.destroyed() {
                 Err(FsError::new(ErrorCode::Estale)
                     .with_message("NFS session was destroyed while retaining a file handle"))
             } else {

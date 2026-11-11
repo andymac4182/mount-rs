@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -108,36 +108,10 @@ impl StagingQuota {
     }
 }
 
-struct RequestTicketGuard {
-    inflight: Arc<TurnCell<HashSet<u64>>>,
-    ticket: Option<u64>,
-}
-
-impl RequestTicketGuard {
-    fn new(inflight: Arc<TurnCell<HashSet<u64>>>, ticket: Option<u64>) -> Self {
-        Self { inflight, ticket }
-    }
-
-    fn disarm(&mut self) {
-        self.ticket = None;
-    }
-}
-
-impl Drop for RequestTicketGuard {
-    fn drop(&mut self) {
-        let Some(ticket) = self.ticket.take() else {
-            return;
-        };
-        // A `TurnCell` released while its thread unwinds is abandoned for
-        // good. The ticket of a request that panicked is never looked up
-        // again, so leave it rather than lose the whole set.
-        if std::thread::panicking() {
-            return;
-        }
-        if let Ok(mut inflight) = self.inflight.lock() {
-            inflight.remove(&ticket);
-        }
-    }
+/// Carried by one request in debug mode to notice a second answer to it.
+#[derive(Default)]
+struct RequestTicket {
+    answered: AtomicBool,
 }
 
 struct ConditionalPutLockRegistry {
@@ -588,8 +562,6 @@ pub struct S3Session {
     stream_request_bytes: Arc<AtomicU64>,
     stream_response_bytes: Arc<AtomicU64>,
     assertions: Arc<TurnCell<Vec<String>>>,
-    inflight: Arc<TurnCell<HashSet<u64>>>,
-    next_ticket: Arc<std::sync::atomic::AtomicU64>,
     next_request_id: Arc<AtomicU64>,
     conditional_put_locks: Arc<ConditionalPutLockRegistry>,
 }
@@ -635,8 +607,6 @@ impl S3Session {
             stream_request_bytes: Arc::new(AtomicU64::new(0)),
             stream_response_bytes: Arc::new(AtomicU64::new(0)),
             assertions: Arc::new(TurnCell::new(Vec::new())),
-            inflight: Arc::new(TurnCell::new(HashSet::new())),
-            next_ticket: Arc::new(AtomicU64::new(1)),
             next_request_id: Arc::new(AtomicU64::new(1)),
             conditional_put_locks: Arc::new(ConditionalPutLockRegistry::new()),
         }
@@ -676,7 +646,6 @@ impl S3Session {
         let started = Instant::now();
         self.stats.requests.fetch_add(1, Ordering::Relaxed);
         let ticket = self.begin_request();
-        let mut ticket_guard = RequestTicketGuard::new(Arc::clone(&self.inflight), ticket);
         let request_id = self.next_request_id();
         let result = self.dispatch(&head, &body).await;
         let (response, error_class) = match result {
@@ -699,8 +668,7 @@ impl S3Session {
                 )
             }
         };
-        self.finish_request(ticket, &head).await;
-        ticket_guard.disarm();
+        self.finish_request(ticket.as_ref(), &head).await;
         self.record_response_stats(
             started,
             body.len() as u64,
@@ -725,7 +693,6 @@ impl S3Session {
         let started = Instant::now();
         self.stats.requests.fetch_add(1, Ordering::Relaxed);
         let ticket = self.begin_request();
-        let mut ticket_guard = RequestTicketGuard::new(Arc::clone(&self.inflight), ticket);
         let request_id = self.next_request_id();
         let body = Box::pin(CountingRequestBody {
             inner: body,
@@ -765,8 +732,7 @@ impl S3Session {
             }
             body => body,
         };
-        self.finish_request(ticket, &head).await;
-        ticket_guard.disarm();
+        self.finish_request(ticket.as_ref(), &head).await;
         let response_bytes = match &response.body {
             Some(S3StreamBody::Bytes(bytes)) => bytes.len() as u64,
             Some(S3StreamBody::Stream(_)) | None => 0,
@@ -777,29 +743,16 @@ impl S3Session {
         response
     }
 
-    fn begin_request(&self) -> Option<u64> {
-        if !self.options.debug {
-            return None;
-        }
-        let ticket = self
-            .next_ticket
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(mut inflight) = self.inflight.lock() {
-            inflight.insert(ticket);
-        }
-        Some(ticket)
+    fn begin_request(&self) -> Option<RequestTicket> {
+        self.options.debug.then(RequestTicket::default)
     }
 
-    async fn finish_request(&self, ticket: Option<u64>, head: &S3RequestHead) {
+    async fn finish_request(&self, ticket: Option<&RequestTicket>, head: &S3RequestHead) {
         let Some(ticket) = ticket else {
             return;
         };
-        let removed = self
-            .inflight
-            .lock()
-            .map(|mut inflight| inflight.remove(&ticket))
-            .unwrap_or(false);
-        if !removed {
+        let answered_before = ticket.answered.swap(true, Ordering::AcqRel);
+        if answered_before {
             let message = format!("{} {} was answered twice", head.method, head.target);
             if let Ok(mut assertions) = self.assertions.lock() {
                 assertions.push(message.clone());
@@ -4905,7 +4858,15 @@ mod tests {
             );
         }
 
-        session.finish_request(Some(999), &head).await;
+        let ticket = RequestTicket::default();
+        session.finish_request(Some(&ticket), &head).await;
+        assert!(
+            assertion_reports
+                .lock()
+                .expect("assertion report")
+                .is_empty()
+        );
+        session.finish_request(Some(&ticket), &head).await;
         assert_eq!(
             assertion_reports
                 .lock()

@@ -199,8 +199,10 @@ pub struct NfsServer {
     // Stored once by `listen` and taken once by `close` or `Drop`; nothing
     // reads either in place, so a swap is all the exclusion they need.
     shutdown: ArcSwapOption<oneshot::Sender<()>>,
-    accept_task: ArcSwapOption<JoinHandle<()>>,
-    connection_tasks: Arc<TurnCell<Vec<JoinHandle<()>>>>,
+    /// The accept loop owns the connection tasks and hands them back when
+    /// it is told to stop. Aborting it instead drops the set, which aborts
+    /// every connection.
+    accept_task: ArcSwapOption<JoinHandle<JoinSet<()>>>,
     clients: Arc<TurnCell<HashMap<u64, NfsConnection>>>,
     next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicUsize>,
@@ -276,7 +278,6 @@ impl NfsServer {
             address: Arc::new(OnceLock::new()),
             shutdown: ArcSwapOption::empty(),
             accept_task: ArcSwapOption::empty(),
-            connection_tasks: Arc::new(TurnCell::new(Vec::new())),
             clients: Arc::new(TurnCell::new(HashMap::new())),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             active_connections: Arc::new(AtomicUsize::new(0)),
@@ -359,14 +360,17 @@ impl NfsServer {
         let max_in_flight = self.options.max_in_flight.max(1);
         let allow_remote = self.options.allow_remote;
         let hooks = self.hooks.clone();
-        let connection_tasks = self.connection_tasks.clone();
         let clients = self.clients.clone();
         let next_connection_id = self.next_connection_id.clone();
         let active_connections = self.active_connections.clone();
         let task = tokio::spawn(async move {
+            let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     _ = &mut shutdown_receiver => break,
+                    // Forget each connection as it ends, so the set holds
+                    // only live ones however many have come and gone.
+                    Some(_) = connections.join_next(), if !connections.is_empty() => {}
                     (stream, peer) = accept_next(|| listener.accept(), |error| {
                         report(&hooks, NfsTransportError::from_io(
                             NfsTransportErrorKind::Accept,
@@ -399,7 +403,7 @@ impl NfsServer {
                             control: Arc::clone(&control),
                             id,
                         };
-                        let task = tokio::spawn(async move {
+                        connections.spawn(async move {
                             // The guard is constructed before spawning so an
                             // abort before the task is first polled still
                             // drops it and decrements the active count.
@@ -417,13 +421,10 @@ impl NfsServer {
                             })
                             .await;
                         });
-                        connection_tasks
-                            .lock()
-                            .expect("NFS connection task lock")
-                            .push(task);
                     }
                 }
             }
+            connections
         });
         self.accept_task.store(Some(Arc::new(task)));
         Ok(address)
@@ -436,38 +437,24 @@ impl NfsServer {
             let _ = sender.send(());
         }
         let accept_task = self.accept_task.swap(None).and_then(Arc::into_inner);
-        if let Some(task) = accept_task {
-            let _ = task.await;
-        }
+        let mut connections = match accept_task {
+            // A loop that failed dropped its set, which aborted its tasks.
+            Some(task) => task.await.unwrap_or_default(),
+            None => JoinSet::new(),
+        };
         let clients = self.clients()?;
         for client in &clients {
             client.control.stop();
         }
-        let tasks = self
-            .connection_tasks
-            .lock()
-            .expect("NFS connection lock")
-            .drain(..)
-            .collect::<Vec<_>>();
         // Let serving tasks observe shutdown and drain their request workers
         // before close returns. Aborting a serving task immediately drops its
         // JoinSet without waiting for those workers to observe cancellation.
-        let mut tasks = tasks;
-        let mut drained = 0;
         let graceful = tokio::time::timeout(std::time::Duration::from_millis(200), async {
-            for task in &mut tasks {
-                let _ = task.await;
-                drained += 1;
-            }
+            while connections.join_next().await.is_some() {}
         })
         .await;
         if graceful.is_err() {
-            for task in &tasks[drained..] {
-                task.abort();
-            }
-            for task in &mut tasks[drained..] {
-                let _ = task.await;
-            }
+            connections.shutdown().await;
         }
         let v3_closed = self.session.destroy().await;
         debug_assert_eq!(self.connections(), 0);
@@ -489,15 +476,10 @@ impl Drop for NfsServer {
         if let Some(sender) = self.shutdown.swap(None).and_then(Arc::into_inner) {
             let _ = sender.send(());
         }
+        // Aborting the accept loop drops its connection set, which aborts
+        // every connection. A loop that already stopped left the set in its
+        // handle, and dropping the handle does the same.
         if let Some(task) = self.accept_task.swap(None).and_then(Arc::into_inner) {
-            task.abort();
-        }
-        for task in self
-            .connection_tasks
-            .lock()
-            .expect("NFS connection lock")
-            .drain(..)
-        {
             task.abort();
         }
     }
