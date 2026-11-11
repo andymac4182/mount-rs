@@ -110,8 +110,7 @@ jobs:
 
       - name: Install and verify the Linux FUSE prerequisite for the FDB CLI gate
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
+          sh scripts/ci-apt-install.sh fuse3
           test -c /dev/fuse
           test -r /dev/fuse
           test -w /dev/fuse

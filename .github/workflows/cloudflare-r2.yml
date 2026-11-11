@@ -84,8 +84,7 @@ jobs:
       - name: Verify the AWS CLI cleanup dependency
         run: |
           if ! command -v aws >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y awscli
+            sh scripts/ci-apt-install.sh awscli
           fi
           aws --version
       - name: Install locked Rust and Node test dependencies

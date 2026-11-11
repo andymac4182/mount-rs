@@ -435,8 +435,7 @@ jobs:
         run: pnpm --dir bindings/mount-rs-napi build
       - name: Install and verify the Linux FUSE prerequisite for the FDB CLI gate
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
+          sh scripts/ci-apt-install.sh fuse3
           test -c /dev/fuse
           test -r /dev/fuse
           test -w /dev/fuse
@@ -540,8 +539,7 @@ jobs:
         run: pnpm --dir bindings/mount-rs-napi build
       - name: Install and verify the Linux FUSE prerequisite for the consumer gate
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
+          sh scripts/ci-apt-install.sh fuse3
           test -c /dev/fuse
           test -r /dev/fuse
           test -w /dev/fuse
@@ -572,8 +570,7 @@ jobs:
       - name: Install the actual Linux WebDAV client
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y davfs2 fuse3
+          sh scripts/ci-apt-install.sh davfs2 fuse3
           test -c /dev/fuse
       - name: Build and run native WebDAV I/O
         run: |
@@ -599,8 +596,7 @@ jobs:
       - name: Install the actual Linux NFS client
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y nfs-common
+          sh scripts/ci-apt-install.sh nfs-common
           sudo modprobe nfs
           sudo modprobe nfsv4
       - name: Build and run privileged native NFS tests
@@ -716,8 +712,7 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install and verify the kernel FUSE prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
+          sh scripts/ci-apt-install.sh fuse3
           test -c /dev/fuse
           test -r /dev/fuse
           test -w /dev/fuse
@@ -790,6 +785,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - run: cargo fmt --all -- --check
+      # The test crates under tests/ carry their own lock files. Catch one
+      # left behind by a manifest change here, in seconds, not in a dozen
+      # integration jobs that each die before compiling.
+      - name: Check every lock file matches its manifest
+        if: runner.os == 'Linux'
+        run: sh scripts/check-lockfiles.sh
       # Native optional providers have separate client/runtime gates. Keeping
       # this matrix feature-off prevents a client-free macOS/Linux runner from
       # attempting to link libfdb_c while still checking every workspace target.
@@ -956,8 +957,7 @@ jobs:
       - name: Install native Node mount prerequisites on Linux
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
+          sh scripts/ci-apt-install.sh fuse3
           test -c /dev/fuse
           test -r /dev/fuse
           test -w /dev/fuse

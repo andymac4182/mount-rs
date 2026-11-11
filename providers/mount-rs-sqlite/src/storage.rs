@@ -4996,6 +4996,9 @@ mod verification {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The parent imports these on Unix only.
+    #[cfg(not(unix))]
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[cfg(target_os = "linux")]
     #[test]
