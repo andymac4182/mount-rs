@@ -12,8 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use arc_swap::ArcSwapOption;
 use mount_rs_core::FsDriver;
 use mount_rs_core::turn_cell::TurnCell;
+#[cfg(target_os = "linux")]
 use mount_rs_core::turn_gate::TurnLock;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -242,7 +244,9 @@ enum P9Listener {
 
 /// A running or attach-only 9P server.
 pub struct P9Server {
-    listener: Arc<TurnLock<Option<P9Listener>>>,
+    /// Stored by the bind and taken by `serve` or `close`, whichever comes
+    /// first; nothing reads it in place.
+    listener: ArcSwapOption<P9Listener>,
     driver: Arc<dyn FsDriver>,
     options: P9ServerOptions,
     hooks: P9ServerHooks,
@@ -307,7 +311,7 @@ impl P9Server {
             .clone()
             .unwrap_or_else(|| P9LockTable::new(Default::default()));
         Self {
-            listener: Arc::new(TurnLock::new(None)),
+            listener: ArcSwapOption::empty(),
             driver,
             options,
             hooks,
@@ -516,7 +520,7 @@ impl P9Server {
             }
             // If serve() has not taken the listener yet, drop it here. If it
             // has, its select loop drops it when the notification is seen.
-            self.listener.lock().await.take();
+            drop(self.listener.swap(None));
             #[cfg(unix)]
             if let Some(path) = &self.options.path {
                 match std::fs::remove_file(path) {
@@ -566,7 +570,7 @@ impl P9Server {
     }
 
     async fn serve_inner(&self) -> io::Result<()> {
-        let listener = self.listener.lock().await.take();
+        let listener = self.listener.swap(None).and_then(Arc::into_inner);
         if self.closed.load(Ordering::Acquire) || self.shutdown_requested.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -609,7 +613,8 @@ impl P9Server {
         let listener = TcpListener::bind(&address).await?;
         let local = listener.local_addr()?;
         let _ = self.tcp_addr.set(local);
-        *self.listener.lock().await = Some(P9Listener::Tcp(listener));
+        self.listener
+            .store(Some(Arc::new(P9Listener::Tcp(listener))));
         Ok(())
     }
 
@@ -621,7 +626,8 @@ impl P9Server {
         let listener = UnixListener::bind(&path)?;
         let mode = std::os::unix::fs::PermissionsExt::from_mode(self.options.socket_mode);
         std::fs::set_permissions(&path, mode)?;
-        *self.listener.lock().await = Some(P9Listener::Unix(listener));
+        self.listener
+            .store(Some(Arc::new(P9Listener::Unix(listener))));
         Ok(())
     }
 
@@ -927,8 +933,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
         max_in_flight,
     } = runtime;
     let session = connection.session.clone();
-    let (mut reader, writer) = tokio::io::split(stream);
-    let writer = Arc::new(TurnLock::new(writer));
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let permits = Arc::new(Semaphore::new(max_in_flight));
     let mut assembler = match P9FrameAssembler::new(max_frame.max(P9_HDRSZ)) {
         Ok(assembler) => assembler,
@@ -958,46 +963,54 @@ async fn run_connection(runtime: ConnectionRuntime) {
     let write_reported = Arc::clone(&reported);
     let write_peer = connection.peer.clone();
     let write_epoch = Arc::clone(&reply_epoch);
-    let write_writer = Arc::clone(&writer);
+    // The writer task owns the write half and is its only user. It hands the
+    // half back when told to stop, so the connection can shut it down.
+    let (stop_writer, writer_stopped) = oneshot::channel::<()>();
     let writer_task = tokio::spawn(async move {
-        while let Some(reply) = reply_receiver.recv().await {
-            // Requests completed before renegotiation may be queued here.
-            // A write already in progress finishes before the new Rversion.
-            if !reply.version && reply.epoch != write_epoch.load(Ordering::Acquire) {
-                let _ = reply.done.send(true);
-                continue;
-            }
-            let mut writer = write_writer.lock().await;
-            if !reply.version && reply.epoch != write_epoch.load(Ordering::Acquire) {
-                let _ = reply.done.send(true);
-                continue;
-            }
-            let result = match writer.write_all(&reply.bytes).await {
-                Ok(()) => writer.flush().await,
-                Err(error) => Err(error),
-            };
-            let failed = if let Err(error) = result {
-                if !is_expected_disconnect(&error) {
-                    report_once(
-                        &write_hooks,
-                        &write_reported,
-                        P9TransportError::from_io(
-                            P9TransportErrorKind::Write,
-                            write_peer.clone(),
-                            &error,
-                        ),
-                    );
+        let replies_writer = &mut writer;
+        let write_replies = async move {
+            let writer = replies_writer;
+            while let Some(reply) = reply_receiver.recv().await {
+                // Requests completed before renegotiation may be queued here.
+                // A write already in progress finishes before the new Rversion.
+                if !reply.version && reply.epoch != write_epoch.load(Ordering::Acquire) {
+                    let _ = reply.done.send(true);
+                    continue;
                 }
-                write_control.stop();
-                true
-            } else {
-                false
-            };
-            let _ = reply.done.send(!failed);
-            if failed {
-                break;
+                let result = match writer.write_all(&reply.bytes).await {
+                    Ok(()) => writer.flush().await,
+                    Err(error) => Err(error),
+                };
+                let failed = if let Err(error) = result {
+                    if !is_expected_disconnect(&error) {
+                        report_once(
+                            &write_hooks,
+                            &write_reported,
+                            P9TransportError::from_io(
+                                P9TransportErrorKind::Write,
+                                write_peer.clone(),
+                                &error,
+                            ),
+                        );
+                    }
+                    write_control.stop();
+                    true
+                } else {
+                    false
+                };
+                let _ = reply.done.send(!failed);
+                if failed {
+                    break;
+                }
             }
+        };
+        // Stopping abandons a write in progress, as a blocked peer would
+        // otherwise hold the connection open.
+        tokio::select! {
+            () = write_replies => {}
+            _ = writer_stopped => {}
         }
+        writer
     });
     let mut buffer = vec![0_u8; 64 * 1024];
     // Keep reading while request work is at the in-flight bound so a peer's
@@ -1342,10 +1355,11 @@ async fn run_connection(runtime: ConnectionRuntime) {
             );
         }
     }
-    writer_task.abort();
-    let _ = writer_task.await;
-    if own {
-        let _ = writer.lock().await.shutdown().await;
+    drop(stop_writer);
+    if let Ok(mut writer) = writer_task.await
+        && own
+    {
+        let _ = writer.shutdown().await;
     }
     let _ = session.destroy().await;
     connections

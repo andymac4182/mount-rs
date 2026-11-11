@@ -175,7 +175,6 @@ struct IdentitySlot {
 /// direction and never for one already completed.
 pub struct RotatingPeerIdentity {
     slot: arc_swap::ArcSwap<IdentitySlot>,
-    installing: mount_rs_core::turn_cell::TurnCell<()>,
 }
 
 impl fmt::Debug for RotatingPeerIdentity {
@@ -194,7 +193,6 @@ impl RotatingPeerIdentity {
     #[must_use]
     pub fn new(initial: StagedPeerIdentity) -> Arc<Self> {
         Arc::new(Self {
-            installing: mount_rs_core::turn_cell::TurnCell::new(()),
             slot: arc_swap::ArcSwap::new(Arc::new(IdentitySlot {
                 certified: initial.certified,
                 spki: initial.identity.spki_sha256(),
@@ -232,7 +230,6 @@ impl RotatingPeerIdentity {
         let spki = crate::tls::spki_sha256_from_der(leaf.as_ref())
             .map_err(|error| PeerIdentityError::Unusable(error.to_string()))?;
         Ok(Arc::new(Self {
-            installing: mount_rs_core::turn_cell::TurnCell::new(()),
             slot: arc_swap::ArcSwap::new(Arc::new(IdentitySlot {
                 certified: Arc::new(certified),
                 spki,
@@ -299,17 +296,37 @@ impl RotatingPeerIdentity {
     /// generation.  Established connections keep what they negotiated.
     pub fn install(&self, staged: StagedPeerIdentity) -> Result<u64, PeerIdentityError> {
         self.check_replacement(&staged)?;
-        // Installs take turns so each sees the generation before it; readers
-        // load the slot without waiting for one.
-        let _installing = self.installing.lock_recovered();
-        let generation = self.slot.load().generation.saturating_add(1);
-        self.slot.store(Arc::new(IdentitySlot {
+        // Each install replaces the slot it read, and tries again if another
+        // install got in first, so each sees the generation before it.
+        // Readers load the slot without waiting.
+        let mut next = IdentitySlot {
             certified: staged.certified,
             spki: staged.identity.spki_sha256(),
             identity: Some(staged.identity),
-            generation,
-        }));
-        Ok(generation)
+            generation: 0,
+        };
+        loop {
+            let current = self.slot.load_full();
+            let generation = current.generation.saturating_add(1);
+            next.generation = generation;
+            let installing = Arc::new(next);
+            let previous = self
+                .slot
+                .compare_and_swap(&current, Arc::clone(&installing));
+            if Arc::ptr_eq(&previous, &current) {
+                return Ok(generation);
+            }
+            drop(previous);
+            // The swap did not happen, so this is the only pointer left.
+            next = match Arc::try_unwrap(installing) {
+                Ok(next) => next,
+                Err(_) => {
+                    return Err(PeerIdentityError::Unusable(
+                        "peer identity slot is still shared".to_owned(),
+                    ));
+                }
+            };
+        }
     }
 
     /// Build the private HTTP/3 server configuration resolving through this
