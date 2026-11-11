@@ -14,9 +14,12 @@ const { nfs4Driver } = await upstream('test/nfs/v4/driver.ts');
 const { createNfsServer } = await upstream('src/nfs/server.ts');
 const { createMemoryDriver } = await upstream('src/drivers/memory.ts');
 
+// This compiles the fixture, which on the slowest hosted runner (Intel macOS)
+// takes longer than three minutes from a cold cache. The limit only has to
+// stop a build that never finishes.
 const build = execFileSync('cargo', [
   'build', '--locked', '--example', 'nfs_oracle', '--message-format=json',
-], { cwd: root, stdio: ['ignore', 'pipe', 'inherit'], timeout: 180000, encoding: 'utf8' });
+], { cwd: root, stdio: ['ignore', 'pipe', 'inherit'], timeout: 20 * 60 * 1000, encoding: 'utf8' });
 const fixture = build.trim().split('\n').map((line) => JSON.parse(line))
   .find((item) => item.reason === 'compiler-artifact' && item.target.name === 'nfs_oracle' && item.executable)
   ?.executable;
