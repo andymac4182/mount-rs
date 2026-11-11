@@ -20,7 +20,6 @@ use mount_rs_core::chunking::ChunkerConfig;
 use mount_rs_core::storage::{InodeId, Namespace, NodeMetadata};
 use mount_rs_core::{Result, backend_error};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// The namespace this connection last stored or loaded, which the next
 /// publication is compared with.
@@ -279,39 +278,6 @@ impl Log {
         self.deleted(append.dead.len());
         self.record(revision, append.entries, append.row.len());
         self.credit = append.credit;
-    }
-}
-
-/// One slot holding the `Published` copy without a lock. It is only used
-/// while the connection mutex is held, so `take` and `put` never race; the
-/// atomic is what lets the slot live beside the connection in shared state.
-pub(crate) struct Slot(AtomicPtr<Published>);
-
-impl Slot {
-    pub fn new() -> Self {
-        Self(AtomicPtr::new(std::ptr::null_mut()))
-    }
-
-    pub fn take(&self) -> Option<Published> {
-        let pointer = self.0.swap(std::ptr::null_mut(), Ordering::AcqRel);
-        // SAFETY: a non-null pointer in the slot came from `Box::into_raw`
-        // in `put`, and the swap above made this call its only owner.
-        (!pointer.is_null()).then(|| *unsafe { Box::from_raw(pointer) })
-    }
-
-    pub fn put(&self, published: Published) {
-        let pointer = Box::into_raw(Box::new(published));
-        let displaced = self.0.swap(pointer, Ordering::AcqRel);
-        if !displaced.is_null() {
-            // SAFETY: as in `take`.
-            drop(unsafe { Box::from_raw(displaced) });
-        }
-    }
-}
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        self.take();
     }
 }
 

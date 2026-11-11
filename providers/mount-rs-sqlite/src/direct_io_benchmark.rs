@@ -23,7 +23,7 @@ unsafe extern "C" fn trace(
     _: *mut c_void,
 ) -> i32 {
     if mask == ffi::SQLITE_TRACE_STMT {
-        // The Box stays alive until tracing is unregistered under the connection mutex.
+        // The Box stays alive until tracing is unregistered on the connection's thread.
         let counts = unsafe { &*(context.cast::<TraceCounts>()) };
         counts.statements.fetch_add(1, Ordering::Relaxed);
         let sql = unsafe { ffi::sqlite3_sql(statement.cast()) };
@@ -50,45 +50,50 @@ impl Observer {
             counts: Box::default(),
             page_size: 0,
         };
-        let connection = database.lock().unwrap();
-        result.page_size = connection
-            .query_row("PRAGMA page_size", [], |row| row.get(0))
-            .unwrap();
-        let rc = unsafe {
-            ffi::sqlite3_trace_v2(
-                connection.handle(),
-                ffi::SQLITE_TRACE_STMT,
-                Some(trace),
-                (&mut *result.counts as *mut TraceCounts).cast(),
-            )
-        };
+        let counts: &TraceCounts = &result.counts;
+        let (page_size, rc) = database.with(|connection| {
+            let page_size = connection
+                .query_row("PRAGMA page_size", [], |row| row.get(0))
+                .unwrap();
+            let rc = unsafe {
+                ffi::sqlite3_trace_v2(
+                    connection.handle(),
+                    ffi::SQLITE_TRACE_STMT,
+                    Some(trace),
+                    std::ptr::from_ref(counts).cast_mut().cast(),
+                )
+            };
+            (page_size, rc)
+        });
         assert_eq!(rc, ffi::SQLITE_OK);
+        result.page_size = page_size;
         result
     }
     fn pager(&self, reset: bool) -> BTreeMap<&'static str, u64> {
-        let connection = self.database.lock().unwrap();
-        [
-            ("cache_hits", ffi::SQLITE_DBSTATUS_CACHE_HIT),
-            ("cache_misses", ffi::SQLITE_DBSTATUS_CACHE_MISS),
-            ("page_writes", ffi::SQLITE_DBSTATUS_CACHE_WRITE),
-            ("cache_spills", ffi::SQLITE_DBSTATUS_CACHE_SPILL),
-        ]
-        .into_iter()
-        .map(|(label, operation)| {
-            let (mut current, mut high) = (0, 0);
-            let rc = unsafe {
-                ffi::sqlite3_db_status(
-                    connection.handle(),
-                    operation,
-                    &mut current,
-                    &mut high,
-                    i32::from(reset),
-                )
-            };
-            assert_eq!(rc, ffi::SQLITE_OK);
-            (label, u64::try_from(current).unwrap())
+        self.database.with(|connection| {
+            [
+                ("cache_hits", ffi::SQLITE_DBSTATUS_CACHE_HIT),
+                ("cache_misses", ffi::SQLITE_DBSTATUS_CACHE_MISS),
+                ("page_writes", ffi::SQLITE_DBSTATUS_CACHE_WRITE),
+                ("cache_spills", ffi::SQLITE_DBSTATUS_CACHE_SPILL),
+            ]
+            .into_iter()
+            .map(|(label, operation)| {
+                let (mut current, mut high) = (0, 0);
+                let rc = unsafe {
+                    ffi::sqlite3_db_status(
+                        connection.handle(),
+                        operation,
+                        &mut current,
+                        &mut high,
+                        i32::from(reset),
+                    )
+                };
+                assert_eq!(rc, ffi::SQLITE_OK);
+                (label, u64::try_from(current).unwrap())
+            })
+            .collect()
         })
-        .collect()
     }
     fn reset(&self) {
         self.pager(true);
@@ -106,11 +111,11 @@ impl Observer {
 }
 impl Drop for Observer {
     fn drop(&mut self) {
-        if let Ok(connection) = self.database.lock() {
-            unsafe {
-                ffi::sqlite3_trace_v2(connection.handle(), 0, None, std::ptr::null_mut());
-            }
-        }
+        // On the connection's thread, so no statement is being traced into
+        // the counters while they are detached.
+        let _ = self.database.owner.run_blocking(|state| unsafe {
+            ffi::sqlite3_trace_v2(state.connection.handle(), 0, None, std::ptr::null_mut());
+        });
     }
 }
 fn run<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -300,16 +305,17 @@ fn direct_provider_io_amplification() {
         3200 * 4096,
         std::slice::from_ref(&observer),
         || {
-            let connection = blocks.0.lock().unwrap();
-            let mut statement = connection
-                .prepare("SELECT bytes FROM mount_rs_blocks WHERE id=?1")
-                .unwrap();
-            for id in &ids {
-                let bytes: Vec<u8> = statement
-                    .query_row(params![id.0], |row| row.get(0))
+            blocks.0.with(|connection| {
+                let mut statement = connection
+                    .prepare("SELECT bytes FROM mount_rs_blocks WHERE id=?1")
                     .unwrap();
-                std::hint::black_box(bytes);
-            }
+                for id in &ids {
+                    let bytes: Vec<u8> = statement
+                        .query_row(params![id.0], |row| row.get(0))
+                        .unwrap();
+                    std::hint::black_box(bytes);
+                }
+            });
         },
     );
     phase(
@@ -318,15 +324,16 @@ fn direct_provider_io_amplification() {
         3200 * 4096,
         std::slice::from_ref(&observer),
         || {
-            let connection = blocks.0.lock().unwrap();
-            let mut statement = connection
-                .prepare("INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)")
-                .unwrap();
-            for index in 0..3200 {
-                statement
-                    .execute(params![format!("raw-{index:060}"), payload(index + 3200)])
+            blocks.0.with(|connection| {
+                let mut statement = connection
+                    .prepare("INSERT INTO mount_rs_blocks(id,bytes) VALUES(?1,?2)")
                     .unwrap();
-            }
+                for index in 0..3200 {
+                    statement
+                        .execute(params![format!("raw-{index:060}"), payload(index + 3200)])
+                        .unwrap();
+                }
+            });
         },
     );
     let metadata = SqliteMetadataStore::open(root.join("metadata.db")).unwrap();

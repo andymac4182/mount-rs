@@ -162,6 +162,7 @@ nothing a cheaper primitive could not guard was removed.
 | Live-mount registries (automatic transport, native NFS), SQLite trace registry, CLI drive metrics map | An atomic pointer to a list or map replaced whole |
 | Authenticator policy cache, one lock held across every key fetch | One atomic snapshot per policy, read without waiting; a turn is taken only by a caller that must fetch |
 | Chunked block cache per-block fill turn (`DrainGate` that never had a shared holder) | `TurnGate`; the exclusion stays, the unused shared half goes |
+| SQLite storage connection (metadata and block stores), which was held through fsync and SQLite's busy wait on the caller's thread | A thread per database that owns the connection. Each operation is one job sent to it; jobs run one at a time in arrival order, and an async caller awaits the reply instead of blocking a runtime thread. A job that panics fails that call and every later one |
 
 Fixed keys mean a client can no longer grow a counter map: undefined NFS and
 MOUNT procedure numbers are counted as `unknown`, and WebDAV counts at most
@@ -219,7 +220,7 @@ test code.
 | providers/mount-rs-object-store-blocks | cache `state` | S | Entries, recency and byte total; hits are already lock-free |
 | providers/mount-rs-pglite | storage `client` | R | Transactions need exclusive use of the one connection |
 | providers/mount-rs-slatedb | `state` | A | Held across the persisted write |
-| providers/mount-rs-sqlite | both `connection`s | R | SQLite connection |
+| providers/mount-rs-sqlite | `SqliteStore.connection` | R | SQLite connection |
 | transports/mount-rs-9p | `P9LockTable.state`, `SessionInner.state` | S | Byte-range locks per path; fid table and users against the generation |
 | transports/mount-rs-9p | `SessionInner.inflight`, server `connections` | C | Duplicate-tag check and insert; insert rechecks closed |
 | transports/mount-rs-9p | `unmount_lock`, `release`, `adoption` | A | Unmount and rollback; server close and task join; the client-set comparison around the mount command |
@@ -276,7 +277,6 @@ waiters parked in arrival order.
 
 | Where | What is held |
 |-------|--------------|
-| `providers/mount-rs-sqlite/src/storage.rs` connection | fsync and SQLite's busy wait |
 | Blob cache local store | An eviction scan over every entry |
 | Memory filesystem state | Serialising the whole filesystem for a snapshot |
 | Key-value state and open files | Whole-file copies |
