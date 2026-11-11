@@ -1006,7 +1006,10 @@ jobs:
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-session.mjs
       - run: pnpm --dir tests/pglite install --frozen-lockfile
       - name: Verify PGlite integration and restart recovery
-        timeout-minutes: 10
+        # The slowest runner (Intel macOS) spends about eight minutes of this
+        # step compiling the Rust SDK and CLI test binaries before any case
+        # runs; ten minutes cut it off mid-build.
+        timeout-minutes: 25
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh
       - name: Benchmark real volatile PGlite providers
         timeout-minutes: 5
