@@ -1431,9 +1431,8 @@ impl MetadataStore for PgliteMetadataStore {
              RETURNING fence, expires"
         );
         let client = self.0.lock_client().await?;
+        let client = client.as_ref().ok_or_else(connection_closed)?;
         let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
             .query_typed_opt(
                 &sql,
                 &[
@@ -1443,8 +1442,28 @@ impl MetadataStore for PgliteMetadataStore {
                 ],
             )
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| FsError::new(ErrorCode::Eagain).with_syscall("acquire writer"))?;
+            .map_err(postgres_error)?;
+        let Some(row) = row else {
+            // EAGAIN tells a caller to wait for the current holder. A volume
+            // in concurrent write mode never grants this lease, so say so
+            // rather than leave the caller waiting on a lease that cannot
+            // exist.
+            let concurrent = client
+                .query_typed_opt(
+                    "SELECT write_mode IS NOT NULL FROM mount_rs_metadata WHERE volume_key=$1",
+                    &[(&self.0.volume_key, Type::TEXT)],
+                )
+                .await
+                .map_err(postgres_error)?
+                .is_some_and(|row| row.get::<_, bool>(0));
+            return Err(if concurrent {
+                FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("acquire writer")
+                    .with_message("PGlite volume is in concurrent write mode")
+            } else {
+                FsError::new(ErrorCode::Eagain).with_syscall("acquire writer")
+            });
+        };
         Ok(WriterLease {
             owner,
             fence: nonnegative(row.get(0), "metadata fence")?,
@@ -4543,12 +4562,14 @@ mod tests {
                 reopened.concurrent_mode_state().await.unwrap(),
                 ConcurrentModeState::Mrc2(backing)
             );
-            assert!(
+            // Not EAGAIN: no amount of waiting makes this lease available.
+            assert_eq!(
                 reopened
                     .acquire_writer("legacy-writer", Duration::from_secs(60))
                     .await
-                    .is_err(),
-                "a legacy lease must never be acquired after concurrent conversion"
+                    .expect_err("a legacy lease must never be acquired after concurrent conversion")
+                    .code,
+                ErrorCode::Ebusy
             );
             // This is the pre-change acquisition condition: it knows
             // nothing about write_mode. The max-fence sentinel still makes
