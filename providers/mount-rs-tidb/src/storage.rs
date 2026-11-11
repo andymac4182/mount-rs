@@ -174,7 +174,7 @@ impl Database {
         // verified by the callback below.
         let pool_options = opts.pool_opts().clone().with_reset_connection(false);
         let pool = Pool::new(
-            OptsBuilder::from_opts(opts)
+            with_keepalive(opts)
                 .pool_opts(pool_options)
                 .after_connect(|connection| Box::pin(configure_pessimistic_session(connection))),
         );
@@ -507,6 +507,21 @@ async fn concurrent_row<C: Queryable>(
         fence,
         expires,
     })
+}
+
+/// How long a TiDB connection may sit idle before the kernel probes it,
+/// unless the URL sets `tcp_keepalive`.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+
+/// Turn on TCP keepalive unless the URL already chose a value.
+///
+/// Without it a peer that vanished without closing (a dropped route, a
+/// replaced load balancer) is never noticed, and the statement waiting on
+/// that connection waits forever. This does not bound a server that is alive
+/// but slow.
+fn with_keepalive(opts: Opts) -> OptsBuilder {
+    let keepalive = opts.tcp_keepalive().unwrap_or(KEEPALIVE_IDLE);
+    OptsBuilder::from_opts(opts).tcp_keepalive(Some(keepalive))
 }
 
 fn concurrent_busy(operation: &str) -> FsError {
@@ -2811,6 +2826,21 @@ mod tests {
         assert!(expiry(u64::MAX, 1).is_err());
         assert!(nonnegative(-1, "metadata fence").is_err());
         assert!(signed(u64::MAX, "metadata fence").is_err());
+    }
+
+    #[test]
+    fn connections_probe_a_silent_peer_unless_the_url_says_otherwise() {
+        let default = Opts::from_url("mysql://root@127.0.0.1:4000/test").unwrap();
+        assert_eq!(default.tcp_keepalive(), None);
+        assert_eq!(
+            Opts::from(with_keepalive(default)).tcp_keepalive(),
+            Some(KEEPALIVE_IDLE)
+        );
+        let chosen = Opts::from_url("mysql://root@127.0.0.1:4000/test?tcp_keepalive=5000").unwrap();
+        assert_eq!(
+            Opts::from(with_keepalive(chosen)).tcp_keepalive(),
+            Some(Duration::from_secs(5))
+        );
     }
 
     #[test]

@@ -167,7 +167,8 @@ impl Database {
                 FsError::new(ErrorCode::Einval).with_message("PGlite volume key must not be empty")
             );
         }
-        let (client, connection) = tokio_postgres::connect(connection_string, NoTls)
+        let (client, connection) = crate::connection_config(connection_string)?
+            .connect(NoTls)
             .await
             .map_err(postgres_error)?;
         let connection = tokio::spawn(async move {
