@@ -4868,48 +4868,13 @@ where
             Err(error) => return Err(error),
         }
 
-        if self.inner.options.concurrent_writes {
-            return self
-                .write_file_atomic_concurrent_replay(&normalized, data, replay_layout)
-                .await;
-        }
-
-        // A concurrent namespace change won the optimistic race. Preserve the
-        // public writeFile semantics by falling back to the existing
-        // open/write/close path; the immutable blocks from the abandoned
-        // attempt remain protected by reconciliation grace.
-        let handle = self
-            .open_flags(
-                &normalized,
-                OpenFlags {
-                    read: false,
-                    write: true,
-                    create: true,
-                    truncate: true,
-                    append: false,
-                    exclusive: false,
-                },
-                0o666,
-            )
-            .await?;
-        let operation = async {
-            let mut written = 0_usize;
-            while written < data.len() {
-                let count = handle.write(&data[written..], Some(written as u64)).await?;
-                if count == 0 || count > data.len() - written {
-                    return Err(error_with_path(ErrorCode::Eio, "write", &normalized));
-                }
-                written += count;
-            }
-            Ok(())
-        }
-        .await;
-        let close = handle.close().await;
-        match (operation, close) {
-            (Err(error), _) => Err(error),
-            (Ok(()), Err(error)) => Err(error),
-            (Ok(()), Ok(())) => Ok(()),
-        }
+        // Another publication won the optimistic race. Rebase onto the
+        // winner and publish the replacement in one step, whatever the write
+        // mode: truncating and rewriting through a handle would expose an
+        // empty or partial file to readers, and leave one behind if the
+        // process stopped between the two publications.
+        self.write_file_atomic_concurrent_replay(&normalized, data, replay_layout)
+            .await
     }
 
     /// A prepared whole-file batch can lose its CAS to an unrelated writer.
@@ -5015,7 +4980,7 @@ where
                     inode,
                     "open",
                     &entry.path,
-                    true,
+                    self.inner.options.concurrent_writes,
                 )?;
             }
             let target = namespace
@@ -5992,6 +5957,23 @@ where
     M: MetadataStore + 'static,
     B: BlockStore + 'static,
 {
+    /// The stored first failure, or `EBADF` once shut down. Reads only the
+    /// in-memory state; the lease worker and failed operations set it.
+    fn health(&self) -> Result<()> {
+        let state = self.lock_state()?;
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.closed {
+            return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
+        }
+        Ok(())
+    }
+
+    fn write_file_is_atomic(&self) -> bool {
+        true
+    }
+
     fn supports_guarded_mutations(&self) -> bool {
         true
     }
@@ -9993,6 +9975,72 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn whole_file_replacement_never_exposes_a_truncated_file() {
+        const LENGTH: usize = 3000;
+        let fs = ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            MemoryBlockStore::new(),
+            options("whole-file-replacement"),
+        )
+        .await
+        .unwrap();
+        assert!(fs.write_file_is_atomic());
+        fs.write_file("/hot", &[b'0'; LENGTH]).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_millis(400);
+        let mut tasks = Vec::new();
+        for writer in 0..4_u8 {
+            let fs = fs.clone();
+            tasks.push(tokio::spawn(async move {
+                while std::time::Instant::now() < deadline {
+                    fs.write_file("/hot", &[b'a' + writer; LENGTH])
+                        .await
+                        .unwrap();
+                }
+            }));
+        }
+        // Unrelated namespace changes, so that prepared replacements keep
+        // finding the namespace has moved on.
+        for churn in 0..2 {
+            let fs = fs.clone();
+            tasks.push(tokio::spawn(async move {
+                let directory = format!("/churn-{churn}");
+                while std::time::Instant::now() < deadline {
+                    fs.mkdir(&directory, MkdirOptions::default()).await.unwrap();
+                    fs.rmdir(&directory).await.unwrap();
+                }
+            }));
+        }
+        for _ in 0..2 {
+            let fs = fs.clone();
+            tasks.push(tokio::spawn(async move {
+                while std::time::Instant::now() < deadline {
+                    // Truncate-then-write would show a shorter file here.
+                    assert_eq!(fs.stat("/hot").await.unwrap().size, LENGTH as u64);
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let handle = fs.open("/hot", "r", 0).await.unwrap();
+        let mut bytes = vec![0; LENGTH];
+        let mut read = 0;
+        while read < LENGTH {
+            read += handle
+                .read(&mut bytes[read..], Some(read as u64))
+                .await
+                .unwrap();
+        }
+        handle.close().await.unwrap();
+        assert!(
+            bytes.iter().all(|byte| *byte == bytes[0]),
+            "a mixture of two bodies"
+        );
+        fs.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_whole_file_writers_all_make_progress() {
         let fs = ChunkedFs::open(
             MemoryMetadataStore::new(),
@@ -11032,12 +11080,26 @@ mod tests {
         .unwrap();
         assert!(clock.advance_ms(1_000));
         let newer = block_on(metadata.acquire_writer("new", Duration::from_secs(10))).unwrap();
+        // Nothing has noticed yet: health reports what is stored, it does
+        // not go and look.
+        assert!(filesystem.health().is_ok());
         let file = block_on(filesystem.open("/file", "w", 0o600));
         assert_eq!(
             file.err().expect("open should be fenced").code,
             ErrorCode::Estale
         );
         assert!(filesystem.failed());
+        // A readiness probe now sees what every later operation returns.
+        assert_eq!(
+            filesystem.health().expect_err("failed closed").code,
+            ErrorCode::Estale
+        );
+        assert_eq!(
+            block_on(filesystem.stat("/")).expect_err("fenced").code,
+            ErrorCode::Estale
+        );
+        block_on(filesystem.shutdown()).ok();
+        assert!(filesystem.health().is_err());
         assert_eq!(block_on(metadata.release_writer(&newer)).unwrap(), ());
     }
 

@@ -678,6 +678,263 @@ fn unix_http_subprocess_stops_gracefully_and_boundedly() {
     );
 }
 
+/// A config serving one SQLite-backed split-store drive, `durable`.
+fn write_sqlite_split_config(
+    root: &Path,
+    name: &str,
+    owner: &str,
+    lease_ttl_ms: u64,
+    http: serde_json::Value,
+) -> PathBuf {
+    let config_path = root.join(name);
+    let mut http = http;
+    http["host"] = "127.0.0.1".into();
+    http["port"] = 0.into();
+    http["drives"] = serde_json::json!([{
+        "id": "durable",
+        "token": {"env": "MOUNT_RS_HTTP_SPLIT_TOKEN"},
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "metadata": {"kind": "sqlite", "path": root.join("metadata.db")},
+                "blocks": {"kind": "sqlite", "path": root.join("blocks.db")},
+                "chunk_size_bytes": 128,
+                "owner": owner,
+                "lease_ttl_ms": lease_ttl_ms
+            }
+        }
+    }]);
+    let config = serde_json::json!({"version": 1, "http": http});
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("serialize HTTP config"),
+    )
+    .expect("write HTTP config");
+    config_path
+}
+
+/// Send a `PUT` declaring `declared` bytes and deliver only the first
+/// `sent`; the caller keeps the connection, and with it the request, open.
+fn stalled_put(address: SocketAddr, path: &str, declared: usize, sent: usize) -> TcpStream {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .expect("connect HTTP subprocess for a stalled write");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set stalled-write timeout");
+    let request = format!(
+        "PUT {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer splitstore-test-token\r\nConnection: close\r\nContent-Length: {declared}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .expect("write stalled HTTP request headers");
+    stream
+        .write_all(&vec![b'p'; sent])
+        .expect("write stalled HTTP request body");
+    stream.flush().expect("flush stalled HTTP request");
+    stream
+}
+
+#[test]
+fn an_acknowledged_upload_survives_the_process_being_killed() {
+    let root = temporary_root();
+    // A short lease: the killed process cannot release it, and the next
+    // one has to wait it out.
+    let config_path = write_sqlite_split_config(
+        &root,
+        "http.json",
+        "http-kill-test",
+        2_000,
+        serde_json::json!({"max_request_bytes": 4096}),
+    );
+    let mut child = HttpChild::start(&config_path, root.clone());
+    let (address, _ready) = child.ready();
+
+    let token = "splitstore-test-token";
+    // Several chunks each, so a prefix would be recognisable.
+    let first: Vec<u8> = (0..1500).map(|index| (index % 251) as u8).collect();
+    let second: Vec<u8> = (0..3000).map(|index| (index % 239) as u8).collect();
+    for (path, body) in [
+        ("/v1/drives/durable/fs/replaced", &first),
+        ("/v1/drives/durable/fs/replaced", &second),
+        ("/v1/drives/durable/fs/created", &first),
+        ("/v1/drives/durable/fs/interrupted", &first),
+    ] {
+        let response = request(address, "PUT", path, token, body);
+        assert_eq!(response.status, 200, "{path}");
+    }
+    // One more upload is part-way through when the process dies.
+    let interrupted = stalled_put(address, "/v1/drives/durable/fs/interrupted", 4000, 2000);
+    let never_created = stalled_put(address, "/v1/drives/durable/fs/never-created", 4000, 2000);
+    thread::sleep(Duration::from_millis(200));
+
+    // SIGKILL: nothing is flushed, drained or released on the way out.
+    let _status = child.kill_owned();
+    drop((interrupted, never_created));
+    assert_listener_closed(address);
+
+    // The killed process still holds the writer lease, and until that runs
+    // out a replacement is refused at startup (EAGAIN) rather than made to
+    // wait: restart it, as a supervisor would.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let (_reopened, address) = loop {
+        let mut candidate = HttpChild::start(&config_path, root.clone());
+        match candidate.stdout.recv_timeout(Duration::from_secs(30)) {
+            Ok(line) => {
+                let address = line
+                    .split_whitespace()
+                    .find_map(|part| part.strip_prefix("http://"))
+                    .expect("readiness URL")
+                    .parse::<SocketAddr>()
+                    .expect("readiness address");
+                break (candidate, address);
+            }
+            Err(_) => {
+                let _ = candidate.child.wait();
+                let stderr = candidate.stderr.try_iter().collect::<Vec<_>>();
+                assert!(
+                    stderr.iter().any(|line| line.contains("EAGAIN")),
+                    "restart failed for another reason: {stderr:?}"
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the killed process's lease never expired: {stderr:?}"
+                );
+                // Not `drop`: that would remove the volume with the child.
+                std::mem::forget(candidate);
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    };
+    for (path, body) in [
+        // Every write that was answered 200 is there, whole.
+        ("/v1/drives/durable/fs/replaced", &second),
+        ("/v1/drives/durable/fs/created", &first),
+        // The write that was not answered left the previous content alone.
+        ("/v1/drives/durable/fs/interrupted", &first),
+    ] {
+        let response = request(address, "GET", path, token, &[]);
+        assert_eq!(response.status, 200, "{path}");
+        assert!(
+            response.body == **body,
+            "{path}: {} bytes",
+            response.body.len()
+        );
+    }
+    let absent = request(
+        address,
+        "GET",
+        "/v1/drives/durable/fs/never-created",
+        token,
+        &[],
+    );
+    assert_eq!(absent.status, 404);
+    let listing = request(address, "GET", "/v1/drives/durable/entries/", token, &[]);
+    assert_eq!(listing.status, 200);
+    let listing: serde_json::Value = serde_json::from_slice(&listing.body).expect("listing");
+    let mut names: Vec<_> = listing
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| entry["name"].as_str().expect("name").to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["created", "interrupted", "replaced"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stop_that_runs_out_of_drain_time_still_releases_the_writer_lease() {
+    let root = temporary_root();
+    // A lease long enough that a process which exits without releasing it
+    // keeps every other owner out for the rest of this test.
+    let lease_ttl_ms = 120_000;
+    let http = serde_json::json!({
+        "max_request_bytes": 4096,
+        "drain_timeout_ms": 300,
+        "request_timeout_ms": 60_000
+    });
+    let first_config = write_sqlite_split_config(
+        &root,
+        "first.json",
+        "http-first-owner",
+        lease_ttl_ms,
+        http.clone(),
+    );
+    let second_config = write_sqlite_split_config(
+        &root,
+        "second.json",
+        "http-second-owner",
+        lease_ttl_ms,
+        http,
+    );
+
+    let mut first = HttpChild::start(&first_config, root.clone());
+    let (address, _ready) = first.ready();
+    let token = "splitstore-test-token";
+    let kept = request(
+        address,
+        "PUT",
+        "/v1/drives/durable/fs/kept",
+        token,
+        b"kept bytes",
+    );
+    assert_eq!(kept.status, 200);
+    // An upload in progress, which a stop answers at once, and a request
+    // whose head never completes, which a graceful stop has to wait for:
+    // that one outlasts the drain timeout.
+    let stalled = stalled_put(address, "/v1/drives/durable/fs/kept", 4000, 100);
+    let mut unfinished = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .expect("connect HTTP subprocess for an unfinished request");
+    unfinished
+        .write_all(b"GET /v1/drives/durable/fs/kept HTTP/1.1\r\nHost: unfinished\r\n")
+        .expect("write an unfinished request head");
+    // Long enough for the server to have started reading that head; a
+    // connection it has read nothing from is simply closed by a stop.
+    thread::sleep(Duration::from_millis(500));
+
+    let stopping = Instant::now();
+    first.signal(libc::SIGTERM);
+    let status = first.wait_for_exit(Duration::from_secs(10));
+    assert!(
+        stopping.elapsed() < Duration::from_secs(10),
+        "the stop was not bounded by the drain timeout"
+    );
+    // The drain failed, and the exit status says so.
+    assert_eq!(status.code(), Some(1), "exit status: {status}");
+    let (stdout, stderr) = first.output();
+    assert!(
+        !stdout.iter().any(|line| line == "http stopped"),
+        "stdout={stdout:?}"
+    );
+    assert!(
+        stderr.iter().any(|line| line.contains("timed out")),
+        "stderr={stderr:?}"
+    );
+    drop((stalled, unfinished));
+
+    // Another owner gets the volume at once, not after the lease expires.
+    let waiting = Instant::now();
+    let second = HttpChild::start(&second_config, root.clone());
+    let (address, _ready) = second.ready_with_timeout(Duration::from_secs(30));
+    assert!(
+        waiting.elapsed() < Duration::from_millis(lease_ttl_ms / 2),
+        "the second owner waited {:?} for the volume",
+        waiting.elapsed()
+    );
+    // And finds the interrupted upload's target as it was.
+    let read = request(address, "GET", "/v1/drives/durable/fs/kept", token, &[]);
+    assert_eq!(read.status, 200);
+    assert_eq!(read.body, b"kept bytes");
+    let written = request(
+        address,
+        "PUT",
+        "/v1/drives/durable/fs/kept",
+        token,
+        b"second owner",
+    );
+    assert_eq!(written.status, 200);
+}
+
 #[cfg(unix)]
 async fn run_configured_session_case(tidb: bool, rustfs: bool, crash: bool) {
     use mount_rs_core::FsDriver;

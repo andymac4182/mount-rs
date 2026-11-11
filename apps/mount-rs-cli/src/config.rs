@@ -26,7 +26,11 @@ const DEFAULT_HTTP_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_HTTP_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_HTTP_MAX_DIRECTORY_ENTRIES: usize = 4096;
 const DEFAULT_HTTP_READ_CHUNK_BYTES: usize = 64 * 1024;
-const DEFAULT_HTTP_DRAIN_TIMEOUT_MS: u64 = 5_000;
+// Longer than the request timeout: a graceful stop lets every accepted
+// request finish or time out by itself before anything is aborted.
+const DEFAULT_HTTP_DRAIN_TIMEOUT_MS: u64 = 35_000;
+// Upload memory budget, as a multiple of `max_request_bytes`.
+const DEFAULT_HTTP_BUFFERED_UPLOAD_REQUESTS: usize = 4;
 const DEFAULT_HTTP_MAX_CONNECTIONS: usize = 256;
 const DEFAULT_HTTP_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
@@ -258,6 +262,8 @@ pub(crate) struct HttpServiceConfig {
     pub host: String,
     pub port: u16,
     pub max_request_bytes: usize,
+    /// Memory that uploads being received may hold in total.
+    pub max_buffered_upload_bytes: usize,
     pub max_response_bytes: usize,
     pub max_directory_entries: usize,
     pub read_chunk_bytes: usize,
@@ -601,6 +607,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "host",
             "port",
             "max_request_bytes",
+            "max_buffered_upload_bytes",
             "max_response_bytes",
             "max_directory_entries",
             "read_chunk_bytes",
@@ -642,6 +649,19 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         .map(|value| positive_usize(value, "config.http.max_request_bytes"))
         .transpose()?
         .unwrap_or(DEFAULT_HTTP_MAX_REQUEST_BYTES);
+    let max_buffered_upload_bytes = match object.get("max_buffered_upload_bytes") {
+        Some(value) => {
+            let budget = positive_usize(value, "config.http.max_buffered_upload_bytes")?;
+            if budget < max_request_bytes {
+                return Err(ConfigError::at(
+                    "config.http.max_buffered_upload_bytes",
+                    "must be at least max_request_bytes, or no upload of that size could start",
+                ));
+            }
+            budget
+        }
+        None => max_request_bytes.saturating_mul(DEFAULT_HTTP_BUFFERED_UPLOAD_REQUESTS),
+    };
     let max_response_bytes = object
         .get("max_response_bytes")
         .map(|value| positive_usize(value, "config.http.max_response_bytes"))
@@ -729,6 +749,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         host,
         port,
         max_request_bytes,
+        max_buffered_upload_bytes,
         max_response_bytes,
         max_directory_entries,
         read_chunk_bytes,
@@ -3512,6 +3533,51 @@ mod tests {
     }
 
     #[test]
+    fn http_upload_budget_and_drain_defaults() {
+        let config = |http: serde_json::Value| {
+            let mut http = http;
+            http["drives"] = serde_json::json!([{
+                "id": "memory",
+                "token": {"env": "MOUNT_RS_MEMORY_TOKEN"},
+                "driver": {"kind": "memory"}
+            }]);
+            parse_config_str(
+                &serde_json::json!({"version": 1, "http": http}).to_string(),
+                Path::new("."),
+            )
+            .map(|spec| spec.http.expect("HTTP config"))
+        };
+
+        let defaults = config(serde_json::json!({})).unwrap();
+        assert_eq!(defaults.max_request_bytes, 8 * 1024 * 1024);
+        assert_eq!(defaults.max_buffered_upload_bytes, 32 * 1024 * 1024);
+        // A graceful stop outlasts the slowest request it accepted.
+        assert_eq!(defaults.request_timeout_ms, 30_000);
+        assert_eq!(defaults.drain_timeout_ms, 35_000);
+        assert!(defaults.drain_timeout_ms >= defaults.request_timeout_ms);
+
+        let explicit = config(serde_json::json!({
+            "max_request_bytes": 4096,
+            "max_buffered_upload_bytes": 4096
+        }))
+        .unwrap();
+        assert_eq!(explicit.max_buffered_upload_bytes, 4096);
+
+        for invalid in [
+            serde_json::json!({"max_request_bytes": 4096, "max_buffered_upload_bytes": 4095}),
+            serde_json::json!({"max_buffered_upload_bytes": 0}),
+            serde_json::json!({"max_buffered_upload_bytes": "32MiB"}),
+            serde_json::json!({"max_buffered_upload_bytes": -1}),
+        ] {
+            let error = config(invalid).unwrap_err();
+            assert!(
+                error.to_string().contains("max_buffered_upload_bytes"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn http_config_reuses_driver_shapes_for_multiple_named_drives() {
         let spec = parse_config_str(
             r#"{
@@ -3551,6 +3617,8 @@ mod tests {
         assert_eq!(http.host, "127.0.0.1");
         assert_eq!(http.port, 0);
         assert_eq!(http.max_request_bytes, 4096);
+        // Four uploads of the largest size, unless configured.
+        assert_eq!(http.max_buffered_upload_bytes, 4 * 4096);
         assert_eq!(http.max_response_bytes, 8192);
         assert_eq!(http.max_directory_entries, 12);
         assert_eq!(http.read_chunk_bytes, 1024);

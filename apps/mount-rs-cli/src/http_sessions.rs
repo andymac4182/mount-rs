@@ -215,6 +215,18 @@ impl Service {
     pub(crate) fn url(&self) -> String {
         self.listener.url()
     }
+    /// Accepts that failed and were retried by the public listener.
+    pub(crate) fn accept_failures(&self) -> u64 {
+        self.listener.accept_failures()
+    }
+    /// Whether nothing but the listener's own requests uses the drives, so
+    /// that a close which aborted those requests has left the drives idle.
+    pub(crate) fn releases_drives_after_failed_drain(&self) -> bool {
+        self.owner.is_none()
+            && self.peer.is_none()
+            && self.application.is_none()
+            && self.supervisor.is_none()
+    }
     pub(crate) fn failure(&self) -> Option<&'static str> {
         if self.owner.as_ref().is_some_and(OwnerService::failed) {
             Some("peer listener or volume registration failed")

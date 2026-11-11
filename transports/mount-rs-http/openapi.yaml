@@ -1,0 +1,1451 @@
+openapi: 3.1.0
+info:
+  title: mount-rs HTTP drive API
+  version: "1.0.0"
+  summary: File and directory access to named mount-rs drives over HTTP.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  description: |
+    The API served by `mount-rs serve-http`. Each drive is a named filesystem
+    with its own bearer token. This document is the v1 launch contract: plain
+    `serve-http` with `remote_sessions: false` and no forwarding.
+
+    ## Transport
+
+    The server speaks cleartext HTTP/1.1 with keep-alive on a loopback
+    address. TLS is terminated by a reverse proxy in front of it. Clients
+    reach the API through that proxy; the base URL is the proxy's URL.
+    Responses produced by the proxy itself (for example its own 413, 502 or
+    504) do not carry the JSON error envelope defined here.
+
+    ## Order of checks
+
+    A request is checked in this order; the first failure is the response.
+
+    1. Server shutting down: 503. (Idle connections are simply closed at
+       shutdown; only a request already in progress receives this.)
+    2. Request path syntax (see the `path` parameter): 400.
+    3. Route exists: 404.
+    4. `/healthz`, `/readyz` and `/v1/drives` are handled here.
+    5. Drive exists and the bearer token is that drive's token: 401.
+    6. Declared `Content-Length` within `max_request_bytes`: 413.
+    7. Method allowed for the route: 405 with `Allow`.
+    8. The operation itself.
+
+    A 405 is therefore returned only to an authenticated caller, and a
+    malformed path is rejected with 400 before authentication.
+
+    ## Limits
+
+    All limits are server configuration. The defaults are listed; the
+    operator may have changed them.
+
+    | Limit | Default | Effect when exceeded |
+    | --- | --- | --- |
+    | Request body (`max_request_bytes`) | 8 MiB (8388608 bytes) | 413 `EFBIG`, connection closed. Applies to `PUT` bodies and JSON bodies. |
+    | Directory entries (`max_directory_entries`) | 4096 | 413 `EOVERFLOW`, connection closed. The directory cannot be listed. There is no pagination. |
+    | Listing response size (`max_response_bytes`) | 8 MiB | 413 `EOVERFLOW`, connection closed. Measured on the uncompressed JSON. |
+    | Request time (`request_timeout_ms`) | 30 s | 504 `ETIMEDOUT`, connection closed. Covers receiving the request body, waiting for upload memory, and the operation up to the response headers. |
+    | Idle keep-alive / header read | same as request time | The server closes the connection without sending a response. |
+    | Buffered upload bytes (`max_buffered_upload_bytes`) | 4 x request body limit | `PUT`s wait for room in arrival order; the wait counts against the request time. |
+    | Concurrent connections (`max_connections`) | 256 | Further connections are accepted and closed immediately without a response. |
+
+    File downloads are not limited in size. An upload is limited to one
+    request body of at most `max_request_bytes`; there is no ranged,
+    chunked-resume or multipart upload, so a file larger than the limit
+    cannot be written through this API.
+
+    ## Not part of this contract
+
+    The same server binary can expose session and forwarding routes when
+    `remote_sessions` or `forwarding` is configured. Those are experimental
+    and are not part of the v1 launch contract.
+
+    There is no ETag, `If-Match`, `If-None-Match` or create-exclusive write,
+    no recursive delete, no copy, no chmod/chown/utimes, and no symlink
+    creation.
+
+    ## Reserved names
+
+    A path segment that starts with `.mount-rs-upload.` is reserved on every
+    drive. Requests that name one are rejected with 400 `EINVAL`, and such
+    entries never appear in listings.
+servers:
+  - url: https://{host}
+    description: The TLS reverse proxy in front of the loopback listener.
+    variables:
+      host:
+        default: files.example.com
+tags:
+  - name: health
+    description: Unauthenticated process probes.
+  - name: drives
+    description: Drive discovery.
+  - name: files
+    description: File content, metadata and removal.
+  - name: directories
+    description: Directory listings.
+  - name: metadata
+    description: Read-only metadata of a path.
+  - name: operations
+    description: Filesystem operations with JSON bodies.
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      tags: [health]
+      summary: Liveness probe.
+      description: |
+        Reports that the process is serving HTTP. It does not check any
+        drive. A probe that is in progress when the server starts shutting
+        down can receive 503 with the error envelope; after that the
+        connection is refused.
+      security: []
+      responses:
+        "200":
+          description: The process is alive.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+            X-Content-Type-Options: {$ref: "#/components/headers/NoSniff"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+              example: {status: ok}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+    head:
+      operationId: headHealth
+      tags: [health]
+      summary: Liveness probe without a body.
+      security: []
+      responses:
+        "200":
+          description: The process is alive. `Content-Length` is that of the GET body.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+            X-Content-Type-Options: {$ref: "#/components/headers/NoSniff"}
+        "503":
+          description: The server is shutting down.
+  /readyz:
+    get:
+      operationId: getReadiness
+      tags: [health]
+      summary: Readiness probe.
+      description: |
+        200 only when at least one drive is configured and every drive is
+        healthy. 503 when any drive has failed closed. The body never
+        contains drive ids. A 503 from this route uses the readiness body
+        below, not the error envelope, except while the server is shutting
+        down, when it is the standard error envelope.
+      security: []
+      responses:
+        "200":
+          description: Every drive is healthy.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+            X-Content-Type-Options: {$ref: "#/components/headers/NoSniff"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ready"}
+              example: {status: ready, drives: 2}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "503":
+          description: |
+            At least one drive has failed closed, or no drive is configured,
+            or the server is shutting down.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+            X-Content-Type-Options: {$ref: "#/components/headers/NoSniff"}
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/NotReady"
+                  - $ref: "#/components/schemas/Error"
+              example: {status: not_ready, drives: 2, failed: 1}
+    head:
+      operationId: headReadiness
+      tags: [health]
+      summary: Readiness probe without a body.
+      security: []
+      responses:
+        "200":
+          description: Every drive is healthy.
+        "503":
+          description: Not ready, or shutting down.
+  /v1/drives:
+    get:
+      operationId: listDrives
+      tags: [drives]
+      summary: List the drives the presented token is valid for.
+      description: |
+        Returns the ids of the drives whose token equals the presented bearer
+        token, sorted by id. A token that matches no drive, a missing header
+        and a malformed header all return 401. The full drive list is never
+        revealed.
+      responses:
+        "200":
+          description: The drives this token can access. Never empty.
+          content:
+            application/json:
+              schema:
+                type: array
+                minItems: 1
+                items: {$ref: "#/components/schemas/DriveSummary"}
+              example: [{id: memory}]
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headDrives
+      tags: [drives]
+      summary: Same as GET without a body.
+      responses:
+        "200":
+          description: The token is valid for at least one drive.
+        "401":
+          description: Missing, malformed or unknown token.
+          headers:
+            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+  /v1/drives/{id}/fs:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    get:
+      operationId: getRoot
+      tags: [files]
+      summary: Metadata and listing of the drive's root directory.
+      description: Equivalent to `GET /v1/drives/{id}/fs/{path}` for the root directory `/`.
+      responses:
+        "200":
+          description: Root directory metadata with its entries.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DirectoryMetadata"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+  /v1/drives/{id}/fs/{path}:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+      - $ref: "#/components/parameters/FsPath"
+    get:
+      operationId: getPath
+      tags: [files]
+      summary: Read a file, or get metadata for a directory or special file.
+      description: |
+        The response depends on what `path` names. A symbolic link is
+        followed.
+
+        - Regular file: the bytes, `Content-Type: application/octet-stream`,
+          `Accept-Ranges: bytes`, and a `Content-Length` equal to the file
+          size (or the range length) when the request started.
+        - Directory: `Content-Type: application/json` with the directory's
+          `stats` and its `entries`. `Range` is ignored. Subject to the
+          directory entry and response size limits (413).
+        - Any other file type (device, FIFO, socket): JSON with `path` and
+          `stats` only.
+
+        Decide by `Content-Type`, or call `HEAD` first.
+
+        `Range` accepts exactly one range in bytes: `bytes=a-b`, `bytes=a-`
+        or `bytes=-n`. An end past the last byte is clamped. A range that is
+        malformed, uses another unit, lists more than one range, starts at or
+        past the end of the file, or is sent for an empty file returns 416
+        with `Content-Range: bytes */<size>`. The server never ignores a
+        `Range` header it cannot satisfy.
+
+        **A download is not snapshot-isolated.** A `GET` that overlaps a
+        `PUT`, `truncate` or `DELETE` of the same file can return a mixture
+        of the old and new content, or a body shorter than `Content-Length`.
+        A client that needs a consistent copy compares the received length
+        with `Content-Length`, and re-reads if the file may have been
+        replaced meanwhile (for example by checking `mtime_ms` and `size`
+        with the `stat` route before and after).
+
+        If the server cannot read the rest of a file after the headers were
+        sent, or is shut down mid-download, it closes the connection; the
+        client sees a body shorter than `Content-Length` and retries,
+        optionally with `Range`. A client that stops reading a download for
+        longer than the request timeout is disconnected.
+      parameters:
+        - $ref: "#/components/parameters/Range"
+      responses:
+        "200":
+          description: The whole file, or JSON metadata for a directory or special file.
+          headers:
+            Accept-Ranges:
+              description: "`bytes`. Present for regular files only."
+              schema: {type: string, const: bytes}
+            Content-Length:
+              description: Exact number of body bytes.
+              schema: {type: integer, minimum: 0}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DirectoryMetadata"
+                  - $ref: "#/components/schemas/PathMetadata"
+        "206":
+          description: The requested byte range of a regular file.
+          headers:
+            Accept-Ranges:
+              schema: {type: string, const: bytes}
+            Content-Range:
+              description: "`bytes <first>-<last>/<size>`."
+              schema: {type: string}
+              example: bytes 7-23/131072
+            Content-Length:
+              description: Length of the range.
+              schema: {type: integer, minimum: 1}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "414": {$ref: "#/components/responses/UriTooLong"}
+        "416": {$ref: "#/components/responses/RangeNotSatisfiable"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headPath
+      tags: [files]
+      summary: Headers of the corresponding GET, without a body.
+      description: |
+        Returns the status, `Content-Type`, `Content-Length`, `Accept-Ranges`
+        and (with `Range`) `Content-Range` that GET would return. For a
+        directory the server builds the listing to compute `Content-Length`,
+        so the directory limits apply. Error responses to HEAD have no body;
+        use the status code.
+      parameters:
+        - $ref: "#/components/parameters/Range"
+      responses:
+        "200":
+          description: The path exists. `Content-Type` tells a file (`application/octet-stream`) from a directory or special file (`application/json`).
+          headers:
+            Accept-Ranges:
+              schema: {type: string, const: bytes}
+            Content-Length:
+              description: File size in bytes, or the length of the JSON metadata.
+              schema: {type: integer, minimum: 0}
+        "206":
+          description: The range is satisfiable.
+          headers:
+            Content-Range:
+              schema: {type: string}
+        "400": {description: Invalid path.}
+        "401":
+          description: Missing or wrong token, or unknown drive.
+          headers:
+            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+        "403": {description: Permission denied by the filesystem.}
+        "404": {description: No such file or directory.}
+        "413": {description: Directory too large to list.}
+        "416":
+          description: Range not satisfiable.
+          headers:
+            Content-Range:
+              schema: {type: string}
+              example: bytes */9
+        "500": {description: Internal error.}
+        "503": {description: Drive unavailable or server shutting down.}
+        "504": {description: Server-side timeout.}
+    put:
+      operationId: putFile
+      tags: [files]
+      summary: Create or replace a file with the request body.
+      description: |
+        The body is the complete new content of the file. Any `Content-Type`
+        is accepted and ignored. An empty body creates an empty file. The
+        parent directory must exist; `PUT` does not create directories.
+
+        **Atomic.** The server receives the whole body, then publishes it in
+        one step. Readers see either the previous content or the new content,
+        never a prefix and never a mixture of two uploads. A request that
+        ends while the body is still being received (client disconnect, 413,
+        timeout, server shutdown) changes nothing: an existing file keeps
+        its previous content and a new file does not appear. A request that
+        is cut off during the single publication step is either fully
+        published or not published at all.
+
+        **Outcome after a lost response.** Because of that last case, a 504,
+        a 500 or a dropped connection on `PUT` means the outcome is unknown:
+        the file has either the old content or the complete new content.
+        Read it back (or simply send the `PUT` again) before assuming
+        either.
+
+        **Durable before 200.** A 200 means the new content has been made
+        durable by the drive's storage, and no `sync` call is needed. Two
+        exceptions are set by the operator, not by the request: a drive on
+        volatile memory storage is never durable, and a split-store drive
+        with `writeback` enabled acknowledges before the data is durable.
+        Ask the operator which applies to your drive.
+
+        **Host-directory drives.** On a drive backed by a host directory, a
+        replace creates a new file (existing hard links keep the old
+        content, and ownership is not carried over), and a `PUT` through a
+        symbolic link is written in place and is not atomic.
+
+        **Overwrite and concurrency.** `PUT` always replaces. There is no
+        create-only mode and no conditional write. When two `PUT`s to the
+        same path overlap, the file ends up with exactly one of the two
+        bodies; which one is not defined (last writer wins).
+
+        **Size.** The body may be at most `max_request_bytes` (default
+        8 MiB). A `Content-Length` above the limit is rejected before the
+        body is read; a chunked body is rejected when it crosses the limit.
+        In both cases the server answers 413 and closes the connection.
+        Larger files are not supported.
+
+        **Memory admission.** The server holds a bounded total of upload
+        bytes in memory (`max_buffered_upload_bytes`, default four times
+        `max_request_bytes`). A `PUT` reserves its `Content-Length`, or the
+        full `max_request_bytes` when it has none, and waits for room in
+        arrival order; the wait counts against the request timeout, so a
+        saturated server answers 504. Send `Content-Length` with every
+        upload.
+
+        **Retry.** `PUT` is idempotent. Retrying after a 5xx, a timeout or a
+        dropped connection is safe, with one caveat: without conditional
+        writes a retry can overwrite a newer write made by another client in
+        between.
+
+        The drive root cannot be written (409 `EISDIR`).
+      requestBody:
+        required: true
+        description: Raw file content, at most `max_request_bytes`.
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+          "*/*":
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: The file now has exactly the uploaded content.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WriteResult"}
+              example: {path: /reports/q3.csv, bytes: 18231}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404":
+          description: The parent directory does not exist (`ENOENT`) or a parent is not a directory (`ENOTDIR`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "409":
+          description: The path is a directory (`EISDIR`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "414": {$ref: "#/components/responses/UriTooLong"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+        "507": {$ref: "#/components/responses/InsufficientStorage"}
+    delete:
+      operationId: deletePath
+      tags: [files]
+      summary: Remove one file, symbolic link or empty directory.
+      description: |
+        Not recursive. A directory must be empty (409 `ENOTEMPTY`
+        otherwise). A symbolic link is removed itself; its target is
+        untouched. The drive root cannot be removed; the attempt is refused
+        with 400 `EINVAL`.
+
+        The effect is idempotent, the status is not: deleting a path that is
+        already gone returns 404. When retrying a `DELETE` whose response was
+        lost, treat 404 as success.
+      responses:
+        "204":
+          description: Removed. No body.
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: The directory is not empty (`ENOTEMPTY`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "414": {$ref: "#/components/responses/UriTooLong"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+  /v1/drives/{id}/entries:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    get:
+      operationId: listRootEntries
+      tags: [directories]
+      summary: List the root directory.
+      description: Equivalent to `GET /v1/drives/{id}/entries/{path}` for `/`.
+      parameters:
+        - $ref: "#/components/parameters/AcceptEncoding"
+      responses:
+        "200": {$ref: "#/components/responses/EntryList"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "406": {$ref: "#/components/responses/NotAcceptable"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+  /v1/drives/{id}/entries/{path}:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+      - $ref: "#/components/parameters/FsPath"
+    get:
+      operationId: listEntries
+      tags: [directories]
+      summary: List the entries of a directory.
+      description: |
+        Returns a JSON array with one object per entry. `.` and `..` are not
+        listed. The order is the drive's enumeration order and is not
+        guaranteed to be sorted. The listing is complete or it fails: a
+        directory with more than `max_directory_entries` entries, or whose
+        JSON exceeds `max_response_bytes`, returns 413 `EOVERFLOW`. There is
+        no pagination.
+
+        **Encoding.** With `Accept-Encoding: gzip` (quality above zero and
+        not lower than identity) a listing of 1024 bytes or more is returned
+        with `Content-Encoding: gzip`. Without an `Accept-Encoding` header
+        the response is plain JSON. Every response carries
+        `Vary: Accept-Encoding`. A request that refuses both gzip and
+        identity returns 406. No other content coding is supported.
+      parameters:
+        - $ref: "#/components/parameters/AcceptEncoding"
+      responses:
+        "200": {$ref: "#/components/responses/EntryList"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404":
+          description: No such directory (`ENOENT`), or the path is not a directory (`ENOTDIR`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "406": {$ref: "#/components/responses/NotAcceptable"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "414": {$ref: "#/components/responses/UriTooLong"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headEntries
+      tags: [directories]
+      summary: Headers of the corresponding GET, without a body.
+      description: |
+        The server builds (and, if negotiated, compresses) the listing to
+        report the `Content-Length` and `Content-Encoding` GET would send.
+      parameters:
+        - $ref: "#/components/parameters/AcceptEncoding"
+      responses:
+        "200":
+          description: The directory can be listed.
+          headers:
+            Vary: {$ref: "#/components/headers/VaryAcceptEncoding"}
+            Content-Encoding: {$ref: "#/components/headers/ContentEncodingGzip"}
+        "401":
+          description: Missing or wrong token, or unknown drive.
+          headers:
+            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+        "404": {description: No such directory, or not a directory.}
+        "406": {description: Neither gzip nor identity is acceptable to the client.}
+        "413": {description: Directory too large to list.}
+        "503": {description: Drive unavailable or server shutting down.}
+        "504": {description: Server-side timeout.}
+  /v1/drives/{id}/stat/{path}:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+      - $ref: "#/components/parameters/FsPath"
+    get:
+      operationId: statPath
+      tags: [metadata]
+      summary: Metadata of a path, following symbolic links.
+      description: |
+        Returns the `Stats` object itself (not wrapped in `path`/`stats`).
+        Works for files, directories and special files, and does not read
+        file content or list the directory. Omit `{path}`
+        (`/v1/drives/{id}/stat`) for the drive root.
+      responses:
+        "200": {$ref: "#/components/responses/StatsResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "414": {$ref: "#/components/responses/UriTooLong"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headStatPath
+      tags: [metadata]
+      summary: Existence check; the status and headers of the GET, without a body.
+      responses:
+        "200": {description: The path exists.}
+        "400": {description: Invalid path.}
+        "401":
+          description: Missing or wrong token, or unknown drive.
+          headers:
+            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+        "404": {description: No such file or directory.}
+        "503": {description: Drive unavailable or server shutting down.}
+        "504": {description: Server-side timeout.}
+  /v1/drives/{id}/lstat/{path}:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+      - $ref: "#/components/parameters/FsPath"
+    get:
+      operationId: lstatPath
+      tags: [metadata]
+      summary: Metadata of a path, without following a final symbolic link.
+      description: |
+        Same as `stat`, except that when the path names a symbolic link the
+        link's own metadata is returned. Omit `{path}` for the drive root.
+      responses:
+        "200": {$ref: "#/components/responses/StatsResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "414": {$ref: "#/components/responses/UriTooLong"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headLstatPath
+      tags: [metadata]
+      summary: The status and headers of the GET, without a body.
+      responses:
+        "200": {description: The path exists.}
+        "400": {description: Invalid path.}
+        "401":
+          description: Missing or wrong token, or unknown drive.
+          headers:
+            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+        "404": {description: No such file or directory.}
+        "503": {description: Drive unavailable or server shutting down.}
+        "504": {description: Server-side timeout.}
+  /v1/drives/{id}/statfs/{path}:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+      - $ref: "#/components/parameters/FsPath"
+    get:
+      operationId: statfsPath
+      tags: [metadata]
+      summary: Capacity figures of the drive's filesystem.
+      description: |
+        Returns block and file counts for the filesystem that holds the
+        path. Omit `{path}` (`/v1/drives/{id}/statfs`) for the drive root,
+        which is the usual call. The figures are what the drive's
+        filesystem reports; for split-store and memory drives they are
+        nominal and are not a measurement of free space in the backing
+        storage.
+      responses:
+        "200":
+          description: Filesystem figures.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatsFs"}
+              example: {filesystem_type: 16914836, block_size: 4096, blocks: 1048576, blocks_free: 1046521, blocks_available: 1046521, files: 1048576, files_free: 1048567}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headStatfsPath
+      tags: [metadata]
+      summary: The status and headers of the GET, without a body.
+      responses:
+        "200": {description: Figures are available.}
+        "401":
+          description: Missing or wrong token, or unknown drive.
+          headers:
+            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+        "503": {description: Drive unavailable or server shutting down.}
+  /v1/drives/{id}/readlink/{path}:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+      - $ref: "#/components/parameters/FsPath"
+    get:
+      operationId: readlinkPath
+      tags: [metadata]
+      summary: Target of a symbolic link.
+      description: |
+        Returns the link target as a JSON string, exactly as stored (it may
+        be relative). A path that is not a symbolic link returns 400
+        `EINVAL`. Symbolic links cannot be created through this API; they
+        exist only when the drive's content was produced another way.
+      responses:
+        "200":
+          description: The link target.
+          content:
+            application/json:
+              schema: {type: string}
+              example: ../shared/q3.csv
+        "400":
+          description: The path is not a symbolic link, or the path is invalid (`EINVAL`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headReadlinkPath
+      tags: [metadata]
+      summary: The status and headers of the GET, without a body.
+      responses:
+        "200": {description: The path is a symbolic link.}
+        "400": {description: Not a symbolic link, or invalid path.}
+        "401":
+          description: Missing or wrong token, or unknown drive.
+          headers:
+            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+        "404": {description: No such file or directory.}
+        "503": {description: Drive unavailable or server shutting down.}
+  /v1/drives/{id}/ops/mkdir:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    post:
+      operationId: mkdir
+      tags: [operations]
+      summary: Create a directory.
+      description: |
+        Without `recursive`, the parent must exist and the path must not
+        (409 `EEXIST`). With `recursive: true`, missing parents are created
+        and an existing directory is not an error, which makes the call
+        idempotent.
+
+        Retrying a non-recursive `mkdir` whose response was lost returns 409
+        `EEXIST` if the first attempt succeeded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MkdirRequest"}
+            example: {path: /reports/2026, recursive: true}
+      responses:
+        "200":
+          description: The directory exists.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MkdirResult"}
+              example: {path: /reports/2026, created: /reports}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "409":
+          description: The path already exists (`EEXIST`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "414": {$ref: "#/components/responses/UriTooLong"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+        "507": {$ref: "#/components/responses/InsufficientStorage"}
+  /v1/drives/{id}/ops/rename:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    post:
+      operationId: rename
+      tags: [operations]
+      summary: Rename or move a file or directory within the drive.
+      description: |
+        Follows POSIX `rename` semantics as implemented by the drive's
+        filesystem. The move is a single step: no reader sees the entry at
+        both names or at neither. An existing file at `to` is replaced. A
+        directory can replace only an empty directory (409 `ENOTEMPTY`
+        otherwise). A file cannot replace a directory (409 `EISDIR`) and a
+        directory cannot replace a file (404 `ENOTDIR`). A directory cannot
+        be moved into itself (400 `EINVAL`). The parent of `to` must exist
+        (404 `ENOENT`). A rename cannot cross drives.
+
+        Not idempotent. If the response is lost and the first attempt
+        succeeded, a retry returns 404 `ENOENT` because `from` no longer
+        exists; check `to` before treating that as a failure.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/RenameRequest"}
+            example: {from: /inbox/a.tmp, to: /inbox/a.csv}
+      responses:
+        "200":
+          description: Renamed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ok"}
+              example: {ok: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404":
+          description: "`from` does not exist or the parent of `to` does not exist (`ENOENT`); or a directory would replace a file (`ENOTDIR`)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "409":
+          description: "`to` is a non-empty directory (`ENOTEMPTY`), or a file would replace a directory (`EISDIR`)."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "414": {$ref: "#/components/responses/UriTooLong"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+        "507": {$ref: "#/components/responses/InsufficientStorage"}
+  /v1/drives/{id}/ops/truncate:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    post:
+      operationId: truncate
+      tags: [operations]
+      summary: Set the length of an existing file.
+      description: |
+        Shrinks the file, or extends it with zero bytes, to exactly `length`
+        bytes. The file must exist. Idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TruncateRequest"}
+            example: {path: /logs/app.log, length: 0}
+      responses:
+        "200":
+          description: The file has the requested length.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Ok"}
+              example: {ok: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "409":
+          description: The path is a directory (`EISDIR`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+        "507": {$ref: "#/components/responses/InsufficientStorage"}
+  /v1/drives/{id}/ops/sync:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    post:
+      operationId: sync
+      tags: [operations]
+      summary: Flush the whole drive to durable storage.
+      description: |
+        A persistence barrier for the drive: when it returns 204, every
+        change acknowledged before the call is durable. `PUT` is already
+        durable when it returns 200, so `sync` is needed only after `mkdir`,
+        `rename`, `truncate` or `DELETE` when the caller requires those to
+        survive a crash. The request must have no body. Idempotent.
+      responses:
+        "204":
+          description: Flushed. No body.
+        "400":
+          description: A request body was sent.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+        "507": {$ref: "#/components/responses/InsufficientStorage"}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <token>`. Each drive has one static token. The
+        token is opaque, non-empty and contains no whitespace. The scheme
+        name is matched case-insensitively; the token is compared exactly.
+        A token for one drive is rejected on every other drive. A request for
+        a drive id that does not exist receives the same 401 as a wrong
+        token, so drive ids cannot be enumerated.
+  parameters:
+    DriveId:
+      name: id
+      in: path
+      required: true
+      description: |
+        Drive id as configured by the operator: 1 to 64 characters from
+        `A-Z a-z 0-9 - _ .`, not `.` or `..`. An id that matches no
+        configured drive returns 401.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9._-]+$"
+      example: memory
+    FsPath:
+      name: path
+      in: path
+      required: true
+      description: |
+        Path of the file or directory inside the drive, relative to the
+        drive root. **It may span several segments separated by `/`**
+        (`reports/2026/q3.csv`); the slashes between segments are sent
+        literally, which generic OpenAPI tooling does not do by default for
+        a path parameter. Omit the parameter (`/v1/drives/{id}/fs`) to
+        address the root directory.
+
+        Each segment is percent-decoded once and must be valid UTF-8.
+        Percent-encode every character that is not allowed raw in a URL
+        path segment, including space (`%20`), `?` (`%3F`), `#` (`%23`) and
+        `%` (`%25`). The query string is ignored.
+
+        The server answers 400 `EINVAL`, before authentication, when:
+
+        - a segment is empty (`a//b`); one trailing `/` is allowed and
+          ignored;
+        - a decoded segment is `.` or `..` (also when written `%2e` or
+          `%2e%2e`);
+        - a decoded segment contains `/`, `\` or a NUL byte (so `%2F`,
+          `%5C` and `%00` are rejected; a file name cannot contain a
+          slash or backslash through this API);
+        - the percent-decoded bytes are not valid UTF-8;
+        - a segment starts with `.mount-rs-upload.`; that prefix is reserved
+          for the server's temporary upload files, which are also omitted
+          from listings on every drive.
+
+        Paths are case-sensitive and are not normalised in any other way.
+        Name and path length limits are those of the drive's filesystem
+        (414 `ENAMETOOLONG`).
+      schema:
+        type: string
+        minLength: 1
+      example: reports/2026/q3.csv
+    Range:
+      name: Range
+      in: header
+      required: false
+      description: |
+        One byte range: `bytes=<first>-<last>`, `bytes=<first>-` or
+        `bytes=-<suffix-length>`. Applies to regular files only.
+      schema:
+        type: string
+        pattern: "^bytes=([0-9]+-[0-9]*|-[0-9]+)$"
+      example: bytes=0-1023
+    AcceptEncoding:
+      name: Accept-Encoding
+      in: header
+      required: false
+      description: |
+        `gzip` and `identity` are understood, with optional `;q=` values and
+        `*`. Other codings are ignored.
+      schema:
+        type: string
+      example: gzip
+  headers:
+    WwwAuthenticate:
+      description: Always `Bearer`.
+      schema: {type: string, const: Bearer}
+    Allow:
+      description: The methods the route supports, for example `GET, HEAD, PUT, DELETE`.
+      schema: {type: string}
+    RetryAfter:
+      description: |
+        Seconds to wait before retrying. Sent as `1` when the condition is
+        transient contention (`EAGAIN`, `EBUSY`). Absent on other 503s.
+      schema: {type: integer, minimum: 0}
+    ConnectionClose:
+      description: "`close`: the server closes the connection after this response."
+      schema: {type: string, const: close}
+    CacheControlNoStore:
+      description: "`no-store`."
+      schema: {type: string, const: no-store}
+    NoSniff:
+      description: "`nosniff`."
+      schema: {type: string, const: nosniff}
+    VaryAcceptEncoding:
+      description: "`Accept-Encoding`."
+      schema: {type: string, const: Accept-Encoding}
+    ContentEncodingGzip:
+      description: "`gzip` when the listing is compressed; absent otherwise."
+      schema: {type: string, const: gzip}
+  responses:
+    StatsResult:
+      description: The path's metadata.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Stats"}
+          example: {dev: 0, ino: 5, mode: 33206, nlink: 1, uid: 501, gid: 20, rdev: 0, size: 5, blksize: 4096, blocks: 1, atime_ms: 1794439474775, mtime_ms: 1794439474550, ctime_ms: 1794439474550, birthtime_ms: 1794439474531}
+    EntryList:
+      description: The directory's entries.
+      headers:
+        Vary: {$ref: "#/components/headers/VaryAcceptEncoding"}
+        Content-Encoding: {$ref: "#/components/headers/ContentEncodingGzip"}
+      content:
+        application/json:
+          schema:
+            type: array
+            items: {$ref: "#/components/schemas/DirEntry"}
+          example:
+            - {name: q3.csv, parent_path: /reports, file_type: File}
+            - {name: archive, parent_path: /reports, file_type: Directory}
+    BadRequest:
+      description: |
+        The request is malformed (`EINVAL`): invalid path, invalid or
+        incomplete JSON body, a JSON path that is not absolute, or an
+        argument the filesystem rejects. Do not retry unchanged.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: EINVAL, message: path traversal and encoded separators are not allowed}}
+    Unauthorized:
+      description: |
+        Missing or malformed `Authorization` header, wrong token for this
+        drive, or unknown drive id (`EACCES`). The three cases are
+        indistinguishable.
+      headers:
+        WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: EACCES, message: bearer authorization required}}
+    Forbidden:
+      description: |
+        The token is valid but the drive's filesystem denies the operation
+        (`EACCES`, `EPERM`), or the drive is read-only (`EROFS`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotFound:
+      description: |
+        The file or directory does not exist (`ENOENT`), a parent component
+        is not a directory (`ENOTDIR`), or the URL matches no route
+        (`ENOENT`, message `drive or route not found`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: ENOENT, message: no such file or directory}}
+    MethodNotAllowed:
+      description: The route does not support this method (`ENOTSUP`).
+      headers:
+        Allow: {$ref: "#/components/headers/Allow"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: ENOTSUP, message: method is not supported for this route}}
+    NotAcceptable:
+      description: The `Accept-Encoding` header refuses both `gzip` and `identity` (`ENOTSUP`).
+      headers:
+        Vary: {$ref: "#/components/headers/VaryAcceptEncoding"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    TooLarge:
+      description: |
+        `EFBIG`: the request body exceeds `max_request_bytes`. `EOVERFLOW`:
+        the directory has too many entries or its listing is too large to
+        return. The server closes the connection in both cases. Neither is
+        retryable.
+      headers:
+        Connection: {$ref: "#/components/headers/ConnectionClose"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: EFBIG, message: request body exceeds the configured limit}}
+    UriTooLong:
+      description: A file name or path is longer than the drive's filesystem allows (`ENAMETOOLONG`).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    RangeNotSatisfiable:
+      description: The `Range` header is malformed, has several ranges, or lies outside the file (`EINVAL`).
+      headers:
+        Content-Range:
+          description: "`bytes */<size>`, where `<size>` is the current file size."
+          schema: {type: string}
+          example: bytes */9
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: EINVAL, message: range is not satisfiable}}
+    InternalError:
+      description: |
+        Storage or server failure (`EIO` or any code not mapped elsewhere).
+        The outcome of a mutating request is unknown. Idempotent requests
+        may be retried with back-off.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    NotImplemented:
+      description: The drive's filesystem does not support the operation (`ENOTSUP`, `ENOSYS`). Not retryable.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unavailable:
+      description: |
+        The request was not served and may be retried with back-off.
+
+        - `ESTALE` or `EBADF`: usually the drive has failed closed or its
+          filesystem is shut down; every request to the drive then fails
+          this way until an operator restarts the service. Files are not
+          gone. `ESTALE` is also returned, rarely, for a stale-handle race
+          on a healthy drive, in which case a retry succeeds. No
+          `Retry-After`.
+        - `EAGAIN` or `EBUSY`: transient contention; `Retry-After: 1`.
+        - `EIO` with message `server is shutting down`: the process is
+          draining; the connection is closed.
+      headers:
+        Retry-After: {$ref: "#/components/headers/RetryAfter"}
+        Connection: {$ref: "#/components/headers/ConnectionClose"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: ESTALE, message: stale file handle}}
+    GatewayTimeout:
+      description: |
+        The request exceeded the server's request timeout (`ETIMEDOUT`). The
+        server closes the connection. The outcome of a mutating request is
+        unknown. A `PUT` is either fully published or not at all, never
+        partial; read back before assuming either.
+      headers:
+        Connection: {$ref: "#/components/headers/ConnectionClose"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: ETIMEDOUT, message: request exceeded the configured timeout}}
+    InsufficientStorage:
+      description: The drive's storage is full (`ENOSPC`) or over quota (`EDQUOT`). Retrying does not help until space is freed.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      description: |
+        The body of every error response except the `/readyz` not-ready
+        body. Branch on `code` and the HTTP status; `message` is for people
+        and may change.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {$ref: "#/components/schemas/ErrorCode"}
+            message:
+              type: string
+              description: Human-readable text. Never contains a token. Not stable.
+    ErrorCode:
+      type: string
+      description: |
+        POSIX-style error name. The codes a client is expected to handle,
+        with their status:
+
+        | Code | Status |
+        | --- | --- |
+        | `EINVAL` | 400 (416 for a bad `Range`) |
+        | `EXDEV`, `EMLINK`, `ELOOP`, `ENXIO` | 400 |
+        | `EACCES` | 401 for authentication, 403 from the filesystem |
+        | `EPERM`, `EROFS` | 403 |
+        | `ENOENT`, `ENOTDIR` | 404 |
+        | `ENOTSUP` | 405 for a method, 406 for `Accept-Encoding`, 501 from the filesystem |
+        | `ENOSYS` | 501 |
+        | `EEXIST`, `ENOTEMPTY`, `EISDIR` | 409 |
+        | `EFBIG`, `EOVERFLOW` | 413 |
+        | `ENAMETOOLONG` | 414 |
+        | `ESTALE`, `EBADF` | 503 |
+        | `EAGAIN`, `EBUSY` | 503 with `Retry-After: 1` |
+        | `ETIMEDOUT` | 504 |
+        | `ENOSPC`, `EDQUOT` | 507 |
+        | `EIO` and all others | 500 (`EIO` is also used for 503 shutting down and 400 body read failure) |
+
+        The remaining values can appear when the drive's filesystem reports
+        them. Treat an unknown code by its HTTP status class.
+      enum:
+        - EPERM
+        - ENOENT
+        - EINTR
+        - EIO
+        - ENXIO
+        - EBADF
+        - EAGAIN
+        - ENOMEM
+        - EACCES
+        - EBUSY
+        - EEXIST
+        - EXDEV
+        - ENODEV
+        - ENOTDIR
+        - EISDIR
+        - EINVAL
+        - ENFILE
+        - EMFILE
+        - EFBIG
+        - ENOSPC
+        - ESPIPE
+        - EROFS
+        - EMLINK
+        - ERANGE
+        - ENAMETOOLONG
+        - ENOSYS
+        - ENOTEMPTY
+        - ELOOP
+        - ENODATA
+        - EPROTO
+        - EOVERFLOW
+        - ENOTSUP
+        - ESTALE
+        - EDQUOT
+        - ETIMEDOUT
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, const: ok}
+    Ready:
+      type: object
+      required: [status, drives]
+      properties:
+        status: {type: string, const: ready}
+        drives:
+          type: integer
+          minimum: 1
+          description: Number of configured drives.
+    NotReady:
+      type: object
+      required: [status, drives, failed]
+      properties:
+        status: {type: string, const: not_ready}
+        drives:
+          type: integer
+          minimum: 0
+          description: Number of configured drives.
+        failed:
+          type: integer
+          minimum: 0
+          description: Number of drives that have failed closed.
+    DriveSummary:
+      type: object
+      required: [id]
+      properties:
+        id: {type: string}
+    FileType:
+      type: string
+      enum: [File, Directory, Symlink, BlockDevice, CharacterDevice, Fifo, Socket]
+    DirEntry:
+      type: object
+      required: [name, parent_path, file_type]
+      properties:
+        name:
+          type: string
+          description: Entry name, one path segment.
+        parent_path:
+          type: string
+          description: Absolute path of the listed directory inside the drive.
+        file_type:
+          $ref: "#/components/schemas/FileType"
+          description: Type of the entry itself; a symbolic link is reported as `Symlink`.
+    Stats:
+      type: object
+      description: |
+        POSIX `stat` fields of the path. Integers up to 64 bits wide are
+        JSON numbers; values above 2^53 lose precision in parsers that use
+        IEEE doubles.
+      required: [dev, ino, mode, nlink, uid, gid, rdev, size, blksize, blocks, atime_ms, mtime_ms, ctime_ms, birthtime_ms]
+      properties:
+        dev: {type: integer, minimum: 0}
+        ino: {type: integer, minimum: 0}
+        mode:
+          type: integer
+          minimum: 0
+          description: File type and permission bits as in `st_mode` (decimal). `mode & 0o170000` is the type; `0o040000` is a directory, `0o100000` a regular file.
+        nlink: {type: integer, minimum: 0}
+        uid: {type: integer, minimum: 0}
+        gid: {type: integer, minimum: 0}
+        rdev: {type: integer, minimum: 0}
+        size:
+          type: integer
+          minimum: 0
+          description: Size in bytes.
+        blksize: {type: integer, minimum: 0}
+        blocks: {type: integer, minimum: 0}
+        atime_ms:
+          type: integer
+          description: Access time, milliseconds since the Unix epoch.
+        mtime_ms:
+          type: integer
+          description: Modification time, milliseconds since the Unix epoch.
+        ctime_ms:
+          type: integer
+          description: Status change time, milliseconds since the Unix epoch.
+        birthtime_ms:
+          type: integer
+          description: Creation time, milliseconds since the Unix epoch.
+    StatsFs:
+      type: object
+      description: Filesystem figures in the style of POSIX `statfs`.
+      required: [filesystem_type, block_size, blocks, blocks_free, blocks_available, files, files_free]
+      properties:
+        filesystem_type:
+          type: integer
+          minimum: 0
+          description: Filesystem type magic number.
+        block_size:
+          type: integer
+          minimum: 0
+          description: Block size in bytes.
+        blocks:
+          type: integer
+          minimum: 0
+          description: Total blocks.
+        blocks_free:
+          type: integer
+          minimum: 0
+          description: Free blocks.
+        blocks_available:
+          type: integer
+          minimum: 0
+          description: Free blocks available to the caller.
+        files:
+          type: integer
+          minimum: 0
+          description: Total file slots (inodes).
+        files_free:
+          type: integer
+          minimum: 0
+          description: Free file slots.
+    PathMetadata:
+      type: object
+      required: [path, stats]
+      properties:
+        path:
+          type: string
+          description: Absolute path inside the drive.
+        stats: {$ref: "#/components/schemas/Stats"}
+    DirectoryMetadata:
+      type: object
+      required: [path, stats, entries]
+      properties:
+        path:
+          type: string
+          description: Absolute path inside the drive.
+        stats: {$ref: "#/components/schemas/Stats"}
+        entries:
+          type: array
+          items: {$ref: "#/components/schemas/DirEntry"}
+    WriteResult:
+      type: object
+      required: [path, bytes]
+      properties:
+        path:
+          type: string
+          description: Absolute path of the written file inside the drive.
+        bytes:
+          type: integer
+          minimum: 0
+          description: Number of bytes stored; equals the request body length.
+    JsonPath:
+      type: string
+      description: |
+        Absolute path inside the drive, starting with `/`, not
+        percent-encoded. Rejected with 400 when it does not start with `/`,
+        contains `\` or a NUL character, has an empty segment (`/a//b`), or
+        has a `.` or `..` segment, or has a segment starting with the
+        reserved prefix `.mount-rs-upload.`. One trailing `/` is ignored.
+      pattern: "^/"
+    MkdirRequest:
+      type: object
+      description: Unknown properties are ignored.
+      required: [path]
+      properties:
+        path: {$ref: "#/components/schemas/JsonPath"}
+        recursive:
+          type: boolean
+          default: false
+          description: Create missing parents and accept an existing directory.
+        mode:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Permission bits for created directories, as a decimal number (493 is `0o755`). Only the low nine bits (`0o777`) are used; file-type, setuid, setgid and sticky bits are discarded. Omit for the filesystem default.
+    MkdirResult:
+      type: object
+      required: [path, created]
+      properties:
+        path:
+          type: string
+          description: The normalised path that was requested.
+        created:
+          type: [string, "null"]
+          description: |
+            With `recursive: true`, the first directory that was created, or
+            `null` when everything already existed. Always `null` for a
+            non-recursive call.
+    RenameRequest:
+      type: object
+      description: Unknown properties are ignored.
+      required: [from, to]
+      properties:
+        from: {$ref: "#/components/schemas/JsonPath"}
+        to: {$ref: "#/components/schemas/JsonPath"}
+    TruncateRequest:
+      type: object
+      description: Unknown properties are ignored.
+      required: [path, length]
+      properties:
+        path: {$ref: "#/components/schemas/JsonPath"}
+        length:
+          type: integer
+          minimum: 0
+          description: New length in bytes.
+    Ok:
+      type: object
+      required: [ok]
+      properties:
+        ok: {type: boolean, const: true}

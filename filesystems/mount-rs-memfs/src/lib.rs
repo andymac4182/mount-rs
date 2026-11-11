@@ -1623,6 +1623,49 @@ impl FsDriver for MemoryFs {
             .map(|(handle, _identity)| handle)
     }
 
+    fn write_file_is_atomic(&self) -> bool {
+        true
+    }
+
+    /// Replace the whole file under one hold of the state lock: no reader or
+    /// other writer can observe the file truncated or half written, and a
+    /// failure leaves the previous content in place.
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        let normalized = normalize_path(path);
+        let mut content = Vec::new();
+        content.try_reserve_exact(data.len()).map_err(|_| {
+            FsError::new(ErrorCode::Efbig)
+                .with_syscall("write")
+                .with_path(&normalized)
+        })?;
+        content.extend_from_slice(data);
+        let mut state = self.lock()?;
+        // Resolves or creates the file exactly as `open(path, "w")` would,
+        // except that an existing file keeps its content until the swap.
+        let flags = OpenFlags {
+            read: false,
+            write: true,
+            create: true,
+            truncate: false,
+            append: false,
+            exclusive: false,
+        };
+        let (_handle, identity) = self.open_flags_locked(&mut state, &normalized, flags, 0o666)?;
+        let node = state
+            .nodes
+            .get_mut(&identity.ino)
+            .ok_or_else(|| FsError::new(ErrorCode::Estale).with_syscall("write"))?;
+        let before = node.blocks();
+        node.data = content;
+        node.mtime_ms = now_ms();
+        node.ctime_ms = node.mtime_ms;
+        let (after, linked) = (node.blocks(), node.nlink > 0);
+        if linked {
+            state.used_blocks = state.used_blocks + after - before;
+        }
+        Ok(())
+    }
+
     async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<Option<String>> {
         if path.contains('\0') {
             return Err(FsError::new(ErrorCode::Einval)

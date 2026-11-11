@@ -2004,6 +2004,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "mount-rs-core",
+ "mount-rs-host",
  "mount-rs-memfs",
  "mount-rs-observability",
  "mount-rs-sqlite",

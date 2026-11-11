@@ -205,6 +205,12 @@ impl<S: StateStore + 'static> FsDriver for PersistedFs<S> {
         }))
     }
 
+    /// The core replaces the file in one step and each saved snapshot is a
+    /// whole filesystem state, so neither a reader nor a crash sees a prefix.
+    fn write_file_is_atomic(&self) -> bool {
+        self.core.write_file_is_atomic()
+    }
+
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
         self.core.write_file(path, data).await?;
         self.persist().await

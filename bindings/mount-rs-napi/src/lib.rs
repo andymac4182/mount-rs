@@ -753,6 +753,14 @@ impl FsDriver for DriverSlot {
         self.capabilities
     }
 
+    fn health(&self) -> CoreResult<()> {
+        self.get()?.health()
+    }
+
+    fn write_file_is_atomic(&self) -> bool {
+        self.get().is_ok_and(|driver| driver.write_file_is_atomic())
+    }
+
     fn supports_guarded_mutations(&self) -> bool {
         self.get()
             .is_ok_and(|driver| driver.supports_guarded_mutations())
@@ -1842,6 +1850,14 @@ struct MountDriver(Arc<dyn FsDriver>);
 impl FsDriver for MountDriver {
     fn capabilities(&self) -> Capabilities {
         self.0.capabilities()
+    }
+
+    fn health(&self) -> CoreResult<()> {
+        self.0.health()
+    }
+
+    fn write_file_is_atomic(&self) -> bool {
+        self.0.write_file_is_atomic()
     }
 
     fn supports_guarded_mutations(&self) -> bool {

@@ -1,16 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-#[cfg(test)]
-use http_body_util::channel::Channel;
 use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::body::{Body as HttpBodyTrait, Frame, Incoming, SizeHint};
 use hyper::header;
@@ -25,15 +23,30 @@ use mount_rs_observability::extract_headers;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, Semaphore, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_READ_CHUNK_BYTES: usize = 64 * 1024;
-pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longer than [`DEFAULT_REQUEST_TIMEOUT`], so a graceful stop lets every
+/// request that was accepted either finish or time out by itself.
+pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(35);
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 4096;
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The default upload memory budget, as a multiple of `max_request_bytes`.
+pub const DEFAULT_BUFFERED_UPLOAD_REQUESTS: usize = 4;
+/// Names beginning with this are the server's own: the temporary sibling an
+/// upload is written to before it replaces its target on a driver whose
+/// `write_file` is not atomic. Clients can neither name nor list them.
+pub const RESERVED_NAME_PREFIX: &str = ".mount-rs-upload.";
+
+/// How long a close that ran out of drain time waits (at most; never longer
+/// than the drain timeout itself) for the requests it aborted to let go of
+/// their file handles and finish publishing.
+const ABORT_GRACE: Duration = Duration::from_secs(5);
+/// The upload budget is counted in units of this many bytes.
+const UPLOAD_BUDGET_UNIT: usize = 1024;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -196,6 +209,12 @@ pub struct HttpServerOptions {
     pub drain_timeout: Duration,
     pub max_connections: usize,
     pub request_timeout: Duration,
+    /// Memory that uploads being received may hold in total. A `PUT`
+    /// reserves its declared length (or `max_request_bytes` when it declares
+    /// none) before its body is read, and waits while the budget is spent.
+    /// `None` is four times `max_request_bytes`; a smaller value than
+    /// `max_request_bytes` is raised to it.
+    pub max_buffered_upload_bytes: Option<usize>,
     #[cfg(feature = "observability")]
     pub telemetry: Telemetry,
 }
@@ -214,6 +233,7 @@ impl Default for HttpServerOptions {
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            max_buffered_upload_bytes: None,
             #[cfg(feature = "observability")]
             telemetry: Telemetry::disabled(),
         }
@@ -280,9 +300,49 @@ struct RequestConfig {
     max_directory_entries: usize,
     read_chunk_bytes: usize,
     request_timeout: Duration,
+    upload_budget: Arc<Semaphore>,
     control: RuntimeControl,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
+}
+
+/// Stops one connection: set by a download whose client stopped reading and
+/// by a close that ran out of drain time.
+#[derive(Clone)]
+struct ConnectionKill(Arc<Notify>);
+
+/// The connections being served, so that a close can stop the ones that
+/// outlive its drain deadline.
+#[derive(Default)]
+struct ConnectionRegistry {
+    next: AtomicU64,
+    live: std::sync::Mutex<HashMap<u64, Arc<Notify>>>,
+}
+
+impl ConnectionRegistry {
+    fn register(&self) -> (u64, Arc<Notify>) {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let kill = Arc::new(Notify::new());
+        if let Ok(mut live) = self.live.lock() {
+            live.insert(id, Arc::clone(&kill));
+        }
+        (id, kill)
+    }
+
+    fn remove(&self, id: u64) {
+        if let Ok(mut live) = self.live.lock() {
+            live.remove(&id);
+        }
+    }
+
+    fn kill_all(&self) {
+        if let Ok(live) = self.live.lock() {
+            for kill in live.values() {
+                // `notify_one` leaves a permit for a connection not yet waiting.
+                kill.notify_one();
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -371,6 +431,8 @@ pub struct HttpServer {
     listener: OnceLock<ListenerHandle>,
     connections: Arc<AtomicUsize>,
     connection_permits: Arc<Semaphore>,
+    registry: Arc<ConnectionRegistry>,
+    accept_failures: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for HttpServer {
@@ -418,16 +480,22 @@ impl HttpServer {
             shutdown: Arc::clone(&shutdown),
             closing: Arc::clone(&closing),
         };
+        let max_request_bytes = options.max_request_bytes.max(1);
+        let upload_budget = options
+            .max_buffered_upload_bytes
+            .unwrap_or_else(|| max_request_bytes.saturating_mul(DEFAULT_BUFFERED_UPLOAD_REQUESTS))
+            .max(max_request_bytes);
         Self {
             state: Arc::new(AppState {
                 handler: None,
                 registry: Arc::new(registry),
                 config: RequestConfig {
-                    max_request_bytes: options.max_request_bytes.max(1),
+                    max_request_bytes,
                     max_response_bytes: options.max_response_bytes.max(1),
                     max_directory_entries: options.max_directory_entries.max(1),
                     read_chunk_bytes: options.read_chunk_bytes.max(1),
                     request_timeout: positive_duration(options.request_timeout),
+                    upload_budget: Arc::new(Semaphore::new(upload_budget_units(upload_budget))),
                     control,
                     #[cfg(feature = "observability")]
                     telemetry: options.telemetry,
@@ -446,6 +514,8 @@ impl HttpServer {
             listener: OnceLock::new(),
             connections: Arc::new(AtomicUsize::new(0)),
             connection_permits: Arc::new(Semaphore::new(options.max_connections.max(1))),
+            registry: Arc::new(ConnectionRegistry::default()),
+            accept_failures: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -465,6 +535,7 @@ impl HttpServer {
         let _guard = ConnectionGuard {
             counter: self.connections.clone(),
             drained: self.drained.clone(),
+            registered: None,
         };
         if self.closing.load(Ordering::Acquire) != 0 {
             return error_response(RequestError::server_closing());
@@ -502,6 +573,13 @@ impl HttpServer {
         self.connections.load(Ordering::Acquire)
     }
 
+    /// How many times accepting a connection has failed and been retried.
+    /// The listener keeps running through these (for example while the
+    /// process is out of file descriptors); a rising count is the only sign.
+    pub fn accept_failures(&self) -> u64 {
+        self.accept_failures.load(Ordering::Relaxed)
+    }
+
     pub async fn listen(&self) -> Result<(), HttpServerError> {
         if self.listener.get().is_some() {
             return Ok(());
@@ -524,6 +602,8 @@ impl HttpServer {
         let connection_permits = Arc::clone(&self.connection_permits);
         let tcp_nodelay = self.tcp_nodelay;
         let http2_prior_knowledge = self.http2_prior_knowledge;
+        let registry = Arc::clone(&self.registry);
+        let accept_failures = Arc::clone(&self.accept_failures);
         let task = tokio::spawn(async move {
             loop {
                 if closing.load(Ordering::Acquire) != 0 {
@@ -535,14 +615,15 @@ impl HttpServer {
                 if closing.load(Ordering::Acquire) != 0 {
                     break;
                 }
+                let accepted = accept_next(
+                    || listener.accept(),
+                    |_error| {
+                        accept_failures.fetch_add(1, Ordering::Relaxed);
+                    },
+                );
                 tokio::select! {
                     _ = shutdown_notified => break,
-                    accepted = listener.accept() => {
-                        let stream = match accepted {
-                            Ok((stream, _peer)) => stream,
-                            Err(error) if retry_accept(error.kind()) => continue,
-                            Err(_) => break,
-                        };
+                    (stream, _peer) = accepted => {
                         if stream.set_nodelay(tcp_nodelay).is_err() {
                             continue;
                         }
@@ -555,45 +636,67 @@ impl HttpServer {
                         };
                         let state = Arc::clone(&state);
                         let shutdown = Arc::clone(&shutdown);
-                        let counter = Arc::clone(&counter);
-                        let drained = Arc::clone(&drained);
                         let closing = Arc::clone(&closing);
                         counter.fetch_add(1, Ordering::AcqRel);
+                        let (id, kill) = registry.register();
+                        let guard = ConnectionGuard {
+                            counter: Arc::clone(&counter),
+                            drained: Arc::clone(&drained),
+                            registered: Some((Arc::clone(&registry), id)),
+                        };
                         tokio::spawn(async move {
                             let _permit = permit;
-                            let _guard = ConnectionGuard { counter, drained };
+                            let _guard = guard;
                             let request_timeout = state.config.request_timeout;
+                            let request_kill = ConnectionKill(Arc::clone(&kill));
                             let service = service_fn(move |request: Request<Incoming>| {
                                 let mut request = request.map(|body| {
                                     body.map_err(|error| -> BoxError { Box::new(error) })
                                         .boxed_unsync()
                                 });
+                                if !http2_prior_knowledge {
+                                    // One HTTP/1.1 connection carries one
+                                    // response at a time, so a stalled
+                                    // download may take its connection down.
+                                    request.extensions_mut().insert(request_kill.clone());
+                                }
                                 if let Some(handler) = &state.handler {
                                     handler.on_http_service_call(&mut request);
                                 }
                                 handle_request(request, Arc::clone(&state))
                             });
                             let io = TokioIo::new(stream);
+                            // Serve until the connection ends, the server
+                            // drains it, or it is stopped outright.
+                            macro_rules! serve {
+                                ($connection:expr) => {{
+                                    let connection = $connection;
+                                    tokio::pin!(connection);
+                                    let shutdown_notified = shutdown.notified();
+                                    tokio::pin!(shutdown_notified);
+                                    shutdown_notified.as_mut().enable();
+                                    if closing.load(Ordering::Acquire) != 0 {
+                                        return;
+                                    }
+                                    tokio::select! {
+                                        _ = kill.notified() => {}
+                                        _ = shutdown_notified => {
+                                            connection.as_mut().graceful_shutdown();
+                                            tokio::select! {
+                                                _ = kill.notified() => {}
+                                                _ = &mut connection => {}
+                                            }
+                                        }
+                                        _ = &mut connection => {}
+                                    }
+                                }};
+                            }
                             if http2_prior_knowledge {
                                 let mut builder = hyper::server::conn::http2::Builder::new(
                                     hyper_util::rt::TokioExecutor::new(),
                                 );
                                 builder.timer(TokioTimer::new());
-                                let connection = builder.serve_connection(io, service);
-                                tokio::pin!(connection);
-                                let shutdown_notified = shutdown.notified();
-                                tokio::pin!(shutdown_notified);
-                                shutdown_notified.as_mut().enable();
-                                if closing.load(Ordering::Acquire) != 0 {
-                                    return;
-                                }
-                                tokio::select! {
-                                    _ = shutdown_notified => {
-                                        connection.as_mut().graceful_shutdown();
-                                        let _ = connection.await;
-                                    }
-                                    _ = &mut connection => {}
-                                }
+                                serve!(builder.serve_connection(io, service));
                                 return;
                             }
                             let mut builder = hyper::server::conn::http1::Builder::new();
@@ -601,21 +704,7 @@ impl HttpServer {
                                 .keep_alive(true)
                                 .header_read_timeout(Some(request_timeout))
                                 .timer(TokioTimer::new());
-                            let connection = builder.serve_connection(io, service);
-                            tokio::pin!(connection);
-                            let shutdown_notified = shutdown.notified();
-                            tokio::pin!(shutdown_notified);
-                            shutdown_notified.as_mut().enable();
-                            if closing.load(Ordering::Acquire) != 0 {
-                                return;
-                            }
-                            tokio::select! {
-                                _ = shutdown_notified => {
-                                    connection.as_mut().graceful_shutdown();
-                                    let _ = connection.await;
-                                }
-                                _ = &mut connection => {}
-                            }
+                            serve!(builder.serve_connection(io, service));
                         });
                     }
                 }
@@ -662,7 +751,16 @@ impl HttpServer {
         }
         match tokio::time::timeout(self.drain_timeout, self.complete_close()).await {
             Ok(result) => result,
-            Err(_) => Err(HttpServerError::Timeout),
+            Err(_) => {
+                // Out of drain time: stop what is still being served, so the
+                // caller can release the drives. A stopped request lets go at
+                // its next await; closing its file handles, and a publication
+                // already under way, are given a little longer to land.
+                self.registry.kill_all();
+                let grace = ABORT_GRACE.min(self.drain_timeout);
+                let _ = tokio::time::timeout(grace, self.complete_close()).await;
+                Err(HttpServerError::Timeout)
+            }
         }
     }
 
@@ -744,10 +842,14 @@ async fn wait_for_drain(
 struct ConnectionGuard {
     counter: Arc<AtomicUsize>,
     drained: Arc<Notify>,
+    registered: Option<(Arc<ConnectionRegistry>, u64)>,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
+        if let Some((registry, id)) = &self.registered {
+            registry.remove(*id);
+        }
         self.counter.fetch_sub(1, Ordering::AcqRel);
         self.drained.notify_waiters();
     }
@@ -832,7 +934,7 @@ enum RequestError {
     Fs(FsError),
     Client {
         status: StatusCode,
-        code: ErrorCode,
+        code: &'static str,
         message: String,
         close: bool,
         content_range: Option<String>,
@@ -845,7 +947,7 @@ impl RequestError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self::Client {
             status: StatusCode::BAD_REQUEST,
-            code: ErrorCode::Einval,
+            code: ErrorCode::Einval.as_str(),
             message: message.into(),
             close: false,
             content_range: None,
@@ -857,7 +959,7 @@ impl RequestError {
     fn unauthorized() -> Self {
         Self::Client {
             status: StatusCode::UNAUTHORIZED,
-            code: ErrorCode::Eacces,
+            code: ErrorCode::Eacces.as_str(),
             message: "bearer authorization required".to_owned(),
             close: false,
             content_range: None,
@@ -869,7 +971,7 @@ impl RequestError {
     fn not_found() -> Self {
         Self::Client {
             status: StatusCode::NOT_FOUND,
-            code: ErrorCode::Enoent,
+            code: ErrorCode::Enoent.as_str(),
             message: "drive or route not found".to_owned(),
             close: false,
             content_range: None,
@@ -881,7 +983,7 @@ impl RequestError {
     fn method_not_allowed(allow: &'static str) -> Self {
         Self::Client {
             status: StatusCode::METHOD_NOT_ALLOWED,
-            code: ErrorCode::Enotsup,
+            code: ErrorCode::Enotsup.as_str(),
             message: "method is not supported for this route".to_owned(),
             close: false,
             content_range: None,
@@ -893,7 +995,7 @@ impl RequestError {
     fn body_too_large() -> Self {
         Self::Client {
             status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: ErrorCode::Efbig,
+            code: ErrorCode::Efbig.as_str(),
             message: "request body exceeds the configured limit".to_owned(),
             close: true,
             content_range: None,
@@ -905,7 +1007,7 @@ impl RequestError {
     fn response_too_large() -> Self {
         Self::Client {
             status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: ErrorCode::Eoverflow,
+            code: ErrorCode::Eoverflow.as_str(),
             message: "directory response exceeds the configured limit".to_owned(),
             close: true,
             content_range: None,
@@ -914,10 +1016,12 @@ impl RequestError {
         }
     }
 
+    /// The server ran out of time; the client did nothing wrong, and a
+    /// write may or may not have been published.
     fn request_timeout() -> Self {
         Self::Client {
-            status: StatusCode::REQUEST_TIMEOUT,
-            code: ErrorCode::Eio,
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "ETIMEDOUT",
             message: "request exceeded the configured timeout".to_owned(),
             close: true,
             content_range: None,
@@ -926,10 +1030,26 @@ impl RequestError {
         }
     }
 
+    fn not_acceptable() -> Self {
+        Self::Client {
+            status: StatusCode::NOT_ACCEPTABLE,
+            code: ErrorCode::Enotsup.as_str(),
+            message: "no acceptable content encoding: identity or gzip is required".to_owned(),
+            close: false,
+            content_range: None,
+            allow: None,
+            authenticate: false,
+        }
+    }
+
+    fn reserved_name() -> Self {
+        Self::bad_request("names beginning with .mount-rs-upload. are reserved")
+    }
+
     fn server_closing() -> Self {
         Self::Client {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            code: ErrorCode::Eio,
+            code: ErrorCode::Eio.as_str(),
             message: "server is shutting down".to_owned(),
             close: true,
             content_range: None,
@@ -941,7 +1061,7 @@ impl RequestError {
     fn range_not_satisfiable(size: u64) -> Self {
         Self::Client {
             status: StatusCode::RANGE_NOT_SATISFIABLE,
-            code: ErrorCode::Einval,
+            code: ErrorCode::Einval.as_str(),
             message: "range is not satisfiable".to_owned(),
             close: false,
             content_range: Some(format!("bytes */{size}")),
@@ -997,6 +1117,8 @@ struct HealthPayload<'a> {
     status: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     drives: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -1185,18 +1307,23 @@ async fn handle_request_uninstrumented(
         | Route::Operation { drive, .. } => drive,
         Route::Discovery | Route::Health { .. } => unreachable!(),
     };
-    let Some(drive) = state.registry.get(drive_id).cloned() else {
-        return error_response(RequestError::not_found());
-    };
-    if !authorized(&parts.headers, &drive) {
+    // An unknown drive answers exactly as a wrong token does, so the
+    // response does not say which drive ids exist.
+    let Some(drive) = state
+        .registry
+        .get(drive_id)
+        .filter(|drive| authorized(&parts.headers, drive))
+        .cloned()
+    else {
         return error_response(RequestError::unauthorized());
-    }
+    };
     if content_length_exceeds(&parts.headers, state.config.max_request_bytes) {
         return error_response(RequestError::body_too_large());
     }
 
     let result = match route {
         Route::File { path, .. } => {
+            let kill = parts.extensions.get::<ConnectionKill>().cloned();
             handle_file(
                 parts.method,
                 parts.headers,
@@ -1204,6 +1331,7 @@ async fn handle_request_uninstrumented(
                 drive,
                 path,
                 state.config.clone(),
+                kill,
             )
             .await
         }
@@ -1299,7 +1427,19 @@ fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> 
         return error_response(RequestError::method_not_allowed("GET, HEAD"));
     }
 
-    let is_ready = !readiness || !registry.is_empty();
+    // Readiness asks every drive whether it can still serve. A drive that
+    // failed closed answers every request with an error until the process
+    // is replaced, so one such drive takes the whole process out of rotation.
+    let failed = if readiness {
+        registry
+            .drives
+            .values()
+            .filter(|drive| drive.driver.health().is_err())
+            .count()
+    } else {
+        0
+    };
+    let is_ready = !readiness || (!registry.is_empty() && failed == 0);
     let status = if is_ready {
         StatusCode::OK
     } else {
@@ -1312,6 +1452,7 @@ fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> 
             "ok"
         },
         drives: readiness.then_some(registry.len()),
+        failed: (readiness && !is_ready).then_some(failed),
     };
     let bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{\"status\":\"error\"}".to_vec());
     health_json_response(status, Bytes::from(bytes), method == Method::HEAD)
@@ -1324,6 +1465,7 @@ async fn handle_file(
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
+    kill: Option<ConnectionKill>,
 ) -> Result<Response<HttpBody>, RequestError> {
     match method {
         Method::GET | Method::HEAD => {
@@ -1333,11 +1475,12 @@ async fn handle_file(
                 drive,
                 path,
                 config.clone(),
+                kill,
             )
             .await
         }
-        Method::PUT => handle_file_write(body, drive, path, config).await,
-        Method::DELETE => handle_file_delete(drive, path).await,
+        Method::PUT => handle_file_write(&headers, body, drive, path, config).await,
+        Method::DELETE => handle_file_delete(drive, path, config).await,
         _ => Err(RequestError::method_not_allowed("GET, HEAD, PUT, DELETE")),
     }
 }
@@ -1348,6 +1491,7 @@ async fn handle_file_read(
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
+    kill: Option<ConnectionKill>,
 ) -> Result<Response<HttpBody>, RequestError> {
     let lstat = drive
         .driver()
@@ -1360,11 +1504,7 @@ async fn handle_file_read(
         lstat
     };
     if stats.is_directory() {
-        let entries = drive
-            .driver()
-            .readdir_bounded(&path, config.max_directory_entries)
-            .await
-            .map_err(directory_listing_error)?;
+        let entries = list_directory(&drive, &path, config.max_directory_entries).await?;
         let payload = serde_json::to_vec(&DirectoryPayload {
             path: &path,
             stats: &stats,
@@ -1466,42 +1606,51 @@ async fn handle_file_read(
             start,
             length,
             config.read_chunk_bytes,
+            config.request_timeout,
+            kill,
             config.control,
         ))
         .map_err(|_| RequestError::Fs(FsError::backend("failed to build HTTP response")))
 }
 
+/// Replace a file with the request body, in one step.
+///
+/// The body is received in full before the drive is touched, so a request
+/// that fails, is abandoned, times out or meets a shutdown while its body is
+/// arriving changes nothing. Publication is then one step of the driver: a
+/// reader, another writer or a restart sees the previous content or the
+/// new, never a prefix. A request abandoned during that step is published
+/// or not, as the driver got to it.
 async fn handle_file_write(
-    mut body: HttpBody,
+    headers: &hyper::HeaderMap,
+    body: HttpBody,
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
 ) -> Result<Response<HttpBody>, RequestError> {
-    let handle = drive
-        .driver()
-        .open(&path, "w", 0o666)
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|length| length.min(config.max_request_bytes));
+    // An upload with no declared length may grow to the request limit.
+    let permit =
+        reserve_upload_budget(&config, declared.unwrap_or(config.max_request_bytes)).await?;
+    let data = read_limited_body(
+        body,
+        config.max_request_bytes,
+        declared.unwrap_or(0),
+        &config.control,
+    )
+    .await?;
+    if config.control.closing.load(Ordering::Acquire) != 0 {
+        return Err(RequestError::server_closing());
+    }
+    let written = data.len();
+    publish_upload(drive.driver(), &path, &data, &config.control)
         .await
         .map_err(RequestError::Fs)?;
-    let mut close_guard = FileCloseGuard::new(handle, &config.control);
-    let handle = close_guard.handle();
-    let mut written = 0usize;
-    let result = async {
-        written = write_upload(
-            &mut body,
-            &handle,
-            &path,
-            config.max_request_bytes,
-            &config.control,
-        )
-        .await?;
-        close_guard.close().await.map_err(RequestError::Fs)?;
-        Ok::<_, RequestError>(())
-    }
-    .await;
-    if let Err(error) = result {
-        let _ = close_guard.close().await;
-        return Err(error);
-    }
+    drop(permit);
     let payload = serde_json::to_vec(&WritePayload {
         path: &path,
         bytes: written,
@@ -1510,96 +1659,295 @@ async fn handle_file_write(
     Ok(json_response(StatusCode::OK, Bytes::from(payload), false))
 }
 
-// Bound buffering independently of request size and transport frame boundaries.
-// PUT remains non-atomic: a failed upload may leave an accepted prefix.
-const UPLOAD_BUFFER_BYTES: usize = 64 * 1024;
+fn upload_budget_units(bytes: usize) -> usize {
+    bytes
+        .div_ceil(UPLOAD_BUDGET_UNIT)
+        .clamp(1, (u32::MAX as usize).min(Semaphore::MAX_PERMITS))
+}
 
-async fn write_upload(
-    body: &mut HttpBody,
-    handle: &Arc<dyn FileHandle>,
+/// Wait for room in the upload memory budget. The wait is part of the
+/// request, so it ends with the request timeout or the server's shutdown.
+async fn reserve_upload_budget(
+    config: &RequestConfig,
+    bytes: usize,
+) -> Result<OwnedSemaphorePermit, RequestError> {
+    let units = upload_budget_units(bytes) as u32;
+    let control = &config.control;
+    let notified = control.shutdown.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if control.closing.load(Ordering::Acquire) != 0 {
+        return Err(RequestError::server_closing());
+    }
+    tokio::select! {
+        _ = notified => Err(RequestError::server_closing()),
+        permit = Arc::clone(&config.upload_budget).acquire_many_owned(units) => permit
+            .map_err(|_| RequestError::Fs(FsError::backend("upload budget unavailable"))),
+    }
+}
+
+/// Publish a received upload. A driver whose `write_file` is atomic does it
+/// in one call; for any other the bytes go to a hidden sibling first.
+async fn publish_upload(
+    driver: Arc<dyn FsDriver>,
     path: &str,
-    limit: usize,
+    data: &[u8],
     control: &RuntimeControl,
-) -> Result<usize, RequestError> {
-    let mut buffer = Vec::with_capacity(UPLOAD_BUFFER_BYTES.min(limit));
-    let mut received = 0usize;
-    loop {
-        let next = next_request_frame(body, &control.shutdown, &control.closing).await;
-        let frame = match next {
-            Ok(Some(frame)) => frame,
-            ending => {
-                // Preserve the accepted prefix on body errors, unless shutdown
-                // has begun. Never acknowledge a failed or cancelled upload.
-                flush_upload(handle, &buffer, path, control).await?;
-                return ending.map(|_| received);
-            }
-        };
-        let Ok(mut data) = frame.into_data() else {
-            continue;
-        };
-        if received.saturating_add(data.len()) > limit {
-            flush_upload(handle, &buffer, path, control).await?;
-            return Err(RequestError::body_too_large());
+) -> mount_rs_core::Result<()> {
+    if driver.write_file_is_atomic() {
+        return driver.write_file(path, data).await;
+    }
+    let existing = match driver.lstat(path).await {
+        Ok(stats) => Some(stats),
+        Err(error) if error.code == ErrorCode::Enoent => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(stats) = &existing {
+        if stats.is_directory() {
+            return Err(FsError::new(ErrorCode::Eisdir)
+                .with_syscall("open")
+                .with_path(path));
         }
-        received += data.len();
-        while !data.is_empty() {
-            let count = (UPLOAD_BUFFER_BYTES - buffer.len()).min(data.len());
-            buffer.extend_from_slice(&data.split_to(count));
-            if buffer.len() == UPLOAD_BUFFER_BYTES {
-                flush_upload(handle, &buffer, path, control).await?;
-                buffer.clear();
+        if stats.is_symbolic_link() {
+            // Renaming over a link would replace the link, not what it
+            // names. Write through it in place, as before; this one case is
+            // not atomic.
+            return driver.write_file(path, data).await;
+        }
+        if !stats.is_file() {
+            return Err(FsError::new(ErrorCode::Enxio)
+                .with_syscall("open")
+                .with_path(path));
+        }
+    }
+    let mut sibling = SiblingGuard {
+        sibling: Some(ActiveSibling::new(path)),
+        driver: Arc::clone(&driver),
+        control: control.clone(),
+    };
+    let name = sibling.path().to_owned();
+    let result = async {
+        write_sibling(driver.as_ref(), &name, data, control).await?;
+        if let Some(stats) = &existing {
+            // The replacement is a new file: keep the permissions the
+            // previous one had where the driver can.
+            let _ = driver.chmod(&name, stats.mode & 0o7777).await;
+        }
+        driver.rename(&name, path).await
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            sibling.sibling = None;
+            // Make the new name durable where the driver can sync a
+            // directory; a driver that cannot has nothing more to offer.
+            if let Ok(directory) = driver.open(parent_path(path), "r", 0).await {
+                let _ = directory.sync().await;
+                let _ = directory.close().await;
             }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = driver.unlink(&name).await;
+            sibling.sibling = None;
+            Err(error)
         }
     }
 }
 
-async fn flush_upload(
-    handle: &Arc<dyn FileHandle>,
+/// Write and sync `data` to a new file that nothing else names.
+async fn write_sibling(
+    driver: &dyn FsDriver,
+    sibling: &str,
     data: &[u8],
-    path: &str,
     control: &RuntimeControl,
-) -> Result<(), RequestError> {
-    let mut offset = 0;
-    while offset < data.len() {
-        let count =
-            write_with_shutdown(handle, &data[offset..], &control.shutdown, &control.closing)
-                .await?;
-        if count == 0 || count > data.len() - offset {
-            return Err(RequestError::Fs(
-                FsError::new(ErrorCode::Eio)
+) -> mount_rs_core::Result<()> {
+    let mut handle = FileCloseGuard::new(driver.open(sibling, "wx", 0o666).await?, control);
+    let file = handle.handle();
+    let written = async {
+        let mut offset = 0;
+        while offset < data.len() {
+            let count = file.write(&data[offset..], Some(offset as u64)).await?;
+            if count == 0 || count > data.len() - offset {
+                return Err(FsError::new(ErrorCode::Eio)
                     .with_syscall("write")
-                    .with_path(path)
-                    .with_message("driver returned an invalid write length"),
-            ));
+                    .with_path(sibling)
+                    .with_message("driver returned an invalid write length"));
+            }
+            offset += count;
         }
-        offset += count;
+        file.sync().await
     }
-    Ok(())
+    .await;
+    let closed = handle.close().await;
+    written.and(closed)
+}
+
+/// Removes an upload's temporary sibling when the request that was writing
+/// it is dropped part-way: abandoned by its client, timed out or aborted.
+struct SiblingGuard {
+    sibling: Option<ActiveSibling>,
+    driver: Arc<dyn FsDriver>,
+    control: RuntimeControl,
+}
+
+impl SiblingGuard {
+    fn path(&self) -> &str {
+        self.sibling
+            .as_ref()
+            .map_or("", |sibling| sibling.path.as_str())
+    }
+}
+
+impl Drop for SiblingGuard {
+    fn drop(&mut self) {
+        let Some(sibling) = self.sibling.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let driver = Arc::clone(&self.driver);
+        // Counted before it is spawned, so a close waits for the removal.
+        let task = TaskGuard::new(
+            Arc::clone(&self.control.background_tasks),
+            Arc::clone(&self.control.drained),
+        );
+        runtime.spawn(async move {
+            let _task = task;
+            // If the rename had already happened there is nothing here.
+            let _ = driver.unlink(&sibling.path).await;
+        });
+    }
+}
+
+fn parent_path(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some(("", _)) | None => "/",
+        Some((parent, _)) => parent,
+    }
+}
+
+fn child_path(directory: &str, name: &str) -> String {
+    format!("{}/{name}", directory.trim_end_matches('/'))
+}
+
+/// The temporary siblings this process is writing right now. Any other
+/// reserved name in a directory was left by a process that stopped mid-upload.
+fn active_siblings() -> &'static std::sync::Mutex<HashSet<String>> {
+    static ACTIVE: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+    ACTIVE.get_or_init(Default::default)
+}
+
+struct ActiveSibling {
+    path: String,
+}
+
+impl ActiveSibling {
+    /// A name beside `target` that no client can use and no other upload has.
+    fn new(target: &str) -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        // Two independently keyed hashes of a per-process sequence number:
+        // unique here, and not repeated by another process on the same drive.
+        let word = || {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u64(sequence);
+            hasher.write_u32(std::process::id());
+            hasher.finish()
+        };
+        let path = child_path(
+            parent_path(target),
+            &format!("{RESERVED_NAME_PREFIX}{:016x}{:016x}", word(), word()),
+        );
+        if let Ok(mut active) = active_siblings().lock() {
+            active.insert(path.clone());
+        }
+        Self { path }
+    }
+}
+
+impl Drop for ActiveSibling {
+    fn drop(&mut self) {
+        if let Ok(mut active) = active_siblings().lock() {
+            active.remove(&self.path);
+        }
+    }
+}
+
+/// List a directory without the server's own temporary names.
+async fn list_directory(
+    drive: &DriveConfig,
+    path: &str,
+    max_entries: usize,
+) -> Result<Vec<mount_rs_core::DirEntry>, RequestError> {
+    let mut entries = drive
+        .driver()
+        .readdir_bounded(path, max_entries)
+        .await
+        .map_err(directory_listing_error)?;
+    entries.retain(|entry| !entry.name.starts_with(RESERVED_NAME_PREFIX));
+    Ok(entries)
 }
 
 async fn handle_file_delete(
     drive: DriveConfig,
     path: String,
+    config: RequestConfig,
 ) -> Result<Response<HttpBody>, RequestError> {
-    let stats = drive
-        .driver()
-        .lstat(&path)
-        .await
-        .map_err(RequestError::Fs)?;
+    // Drives answer EBUSY here, which would reach the client as a 503 that
+    // invites a retry. The refusal is permanent, so say so.
+    if path == "/" {
+        return Err(RequestError::bad_request(
+            "the drive root cannot be removed",
+        ));
+    }
+    let driver = drive.driver();
+    let stats = driver.lstat(&path).await.map_err(RequestError::Fs)?;
     if stats.is_directory() {
-        drive
-            .driver()
-            .rmdir(&path)
-            .await
-            .map_err(RequestError::Fs)?;
+        match driver.rmdir(&path).await {
+            Err(error)
+                if error.code == ErrorCode::Enotempty
+                    && remove_abandoned_siblings(
+                        driver.as_ref(),
+                        &path,
+                        config.max_directory_entries,
+                    )
+                    .await =>
+            {
+                driver.rmdir(&path).await.map_err(RequestError::Fs)?;
+            }
+            result => result.map_err(RequestError::Fs)?,
+        }
     } else {
-        drive
-            .driver()
-            .unlink(&path)
-            .await
-            .map_err(RequestError::Fs)?;
+        driver.unlink(&path).await.map_err(RequestError::Fs)?;
     }
     Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+/// A directory that lists as empty may still hold temporary siblings left
+/// by a process that stopped mid-upload; no client can name them, so remove
+/// them here. Returns whether the directory is worth another `rmdir`.
+async fn remove_abandoned_siblings(driver: &dyn FsDriver, path: &str, max_entries: usize) -> bool {
+    let Ok(entries) = driver.readdir_bounded(path, max_entries).await else {
+        return false;
+    };
+    let abandoned = |name: &str| {
+        name.starts_with(RESERVED_NAME_PREFIX)
+            && active_siblings()
+                .lock()
+                .is_ok_and(|active| !active.contains(&child_path(path, name)))
+    };
+    if entries.is_empty() || !entries.iter().all(|entry| abandoned(&entry.name)) {
+        return false;
+    }
+    for entry in entries {
+        if driver.unlink(&child_path(path, &entry.name)).await.is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 async fn handle_entries(
@@ -1612,11 +1960,7 @@ async fn handle_entries(
     if method != Method::GET && method != Method::HEAD {
         return Err(RequestError::method_not_allowed("GET, HEAD"));
     }
-    let entries = drive
-        .driver()
-        .readdir_bounded(&path, config.max_directory_entries)
-        .await
-        .map_err(directory_listing_error)?;
+    let entries = list_directory(&drive, &path, config.max_directory_entries).await?;
     let payload = serde_json::to_vec(&entries)
         .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
     if payload.len() > config.max_response_bytes {
@@ -1689,7 +2033,7 @@ async fn entries_response(
 ) -> Result<Response<HttpBody>, RequestError> {
     let (gzip, identity) = listing_encodings(headers);
     if gzip == 0 && identity == 0 {
-        let mut response = empty_response(StatusCode::NOT_ACCEPTABLE);
+        let mut response = error_response(RequestError::not_acceptable());
         response.headers_mut().insert(
             header::VARY,
             header::HeaderValue::from_static("Accept-Encoding"),
@@ -1758,7 +2102,9 @@ async fn handle_operation(
                     &path,
                     MkdirOptions {
                         recursive: request.recursive,
-                        mode: request.mode,
+                        // Permission bits only: a client does not get to
+                        // set the file type, setuid, setgid or sticky bits.
+                        mode: request.mode.map(|mode| mode & 0o777),
                     },
                 )
                 .await
@@ -1802,7 +2148,8 @@ async fn handle_operation(
             ))
         }
         "sync" => {
-            let bytes = read_limited_body(body, config.max_request_bytes, &config.control).await?;
+            let bytes =
+                read_limited_body(body, config.max_request_bytes, 0, &config.control).await?;
             if !bytes.is_empty() {
                 return Err(RequestError::bad_request(
                     "sync does not accept a request body",
@@ -1836,7 +2183,7 @@ async fn next_request_frame(
             Some(Ok(frame)) => Ok(Some(frame)),
             Some(Err(_)) => Err(RequestError::Client {
                 status: StatusCode::BAD_REQUEST,
-                code: ErrorCode::Eio,
+                code: ErrorCode::Eio.as_str(),
                 message: "request body read failed".to_owned(),
                 close: true,
                 content_range: None,
@@ -1847,44 +2194,22 @@ async fn next_request_frame(
     }
 }
 
-async fn write_with_shutdown(
-    handle: &Arc<dyn FileHandle>,
-    data: &[u8],
-    shutdown: &Notify,
-    closing: &AtomicUsize,
-) -> Result<usize, RequestError> {
-    if closing.load(Ordering::Acquire) != 0 {
-        return Err(RequestError::server_closing());
-    }
-    let notified = shutdown.notified();
-    tokio::pin!(notified);
-    notified.as_mut().enable();
-    if closing.load(Ordering::Acquire) != 0 {
-        return Err(RequestError::server_closing());
-    }
-    let write = handle.write(data, None);
-    tokio::pin!(write);
-    tokio::select! {
-        _ = notified => Err(RequestError::server_closing()),
-        result = write => result.map_err(RequestError::Fs),
-    }
-}
-
 async fn parse_json_body<T: for<'de> Deserialize<'de>>(
     body: HttpBody,
     max_request_bytes: usize,
     control: &RuntimeControl,
 ) -> Result<T, RequestError> {
-    let bytes = read_limited_body(body, max_request_bytes, control).await?;
+    let bytes = read_limited_body(body, max_request_bytes, 0, control).await?;
     serde_json::from_slice(&bytes).map_err(|_| RequestError::bad_request("invalid JSON request"))
 }
 
 async fn read_limited_body(
     mut body: HttpBody,
     max_request_bytes: usize,
+    expected_bytes: usize,
     control: &RuntimeControl,
 ) -> Result<Vec<u8>, RequestError> {
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(expected_bytes.min(max_request_bytes));
     while let Some(frame) =
         next_request_frame(&mut body, &control.shutdown, &control.closing).await?
     {
@@ -1962,6 +2287,9 @@ fn decode_uri_segments(raw_path: &str) -> Result<Vec<String>, RequestError> {
         let segment = percent_decode_str(raw_segment)
             .decode_utf8()
             .map_err(|_| RequestError::bad_request("request path is not valid UTF-8"))?;
+        if segment.starts_with(RESERVED_NAME_PREFIX) {
+            return Err(RequestError::reserved_name());
+        }
         if segment == "."
             || segment == ".."
             || segment.contains('/')
@@ -2004,6 +2332,9 @@ fn validate_virtual_path(path: &str) -> Result<String, RequestError> {
         if *piece == "." || *piece == ".." {
             return Err(RequestError::bad_request("path traversal is not allowed"));
         }
+        if piece.starts_with(RESERVED_NAME_PREFIX) {
+            return Err(RequestError::reserved_name());
+        }
     }
     Ok(path_from_segments(
         &pieces
@@ -2015,6 +2346,8 @@ fn validate_virtual_path(path: &str) -> Result<String, RequestError> {
     ))
 }
 
+/// Accept failures that say nothing about the listener: the caller that
+/// was being accepted went away. These are retried at once.
 fn retry_accept(kind: std::io::ErrorKind) -> bool {
     use std::io::ErrorKind;
     matches!(
@@ -2023,13 +2356,44 @@ fn retry_accept(kind: std::io::ErrorKind) -> bool {
     )
 }
 
+/// Wait for the next connection, outliving failed accepts.
+///
+/// An accept fails for reasons that pass: the process is briefly out of file
+/// descriptors, or a client gave up before it was accepted. Ending the
+/// listener on one of those leaves a process that looks alive and never
+/// answers again. Each other failure is reported, and the pause (10 ms,
+/// doubling to 1 s) keeps a persistent one from spinning.
+async fn accept_next<T, F, Fut>(mut accept: F, mut failed: impl FnMut(&std::io::Error)) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    let mut pause = Duration::from_millis(10);
+    loop {
+        match accept().await {
+            Ok(accepted) => return accepted,
+            Err(error) if retry_accept(error.kind()) => {}
+            Err(error) => {
+                failed(&error);
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
 fn authorized(headers: &hyper::HeaderMap, drive: &DriveConfig) -> bool {
     bearer_token(headers).is_some_and(|token| drive.token_matches(token))
 }
 
 fn bearer_token(headers: &hyper::HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value.strip_prefix("Bearer ")?;
+    // The scheme name is case-insensitive (RFC 9110 section 11.1).
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim_start_matches(' ');
     if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
         return None;
     }
@@ -2121,10 +2485,14 @@ fn parse_range(value: &str, size: u64) -> Result<ByteRange, ()> {
 }
 
 fn error_response(error: RequestError) -> Response<HttpBody> {
+    let mut retry_after = false;
     let (status, code, message, close, content_range, allow, authenticate) = match error {
         RequestError::Fs(error) => (
-            status_for_error(error.code),
-            error.code,
+            {
+                retry_after = matches!(error.code, ErrorCode::Eagain | ErrorCode::Ebusy);
+                status_for_error(error.code)
+            },
+            error.code.as_str(),
             error.code.description().to_owned(),
             false,
             None,
@@ -2151,7 +2519,7 @@ fn error_response(error: RequestError) -> Response<HttpBody> {
     };
     let body = serde_json::to_vec(&ErrorEnvelope {
         error: ErrorDetail {
-            code: code.as_str().to_owned(),
+            code: code.to_owned(),
             message,
         },
     })
@@ -2172,20 +2540,37 @@ fn error_response(error: RequestError) -> Response<HttpBody> {
     if authenticate {
         builder = builder.header(header::WWW_AUTHENTICATE, "Bearer");
     }
+    if retry_after {
+        builder = builder.header(header::RETRY_AFTER, "1");
+    }
     builder
         .body(full_body(Bytes::from(body)))
         .unwrap_or_else(|_| Response::new(full_body(Bytes::new())))
 }
 
+/// The HTTP status for a filesystem error. A condition the client caused
+/// or can correct is a 4xx; one only the server or its storage can clear is
+/// a 5xx, and only an error with no better description is a 500.
 fn status_for_error(code: ErrorCode) -> StatusCode {
     match code {
+        ErrorCode::Enoent | ErrorCode::Enotdir => StatusCode::NOT_FOUND,
+        ErrorCode::Eexist | ErrorCode::Enotempty | ErrorCode::Eisdir => StatusCode::CONFLICT,
+        ErrorCode::Einval
+        | ErrorCode::Eloop
+        | ErrorCode::Exdev
+        | ErrorCode::Emlink
+        | ErrorCode::Enxio => StatusCode::BAD_REQUEST,
         ErrorCode::Eacces | ErrorCode::Eperm | ErrorCode::Erofs => StatusCode::FORBIDDEN,
-        ErrorCode::Enoent | ErrorCode::Estale => StatusCode::NOT_FOUND,
-        ErrorCode::Eexist | ErrorCode::Enotempty | ErrorCode::Ebusy => StatusCode::CONFLICT,
-        ErrorCode::Enotsup | ErrorCode::Enosys => StatusCode::NOT_IMPLEMENTED,
-        ErrorCode::Enotdir | ErrorCode::Eisdir | ErrorCode::Einval | ErrorCode::Eloop => {
-            StatusCode::BAD_REQUEST
+        // A drive that failed closed answers ESTALE for everything, and a
+        // drive being shut down EBADF: the files are not gone, the drive is
+        // unavailable.
+        ErrorCode::Estale | ErrorCode::Ebadf | ErrorCode::Eagain | ErrorCode::Ebusy => {
+            StatusCode::SERVICE_UNAVAILABLE
         }
+        ErrorCode::Enospc | ErrorCode::Edquot => StatusCode::INSUFFICIENT_STORAGE,
+        ErrorCode::Efbig | ErrorCode::Eoverflow => StatusCode::PAYLOAD_TOO_LARGE,
+        ErrorCode::Enametoolong => StatusCode::URI_TOO_LONG,
+        ErrorCode::Enotsup | ErrorCode::Enosys => StatusCode::NOT_IMPLEMENTED,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -2303,6 +2688,8 @@ fn stream_file(
     start: u64,
     length: u64,
     chunk_size: usize,
+    send_timeout: Duration,
+    kill: Option<ConnectionKill>,
     control: RuntimeControl,
 ) -> HttpBody {
     let (sender, receiver) = tokio::sync::mpsc::channel(2);
@@ -2353,12 +2740,25 @@ fn stream_file(
                     if control.closing.load(Ordering::Acquire) != 0 {
                         break;
                     }
+                    let chunk = Bytes::copy_from_slice(&buffer[..count]);
                     let send_result = tokio::select! {
                         _ = notified => break,
-                        result = sender.send(Ok(Bytes::copy_from_slice(&buffer[..count]))) => result,
+                        result = tokio::time::timeout(send_timeout, sender.send(Ok(chunk))) => result,
                     };
-                    if send_result.is_err() {
-                        break;
+                    match send_result {
+                        Ok(Ok(())) => {}
+                        // The response was dropped: the client went away.
+                        Ok(Err(_)) => break,
+                        Err(_) => {
+                            // Nothing has taken a chunk for a whole request
+                            // timeout: the client stopped reading. Give up
+                            // the file handle, and the connection with it
+                            // when it carries nothing else.
+                            if let Some(kill) = &kill {
+                                kill.0.notify_one();
+                            }
+                            break;
+                        }
                     }
                     position += count as u64;
                 }
@@ -2437,6 +2837,59 @@ mod tests {
         }
         assert!(!retry_accept(ErrorKind::PermissionDenied));
         assert!(!retry_accept(ErrorKind::OutOfMemory));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_accept_is_reported_and_the_listener_keeps_accepting() {
+        let attempts = std::cell::Cell::new(0);
+        let reported = std::cell::RefCell::new(Vec::new());
+        let started = tokio::time::Instant::now();
+        let accepted = accept_next(
+            || {
+                attempts.set(attempts.get() + 1);
+                let attempt = attempts.get();
+                async move {
+                    match attempt {
+                        // The caller went away first: retried at once, and
+                        // not worth reporting.
+                        1 => Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted)),
+                        // EMFILE, ENFILE: out of file descriptors.
+                        2 | 3 => Err(std::io::Error::from_raw_os_error(24)),
+                        4 => Err(std::io::Error::from_raw_os_error(23)),
+                        _ => Ok(attempt),
+                    }
+                }
+            },
+            |error| reported.borrow_mut().push(error.raw_os_error()),
+        )
+        .await;
+        assert_eq!(accepted, 5);
+        assert_eq!(*reported.borrow(), vec![Some(24), Some(24), Some(23)]);
+        // 10 ms, 20 ms, 40 ms: it backs off instead of spinning.
+        assert_eq!(started.elapsed(), Duration::from_millis(70));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_pause_after_a_failed_accept_stops_growing_at_one_second() {
+        let attempts = std::cell::Cell::new(0);
+        let started = tokio::time::Instant::now();
+        accept_next(
+            || {
+                attempts.set(attempts.get() + 1);
+                let attempt = attempts.get();
+                async move {
+                    if attempt <= 10 {
+                        Err(std::io::Error::from_raw_os_error(24))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            |_error| {},
+        )
+        .await;
+        // 10+20+40+80+160+320+640 ms, then one second each for the rest.
+        assert_eq!(started.elapsed(), Duration::from_millis(1270 + 3000));
     }
 
     #[test]
@@ -2616,81 +3069,6 @@ mod tests {
         )
         .await
         .unwrap();
-    }
-
-    struct UploadHandle {
-        bytes: std::sync::Mutex<Vec<u8>>,
-        calls: AtomicUsize,
-        max_write: usize,
-    }
-
-    #[async_trait::async_trait]
-    impl FileHandle for UploadHandle {
-        async fn read(&self, _: &mut [u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
-            unreachable!()
-        }
-        async fn write(&self, bytes: &[u8], _: Option<u64>) -> mount_rs_core::Result<usize> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            let count = bytes.len().min(self.max_write);
-            self.bytes
-                .lock()
-                .unwrap()
-                .extend_from_slice(&bytes[..count]);
-            Ok(count)
-        }
-        async fn stat(&self) -> mount_rs_core::Result<Stats> {
-            unreachable!()
-        }
-        async fn truncate(&self, _: u64) -> mount_rs_core::Result<()> {
-            unreachable!()
-        }
-        async fn close(&self) -> mount_rs_core::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn fragmented_uploads_are_bounded_and_preserve_partial_writes() {
-        for max_write in [usize::MAX, 997, 0] {
-            let expected: Vec<u8> = (0..UPLOAD_BUFFER_BYTES * 2 + 51)
-                .map(|i| (i % 251) as u8)
-                .collect();
-            let frames = expected
-                .chunks(113)
-                .map(Bytes::copy_from_slice)
-                .collect::<Vec<_>>();
-            let (mut sender, body) = Channel::<Bytes, BoxError>::new(2);
-            tokio::spawn(async move {
-                for frame in frames {
-                    if sender.send_data(frame).await.is_err() {
-                        break;
-                    }
-                }
-            });
-            let mut body = body.boxed_unsync();
-            let recorded = Arc::new(UploadHandle {
-                bytes: std::sync::Mutex::new(Vec::new()),
-                calls: AtomicUsize::new(0),
-                max_write,
-            });
-            let handle: Arc<dyn FileHandle> = recorded.clone();
-            let control = RuntimeControl {
-                background_tasks: Arc::new(AtomicUsize::new(0)),
-                drained: Arc::new(Notify::new()),
-                shutdown: Arc::new(Notify::new()),
-                closing: Arc::new(AtomicUsize::new(0)),
-            };
-            let result = write_upload(&mut body, &handle, "/file", expected.len(), &control).await;
-            if max_write == 0 {
-                assert!(result.is_err());
-                continue;
-            }
-            assert_eq!(result.unwrap(), expected.len());
-            assert_eq!(*recorded.bytes.lock().unwrap(), expected);
-            if max_write == usize::MAX {
-                assert_eq!(recorded.calls.load(Ordering::Relaxed), 3);
-            }
-        }
     }
 
     struct PendingCloseHandle {

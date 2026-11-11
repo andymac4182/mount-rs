@@ -673,6 +673,14 @@ impl FsDriver for InstrumentedDriver {
         self.inner.capabilities()
     }
 
+    fn health(&self) -> Result<()> {
+        self.inner.health()
+    }
+
+    fn write_file_is_atomic(&self) -> bool {
+        self.inner.write_file_is_atomic()
+    }
+
     fn supports_guarded_mutations(&self) -> bool {
         self.inner.supports_guarded_mutations()
     }
