@@ -970,20 +970,27 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
         // behind non-authoritative fill admission or disk-cache I/O.
         drop(_write);
         let key = digest(id.0.as_bytes());
-        self.cache_bytes(guard, key, bytes, None).await?;
+        // The block is stored. A cache that cannot take a copy only costs a
+        // later miss; reporting it would tell the caller a completed write
+        // failed.
+        let _ = self.cache_bytes(guard, key, bytes, None).await;
         Ok(id)
     }
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
         let guard = self.io.clone().read_owned().await;
         let key = digest(id.0.as_bytes());
-        let (guard, hit) = self.read_cached(guard, key.clone(), read_file).await?;
-        if let Some(bytes) = hit {
-            return Ok(bytes);
-        }
+        // A cache fault is a miss, never a read error: the backing store is
+        // the authority and can still answer.
+        let guard = match self.read_cached(guard, key.clone(), read_file).await {
+            Ok((_, Some(bytes))) => return Ok(bytes),
+            Ok((guard, None)) => guard,
+            Err(_) => self.io.clone().read_owned().await,
+        };
         let started = std::time::Instant::now();
         let bytes = self.backing.get(id).await?;
-        self.cache_bytes(guard, key, &bytes, Some(started.elapsed()))
-            .await?;
+        let _ = self
+            .cache_bytes(guard, key, &bytes, Some(started.elapsed()))
+            .await;
         Ok(bytes)
     }
     async fn flush(&self) -> Result<()> {
@@ -1066,6 +1073,28 @@ mod tests {
             Ok(())
         }
     }
+    #[tokio::test]
+    async fn abandoned_index_bypasses_the_cache_but_still_refuses_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let backing = Arc::new(Backing::default());
+        let cache = DiskCachedBlockStore::open(backing.clone(), root.path(), "abandoned", 1024, 8)
+            .await
+            .unwrap();
+        let cached = cache.put(b"before the fault").await.unwrap();
+        // What a panic inside an index section leaves behind.
+        cache.disk.broken.store(true, Ordering::Release);
+
+        // A write the backing store accepted is reported as written.
+        let id = cache.put(b"after the fault").await.unwrap();
+        assert_eq!(backing.get(&id).await.unwrap(), b"after the fault");
+        // Reads are answered by the backing store, cached before or not.
+        assert_eq!(cache.get(&id).await.unwrap(), b"after the fault");
+        assert_eq!(cache.get(&cached).await.unwrap(), b"before the fault");
+        // Delete must invalidate the cached copy first, and cannot.
+        assert!(cache.delete(&cached).await.is_err());
+        assert_eq!(backing.get(&cached).await.unwrap(), b"before the fault");
+    }
+
     #[tokio::test]
     async fn deferred_fill_returns_before_disk_work_and_delete_invalidates_it() {
         let root = tempfile::tempdir().unwrap();
