@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::body::{Body as HttpBodyTrait, Frame, Incoming, SizeHint};
@@ -311,40 +312,6 @@ struct RequestConfig {
 #[derive(Clone)]
 struct ConnectionKill(Arc<Notify>);
 
-/// The connections being served, so that a close can stop the ones that
-/// outlive its drain deadline.
-#[derive(Default)]
-struct ConnectionRegistry {
-    next: AtomicU64,
-    live: std::sync::Mutex<HashMap<u64, Arc<Notify>>>,
-}
-
-impl ConnectionRegistry {
-    fn register(&self) -> (u64, Arc<Notify>) {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let kill = Arc::new(Notify::new());
-        if let Ok(mut live) = self.live.lock() {
-            live.insert(id, Arc::clone(&kill));
-        }
-        (id, kill)
-    }
-
-    fn remove(&self, id: u64) {
-        if let Ok(mut live) = self.live.lock() {
-            live.remove(&id);
-        }
-    }
-
-    fn kill_all(&self) {
-        if let Ok(live) = self.live.lock() {
-            for kill in live.values() {
-                // `notify_one` leaves a permit for a connection not yet waiting.
-                kill.notify_one();
-            }
-        }
-    }
-}
-
 #[derive(Clone)]
 struct RuntimeControl {
     background_tasks: Arc<AtomicUsize>,
@@ -431,7 +398,9 @@ pub struct HttpServer {
     listener: OnceLock<ListenerHandle>,
     connections: Arc<AtomicUsize>,
     connection_permits: Arc<Semaphore>,
-    registry: Arc<ConnectionRegistry>,
+    /// Set to true by a close that ran out of drain time: every connection
+    /// still being served stops.
+    stop_all: watch::Sender<bool>,
     accept_failures: Arc<AtomicU64>,
 }
 
@@ -514,7 +483,7 @@ impl HttpServer {
             listener: OnceLock::new(),
             connections: Arc::new(AtomicUsize::new(0)),
             connection_permits: Arc::new(Semaphore::new(options.max_connections.max(1))),
-            registry: Arc::new(ConnectionRegistry::default()),
+            stop_all: watch::channel(false).0,
             accept_failures: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -535,7 +504,6 @@ impl HttpServer {
         let _guard = ConnectionGuard {
             counter: self.connections.clone(),
             drained: self.drained.clone(),
-            registered: None,
         };
         if self.closing.load(Ordering::Acquire) != 0 {
             return error_response(RequestError::server_closing());
@@ -602,7 +570,7 @@ impl HttpServer {
         let connection_permits = Arc::clone(&self.connection_permits);
         let tcp_nodelay = self.tcp_nodelay;
         let http2_prior_knowledge = self.http2_prior_knowledge;
-        let registry = Arc::clone(&self.registry);
+        let stop_all = self.stop_all.clone();
         let accept_failures = Arc::clone(&self.accept_failures);
         let task = tokio::spawn(async move {
             loop {
@@ -638,11 +606,11 @@ impl HttpServer {
                         let shutdown = Arc::clone(&shutdown);
                         let closing = Arc::clone(&closing);
                         counter.fetch_add(1, Ordering::AcqRel);
-                        let (id, kill) = registry.register();
+                        let kill = Arc::new(Notify::new());
+                        let mut stop_all = stop_all.subscribe();
                         let guard = ConnectionGuard {
                             counter: Arc::clone(&counter),
                             drained: Arc::clone(&drained),
-                            registered: Some((Arc::clone(&registry), id)),
                         };
                         tokio::spawn(async move {
                             let _permit = permit;
@@ -678,12 +646,28 @@ impl HttpServer {
                                     if closing.load(Ordering::Acquire) != 0 {
                                         return;
                                     }
+                                    // Stopped alone, by a download whose
+                                    // client stopped reading, or with every
+                                    // other connection.
+                                    let killed = async {
+                                        tokio::select! {
+                                            _ = kill.notified() => {}
+                                            stop = async {
+                                                stop_all.wait_for(|stop| *stop).await.is_ok()
+                                            } => {
+                                                if !stop {
+                                                    std::future::pending::<()>().await;
+                                                }
+                                            }
+                                        }
+                                    };
+                                    tokio::pin!(killed);
                                     tokio::select! {
-                                        _ = kill.notified() => {}
+                                        _ = &mut killed => {}
                                         _ = shutdown_notified => {
                                             connection.as_mut().graceful_shutdown();
                                             tokio::select! {
-                                                _ = kill.notified() => {}
+                                                _ = &mut killed => {}
                                                 _ = &mut connection => {}
                                             }
                                         }
@@ -756,7 +740,7 @@ impl HttpServer {
                 // caller can release the drives. A stopped request lets go at
                 // its next await; closing its file handles, and a publication
                 // already under way, are given a little longer to land.
-                self.registry.kill_all();
+                self.stop_all.send_replace(true);
                 let grace = ABORT_GRACE.min(self.drain_timeout);
                 let _ = tokio::time::timeout(grace, self.complete_close()).await;
                 Err(HttpServerError::Timeout)
@@ -842,14 +826,10 @@ async fn wait_for_drain(
 struct ConnectionGuard {
     counter: Arc<AtomicUsize>,
     drained: Arc<Notify>,
-    registered: Option<(Arc<ConnectionRegistry>, u64)>,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        if let Some((registry, id)) = &self.registered {
-            registry.remove(*id);
-        }
         self.counter.fetch_sub(1, Ordering::AcqRel);
         self.drained.notify_waiters();
     }
@@ -1834,8 +1814,8 @@ fn child_path(directory: &str, name: &str) -> String {
 
 /// The temporary siblings this process is writing right now. Any other
 /// reserved name in a directory was left by a process that stopped mid-upload.
-fn active_siblings() -> &'static std::sync::Mutex<HashSet<String>> {
-    static ACTIVE: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
+fn active_siblings() -> &'static ArcSwap<im::HashSet<String>> {
+    static ACTIVE: OnceLock<ArcSwap<im::HashSet<String>>> = OnceLock::new();
     ACTIVE.get_or_init(Default::default)
 }
 
@@ -1861,18 +1841,14 @@ impl ActiveSibling {
             parent_path(target),
             &format!("{RESERVED_NAME_PREFIX}{:016x}{:016x}", word(), word()),
         );
-        if let Ok(mut active) = active_siblings().lock() {
-            active.insert(path.clone());
-        }
+        active_siblings().rcu(|active| active.update(path.clone()));
         Self { path }
     }
 }
 
 impl Drop for ActiveSibling {
     fn drop(&mut self) {
-        if let Ok(mut active) = active_siblings().lock() {
-            active.remove(&self.path);
-        }
+        active_siblings().rcu(|active| active.without(&self.path));
     }
 }
 
@@ -1935,9 +1911,7 @@ async fn remove_abandoned_siblings(driver: &dyn FsDriver, path: &str, max_entrie
     };
     let abandoned = |name: &str| {
         name.starts_with(RESERVED_NAME_PREFIX)
-            && active_siblings()
-                .lock()
-                .is_ok_and(|active| !active.contains(&child_path(path, name)))
+            && !active_siblings().load().contains(&child_path(path, name))
     };
     if entries.is_empty() || !entries.iter().all(|entry| abandoned(&entry.name)) {
         return false;

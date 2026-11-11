@@ -16,11 +16,13 @@ observability-otlp = [
 ]
 
 [dependencies]
+arc-swap = "1.9"
 bytes = "1"
 flate2 = "1"
 http-body-util = { version = "0.1", features = ["channel"] }
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
+im = "15.1"
 mount-rs-core = { path = "../.." }
 mount-rs-observability = { path = "../../crates/mount-rs-observability", optional = true }
 percent-encoding = "2"
