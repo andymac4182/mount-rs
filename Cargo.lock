@@ -1997,12 +1997,14 @@ dependencies = [
 name = "mount-rs-http"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "bytes",
  "flate2",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "im",
  "mount-rs-core",
  "mount-rs-host",
  "mount-rs-memfs",
