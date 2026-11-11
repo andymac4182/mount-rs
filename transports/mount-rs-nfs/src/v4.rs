@@ -650,12 +650,20 @@ struct CachedReply {
 
 #[derive(Debug, Clone)]
 struct SessionState {
-    id: [u8; NFS4_SESSIONID_SIZE],
     clientid: u64,
     next_sequence: Vec<u32>,
     in_flight: Vec<Option<u32>>,
     cached: Vec<Option<CachedReply>>,
     max_operations: u32,
+    max_cached: usize,
+}
+
+/// What an admitted request keeps from its session after the state lock is
+/// released.
+#[derive(Debug, Clone, Copy)]
+struct AdmittedSession {
+    clientid: u64,
+    highest_slot: u32,
     max_cached: usize,
 }
 
@@ -2389,6 +2397,14 @@ impl Nfs4Session {
                     .expect("validated session while holding state lock");
                 session.next_sequence[slot_index] = expected.wrapping_add(1);
                 session.in_flight[slot_index] = Some(*sequence);
+                // Copy only what the request needs. Cloning the session would
+                // copy every slot's cached reply under the state lock, on
+                // every request.
+                let admitted = AdmittedSession {
+                    clientid,
+                    highest_slot: session.next_sequence.len().saturating_sub(1) as u32,
+                    max_cached: session.max_cached,
+                };
                 let in_flight = InFlightSlot {
                     state: Arc::clone(&self.state),
                     sessionid: *sessionid,
@@ -2399,14 +2415,7 @@ impl Nfs4Session {
                 if let Some(client) = state.clients.get_mut(&clientid) {
                     client.renewed = self.now();
                 }
-                (
-                    state
-                        .sessions
-                        .get(sessionid)
-                        .expect("validated session while holding state lock")
-                        .clone(),
-                    in_flight,
-                )
+                (admitted, in_flight)
             } else if let Some(cached) = state
                 .sessions
                 .get(sessionid)
@@ -2436,7 +2445,6 @@ impl Nfs4Session {
                 return Ok(self.compound_error_body(NFS4ERR_SEQ_MISORDERED, &tag, &[]));
             }
         };
-        debug_assert_eq!(session.id, *sessionid);
         let mut cursor = Cursor {
             clientid: Some(session.clientid),
             session: Some(*sessionid),
@@ -2445,12 +2453,7 @@ impl Nfs4Session {
         let sequence_result = V4OpResult::with_body(
             OP_SEQUENCE,
             NFS4_OK,
-            sequence_body(
-                *sessionid,
-                *sequence,
-                *slot,
-                session.next_sequence.len().saturating_sub(1) as u32,
-            ),
+            sequence_body(*sessionid, *sequence, *slot, session.highest_slot),
         );
         let mut results = vec![sequence_result];
         let mut status = NFS4_OK;
@@ -2850,7 +2853,6 @@ impl Nfs4Session {
             state.sessions.insert(
                 id,
                 SessionState {
-                    id,
                     clientid: *clientid,
                     next_sequence: vec![1; slots],
                     in_flight: vec![None; slots],
@@ -5500,7 +5502,6 @@ mod tests {
             state.sessions.insert(
                 id,
                 super::SessionState {
-                    id,
                     clientid: 7,
                     next_sequence: vec![1],
                     in_flight: vec![None],
@@ -5573,7 +5574,6 @@ mod tests {
         session.state.lock().unwrap().sessions.insert(
             id,
             super::SessionState {
-                id,
                 clientid: 1,
                 next_sequence: vec![u32::MAX],
                 in_flight: vec![None],
