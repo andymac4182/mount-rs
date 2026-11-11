@@ -1471,7 +1471,9 @@ dependencies = [
 name = "mount-rs-kv"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "im",
  "libc",
  "mount-rs-core",
 ]

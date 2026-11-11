@@ -7,7 +7,9 @@ description = "Generic key-value storage adapter with mount-rs filesystem semant
 license = "Apache-2.0"
 
 [dependencies]
+arc-swap = "1.9"
 async-trait = "0.1"
+im = "15.1"
 mount-rs-core = { path = "../.." }
 
 [target.'cfg(unix)'.dependencies]

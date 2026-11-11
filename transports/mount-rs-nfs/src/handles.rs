@@ -1099,4 +1099,107 @@ mod tests {
         assert!(snapshots.get(1).is_some());
         assert!(snapshots.get(2).is_none());
     }
+
+    /// Benchmark for the directory-snapshot cache: READDIR continuation on a
+    /// cached listing (`get`), a re-list of a cached directory (`set_same`)
+    /// and a listing of a new directory into a full cache (`set_new`).
+    /// Latencies are per-operation averages over batches of 100, because one
+    /// operation is shorter than the clock tick on some hosts.
+    ///
+    ///
+    /// These numbers are why the cell stays. A lock-free replacement (an
+    /// atomically published persistent trie holding the map and the order)
+    /// was built and measured against the cell with the listing copy taken
+    /// out of both: for one caller a `set_new` took 1.7 to 2.4 microseconds
+    /// against 1.2 to 1.3, although eight callers at once ran 2 to 7 times
+    /// faster. A READDIR that starts a listing always does one `set`.
+    ///
+    /// `cargo test --release -p mount-rs-nfs --lib -- --ignored --nocapture bench_directory_snapshots`
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_directory_snapshots() {
+        use std::sync::Barrier;
+        use std::time::Instant;
+
+        const BATCH: usize = 100;
+        fn listing(seed: u64) -> Vec<String> {
+            (0..32).map(|i| format!("entry-{seed:04}-{i:02}")).collect()
+        }
+        fn run(op: &'static str, cached: u64, threads: usize, batches: usize) {
+            let snapshots = DirectorySnapshots::new(cached as usize);
+            for id in 0..cached {
+                snapshots.set(id, listing(id));
+            }
+            let barrier = Arc::new(Barrier::new(threads + 1));
+            let workers = (0..threads)
+                .map(|thread| {
+                    let snapshots = snapshots.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let mut samples = Vec::with_capacity(batches);
+                        let mut random = 0x9e37_79b9_7f4a_7c15_u64 ^ (thread as u64) << 32;
+                        let mut fresh = cached + (thread as u64 + 1) * 1_000_000_000;
+                        barrier.wait();
+                        for _ in 0..batches {
+                            let mut inputs = Vec::with_capacity(BATCH);
+                            for _ in 0..BATCH {
+                                random = random
+                                    .wrapping_mul(6_364_136_223_846_793_005)
+                                    .wrapping_add(1_442_695_040_888_963_407);
+                                let existing = (random >> 33) % cached;
+                                match op {
+                                    "get" => inputs.push((existing, Vec::new())),
+                                    "set_same" => inputs.push((existing, listing(existing))),
+                                    _ => {
+                                        fresh += 1;
+                                        inputs.push((fresh, listing(fresh)));
+                                    }
+                                }
+                            }
+                            let started = Instant::now();
+                            for (id, names) in inputs {
+                                if op == "get" {
+                                    std::hint::black_box(snapshots.get(id));
+                                } else {
+                                    std::hint::black_box(snapshots.set(id, names));
+                                }
+                            }
+                            samples.push(started.elapsed().as_nanos() as u64 / BATCH as u64);
+                        }
+                        samples
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            let started = Instant::now();
+            let mut samples = Vec::new();
+            for worker in workers {
+                samples.extend(worker.join().unwrap());
+            }
+            let wall = started.elapsed();
+            samples.sort_unstable();
+            // Wall time includes preparing the inputs, so the rate is taken
+            // from the time spent inside the operations.
+            let busy: u64 = samples.iter().sum::<u64>() * BATCH as u64;
+            let ops = (samples.len() * BATCH) as f64;
+            println!(
+                "snapbench op={op} cached={cached} threads={threads} ops/s={:.0} mean={:.0}ns p50={}ns p99={}ns wall={:?}",
+                ops * threads as f64 / (busy as f64 / 1e9),
+                busy as f64 / ops,
+                samples[samples.len() / 2],
+                samples[samples.len() * 99 / 100],
+                wall,
+            );
+        }
+        for round in 0..3 {
+            println!("snapbench round={round}");
+            for op in ["get", "set_same", "set_new"] {
+                for cached in [1_u64, 64, 1_000] {
+                    for threads in [1_usize, 8] {
+                        run(op, cached, threads, if op == "get" { 2_000 } else { 1_000 });
+                    }
+                }
+            }
+        }
+    }
 }

@@ -8,7 +8,6 @@
 //! This provider never makes a host-safe-mount claim about the server's data
 //! directory.
 
-use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use mount_rs_core::diagnostics::profile::{self, Event};
@@ -20,15 +19,18 @@ use mount_rs_core::storage::{
     MetadataStore, Namespace, NodeMetadata, WriterLease, decode_inode_namespace,
     encode_inode_namespace, validate_inode_publication, validate_node_kind,
 };
-use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
     VersionPublication, VersionedMetadataStore, VolumeId,
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
@@ -148,10 +150,90 @@ impl Default for PgliteStorageOptions {
     }
 }
 
+/// A future that borrows the connection for as long as it runs.
+type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// One whole operation, a single statement or a complete transaction, run by
+/// the task that owns the connection.
+type Job = Box<dyn for<'a> FnOnce(&'a mut Client) -> ClientFuture<'a, ()> + Send>;
+
+enum Request {
+    Job(Job),
+    Close,
+}
+
+/// Run one operation's future on the owning task and hand its result back.
+///
+/// The caller dropping its side stops the operation at its next suspension
+/// point: the future is dropped, so an open transaction rolls back, exactly
+/// as when the caller held the connection itself. An operation whose caller
+/// left before it started is never polled and sends nothing.
+struct Answer<'a, R> {
+    operation: Option<ClientFuture<'a, Result<R>>>,
+    reply: Option<oneshot::Sender<std::thread::Result<Result<R>>>>,
+}
+
+impl<R> Future for Answer<'_, R> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        let this = &mut *self;
+        let (Some(operation), Some(reply)) = (this.operation.as_mut(), this.reply.as_mut()) else {
+            return Poll::Ready(());
+        };
+        if reply.poll_closed(context).is_ready() {
+            this.operation = None;
+            return Poll::Ready(());
+        }
+        // A panic belongs to the caller that asked for the operation. The
+        // owning task survives it so later callers and close still work.
+        let outcome =
+            match std::panic::catch_unwind(AssertUnwindSafe(|| operation.as_mut().poll(context))) {
+                Ok(Poll::Pending) => return Poll::Pending,
+                Ok(Poll::Ready(result)) => Ok(result),
+                Err(panic) => Err(panic),
+            };
+        this.operation = None;
+        if let Some(reply) = this.reply.take() {
+            let _ = reply.send(outcome);
+        }
+        Poll::Ready(())
+    }
+}
+
+/// The task that owns the one connection. It runs one operation at a time in
+/// arrival order, so a transaction's statements are never interleaved with
+/// another caller's. Closing, or dropping every store handle, ends it; it
+/// then drops the client and waits for the PostgreSQL-wire task to finish.
+async fn own_client(
+    mut client: Client,
+    connection: JoinHandle<()>,
+    mut requests: mpsc::UnboundedReceiver<Request>,
+    close_gate: CloseGate,
+) {
+    while let Some(request) = requests.recv().await {
+        match request {
+            // An operation that was queued when close began is dropped
+            // unrun, which its caller reports as a closed connection.
+            Request::Job(job) => {
+                if close_gate.is_open() {
+                    job(&mut client).await;
+                }
+            }
+            Request::Close => break,
+        }
+    }
+    // Refuse what is still queued before waiting for the socket.
+    drop(requests);
+    drop(client);
+    let _ = connection.await;
+    close_gate.complete();
+}
+
 #[derive(Clone)]
 struct Database {
-    client: Arc<TurnLock<Option<Client>>>,
-    connection: Arc<ArcSwapOption<JoinHandle<()>>>,
+    /// The connection is owned by one task; callers send it whole operations.
+    requests: mpsc::UnboundedSender<Request>,
     close_gate: CloseGate,
     volume_key: String,
     durable: bool,
@@ -175,34 +257,54 @@ impl Database {
         let connection = tokio::spawn(async move {
             let _ = connection.await;
         });
+        let (requests, receiver) = mpsc::unbounded_channel();
+        let close_gate = CloseGate::new();
+        tokio::spawn(own_client(client, connection, receiver, close_gate.clone()));
         let database = Self {
-            client: Arc::new(TurnLock::new(Some(client))),
-            connection: Arc::new(ArcSwapOption::from_pointee(connection)),
-            close_gate: CloseGate::new(),
+            requests,
+            close_gate,
             volume_key: options.volume_key,
             durable: options.durable,
         };
+        let schema = schema.to_owned();
         database
-            .client
-            .lock()
-            .await
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .batch_execute(schema)
-            .await
-            .map_err(postgres_error)?;
+            .run(move |client| {
+                Box::pin(async move { client.batch_execute(&schema).await.map_err(postgres_error) })
+            })
+            .await?;
         Ok(database)
     }
 
-    async fn lock_client(&self) -> Result<TurnLockGuard<'_, Option<Client>>> {
+    /// Run one whole operation with exclusive use of the connection.
+    ///
+    /// Operations run one at a time in the order they were sent. Dropping the
+    /// returned future cancels the operation: one that has not started never
+    /// runs, and one in progress is dropped at its next suspension point, so
+    /// its transaction rolls back before the next operation starts.
+    async fn run<R, F>(&self, operation: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: for<'a> FnOnce(&'a mut Client) -> ClientFuture<'a, Result<R>> + Send + 'static,
+    {
         if !self.close_gate.is_open() {
             return Err(connection_closed());
         }
-        let client = self.client.lock().await;
-        if client.is_none() || !self.close_gate.is_open() {
-            return Err(connection_closed());
+        let (reply, result) = oneshot::channel();
+        let job: Job = Box::new(move |client| {
+            Box::pin(Answer {
+                operation: Some(operation(client)),
+                reply: Some(reply),
+            })
+        });
+        self.requests
+            .send(Request::Job(job))
+            .map_err(|_| connection_closed())?;
+        match result.await {
+            Ok(Ok(result)) => result,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            // The owning task dropped the operation: the store is closed.
+            Err(_) => Err(connection_closed()),
         }
-        Ok(client)
     }
 
     /// Close the client and wait for the PostgreSQL-wire task to observe the
@@ -211,69 +313,61 @@ impl Database {
     /// racing the old socket's teardown.
     async fn close(&self) -> Result<()> {
         if self.close_gate.start() {
-            let database = self.clone();
-            // Keep teardown owned by a task independent of this caller. If a
+            // Teardown belongs to the owning task, not to this caller. If a
             // close future is canceled, later callers still await this same
-            // teardown rather than observing partially detached state.
-            tokio::spawn(async move {
-                database.finish_close().await;
-            });
+            // teardown rather than observing partially detached state. The
+            // operation in progress finishes first; queued ones are refused.
+            if self.requests.send(Request::Close).is_err() {
+                // The owning task has already gone, with the connection.
+                self.close_gate.complete();
+            }
         }
         self.close_gate.wait().await;
         Ok(())
     }
 
-    async fn finish_close(&self) {
-        let client = self.client.lock().await.take();
-        drop(client);
-        // Only this one teardown ever reaches the handle, so the swapped-out
-        // pointer is the last one.
-        let connection = self.connection.swap(None).and_then(Arc::into_inner);
-        if let Some(connection) = connection {
-            let _ = connection.await;
-        }
-        self.close_gate.complete();
-    }
-
     async fn ensure_metadata_row(&self) -> Result<()> {
-        let client = self.lock_client().await?;
-        client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                "INSERT INTO mount_rs_metadata
+        let this = self.clone();
+        self.run(move |client| {
+            Box::pin(async move {
+                client
+                    .execute_typed(
+                        "INSERT INTO mount_rs_metadata
                     (volume_key, revision, namespace, owner, fence, expires, volume_id)
                  VALUES ($1, 0, NULL, NULL, 0, 0, 'pglite-' || md5($1))
                  ON CONFLICT (volume_key) DO NOTHING",
-                &[(&self.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?;
-        client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                "UPDATE mount_rs_metadata
+                        &[(&this.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                client
+                    .execute_typed(
+                        "UPDATE mount_rs_metadata
                  SET volume_id = 'pglite-' || md5(volume_key)
                  WHERE volume_key=$1 AND (volume_id IS NULL OR volume_id='')",
-                &[(&self.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?;
-        Ok(())
+                        &[(&this.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                Ok(())
+            })
+        })
+        .await
     }
 
     async fn flush(&self) -> Result<()> {
         // Successful execute/commit calls already received the server's
         // acknowledgement. This round trip is the provider barrier and also
         // propagates a dead connection to fsync callers.
-        let client = self.lock_client().await?;
-        client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .batch_execute("SELECT 1")
-            .await
-            .map_err(postgres_error)
+        self.run(move |client| {
+            Box::pin(async move {
+                client
+                    .batch_execute("SELECT 1")
+                    .await
+                    .map_err(postgres_error)
+            })
+        })
+        .await
     }
 }
 
@@ -304,49 +398,53 @@ fn decode_delegation_row(row: &tokio_postgres::Row) -> Result<(DelegationState, 
 }
 
 impl PgliteMetadataStore {
-    async fn delegation_transaction<T>(
+    async fn delegation_transaction<T: Send + 'static>(
         &self,
         backing: ConcurrentBackingId,
         expected: Option<u64>,
         force_revision: bool,
-        retired_receipt: Option<&GrantToken>,
-        operation: impl FnOnce(&mut DelegationState, &mut Namespace) -> Result<T> + Send,
+        retired_receipt: Option<GrantToken>,
+        operation: impl FnOnce(&mut DelegationState, &mut Namespace) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let mut guard = self.0.lock_client().await?;
-        let tx = guard
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
+        let this = self.clone();
+        self.0
+            .run(move |guard| {
+                Box::pin(async move {
+                    let tx = guard
+                        .transaction()
+                        .await
+                        .map_err(postgres_error)?;
+                    let row = tx.query_one("SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&this.0.volume_key]).await.map_err(postgres_error)?;
+                    let (mut state, mut ns) = decode_delegation_row(&row)?;
+                    if state.backing != backing {
+                        return Err(stale());
+                    }
+                    let revision = nonnegative(row.get(7), "revision")?;
+                    if expected.is_some_and(|value| value != revision)
+                        && !retired_receipt.is_some_and(|token| state.retired.contains(&token))
+                    {
+                        return Err(FsError::new(ErrorCode::Eagain));
+                    }
+                    let before = serde_json::to_string(&ns).map_err(backend_error)?;
+                    let result = operation(&mut state, &mut ns)?;
+                    state.validate(&ns)?;
+                    let after = serde_json::to_string(&ns).map_err(backend_error)?;
+                    let next = if force_revision || before != after {
+                        revision.checked_add(1).ok_or_else(stale)?
+                    } else {
+                        revision
+                    };
+                    let next = i64::try_from(next).map_err(|_| stale())?;
+                    let state = serde_json::to_string(&state).map_err(backend_error)?;
+                    let changed = tx.execute("UPDATE mount_rs_metadata SET revision=$2, namespace=$3, delegation=$4 WHERE volume_key=$1", &[&this.0.volume_key, &next, &after, &state]).await.map_err(postgres_error)?;
+                    if changed != 1 {
+                        return Err(stale());
+                    }
+                    tx.commit().await.map_err(postgres_error)?;
+                    Ok(result)
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        let row = tx.query_one("SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
-        let (mut state, mut ns) = decode_delegation_row(&row)?;
-        if state.backing != backing {
-            return Err(stale());
-        }
-        let revision = nonnegative(row.get(7), "revision")?;
-        if expected.is_some_and(|value| value != revision)
-            && !retired_receipt.is_some_and(|token| state.retired.contains(token))
-        {
-            return Err(FsError::new(ErrorCode::Eagain));
-        }
-        let before = serde_json::to_string(&ns).map_err(backend_error)?;
-        let result = operation(&mut state, &mut ns)?;
-        state.validate(&ns)?;
-        let after = serde_json::to_string(&ns).map_err(backend_error)?;
-        let next = if force_revision || before != after {
-            revision.checked_add(1).ok_or_else(stale)?
-        } else {
-            revision
-        };
-        let next = i64::try_from(next).map_err(|_| stale())?;
-        let state = serde_json::to_string(&state).map_err(backend_error)?;
-        let changed = tx.execute("UPDATE mount_rs_metadata SET revision=$2, namespace=$3, delegation=$4 WHERE volume_key=$1", &[&self.0.volume_key, &next, &after, &state]).await.map_err(postgres_error)?;
-        if changed != 1 {
-            return Err(stale());
-        }
-        tx.commit().await.map_err(postgres_error)?;
-        Ok(result)
     }
 
     /// Connect to a PGlite PostgreSQL-wire endpoint and initialize the
@@ -445,180 +543,181 @@ fn incompatible_schema(message: impl Into<String>) -> FsError {
 }
 
 async fn load_volume_id(database: &Database) -> Result<VolumeId> {
-    let client = database.lock_client().await?;
-    let row = client
-        .as_ref()
-        .ok_or_else(connection_closed)?
-        .query_typed_opt(
-            "SELECT volume_id FROM mount_rs_metadata WHERE volume_key=$1",
-            &[(&database.volume_key, Type::TEXT)],
-        )
+    let this = database.clone();
+    database
+        .run(move |client| {
+            Box::pin(async move {
+                let row = client
+                    .query_typed_opt(
+                        "SELECT volume_id FROM mount_rs_metadata WHERE volume_key=$1",
+                        &[(&this.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?
+                    .ok_or_else(|| incompatible_schema("PGlite metadata row is missing"))?;
+                let value = row
+                    .get::<_, Option<String>>(0)
+                    .ok_or_else(|| incompatible_schema("PGlite metadata volume_id is missing"))?;
+                VolumeId::new(value).map_err(|_| incompatible_schema("PGlite volume_id is invalid"))
+            })
+        })
         .await
-        .map_err(postgres_error)?
-        .ok_or_else(|| incompatible_schema("PGlite metadata row is missing"))?;
-    let value = row
-        .get::<_, Option<String>>(0)
-        .ok_or_else(|| incompatible_schema("PGlite metadata volume_id is missing"))?;
-    VolumeId::new(value).map_err(|_| incompatible_schema("PGlite volume_id is invalid"))
 }
 
 async fn initialize_version_schema(database: &Database) -> Result<()> {
-    let mut client = database.lock_client().await?;
-    let tx = client
-        .as_mut()
-        .ok_or_else(connection_closed)?
-        .transaction()
-        .await
-        .map_err(postgres_error)?;
-    tx.batch_execute(VERSION_SCHEMA)
-        .await
-        .map_err(postgres_error)?;
+    let this = database.clone();
+    database
+        .run(move |client| {
+            Box::pin(async move {
+                let tx = client.transaction().await.map_err(postgres_error)?;
+                tx.batch_execute(VERSION_SCHEMA)
+                    .await
+                    .map_err(postgres_error)?;
 
-    let stored_version = tx
-        .query_typed_opt(
-            "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
-            &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
-        )
-        .await
-        .map_err(postgres_error)?
-        .map(|row| row.get::<_, i64>(0));
-    if stored_version.is_some_and(|version| version > VERSION_SCHEMA_VERSION) {
-        return Err(incompatible_schema(
-            "PGlite versioning schema is newer than this mount-rs build",
-        ));
-    }
+                let stored_version = tx
+                    .query_typed_opt(
+                        "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
+                        &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?
+                    .map(|row| row.get::<_, i64>(0));
+                if stored_version.is_some_and(|version| version > VERSION_SCHEMA_VERSION) {
+                    return Err(incompatible_schema(
+                        "PGlite versioning schema is newer than this mount-rs build",
+                    ));
+                }
 
-    let volume_id = load_volume_id_from_transaction(&tx, database).await?;
-    let state = tx
-        .query_typed_opt(
-            "SELECT volume_id, next_sequence, next_read_fence
+                let volume_id = load_volume_id_from_transaction(&tx, &this).await?;
+                let state = tx
+                    .query_typed_opt(
+                        "SELECT volume_id, next_sequence, next_read_fence
              FROM mount_rs_version_state WHERE volume_key=$1 FOR UPDATE",
-            &[(&database.volume_key, Type::TEXT)],
-        )
-        .await
-        .map_err(postgres_error)?;
-    match state {
-        Some(row) => {
-            let state_volume = row.get::<_, String>(0);
-            let next_sequence = row.get::<_, i64>(1);
-            let next_read_fence = row.get::<_, i64>(2);
-            if state_volume != volume_id.0 || next_sequence <= 0 || next_read_fence < 0 {
-                return Err(incompatible_schema(
-                    "PGlite version state is inconsistent with its metadata volume",
-                ));
-            }
-        }
-        None => {
-            tx.execute_typed(
-                "INSERT INTO mount_rs_version_state
+                        &[(&this.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                match state {
+                    Some(row) => {
+                        let state_volume = row.get::<_, String>(0);
+                        let next_sequence = row.get::<_, i64>(1);
+                        let next_read_fence = row.get::<_, i64>(2);
+                        if state_volume != volume_id.0 || next_sequence <= 0 || next_read_fence < 0
+                        {
+                            return Err(incompatible_schema(
+                                "PGlite version state is inconsistent with its metadata volume",
+                            ));
+                        }
+                    }
+                    None => {
+                        tx.execute_typed(
+                            "INSERT INTO mount_rs_version_state
                  (volume_key, volume_id, head_id, next_sequence, next_read_fence)
                  VALUES ($1, $2, NULL, 1, 0)",
-                &[
-                    (&database.volume_key, Type::TEXT),
-                    (&volume_id.0, Type::TEXT),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        }
-    }
+                            &[(&this.volume_key, Type::TEXT), (&volume_id.0, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    }
+                }
 
-    let invalid_versions = tx
-        .query_typed_opt(
-            "SELECT EXISTS(
+                let invalid_versions = tx
+                    .query_typed_opt(
+                        "SELECT EXISTS(
                  SELECT 1 FROM mount_rs_versions
                  WHERE volume_key=$1 AND (volume_id IS NULL OR volume_id<>$2)
              )",
-            &[
-                (&database.volume_key, Type::TEXT),
-                (&volume_id.0, Type::TEXT),
-            ],
-        )
-        .await
-        .map_err(postgres_error)?
-        .ok_or_else(|| incompatible_schema("PGlite schema query returned no row"))?
-        .get::<_, bool>(0);
-    let invalid_pins = tx
-        .query_typed_opt(
-            "SELECT EXISTS(
+                        &[(&this.volume_key, Type::TEXT), (&volume_id.0, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?
+                    .ok_or_else(|| incompatible_schema("PGlite schema query returned no row"))?
+                    .get::<_, bool>(0);
+                let invalid_pins = tx
+                    .query_typed_opt(
+                        "SELECT EXISTS(
                  SELECT 1 FROM mount_rs_version_pins
                  WHERE volume_key=$1 AND (volume_id IS NULL OR volume_id<>$2)
              )",
-            &[
-                (&database.volume_key, Type::TEXT),
-                (&volume_id.0, Type::TEXT),
-            ],
-        )
-        .await
-        .map_err(postgres_error)?
-        .ok_or_else(|| incompatible_schema("PGlite schema query returned no row"))?
-        .get::<_, bool>(0);
-    if invalid_versions || invalid_pins {
-        return Err(incompatible_schema(
-            "PGlite version records or pins cross provider volumes",
-        ));
-    }
+                        &[(&this.volume_key, Type::TEXT), (&volume_id.0, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?
+                    .ok_or_else(|| incompatible_schema("PGlite schema query returned no row"))?
+                    .get::<_, bool>(0);
+                if invalid_versions || invalid_pins {
+                    return Err(incompatible_schema(
+                        "PGlite version records or pins cross provider volumes",
+                    ));
+                }
 
-    let head_id = tx
-        .query_typed_opt(
-            "SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1",
-            &[(&database.volume_key, Type::TEXT)],
-        )
-        .await
-        .map_err(postgres_error)?
-        .and_then(|row| row.get::<_, Option<String>>(0));
-    if let Some(head_id) = head_id {
-        let head = VersionId::decode(&head_id)
-            .map_err(|_| incompatible_schema("PGlite version head is malformed"))?;
-        if head.volume != volume_id {
-            return Err(incompatible_schema(
-                "PGlite version head belongs to another provider volume",
-            ));
-        }
-        let row = tx
-            .query_typed_opt(
-                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"),
-                &[
-                    (&database.volume_key, Type::TEXT),
-                    (&head_id, Type::TEXT),
-                    (&volume_id.0, Type::TEXT),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| {
-                incompatible_schema("PGlite version head references a missing version")
-            })?;
-        let record = decode_version_row(&row)
-            .and_then(|record| {
-                record.validate_for_volume(&volume_id)?;
-                Ok(record)
-            })
-            .map_err(|_| incompatible_schema("PGlite version head record is invalid"))?;
-        if record.id != head {
-            return Err(incompatible_schema(
-                "PGlite version head differs from its record identity",
-            ));
-        }
-    }
+                let head_id = tx
+                    .query_typed_opt(
+                        "SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1",
+                        &[(&this.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?
+                    .and_then(|row| row.get::<_, Option<String>>(0));
+                if let Some(head_id) = head_id {
+                    let head = VersionId::decode(&head_id)
+                        .map_err(|_| incompatible_schema("PGlite version head is malformed"))?;
+                    if head.volume != volume_id {
+                        return Err(incompatible_schema(
+                            "PGlite version head belongs to another provider volume",
+                        ));
+                    }
+                    let row = tx
+                        .query_typed_opt(
+                            &format!(
+                                "{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"
+                            ),
+                            &[
+                                (&this.volume_key, Type::TEXT),
+                                (&head_id, Type::TEXT),
+                                (&volume_id.0, Type::TEXT),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| {
+                            incompatible_schema("PGlite version head references a missing version")
+                        })?;
+                    let record = decode_version_row(&row)
+                        .and_then(|record| {
+                            record.validate_for_volume(&volume_id)?;
+                            Ok(record)
+                        })
+                        .map_err(|_| {
+                            incompatible_schema("PGlite version head record is invalid")
+                        })?;
+                    if record.id != head {
+                        return Err(incompatible_schema(
+                            "PGlite version head differs from its record identity",
+                        ));
+                    }
+                }
 
-    let schema_version = if stored_version == Some(VERSION_SCHEMA_VERSION) {
-        VERSION_SCHEMA_VERSION
-    } else {
-        VERSION_SCHEMA_BASE_VERSION
-    };
-    tx.execute_typed(
-        "INSERT INTO mount_rs_schema_versions(schema_name, schema_version)
+                let schema_version = if stored_version == Some(VERSION_SCHEMA_VERSION) {
+                    VERSION_SCHEMA_VERSION
+                } else {
+                    VERSION_SCHEMA_BASE_VERSION
+                };
+                tx.execute_typed(
+                    "INSERT INTO mount_rs_schema_versions(schema_name, schema_version)
          VALUES ($1, $2)
          ON CONFLICT(schema_name) DO UPDATE SET schema_version=excluded.schema_version",
-        &[
-            (&VERSION_SCHEMA_NAME, Type::TEXT),
-            (&schema_version, Type::INT8),
-        ],
-    )
-    .await
-    .map_err(postgres_error)?;
-    tx.commit().await.map_err(postgres_error)
+                    &[
+                        (&VERSION_SCHEMA_NAME, Type::TEXT),
+                        (&schema_version, Type::INT8),
+                    ],
+                )
+                .await
+                .map_err(postgres_error)?;
+                tx.commit().await.map_err(postgres_error)
+            })
+        })
+        .await
 }
 
 async fn load_volume_id_from_transaction(
@@ -848,90 +947,104 @@ impl MetadataStore for PgliteMetadataStore {
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT revision, namespace, write_mode FROM mount_rs_metadata WHERE volume_key = $1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        if row.get::<_, Option<String>>(2).as_deref() == Some("MRC4") {
-            return Err(stale());
-        }
-        let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
-        let namespace = row
-            .get::<_, Option<String>>(1)
-            .map(|json| {
-                profile::add(Event::NamespaceReturned, json.len() as u64);
-                serde_json::from_str(&json)
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT revision, namespace, write_mode FROM mount_rs_metadata WHERE volume_key = $1",
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    if row.get::<_, Option<String>>(2).as_deref() == Some("MRC4") {
+                        return Err(stale());
+                    }
+                    let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
+                    let namespace = row
+                        .get::<_, Option<String>>(1)
+                        .map(|json| {
+                            profile::add(Event::NamespaceReturned, json.len() as u64);
+                            serde_json::from_str(&json)
+                        })
+                        .transpose()
+                        .map_err(backend_error)?;
+                    Ok(LoadedMetadata {
+                        revision,
+                        namespace,
+                    })
+                })
             })
-            .transpose()
-            .map_err(backend_error)?;
-        Ok(LoadedMetadata {
-            revision,
-            namespace,
-        })
+            .await
     }
 
     async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
         // An out-of-range caller revision cannot match the signed provider
         // revision. Zero forces a full payload read, including initialization.
         let known = i64::try_from(known_revision).unwrap_or(0);
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT revision,
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT revision,
                         CASE WHEN revision > 0 AND revision = $2 THEN NULL ELSE namespace END, write_mode
                  FROM mount_rs_metadata WHERE volume_key = $1",
-                &[(&self.0.volume_key, Type::TEXT), (&known, Type::INT8)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        if row.get::<_, Option<String>>(2).as_deref() == Some("MRC4") {
-            return Err(stale());
-        }
-        let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
-        if revision != 0 && revision == known_revision {
-            return Ok(None);
-        }
-        // A single statement snapshot supplies both revision and payload. The
-        // CASE projection suppresses unchanged namespace bytes before the wire.
-        let namespace = row
-            .get::<_, Option<String>>(1)
-            .map(|json| {
-                profile::add(Event::NamespaceReturned, json.len() as u64);
-                serde_json::from_str(&json)
+                            &[(&this.0.volume_key, Type::TEXT), (&known, Type::INT8)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    if row.get::<_, Option<String>>(2).as_deref() == Some("MRC4") {
+                        return Err(stale());
+                    }
+                    let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
+                    if revision != 0 && revision == known_revision {
+                        return Ok(None);
+                    }
+                    // A single statement snapshot supplies both revision and payload. The
+                    // CASE projection suppresses unchanged namespace bytes before the wire.
+                    let namespace = row
+                        .get::<_, Option<String>>(1)
+                        .map(|json| {
+                            profile::add(Event::NamespaceReturned, json.len() as u64);
+                            serde_json::from_str(&json)
+                        })
+                        .transpose()
+                        .map_err(backend_error)?;
+                    Ok(Some(LoadedMetadata {
+                        revision,
+                        namespace,
+                    }))
+                })
             })
-            .transpose()
-            .map_err(backend_error)?;
-        Ok(Some(LoadedMetadata {
-            revision,
-            namespace,
-        }))
+            .await
     }
 
     async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
-        let client = self.0.lock_client().await?;
-        let row = client.as_ref().ok_or_else(connection_closed)?.query_one(
-            "SELECT write_mode, backing_id, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1", &[&self.0.volume_key]
-        ).await.map_err(postgres_error)?;
-        if row.get::<_, Option<String>>(0).as_deref() != Some("MRC4") {
-            return Ok(None);
-        }
-        let backing =
-            ConcurrentBackingId::from_hex(&row.get::<_, Option<String>>(1).ok_or_else(stale)?)
-                .map_err(|_| stale())?;
-        Ok(Some(InodeModeState {
-            backing,
-            structural_generation: inode_authority(&row, backing)?,
-        }))
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client.query_one(
+                        "SELECT write_mode, backing_id, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1", &[&this.0.volume_key]
+                    ).await.map_err(postgres_error)?;
+                    if row.get::<_, Option<String>>(0).as_deref() != Some("MRC4") {
+                        return Ok(None);
+                    }
+                    let backing =
+                        ConcurrentBackingId::from_hex(&row.get::<_, Option<String>>(1).ok_or_else(stale)?)
+                            .map_err(|_| stale())?;
+                    Ok(Some(InodeModeState {
+                        backing,
+                        structural_generation: inode_authority(&row, backing)?,
+                    }))
+                })
+            })
+            .await
     }
 
     async fn prepare_inode_mode(
@@ -943,101 +1056,111 @@ impl MetadataStore for PgliteMetadataStore {
         let generation = expected
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let tx = client
+                        .transaction()
+                        .await
+                        .map_err(postgres_error)?;
+                    let row = tx.query_one("SELECT write_mode, backing_id, owner, fence, expires, revision, namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&this.0.volume_key]).await.map_err(postgres_error)?;
+                    if row.get::<_, Option<String>>(0).as_deref() != Some("MRC2")
+                        || row.get::<_, Option<String>>(1).as_deref() != Some(backing.to_hex().as_str())
+                        || row.get::<_, Option<String>>(2).is_some()
+                        || row.get::<_, i64>(3) != CONCURRENT_FENCE_SENTINEL
+                        || row.get::<_, i64>(4) != 0
+                    {
+                        return Err(stale());
+                    }
+                    if row.get::<_, i64>(5) != expected {
+                        return Err(inode_conflict());
+                    }
+                    if expected == 0 {
+                        return Err(FsError::new(ErrorCode::Ebusy));
+                    }
+                    let namespace: Namespace =
+                        serde_json::from_str(&row.get::<_, Option<String>>(6).ok_or_else(stale)?)
+                            .map_err(backend_error)?;
+                    namespace.validate()?;
+                    let guards = tx
+                        .query(
+                            "SELECT inode FROM mount_rs_inode_guards WHERE volume_key=$1 FOR UPDATE",
+                            &[&this.0.volume_key],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if !guards.is_empty() {
+                        return Err(stale());
+                    }
+                    for (inode, node) in &namespace.nodes {
+                        let node = encode_inode_node(node)?;
+                        tx.execute("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[&this.0.volume_key, &inode_signed(*inode)?, &generation, &node]).await.map_err(postgres_error)?;
+                    }
+                    let encoded =
+                        String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
+                    profile::add(Event::NamespaceSerialized, encoded.len() as u64);
+                    tx.execute(
+                        "UPDATE mount_rs_metadata SET write_mode='MRC4',revision=$2,namespace=$3 WHERE volume_key=$1",
+                        &[&this.0.volume_key, &generation, &encoded],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                    tx.commit().await.map_err(postgres_error)
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        let row = tx.query_one("SELECT write_mode, backing_id, owner, fence, expires, revision, namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
-        if row.get::<_, Option<String>>(0).as_deref() != Some("MRC2")
-            || row.get::<_, Option<String>>(1).as_deref() != Some(backing.to_hex().as_str())
-            || row.get::<_, Option<String>>(2).is_some()
-            || row.get::<_, i64>(3) != CONCURRENT_FENCE_SENTINEL
-            || row.get::<_, i64>(4) != 0
-        {
-            return Err(stale());
-        }
-        if row.get::<_, i64>(5) != expected {
-            return Err(inode_conflict());
-        }
-        if expected == 0 {
-            return Err(FsError::new(ErrorCode::Ebusy));
-        }
-        let namespace: Namespace =
-            serde_json::from_str(&row.get::<_, Option<String>>(6).ok_or_else(stale)?)
-                .map_err(backend_error)?;
-        namespace.validate()?;
-        let guards = tx
-            .query(
-                "SELECT inode FROM mount_rs_inode_guards WHERE volume_key=$1 FOR UPDATE",
-                &[&self.0.volume_key],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if !guards.is_empty() {
-            return Err(stale());
-        }
-        for (inode, node) in &namespace.nodes {
-            let node = encode_inode_node(node)?;
-            tx.execute("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[&self.0.volume_key, &inode_signed(*inode)?, &generation, &node]).await.map_err(postgres_error)?;
-        }
-        let encoded =
-            String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
-        profile::add(Event::NamespaceSerialized, encoded.len() as u64);
-        tx.execute(
-            "UPDATE mount_rs_metadata SET write_mode='MRC4',revision=$2,namespace=$3 WHERE volume_key=$1",
-            &[&self.0.volume_key, &generation, &encoded],
-        )
-        .await
-        .map_err(postgres_error)?;
-        tx.commit().await.map_err(postgres_error)
     }
 
     async fn load_inode_snapshot(
         &self,
         backing: ConcurrentBackingId,
     ) -> Result<InodeMetadataSnapshot> {
-        let client = self.0.lock_client().await?;
-        // One statement snapshot supplies the root and every authoritative guard.
-        let rows = client.as_ref().ok_or_else(connection_closed)?.query(
-            "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,m.namespace,g.inode,g.generation,g.revision,g.node FROM mount_rs_metadata m LEFT JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 ORDER BY g.inode", &[&self.0.volume_key]
-        ).await.map_err(postgres_error)?;
-        let first = rows.first().ok_or_else(stale)?;
-        let generation = inode_authority(first, backing)?;
-        let mut namespace = decode_inode_namespace(
-            first
-                .get::<_, Option<String>>(6)
-                .ok_or_else(stale)?
-                .as_bytes(),
-        )?;
-        let base_keys: Vec<_> = namespace.nodes.keys().copied().collect();
-        namespace.nodes.clear();
-        let mut revisions = BTreeMap::new();
-        for row in rows {
-            let inode = nonnegative(row.get::<_, Option<i64>>(7).ok_or_else(stale)?, "inode")?;
-            if nonnegative(row.get(8), "guard generation")? != generation {
-                return Err(stale());
-            }
-            let node = decode_inode_node(inode, &row.get::<_, String>(10))?;
-            namespace.nodes.insert(inode, node);
-            revisions.insert(inode, nonnegative(row.get(9), "inode revision")?);
-        }
-        if !base_keys
-            .iter()
-            .copied()
-            .eq(namespace.nodes.keys().copied())
-        {
-            return Err(stale());
-        }
-        let snapshot = InodeMetadataSnapshot {
-            structural_generation: generation,
-            namespace,
-            inode_revisions: revisions,
-        };
-        snapshot.validate()?;
-        Ok(snapshot)
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    // One statement snapshot supplies the root and every authoritative guard.
+                    let rows = client.query(
+                        "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,m.namespace,g.inode,g.generation,g.revision,g.node FROM mount_rs_metadata m LEFT JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 ORDER BY g.inode", &[&this.0.volume_key]
+                    ).await.map_err(postgres_error)?;
+                    let first = rows.first().ok_or_else(stale)?;
+                    let generation = inode_authority(first, backing)?;
+                    let mut namespace = decode_inode_namespace(
+                        first
+                            .get::<_, Option<String>>(6)
+                            .ok_or_else(stale)?
+                            .as_bytes(),
+                    )?;
+                    let base_keys: Vec<_> = namespace.nodes.keys().copied().collect();
+                    namespace.nodes.clear();
+                    let mut revisions = BTreeMap::new();
+                    for row in rows {
+                        let inode = nonnegative(row.get::<_, Option<i64>>(7).ok_or_else(stale)?, "inode")?;
+                        if nonnegative(row.get(8), "guard generation")? != generation {
+                            return Err(stale());
+                        }
+                        let node = decode_inode_node(inode, &row.get::<_, String>(10))?;
+                        namespace.nodes.insert(inode, node);
+                        revisions.insert(inode, nonnegative(row.get(9), "inode revision")?);
+                    }
+                    if !base_keys
+                        .iter()
+                        .copied()
+                        .eq(namespace.nodes.keys().copied())
+                    {
+                        return Err(stale());
+                    }
+                    let snapshot = InodeMetadataSnapshot {
+                        structural_generation: generation,
+                        namespace,
+                        inode_revisions: revisions,
+                    };
+                    snapshot.validate()?;
+                    Ok(snapshot)
+                })
+            })
+            .await
     }
 
     async fn load_inode(
@@ -1063,23 +1186,29 @@ impl MetadataStore for PgliteMetadataStore {
         let known_rev = known
             .and_then(|v| i64::try_from(v.inode_revision).ok())
             .unwrap_or(-1);
-        let client = self.0.lock_client().await?;
-        let row = client.as_ref().ok_or_else(connection_closed)?.query_opt(
-            "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,g.generation,g.revision,CASE WHEN m.revision=$3 AND g.generation=$3 AND g.revision=$4 THEN NULL ELSE g.node END FROM mount_rs_metadata m JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 AND g.inode=$2", &[&self.0.volume_key,&inode_sql,&known_gen,&known_rev]
-        ).await.map_err(postgres_error)?.ok_or_else(stale)?;
-        let generation = inode_authority(&row, backing)?;
-        if nonnegative(row.get(6), "guard generation")? != generation {
-            return Err(stale());
-        }
-        let version = InodeVersion {
-            structural_generation: generation,
-            inode_revision: nonnegative(row.get(7), "inode revision")?,
-        };
-        if known == Some(version) {
-            return Ok(None);
-        }
-        let node = decode_inode_node(inode, &row.get::<_, Option<String>>(8).ok_or_else(stale)?)?;
-        Ok(Some(LoadedInode { version, node }))
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client.query_opt(
+                        "SELECT m.write_mode,m.backing_id,m.owner,m.fence,m.expires,m.revision,g.generation,g.revision,CASE WHEN m.revision=$3 AND g.generation=$3 AND g.revision=$4 THEN NULL ELSE g.node END FROM mount_rs_metadata m JOIN mount_rs_inode_guards g ON g.volume_key=m.volume_key WHERE m.volume_key=$1 AND g.inode=$2", &[&this.0.volume_key,&inode_sql,&known_gen,&known_rev]
+                    ).await.map_err(postgres_error)?.ok_or_else(stale)?;
+                    let generation = inode_authority(&row, backing)?;
+                    if nonnegative(row.get(6), "guard generation")? != generation {
+                        return Err(stale());
+                    }
+                    let version = InodeVersion {
+                        structural_generation: generation,
+                        inode_revision: nonnegative(row.get(7), "inode revision")?,
+                    };
+                    if known == Some(version) {
+                        return Ok(None);
+                    }
+                    let node = decode_inode_node(inode, &row.get::<_, Option<String>>(8).ok_or_else(stale)?)?;
+                    Ok(Some(LoadedInode { version, node }))
+                })
+            })
+            .await
     }
 
     async fn publish_inode_if_version(
@@ -1095,37 +1224,41 @@ impl MetadataStore for PgliteMetadataStore {
         let next = expected_rev
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let tx = client
+                        .transaction()
+                        .await
+                        .map_err(postgres_error)?;
+                    // Lock only this guard first. A structural writer locks all guards before
+                    // replacing them; a waiting publisher must reread fresh root authority.
+                    let guard = tx.query_opt("SELECT generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 AND inode=$2 FOR UPDATE", &[&this.0.volume_key,&inode_sql]).await.map_err(postgres_error)?;
+                    let root = tx.query_one("SELECT write_mode,backing_id,owner,fence,expires,revision FROM mount_rs_metadata WHERE volume_key=$1", &[&this.0.volume_key]).await.map_err(postgres_error)?;
+                    let generation = inode_authority(&root, backing)?;
+                    if generation != expected.structural_generation {
+                        return Err(inode_conflict());
+                    }
+                    let guard = guard.ok_or_else(stale)?;
+                    if guard.get::<_, i64>(0) != expected_gen || guard.get::<_, i64>(1) != expected_rev {
+                        return Err(inode_conflict());
+                    }
+                    let original = decode_inode_node(inode, &guard.get::<_, String>(2))?;
+                    validate_inode_publication(inode, &original, &node)?;
+                    let json = encode_inode_node(&node)?;
+                    let changed = tx.execute("UPDATE mount_rs_inode_guards SET revision=$3,node=$4 WHERE volume_key=$1 AND inode=$2 AND generation=$5 AND revision=$6", &[&this.0.volume_key,&inode_sql,&next,&json,&expected_gen,&expected_rev]).await.map_err(postgres_error)?;
+                    if changed != 1 {
+                        return Err(stale());
+                    }
+                    tx.commit().await.map_err(postgres_error)?;
+                    Ok(InodeVersion {
+                        structural_generation: generation,
+                        inode_revision: next as u64,
+                    })
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        // Lock only this guard first. A structural writer locks all guards before
-        // replacing them; a waiting publisher must reread fresh root authority.
-        let guard = tx.query_opt("SELECT generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 AND inode=$2 FOR UPDATE", &[&self.0.volume_key,&inode_sql]).await.map_err(postgres_error)?;
-        let root = tx.query_one("SELECT write_mode,backing_id,owner,fence,expires,revision FROM mount_rs_metadata WHERE volume_key=$1", &[&self.0.volume_key]).await.map_err(postgres_error)?;
-        let generation = inode_authority(&root, backing)?;
-        if generation != expected.structural_generation {
-            return Err(inode_conflict());
-        }
-        let guard = guard.ok_or_else(stale)?;
-        if guard.get::<_, i64>(0) != expected_gen || guard.get::<_, i64>(1) != expected_rev {
-            return Err(inode_conflict());
-        }
-        let original = decode_inode_node(inode, &guard.get::<_, String>(2))?;
-        validate_inode_publication(inode, &original, &node)?;
-        let json = encode_inode_node(&node)?;
-        let changed = tx.execute("UPDATE mount_rs_inode_guards SET revision=$3,node=$4 WHERE volume_key=$1 AND inode=$2 AND generation=$5 AND revision=$6", &[&self.0.volume_key,&inode_sql,&next,&json,&expected_gen,&expected_rev]).await.map_err(postgres_error)?;
-        if changed != 1 {
-            return Err(stale());
-        }
-        tx.commit().await.map_err(postgres_error)?;
-        Ok(InodeVersion {
-            structural_generation: generation,
-            inode_revision: next as u64,
-        })
     }
 
     async fn publish_structure_if_versions(
@@ -1140,112 +1273,128 @@ impl MetadataStore for PgliteMetadataStore {
         let next = expected
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
+        let expected_inode_revisions = expected_inode_revisions.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let tx = client
+                        .transaction()
+                        .await
+                        .map_err(postgres_error)?;
+                    let root = tx.query_one("SELECT write_mode,backing_id,owner,fence,expires,revision,namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&this.0.volume_key]).await.map_err(postgres_error)?;
+                    if inode_authority(&root, backing)? != expected_generation {
+                        return Err(inode_conflict());
+                    }
+                    let rows = tx.query("SELECT inode,generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 ORDER BY inode FOR UPDATE", &[&this.0.volume_key]).await.map_err(postgres_error)?;
+                    let mut actual = BTreeMap::new();
+                    let mut nodes = BTreeMap::new();
+                    for row in rows {
+                        if row.get::<_, i64>(1) != expected {
+                            return Err(stale());
+                        }
+                        let inode = nonnegative(row.get(0), "inode")?;
+                        let node = decode_inode_node(inode, &row.get::<_, String>(3))?;
+                        nodes.insert(inode, node);
+                        actual.insert(inode, nonnegative(row.get(2), "inode revision")?);
+                    }
+                    let mut base = decode_inode_namespace(
+                        root.get::<_, Option<String>>(6)
+                            .ok_or_else(stale)?
+                            .as_bytes(),
+                    )?;
+                    if !actual.keys().eq(base.nodes.keys()) {
+                        return Err(stale());
+                    }
+                    base.nodes = nodes.into();
+                    base.validate()?;
+                    if actual != expected_inode_revisions {
+                        return Err(inode_conflict());
+                    }
+                    let json = String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
+                    profile::add(Event::NamespaceSerialized, json.len() as u64);
+                    tx.execute(
+                        "DELETE FROM mount_rs_inode_guards WHERE volume_key=$1",
+                        &[&this.0.volume_key],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                    for (inode, node) in &namespace.nodes {
+                        let node = encode_inode_node(node)?;
+                        tx.execute("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[&this.0.volume_key,&inode_signed(*inode)?,&next,&node]).await.map_err(postgres_error)?;
+                    }
+                    tx.execute(
+                        "UPDATE mount_rs_metadata SET revision=$2,namespace=$3 WHERE volume_key=$1",
+                        &[&this.0.volume_key, &next, &json],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                    tx.commit().await.map_err(postgres_error)?;
+                    Ok(next as u64)
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        let root = tx.query_one("SELECT write_mode,backing_id,owner,fence,expires,revision,namespace FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
-        if inode_authority(&root, backing)? != expected_generation {
-            return Err(inode_conflict());
-        }
-        let rows = tx.query("SELECT inode,generation,revision,node FROM mount_rs_inode_guards WHERE volume_key=$1 ORDER BY inode FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
-        let mut actual = BTreeMap::new();
-        let mut nodes = BTreeMap::new();
-        for row in rows {
-            if row.get::<_, i64>(1) != expected {
-                return Err(stale());
-            }
-            let inode = nonnegative(row.get(0), "inode")?;
-            let node = decode_inode_node(inode, &row.get::<_, String>(3))?;
-            nodes.insert(inode, node);
-            actual.insert(inode, nonnegative(row.get(2), "inode revision")?);
-        }
-        let mut base = decode_inode_namespace(
-            root.get::<_, Option<String>>(6)
-                .ok_or_else(stale)?
-                .as_bytes(),
-        )?;
-        if !actual.keys().eq(base.nodes.keys()) {
-            return Err(stale());
-        }
-        base.nodes = nodes.into();
-        base.validate()?;
-        if &actual != expected_inode_revisions {
-            return Err(inode_conflict());
-        }
-        let json = String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
-        profile::add(Event::NamespaceSerialized, json.len() as u64);
-        tx.execute(
-            "DELETE FROM mount_rs_inode_guards WHERE volume_key=$1",
-            &[&self.0.volume_key],
-        )
-        .await
-        .map_err(postgres_error)?;
-        for (inode, node) in &namespace.nodes {
-            let node = encode_inode_node(node)?;
-            tx.execute("INSERT INTO mount_rs_inode_guards(volume_key,inode,generation,revision,node) VALUES($1,$2,$3,0,$4)", &[&self.0.volume_key,&inode_signed(*inode)?,&next,&node]).await.map_err(postgres_error)?;
-        }
-        tx.execute(
-            "UPDATE mount_rs_metadata SET revision=$2,namespace=$3 WHERE volume_key=$1",
-            &[&self.0.volume_key, &next, &json],
-        )
-        .await
-        .map_err(postgres_error)?;
-        tx.commit().await.map_err(postgres_error)?;
-        Ok(next as u64)
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT write_mode, backing_id, owner, fence, expires
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT write_mode, backing_id, owner, fence, expires
                  FROM mount_rs_metadata WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    let mode = row.get::<_, Option<String>>(0);
+                    let backing = row.get::<_, Option<String>>(1);
+                    let owner = row.get::<_, Option<String>>(2);
+                    let fence = row.get::<_, i64>(3);
+                    let expires = row.get::<_, i64>(4);
+                    match (mode.as_deref(), backing.as_deref()) {
+                        (None, None) if fence != CONCURRENT_FENCE_SENTINEL => {
+                            Ok(ConcurrentModeState::Legacy)
+                        }
+                        (Some(CONCURRENT_WRITE_MODE), None)
+                            if owner.is_none()
+                                && fence == CONCURRENT_FENCE_SENTINEL
+                                && expires == 0 =>
+                        {
+                            Ok(ConcurrentModeState::Mrc1)
+                        }
+                        (Some(BOUND_CONCURRENT_WRITE_MODE), Some(id))
+                            if owner.is_none()
+                                && fence == CONCURRENT_FENCE_SENTINEL
+                                && expires == 0 =>
+                        {
+                            Ok(ConcurrentModeState::Mrc2(
+                                ConcurrentBackingId::from_hex(id).map_err(|_| stale())?,
+                            ))
+                        }
+                        (Some(BOUND_CONCURRENT_WRITE_MODE), _)
+                        | (Some("MRC3"), _)
+                        | (Some("MRC4"), _) => Err(stale()),
+                        _ => Err(backend_error(
+                            "PGlite concurrent mode, backing ID, and fence disagree",
+                        )),
+                    }
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let mode = row.get::<_, Option<String>>(0);
-        let backing = row.get::<_, Option<String>>(1);
-        let owner = row.get::<_, Option<String>>(2);
-        let fence = row.get::<_, i64>(3);
-        let expires = row.get::<_, i64>(4);
-        match (mode.as_deref(), backing.as_deref()) {
-            (None, None) if fence != CONCURRENT_FENCE_SENTINEL => Ok(ConcurrentModeState::Legacy),
-            (Some(CONCURRENT_WRITE_MODE), None)
-                if owner.is_none() && fence == CONCURRENT_FENCE_SENTINEL && expires == 0 =>
-            {
-                Ok(ConcurrentModeState::Mrc1)
-            }
-            (Some(BOUND_CONCURRENT_WRITE_MODE), Some(id))
-                if owner.is_none() && fence == CONCURRENT_FENCE_SENTINEL && expires == 0 =>
-            {
-                Ok(ConcurrentModeState::Mrc2(
-                    ConcurrentBackingId::from_hex(id).map_err(|_| stale())?,
-                ))
-            }
-            (Some(BOUND_CONCURRENT_WRITE_MODE), _) | (Some("MRC3"), _) | (Some("MRC4"), _) => {
-                Err(stale())
-            }
-            _ => Err(backend_error(
-                "PGlite concurrent mode, backing ID, and fence disagree",
-            )),
-        }
     }
 
     async fn preflight_new_bound_mode(&self) -> Result<()> {
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT write_mode IS NULL AND backing_id IS NULL AND revision=0
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT write_mode IS NULL AND backing_id IS NULL AND revision=0
                         AND namespace IS NULL AND owner IS NULL AND fence=0 AND expires=0
                         AND EXISTS (SELECT 1 FROM mount_rs_version_state
                                     WHERE volume_key=$1 AND head_id IS NULL
@@ -1253,26 +1402,32 @@ impl MetadataStore for PgliteMetadataStore {
                         AND NOT EXISTS (SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
                         AND NOT EXISTS (SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)
                  FROM mount_rs_metadata WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    if row.get::<_, bool>(0) {
+                        Ok(())
+                    } else {
+                        Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("preflight new bound PGlite metadata"))
+                    }
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        if row.get::<_, bool>(0) {
-            Ok(())
-        } else {
-            Err(FsError::new(ErrorCode::Ebusy).with_syscall("preflight new bound PGlite metadata"))
-        }
     }
 
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
-        let client = self.0.lock_client().await?;
-        let backing_text = backing.to_hex();
-        let changed = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3, fence=$4
+        let this = self.clone();
+        let changed = self
+            .0
+            .run(move |client| {
+                Box::pin(async move {
+                    let backing_text = backing.to_hex();
+                    let changed = client
+                        .execute_typed(
+                            "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3, fence=$4
                  WHERE volume_key=$1 AND write_mode IS NULL AND backing_id IS NULL
                    AND revision=0 AND namespace IS NULL
                    AND owner IS NULL AND fence=0 AND expires=0
@@ -1282,19 +1437,23 @@ impl MetadataStore for PgliteMetadataStore {
                        AND next_sequence=1 AND next_read_fence=0)
                    AND NOT EXISTS (SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
                    AND NOT EXISTS (SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
-                    (&backing_text, Type::TEXT),
-                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
+                                (&backing_text, Type::TEXT),
+                                (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    Ok(changed)
+                })
+            })
+            .await?;
         if changed == 1 {
             return Ok(());
         }
-        drop(client);
+        // A separate operation: another caller may run between the two.
         match self.concurrent_mode_state().await? {
             ConcurrentModeState::Mrc2(id) if id == backing => Ok(()),
             ConcurrentModeState::Mrc2(_) => Err(stale()),
@@ -1307,15 +1466,21 @@ impl MetadataStore for PgliteMetadataStore {
     }
 
     async fn delegation_state(&self) -> Result<Option<DelegationState>> {
-        let client = self.0.lock_client().await?;
-        let row = client.as_ref().ok_or_else(connection_closed)?.query_one(
-            "SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires FROM mount_rs_metadata WHERE volume_key=$1", &[&self.0.volume_key]
-        ).await.map_err(postgres_error)?;
-        if row.get::<_, Option<String>>(0).as_deref() != Some("MRC3") {
-            return Ok(None);
-        }
-        let (state, _) = decode_delegation_row(&row)?;
-        Ok(Some(state))
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client.query_one(
+                        "SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires FROM mount_rs_metadata WHERE volume_key=$1", &[&this.0.volume_key]
+                    ).await.map_err(postgres_error)?;
+                    if row.get::<_, Option<String>>(0).as_deref() != Some("MRC3") {
+                        return Ok(None);
+                    }
+                    let (state, _) = decode_delegation_row(&row)?;
+                    Ok(Some(state))
+                })
+            })
+            .await
     }
 
     async fn prepare_delegated_mode(
@@ -1323,64 +1488,69 @@ impl MetadataStore for PgliteMetadataStore {
         backing: ConcurrentBackingId,
         expected_revision: u64,
     ) -> Result<()> {
-        let mut guard = self.0.lock_client().await?;
-        let tx = guard
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
+        let this = self.clone();
+        self.0
+            .run(move |guard| {
+                Box::pin(async move {
+                    let tx = guard
+                        .transaction()
+                        .await
+                        .map_err(postgres_error)?;
+                    let row = tx.query_one("SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&this.0.volume_key]).await.map_err(postgres_error)?;
+                    let revision = nonnegative(row.get(7), "revision")?;
+                    if row.get::<_, Option<String>>(0).as_deref() == Some("MRC3") {
+                        let (state, _) = decode_delegation_row(&row)?;
+                        if state.backing != backing {
+                            return Err(stale());
+                        }
+                        tx.commit().await.map_err(postgres_error)?;
+                        return Ok(());
+                    }
+                    if revision != expected_revision {
+                        return Err(FsError::new(ErrorCode::Eagain));
+                    }
+                    let mode = row.get::<_, Option<String>>(0);
+                    let valid_mode = mode.is_none() || mode.as_deref() == Some(BOUND_CONCURRENT_WRITE_MODE);
+                    if !valid_mode || row.get::<_, Option<String>>(4).is_some() {
+                        return Err(FsError::new(ErrorCode::Ebusy));
+                    }
+                    if mode.is_some()
+                        && row.get::<_, Option<String>>(1).as_deref() != Some(backing.to_hex().as_str())
+                    {
+                        return Err(stale());
+                    }
+                    if row.get::<_, Option<String>>(2).is_some()
+                        || (mode.is_none()
+                            && (row.get::<_, Option<String>>(1).is_some()
+                                || row.get::<_, i64>(5) == CONCURRENT_FENCE_SENTINEL))
+                        || (mode.is_some() && row.get::<_, i64>(5) != CONCURRENT_FENCE_SENTINEL)
+                        || row.get::<_, i64>(6) != 0
+                    {
+                        return Err(stale());
+                    }
+                    let ns: Namespace =
+                        serde_json::from_str(&row.get::<_, Option<String>>(3).ok_or_else(stale)?)
+                            .map_err(backend_error)?;
+                    ns.validate()?;
+                    let historical: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM mount_rs_versions WHERE volume_key=$1) OR EXISTS(SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1) OR EXISTS(SELECT 1 FROM mount_rs_version_state WHERE volume_key=$1 AND (head_id IS NOT NULL OR next_sequence<>1 OR next_read_fence<>0))", &[&this.0.volume_key]).await.map_err(postgres_error)?.get(0);
+                    if historical {
+                        return Err(FsError::new(ErrorCode::Ebusy));
+                    }
+                    let state = serde_json::to_string(&DelegationState::new(backing)).map_err(backend_error)?;
+                    let changed = tx.execute("UPDATE mount_rs_metadata SET write_mode='MRC3', backing_id=$2, delegation=$3, owner=NULL, fence=$4, expires=0 WHERE volume_key=$1", &[&this.0.volume_key, &backing.to_hex(), &state, &CONCURRENT_FENCE_SENTINEL]).await.map_err(postgres_error)?;
+                    if changed != 1 {
+                        return Err(stale());
+                    }
+                    tx.commit().await.map_err(postgres_error)?;
+                    Ok(())
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        let row = tx.query_one("SELECT write_mode, backing_id, delegation, namespace, owner, fence, expires, revision FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE", &[&self.0.volume_key]).await.map_err(postgres_error)?;
-        let revision = nonnegative(row.get(7), "revision")?;
-        if row.get::<_, Option<String>>(0).as_deref() == Some("MRC3") {
-            let (state, _) = decode_delegation_row(&row)?;
-            if state.backing != backing {
-                return Err(stale());
-            }
-            tx.commit().await.map_err(postgres_error)?;
-            return Ok(());
-        }
-        if revision != expected_revision {
-            return Err(FsError::new(ErrorCode::Eagain));
-        }
-        let mode = row.get::<_, Option<String>>(0);
-        let valid_mode = mode.is_none() || mode.as_deref() == Some(BOUND_CONCURRENT_WRITE_MODE);
-        if !valid_mode || row.get::<_, Option<String>>(4).is_some() {
-            return Err(FsError::new(ErrorCode::Ebusy));
-        }
-        if mode.is_some()
-            && row.get::<_, Option<String>>(1).as_deref() != Some(backing.to_hex().as_str())
-        {
-            return Err(stale());
-        }
-        if row.get::<_, Option<String>>(2).is_some()
-            || (mode.is_none()
-                && (row.get::<_, Option<String>>(1).is_some()
-                    || row.get::<_, i64>(5) == CONCURRENT_FENCE_SENTINEL))
-            || (mode.is_some() && row.get::<_, i64>(5) != CONCURRENT_FENCE_SENTINEL)
-            || row.get::<_, i64>(6) != 0
-        {
-            return Err(stale());
-        }
-        let ns: Namespace =
-            serde_json::from_str(&row.get::<_, Option<String>>(3).ok_or_else(stale)?)
-                .map_err(backend_error)?;
-        ns.validate()?;
-        let historical: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM mount_rs_versions WHERE volume_key=$1) OR EXISTS(SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1) OR EXISTS(SELECT 1 FROM mount_rs_version_state WHERE volume_key=$1 AND (head_id IS NOT NULL OR next_sequence<>1 OR next_read_fence<>0))", &[&self.0.volume_key]).await.map_err(postgres_error)?.get(0);
-        if historical {
-            return Err(FsError::new(ErrorCode::Ebusy));
-        }
-        let state = serde_json::to_string(&DelegationState::new(backing)).map_err(backend_error)?;
-        let changed = tx.execute("UPDATE mount_rs_metadata SET write_mode='MRC3', backing_id=$2, delegation=$3, owner=NULL, fence=$4, expires=0 WHERE volume_key=$1", &[&self.0.volume_key, &backing.to_hex(), &state, &CONCURRENT_FENCE_SENTINEL]).await.map_err(postgres_error)?;
-        if changed != 1 {
-            return Err(stale());
-        }
-        tx.commit().await.map_err(postgres_error)?;
-        Ok(())
     }
 
     async fn checkout(&self, request: &CheckoutRequest) -> Result<DirectoryGrant> {
-        self.delegation_transaction(request.backing, None, false, None, |state, ns| {
+        let request = request.clone();
+        self.delegation_transaction(request.backing, None, false, None, move |state, ns| {
             state.checkout(ns, request.root, &request.owner)
         })
         .await
@@ -1390,13 +1560,14 @@ impl MetadataStore for PgliteMetadataStore {
         request: &DelegatedPublish,
         namespace: Namespace,
     ) -> Result<u64> {
+        let token = request.token.clone();
         self.delegation_transaction(
             request.backing,
             Some(request.expected_revision),
             true,
             None,
-            |state, ns| {
-                state.authorize_publish(ns, &namespace, &request.token)?;
+            move |state, ns| {
+                state.authorize_publish(ns, &namespace, &token)?;
                 *ns = namespace;
                 Ok(())
             },
@@ -1409,14 +1580,18 @@ impl MetadataStore for PgliteMetadataStore {
             request.backing,
             Some(request.expected_revision),
             false,
-            Some(&request.token),
-            |state, ns| state.checkin(&request.token, ns),
+            Some(request.token.clone()),
+            {
+                let token = request.token.clone();
+                move |state, ns| state.checkin(&token, ns)
+            },
         )
         .await
     }
     async fn recover(&self, request: &DelegatedRecovery) -> Result<()> {
-        self.delegation_transaction(request.backing, None, false, None, |state, ns| {
-            state.recover(request.root, request.expected_fence, ns)
+        let (root, expected_fence) = (request.root, request.expected_fence);
+        self.delegation_transaction(request.backing, None, false, None, move |state, ns| {
+            state.recover(root, expected_fence, ns)
         })
         .await
     }
@@ -1434,45 +1609,50 @@ impl MetadataStore for PgliteMetadataStore {
                AND fence<9223372036854775807 AND $3<=9223372036854775807-{NOW}
              RETURNING fence, expires"
         );
-        let client = self.0.lock_client().await?;
-        let client = client.as_ref().ok_or_else(connection_closed)?;
-        let row = client
-            .query_typed_opt(
-                &sql,
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&owner, Type::TEXT),
-                    (&ttl, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        let Some(row) = row else {
-            // EAGAIN tells a caller to wait for the current holder. A volume
-            // in concurrent write mode never grants this lease, so say so
-            // rather than leave the caller waiting on a lease that cannot
-            // exist.
-            let concurrent = client
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            &sql,
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&owner, Type::TEXT),
+                                (&ttl, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    let Some(row) = row else {
+                        // EAGAIN tells a caller to wait for the current holder. A volume
+                        // in concurrent write mode never grants this lease, so say so
+                        // rather than leave the caller waiting on a lease that cannot
+                        // exist.
+                        let concurrent = client
                 .query_typed_opt(
                     "SELECT write_mode IS NOT NULL FROM mount_rs_metadata WHERE volume_key=$1",
-                    &[(&self.0.volume_key, Type::TEXT)],
+                    &[(&this.0.volume_key, Type::TEXT)],
                 )
                 .await
                 .map_err(postgres_error)?
                 .is_some_and(|row| row.get::<_, bool>(0));
-            return Err(if concurrent {
-                FsError::new(ErrorCode::Ebusy)
-                    .with_syscall("acquire writer")
-                    .with_message("PGlite volume is in concurrent write mode")
-            } else {
-                FsError::new(ErrorCode::Eagain).with_syscall("acquire writer")
-            });
-        };
-        Ok(WriterLease {
-            owner,
-            fence: nonnegative(row.get(0), "metadata fence")?,
-            expires_at_ms: nonnegative(row.get(1), "metadata expiry")?,
-        })
+                        return Err(if concurrent {
+                            FsError::new(ErrorCode::Ebusy)
+                                .with_syscall("acquire writer")
+                                .with_message("PGlite volume is in concurrent write mode")
+                        } else {
+                            FsError::new(ErrorCode::Eagain).with_syscall("acquire writer")
+                        });
+                    };
+                    Ok(WriterLease {
+                        owner,
+                        fence: nonnegative(row.get(0), "metadata fence")?,
+                        expires_at_ms: nonnegative(row.get(1), "metadata expiry")?,
+                    })
+                })
+            })
+            .await
     }
 
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
@@ -1485,27 +1665,32 @@ impl MetadataStore for PgliteMetadataStore {
                AND $5<=9223372036854775807-{NOW}
              RETURNING expires"
         );
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                &sql,
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.owner, Type::TEXT),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                    (&ttl, Type::INT8),
-                ],
-            )
+        let lease = lease.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            &sql,
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&lease.owner, Type::TEXT),
+                                (&fence, Type::INT8),
+                                (&expires, Type::INT8),
+                                (&ttl, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(stale)?;
+                    Ok(WriterLease {
+                        expires_at_ms: nonnegative(row.get(0), "metadata expiry")?,
+                        ..lease.clone()
+                    })
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(stale)?;
-        Ok(WriterLease {
-            expires_at_ms: nonnegative(row.get(0), "metadata expiry")?,
-            ..lease.clone()
-        })
     }
 
     async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
@@ -1515,25 +1700,30 @@ impl MetadataStore for PgliteMetadataStore {
              WHERE volume_key=$1 AND write_mode IS NULL
                AND owner=$2 AND fence=$3 AND expires=$4 AND expires>{NOW}"
         );
-        let client = self.0.lock_client().await?;
-        let changed = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                &sql,
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.owner, Type::TEXT),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                ],
-            )
+        let lease = lease.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let changed = client
+                        .execute_typed(
+                            &sql,
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&lease.owner, Type::TEXT),
+                                (&fence, Type::INT8),
+                                (&expires, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if changed != 1 {
+                        return Err(stale());
+                    }
+                    Ok(())
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        if changed != 1 {
-            return Err(stale());
-        }
-        Ok(())
     }
 
     async fn publish(
@@ -1551,80 +1741,86 @@ impl MetadataStore for PgliteMetadataStore {
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
         profile::add(Event::NamespaceSerialized, namespace.len() as u64);
 
-        let mut client = self.0.lock_client().await?;
-        let client = client.as_mut().ok_or_else(connection_closed)?;
-        // A single PostgreSQL DML statement is an atomic autocommit
-        // transaction. Keep the common successful CAS to one server round
-        // trip; only a zero-row result needs the explicit locked read below
-        // to retain the stale-versus-revision classification.
-        let changed = client
-            .execute_typed(
-                &format!(
-                    "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
+        let lease = lease.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    // A single PostgreSQL DML statement is an atomic autocommit
+                    // transaction. Keep the common successful CAS to one server round
+                    // trip; only a zero-row result needs the explicit locked read below
+                    // to retain the stale-versus-revision classification.
+                    let changed = client
+                        .execute_typed(
+                            &format!(
+                                "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
                      WHERE volume_key=$1 AND revision=$4 AND write_mode IS NULL
                        AND owner IS NOT DISTINCT FROM $5 AND fence=$6 AND expires=$7
                        AND expires>{NOW}"
-                ),
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&next, Type::INT8),
-                    (&namespace, Type::TEXT),
-                    (&expected, Type::INT8),
-                    (&lease.owner, Type::TEXT),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if changed != 1 {
-            // The conditional update is the successful-path CAS. Only the
-            // exceptional path needs a locked read to preserve the exact
-            // stale-versus-revision-conflict classification that callers
-            // receive from the former preflight SELECT.
-            let tx = client.transaction().await.map_err(postgres_error)?;
-            let state = match tx
-                .query_typed_opt(
-                    &format!(
-                        "SELECT
+                            ),
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&next, Type::INT8),
+                                (&namespace, Type::TEXT),
+                                (&expected, Type::INT8),
+                                (&lease.owner, Type::TEXT),
+                                (&fence, Type::INT8),
+                                (&expires, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if changed != 1 {
+                        // The conditional update is the successful-path CAS. Only the
+                        // exceptional path needs a locked read to preserve the exact
+                        // stale-versus-revision-conflict classification that callers
+                        // receive from the former preflight SELECT.
+                        let tx = client.transaction().await.map_err(postgres_error)?;
+                        let state = match tx
+                            .query_typed_opt(
+                                &format!(
+                                    "SELECT
                              (write_mode IS NULL AND owner IS NOT DISTINCT FROM $2 AND fence=$3 AND expires=$4
                               AND expires>{NOW}) AS lease_valid,
                              (revision=$5) AS revision_valid
                          FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE"
-                    ),
-                    &[
-                        (&self.0.volume_key, Type::TEXT),
-                        (&lease.owner, Type::TEXT),
-                        (&fence, Type::INT8),
-                        (&expires, Type::INT8),
-                        (&expected, Type::INT8),
-                    ],
-                )
-                .await
-            {
-                Ok(Some(row)) => (row.get::<_, bool>(0), row.get::<_, bool>(1)),
-                Ok(None) => {
-                    let _ = tx.rollback().await;
-                    return Err(backend_error("PGlite metadata row is missing"));
-                }
-                Err(error) => {
-                    let _ = tx.rollback().await;
-                    return Err(postgres_error(error));
-                }
-            };
-            let error = if !state.0 {
-                stale()
-            } else if !state.1 {
-                FsError::new(ErrorCode::Eagain).with_syscall("publish metadata")
-            } else {
-                // The row was locked and the revision and lease were still
-                // valid, so an unexplained zero-row CAS is fail-closed.
-                stale()
-            };
-            let _ = tx.rollback().await;
-            return Err(error);
-        }
-        Ok(next as u64)
+                                ),
+                                &[
+                                    (&this.0.volume_key, Type::TEXT),
+                                    (&lease.owner, Type::TEXT),
+                                    (&fence, Type::INT8),
+                                    (&expires, Type::INT8),
+                                    (&expected, Type::INT8),
+                                ],
+                            )
+                            .await
+                        {
+                            Ok(Some(row)) => (row.get::<_, bool>(0), row.get::<_, bool>(1)),
+                            Ok(None) => {
+                                let _ = tx.rollback().await;
+                                return Err(backend_error("PGlite metadata row is missing"));
+                            }
+                            Err(error) => {
+                                let _ = tx.rollback().await;
+                                return Err(postgres_error(error));
+                            }
+                        };
+                        let error = if !state.0 {
+                            stale()
+                        } else if !state.1 {
+                            FsError::new(ErrorCode::Eagain).with_syscall("publish metadata")
+                        } else {
+                            // The row was locked and the revision and lease were still
+                            // valid, so an unexplained zero-row CAS is fail-closed.
+                            stale()
+                        };
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
+                    Ok(next as u64)
+                })
+            })
+            .await
     }
 
     async fn publish_bound_if_revision(
@@ -1642,67 +1838,69 @@ impl MetadataStore for PgliteMetadataStore {
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
         profile::add(Event::NamespaceSerialized, namespace.len() as u64);
         let backing_text = backing.to_hex();
-        let client = self.0.lock_client().await?;
-        // A failed acknowledgement may follow a committed update. Preserve
-        // transport errors; only a confirmed zero-row update is classified.
-        let changed = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    // A failed acknowledgement may follow a committed update. Preserve
+                    // transport errors; only a confirmed zero-row update is classified.
+                    let changed = client
+                        .execute_typed(
+                            "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
                  WHERE volume_key=$1 AND revision=$4 AND write_mode=$5
                    AND owner IS NULL AND fence=$6 AND expires=0 AND backing_id=$7",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&next, Type::INT8),
-                    (&namespace, Type::TEXT),
-                    (&expected, Type::INT8),
-                    (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
-                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
-                    (&backing_text, Type::TEXT),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if changed == 1 {
-            return Ok(next as u64);
-        }
-        if changed != 0 {
-            return Err(backend_error("PGlite bound CAS changed multiple rows"));
-        }
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT revision, write_mode, backing_id, owner, fence, expires
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&next, Type::INT8),
+                                (&namespace, Type::TEXT),
+                                (&expected, Type::INT8),
+                                (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
+                                (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                                (&backing_text, Type::TEXT),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if changed == 1 {
+                        return Ok(next as u64);
+                    }
+                    if changed != 0 {
+                        return Err(backend_error("PGlite bound CAS changed multiple rows"));
+                    }
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT revision, write_mode, backing_id, owner, fence, expires
                  FROM mount_rs_metadata WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    let mode = row.get::<_, Option<String>>(1);
+                    let actual = row.get::<_, Option<String>>(2);
+                    if mode.as_deref() == Some(BOUND_CONCURRENT_WRITE_MODE)
+                        && actual.as_deref() != Some(backing_text.as_str())
+                    {
+                        return Err(stale());
+                    }
+                    if mode.as_deref() != Some(BOUND_CONCURRENT_WRITE_MODE)
+                        || row.get::<_, Option<String>>(3).is_some()
+                        || row.get::<_, i64>(4) != CONCURRENT_FENCE_SENTINEL
+                        || row.get::<_, i64>(5) != 0
+                    {
+                        return Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("publish bound concurrent PGlite metadata"));
+                    }
+                    if row.get::<_, i64>(0) != expected {
+                        return Err(FsError::new(ErrorCode::Eagain)
+                            .with_syscall("publish bound concurrent PGlite metadata"));
+                    }
+                    Err(backend_error(
+                        "PGlite bound CAS returned zero for unchanged revision",
+                    ))
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let mode = row.get::<_, Option<String>>(1);
-        let actual = row.get::<_, Option<String>>(2);
-        if mode.as_deref() == Some(BOUND_CONCURRENT_WRITE_MODE)
-            && actual.as_deref() != Some(backing_text.as_str())
-        {
-            return Err(stale());
-        }
-        if mode.as_deref() != Some(BOUND_CONCURRENT_WRITE_MODE)
-            || row.get::<_, Option<String>>(3).is_some()
-            || row.get::<_, i64>(4) != CONCURRENT_FENCE_SENTINEL
-            || row.get::<_, i64>(5) != 0
-        {
-            return Err(FsError::new(ErrorCode::Ebusy)
-                .with_syscall("publish bound concurrent PGlite metadata"));
-        }
-        if row.get::<_, i64>(0) != expected {
-            return Err(FsError::new(ErrorCode::Eagain)
-                .with_syscall("publish bound concurrent PGlite metadata"));
-        }
-        Err(backend_error(
-            "PGlite bound CAS returned zero for unchanged revision",
-        ))
     }
 
     async fn migrate_mrc1_to_bound_mode(
@@ -1713,12 +1911,13 @@ impl MetadataStore for PgliteMetadataStore {
         let expected =
             i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
         let backing_text = backing.to_hex();
-        let client = self.0.lock_client().await?;
-        let changed = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let changed = client
+                        .execute_typed(
+                            "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3
                  WHERE volume_key=$1 AND revision=$4 AND write_mode=$5 AND backing_id IS NULL
                    AND owner IS NULL AND fence=$6 AND expires=0
                    AND EXISTS (
@@ -1727,50 +1926,52 @@ impl MetadataStore for PgliteMetadataStore {
                        AND next_sequence=1 AND next_read_fence=0)
                    AND NOT EXISTS (SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
                    AND NOT EXISTS (SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
-                    (&backing_text, Type::TEXT),
-                    (&expected, Type::INT8),
-                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
-                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
-                ],
-            )
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
+                                (&backing_text, Type::TEXT),
+                                (&expected, Type::INT8),
+                                (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                                (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if changed == 1 {
+                        return Ok(());
+                    }
+                    if changed != 0 {
+                        return Err(backend_error("PGlite migration changed multiple rows"));
+                    }
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT revision FROM mount_rs_metadata WHERE volume_key=$1",
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    if row.get::<_, i64>(0) != expected {
+                        return Err(FsError::new(ErrorCode::Eagain)
+                            .with_syscall("migrate concurrent PGlite mode"));
+                    }
+                    Err(FsError::new(ErrorCode::Ebusy)
+                        .with_syscall("migrate concurrent PGlite mode"))
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        if changed == 1 {
-            return Ok(());
-        }
-        if changed != 0 {
-            return Err(backend_error("PGlite migration changed multiple rows"));
-        }
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT revision FROM mount_rs_metadata WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        if row.get::<_, i64>(0) != expected {
-            return Err(
-                FsError::new(ErrorCode::Eagain).with_syscall("migrate concurrent PGlite mode")
-            );
-        }
-        Err(FsError::new(ErrorCode::Ebusy).with_syscall("migrate concurrent PGlite mode"))
     }
 
     async fn preflight_mrc1_to_bound_mode(&self, expected_revision: u64) -> Result<()> {
         let expected =
             i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT revision,
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT revision,
                         write_mode=$2 AND backing_id IS NULL AND owner IS NULL
                         AND fence=$3 AND expires=0
                         AND EXISTS (SELECT 1 FROM mount_rs_version_state
@@ -1779,25 +1980,28 @@ impl MetadataStore for PgliteMetadataStore {
                         AND NOT EXISTS (SELECT 1 FROM mount_rs_versions WHERE volume_key=$1)
                         AND NOT EXISTS (SELECT 1 FROM mount_rs_version_pins WHERE volume_key=$1)
                  FROM mount_rs_metadata WHERE volume_key=$1",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
-                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
-                ],
-            )
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                                (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    if row.get::<_, i64>(0) != expected {
+                        return Err(FsError::new(ErrorCode::Eagain)
+                            .with_syscall("preflight MRC1 PGlite metadata"));
+                    }
+                    if row.get::<_, bool>(1) {
+                        Ok(())
+                    } else {
+                        Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("preflight MRC1 PGlite metadata"))
+                    }
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        if row.get::<_, i64>(0) != expected {
-            return Err(
-                FsError::new(ErrorCode::Eagain).with_syscall("preflight MRC1 PGlite metadata")
-            );
-        }
-        if row.get::<_, bool>(1) {
-            Ok(())
-        } else {
-            Err(FsError::new(ErrorCode::Ebusy).with_syscall("preflight MRC1 PGlite metadata"))
-        }
     }
 
     async fn flush(&self) -> Result<()> {
@@ -1812,14 +2016,15 @@ impl VersionedMetadataStore for PgliteMetadataStore {
     }
 
     async fn version_head(&self) -> Result<Option<VersionHead>> {
-        let client = self.0.lock_client().await?;
-        // One statement observes one committed snapshot; successive SELECTs
-        // could mix a pre-publication revision with a post-publication head.
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT m.revision, s.head_id, s.volume_key IS NOT NULL,
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    // One statement observes one committed snapshot; successive SELECTs
+                    // could mix a pre-publication revision with a post-publication head.
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT m.revision, s.head_id, s.volume_key IS NOT NULL,
                         v.id, v.volume_key, v.volume_id, v.sequence,
                         v.parent_id, v.restored_from, v.forked_from, v.namespace,
                         v.block_store_id, v.kind, v.created_at_ms, v.durable
@@ -1828,35 +2033,40 @@ impl VersionedMetadataStore for PgliteMetadataStore {
                  LEFT JOIN mount_rs_versions v ON v.volume_key=m.volume_key
                       AND v.id=s.head_id AND v.volume_id=$2
                  WHERE m.volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT), (&self.1.0, Type::TEXT)],
-            )
+                            &[(&this.0.volume_key, Type::TEXT), (&this.1.0, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
+                    if !row.get::<_, bool>(2) {
+                        return Err(incompatible_schema("PGlite version state is missing"));
+                    }
+                    let Some(head_id) = row.get::<_, Option<String>>(1) else {
+                        return Ok(None);
+                    };
+                    let version = VersionId::decode(&head_id).map_err(|_| {
+                        FsError::new(ErrorCode::Eio)
+                            .with_syscall("version head")
+                            .with_message("stored PGlite version head is malformed")
+                    })?;
+                    if version.volume != this.1 {
+                        return Err(FsError::new(ErrorCode::Eio)
+                            .with_syscall("version head")
+                            .with_message("stored PGlite version head belongs to another volume"));
+                    }
+                    if row.get::<_, Option<String>>(3).is_none() {
+                        return Err(FsError::new(ErrorCode::Eio)
+                            .with_syscall("version head")
+                            .with_message(
+                                "stored PGlite version head references a missing version",
+                            ));
+                    }
+                    check_stored_version_row_at(&row, 3, &version, "version head")?;
+                    Ok(Some(VersionHead { version, revision }))
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let revision = nonnegative(row.get::<_, i64>(0), "metadata revision")?;
-        if !row.get::<_, bool>(2) {
-            return Err(incompatible_schema("PGlite version state is missing"));
-        }
-        let Some(head_id) = row.get::<_, Option<String>>(1) else {
-            return Ok(None);
-        };
-        let version = VersionId::decode(&head_id).map_err(|_| {
-            FsError::new(ErrorCode::Eio)
-                .with_syscall("version head")
-                .with_message("stored PGlite version head is malformed")
-        })?;
-        if version.volume != self.1 {
-            return Err(FsError::new(ErrorCode::Eio)
-                .with_syscall("version head")
-                .with_message("stored PGlite version head belongs to another volume"));
-        }
-        if row.get::<_, Option<String>>(3).is_none() {
-            return Err(FsError::new(ErrorCode::Eio)
-                .with_syscall("version head")
-                .with_message("stored PGlite version head references a missing version"));
-        }
-        check_stored_version_row_at(&row, 3, &version, "version head")?;
-        Ok(Some(VersionHead { version, revision }))
     }
 
     async fn load_version(&self, id: &VersionId) -> Result<VersionInfo> {
@@ -1864,70 +2074,92 @@ impl VersionedMetadataStore for PgliteMetadataStore {
             return Err(FsError::new(ErrorCode::Enoent).with_syscall("load version"));
         }
         let encoded = id.encode();
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2"),
-                &[(&self.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
-            )
+        let id = id.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2"),
+                            &[(&this.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| {
+                            FsError::new(ErrorCode::Enoent).with_syscall("load version")
+                        })?;
+                    let info = decode_version_row(&row)?;
+                    info.validate_for_volume(&this.1)?;
+                    if info.id != id {
+                        return Err(FsError::new(ErrorCode::Enoent).with_syscall("load version"));
+                    }
+                    Ok(info)
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("load version"))?;
-        let info = decode_version_row(&row)?;
-        info.validate_for_volume(&self.1)?;
-        if info.id != *id {
-            return Err(FsError::new(ErrorCode::Enoent).with_syscall("load version"));
-        }
-        Ok(info)
     }
 
     async fn list_versions(&self) -> Result<Vec<VersionInfo>> {
-        let client = self.0.lock_client().await?;
-        let rows = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed(
-                &format!("{VERSION_SELECT} WHERE volume_key=$1 ORDER BY sequence"),
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?;
-        rows.into_iter()
-            .map(|row| {
-                let version = decode_version_row(&row)?;
-                version.validate_for_volume(&self.1)?;
-                Ok(version)
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let rows = client
+                        .query_typed(
+                            &format!("{VERSION_SELECT} WHERE volume_key=$1 ORDER BY sequence"),
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    rows.into_iter()
+                        .map(|row| {
+                            let version = decode_version_row(&row)?;
+                            version.validate_for_volume(&this.1)?;
+                            Ok(version)
+                        })
+                        .collect()
+                })
             })
-            .collect()
+            .await
     }
 
     async fn find_publication(&self, operation_id: &PublicationId) -> Result<Option<VersionInfo>> {
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT id FROM mount_rs_versions
+        let operation_id = operation_id.clone();
+        let this = self.clone();
+        let id = self
+            .0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT id FROM mount_rs_versions
                  WHERE volume_key=$1 AND operation_id=$2",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&operation_id.0, Type::TEXT),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        let Some(row) = row else {
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&operation_id.0, Type::TEXT),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    let Some(row) = row else {
+                        return Ok(None);
+                    };
+                    let encoded = row.get::<_, String>(0);
+                    let id = VersionId::decode(&encoded).map_err(|_| {
+                        FsError::new(ErrorCode::Eio)
+                            .with_syscall("find publication")
+                            .with_message(
+                                "stored PGlite publication references a malformed version",
+                            )
+                    })?;
+                    Ok(Some(id))
+                })
+            })
+            .await?;
+        let Some(id) = id else {
             return Ok(None);
         };
-        let encoded = row.get::<_, String>(0);
-        let id = VersionId::decode(&encoded).map_err(|_| {
-            FsError::new(ErrorCode::Eio)
-                .with_syscall("find publication")
-                .with_message("stored PGlite publication references a malformed version")
-        })?;
-        drop(client);
         self.load_version(&id).await.map(Some)
     }
 
@@ -1946,217 +2178,227 @@ impl VersionedMetadataStore for PgliteMetadataStore {
             .map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
         let (fence, expires) = lease_numbers(lease)?;
         let operation_id = publication.operation_id.0.clone();
-        let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
-            .await
-            .map_err(postgres_error)?;
+        let lease = lease.clone();
+        let durable = publication.durable;
+        let this = self.clone();
+        let version = self
+            .0
+            .run(move |client| {
+                Box::pin(async move {
+                    let tx = client
+                        .transaction()
+                        .await
+                        .map_err(postgres_error)?;
 
-        let existing = tx
-            .query_typed_opt(
-                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND operation_id=$2"),
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&operation_id, Type::TEXT),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if let Some(row) = existing {
-            let committed = decode_version_row(&row)?;
-            committed.validate_for_volume(&self.1)?;
-            if !publication.matches_committed(&committed)? {
-                return Err(FsError::new(ErrorCode::Eexist)
-                    .with_syscall("publish version")
-                    .with_message("publication id was reused with a different payload"));
-            }
-            tx.commit().await.map_err(postgres_error)?;
-            return Ok(committed);
-        }
+                    let existing = tx
+                        .query_typed_opt(
+                            &format!("{VERSION_SELECT} WHERE volume_key=$1 AND operation_id=$2"),
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&operation_id, Type::TEXT),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if let Some(row) = existing {
+                        let committed = decode_version_row(&row)?;
+                        committed.validate_for_volume(&this.1)?;
+                        if !publication.matches_committed(&committed)? {
+                            return Err(FsError::new(ErrorCode::Eexist)
+                                .with_syscall("publish version")
+                                .with_message("publication id was reused with a different payload"));
+                        }
+                        tx.commit().await.map_err(postgres_error)?;
+                        return Ok(committed);
+                    }
 
-        let state = tx
-            .query_typed_opt(
-                &format!(
-                    "SELECT
+                    let state = tx
+                        .query_typed_opt(
+                            &format!(
+                                "SELECT
                          (write_mode IS NULL AND owner=$2 AND fence=$3 AND expires=$4 AND expires>{NOW}) AS lease_valid,
                          (revision=$5) AS revision_valid,
                          (SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1)
                      FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE"
-                ),
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.owner, Type::TEXT),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                    (&expected_revision, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        if !state.get::<_, bool>(0) {
-            return Err(stale());
-        }
-        if !state.get::<_, bool>(1) {
-            return Err(FsError::new(ErrorCode::Eagain).with_syscall("publish version"));
-        }
-        let head_id = state.get::<_, Option<String>>(2);
-        let expected_parent = publication.expected_parent.as_ref().map(VersionId::encode);
-        if head_id != expected_parent {
-            return Err(FsError::new(ErrorCode::Eagain)
-                .with_syscall("publish version")
-                .with_message("version head changed concurrently"));
-        }
-        if let Some(head_id) = head_id.as_deref() {
-            let head = VersionId::decode(head_id).map_err(|_| {
-                FsError::new(ErrorCode::Eio)
-                    .with_syscall("publish version")
-                    .with_message("stored PGlite version head is malformed")
-            })?;
-            let row = tx
-                .query_typed_opt(
-                    &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"),
-                    &[
-                        (&self.0.volume_key, Type::TEXT),
-                        (&head_id, Type::TEXT),
-                        (&self.1.0, Type::TEXT),
-                    ],
-                )
-                .await
-                .map_err(postgres_error)?
-                .ok_or_else(|| {
-                    FsError::new(ErrorCode::Eio)
-                        .with_syscall("publish version")
-                        .with_message("stored PGlite version head references a missing version")
-                })?;
-            check_stored_version_row_at(&row, 0, &head, "publish version")?;
-        }
+                            ),
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&lease.owner, Type::TEXT),
+                                (&fence, Type::INT8),
+                                (&expires, Type::INT8),
+                                (&expected_revision, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    if !state.get::<_, bool>(0) {
+                        return Err(stale());
+                    }
+                    if !state.get::<_, bool>(1) {
+                        return Err(FsError::new(ErrorCode::Eagain).with_syscall("publish version"));
+                    }
+                    let head_id = state.get::<_, Option<String>>(2);
+                    let expected_parent = publication.expected_parent.as_ref().map(VersionId::encode);
+                    if head_id != expected_parent {
+                        return Err(FsError::new(ErrorCode::Eagain)
+                            .with_syscall("publish version")
+                            .with_message("version head changed concurrently"));
+                    }
+                    if let Some(head_id) = head_id.as_deref() {
+                        let head = VersionId::decode(head_id).map_err(|_| {
+                            FsError::new(ErrorCode::Eio)
+                                .with_syscall("publish version")
+                                .with_message("stored PGlite version head is malformed")
+                        })?;
+                        let row = tx
+                            .query_typed_opt(
+                                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"),
+                                &[
+                                    (&this.0.volume_key, Type::TEXT),
+                                    (&head_id, Type::TEXT),
+                                    (&this.1.0, Type::TEXT),
+                                ],
+                            )
+                            .await
+                            .map_err(postgres_error)?
+                            .ok_or_else(|| {
+                                FsError::new(ErrorCode::Eio)
+                                    .with_syscall("publish version")
+                                    .with_message("stored PGlite version head references a missing version")
+                            })?;
+                        check_stored_version_row_at(&row, 0, &head, "publish version")?;
+                    }
 
-        let state_row = tx
-            .query_typed_opt(
-                "SELECT next_sequence FROM mount_rs_version_state
+                    let state_row = tx
+                        .query_typed_opt(
+                            "SELECT next_sequence FROM mount_rs_version_state
                  WHERE volume_key=$1 FOR UPDATE",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?;
-        let sequence = nonnegative(state_row.get::<_, i64>(0), "version sequence")?;
-        let sequence_i64 =
-            i64::try_from(sequence).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
-        let id = VersionId::new(self.1.clone(), sequence)?;
-        let id_text = id.encode();
-        let created_at_ms = tx
-            .query_typed_opt(NOW_SELECT, &[])
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
-            .get::<_, i64>(0);
-        let namespace = serde_json::to_string(&publication.namespace).map_err(backend_error)?;
-        let parent_id = publication.expected_parent.as_ref().map(VersionId::encode);
-        let restored_from = publication.restored_from.as_ref().map(VersionId::encode);
-        let forked_from = publication.forked_from.as_ref().map(VersionId::encode);
-        let kind = version_kind_name(&publication.kind);
-        let durable = publication.durable;
-        tx.execute_typed(
-            "INSERT INTO mount_rs_versions
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?;
+                    let sequence = nonnegative(state_row.get::<_, i64>(0), "version sequence")?;
+                    let sequence_i64 =
+                        i64::try_from(sequence).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+                    let id = VersionId::new(this.1.clone(), sequence)?;
+                    let id_text = id.encode();
+                    let created_at_ms = tx
+                        .query_typed_opt(NOW_SELECT, &[])
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
+                        .get::<_, i64>(0);
+                    let namespace = serde_json::to_string(&publication.namespace).map_err(backend_error)?;
+                    let parent_id = publication.expected_parent.as_ref().map(VersionId::encode);
+                    let restored_from = publication.restored_from.as_ref().map(VersionId::encode);
+                    let forked_from = publication.forked_from.as_ref().map(VersionId::encode);
+                    let kind = version_kind_name(&publication.kind);
+                    let durable = publication.durable;
+                    tx.execute_typed(
+                        "INSERT INTO mount_rs_versions
              (volume_key, id, volume_id, sequence, parent_id, restored_from,
               forked_from, namespace, block_store_id, kind, created_at_ms,
               durable, operation_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
-            &[
-                (&self.0.volume_key, Type::TEXT),
-                (&id_text, Type::TEXT),
-                (&self.1.0, Type::TEXT),
-                (&sequence_i64, Type::INT8),
-                (&parent_id, Type::TEXT),
-                (&restored_from, Type::TEXT),
-                (&forked_from, Type::TEXT),
-                (&namespace, Type::TEXT),
-                (&publication.block_store_id.0, Type::TEXT),
-                (&kind, Type::TEXT),
-                (&created_at_ms, Type::INT8),
-                (&durable, Type::BOOL),
-                (&operation_id, Type::TEXT),
-            ],
-        )
-        .await
-        .map_err(postgres_error)?;
-        if publication.kind == VersionKind::NamespacePublication {
-            let changed = tx
-                .execute_typed(
-                    "UPDATE mount_rs_schema_versions SET schema_version=$2
+                        &[
+                            (&this.0.volume_key, Type::TEXT),
+                            (&id_text, Type::TEXT),
+                            (&this.1.0, Type::TEXT),
+                            (&sequence_i64, Type::INT8),
+                            (&parent_id, Type::TEXT),
+                            (&restored_from, Type::TEXT),
+                            (&forked_from, Type::TEXT),
+                            (&namespace, Type::TEXT),
+                            (&publication.block_store_id.0, Type::TEXT),
+                            (&kind, Type::TEXT),
+                            (&created_at_ms, Type::INT8),
+                            (&durable, Type::BOOL),
+                            (&operation_id, Type::TEXT),
+                        ],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                    if publication.kind == VersionKind::NamespacePublication {
+                        let changed = tx
+                            .execute_typed(
+                                "UPDATE mount_rs_schema_versions SET schema_version=$2
                      WHERE schema_name=$1 AND schema_version BETWEEN $3 AND $2",
-                    &[
-                        (&VERSION_SCHEMA_NAME, Type::TEXT),
-                        (&VERSION_SCHEMA_VERSION, Type::INT8),
-                        (&VERSION_SCHEMA_BASE_VERSION, Type::INT8),
-                    ],
-                )
-                .await
-                .map_err(postgres_error)?;
-            if changed != 1 {
-                return Err(incompatible_schema("version kind schema gate is missing"));
-            }
-        }
-        let next_revision = expected_revision
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let metadata_update_sql = format!(
-            "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
+                                &[
+                                    (&VERSION_SCHEMA_NAME, Type::TEXT),
+                                    (&VERSION_SCHEMA_VERSION, Type::INT8),
+                                    (&VERSION_SCHEMA_BASE_VERSION, Type::INT8),
+                                ],
+                            )
+                            .await
+                            .map_err(postgres_error)?;
+                        if changed != 1 {
+                            return Err(incompatible_schema("version kind schema gate is missing"));
+                        }
+                    }
+                    let next_revision = expected_revision
+                        .checked_add(1)
+                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                    let metadata_update_sql = format!(
+                        "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
                  WHERE volume_key=$1 AND revision=$4 AND write_mode IS NULL
                    AND owner=$5 AND fence=$6 AND expires=$7 AND expires>{NOW}"
-        );
-        let changed = tx
-            .execute_typed(
-                &metadata_update_sql,
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&next_revision, Type::INT8),
-                    (&namespace, Type::TEXT),
-                    (&expected_revision, Type::INT8),
-                    (&lease.owner, Type::TEXT),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if changed != 1 {
-            return Err(stale());
-        }
-        let next_sequence = sequence_i64
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        tx.execute_typed(
-            "UPDATE mount_rs_version_state SET head_id=$2, next_sequence=$3
+                    );
+                    let changed = tx
+                        .execute_typed(
+                            &metadata_update_sql,
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&next_revision, Type::INT8),
+                                (&namespace, Type::TEXT),
+                                (&expected_revision, Type::INT8),
+                                (&lease.owner, Type::TEXT),
+                                (&fence, Type::INT8),
+                                (&expires, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if changed != 1 {
+                        return Err(stale());
+                    }
+                    let next_sequence = sequence_i64
+                        .checked_add(1)
+                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                    tx.execute_typed(
+                        "UPDATE mount_rs_version_state SET head_id=$2, next_sequence=$3
              WHERE volume_key=$1",
-            &[
-                (&self.0.volume_key, Type::TEXT),
-                (&id_text, Type::TEXT),
-                (&next_sequence, Type::INT8),
-            ],
-        )
-        .await
-        .map_err(postgres_error)?;
-        tx.commit().await.map_err(postgres_error)?;
-        if publication.durable {
+                        &[
+                            (&this.0.volume_key, Type::TEXT),
+                            (&id_text, Type::TEXT),
+                            (&next_sequence, Type::INT8),
+                        ],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                    tx.commit().await.map_err(postgres_error)?;
+
+                    Ok(VersionInfo {
+                        id,
+                        parent: publication.expected_parent,
+                        restored_from: publication.restored_from,
+                        forked_from: publication.forked_from,
+                        kind: publication.kind,
+                        namespace: publication.namespace,
+                        block_store_id: publication.block_store_id,
+                        created_at_ms,
+                        durable: publication.durable,
+                    })
+                })
+            })
+            .await?;
+        // The barrier is its own operation, after the transaction has
+        // committed and given the connection back.
+        if durable {
             self.0.flush().await?;
         }
-
-        Ok(VersionInfo {
-            id,
-            parent: publication.expected_parent,
-            restored_from: publication.restored_from,
-            forked_from: publication.forked_from,
-            kind: publication.kind,
-            namespace: publication.namespace,
-            block_store_id: publication.block_store_id,
-            created_at_ms,
-            durable: publication.durable,
-        })
+        Ok(version)
     }
 
     async fn open_view_pin(&self, id: &VersionId, request: ReadLeaseRequest) -> Result<ReadLease> {
@@ -2166,89 +2408,97 @@ impl VersionedMetadataStore for PgliteMetadataStore {
             return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
         }
         let encoded = id.encode();
-        let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
-            .await
-            .map_err(postgres_error)?;
-        // Serialize with deletion before observing version existence, then
-        // retain the volume lock until the new pin commits.
-        tx.query_typed_opt(
-            "SELECT 1 FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE",
-            &[(&self.0.volume_key, Type::TEXT)],
-        )
-        .await
-        .map_err(postgres_error)?
-        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let row = tx
-            .query_typed_opt(
-                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"),
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&encoded, Type::TEXT),
-                    (&self.1.0, Type::TEXT),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("open version view"))?;
-        check_stored_version_row_at(&row, 0, id, "open version view")?;
-        let state = tx
-            .query_typed_opt(
-                "SELECT next_read_fence FROM mount_rs_version_state
+        let id = id.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let tx = client.transaction().await.map_err(postgres_error)?;
+                    // Serialize with deletion before observing version existence, then
+                    // retain the volume lock until the new pin commits.
+                    tx.query_typed_opt(
+                        "SELECT 1 FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE",
+                        &[(&this.0.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?
+                    .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    let row = tx
+                        .query_typed_opt(
+                            &format!(
+                                "{VERSION_SELECT} WHERE volume_key=$1 AND id=$2 AND volume_id=$3"
+                            ),
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&encoded, Type::TEXT),
+                                (&this.1.0, Type::TEXT),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| {
+                            FsError::new(ErrorCode::Enoent).with_syscall("open version view")
+                        })?;
+                    check_stored_version_row_at(&row, 0, &id, "open version view")?;
+                    let state = tx
+                        .query_typed_opt(
+                            "SELECT next_read_fence FROM mount_rs_version_state
                  WHERE volume_key=$1 FOR UPDATE",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?;
-        let current_fence = state.get::<_, i64>(0);
-        let next_fence = current_fence
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let now_ms = tx
-            .query_typed_opt(NOW_SELECT, &[])
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
-            .get::<_, i64>(0);
-        let expires = now_ms
-            .checked_add(ttl_ms)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let view_id = format!("{}-view-{next_fence}", self.1);
-        tx.execute_typed(
-            "UPDATE mount_rs_version_state SET next_read_fence=$2 WHERE volume_key=$1",
-            &[(&self.0.volume_key, Type::TEXT), (&next_fence, Type::INT8)],
-        )
-        .await
-        .map_err(postgres_error)?;
-        tx.execute_typed(
-            "INSERT INTO mount_rs_version_pins
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?;
+                    let current_fence = state.get::<_, i64>(0);
+                    let next_fence = current_fence
+                        .checked_add(1)
+                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                    let now_ms = tx
+                        .query_typed_opt(NOW_SELECT, &[])
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
+                        .get::<_, i64>(0);
+                    let expires = now_ms
+                        .checked_add(ttl_ms)
+                        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                    let view_id = format!("{}-view-{next_fence}", this.1);
+                    tx.execute_typed(
+                        "UPDATE mount_rs_version_state SET next_read_fence=$2 WHERE volume_key=$1",
+                        &[(&this.0.volume_key, Type::TEXT), (&next_fence, Type::INT8)],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                    tx.execute_typed(
+                        "INSERT INTO mount_rs_version_pins
              (volume_key, view_id, volume_id, version_id, owner, fence, expires)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            &[
-                (&self.0.volume_key, Type::TEXT),
-                (&view_id, Type::TEXT),
-                (&self.1.0, Type::TEXT),
-                (&encoded, Type::TEXT),
-                (&request.owner, Type::TEXT),
-                (&next_fence, Type::INT8),
-                (&expires, Type::INT8),
-            ],
-        )
-        .await
-        .map_err(postgres_error)?;
-        tx.commit().await.map_err(postgres_error)?;
-        Ok(ReadLease {
-            volume: self.1.clone(),
-            version: id.clone(),
-            view_id,
-            owner: request.owner,
-            fence: u64::try_from(next_fence).map_err(|_| FsError::new(ErrorCode::Eio))?,
-            expires_at_ms: u64::try_from(expires).map_err(|_| FsError::new(ErrorCode::Eio))?,
-        })
+                        &[
+                            (&this.0.volume_key, Type::TEXT),
+                            (&view_id, Type::TEXT),
+                            (&this.1.0, Type::TEXT),
+                            (&encoded, Type::TEXT),
+                            (&request.owner, Type::TEXT),
+                            (&next_fence, Type::INT8),
+                            (&expires, Type::INT8),
+                        ],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                    tx.commit().await.map_err(postgres_error)?;
+                    Ok(ReadLease {
+                        volume: this.1.clone(),
+                        version: id.clone(),
+                        view_id,
+                        owner: request.owner,
+                        fence: u64::try_from(next_fence)
+                            .map_err(|_| FsError::new(ErrorCode::Eio))?,
+                        expires_at_ms: u64::try_from(expires)
+                            .map_err(|_| FsError::new(ErrorCode::Eio))?,
+                    })
+                })
+            })
+            .await
     }
 
     async fn renew_view_pin(
@@ -2264,88 +2514,91 @@ impl VersionedMetadataStore for PgliteMetadataStore {
         let fence = i64::try_from(lease.fence).map_err(|_| FsError::new(ErrorCode::Estale))?;
         let expires =
             i64::try_from(lease.expires_at_ms).map_err(|_| FsError::new(ErrorCode::Estale))?;
-        let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
-            .await
-            .map_err(postgres_error)?;
-        // An expired pin can be deleted while it is being renewed unless both
-        // operations lock this same volume row before checking the pin.
-        tx.query_typed_opt(
-            "SELECT 1 FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE",
-            &[(&self.0.volume_key, Type::TEXT)],
-        )
-        .await
-        .map_err(postgres_error)?
-        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
-        let current = tx
-            .query_typed_opt(
-                "SELECT volume_id, version_id, owner, fence, expires
+        let lease = lease.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let tx = client.transaction().await.map_err(postgres_error)?;
+                    // An expired pin can be deleted while it is being renewed unless both
+                    // operations lock this same volume row before checking the pin.
+                    tx.query_typed_opt(
+                        "SELECT 1 FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE",
+                        &[(&this.0.volume_key, Type::TEXT)],
+                    )
+                    .await
+                    .map_err(postgres_error)?
+                    .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+                    let current = tx
+                        .query_typed_opt(
+                            "SELECT volume_id, version_id, owner, fence, expires
                  FROM mount_rs_version_pins
                  WHERE volume_key=$1 AND view_id=$2 FOR UPDATE",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.view_id, Type::TEXT),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        let Some(current) = current else {
-            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
-        };
-        let current_volume = current.get::<_, String>(0);
-        let current_version = current.get::<_, String>(1);
-        let current_owner = current.get::<_, String>(2);
-        let current_fence = current.get::<_, i64>(3);
-        let current_expires = current.get::<_, i64>(4);
-        let now_ms = tx
-            .query_typed_opt(NOW_SELECT, &[])
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
-            .get::<_, i64>(0);
-        let next_expires = plan_view_pin_renewal(
-            PinRenewalIdentity {
-                volume_matches: current_volume == self.1.0,
-                version_matches: current_version == lease.version.encode(),
-                request_owner_matches: current_owner == request.owner,
-                lease_owner_matches: current_owner == lease.owner,
-            },
-            PinRenewalToken {
-                fence: current_fence,
-                expires_at_ms: current_expires,
-            },
-            PinRenewalToken {
-                fence,
-                expires_at_ms: expires,
-            },
-            now_ms,
-            ttl_ms,
-        )?;
-        let changed = tx
-            .execute_typed(
-                "UPDATE mount_rs_version_pins SET expires=$3
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&lease.view_id, Type::TEXT),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    let Some(current) = current else {
+                        return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+                    };
+                    let current_volume = current.get::<_, String>(0);
+                    let current_version = current.get::<_, String>(1);
+                    let current_owner = current.get::<_, String>(2);
+                    let current_fence = current.get::<_, i64>(3);
+                    let current_expires = current.get::<_, i64>(4);
+                    let now_ms = tx
+                        .query_typed_opt(NOW_SELECT, &[])
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
+                        .get::<_, i64>(0);
+                    let next_expires = plan_view_pin_renewal(
+                        PinRenewalIdentity {
+                            volume_matches: current_volume == this.1.0,
+                            version_matches: current_version == lease.version.encode(),
+                            request_owner_matches: current_owner == request.owner,
+                            lease_owner_matches: current_owner == lease.owner,
+                        },
+                        PinRenewalToken {
+                            fence: current_fence,
+                            expires_at_ms: current_expires,
+                        },
+                        PinRenewalToken {
+                            fence,
+                            expires_at_ms: expires,
+                        },
+                        now_ms,
+                        ttl_ms,
+                    )?;
+                    let changed = tx
+                        .execute_typed(
+                            "UPDATE mount_rs_version_pins SET expires=$3
                  WHERE volume_key=$1 AND view_id=$2 AND fence=$4 AND expires=$5",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.view_id, Type::TEXT),
-                    (&next_expires, Type::INT8),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                ],
-            )
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&lease.view_id, Type::TEXT),
+                                (&next_expires, Type::INT8),
+                                (&fence, Type::INT8),
+                                (&expires, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if changed != 1 {
+                        return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+                    }
+                    tx.commit().await.map_err(postgres_error)?;
+                    Ok(ReadLease {
+                        expires_at_ms: u64::try_from(next_expires)
+                            .map_err(|_| FsError::new(ErrorCode::Eio))?,
+                        ..lease.clone()
+                    })
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        if changed != 1 {
-            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
-        }
-        tx.commit().await.map_err(postgres_error)?;
-        Ok(ReadLease {
-            expires_at_ms: u64::try_from(next_expires).map_err(|_| FsError::new(ErrorCode::Eio))?,
-            ..lease.clone()
-        })
     }
 
     async fn close_view_pin(&self, lease: &ReadLease) -> Result<()> {
@@ -2353,55 +2606,57 @@ impl VersionedMetadataStore for PgliteMetadataStore {
         let expires =
             i64::try_from(lease.expires_at_ms).map_err(|_| FsError::new(ErrorCode::Estale))?;
         let encoded = lease.version.encode();
-        let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
-            .await
-            .map_err(postgres_error)?;
-        let changed = tx
-            .execute_typed(
-                "DELETE FROM mount_rs_version_pins
+        let lease = lease.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let tx = client.transaction().await.map_err(postgres_error)?;
+                    let changed = tx
+                        .execute_typed(
+                            "DELETE FROM mount_rs_version_pins
                  WHERE volume_key=$1 AND view_id=$2 AND volume_id=$3
                    AND version_id=$4 AND owner=$5 AND fence=$6 AND expires=$7",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.view_id, Type::TEXT),
-                    (&lease.volume.0, Type::TEXT),
-                    (&encoded, Type::TEXT),
-                    (&lease.owner, Type::TEXT),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if changed == 1 {
-            tx.commit().await.map_err(postgres_error)?;
-            return Ok(());
-        }
-        let exists = tx
-            .query_typed_opt(
-                "SELECT EXISTS(
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&lease.view_id, Type::TEXT),
+                                (&lease.volume.0, Type::TEXT),
+                                (&encoded, Type::TEXT),
+                                (&lease.owner, Type::TEXT),
+                                (&fence, Type::INT8),
+                                (&expires, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if changed == 1 {
+                        tx.commit().await.map_err(postgres_error)?;
+                        return Ok(());
+                    }
+                    let exists = tx
+                        .query_typed_opt(
+                            "SELECT EXISTS(
                      SELECT 1 FROM mount_rs_version_pins
                      WHERE volume_key=$1 AND view_id=$2
                  )",
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.view_id, Type::TEXT),
-                ],
-            )
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&lease.view_id, Type::TEXT),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| incompatible_schema("PGlite pin query returned no row"))?
+                        .get::<_, bool>(0);
+                    tx.commit().await.map_err(postgres_error)?;
+                    if exists {
+                        Err(FsError::new(ErrorCode::Estale).with_syscall("close view"))
+                    } else {
+                        Ok(())
+                    }
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite pin query returned no row"))?
-            .get::<_, bool>(0);
-        tx.commit().await.map_err(postgres_error)?;
-        if exists {
-            Err(FsError::new(ErrorCode::Estale).with_syscall("close view"))
-        } else {
-            Ok(())
-        }
     }
 
     async fn delete_version(&self, lease: &WriterLease, id: &VersionId) -> Result<()> {
@@ -2410,77 +2665,82 @@ impl VersionedMetadataStore for PgliteMetadataStore {
         }
         let (fence, expires) = lease_numbers(lease)?;
         let encoded = id.encode();
-        let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
-            .await
-            .map_err(postgres_error)?;
-        let valid = tx
-            .query_typed_opt(
-                &format!(
-                    "SELECT write_mode IS NULL AND owner=$2 AND fence=$3 AND expires=$4 AND expires>{NOW}
+        let lease = lease.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let tx = client
+                        .transaction()
+                        .await
+                        .map_err(postgres_error)?;
+                    let valid = tx
+                        .query_typed_opt(
+                            &format!(
+                                "SELECT write_mode IS NULL AND owner=$2 AND fence=$3 AND expires=$4 AND expires>{NOW}
                      FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE"
-                ),
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.owner, Type::TEXT),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                ],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?
-            .get::<_, bool>(0);
-        if !valid {
-            return Err(stale());
-        }
-        let head_id = tx
-            .query_typed_opt(
-                "SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?
-            .get::<_, Option<String>>(0);
-        if head_id.as_deref() == Some(&encoded) {
-            return Err(FsError::new(ErrorCode::Ebusy)
-                .with_syscall("delete version")
-                .with_message("current version cannot be deleted"));
-        }
-        let protected = tx
-            .query_typed_opt(
-                &format!(
-                    "SELECT EXISTS(
+                            ),
+                            &[
+                                (&this.0.volume_key, Type::TEXT),
+                                (&lease.owner, Type::TEXT),
+                                (&fence, Type::INT8),
+                                (&expires, Type::INT8),
+                            ],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite metadata row is missing"))?
+                        .get::<_, bool>(0);
+                    if !valid {
+                        return Err(stale());
+                    }
+                    let head_id = tx
+                        .query_typed_opt(
+                            "SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1",
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?
+                        .get::<_, Option<String>>(0);
+                    if head_id.as_deref() == Some(&encoded) {
+                        return Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("delete version")
+                            .with_message("current version cannot be deleted"));
+                    }
+                    let protected = tx
+                        .query_typed_opt(
+                            &format!(
+                                "SELECT EXISTS(
                          SELECT 1 FROM mount_rs_version_pins
                          WHERE volume_key=$1 AND version_id=$2 AND expires>{NOW}
                      )"
-                ),
-                &[(&self.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
-            )
+                            ),
+                            &[(&this.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| incompatible_schema("PGlite pin query returned no row"))?
+                        .get::<_, bool>(0);
+                    if protected {
+                        return Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("delete version")
+                            .with_message("version has an active read lease"));
+                    }
+                    let changed = tx
+                        .execute_typed(
+                            "DELETE FROM mount_rs_versions WHERE volume_key=$1 AND id=$2",
+                            &[(&this.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    if changed != 1 {
+                        return Err(FsError::new(ErrorCode::Enoent).with_syscall("delete version"));
+                    }
+                    tx.commit().await.map_err(postgres_error)
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| incompatible_schema("PGlite pin query returned no row"))?
-            .get::<_, bool>(0);
-        if protected {
-            return Err(FsError::new(ErrorCode::Ebusy)
-                .with_syscall("delete version")
-                .with_message("version has an active read lease"));
-        }
-        let changed = tx
-            .execute_typed(
-                "DELETE FROM mount_rs_versions WHERE volume_key=$1 AND id=$2",
-                &[(&self.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?;
-        if changed != 1 {
-            return Err(FsError::new(ErrorCode::Enoent).with_syscall("delete version"));
-        }
-        tx.commit().await.map_err(postgres_error)
     }
 }
 
@@ -2492,51 +2752,57 @@ impl BlockStore for PgliteBlockStore {
 
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         let candidate = uuid::Uuid::new_v4().simple().to_string();
-        let client = self.0.lock_client().await?;
-        client
-            .as_ref()
-            .ok_or_else(connection_closed)?
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    client
             .execute_typed(
                 "INSERT INTO mount_rs_block_authority (volume_key, backing_id) VALUES ($1, $2)
                  ON CONFLICT (volume_key) DO NOTHING",
-                &[(&self.0.volume_key, Type::TEXT), (&candidate, Type::TEXT)],
+                &[(&this.0.volume_key, Type::TEXT), (&candidate, Type::TEXT)],
             )
             .await
             .map_err(postgres_error)?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT backing_id FROM mount_rs_block_authority WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT backing_id FROM mount_rs_block_authority WHERE volume_key=$1",
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite block authority disappeared"))?;
+                    ConcurrentBackingId::from_hex(&row.get::<_, String>(0))
+                        .map_err(|_| backend_error("PGlite block authority ID is invalid"))
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite block authority disappeared"))?;
-        ConcurrentBackingId::from_hex(&row.get::<_, String>(0))
-            .map_err(|_| backend_error("PGlite block authority ID is invalid"))
     }
 
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
-        let client = self.0.lock_client().await?;
-        let row = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT backing_id FROM mount_rs_block_authority WHERE volume_key=$1",
-                &[(&self.0.volume_key, Type::TEXT)],
-            )
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT backing_id FROM mount_rs_block_authority WHERE volume_key=$1",
+                            &[(&this.0.volume_key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    let Some(row) = row else {
+                        return Err(stale());
+                    };
+                    let actual = ConcurrentBackingId::from_hex(&row.get::<_, String>(0))
+                        .map_err(|_| stale())?;
+                    if actual != expected {
+                        return Err(stale());
+                    }
+                    Ok(())
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        let Some(row) = row else {
-            return Err(stale());
-        };
-        let actual =
-            ConcurrentBackingId::from_hex(&row.get::<_, String>(0)).map_err(|_| stale())?;
-        if actual != expected {
-            return Err(stale());
-        }
-        Ok(())
     }
 
     async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -2549,59 +2815,67 @@ impl BlockStore for PgliteBlockStore {
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let bytes = bytes.to_vec();
-        let client = self.0.lock_client().await?;
-        // A collision is checked below and never aliases different content.
-        let id = block_id(&bytes);
-        let changed = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    // A collision is checked below and never aliases different content.
+                    let id = block_id(&bytes);
+                    let changed = client
             .execute_typed(
                 "INSERT INTO mount_rs_blocks (volume_key, id, bytes) VALUES ($1, $2, $3)
                  ON CONFLICT (volume_key, id) DO NOTHING",
                 &[
-                    (&self.0.volume_key, Type::TEXT),
+                    (&this.0.volume_key, Type::TEXT),
                     (&id, Type::TEXT),
                     (&bytes, Type::BYTEA),
                 ],
             )
             .await
             .map_err(postgres_error)?;
-        if changed == 1 {
-            return Ok(BlockId(id));
-        }
+                    if changed == 1 {
+                        return Ok(BlockId(id));
+                    }
 
-        let existing = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT bytes FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
-                &[(&self.0.volume_key, Type::TEXT), (&id, Type::TEXT)],
-            )
+                    let existing = client
+                        .query_typed_opt(
+                            "SELECT bytes FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
+                            &[(&this.0.volume_key, Type::TEXT), (&id, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .ok_or_else(|| backend_error("PGlite block conflict disappeared"))?
+                        .get::<_, Vec<u8>>(0);
+                    if existing == bytes {
+                        Ok(BlockId(id))
+                    } else {
+                        Err(backend_error("PGlite block identity collision"))
+                    }
+                })
+            })
             .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| backend_error("PGlite block conflict disappeared"))?
-            .get::<_, Vec<u8>>(0);
-        if existing == bytes {
-            Ok(BlockId(id))
-        } else {
-            Err(backend_error("PGlite block identity collision"))
-        }
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
-        let client = self.0.lock_client().await?;
-        let bytes = client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .query_typed_opt(
-                "SELECT bytes FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
-                &[(&self.0.volume_key, Type::TEXT), (&id.0, Type::TEXT)],
-            )
-            .await
-            .map_err(postgres_error)?
-            .map(|row| row.get::<_, Vec<u8>>(0))
-            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("get block"))?;
-        drop(client);
+        let key = id.0.clone();
+        let this = self.clone();
+        let bytes = self
+            .0
+            .run(move |client| {
+                Box::pin(async move {
+                    client
+                        .query_typed_opt(
+                            "SELECT bytes FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
+                            &[(&this.0.volume_key, Type::TEXT), (&key, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?
+                        .map(|row| row.get::<_, Vec<u8>>(0))
+                        .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("get block"))
+                })
+            })
+            .await?;
+        // Hash outside the operation so other callers are not kept waiting.
         if block_id(&bytes) != id.0 {
             return Err(FsError::new(ErrorCode::Eio).with_syscall("verify PGlite block digest"));
         }
@@ -2613,17 +2887,22 @@ impl BlockStore for PgliteBlockStore {
     }
 
     async fn delete(&self, id: &BlockId) -> Result<()> {
-        let client = self.0.lock_client().await?;
-        client
-            .as_ref()
-            .ok_or_else(connection_closed)?
-            .execute_typed(
-                "DELETE FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
-                &[(&self.0.volume_key, Type::TEXT), (&id.0, Type::TEXT)],
-            )
+        let id = id.clone();
+        let this = self.clone();
+        self.0
+            .run(move |client| {
+                Box::pin(async move {
+                    client
+                        .execute_typed(
+                            "DELETE FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
+                            &[(&this.0.volume_key, Type::TEXT), (&id.0, Type::TEXT)],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    Ok(())
+                })
+            })
             .await
-            .map_err(postgres_error)?;
-        Ok(())
     }
 }
 
@@ -2989,6 +3268,26 @@ mod tests {
     use mount_rs_core::versioning::BlockStoreId;
     use mount_rs_memfs::MemoryFs;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Run test statements as one operation on the store's own connection.
+    /// `key` is bound to the store's volume key.
+    macro_rules! on_client {
+        ($database:expr, |$client:ident, $key:ident| $body:block) => {{
+            #[allow(unused_variables)]
+            let $key = $database.volume_key.clone();
+            $database
+                .run(move |$client| {
+                    Box::pin(async move {
+                        $body;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap()
+        }};
+    }
 
     mod wire_pause {
         use std::io::{self, Read, Write};
@@ -3299,10 +3598,8 @@ mod tests {
             store.release_writer(&lease).await.unwrap();
             let volume = store.volume_id();
             {
-                let client = store.0.lock_client().await.unwrap();
+                on_client!(store.0, |client, key| {
                 let schema = client
-                    .as_ref()
-                    .unwrap()
                     .query_typed_one(
                         "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
                         &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
@@ -3310,6 +3607,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(schema.get::<_, i64>(0), VERSION_SCHEMA_BASE_VERSION);
+                });
             }
             store.close().await.unwrap();
 
@@ -3320,10 +3618,8 @@ mod tests {
             assert_eq!(reopened.version_head().await.unwrap().unwrap().version, first.id);
             assert_eq!(reopened.list_versions().await.unwrap().len(), 1);
             {
-                let client = reopened.0.lock_client().await.unwrap();
+                on_client!(reopened.0, |client, key| {
                 let schema = client
-                    .as_ref()
-                    .unwrap()
                     .query_typed_one(
                         "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
                         &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
@@ -3331,6 +3627,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(schema.get::<_, i64>(0), VERSION_SCHEMA_BASE_VERSION);
+                });
             }
             let lease = reopened
                 .acquire_writer("schema-upgrade", Duration::from_secs(60))
@@ -3346,8 +3643,7 @@ mod tests {
             let second = reopened.publish_version(&lease, next).await.unwrap();
             reopened.release_writer(&lease).await.unwrap();
             {
-                let client = reopened.0.lock_client().await.unwrap();
-                let client = client.as_ref().unwrap();
+                on_client!(reopened.0, |client, key| {
                 let schema = client
                     .query_typed_one(
                         "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
@@ -3360,7 +3656,7 @@ mod tests {
                     .query_typed_one(
                         "SELECT kind FROM mount_rs_versions WHERE volume_key=$1 AND id=$2",
                         &[
-                            (&options.volume_key, Type::TEXT),
+                            (&key, Type::TEXT),
                             (&second.id.encode(), Type::TEXT),
                         ],
                     )
@@ -3374,6 +3670,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                });
             }
             let error = match PgliteMetadataStore::connect_with_options(url, options).await {
                 Ok(_) => panic!("future version schema must be rejected"),
@@ -3381,10 +3678,8 @@ mod tests {
             };
             assert!(error.is(ErrorCode::Enotsup));
             {
-                let client = reopened.0.lock_client().await.unwrap();
+                on_client!(reopened.0, |client, key| {
                 let schema = client
-                    .as_ref()
-                    .unwrap()
                     .query_typed_one(
                         "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
                         &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
@@ -3392,6 +3687,7 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(schema.get::<_, i64>(0), 99);
+                });
             }
             reopened.close().await.unwrap();
             blocks.close().await.unwrap();
@@ -3432,20 +3728,17 @@ mod tests {
     }
 
     async fn corrupt_version_row(metadata: &PgliteMetadataStore, id: &VersionId, sql: &str) {
-        let client = metadata.0.lock_client().await.unwrap();
         let encoded = id.encode();
-        assert_eq!(
-            client
-                .as_ref()
-                .unwrap()
-                .execute_typed(
-                    sql,
-                    &[(&metadata.0.volume_key, Type::TEXT), (&encoded, Type::TEXT),],
-                )
-                .await
-                .unwrap(),
-            1
-        );
+        let sql = sql.to_owned();
+        on_client!(metadata.0, |client, key| {
+            assert_eq!(
+                client
+                    .execute_typed(&sql, &[(&key, Type::TEXT), (&encoded, Type::TEXT),],)
+                    .await
+                    .unwrap(),
+                1
+            );
+        });
     }
 
     #[test]
@@ -3456,7 +3749,24 @@ mod tests {
     }
 
     async fn cancel_close_while_client_is_held(database: &Database) {
-        let client_guard = database.client.lock().await;
+        // An operation in progress keeps the connection until it finishes.
+        let (started, running) = oneshot::channel();
+        let (release, released) = oneshot::channel::<()>();
+        let holder = tokio::spawn({
+            let database = database.clone();
+            async move {
+                database
+                    .run(move |_client| {
+                        Box::pin(async move {
+                            let _ = started.send(());
+                            let _ = released.await;
+                            Ok(())
+                        })
+                    })
+                    .await
+            }
+        });
+        running.await.unwrap();
         let canceled = tokio::spawn({
             let database = database.clone();
             async move { database.close().await }
@@ -3472,8 +3782,388 @@ mod tests {
         });
         tokio::task::yield_now().await;
         assert!(!second.is_finished());
-        drop(client_guard);
+        release.send(()).unwrap();
+        holder.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
+    }
+
+    const SCRATCH: &str = "CREATE TABLE IF NOT EXISTS mount_rs_owner_test (
+        volume_key TEXT NOT NULL, label TEXT NOT NULL)";
+
+    async fn scratch_database(url: &str, volume_key: &str) -> Database {
+        Database::connect(url, SCRATCH, PgliteStorageOptions::new(volume_key))
+            .await
+            .unwrap()
+    }
+
+    async fn insert_label(client: &Client, key: &str, label: &str) -> Result<u64> {
+        client
+            .execute(
+                "INSERT INTO mount_rs_owner_test (volume_key, label) VALUES ($1, $2)",
+                &[&key, &label],
+            )
+            .await
+            .map_err(postgres_error)
+    }
+
+    /// What a separate connection sees committed for this volume key.
+    async fn committed_labels(url: &str, volume_key: &str) -> Vec<String> {
+        let observer = scratch_database(url, volume_key).await;
+        let key = volume_key.to_owned();
+        let labels = observer
+            .run(move |client| {
+                Box::pin(async move {
+                    let rows = client
+                        .query(
+                            "SELECT label FROM mount_rs_owner_test
+                             WHERE volume_key=$1 ORDER BY label",
+                            &[&key],
+                        )
+                        .await
+                        .map_err(postgres_error)?;
+                    Ok(rows.into_iter().map(|row| row.get(0)).collect())
+                })
+            })
+            .await
+            .unwrap();
+        observer.close().await.unwrap();
+        labels
+    }
+
+    /// Callers on several threads mix transactions that roll back with single
+    /// statements that commit on their own. A statement sent between another
+    /// caller's BEGIN and ROLLBACK would run inside that transaction and be
+    /// lost although its caller was told it inserted a row.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn concurrent_callers_never_run_inside_another_callers_transaction() {
+        const CALLERS: usize = 8;
+        const ROUNDS: usize = 40;
+        let server = PgliteServer::start();
+        let url = server.connection_string().to_owned();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let key = "owner-exclusion";
+            let database = scratch_database(&url, key).await;
+            let mut callers = Vec::new();
+            for caller in 0..CALLERS {
+                let database = database.clone();
+                callers.push(tokio::spawn(async move {
+                    let mut committed = Vec::new();
+                    for round in 0..ROUNDS {
+                        if caller % 2 == 0 {
+                            database
+                                .run(move |client| {
+                                    Box::pin(async move {
+                                        let tx =
+                                            client.transaction().await.map_err(postgres_error)?;
+                                        insert_label(tx.client(), key, "rolled-back").await?;
+                                        tokio::task::yield_now().await;
+                                        let seen: i64 = tx
+                                            .query_one(
+                                                "SELECT count(*) FROM mount_rs_owner_test
+                                                 WHERE volume_key=$1 AND label='rolled-back'",
+                                                &[&key],
+                                            )
+                                            .await
+                                            .map_err(postgres_error)?
+                                            .get(0);
+                                        assert_eq!(seen, 1, "another transaction was still open");
+                                        tokio::task::yield_now().await;
+                                        tx.rollback().await.map_err(postgres_error)
+                                    })
+                                })
+                                .await
+                                .unwrap();
+                        } else {
+                            let label = format!("{caller:02}-{round:03}");
+                            committed.push(label.clone());
+                            let changed = database
+                                .run(move |client| {
+                                    Box::pin(async move { insert_label(client, key, &label).await })
+                                })
+                                .await
+                                .unwrap();
+                            assert_eq!(changed, 1);
+                        }
+                    }
+                    committed
+                }));
+            }
+            let mut expected = Vec::new();
+            for caller in callers {
+                expected.extend(caller.await.unwrap());
+            }
+            expected.sort();
+            assert_eq!(expected.len(), CALLERS / 2 * ROUNDS);
+            assert_eq!(committed_labels(&url, key).await, expected);
+            database.close().await.unwrap();
+        });
+    }
+
+    /// Dropping a caller cancels its operation: a transaction in progress is
+    /// rolled back before the next operation starts, and an operation that
+    /// was still waiting its turn never runs.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn a_dropped_caller_cancels_its_operation() {
+        let server = PgliteServer::start();
+        let url = server.connection_string().to_owned();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let key = "owner-cancellation";
+            let database = scratch_database(&url, key).await;
+
+            let (started, running) = oneshot::channel();
+            let abandoned = tokio::spawn({
+                let database = database.clone();
+                async move {
+                    database
+                        .run(move |client| {
+                            Box::pin(async move {
+                                let tx = client.transaction().await.map_err(postgres_error)?;
+                                insert_label(tx.client(), key, "abandoned").await?;
+                                let _ = started.send(());
+                                std::future::pending::<()>().await;
+                                tx.commit().await.map_err(postgres_error)
+                            })
+                        })
+                        .await
+                }
+            });
+            running.await.unwrap();
+            // A second caller queues behind the open transaction and leaves
+            // before its turn.
+            let ran = Arc::new(AtomicBool::new(false));
+            let impatient = tokio::spawn({
+                let database = database.clone();
+                let ran = ran.clone();
+                async move {
+                    database
+                        .run(move |client| {
+                            Box::pin(async move {
+                                ran.store(true, Ordering::SeqCst);
+                                insert_label(client, key, "impatient").await
+                            })
+                        })
+                        .await
+                }
+            });
+            tokio::task::yield_now().await;
+            impatient.abort();
+            assert!(impatient.await.unwrap_err().is_cancelled());
+            abandoned.abort();
+            assert!(abandoned.await.unwrap_err().is_cancelled());
+
+            // The next operation runs outside the abandoned transaction.
+            let changed = database
+                .run(move |client| Box::pin(async move { insert_label(client, key, "kept").await }))
+                .await
+                .unwrap();
+            assert_eq!(changed, 1);
+            assert!(!ran.load(Ordering::SeqCst));
+            assert_eq!(committed_labels(&url, key).await, ["kept"]);
+            database.close().await.unwrap();
+        });
+    }
+
+    /// Close waits for the operation in progress, refuses the ones queued
+    /// behind it, and every later operation reports a closed connection.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn close_finishes_the_running_operation_and_refuses_queued_ones() {
+        let server = PgliteServer::start();
+        let url = server.connection_string().to_owned();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let key = "owner-close";
+            let database = scratch_database(&url, key).await;
+            let (started, running) = oneshot::channel();
+            let (release, released) = oneshot::channel::<()>();
+            let in_progress = tokio::spawn({
+                let database = database.clone();
+                async move {
+                    database
+                        .run(move |client| {
+                            Box::pin(async move {
+                                let tx = client.transaction().await.map_err(postgres_error)?;
+                                let _ = started.send(());
+                                let _ = released.await;
+                                insert_label(tx.client(), key, "finished").await?;
+                                tx.commit().await.map_err(postgres_error)
+                            })
+                        })
+                        .await
+                }
+            });
+            running.await.unwrap();
+            let ran = Arc::new(AtomicBool::new(false));
+            let queued = tokio::spawn({
+                let database = database.clone();
+                let ran = ran.clone();
+                async move {
+                    database
+                        .run(move |client| {
+                            Box::pin(async move {
+                                ran.store(true, Ordering::SeqCst);
+                                insert_label(client, key, "queued").await
+                            })
+                        })
+                        .await
+                }
+            });
+            tokio::task::yield_now().await;
+            let closing = tokio::spawn({
+                let database = database.clone();
+                async move { database.close().await }
+            });
+            tokio::task::yield_now().await;
+            assert!(database.close_gate.is_closing());
+            assert!(!closing.is_finished());
+
+            release.send(()).unwrap();
+            in_progress.await.unwrap().unwrap();
+            assert!(queued.await.unwrap().unwrap_err().is(ErrorCode::Ebadf));
+            assert!(!ran.load(Ordering::SeqCst));
+            closing.await.unwrap().unwrap();
+
+            let late = database
+                .run(move |client| Box::pin(async move { insert_label(client, key, "late").await }))
+                .await;
+            assert!(late.unwrap_err().is(ErrorCode::Ebadf));
+            database.close().await.unwrap();
+            assert_eq!(committed_labels(&url, key).await, ["finished"]);
+        });
+    }
+
+    /// A panic inside an operation unwinds in the caller that asked for it.
+    /// Its transaction rolls back and the store keeps working and closing.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn a_panicking_operation_unwinds_in_its_caller_and_the_store_survives() {
+        let server = PgliteServer::start();
+        let url = server.connection_string().to_owned();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let key = "owner-panic";
+            let database = scratch_database(&url, key).await;
+            let panicking = tokio::spawn({
+                let database = database.clone();
+                async move {
+                    database
+                        .run(move |client| {
+                            Box::pin(async move {
+                                let tx = client.transaction().await.map_err(postgres_error)?;
+                                insert_label(tx.client(), key, "panicked").await?;
+                                if key.len() > 1 {
+                                    panic!("operation panic under test");
+                                }
+                                tx.commit().await.map_err(postgres_error)
+                            })
+                        })
+                        .await
+                }
+            });
+            assert!(panicking.await.unwrap_err().is_panic());
+            let changed = database
+                .run(move |client| {
+                    Box::pin(async move { insert_label(client, key, "after").await })
+                })
+                .await
+                .unwrap();
+            assert_eq!(changed, 1);
+            assert_eq!(committed_labels(&url, key).await, ["after"]);
+            database.close().await.unwrap();
+        });
+    }
+
+    /// Dropping every handle without closing still ends the connection, so a
+    /// server that admits one connection accepts the next store.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn dropping_every_handle_ends_the_connection() {
+        let server = PgliteServer::start_with_max_connections(1);
+        let url = server.connection_string().to_owned();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let options = PgliteStorageOptions::new("owner-drop");
+            let first = Database::connect(&url, SCRATCH, options.clone())
+                .await
+                .unwrap();
+            drop(first.clone());
+            drop(first);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let second = loop {
+                match Database::connect(&url, SCRATCH, options.clone()).await {
+                    Ok(database) => break database,
+                    Err(error) => assert!(
+                        std::time::Instant::now() < deadline,
+                        "the dropped store kept its connection: {error:?}"
+                    ),
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            second.close().await.unwrap();
+        });
+    }
+
+    /// A durable publication runs its flush barrier as a separate operation
+    /// after the transaction has given the connection back.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn durable_publication_completes_its_flush_barrier() {
+        let server = PgliteServer::start();
+        let url = server.connection_string().to_owned();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let options = PgliteStorageOptions::new("owner-durable-publication").with_durable(true);
+            let metadata = PgliteMetadataStore::connect_with_options(&url, options.clone())
+                .await
+                .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(&url, options)
+                .await
+                .unwrap();
+            let block = blocks.put(b"abc").await.unwrap();
+            let lease = metadata
+                .acquire_writer("durable-publisher", Duration::from_secs(60))
+                .await
+                .unwrap();
+            let mut publication = version_publication(0, None, "durable", namespace(block).await);
+            publication.durable = true;
+            let version = tokio::time::timeout(
+                Duration::from_secs(20),
+                metadata.publish_version(&lease, publication),
+            )
+            .await
+            .expect("a durable publication never returned")
+            .unwrap();
+            assert!(version.durable);
+            assert_eq!(
+                metadata.version_head().await.unwrap().unwrap().version,
+                version.id
+            );
+            metadata.close().await.unwrap();
+            blocks.close().await.unwrap();
+        });
     }
 
     async fn namespace(block: BlockId) -> Namespace {
@@ -3575,15 +4265,16 @@ mod tests {
             // This is the exact conditional projection used by pre-MRC4 readers.
             // Enrollment must force a changed payload which their decoder rejects.
             {
-                let client = metadata.0.lock_client().await.unwrap();
+                on_client!(metadata.0, |client, key| {
                 let old_revision: i64 = 1;
-                let row = client.as_ref().unwrap().query_one(
+                let row = client.query_one(
                     "SELECT revision, CASE WHEN revision > 0 AND revision = $2 THEN NULL ELSE namespace END FROM mount_rs_metadata WHERE volume_key = $1",
-                    &[&metadata.0.volume_key, &old_revision]
+                    &[&key, &old_revision]
                 ).await.unwrap();
                 assert_eq!(row.get::<_, i64>(0), 2);
                 let payload = row.get::<_, Option<String>>(1).unwrap();
                 assert!(serde_json::from_str::<Namespace>(&payload).is_err());
+                });
             }
             let initial = metadata.load_inode_snapshot(backing).await.unwrap();
             assert_eq!(initial.structural_generation, 2);
@@ -3694,11 +4385,12 @@ mod tests {
             for malformed in [malformed_kind, malformed_extent] {
                 let json = serde_json::to_string(&malformed).unwrap();
                 {
-                    let client = reopened.0.lock_client().await.unwrap();
-                    client.as_ref().unwrap().execute(
+                    on_client!(reopened.0, |client, key| {
+                    client.execute(
                         "UPDATE mount_rs_inode_guards SET revision=1,node=$3 WHERE volume_key=$1 AND inode=$2",
-                        &[&reopened.0.volume_key,&inode_signed(inode).unwrap(),&json]
+                        &[&key,&inode_signed(inode).unwrap(),&json]
                     ).await.unwrap();
+                    });
                 }
                 assert!(reopened.load_inode(backing, inode).await.is_err());
                 assert!(reopened.load_inode_if_changed(backing, inode, Some(file.version)).await.is_err());
@@ -3770,35 +4462,36 @@ mod tests {
                 2
             );
             {
-                let client = metadata.0.lock_client().await.unwrap();
-                client.as_ref().unwrap().execute_typed(
+                on_client!(metadata.0, |client, key| {
+                    client.execute_typed(
                     "UPDATE mount_rs_metadata SET namespace='malformed-json' WHERE volume_key=$1",
-                    &[(&metadata.0.volume_key, Type::TEXT)],
+                    &[(&key, Type::TEXT)],
                 ).await.unwrap();
+                });
             }
             // An unchanged revision is not an audit of out-of-band payload edits.
             assert!(metadata.load_if_changed(2).await.unwrap().is_none());
             assert!(metadata.load().await.is_err());
             assert!(metadata.load_if_changed(1).await.is_err());
             {
-                let client = metadata.0.lock_client().await.unwrap();
-                client.as_ref().unwrap().batch_execute(
+                on_client!(metadata.0, |client, key| {
+                    client.batch_execute(
                     "ALTER TABLE mount_rs_metadata DROP CONSTRAINT mount_rs_metadata_revision_check;
                      UPDATE mount_rs_metadata SET revision=-1;",
                 ).await.unwrap();
+                });
             }
             assert!(metadata.load_if_changed(u64::MAX).await.is_err());
             {
-                let client = metadata.0.lock_client().await.unwrap();
-                client
-                    .as_ref()
-                    .unwrap()
-                    .execute_typed(
-                        "DELETE FROM mount_rs_metadata WHERE volume_key=$1",
-                        &[(&metadata.0.volume_key, Type::TEXT)],
-                    )
-                    .await
-                    .unwrap();
+                on_client!(metadata.0, |client, key| {
+                    client
+                        .execute_typed(
+                            "DELETE FROM mount_rs_metadata WHERE volume_key=$1",
+                            &[(&key, Type::TEXT)],
+                        )
+                        .await
+                        .unwrap();
+                });
             }
             assert!(metadata.load_if_changed(2).await.is_err());
             metadata.close().await.unwrap();
@@ -3863,24 +4556,23 @@ mod tests {
     // Only the offline migration tests create an MRC1 volume. Normal
     // concurrent clients prepare an MRC2 volume with a block authority ID.
     async fn seed_test_owned_mrc1_volume(metadata: &PgliteMetadataStore) {
-        let client = metadata.0.lock_client().await.unwrap();
-        let changed = client
-            .as_ref()
-            .unwrap()
-            .execute_typed(
-                "UPDATE mount_rs_metadata SET write_mode=$2, fence=$3
+        on_client!(metadata.0, |client, key| {
+            let changed = client
+                .execute_typed(
+                    "UPDATE mount_rs_metadata SET write_mode=$2, fence=$3
                  WHERE volume_key=$1 AND write_mode IS NULL AND backing_id IS NULL
                    AND revision=0 AND namespace IS NULL
                    AND owner IS NULL AND fence=0 AND expires=0",
-                &[
-                    (&metadata.0.volume_key, Type::TEXT),
-                    (&CONCURRENT_WRITE_MODE, Type::TEXT),
-                    (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
-                ],
-            )
-            .await
-            .unwrap();
-        assert_eq!(changed, 1, "test-owned MRC1 fixture must start fresh");
+                    &[
+                        (&key, Type::TEXT),
+                        (&CONCURRENT_WRITE_MODE, Type::TEXT),
+                        (&CONCURRENT_FENCE_SENTINEL, Type::INT8),
+                    ],
+                )
+                .await
+                .unwrap();
+            assert_eq!(changed, 1, "test-owned MRC1 fixture must start fresh");
+        });
     }
 
     #[test]
@@ -4578,31 +5270,23 @@ mod tests {
             // This is the pre-change acquisition condition: it knows
             // nothing about write_mode. The max-fence sentinel still makes
             // it return no row, so an older binary cannot claim the volume.
-            let client = reopened.0.lock_client().await.unwrap();
-            let old_owner = "older-binary".to_owned();
-            let old_sql = format!(
-                "UPDATE mount_rs_metadata SET owner=$2, fence=fence+1, expires={NOW}+60000
+            on_client!(reopened.0, |client, key| {
+                let old_owner = "older-binary".to_owned();
+                let old_sql = format!(
+                    "UPDATE mount_rs_metadata SET owner=$2, fence=fence+1, expires={NOW}+60000
                  WHERE volume_key=$1 AND (owner IS NULL OR expires<={NOW})
                    AND fence<9223372036854775807
                  RETURNING fence"
-            );
-            let old_acquire = client
-                .as_ref()
-                .unwrap()
-                .query_typed_opt(
-                    &old_sql,
-                    &[
-                        (&reopened.0.volume_key, Type::TEXT),
-                        (&old_owner, Type::TEXT),
-                    ],
-                )
-                .await
-                .unwrap();
-            assert!(
-                old_acquire.is_none(),
-                "an older binary bypassed the sentinel"
-            );
-            drop(client);
+                );
+                let old_acquire = client
+                    .query_typed_opt(&old_sql, &[(&key, Type::TEXT), (&old_owner, Type::TEXT)])
+                    .await
+                    .unwrap();
+                assert!(
+                    old_acquire.is_none(),
+                    "an older binary bypassed the sentinel"
+                );
+            });
             reopened.close().await.unwrap();
             blocks.close().await.unwrap();
         });
@@ -4753,34 +5437,30 @@ mod tests {
                     .await
                     .unwrap();
                 let backing = blocks.prepare_concurrent_backing().await.unwrap();
-                let client = metadata.0.lock_client().await.unwrap();
-                client
-                    .as_ref()
-                    .unwrap()
-                    .execute_typed(seed_sql, &[(&metadata.0.volume_key, Type::TEXT)])
-                    .await
-                    .unwrap();
-                drop(client);
+                on_client!(metadata.0, |client, key| {
+                    client
+                        .execute_typed(seed_sql, &[(&key, Type::TEXT)])
+                        .await
+                        .unwrap();
+                });
 
                 let error = metadata
                     .prepare_bound_concurrent_mode(backing)
                     .await
                     .unwrap_err();
                 assert!(error.is(ErrorCode::Ebusy), "{suffix}: {error:?}");
-                let client = metadata.0.lock_client().await.unwrap();
-                let row = client
-                    .as_ref()
-                    .unwrap()
-                    .query_typed_opt(
-                        "SELECT write_mode, fence FROM mount_rs_metadata WHERE volume_key=$1",
-                        &[(&metadata.0.volume_key, Type::TEXT)],
-                    )
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(row.get::<_, Option<String>>(0).is_none(), "{suffix}");
-                assert_eq!(row.get::<_, i64>(1), 0, "{suffix}");
-                drop(client);
+                on_client!(metadata.0, |client, key| {
+                    let row = client
+                        .query_typed_opt(
+                            "SELECT write_mode, fence FROM mount_rs_metadata WHERE volume_key=$1",
+                            &[(&key, Type::TEXT)],
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(row.get::<_, Option<String>>(0).is_none(), "{suffix}");
+                    assert_eq!(row.get::<_, i64>(1), 0, "{suffix}");
+                });
                 metadata.close().await.unwrap();
                 blocks.close().await.unwrap();
             }
@@ -4915,22 +5595,20 @@ mod tests {
             // Simulate an inconsistent migration or a damaged marker. A
             // correct conversion never leaves a lease live, but operations
             // must fail closed if the marker appears while one is present.
-            let client = metadata.0.lock_client().await.unwrap();
-            let backing_text = backing.to_hex();
-            client
-                .as_ref()
-                .unwrap()
+            on_client!(metadata.0, |client, key| {
+                let backing_text = backing.to_hex();
+                client
                 .execute_typed(
                     "UPDATE mount_rs_metadata SET write_mode=$2, backing_id=$3 WHERE volume_key=$1",
                     &[
-                        (&metadata.0.volume_key, Type::TEXT),
+                        (&key, Type::TEXT),
                         (&BOUND_CONCURRENT_WRITE_MODE, Type::TEXT),
                         (&backing_text, Type::TEXT),
                     ],
                 )
                 .await
                 .unwrap();
-            drop(client);
+            });
             assert!(
                 metadata
                     .renew_writer(&lease, Duration::from_secs(60))
@@ -4981,17 +5659,15 @@ mod tests {
                 .prepare_bound_concurrent_mode(backing)
                 .await
                 .unwrap();
-            let client = metadata.0.lock_client().await.unwrap();
-            client
-                .as_ref()
-                .unwrap()
-                .execute_typed(
-                    "UPDATE mount_rs_metadata SET fence=0 WHERE volume_key=$1",
-                    &[(&metadata.0.volume_key, Type::TEXT)],
-                )
-                .await
-                .unwrap();
-            drop(client);
+            on_client!(metadata.0, |client, key| {
+                client
+                    .execute_typed(
+                        "UPDATE mount_rs_metadata SET fence=0 WHERE volume_key=$1",
+                        &[(&key, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            });
             assert!(
                 metadata
                     .prepare_bound_concurrent_mode(backing)
@@ -5189,24 +5865,23 @@ mod tests {
             )
             .await
             .unwrap();
-            let client = peer.0.lock_client().await.unwrap();
-            assert_eq!(
-                client
-                    .as_ref()
-                    .unwrap()
-                    .execute_typed(
-                        "UPDATE mount_rs_blocks SET bytes=$3 WHERE volume_key=$1 AND id=$2",
-                        &[
-                            (&peer.0.volume_key, Type::TEXT),
-                            (&id.0, Type::TEXT),
-                            (&tampered, Type::BYTEA),
-                        ],
-                    )
-                    .await
-                    .unwrap(),
-                1
-            );
-            drop(client);
+            let stored = id.0.clone();
+            on_client!(peer.0, |client, key| {
+                assert_eq!(
+                    client
+                        .execute_typed(
+                            "UPDATE mount_rs_blocks SET bytes=$3 WHERE volume_key=$1 AND id=$2",
+                            &[
+                                (&key, Type::TEXT),
+                                (&stored, Type::TEXT),
+                                (&tampered, Type::BYTEA),
+                            ],
+                        )
+                        .await
+                        .unwrap(),
+                    1
+                );
+            });
             peer.close().await.unwrap();
 
             let error = blocks.get(&id).await.unwrap_err();
@@ -5400,17 +6075,15 @@ mod tests {
                 ConcurrentModeState::Mrc2(id)
             );
             assert_eq!(metadata.load().await.unwrap().revision, 0);
-            let client = metadata.0.lock_client().await.unwrap();
-            client
-                .as_ref()
-                .unwrap()
-                .execute_typed(
-                    "UPDATE mount_rs_metadata SET backing_id=NULL WHERE volume_key=$1",
-                    &[(&metadata.0.volume_key, Type::TEXT)],
-                )
-                .await
-                .unwrap();
-            drop(client);
+            on_client!(metadata.0, |client, key| {
+                client
+                    .execute_typed(
+                        "UPDATE mount_rs_metadata SET backing_id=NULL WHERE volume_key=$1",
+                        &[(&key, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            });
             assert!(
                 metadata
                     .concurrent_mode_state()
@@ -5418,32 +6091,25 @@ mod tests {
                     .unwrap_err()
                     .is(ErrorCode::Estale)
             );
-            let client = metadata.0.lock_client().await.unwrap();
-            let backing_text = id.to_hex();
-            client
-                .as_ref()
-                .unwrap()
-                .execute_typed(
-                    "UPDATE mount_rs_metadata SET backing_id=$2 WHERE volume_key=$1",
-                    &[
-                        (&metadata.0.volume_key, Type::TEXT),
-                        (&backing_text, Type::TEXT),
-                    ],
-                )
-                .await
-                .unwrap();
-            drop(client);
-            let client = blocks.0.lock_client().await.unwrap();
-            client
-                .as_ref()
-                .unwrap()
-                .execute_typed(
-                    "DELETE FROM mount_rs_block_authority WHERE volume_key=$1",
-                    &[(&blocks.0.volume_key, Type::TEXT)],
-                )
-                .await
-                .unwrap();
-            drop(client);
+            on_client!(metadata.0, |client, key| {
+                let backing_text = id.to_hex();
+                client
+                    .execute_typed(
+                        "UPDATE mount_rs_metadata SET backing_id=$2 WHERE volume_key=$1",
+                        &[(&key, Type::TEXT), (&backing_text, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            });
+            on_client!(blocks.0, |client, key| {
+                client
+                    .execute_typed(
+                        "DELETE FROM mount_rs_block_authority WHERE volume_key=$1",
+                        &[(&key, Type::TEXT)],
+                    )
+                    .await
+                    .unwrap();
+            });
             assert!(
                 blocks
                     .verify_concurrent_backing(id)
@@ -5454,5 +6120,102 @@ mod tests {
             metadata.close().await.unwrap();
             blocks.close().await.unwrap();
         });
+    }
+
+    /// Throughput and latency of the one-connection path: one single-statement
+    /// operation and one four-statement transaction, with 1 and 8 concurrent
+    /// callers, on a current-thread and on a four-worker runtime. Run with
+    /// `--release -- --ignored --nocapture client_exclusion_benchmark`.
+    #[test]
+    #[ignore = "benchmark; requires the isolated tests/pglite Node server and its dependencies"]
+    fn client_exclusion_benchmark() {
+        async fn measure(
+            metadata: &PgliteMetadataStore,
+            transaction: bool,
+            callers: usize,
+            total: usize,
+        ) -> (f64, u128, u128) {
+            let lease = ReadLease {
+                volume: metadata.volume_id(),
+                version: VersionId::new(metadata.volume_id(), 1).unwrap(),
+                view_id: "client-exclusion-benchmark-missing".to_owned(),
+                owner: "client-exclusion-benchmark".to_owned(),
+                fence: 1,
+                expires_at_ms: 1,
+            };
+            let each = total / callers;
+            let started = std::time::Instant::now();
+            let mut tasks = Vec::new();
+            for _ in 0..callers {
+                let metadata = metadata.clone();
+                let lease = lease.clone();
+                tasks.push(tokio::spawn(async move {
+                    let mut samples = Vec::with_capacity(each);
+                    for _ in 0..each {
+                        let begin = std::time::Instant::now();
+                        if transaction {
+                            metadata.close_view_pin(&lease).await.unwrap();
+                        } else {
+                            metadata.load_if_changed(0).await.unwrap().unwrap();
+                        }
+                        samples.push(begin.elapsed().as_nanos());
+                    }
+                    samples
+                }));
+            }
+            let mut samples = Vec::with_capacity(total);
+            for task in tasks {
+                samples.extend(task.await.unwrap());
+            }
+            let elapsed = started.elapsed().as_secs_f64();
+            samples.sort_unstable();
+            let p50 = samples[samples.len() / 2];
+            let p99 = samples[samples.len() * 99 / 100];
+            (samples.len() as f64 / elapsed, p50 / 1000, p99 / 1000)
+        }
+
+        let server = PgliteServer::start();
+        let url = server.connection_string().to_owned();
+        for (runtime_name, runtime) in [
+            (
+                "current-thread",
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+            ),
+            (
+                "multi-thread-4",
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .enable_all()
+                    .build()
+                    .unwrap(),
+            ),
+        ] {
+            let url = url.clone();
+            runtime.block_on(async move {
+                let metadata = PgliteMetadataStore::connect_with_key(
+                    &url,
+                    format!("client-exclusion-benchmark-{runtime_name}"),
+                )
+                .await
+                .unwrap();
+                measure(&metadata, false, 1, 400).await;
+                measure(&metadata, true, 1, 100).await;
+                for (operation, transaction, total) in
+                    [("statement", false, 4000), ("transaction", true, 1000)]
+                {
+                    for callers in [1, 8] {
+                        let (rate, p50, p99) =
+                            measure(&metadata, transaction, callers, total).await;
+                        println!(
+                            "client_exclusion_benchmark runtime={runtime_name} op={operation} callers={callers} ops_per_s={rate:.0} p50_us={p50} p99_us={p99}"
+                        );
+                    }
+                }
+                metadata.close().await.unwrap();
+            });
+        }
     }
 }

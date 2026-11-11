@@ -504,4 +504,139 @@ mod linux {
             "remove native panic mountpoint: {removed:?}"
         );
     }
+
+    /// Sixteen readers and a stat loop at once on the real kernel device.
+    /// Replies come from the session loop and from the positional-read
+    /// workers concurrently and take no lock: the kernel accepts each reply
+    /// as one whole write. Every read must return its own file's bytes and
+    /// the session must report no transport error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires an explicitly enabled Linux FUSE kernel harness"]
+    async fn native_parallel_reads_reply_without_a_reply_lock() {
+        use std::os::unix::fs::FileExt;
+
+        const READERS: usize = 16;
+        const FILE_SIZE: usize = 512 * 1024;
+        const PASSES: usize = 12;
+
+        assert_native_prerequisites();
+
+        let backend = Arc::new(MemoryFs::empty());
+        for reader in 0..READERS {
+            let file = backend
+                .open(&format!("/file-{reader}"), "w", 0o644)
+                .await
+                .expect("create seeded file");
+            file.write(&vec![b'a' + reader as u8; FILE_SIZE], Some(0))
+                .await
+                .expect("seed file");
+            file.close().await.expect("close seeded file");
+        }
+
+        let mountpoint = unique_mountpoint();
+        std::fs::create_dir(&mountpoint).expect("create native parallel mountpoint");
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<FuseTransportError>::new()));
+        let observed_callback = Arc::clone(&observed);
+        let mounted = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            mount_with_hooks(
+                backend,
+                &mountpoint,
+                native_mount_options(),
+                FuseMountHooks {
+                    on_transport_error: Some(Arc::new(move |error| {
+                        observed_callback
+                            .lock()
+                            .expect("transport callback lock")
+                            .push(error);
+                    })),
+                },
+            ),
+        )
+        .await
+        {
+            Ok(Ok(mounted)) => mounted,
+            Ok(Err(error)) => {
+                let _ = std::fs::remove_dir(&mountpoint);
+                panic!("opted-in native parallel FUSE mount failed: {error}");
+            }
+            Err(_) => {
+                let _ = std::fs::remove_dir(&mountpoint);
+                panic!("native parallel FUSE mount did not complete within 15 seconds");
+            }
+        };
+
+        let mut clients = tokio::task::JoinSet::new();
+        for reader in 0..READERS {
+            let path = mountpoint.join(format!("file-{reader}"));
+            clients.spawn_blocking(move || -> Result<(), String> {
+                use std::os::unix::fs::OpenOptionsExt;
+
+                let mut buffer = vec![0_u8; 16 * 1024];
+                for pass in 0..PASSES {
+                    // O_DIRECT bypasses the page cache, so every read below
+                    // is a FUSE_READ request answered by a read worker.
+                    let file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_DIRECT)
+                        .open(&path)
+                        .map_err(|error| error.to_string())?;
+                    let mut offset = 0;
+                    while offset < FILE_SIZE {
+                        let bytes = file
+                            .read_at(&mut buffer, offset as u64)
+                            .map_err(|error| format!("reader {reader} pass {pass}: {error}"))?;
+                        if bytes == 0 {
+                            return Err(format!("reader {reader}: short file at {offset}"));
+                        }
+                        if buffer[..bytes]
+                            .iter()
+                            .any(|byte| *byte != b'a' + reader as u8)
+                        {
+                            return Err(format!(
+                                "reader {reader} pass {pass}: another file's bytes at {offset}"
+                            ));
+                        }
+                        offset += bytes;
+                    }
+                }
+                Ok(())
+            });
+        }
+        {
+            let mountpoint = mountpoint.clone();
+            clients.spawn_blocking(move || -> Result<(), String> {
+                for round in 0..2_000 {
+                    let reader = round % READERS;
+                    let metadata = std::fs::metadata(mountpoint.join(format!("file-{reader}")))
+                        .map_err(|error| format!("stat during parallel reads: {error}"))?;
+                    if metadata.len() != FILE_SIZE as u64 {
+                        return Err(format!("stat returned length {}", metadata.len()));
+                    }
+                }
+                Ok(())
+            });
+        }
+        let client = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let mut results = Vec::new();
+            while let Some(result) = clients.join_next().await {
+                results.push(result.expect("native parallel client task"));
+            }
+            results
+        })
+        .await;
+
+        let unmounted =
+            tokio::time::timeout(std::time::Duration::from_secs(15), mounted.unmount()).await;
+        let removed = std::fs::remove_dir(&mountpoint);
+        let client = client.expect("native parallel clients timed out");
+        assert!(client.iter().all(Result::is_ok), "{client:?}");
+        assert!(
+            observed.lock().expect("transport callback lock").is_empty(),
+            "parallel replies must not fail the transport"
+        );
+        assert!(unmounted.is_ok(), "native unmount timed out: {unmounted:?}");
+        assert!(unmounted.as_ref().is_ok_and(Result::is_ok), "{unmounted:?}");
+        assert!(removed.is_ok(), "remove native mountpoint: {removed:?}");
+    }
 }

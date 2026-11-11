@@ -193,6 +193,15 @@ nothing a cheaper primitive could not guard was removed.
 | Chunked block cache `io_gate`, which made every delete wait for all in-flight reads and puts | 64 delete counters, bumped inside the index turn. A fill or put records its counter before the backing call and is not cached if it moved |
 | SQLite snapshot store connection, held through a durable commit on a runtime thread | The owner thread: load and save are each one job |
 | SQLite block-store group-commit turn | A lock-free queue of puts drained by the owner thread into one transaction. Reads go on a priority lane that runs before the next commit. Puts are as fast as before and four-thread cached reads about 15% faster; under mixed load puts are about twice as fast and the slowest 1% of reads rise from about 0.1 ms to about 0.9 ms, because twice as many commits get through |
+| Catalog connection pool, 8 SQLite connections each behind a lock | 8 owner threads, one per connection; each load or update is one job. Loads with 16 callers are about twice as fast (83k to 170k per second); one caller and updates are at parity |
+| PGlite client, one lock across each transaction | An owner task that runs whole operations in arrival order; a caller that goes away cancels its transaction. At parity against a real server. Found a deadlock under the old lock: a durable publish called flush while holding it and never returned |
+| FoundationDB client network start and stop locks | A lease counter and write-once cells (`NetworkGate`), with 13 race tests on fake start and stop actions. The native path is type-checked here but not run: this machine has no FoundationDB client library, so the live-cluster CI jobs are its first run |
+| Blob cache Redis discovery connection | An owner task; the caller's deadline still covers queueing, connect and the exchange. At parity for one caller, faster for eight |
+| FUSE reply writer | Nothing on the kernel device, where one write is one whole message. Parity, and 8% faster with 16 requests in flight; 10 of 10 native mount runs on Linux |
+| NFS reply writer | A queue of framed replies and an atomic slot holding the socket: the call that takes the socket writes everything queued, up to 16 frames per write. One call at a time is at parity; small replies are 28% faster at depth 16 and 91% faster at depth 64 |
+| Node FUSE session | An owner task fed in JavaScript call order. `handle()` is at parity one at a time and about 25% faster 16 at once |
+| Node S3 and WebDAV body streams | A combining queue: a pull that finds the body idle runs in place; one that does not is queued and run in order. About 15% faster |
+| kv state (attributes, directory set, open-file table, counters) | Atomic counters, an atomic snapshot of persistent maps, per-path attributes updated in place, and a bucketed open-file table. Eight callers: stat 30 times faster, open and close 12 times, rename 70 times. One caller: parity, except open and close 17% slower (1.75 to 2.05 microseconds) |
 | Fault injector state (test support), a spinning cell held while cloning and sorting up to a million events | An atomic snapshot: the decision, its sequence number and its event are published in one compare-and-swap; the trace walks an immutable list |
 | Chunked pending access times gate | One atomic slot per inode with an atomic time; the sweep closes a slot by compare-and-swap |
 
@@ -211,8 +220,8 @@ counterexamples are below. A lock with no counterexample was removed.
 type alias in production code and fails if one is not named in a row for
 its crate below, so a new lock cannot be added without a reason written
 here. Production code has no standard-library, `parking_lot` or `tokio`
-lock; every mention of one is in test code. Two locks are not fields and
-are listed by hand: the Node 9P fid table and the NFS reply writer.
+lock; every mention of one is in test code. One lock is not a field and
+is listed by hand: the Node 9P fid table.
 
 **Kind** says what the lock is for:
 
@@ -226,10 +235,8 @@ are listed by hand: the Node 9P fid table and the NFS reply writer.
 
 | Crate | Lock | Kind | What goes wrong without it |
 |-------|------|------|----------------------------|
-| bindings/mount-rs-napi | `FuseSession.inner` | A | The session's `handle` takes `&mut self` across an await. With take-and-put-back a second JavaScript `handle()` finds the slot empty, and one caller's `take_last_error` returns the other's error |
 | bindings/mount-rs-napi | `HandleState.close_gate` | A | Held across the JavaScript close. With a flag, a second closer returns "closed" while the first close is still running; if that close rejects, the handle is open and the second caller was told otherwise |
 | bindings/mount-rs-napi | `native_delegation_mounts` | A | A mount passes the "no active mounts" check and awaits the mount; a scope check-in sees an empty list and checks the directory in; the mount is then recorded: a live delegated mount over a directory that is not checked out |
-| bindings/mount-rs-napi | `S3BodyStream.inner`, `WebdavBodyStream.inner` | A | JavaScript does not serialise `next()` and `return()`. With take-and-put-back a second pull finds the slot empty and reports end of stream (a truncated body), and a close that finds it empty lets the stream outlive the close |
 | bindings/mount-rs-napi | `NativePathLock` state (three handles to one `ParkCell`) | S | The body of a reader/writer path lock. With split atomics, a release reads an empty waiter list just before a waiter adds itself, and that waiter is never woken |
 | bindings/mount-rs-napi | 9P fid table (`Standalone`) | S | Two opens of one fid both pass the "not open" check and both open a backend handle; the first is never closed |
 | bindings/mount-rs-sqlite-vfs | `StorageVolume.state` | A | Held across provider round trips. A delete and a commit both publish from revision R; one is rejected and marks the volume failed: a healthy volume fails for good on a benign race |
@@ -237,8 +244,7 @@ are listed by hand: the Node 9P fid table and the NFS reply writer.
 | crates/mount-rs-blob-cache | `LocalCache.state` | S | Two admissions pick the same eviction victim and both subtract its size: the byte count is too low and the memory budget is exceeded. A copied snapshot would copy up to a million entries on every hit, because a hit updates recency |
 | crates/mount-rs-blob-cache | `write_gate` | A | A put marks the store dirty and is inside the backing write; a flush completes and clears the mark; the put's block lands after the barrier: a store marked clean that holds an unflushed block |
 | crates/mount-rs-blob-cache | flight `Entry.turn`, `PeerLink.dial` | D | Two misses on one block both go to peers and the backing store; two requests to one peer both dial |
-| crates/mount-rs-blob-cache | `RedisDiscovery.connection` | R | One request and reply own the socket; two interleaved commands read each other's replies. Kept for performance: see below |
-| crates/mount-rs-blob-cache | `LocalCache.disk_io` | A | An insert passes the index check and is writing the file; an invalidate removes the index entry and unlinks; the insert's rename lands: a file on disk the index does not know. Kept for performance: see below |
+| crates/mount-rs-blob-cache | `LocalCache.disk_io` | A | An insert passes the index check and is writing the file; an invalidate removes the index entry and unlinks; the insert's rename lands: a file on disk the index does not know. A disk-writer thread was built and measured slower: see below |
 | crates/mount-rs-cluster | coalesce `Entry.turn` | D | N requests on a cold route make N registry lookups |
 | crates/mount-rs-cluster | `Slot.gate` | A | Two closes both pass the open check and both call `close()`. With a flag, close runs while a read is still inside the handle, and two cursor reads interleave on one cursor |
 | crates/mount-rs-cluster | `path_operations` | A | A path call passes the closing check and is inside the driver; close finds no handles and returns; the server releases the volume lease while that call is still writing |
@@ -246,7 +252,6 @@ are listed by hand: the Node 9P fid table and the NFS reply writer.
 | crates/mount-rs-remote-client | `renew_lock` | A | Two renewals fetch tokens expiring at 100 and 200. The server applies them in one order and the client stores them in the other, so the client believes 200, stops renewing, and at 100 the server closes its handles |
 | crates/mount-rs-remote-client | `RemoteHandle.gate` | A | A read passes the closed check and is executing on the server; close sends `HandleClose`: the handle is closed under the read |
 | crates/mount-rs-service | `PolicySlot.refresh` | A | Two requests both see the last fetch as a minute old and both fetch, breaking "at most one key fetch a minute" before authentication. With a compare-and-swap the loser cannot wait, so a valid token signed by the rotated key is rejected |
-| crates/mount-rs-service | catalog `connections` | R | A SQLite connection cannot be shared between threads. Kept for performance: see below |
 | filesystems/mount-rs-chunked | `StateCell.mutex` | S | The handle-transition counter is read then added to. Two deciders both see it even and both add, leaving it even while both still decide; a lock-free open then takes a reference to an inode that unlink has just dropped (`ESTALE` on an open handle) |
 | filesystems/mount-rs-chunked | block cache `Index` turn | S | With a retried compare-and-swap, a losing insert has already published its block to the lock-free front: a block served from cache after its delete |
 | filesystems/mount-rs-chunked | `gate` | A | A write and a mutation batch both snapshot revision r. The batch publishes r+1; the write publishes expecting r, is rejected, and fails the volume closed: a healthy single owner poisons itself |
@@ -259,52 +264,48 @@ are listed by hand: the Node 9P fid table and the NFS reply writer.
 | filesystems/mount-rs-host | disk cache `writes` | A | The same contract as the chunked `write_gate` |
 | filesystems/mount-rs-host | `HostHandle.state` | A | Two cursor reads both read the position, read the same range and both store. The kernel cursor cannot stand in on Windows. A close by swap returns while a worker still holds the descriptor |
 | filesystems/mount-rs-host | disk cache `Shared` turn | S | With a retried compare-and-swap, a losing reservation has already removed a key from the read index; the index and the entry table disagree and `make_room` panics |
-| filesystems/mount-rs-kv | `Inner.state` | S | Attribute map, directory set and open-file table change together on rename. An atomic snapshot is possible but adds an allocation to every handle write. Kept for performance: see below |
 | filesystems/mount-rs-kv | each `OpenEntry.file` | S | Two cursor writes on one handle both load the position and both write at p. A copied snapshot would copy the whole file on every write |
 | filesystems/mount-rs-kv | each `OpenEntry.saving` | A | Two flushes of one file snapshot in order but reach the store out of order: the older save lands last and the file is marked clean. This was a bug; the gate is the fix |
 | filesystems/mount-rs-memfs | `MemoryFs.inner` | S | Two cursor writes both load the position and write at p. Reserving the position first breaks short reads (the cursor ends past end of file and the next write leaves a hole) |
 | filesystems/mount-rs-persist | `SaveGate.lock` | A | Save 1 snapshots; save 2 snapshots a superset and writes; save 1's write lands last: an acknowledged write is gone after restart |
 | filesystems/mount-rs-versioned | `ViewLifetime.state` | A | Two begins both copy the pin and both renew it. The first rotates the pin; the second fails its exact-expiry check and closes a healthy view |
 | filesystems/mount-rs-versioned | `HistoricalFileHandle.admission` | A | Two closes both see "open" and both release: the view pin is released under another open handle |
-| providers/mount-rs-foundationdb | `CLIENT_NETWORK`, `CLIENT_NETWORK_STOPPING` | A | Held across the one-time native start and the thread join. A removal plan exists (a lease counter and write-once cells) but could not be built or tested here: the crate needs the FoundationDB client library, and the default build compiles an empty shell. Not removed untested |
 | providers/mount-rs-object-store-blocks | cache `ObjectStoreBlockCache.state` | S | The section publishes to and retracts from the lock-free front. With compare-and-swap, A inserts X; B removes X and retracts nothing; A then publishes X: X is in the front but not the index and is served for ever |
-| providers/mount-rs-pglite | `Database.client` | R | A transaction needs `&mut` on the one connection. Without the lock a second caller's statement is sent between a transaction's statements, runs inside it, and is lost when it rolls back although the caller was told it changed a row |
 | providers/mount-rs-slatedb | `SlateDbMetadataStore.state` | A | Held across the persisted write. A publish starts writing {rev 6, fence 3}; the lease expires and an acquire writes {rev 5, fence 4}; the publish lands second. Disk says fence 3, and after reopen fence 4 is issued twice |
 | transports/mount-rs-9p | `MountState.release` | A | The monitor is inside `server.close`; an unmount sees its own close return at once, finds no task and removes the directory before the socket file is gone: `ENOTEMPTY`, and unmount reports failure for a mount that is gone |
 | transports/mount-rs-9p | `P9Server.adoption` | A | Two mounts both snapshot the client set and both run `mount`; each adopts the first new connection, so A adopts B's. Unmounting B closes the server under A's live mount |
 | transports/mount-rs-9p | `SessionInner.state` | S | Two opens of one fid both pass the "not open" check and both open a backend handle; the first is never closed. A copied snapshot copies an unbounded fid table per walk step |
 | transports/mount-rs-9p | `path_lock` | A | A walk reads fid path `/a` and stats `/a/x`; a rename moves `/a` to `/b` and rewrites fid paths; the walk then stores `/a/x`: a fid naming a path that no longer exists |
-| transports/mount-rs-fuse | reply `writer` | A | A reply frame is written in a loop of partial writes on the public `from_owned_fd` path, so two replies interleave bytes. Kept for performance: see below |
+| transports/mount-rs-fuse | `Framing::Stream` in the device | A | Only for a byte-stream descriptor passed to `from_owned_fd`, where a reply is written in a loop of partial writes and two replies would interleave. The kernel device and message sockets write each reply in one call and take no lock; this crate's tests are the only users of the stream case |
 | transports/mount-rs-nfs | `FileHandleTable.state` | S | One call inserts handle N unpinned; another call's limit check evicts N; the first then pins a missing entry: `ESTALE` on a file just looked up |
-| transports/mount-rs-nfs | `DirectorySnapshots.state` | S | The snapshot map and its eviction order must agree; an atomic snapshot would copy every cached listing on each READDIR. Kept for performance: see below |
+| transports/mount-rs-nfs | `DirectorySnapshots.state` | S | The snapshot map and its eviction order must agree. Two lock-free versions were built and measured slower: see below |
 | transports/mount-rs-nfs | `RetainedHandles.by_id` | C | Two calls on one new handle both open a descriptor, both see no entry and both insert: one descriptor leaks and two pins meet one unpin |
 | transports/mount-rs-nfs | NFSv4 `state` (`Nfs4Session`, `InFlightSlot`) | S | Two retransmissions of one (session, slot, sequence) both see nothing in flight and both run a non-idempotent operation. Two LOCK owners both find no conflict and both insert overlapping exclusive ranges |
 | transports/mount-rs-nfs | `listen_lock` | A | Listen passes the closed check; close finds no listener and returns; listen binds and stores its task: a closed server with an accepting listener |
 | transports/mount-rs-nfs | native `unmount_lock` | A | A forced unmount is in progress; a graceful one finishes and marks the mount gone; the forced one marks it mounted again: a retry runs `umount` on whatever now sits at that mount point |
 | transports/mount-rs-nfs | `path_lock` (`SharedNfsState`, `Nfs3Session`, `Nfs4Session`) | A | LOOKUP stats P; REMOVE unlinks P; LOOKUP binds a handle to P. The next CREATE at P reuses the id, so the old handle addresses a different file |
-| transports/mount-rs-nfs | connection reply writer | A | Record frames from concurrent calls interleave on the socket. Kept for performance: see below |
 | transports/mount-rs-s3 | per-key conditional-put gate (`ConditionalPutEntry`) | A | The driver has no compare-and-swap for `If-Match`. Two PUTs with the same `If-Match` both pass the check and both write: two conditional PUTs succeed |
 | transports/mount-rs-webdav | `close_gate` | A | A swaps the closed flag and awaits the close; B sees the flag and returns Ok; A's close fails or is cancelled: B was told Ok for an unclosed handle, and drop then skips it |
 | transports/mount-rs-webdav | `lifecycle` | A | The server can restart. A listen passes its checks and awaits bind; a close finds nothing and returns Ok; the listen stores its task: close returned Ok and the server is accepting |
 | vendor/tunnel-transport | per-destination dial gate (`DialLocks`) | A | Two connects to one destination both miss the pool and both dial; the second insert replaces the first, which is then outside the pool and missed by shutdown |
-| vendor/quinn-proto | `TokenMemoryCache` | S | A map with its order list. Kept for performance: see below |
+| vendor/quinn-proto | `TokenMemoryCache` | S | A map with its order list. Two lock-free versions were built and measured slower: see below |
 | vendor/quinn-proto | `BloomTokenLog`, `QlogStream` | S, R | Not compiled in this workspace (their features are off). A filter turnover racing an insert accepts a replayed token; the qlog writer is used through `&mut` |
 
-**Kept for performance.** These could be removed, and were not, because
-the replacement is slower than the lock on the path that takes it. The
-owner-thread cost was measured on the SQLite storage connection: 5 to 7
-microseconds per operation for the hand-off.
+**Kept because the replacement measured slower.** For each of these the
+removal was built, tested and benchmarked against the lock, then reverted.
+The benchmark is in the tree as an ignored test.
 
-| Lock | Replacement | Why it is slower |
-|------|-------------|------------------|
-| Node `FuseSession.inner`; FUSE and NFS reply writers; Node S3 and WebDAV body streams | A task that owns the session, socket or stream, fed by a channel | A task hand-off and a reply channel on every request, reply or chunk. Each lock is uncontended in the normal case and costs tens of nanoseconds |
-| kv `Inner.state` | An atomic snapshot of persistent maps | An allocation on every handle write |
-| NFS `DirectorySnapshots.state` | An atomic snapshot | Copies the snapshot map per READDIR |
-| quinn `TokenMemoryCache` | An atomic snapshot | Copies up to the server-name limit per call, for a section of about 100 nanoseconds |
-| Catalog `connections` | Eight owner threads | A thread hand-off per catalog query; the pool already spreads callers over eight connections |
-| `RedisDiscovery.connection` | An owner task | Discovery runs on a timer, not per request; a task adds a hop and removes no wait |
-| `LocalCache.disk_io` | A disk-writer thread | Every cache insert would hop to one thread, which serialises writes exactly as the lock does |
-| PGlite `Database.client` | An owner task | About 25 call sites would become boxed jobs, and a dropped caller could no longer cancel its transaction |
+| Lock | Replacement built | Measured | Benchmark |
+|------|-------------------|----------|-----------|
+| blob cache `LocalCache.disk_io` | A disk-writer thread owning every directory change | One inserter: median 0.277 ms to 0.329 ms, slower in 5 of 5 paired runs (12 to 27%). Eight inserters: median better, but the slowest 0.1% rose from 18-33 ms to 83-153 ms | `local::tests::profile_disk_inserts` |
+| NFS `DirectorySnapshots.state` | An atomic snapshot over a persistent map; then over a purpose-built persistent trie | Against the lock with the same listing sharing, one caller storing a listing is 37 to 87% slower (0.45 to 1.1 microseconds), because a persistent structure allocates on every store and every READDIR from the start does one | `handles::tests::bench_directory_snapshots` |
+| quinn `TokenMemoryCache` | Hashed buckets replaced by compare-and-swap, with `arc-swap` and with epoch reclamation | Evicting insert 166-174 ns under the lock, 414-434 ns at best without; eight callers inserting 9.5-12.2 M/s against 5.4-7.4 M/s | `token_memory_cache::tests::token_cache_bench` |
+
+The first round of this work kept eleven locks on an estimate that an
+owner task or a snapshot would be slower. Measured, eight of them were not:
+they are in the removed table above. The estimate was wrong most often
+where the lock was held across slow work, because the replacement also
+batches or stops callers queueing.
 
 Three removals trade a little memory for the lock: the S3 connection
 shutdown list, the Node open-handle callback list and the retired SQLite
@@ -342,6 +343,15 @@ before:
 - 9P: an invalid lock type was accepted.
 - Node 9P: a second listen on port 0 could bind a second server and
   replace the first.
+- Node: overlapping calls from JavaScript did not run in call order. Four
+  overlapping `next()` calls damaged an S3 body in 3 of 3 runs, and a
+  LOOKUP issued after the MKDIR of the same name ran first in 45 of 3,000
+  pairs. Calls now run strictly in call order.
+- kv: an open could keep contents it read from the store before another
+  buffer for the same path was saved, and then save over the newer write.
+- kv: a close could drop a buffer while a later save of it was still in
+  flight, so the next open read the store too early.
+- PGlite: a durable publish deadlocked on its own flush.
 
 Known and not fixed: kv path `truncate` can still modify an entry the last
 close is detaching; a kv flush cancelled mid-write leaves the file marked

@@ -243,4 +243,132 @@ mod tests {
             }
         }
     }
+
+    /// Timed operations per batch. One clock reading pair covers a whole
+    /// batch because a single call is shorter than the clock's tick.
+    const BATCH: usize = 64;
+
+    #[derive(Clone, Copy, Debug)]
+    enum BenchOp {
+        /// Store a token under a name the cache already holds.
+        Insert,
+        /// Store a token under a new name while the cache is full.
+        InsertEvict,
+        /// Take a token that is present.
+        Take,
+    }
+
+    fn bench_worker(
+        store: &dyn TokenStore,
+        op: BenchOp,
+        thread: usize,
+        batches: usize,
+    ) -> (std::time::Duration, Vec<u64>) {
+        use std::time::Instant;
+
+        let token = Bytes::from_static(&[7u8; 48]);
+        let shared: Vec<String> = (0..16).map(|i| format!("shared-{i}.example.com")).collect();
+        let own: Vec<String> = (0..32)
+            .map(|i| format!("own-{thread}-{i}.example.com"))
+            .collect();
+        let mut fresh: Vec<String> = Vec::with_capacity(BATCH);
+        let mut spent = std::time::Duration::ZERO;
+        let mut per_op = Vec::with_capacity(batches);
+        for batch in 0..batches {
+            let elapsed = match op {
+                BenchOp::Insert => {
+                    let start = Instant::now();
+                    for i in 0..BATCH {
+                        store.insert(&shared[(i + thread) % shared.len()], token.clone());
+                    }
+                    start.elapsed()
+                }
+                BenchOp::InsertEvict => {
+                    fresh.clear();
+                    fresh.extend(
+                        (0..BATCH).map(|i| format!("fresh-{thread}-{batch}-{i}.example.com")),
+                    );
+                    let start = Instant::now();
+                    for name in &fresh {
+                        store.insert(name, token.clone());
+                    }
+                    start.elapsed()
+                }
+                BenchOp::Take => {
+                    for name in &own {
+                        store.insert(name, token.clone());
+                        store.insert(name, token.clone());
+                    }
+                    let mut found = 0;
+                    let start = Instant::now();
+                    for i in 0..BATCH {
+                        found += usize::from(store.take(&own[i % own.len()]).is_some());
+                    }
+                    let elapsed = start.elapsed();
+                    assert_eq!(found, BATCH);
+                    elapsed
+                }
+            };
+            spent += elapsed;
+            per_op.push(elapsed.as_nanos() as u64 / BATCH as u64);
+        }
+        (spent, per_op)
+    }
+
+    fn bench_case(label: &str, store: Arc<dyn TokenStore>, op: BenchOp, threads: usize) {
+        const BATCHES: usize = 20_000;
+        if matches!(op, BenchOp::InsertEvict) {
+            for i in 0..256 {
+                store.insert(&format!("prefill-{i}.example.com"), Bytes::from_static(b"p"));
+            }
+        }
+        let barrier = Arc::new(std::sync::Barrier::new(threads));
+        let workers: Vec<_> = (0..threads)
+            .map(|thread| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    bench_worker(&*store, op, thread, BATCHES)
+                })
+            })
+            .collect();
+        let mut ops_per_sec = 0.0;
+        let mut per_op = Vec::new();
+        for worker in workers {
+            let (spent, samples) = worker.join().unwrap();
+            ops_per_sec += (BATCHES * BATCH) as f64 / spent.as_secs_f64();
+            per_op.extend(samples);
+        }
+        per_op.sort_unstable();
+        let p50 = per_op[per_op.len() / 2];
+        let p99 = per_op[per_op.len() * 99 / 100];
+        println!(
+            "token_cache_bench impl={label} op={op:?} threads={threads} ops_per_sec={ops_per_sec:.0} p50_ns={p50} p99_ns={p99}"
+        );
+    }
+
+    /// Throughput and per-call time of `insert` and `take`, for one caller
+    /// and for eight sharing one cache. Times are per call, averaged over a
+    /// batch of 64.
+    ///
+    /// This is the measurement any replacement for the `Turn` cell has to
+    /// match; see "Why `TokenMemoryCache` keeps its cell" in
+    /// `UPSTREAM_PATCH.md` for the two lock-free versions that did not.
+    ///
+    /// The crate is not a workspace member, so run it from a copy that has an
+    /// empty `[workspace]` table appended to `Cargo.toml`:
+    /// `cargo test --release --lib token_cache_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark; run in release with --nocapture"]
+    fn token_cache_bench() {
+        for round in 0..3 {
+            println!("round {round}");
+            for op in [BenchOp::Insert, BenchOp::InsertEvict, BenchOp::Take] {
+                for threads in [1, 8] {
+                    bench_case("turn", Arc::new(TokenMemoryCache::default()), op, threads);
+                }
+            }
+        }
+    }
 }

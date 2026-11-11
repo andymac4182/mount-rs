@@ -6,6 +6,7 @@ pub mod kv_binding;
 pub mod memory_factory;
 pub mod nfs_codec;
 pub mod p9_codec;
+mod serial;
 pub mod servers;
 pub mod utilities;
 
