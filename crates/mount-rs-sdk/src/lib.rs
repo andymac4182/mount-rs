@@ -304,6 +304,9 @@ mod tests {
         reopened.shutdown().await.unwrap();
     }
 
+    // Delegated SQLite blocks bind a block ID to a physical file, which the
+    // SQLite provider supports on Unix only; elsewhere it returns ENOTSUP.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sqlite_sdk_directory_handoff_and_expected_fence_recovery() {
         use mount_rs_core::storage::MetadataStore;
