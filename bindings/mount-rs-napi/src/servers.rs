@@ -15,6 +15,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use mount_rs_9p::{
     DirCursor as TransportP9DirCursor, FidCursorView as TransportP9FidCursorView,
@@ -147,7 +148,7 @@ impl From<TransportS3Error> for TransportErrorEvent {
 /// callback racing with shutdown a no-op; the TSFN's aborted lock closes the
 /// remaining call-versus-release race.
 pub(crate) struct TransportErrorCallback {
-    callback: TurnCell<Option<Arc<TransportErrorTsfn>>>,
+    callback: ArcSwapOption<TransportErrorTsfn>,
     closed: AtomicBool,
 }
 
@@ -164,7 +165,7 @@ struct WebdavErrorEvent {
 
 /// Owns the JavaScript callback for request-level WebDAV errors.
 pub(crate) struct WebdavErrorCallback {
-    callback: TurnCell<Option<Arc<WebdavErrorTsfn>>>,
+    callback: ArcSwapOption<WebdavErrorTsfn>,
     closed: AtomicBool,
 }
 
@@ -182,7 +183,7 @@ impl WebdavErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -191,11 +192,7 @@ impl WebdavErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned());
+        let callback = self.callback.load_full();
         let Some(callback) = callback else {
             return;
         };
@@ -217,11 +214,7 @@ impl WebdavErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -261,7 +254,7 @@ impl TransportErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -270,11 +263,7 @@ impl TransportErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned());
+        let callback = self.callback.load_full();
         let Some(callback) = callback else {
             return;
         };
@@ -297,11 +286,7 @@ impl TransportErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -340,7 +325,7 @@ struct NfsErrorEvent {
 
 /// Owns the JavaScript callback for request-level NFS errors.
 pub(crate) struct NfsErrorCallback {
-    callback: TurnCell<Option<Arc<NfsErrorTsfn>>>,
+    callback: ArcSwapOption<NfsErrorTsfn>,
     closed: AtomicBool,
 }
 
@@ -358,7 +343,7 @@ impl NfsErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -367,11 +352,7 @@ impl NfsErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned());
+        let callback = self.callback.load_full();
         let Some(callback) = callback else {
             return;
         };
@@ -394,11 +375,7 @@ impl NfsErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -478,7 +455,7 @@ fn parse_nfs_clock(value: Unknown<'static>) -> Option<f64> {
 }
 
 pub(crate) struct NfsIdMapNameCallback {
-    callback: TurnCell<Option<Arc<NfsIdMapNameTsfn>>>,
+    callback: ArcSwapOption<NfsIdMapNameTsfn>,
     closed: AtomicBool,
 }
 
@@ -490,7 +467,7 @@ impl NfsIdMapNameCallback {
             .callee_handled::<false>()
             .build_callback(|context| Ok(FnArgs::from((context.value.id, context.value.group))))?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -499,11 +476,7 @@ impl NfsIdMapNameCallback {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned())?;
+        let callback = self.callback.load_full()?;
         let (sender, receiver) = sync_channel(1);
         let status = callback.call_with_return_value(
             NfsIdMapNameEvent {
@@ -526,11 +499,7 @@ impl NfsIdMapNameCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -557,7 +526,7 @@ impl Drop for NfsIdMapNameCallback {
 }
 
 pub(crate) struct NfsIdMapIdCallback {
-    callback: TurnCell<Option<Arc<NfsIdMapIdTsfn>>>,
+    callback: ArcSwapOption<NfsIdMapIdTsfn>,
     closed: AtomicBool,
 }
 
@@ -571,7 +540,7 @@ impl NfsIdMapIdCallback {
                 Ok(FnArgs::from((context.value.name, context.value.group)))
             })?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -580,11 +549,7 @@ impl NfsIdMapIdCallback {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned())?;
+        let callback = self.callback.load_full()?;
         let (sender, receiver) = sync_channel(1);
         let status = callback.call_with_return_value(
             NfsIdMapIdEvent {
@@ -607,11 +572,7 @@ impl NfsIdMapIdCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -638,7 +599,7 @@ impl Drop for NfsIdMapIdCallback {
 }
 
 pub(crate) struct NfsClockCallback {
-    callback: TurnCell<Option<Arc<NfsClockTsfn>>>,
+    callback: ArcSwapOption<NfsClockTsfn>,
     closed: AtomicBool,
 }
 
@@ -650,7 +611,7 @@ impl NfsClockCallback {
             .callee_handled::<false>()
             .build_callback(|_| Ok(()))?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -659,11 +620,7 @@ impl NfsClockCallback {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned())?;
+        let callback = self.callback.load_full()?;
         let (sender, receiver) = sync_channel(1);
         let status = callback.call_with_return_value(
             (),
@@ -683,11 +640,7 @@ impl NfsClockCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -807,7 +760,7 @@ struct P9SessionErrorEvent {
 
 /// Owns the JavaScript callback for request-level 9P errors.
 pub(crate) struct P9SessionErrorCallback {
-    callback: TurnCell<Option<Arc<P9SessionErrorTsfn>>>,
+    callback: ArcSwapOption<P9SessionErrorTsfn>,
     closed: AtomicBool,
 }
 
@@ -825,7 +778,7 @@ impl P9SessionErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -834,11 +787,7 @@ impl P9SessionErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned());
+        let callback = self.callback.load_full();
         let Some(callback) = callback else {
             return;
         };
@@ -856,11 +805,7 @@ impl P9SessionErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -893,7 +838,7 @@ type P9AssertionTsfn =
 
 /// Owns the JavaScript callback for debug-mode 9P assertion failures.
 pub(crate) struct P9AssertionCallback {
-    callback: TurnCell<Option<Arc<P9AssertionTsfn>>>,
+    callback: ArcSwapOption<P9AssertionTsfn>,
     closed: AtomicBool,
 }
 
@@ -905,7 +850,7 @@ impl P9AssertionCallback {
             .callee_handled::<false>()
             .build_callback(|context| Ok(FnArgs::from((context.value,))))?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -914,11 +859,7 @@ impl P9AssertionCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned());
+        let callback = self.callback.load_full();
         let Some(callback) = callback else {
             return;
         };
@@ -936,11 +877,7 @@ impl P9AssertionCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -970,7 +907,7 @@ pub(crate) type JsS3RequestIdCallback = Function<'static, Unknown<'static>, Unkn
 type S3RequestIdTsfn = ThreadsafeFunction<(), Unknown<'static>, (), Status, false, false>;
 
 struct S3RequestIdCallback {
-    callback: TurnCell<Option<Arc<S3RequestIdTsfn>>>,
+    callback: ArcSwapOption<S3RequestIdTsfn>,
     closed: AtomicBool,
 }
 
@@ -982,7 +919,7 @@ impl S3RequestIdCallback {
             .callee_handled::<false>()
             .build_callback(|_| Ok(()))?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -991,11 +928,7 @@ impl S3RequestIdCallback {
         if self.closed.load(Ordering::Acquire) {
             return None;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned())?;
+        let callback = self.callback.load_full()?;
         let (sender, receiver) = sync_channel(1);
         let status = callback.call_with_return_value(
             (),
@@ -1015,11 +948,7 @@ impl S3RequestIdCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };
@@ -1057,7 +986,7 @@ struct S3ErrorEvent {
 }
 
 struct S3ErrorCallback {
-    callback: TurnCell<Option<Arc<S3ErrorTsfn>>>,
+    callback: ArcSwapOption<S3ErrorTsfn>,
     closed: AtomicBool,
 }
 
@@ -1075,7 +1004,7 @@ impl S3ErrorCallback {
                 )))
             })?;
         Ok(Arc::new(Self {
-            callback: TurnCell::new(Some(Arc::new(callback))),
+            callback: ArcSwapOption::from_pointee(callback),
             closed: AtomicBool::new(false),
         }))
     }
@@ -1084,11 +1013,7 @@ impl S3ErrorCallback {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|callback| callback.as_ref().cloned());
+        let callback = self.callback.load_full();
         let Some(callback) = callback else {
             return;
         };
@@ -1106,11 +1031,7 @@ impl S3ErrorCallback {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let callback = self
-            .callback
-            .lock()
-            .ok()
-            .and_then(|mut callback| callback.take());
+        let callback = self.callback.swap(None);
         let Some(callback) = callback else {
             return;
         };

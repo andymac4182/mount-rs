@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -276,9 +277,20 @@ pub struct WebdavSession {
     pub locks: Arc<TurnCell<DavLockTable>>,
     pub options: WebdavSessionOptions,
     hooks: WebdavSessionHooks,
-    stats: TurnCell<WebdavSessionStats>,
-    assertions: TurnCell<Vec<String>>,
+    requests: AtomicU64,
+    replies: AtomicU64,
+    errors: AtomicU64,
+    /// Requests by method, keyed by the client's own method string. The
+    /// scalar counters above are atomics, so a snapshot may show a request
+    /// this map does not yet count.
+    methods: TurnCell<BTreeMap<String, u64>>,
 }
+
+/// How many distinct method strings are counted under their own name. The
+/// string is the client's, so past this many a new one is counted as
+/// [`OTHER_METHODS`] rather than growing the map without bound.
+const METHOD_KEY_LIMIT: usize = 64;
+const OTHER_METHODS: &str = "OTHER";
 
 impl std::fmt::Debug for WebdavSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -303,23 +315,31 @@ impl WebdavSession {
             locks: Arc::new(TurnCell::new(DavLockTable::new(options.locks.clone()))),
             options,
             hooks,
-            stats: TurnCell::new(WebdavSessionStats::default()),
-            assertions: TurnCell::new(Vec::new()),
+            requests: AtomicU64::new(0),
+            replies: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            methods: TurnCell::new(BTreeMap::new()),
         }
     }
 
     pub fn stats(&self) -> WebdavSessionStats {
-        self.stats
-            .lock()
-            .map(|stats| stats.clone())
-            .unwrap_or_default()
+        WebdavSessionStats {
+            requests: self.requests.load(Ordering::Relaxed),
+            replies: self.replies.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            methods: self
+                .methods
+                .lock()
+                .map(|methods| methods.clone())
+                .unwrap_or_default(),
+            // The session records no assertions.
+            assertions: 0,
+        }
     }
 
     pub fn assertions(&self) -> Vec<String> {
-        self.assertions
-            .lock()
-            .map(|items| items.clone())
-            .unwrap_or_default()
+        // The session records no assertions.
+        Vec::new()
     }
 
     fn lock_table(&self) -> Result<TurnCellGuard<'_, DavLockTable>, WebdavError> {
@@ -451,21 +471,22 @@ impl WebdavSession {
     }
 
     fn count_request(&self, method: &str) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.requests += 1;
-            *stats
-                .methods
-                .entry(method.to_ascii_uppercase())
-                .or_default() += 1;
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut methods) = self.methods.lock() {
+            let method = method.to_ascii_uppercase();
+            let key = if methods.len() < METHOD_KEY_LIMIT || methods.contains_key(&method) {
+                method
+            } else {
+                OTHER_METHODS.to_owned()
+            };
+            *methods.entry(key).or_default() += 1;
         }
     }
 
     fn count_reply(&self, status: u16) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.replies += 1;
-            if status >= 400 {
-                stats.errors += 1;
-            }
+        self.replies.fetch_add(1, Ordering::Relaxed);
+        if status >= 400 {
+            self.errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -2124,5 +2145,33 @@ mod read_identity_tests {
         .await
         .unwrap();
         assert_eq!(closes.load(Ordering::SeqCst), 5);
+    }
+}
+
+#[cfg(test)]
+mod method_stats_tests {
+    use super::*;
+    use mount_rs_memfs::MemoryFs;
+
+    #[test]
+    fn invented_method_names_stop_adding_counters() {
+        let session =
+            WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+        session.count_request("patch");
+        for index in 0..1_000 {
+            session.count_request(&format!("M{index}"));
+        }
+        session.count_request("PATCH");
+
+        let stats = session.stats();
+        assert_eq!(stats.requests, 1_002);
+        assert_eq!(stats.methods.len(), METHOD_KEY_LIMIT + 1);
+        // A method already counted keeps its own name.
+        assert_eq!(stats.methods.get("PATCH"), Some(&2));
+        assert_eq!(
+            stats.methods.get(OTHER_METHODS),
+            Some(&(1_001 - METHOD_KEY_LIMIT as u64))
+        );
+        assert_eq!(stats.methods.values().sum::<u64>(), 1_002);
     }
 }

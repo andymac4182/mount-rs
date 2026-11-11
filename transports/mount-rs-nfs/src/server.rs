@@ -13,6 +13,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use arc_swap::ArcSwapOption;
 use mount_rs_core::diagnostics::RequestTrace;
 use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::TurnLock;
@@ -195,8 +196,10 @@ pub struct NfsServer {
     options: NfsServerOptions,
     hooks: NfsServerHooks,
     address: Arc<OnceLock<SocketAddr>>,
-    shutdown: Arc<TurnCell<Option<oneshot::Sender<()>>>>,
-    accept_task: Arc<TurnCell<Option<JoinHandle<()>>>>,
+    // Stored once by `listen` and taken once by `close` or `Drop`; nothing
+    // reads either in place, so a swap is all the exclusion they need.
+    shutdown: ArcSwapOption<oneshot::Sender<()>>,
+    accept_task: ArcSwapOption<JoinHandle<()>>,
     connection_tasks: Arc<TurnCell<Vec<JoinHandle<()>>>>,
     clients: Arc<TurnCell<HashMap<u64, NfsConnection>>>,
     next_connection_id: Arc<AtomicU64>,
@@ -271,8 +274,8 @@ impl NfsServer {
             options,
             hooks,
             address: Arc::new(OnceLock::new()),
-            shutdown: Arc::new(TurnCell::new(None)),
-            accept_task: Arc::new(TurnCell::new(None)),
+            shutdown: ArcSwapOption::empty(),
+            accept_task: ArcSwapOption::empty(),
             connection_tasks: Arc::new(TurnCell::new(Vec::new())),
             clients: Arc::new(TurnCell::new(HashMap::new())),
             next_connection_id: Arc::new(AtomicU64::new(1)),
@@ -349,7 +352,7 @@ impl NfsServer {
         let address = listener.local_addr()?;
         let _ = self.address.set(address);
         let (shutdown_sender, mut shutdown_receiver) = oneshot::channel();
-        *self.shutdown.lock().expect("NFS shutdown lock") = Some(shutdown_sender);
+        self.shutdown.store(Some(Arc::new(shutdown_sender)));
         let session = self.session.clone();
         let v4_session = self.v4_session.clone();
         let record_limit = self.options.record_limit;
@@ -422,17 +425,17 @@ impl NfsServer {
                 }
             }
         });
-        *self.accept_task.lock().expect("NFS accept lock") = Some(task);
+        self.accept_task.store(Some(Arc::new(task)));
         Ok(address)
     }
 
     pub async fn close(&self) -> io::Result<()> {
         let _listen_guard = self.listen_lock.lock().await;
         self.closed.store(true, Ordering::Release);
-        if let Some(sender) = self.shutdown.lock().expect("NFS shutdown lock").take() {
+        if let Some(sender) = self.shutdown.swap(None).and_then(Arc::into_inner) {
             let _ = sender.send(());
         }
-        let accept_task = self.accept_task.lock().expect("NFS accept lock").take();
+        let accept_task = self.accept_task.swap(None).and_then(Arc::into_inner);
         if let Some(task) = accept_task {
             let _ = task.await;
         }
@@ -483,10 +486,10 @@ impl NfsServer {
 
 impl Drop for NfsServer {
     fn drop(&mut self) {
-        if let Some(sender) = self.shutdown.lock().expect("NFS shutdown lock").take() {
+        if let Some(sender) = self.shutdown.swap(None).and_then(Arc::into_inner) {
             let _ = sender.send(());
         }
-        if let Some(task) = self.accept_task.lock().expect("NFS accept lock").take() {
+        if let Some(task) = self.accept_task.swap(None).and_then(Arc::into_inner) {
             task.abort();
         }
         for task in self

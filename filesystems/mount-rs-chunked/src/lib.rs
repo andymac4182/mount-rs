@@ -280,7 +280,9 @@ impl AsyncGate {
 
 struct RuntimeState {
     namespace: Arc<Namespace>,
-    inode_revisions: BTreeMap<InodeId, u64>,
+    // Shared so a structural publish takes a pointer, not a copy, under the
+    // state cell; a writer copies only while a publish still holds the old map.
+    inode_revisions: Arc<BTreeMap<InodeId, u64>>,
     selected_inodes: HashMap<InodeId, Arc<NodeMetadata>>,
     /// Local operation generation, incremented for every staged mutation.
     revision: u64,
@@ -1492,7 +1494,7 @@ where
                 gate: AsyncGate::new(),
                 lifecycle: mount_rs_core::drain_gate::DrainGate::striped(),
                 state: StateCell::new(RuntimeState {
-                    inode_revisions: BTreeMap::new(),
+                    inode_revisions: Arc::default(),
                     selected_inodes: HashMap::new(),
                     namespace: Arc::new(namespace),
                     revision: loaded.revision,
@@ -2047,7 +2049,7 @@ where
                         gate: AsyncGate::new(),
                         lifecycle: mount_rs_core::drain_gate::DrainGate::striped(),
                         state: StateCell::new(RuntimeState {
-                            inode_revisions,
+                            inode_revisions: Arc::new(inode_revisions),
                             selected_inodes: HashMap::new(),
                             namespace: Arc::new(namespace),
                             revision,
@@ -2132,7 +2134,7 @@ where
                 gate: AsyncGate::new(),
                 lifecycle: mount_rs_core::drain_gate::DrainGate::striped(),
                 state: StateCell::new(RuntimeState {
-                    inode_revisions: BTreeMap::new(),
+                    inode_revisions: Arc::default(),
                     selected_inodes: HashMap::new(),
                     namespace: Arc::new(namespace.clone()),
                     revision: loaded.revision,
@@ -2583,9 +2585,7 @@ where
                     .checked_add(1)
                     .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
             }
-            state
-                .inode_revisions
-                .insert(inode, loaded.version.inode_revision);
+            Arc::make_mut(&mut state.inode_revisions).insert(inode, loaded.version.inode_revision);
             state.selected_inodes.insert(inode, Arc::new(loaded.node));
         }
         Ok(())
@@ -2604,7 +2604,7 @@ where
             if state.revision != generation {
                 return Err(FsError::new(ErrorCode::Eagain));
             }
-            (state.persisted_revision, state.inode_revisions.clone())
+            (state.persisted_revision, Arc::clone(&state.inode_revisions))
         };
         if !blocks_flushed {
             self.inner.blocks.flush().await?;
@@ -2649,7 +2649,7 @@ where
                 .checked_add(1)
                 .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
             state.persisted_revision = next;
-            state.inode_revisions.clear();
+            state.inode_revisions = Arc::default();
             state.selected_inodes.clear();
         }
         publication.disarm();
@@ -2777,7 +2777,7 @@ where
                     .revision
                     .checked_add(1)
                     .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-                state.inode_revisions.insert(inode, version.inode_revision);
+                Arc::make_mut(&mut state.inode_revisions).insert(inode, version.inode_revision);
                 state.selected_inodes.insert(inode, Arc::new(node));
             }
             publication.disarm();
@@ -2832,7 +2832,7 @@ where
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-            state.inode_revisions.insert(inode, version.inode_revision);
+            Arc::make_mut(&mut state.inode_revisions).insert(inode, version.inode_revision);
             state.selected_inodes.insert(inode, Arc::new(node));
         }
         publication.disarm();
@@ -3082,7 +3082,7 @@ where
                 retain_open_detached(&mut state, &snapshot.namespace);
                 state.namespace = Arc::new(snapshot.namespace);
                 if state.persisted_revision != snapshot.structural_generation
-                    || state.inode_revisions != snapshot.inode_revisions
+                    || *state.inode_revisions != snapshot.inode_revisions
                     || !state.selected_inodes.is_empty()
                 {
                     state.revision = state
@@ -3091,7 +3091,7 @@ where
                         .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
                 }
                 state.persisted_revision = snapshot.structural_generation;
-                state.inode_revisions = snapshot.inode_revisions;
+                state.inode_revisions = Arc::new(snapshot.inode_revisions);
                 state.selected_inodes.clear();
             }
             return Ok(());

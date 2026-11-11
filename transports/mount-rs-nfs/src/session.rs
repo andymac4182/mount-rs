@@ -10,6 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::turn_cell::TurnCell;
@@ -416,20 +417,142 @@ pub struct NfsSessionStats {
     pub procedures: HashMap<String, u64>,
 }
 
-#[derive(Clone)]
-pub(crate) struct SharedStats(pub(crate) Arc<TurnCell<NfsSessionStats>>);
+/// Request counters shared by every connection of a server.
+///
+/// Every counter is its own atomic, so recording a request takes no lock.
+/// Each counter is exact; a snapshot reads them one after another and so may
+/// show a request whose reply is not yet counted.
+#[derive(Clone, Default)]
+pub(crate) struct SharedStats(Arc<StatCounters>);
 
-impl fmt::Debug for SharedStats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("SharedStats")
-            .field(&crate::handles::CellDebug(&self.0))
-            .finish()
+struct StatCounters {
+    requests: AtomicU64,
+    replies: AtomicU64,
+    errors: AtomicU64,
+    dropped: AtomicU64,
+    procedures: [AtomicU64; PROCEDURE_SLOTS],
+}
+
+impl Default for StatCounters {
+    fn default() -> Self {
+        Self {
+            requests: AtomicU64::new(0),
+            replies: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            procedures: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
     }
 }
 
-impl Default for SharedStats {
-    fn default() -> Self {
-        Self(Arc::new(TurnCell::new(NfsSessionStats::default())))
+/// NFSv3 procedures are numbered `0..NFS3_PROCEDURES` and MOUNTv3 ones
+/// `0..MOUNT3_PROCEDURES`. Each program has one further slot for every
+/// number it does not define, so a client cannot grow the table by sending
+/// procedure numbers.
+const NFS3_PROCEDURES: u32 = NFSPROC3_COMMIT + 1;
+const MOUNT3_PROCEDURES: u32 = MOUNTPROC3_EXPORT + 1;
+const NFS3_UNKNOWN_SLOT: usize = NFS3_PROCEDURES as usize;
+const MOUNT3_FIRST_SLOT: usize = NFS3_UNKNOWN_SLOT + 1;
+const MOUNT3_UNKNOWN_SLOT: usize = MOUNT3_FIRST_SLOT + MOUNT3_PROCEDURES as usize;
+const NFS4_NULL_SLOT: usize = MOUNT3_UNKNOWN_SLOT + 1;
+const NFS4_COMPOUND_SLOT: usize = NFS4_NULL_SLOT + 1;
+const NFS4_UNKNOWN_SLOT: usize = NFS4_COMPOUND_SLOT + 1;
+const PROCEDURE_SLOTS: usize = NFS4_UNKNOWN_SLOT + 1;
+
+/// One per-procedure counter of [`SharedStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcedureSlot(usize);
+
+impl ProcedureSlot {
+    /// The counter of an NFSv3 or MOUNTv3 procedure.
+    pub(crate) fn v3(program: u32, procedure: u32) -> Self {
+        Self(if program == NFS_PROGRAM {
+            if procedure < NFS3_PROCEDURES {
+                procedure as usize
+            } else {
+                NFS3_UNKNOWN_SLOT
+            }
+        } else if procedure < MOUNT3_PROCEDURES {
+            MOUNT3_FIRST_SLOT + procedure as usize
+        } else {
+            MOUNT3_UNKNOWN_SLOT
+        })
+    }
+
+    /// The counter of an NFSv4 procedure.
+    pub(crate) fn v4(procedure: u32) -> Self {
+        Self(match procedure {
+            crate::v4::NFSPROC4_NULL => NFS4_NULL_SLOT,
+            crate::v4::NFSPROC4_COMPOUND => NFS4_COMPOUND_SLOT,
+            _ => NFS4_UNKNOWN_SLOT,
+        })
+    }
+
+    /// The key this counter has in [`NfsSessionStats::procedures`].
+    fn name(self) -> String {
+        match self.0 {
+            NFS3_UNKNOWN_SLOT => "NFS:unknown".to_owned(),
+            MOUNT3_UNKNOWN_SLOT => "MOUNT:unknown".to_owned(),
+            NFS4_NULL_SLOT => "NFS4:NULL".to_owned(),
+            NFS4_COMPOUND_SLOT => "NFS4:COMPOUND".to_owned(),
+            NFS4_UNKNOWN_SLOT => "NFS4:unknown".to_owned(),
+            slot if slot < NFS3_UNKNOWN_SLOT => {
+                format!("NFS:{}", procedure_name(NFS_PROGRAM, slot as u32))
+            }
+            slot => format!(
+                "MOUNT:{}",
+                procedure_name(MOUNT_PROGRAM, (slot - MOUNT3_FIRST_SLOT) as u32)
+            ),
+        }
+    }
+}
+
+impl SharedStats {
+    pub(crate) fn record_request(&self) {
+        self.0.requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_reply(&self) {
+        self.0.replies.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_error(&self) {
+        self.0.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_dropped(&self) {
+        self.0.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_procedure(&self, slot: ProcedureSlot) {
+        self.0.procedures[slot.0].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The counters as they are now. A procedure appears once it has been
+    /// called.
+    pub(crate) fn snapshot(&self) -> NfsSessionStats {
+        NfsSessionStats {
+            requests: self.0.requests.load(Ordering::Relaxed),
+            replies: self.0.replies.load(Ordering::Relaxed),
+            errors: self.0.errors.load(Ordering::Relaxed),
+            dropped: self.0.dropped.load(Ordering::Relaxed),
+            procedures: self
+                .0
+                .procedures
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, count)| {
+                    let count = count.load(Ordering::Relaxed);
+                    (count > 0).then(|| (ProcedureSlot(slot).name(), count))
+                })
+                .collect(),
+        }
+    }
+}
+
+impl fmt::Debug for SharedStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SharedStats").finish_non_exhaustive()
     }
 }
 
@@ -480,14 +603,12 @@ pub async fn route_nfs_call(
         Some((NFS_PROGRAM, NFS_V4)) => v4.handle_call(message, context).await,
         _ => {
             {
-                let mut stats = v3.stats.0.lock().expect("NFS stats lock");
-                stats.requests = stats.requests.saturating_add(1);
+                v3.stats.record_request();
             }
             let call = match decode_call(message) {
                 Ok((call, _)) => call,
                 Err(_) => {
-                    let mut stats = v3.stats.0.lock().expect("NFS stats lock");
-                    stats.dropped = stats.dropped.saturating_add(1);
+                    v3.stats.record_dropped();
                     return None;
                 }
             };
@@ -505,8 +626,7 @@ pub async fn route_nfs_call(
                 };
                 encode_accept_error(call.xid, RPC_PROG_MISMATCH, Some((NFS_V3, highest)))
             };
-            let mut stats = v3.stats.0.lock().expect("NFS stats lock");
-            stats.replies = stats.replies.saturating_add(1);
+            v3.stats.record_reply();
             Some(reply)
         }
     }
@@ -1030,7 +1150,7 @@ impl Nfs3Session {
     }
 
     pub fn stats(&self) -> NfsSessionStats {
-        self.stats.0.lock().expect("NFS stats lock").clone()
+        self.stats.snapshot()
     }
 
     pub fn mounts(&self) -> Vec<(String, String)> {
@@ -1109,21 +1229,18 @@ impl Nfs3Session {
     /// legal RPC reply and the method does not propagate driver or codec errors.
     pub async fn handle_call(&self, message: &[u8], context: NfsRequestContext) -> Option<Vec<u8>> {
         {
-            let mut stats = self.stats.0.lock().expect("NFS stats lock");
-            stats.requests = stats.requests.saturating_add(1);
+            self.stats.record_request();
         }
         let (call, mut args) = match decode_call(message) {
             Ok(value) => value,
             Err(_) => {
-                let mut stats = self.stats.0.lock().expect("NFS stats lock");
-                stats.dropped = stats.dropped.saturating_add(1);
+                self.stats.record_dropped();
                 return None;
             }
         };
         if self.destroyed() {
             self.record_error();
-            let mut stats = self.stats.0.lock().expect("NFS stats lock");
-            stats.replies = stats.replies.saturating_add(1);
+            self.stats.record_reply();
             return Some(encode_accept_error(call.xid, RPC_SYSTEM_ERR, None));
         }
         let reply = match self.dispatch(&call, &mut args, &context).await {
@@ -1138,8 +1255,7 @@ impl Nfs3Session {
                 encode_accept_error(call.xid, RPC_PROC_UNAVAIL, None)
             }
         };
-        let mut stats = self.stats.0.lock().expect("NFS stats lock");
-        stats.replies = stats.replies.saturating_add(1);
+        self.stats.record_reply();
         Some(reply)
     }
 
@@ -1171,23 +1287,8 @@ impl Nfs3Session {
                 Some((expected_version, expected_version)),
             ));
         }
-        let name = format!(
-            "{}:{}",
-            if call.program == NFS_PROGRAM {
-                "NFS"
-            } else {
-                "MOUNT"
-            },
-            procedure_name(call.program, call.procedure)
-        );
         self.stats
-            .0
-            .lock()
-            .expect("NFS stats lock")
-            .procedures
-            .entry(name)
-            .and_modify(|count| *count = count.saturating_add(1))
-            .or_insert(1);
+            .record_procedure(ProcedureSlot::v3(call.program, call.procedure));
         let mut writer = XdrWriter::with_capacity(256);
         write_accepted_reply_header(&mut writer, call.xid);
         match (call.program, call.procedure) {
@@ -1743,8 +1844,7 @@ impl Nfs3Session {
     }
 
     fn record_stat_error(&self) {
-        let mut stats = self.stats.0.lock().expect("NFS stats lock");
-        stats.errors = stats.errors.saturating_add(1);
+        self.stats.record_error();
     }
 
     fn record_error(&self) {

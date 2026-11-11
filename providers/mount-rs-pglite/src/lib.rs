@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use mount_rs_core::{
@@ -119,7 +120,7 @@ impl CloseGate {
 #[derive(Clone)]
 pub struct PgliteStore {
     client: Arc<TurnLock<Option<Client>>>,
-    connection: Arc<TurnLock<Option<JoinHandle<()>>>>,
+    connection: Arc<ArcSwapOption<JoinHandle<()>>>,
     close_gate: CloseGate,
     state_key: String,
 }
@@ -142,7 +143,7 @@ impl PgliteStore {
         });
         let store = Self {
             client: Arc::new(TurnLock::new(Some(client))),
-            connection: Arc::new(TurnLock::new(Some(connection))),
+            connection: Arc::new(ArcSwapOption::from_pointee(connection)),
             close_gate: CloseGate::new(),
             state_key: state_key.into(),
         };
@@ -180,7 +181,9 @@ impl PgliteStore {
     async fn finish_close(&self) {
         let client = self.client.lock().await.take();
         drop(client);
-        let connection = self.connection.lock().await.take();
+        // Only this one teardown ever reaches the handle, so the swapped-out
+        // pointer is the last one.
+        let connection = self.connection.swap(None).and_then(Arc::into_inner);
         if let Some(connection) = connection {
             let _ = connection.await;
         }

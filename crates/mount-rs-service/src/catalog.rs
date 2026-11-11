@@ -3,7 +3,6 @@
 #[cfg(feature = "io-profiling")]
 use mount_rs_core::diagnostics::profile;
 use mount_rs_core::diagnostics::profile::{Event, Span};
-use mount_rs_core::turn_cell::TurnCell;
 #[cfg(unix)]
 use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
 
@@ -20,6 +19,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -257,7 +257,7 @@ pub struct SqliteCatalog {
 
 struct CatalogConnections {
     path: PathBuf,
-    current: TurnCell<Option<CachedSnapshot>>,
+    current: ArcSwapOption<CachedSnapshot>,
     #[cfg(unix)]
     identity: FileIdentity,
     #[cfg(unix)]
@@ -275,16 +275,15 @@ struct CachedSnapshot {
 // Reuse requires exact document equality as well as the SQL revision: out-of-band
 // edits at an unchanged revision must still be decoded and validated.
 //
-// The cache is held only to compare and to store, never across the decode, so
-// nothing waits on it for longer than a comparison. Concurrent reads of a new
-// revision each decode it; an older read never replaces a newer cached document.
+// Readers compare against a loaded pointer with no exclusion, and nothing is
+// held across the decode. Concurrent reads of a new revision each decode it;
+// an older read never replaces a newer cached document.
 fn shared_snapshot(
-    current: &TurnCell<Option<CachedSnapshot>>,
+    current: &ArcSwapOption<CachedSnapshot>,
     revision: i64,
     document: &[u8],
 ) -> Result<Arc<CatalogSnapshot>, CatalogError> {
-    let unavailable = |()| CatalogError::Invalid("catalog snapshot unavailable");
-    if let Some(cached) = current.lock().map_err(unavailable)?.as_ref()
+    if let Some(cached) = current.load().as_ref()
         && cached.revision == revision
         && cached.document.as_ref() == document
     {
@@ -293,18 +292,23 @@ fn shared_snapshot(
     let decode_profile = Span::new(Event::CatalogDecode).units(document.len() as u64);
     let snapshot = Arc::new(decode_snapshot(revision, document)?);
     drop(decode_profile);
-    let cached = CachedSnapshot {
+    let cached = Arc::new(CachedSnapshot {
         revision,
         document: document.into(),
         snapshot: Arc::clone(&snapshot),
-    };
-    let mut current = current.lock().map_err(unavailable)?;
-    if current
-        .as_ref()
-        .is_none_or(|newest| newest.revision <= revision)
-    {
-        *current = Some(cached);
-    }
+    });
+    // `rcu` re-runs the revision check against whatever a racing publisher
+    // stored, so the check and the store stay one step as they were under the cell.
+    current.rcu(|newest| {
+        if newest
+            .as_ref()
+            .is_none_or(|newest| newest.revision <= revision)
+        {
+            Some(Arc::clone(&cached))
+        } else {
+            newest.clone()
+        }
+    });
     Ok(snapshot)
 }
 
@@ -394,7 +398,7 @@ impl SqliteCatalog {
             }
             Ok(CatalogConnections {
                 path: setup_path,
-                current: TurnCell::new(None),
+                current: ArcSwapOption::empty(),
                 identity,
                 connections,
                 next: AtomicUsize::new(0),
@@ -403,7 +407,7 @@ impl SqliteCatalog {
             #[cfg(not(unix))]
             {
                 drop(connection);
-                Ok(CatalogConnections { path: setup_path, current: TurnCell::new(None) })
+                Ok(CatalogConnections { path: setup_path, current: ArcSwapOption::empty() })
             }
         })
         .await??;
@@ -693,7 +697,7 @@ mod reuse_tests {
             },
         );
         let document = serde_json::to_vec(&snapshot).unwrap();
-        let current = TurnCell::new(None);
+        let current = ArcSwapOption::empty();
         let first = shared_snapshot(&current, 0, &document).unwrap();
         // The former owned-snapshot path is a positive control for this counter.
         let owned = crate::dispatch::allocation_tests::count(|| {

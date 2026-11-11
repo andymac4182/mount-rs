@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
 use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountHooks, AutoMountOptions, AutoTransport, Transport,
     TransportProbe,
@@ -713,7 +714,9 @@ pub struct JsDirEntry {
 /// alive until garbage collection. The slot also makes post-shutdown calls
 /// fail closed with EBADF instead of dereferencing a released provider.
 struct DriverSlot {
-    driver: TurnCell<Option<Arc<dyn FsDriver>>>,
+    /// Read on every filesystem call from every thread, replaced once at
+    /// shutdown: a pointer swap, so no call waits on another.
+    driver: ArcSwapOption<Arc<dyn FsDriver>>,
     capabilities: Capabilities,
     has_utimens: bool,
 }
@@ -723,18 +726,15 @@ impl DriverSlot {
         let capabilities = driver.capabilities();
         let has_utimens = driver.has_utimens();
         Self {
-            driver: TurnCell::new(Some(driver)),
+            driver: ArcSwapOption::from_pointee(driver),
             capabilities,
             has_utimens,
         }
     }
 
     fn get(&self) -> CoreResult<Arc<dyn FsDriver>> {
-        let driver = self
-            .driver
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("driver lock poisoned"))?;
-        driver.clone().ok_or_else(|| {
+        let driver = self.driver.load();
+        driver.as_deref().cloned().ok_or_else(|| {
             FsError::new(ErrorCode::Ebadf)
                 .with_syscall("filesystem")
                 .with_message("filesystem is closed")
@@ -744,12 +744,7 @@ impl DriverSlot {
     fn clear(&self) -> CoreResult<()> {
         // Take the provider out and let go of the slot before dropping it:
         // the drop can close native connections.
-        let driver = self
-            .driver
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("driver lock poisoned"))?
-            .take();
-        drop(driver);
+        drop(self.driver.swap(None));
         Ok(())
     }
 }
@@ -3047,44 +3042,33 @@ pub struct FileHandle {
     // A closed core handle can still retain the native provider through its
     // filesystem field. Detach it after close so a retained JS wrapper does
     // not keep a process-scoped FoundationDB client guard alive until GC.
-    inner: Arc<TurnCell<Option<Arc<dyn CoreFileHandle>>>>,
+    inner: Arc<ArcSwapOption<Arc<dyn CoreFileHandle>>>,
 }
 
 #[napi]
 impl FileHandle {
     pub(crate) fn from_core(inner: Arc<dyn CoreFileHandle>) -> Self {
         Self {
-            inner: Arc::new(TurnCell::new(Some(inner))),
+            inner: Arc::new(ArcSwapOption::from_pointee(inner)),
         }
     }
 
     pub(crate) fn open_inner(&self, syscall: &str) -> napi::Result<Arc<dyn CoreFileHandle>> {
-        self.inner
-            .lock()
-            .map_err(|_| {
-                to_js_error(
-                    FsError::new(ErrorCode::Eio)
-                        .with_syscall(syscall)
-                        .with_message("file handle lock poisoned"),
-                )
-            })?
-            .clone()
-            .ok_or_else(|| {
-                to_js_error(
-                    FsError::new(ErrorCode::Ebadf)
-                        .with_syscall(syscall)
-                        .with_message("file handle is closed"),
-                )
-            })
+        self.inner.load().as_deref().cloned().ok_or_else(|| {
+            to_js_error(
+                FsError::new(ErrorCode::Ebadf)
+                    .with_syscall(syscall)
+                    .with_message("file handle is closed"),
+            )
+        })
     }
 
     #[napi(getter)]
     pub fn fd(&self) -> Option<f64> {
-        self.inner.lock().ok().and_then(|inner| {
-            inner
-                .as_ref()
-                .and_then(|handle| handle.fd().map(|value| value as f64))
-        })
+        self.inner
+            .load()
+            .as_deref()
+            .and_then(|handle| handle.fd().map(|value| value as f64))
     }
 
     #[napi]
@@ -3176,33 +3160,12 @@ impl FileHandle {
 
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
-        let inner = self
-            .inner
-            .lock()
-            .map_err(|_| {
-                to_js_error(
-                    FsError::new(ErrorCode::Eio)
-                        .with_syscall("close")
-                        .with_message("file handle lock poisoned"),
-                )
-            })?
-            .clone();
+        let inner = self.inner.load().as_deref().cloned();
         let Some(inner) = inner else {
             return Ok(());
         };
         inner.close().await.map_err(to_js_error)?;
-        let detached = self
-            .inner
-            .lock()
-            .map_err(|_| {
-                to_js_error(
-                    FsError::new(ErrorCode::Eio)
-                        .with_syscall("close")
-                        .with_message("file handle lock poisoned"),
-                )
-            })?
-            .take();
-        drop(detached);
+        drop(self.inner.swap(None));
         Ok(())
     }
 }
@@ -3521,8 +3484,8 @@ async fn complete_inactive_delegation_mounts(state: &mut DelegatedNativeState) -
 pub struct Filesystem {
     driver: Arc<dyn FsDriver>,
     shutdown: Option<Arc<ShutdownCallback>>,
-    reconcile: TurnCell<Option<Arc<ReconcileCallback>>>,
-    delegation: TurnCell<Option<ChunkedFs<DynMetadataStore, DynBlockStore>>>,
+    reconcile: ArcSwapOption<Arc<ReconcileCallback>>,
+    delegation: ArcSwapOption<ChunkedFs<DynMetadataStore, DynBlockStore>>,
     delegated_ownership: bool,
     native_delegation_mounts: Arc<TurnLock<DelegatedNativeState>>,
 }
@@ -3539,8 +3502,8 @@ impl Filesystem {
         Self {
             driver: slot,
             shutdown: Some(ShutdownController::callback(controller)),
-            reconcile: TurnCell::new(reconcile),
-            delegation: TurnCell::new(None),
+            reconcile: ArcSwapOption::new(reconcile.map(Arc::new)),
+            delegation: ArcSwapOption::empty(),
             delegated_ownership: false,
             native_delegation_mounts: Arc::new(TurnLock::new(DelegatedNativeState::default())),
         }
@@ -3627,18 +3590,8 @@ impl Filesystem {
         // of DriverSlot. Detach it after the provider shutdown succeeds so
         // durable SQLite files can be removed immediately on Windows rather
         // than waiting for JavaScript garbage collection.
-        let delegation = self
-            .delegation
-            .lock()
-            .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
-            .take();
-        drop(delegation);
-        let reconcile = self
-            .reconcile
-            .lock()
-            .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
-            .take();
-        drop(reconcile);
+        drop(self.delegation.swap(None));
+        drop(self.reconcile.swap(None));
         Ok(())
     }
 
@@ -3661,9 +3614,9 @@ impl Filesystem {
 
     fn delegated_filesystem(&self) -> napi::Result<ChunkedFs<DynMetadataStore, DynBlockStore>> {
         self.delegation
-            .lock()
-            .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
-            .clone()
+            .load()
+            .as_deref()
+            .cloned()
             .ok_or_else(|| to_js_error(FsError::new(ErrorCode::Enotsup)))
     }
 
@@ -3704,18 +3657,13 @@ impl Filesystem {
     #[napi(js_name = "reconcileBlocks")]
     pub async fn reconcile_blocks(&self, grace_ms: f64) -> napi::Result<JsBlockReconcileReport> {
         let grace = validate_reconcile_grace(grace_ms)?;
-        let callback = self
-            .reconcile
-            .lock()
-            .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
-            .clone()
-            .ok_or_else(|| {
-                to_js_error(
-                    FsError::new(ErrorCode::Enotsup)
-                        .with_syscall("reconcile blocks")
-                        .with_message("filesystem does not expose chunked block reconciliation"),
-                )
-            })?;
+        let callback = self.reconcile.load().as_deref().cloned().ok_or_else(|| {
+            to_js_error(
+                FsError::new(ErrorCode::Enotsup)
+                    .with_syscall("reconcile blocks")
+                    .with_message("filesystem does not expose chunked block reconciliation"),
+            )
+        })?;
         callback(grace).await.map(Into::into).map_err(to_js_error)
     }
 
@@ -4255,7 +4203,7 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
     let delegation = filesystem.clone();
     let mut wrapper =
         Filesystem::from_driver(Arc::new(filesystem), Some(shutdown), Some(reconcile));
-    wrapper.delegation = TurnCell::new(Some(delegation));
+    wrapper.delegation = ArcSwapOption::from_pointee(delegation);
     wrapper.delegated_ownership = ownership_mode == Some(OwnershipMode::Shared);
     Ok(wrapper)
 }

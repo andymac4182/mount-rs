@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use mount_rs_core::driver::{FileHandle, FsDriver};
@@ -215,17 +216,15 @@ enum Kind {
     Missing,
 }
 
-struct HandleState {
-    position: u64,
-    closed: bool,
-}
-
 struct KvFileHandle<S> {
     inner: Arc<Inner<S>>,
     entry: Arc<TurnCell<OpenFile>>,
     flags: OpenFlags,
     fd: u64,
-    state: TurnCell<HandleState>,
+    closed: AtomicBool,
+    // Only read and written while `entry` is held, which orders this handle's
+    // reads and writes, so a load and a later store are one step.
+    position: AtomicU64,
 }
 
 struct KvDirectoryHandle<S> {
@@ -606,11 +605,10 @@ where
 
     fn begin(&self, write: bool, syscall: &str) -> Result<String> {
         let path = self.path()?;
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall(syscall))?;
-        if state.closed || (write && !self.flags.write) || (!write && !self.flags.read) {
+        if self.closed.load(Ordering::Acquire)
+            || (write && !self.flags.write)
+            || (!write && !self.flags.read)
+        {
             return Err(FsError::new(ErrorCode::Ebadf)
                 .with_syscall(syscall)
                 .with_path(path));
@@ -620,11 +618,7 @@ where
 
     fn ensure_open(&self, syscall: &str) -> Result<String> {
         let path = self.path()?;
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall(syscall))?;
-        if state.closed {
+        if self.closed.load(Ordering::Acquire) {
             return Err(FsError::new(ErrorCode::Ebadf)
                 .with_syscall(syscall)
                 .with_path(path));
@@ -644,16 +638,13 @@ where
 
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> Result<usize> {
         let _path = self.begin(false, "read")?;
-        let mut handle = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("read"))?;
-        let from = position.unwrap_or(handle.position);
-        let from = usize::try_from(from).unwrap_or(usize::MAX);
         let file = self
             .entry
             .lock()
             .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("read"))?;
+        let current = self.position.load(Ordering::Relaxed);
+        let from = position.unwrap_or(current);
+        let from = usize::try_from(from).unwrap_or(usize::MAX);
         let count = if from >= file.data.len() {
             0
         } else {
@@ -663,19 +654,15 @@ where
             buffer[..count].copy_from_slice(&file.data[from..from + count]);
         }
         if position.is_none() {
-            handle.position = handle.position.saturating_add(count as u64);
+            self.position
+                .store(current.saturating_add(count as u64), Ordering::Relaxed);
         }
         drop(file);
-        drop(handle);
         Ok(count)
     }
 
     async fn write(&self, buffer: &[u8], position: Option<u64>) -> Result<usize> {
         let path = self.begin(true, "write")?;
-        let mut handle = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("write"))?;
         let mut file = self
             .entry
             .lock()
@@ -683,7 +670,7 @@ where
         let from = if self.flags.append {
             file.data.len() as u64
         } else {
-            position.unwrap_or(handle.position)
+            position.unwrap_or_else(|| self.position.load(Ordering::Relaxed))
         };
         let end = from.checked_add(buffer.len() as u64).ok_or_else(|| {
             FsError::new(ErrorCode::Efbig)
@@ -698,11 +685,10 @@ where
             file.data[start..start + buffer.len()].copy_from_slice(buffer);
         }
         if self.flags.append || position.is_none() {
-            handle.position = end;
+            self.position.store(end, Ordering::Relaxed);
         }
         file.dirty = true;
         drop(file);
-        drop(handle);
         self.inner.touch(&path, "write")?;
         Ok(buffer.len())
     }
@@ -737,19 +723,7 @@ where
     }
 
     async fn close(&self) -> Result<()> {
-        let should_release = {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("close"))?;
-            if state.closed {
-                false
-            } else {
-                state.closed = true;
-                true
-            }
-        };
-        if should_release {
+        if !self.closed.swap(true, Ordering::AcqRel) {
             self.inner.release(&self.entry).await?;
         }
         Ok(())
@@ -1056,10 +1030,8 @@ where
                 entry,
                 flags,
                 fd: self.inner.allocate_fd()?,
-                state: TurnCell::new(HandleState {
-                    position: 0,
-                    closed: false,
-                }),
+                closed: AtomicBool::new(false),
+                position: AtomicU64::new(0),
             }));
         }
         if flags.exclusive {
@@ -1097,10 +1069,8 @@ where
             entry,
             flags,
             fd: self.inner.allocate_fd()?,
-            state: TurnCell::new(HandleState {
-                position: 0,
-                closed: false,
-            }),
+            closed: AtomicBool::new(false),
+            position: AtomicU64::new(0),
         }))
     }
 

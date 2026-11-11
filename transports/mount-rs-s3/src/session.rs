@@ -493,6 +493,78 @@ pub enum S3ErrorClass {
     Server,
 }
 
+/// Every [`S3ErrorClass`], in declaration order: a class's discriminant is
+/// its index here and in [`StatCounters::error_classes`].
+const ERROR_CLASSES: [S3ErrorClass; 5] = [
+    S3ErrorClass::Authentication,
+    S3ErrorClass::ConditionalConflict,
+    S3ErrorClass::Throttled,
+    S3ErrorClass::Client,
+    S3ErrorClass::Server,
+];
+
+/// The counters behind [`S3SessionStats`], each its own atomic so that a
+/// request never waits on another to be counted. Each counter is exact; a
+/// snapshot reads them one after another. Both keyed sets are fixed: the
+/// operations the router can produce, and the error classes.
+struct StatCounters {
+    requests: AtomicU64,
+    replies: AtomicU64,
+    errors: AtomicU64,
+    assertions: AtomicU64,
+    duration_ms_total: AtomicU64,
+    duration_ms_max: AtomicU64,
+    request_bytes: AtomicU64,
+    response_bytes: AtomicU64,
+    operations: [AtomicU64; OPERATION_NAMES.len()],
+    error_classes: [AtomicU64; ERROR_CLASSES.len()],
+}
+
+impl StatCounters {
+    fn new() -> Self {
+        Self {
+            requests: AtomicU64::new(0),
+            replies: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            assertions: AtomicU64::new(0),
+            duration_ms_total: AtomicU64::new(0),
+            duration_ms_max: AtomicU64::new(0),
+            request_bytes: AtomicU64::new(0),
+            response_bytes: AtomicU64::new(0),
+            operations: std::array::from_fn(|_| AtomicU64::new(0)),
+            error_classes: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    fn snapshot(&self) -> S3SessionStats {
+        let counted = |count: &AtomicU64| {
+            let count = count.load(Ordering::Relaxed);
+            (count > 0).then_some(count)
+        };
+        S3SessionStats {
+            requests: self.requests.load(Ordering::Relaxed),
+            replies: self.replies.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            // An operation or class appears once it has been counted.
+            operations: OPERATION_NAMES
+                .iter()
+                .zip(&self.operations)
+                .filter_map(|(name, count)| Some(((*name).to_owned(), counted(count)?)))
+                .collect(),
+            assertions: self.assertions.load(Ordering::Relaxed),
+            duration_ms_total: self.duration_ms_total.load(Ordering::Relaxed),
+            duration_ms_max: self.duration_ms_max.load(Ordering::Relaxed),
+            request_bytes: self.request_bytes.load(Ordering::Relaxed),
+            response_bytes: self.response_bytes.load(Ordering::Relaxed),
+            error_classes: ERROR_CLASSES
+                .iter()
+                .zip(&self.error_classes)
+                .filter_map(|(class, count)| Some((*class, counted(count)?)))
+                .collect(),
+        }
+    }
+}
+
 fn classify_error(error: &S3Error) -> S3ErrorClass {
     match error.code.as_str() {
         "AccessDenied"
@@ -512,7 +584,7 @@ fn classify_error(error: &S3Error) -> S3ErrorClass {
 pub struct S3Session {
     pub buckets: Arc<BTreeMap<String, Arc<dyn FsDriver>>>,
     pub options: S3SessionOptions,
-    stats: Arc<TurnLock<S3SessionStats>>,
+    stats: Arc<StatCounters>,
     stream_request_bytes: Arc<AtomicU64>,
     stream_response_bytes: Arc<AtomicU64>,
     assertions: Arc<TurnCell<Vec<String>>>,
@@ -559,7 +631,7 @@ impl S3Session {
         Self {
             buckets: Arc::new(buckets.into_iter().collect()),
             options,
-            stats: Arc::new(TurnLock::new(S3SessionStats::default())),
+            stats: Arc::new(StatCounters::new()),
             stream_request_bytes: Arc::new(AtomicU64::new(0)),
             stream_response_bytes: Arc::new(AtomicU64::new(0)),
             assertions: Arc::new(TurnCell::new(Vec::new())),
@@ -571,7 +643,7 @@ impl S3Session {
     }
 
     pub async fn stats(&self) -> S3SessionStats {
-        let mut snapshot = self.stats.lock().await.clone();
+        let mut snapshot = self.stats.snapshot();
         snapshot.request_bytes = snapshot
             .request_bytes
             .saturating_add(self.stream_request_bytes.load(Ordering::Relaxed));
@@ -602,10 +674,7 @@ impl S3Session {
     /// response rather than escaping to the HTTP layer.
     pub async fn handle_request(&self, head: S3RequestHead, body: Vec<u8>) -> S3Response {
         let started = Instant::now();
-        {
-            let mut stats = self.stats.lock().await;
-            stats.requests += 1;
-        }
+        self.stats.requests.fetch_add(1, Ordering::Relaxed);
         let ticket = self.begin_request();
         let mut ticket_guard = RequestTicketGuard::new(Arc::clone(&self.inflight), ticket);
         let request_id = self.next_request_id();
@@ -638,8 +707,7 @@ impl S3Session {
             response.body.len() as u64,
             response.status,
             error_class,
-        )
-        .await;
+        );
         response
     }
 
@@ -655,10 +723,7 @@ impl S3Session {
         body: S3RequestBody,
     ) -> S3StreamResponse {
         let started = Instant::now();
-        {
-            let mut stats = self.stats.lock().await;
-            stats.requests += 1;
-        }
+        self.stats.requests.fetch_add(1, Ordering::Relaxed);
         let ticket = self.begin_request();
         let mut ticket_guard = RequestTicketGuard::new(Arc::clone(&self.inflight), ticket);
         let request_id = self.next_request_id();
@@ -706,8 +771,7 @@ impl S3Session {
             Some(S3StreamBody::Bytes(bytes)) => bytes.len() as u64,
             Some(S3StreamBody::Stream(_)) | None => 0,
         };
-        self.record_response_stats(started, 0, response_bytes, response.status, error_class)
-            .await;
+        self.record_response_stats(started, 0, response_bytes, response.status, error_class);
         // Keep the response owned by this function until after statistics are
         // updated.  This also makes the error path mirror handle_request.
         response
@@ -743,8 +807,7 @@ impl S3Session {
             if let Some(hook) = &self.options.hooks.on_assertion {
                 hook(message);
             }
-            let mut stats = self.stats.lock().await;
-            stats.assertions += 1;
+            self.stats.assertions.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -778,7 +841,7 @@ impl S3Session {
         }
     }
 
-    async fn record_response_stats(
+    fn record_response_stats(
         &self,
         started: Instant,
         request_bytes: u64,
@@ -787,17 +850,25 @@ impl S3Session {
         error_class: Option<S3ErrorClass>,
     ) {
         let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let mut stats = self.stats.lock().await;
-        stats.replies += 1;
-        stats.duration_ms_total = stats.duration_ms_total.saturating_add(elapsed_ms);
-        stats.duration_ms_max = stats.duration_ms_max.max(elapsed_ms);
-        stats.request_bytes = stats.request_bytes.saturating_add(request_bytes);
-        stats.response_bytes = stats.response_bytes.saturating_add(response_bytes);
+        let stats = &self.stats;
+        stats.replies.fetch_add(1, Ordering::Relaxed);
+        stats
+            .duration_ms_total
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
+        stats
+            .duration_ms_max
+            .fetch_max(elapsed_ms, Ordering::Relaxed);
+        stats
+            .request_bytes
+            .fetch_add(request_bytes, Ordering::Relaxed);
+        stats
+            .response_bytes
+            .fetch_add(response_bytes, Ordering::Relaxed);
         if status >= 400 {
-            stats.errors += 1;
+            stats.errors.fetch_add(1, Ordering::Relaxed);
         }
         if let Some(error_class) = error_class {
-            *stats.error_classes.entry(error_class).or_default() += 1;
+            stats.error_classes[error_class as usize].fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -827,7 +898,7 @@ impl S3Session {
                 .map(S3StreamResponse::from);
         }
 
-        self.count_operation(operation_name(&operation)).await;
+        self.count_operation(&operation);
         let bucket_name = operation_bucket(&operation);
         let driver = if let Some(bucket) = bucket_name {
             self.buckets
@@ -884,7 +955,7 @@ impl S3Session {
             .map_err(|error| error.with_resource(target.path.clone()))?;
         let operation = protocol::route_request(&head.method, &target, &head.headers)
             .map_err(|error| error.with_resource(target.path.clone()))?;
-        self.count_operation(operation_name(&operation)).await;
+        self.count_operation(&operation);
         if matches!(&operation, Operation::DeleteObject(target) if target.path.is_empty()) {
             return Ok(S3Response::empty(204));
         }
@@ -1062,9 +1133,8 @@ impl S3Session {
         })
     }
 
-    async fn count_operation(&self, operation: &str) {
-        let mut stats = self.stats.lock().await;
-        *stats.operations.entry(operation.to_owned()).or_default() += 1;
+    fn count_operation(&self, operation: &Operation) {
+        self.stats.operations[operation_index(operation)].fetch_add(1, Ordering::Relaxed);
     }
 
     async fn acquire_conditional_put_lock(
@@ -2191,22 +2261,41 @@ struct UploadManifest {
     mtime_ms: Option<i64>,
 }
 
-fn operation_name(operation: &Operation) -> &'static str {
+/// The key of each operation in [`S3SessionStats::operations`], indexed by
+/// [`operation_index`].
+const OPERATION_NAMES: [&str; 14] = [
+    "ListBuckets",
+    "HeadBucket",
+    "ListObjectsV2",
+    "GetObject",
+    "HeadObject",
+    "PutObject",
+    "DeleteObject",
+    "DeleteObjects",
+    "CopyObject",
+    "CreateMultipartUpload",
+    "UploadPart",
+    "CompleteMultipartUpload",
+    "AbortMultipartUpload",
+    "ListParts",
+];
+
+fn operation_index(operation: &Operation) -> usize {
     match operation {
-        Operation::ListBuckets => "ListBuckets",
-        Operation::HeadBucket { .. } => "HeadBucket",
-        Operation::ListObjectsV2 { .. } => "ListObjectsV2",
-        Operation::GetObject(_) => "GetObject",
-        Operation::HeadObject(_) => "HeadObject",
-        Operation::PutObject(_) => "PutObject",
-        Operation::DeleteObject(_) => "DeleteObject",
-        Operation::DeleteObjects { .. } => "DeleteObjects",
-        Operation::CopyObject { .. } => "CopyObject",
-        Operation::CreateMultipartUpload(_) => "CreateMultipartUpload",
-        Operation::UploadPart { .. } => "UploadPart",
-        Operation::CompleteMultipartUpload { .. } => "CompleteMultipartUpload",
-        Operation::AbortMultipartUpload { .. } => "AbortMultipartUpload",
-        Operation::ListParts { .. } => "ListParts",
+        Operation::ListBuckets => 0,
+        Operation::HeadBucket { .. } => 1,
+        Operation::ListObjectsV2 { .. } => 2,
+        Operation::GetObject(_) => 3,
+        Operation::HeadObject(_) => 4,
+        Operation::PutObject(_) => 5,
+        Operation::DeleteObject(_) => 6,
+        Operation::DeleteObjects { .. } => 7,
+        Operation::CopyObject { .. } => 8,
+        Operation::CreateMultipartUpload(_) => 9,
+        Operation::UploadPart { .. } => 10,
+        Operation::CompleteMultipartUpload { .. } => 11,
+        Operation::AbortMultipartUpload { .. } => 12,
+        Operation::ListParts { .. } => 13,
     }
 }
 

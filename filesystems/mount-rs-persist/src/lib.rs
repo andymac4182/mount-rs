@@ -7,11 +7,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
 use mount_rs_core::{
-    Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, OpenFlags,
-    Result, Stats, StatsFs,
+    Capabilities, DirEntry, FileHandle, FsDriver, MkdirOptions, OpenFlags, Result, Stats, StatsFs,
 };
 pub use mount_rs_core::{LoadedSnapshot, StateStore, snapshot_conflict};
 use mount_rs_memfs::MemoryFs;
@@ -27,15 +25,17 @@ use mount_rs_memfs::MemoryFs;
 /// a particular async runtime.
 #[derive(Clone)]
 struct SaveGate {
-    lock: Arc<TurnLock<()>>,
+    /// The version of the last saved snapshot, which only a save reads or
+    /// replaces.
+    lock: Arc<TurnLock<String>>,
 }
 
-type SaveGateGuard = OwnedTurnLockGuard<()>;
+type SaveGateGuard = OwnedTurnLockGuard<String>;
 
 impl SaveGate {
-    fn new() -> Self {
+    fn new(version: String) -> Self {
         Self {
-            lock: Arc::new(TurnLock::new(())),
+            lock: Arc::new(TurnLock::new(version)),
         }
     }
 
@@ -50,7 +50,6 @@ pub struct PersistedFs<S: StateStore> {
     core: MemoryFs,
     store: Arc<S>,
     save_gate: SaveGate,
-    snapshot_version: Arc<TurnCell<String>>,
 }
 
 impl<S: StateStore> Clone for PersistedFs<S> {
@@ -59,7 +58,6 @@ impl<S: StateStore> Clone for PersistedFs<S> {
             core: self.core.clone(),
             store: Arc::clone(&self.store),
             save_gate: self.save_gate.clone(),
-            snapshot_version: Arc::clone(&self.snapshot_version),
         }
     }
 }
@@ -76,8 +74,7 @@ impl<S: StateStore> PersistedFs<S> {
         let filesystem = Self {
             core,
             store,
-            save_gate: SaveGate::new(),
-            snapshot_version: Arc::new(TurnCell::new(loaded.version)),
+            save_gate: SaveGate::new(loaded.version),
         };
         if !has_snapshot {
             filesystem.persist().await?;
@@ -90,22 +87,10 @@ impl<S: StateStore> PersistedFs<S> {
     }
 
     pub async fn persist(&self) -> Result<()> {
-        let _guard = self.save_gate.lock().await;
+        let mut version = self.save_gate.lock().await;
         let snapshot = self.core.snapshot_bytes()?;
-        let expected_version = self
-            .snapshot_version
-            .lock()
-            .map_err(|_| {
-                FsError::new(ErrorCode::Eio).with_message("snapshot version lock poisoned")
-            })?
-            .clone();
-        let next_version = self
-            .store
-            .save_versioned(snapshot, &expected_version)
-            .await?;
-        *self.snapshot_version.lock().map_err(|_| {
-            FsError::new(ErrorCode::Eio).with_message("snapshot version lock poisoned")
-        })? = next_version;
+        let next_version = self.store.save_versioned(snapshot, &version).await?;
+        *version = next_version;
         Ok(())
     }
 
@@ -286,6 +271,7 @@ impl<S: StateStore + 'static> FsDriver for PersistedFs<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mount_rs_core::ErrorCode;
     use mount_rs_core::{FsDriver, OpenFlags};
     use mount_rs_memfs::MemoryFs;
     use std::collections::VecDeque;
@@ -344,7 +330,7 @@ mod tests {
         const LIVE: usize = 0;
         const CANCELLED: usize = 1;
 
-        let gate = SaveGate::new();
+        let gate = SaveGate::new(String::new());
         let runnable = Arc::new(Mutex::new(VecDeque::new()));
         let holder = acquire_uncontended_gate(&gate, &runnable);
         let live_waker = Waker::from(Arc::new(QueuedWake {
@@ -395,7 +381,7 @@ mod tests {
         const SECOND: usize = 1;
         const NEWCOMER: usize = 2;
 
-        let gate = SaveGate::new();
+        let gate = SaveGate::new(String::new());
         let runnable = Arc::new(Mutex::new(VecDeque::new()));
         let holder = acquire_uncontended_gate(&gate, &runnable);
         let first_waker = Waker::from(Arc::new(QueuedWake {
@@ -474,7 +460,7 @@ mod tests {
         for order in ORDERS {
             for cancelled in 0..3 {
                 for cancel_after_unlock in [false, true] {
-                    let gate = SaveGate::new();
+                    let gate = SaveGate::new(String::new());
                     let runnable = Arc::new(Mutex::new(VecDeque::new()));
                     let holder = acquire_uncontended_gate(&gate, &runnable);
                     let mut wakers: [Waker; 3] = std::array::from_fn(|task| {
@@ -581,7 +567,7 @@ mod tests {
 
     #[test]
     fn save_gate_serves_queued_waiters_in_arrival_order() {
-        let gate = SaveGate::new();
+        let gate = SaveGate::new(String::new());
         let owner = block_on(gate.lock());
         let first_wake = Arc::new(CountingWake::default());
         let second_wake = Arc::new(CountingWake::default());
@@ -608,7 +594,7 @@ mod tests {
 
     #[test]
     fn save_gate_cancellation_wakes_the_next_live_waiter() {
-        let gate = SaveGate::new();
+        let gate = SaveGate::new(String::new());
         let owner = block_on(gate.lock());
         let live_wake = Arc::new(CountingWake::default());
         let canceled_wake = Arc::new(CountingWake::default());
@@ -629,7 +615,7 @@ mod tests {
 
     #[test]
     fn save_gate_front_cancellation_while_held_wakes_the_next_waiter_on_release() {
-        let gate = SaveGate::new();
+        let gate = SaveGate::new(String::new());
         let owner = block_on(gate.lock());
         let first_wake = Arc::new(CountingWake::default());
         let second_wake = Arc::new(CountingWake::default());
@@ -651,7 +637,7 @@ mod tests {
 
     #[test]
     fn save_gate_canceled_handoff_passes_to_the_next_waiter() {
-        let gate = SaveGate::new();
+        let gate = SaveGate::new(String::new());
         let owner = block_on(gate.lock());
         let first_wake = Arc::new(CountingWake::default());
         let second_wake = Arc::new(CountingWake::default());
@@ -672,7 +658,7 @@ mod tests {
 
     #[test]
     fn save_gate_late_arrival_cannot_pass_a_woken_waiter() {
-        let gate = SaveGate::new();
+        let gate = SaveGate::new(String::new());
         let owner = block_on(gate.lock());
         let queued_wake = Arc::new(CountingWake::default());
         let late_wake = Arc::new(CountingWake::default());
@@ -699,7 +685,7 @@ mod tests {
 
     #[test]
     fn save_gate_repoll_replaces_the_waiters_waker() {
-        let gate = SaveGate::new();
+        let gate = SaveGate::new(String::new());
         let owner = block_on(gate.lock());
         let old_wake = Arc::new(CountingWake::default());
         let current_wake = Arc::new(CountingWake::default());

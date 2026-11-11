@@ -15,6 +15,8 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
+use atomic_waker::AtomicWaker;
 use axum::{
     Router,
     body::{Body, BodyDataStream},
@@ -103,7 +105,8 @@ pub struct S3Server {
     drain_timeout: Duration,
     active_connections: Arc<AtomicUsize>,
     connection_shutdowns: Arc<ConnectionShutdowns>,
-    shutdown: TurnLock<Option<oneshot::Sender<()>>>,
+    /// Taken once, by `close` or `Drop`; nothing reads it in place.
+    shutdown: ArcSwapOption<oneshot::Sender<()>>,
     task: TurnLock<Option<JoinHandle<Result<(), std::io::Error>>>>,
 }
 
@@ -116,7 +119,7 @@ struct HttpState {
 #[derive(Default)]
 struct ConnectionShutdown {
     cancelled: AtomicBool,
-    waker: TurnCell<Option<std::task::Waker>>,
+    waker: AtomicWaker,
 }
 
 impl ConnectionShutdown {
@@ -124,19 +127,15 @@ impl ConnectionShutdown {
         if self.cancelled.load(Ordering::Acquire) {
             return true;
         }
-        let mut waker = self.waker.lock().expect("S3 connection waker lock");
-        if self.cancelled.load(Ordering::Acquire) {
-            return true;
-        }
-        *waker = Some(context.waker().clone());
-        false
+        self.waker.register(context.waker());
+        // Checked again after registering: a `cancel` that set the flag
+        // before the waker was in place would otherwise wake no one.
+        self.cancelled.load(Ordering::Acquire)
     }
 
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
-        if let Some(waker) = self.waker.lock().expect("S3 connection waker lock").take() {
-            waker.wake();
-        }
+        self.waker.wake();
     }
 
     fn is_cancelled(&self) -> bool {
@@ -236,7 +235,7 @@ impl S3Server {
             drain_timeout: options.drain_timeout,
             active_connections,
             connection_shutdowns,
-            shutdown: TurnLock::new(Some(shutdown_tx)),
+            shutdown: ArcSwapOption::from_pointee(shutdown_tx),
             task: TurnLock::new(Some(task)),
         })
     }
@@ -272,7 +271,7 @@ impl S3Server {
     }
 
     pub async fn close(&self) -> Result<(), S3BindError> {
-        if let Some(sender) = self.shutdown.lock().await.take() {
+        if let Some(sender) = self.shutdown.swap(None).and_then(Arc::into_inner) {
             let _ = sender.send(());
         }
         if let Some(mut task) = self.task.lock().await.take() {
@@ -304,7 +303,7 @@ impl S3Server {
 
 impl Drop for S3Server {
     fn drop(&mut self) {
-        if let Some(sender) = self.shutdown.get_mut().take() {
+        if let Some(sender) = self.shutdown.swap(None).and_then(Arc::into_inner) {
             let _ = sender.send(());
         }
         if let Some(task) = self.task.get_mut().take() {

@@ -222,8 +222,9 @@ pub struct WebdavServer {
     closing: Arc<AtomicUsize>,
     drained: Arc<Notify>,
     background_tasks: Arc<AtomicUsize>,
-    lifecycle: TurnLock<()>,
-    state: TurnCell<ServerState>,
+    /// Held across `listen` and `close`, which are the only users of the
+    /// accept task it guards.
+    lifecycle: TurnLock<ServerState>,
     connections: Arc<ConnectionRegistry>,
     hooks: WebdavServerHooks,
 }
@@ -260,8 +261,7 @@ impl WebdavServer {
             closing: Arc::new(AtomicUsize::new(0)),
             drained: Arc::new(Notify::new()),
             background_tasks: Arc::new(AtomicUsize::new(0)),
-            lifecycle: TurnLock::new(()),
-            state: TurnCell::new(ServerState { task: None }),
+            lifecycle: TurnLock::new(ServerState { task: None }),
             connections: Arc::new(ConnectionRegistry::default()),
             hooks,
         }
@@ -289,12 +289,8 @@ impl WebdavServer {
     }
 
     pub async fn listen(&self) -> Result<(), WebdavServerError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        let running = self
-            .state
-            .lock()
-            .map(|state| task_is_running(state.task.as_ref()))
-            .unwrap_or(false);
+        let mut lifecycle = self.lifecycle.lock().await;
+        let running = task_is_running(lifecycle.task.as_ref());
         let closing = self.closing.load(Ordering::Acquire) != 0;
         if closing {
             return Err(WebdavServerError::Io(std::io::Error::other(if running {
@@ -407,19 +403,13 @@ impl WebdavServer {
                 }
             }
         });
-        if let Ok(mut state) = self.state.lock() {
-            state.task = Some(task);
-        }
+        lifecycle.task = Some(task);
         Ok(())
     }
 
     pub async fn close(&self) -> Result<(), WebdavServerError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        let task = self
-            .state
-            .lock()
-            .ok()
-            .and_then(|mut state| state.task.take());
+        let mut lifecycle = self.lifecycle.lock().await;
+        let task = lifecycle.task.take();
         if task.is_none() && self.closing.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
@@ -458,9 +448,8 @@ impl WebdavServer {
                 connections.abort_all();
                 if let Some(task) = task.take()
                     && !task.is_finished()
-                    && let Ok(mut state) = self.state.lock()
                 {
-                    state.task = Some(task);
+                    lifecycle.task = Some(task);
                 }
                 Err(WebdavServerError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
