@@ -16,11 +16,11 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use mount_rs_core::FsDriver;
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::TurnLock;
 use tokio::process::Command;
 
@@ -827,23 +827,43 @@ enum UnmountOutcome {
     TimedOut,
 }
 
-static LIVE_MOUNTS: OnceLock<TurnCell<Vec<Weak<NativeNfsMountInner>>>> = OnceLock::new();
-
-fn live_registry() -> &'static TurnCell<Vec<Weak<NativeNfsMountInner>>> {
-    LIVE_MOUNTS.get_or_init(|| TurnCell::new(Vec::new()))
-}
+// Mounts come and go rarely, so each change replaces the list with a copy.
+static LIVE_MOUNTS: LazyLock<ArcSwap<Vec<Weak<NativeNfsMountInner>>>> =
+    LazyLock::new(ArcSwap::default);
 
 fn register_mount(mount: &Arc<NativeNfsMountInner>) {
-    let mut mounts = live_registry().lock().expect("NFS live mount registry");
-    mounts.retain(|mount| mount.strong_count() != 0);
-    mounts.push(Arc::downgrade(mount));
+    LIVE_MOUNTS.rcu(|mounts| {
+        let mut mounts: Vec<_> = mounts
+            .iter()
+            .filter(|mount| mount.strong_count() != 0)
+            .cloned()
+            .collect();
+        mounts.push(Arc::downgrade(mount));
+        mounts
+    });
 }
 
 /// Return live native mounts created by this process, in creation order.
 pub fn live_nfs_mounts() -> Vec<NativeNfsMount> {
-    let mut mounts = live_registry().lock().expect("NFS live mount registry");
-    let live = mounts.iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
-    mounts.retain(|mount| mount.strong_count() != 0);
+    let live = LIVE_MOUNTS
+        .load()
+        .iter()
+        .filter_map(Weak::upgrade)
+        .collect::<Vec<_>>();
+    // Forget mounts that have gone, unless the list is already clean.
+    if LIVE_MOUNTS
+        .load()
+        .iter()
+        .any(|mount| mount.strong_count() == 0)
+    {
+        LIVE_MOUNTS.rcu(|mounts| {
+            mounts
+                .iter()
+                .filter(|mount| mount.strong_count() != 0)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+    }
     live.into_iter()
         .map(|inner| NativeNfsMount { inner })
         .collect()

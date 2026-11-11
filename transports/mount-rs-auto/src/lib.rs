@@ -23,11 +23,11 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use mount_rs_core::FsDriver;
-use mount_rs_core::turn_cell::TurnCell;
 
 pub use mount_rs_9p::{
     P9ClientProbe, P9Mount, P9MountOptions, P9MountTransport, P9Platform, P9ServerHooks,
@@ -319,7 +319,7 @@ impl AutoMount {
 
 /// One bit per transport this facade has dispatched to.
 static LOADED: AtomicU8 = AtomicU8::new(0);
-static LIVE: OnceLock<TurnCell<Vec<AutoMount>>> = OnceLock::new();
+static LIVE: LazyLock<ArcSwap<Vec<AutoMount>>> = LazyLock::new(ArcSwap::default);
 
 const TRANSPORTS: [Transport; 3] = [Transport::Fuse, Transport::P9, Transport::Nfs];
 
@@ -331,10 +331,16 @@ fn transport_bit(transport: Transport) -> u8 {
     }
 }
 
-/// Run `f` on the live-mount registry. The critical sections only push,
-/// filter and clone the list, so it is usable even if one panicked.
-fn with_live<R>(f: impl FnOnce(&mut Vec<AutoMount>) -> R) -> R {
-    f(&mut LIVE.get_or_init(TurnCell::default).lock_recovered())
+/// Replace the live-mount registry with `change` applied to a copy of it,
+/// and return the result. Mounts come and go rarely, so a copy per change is
+/// cheap, and `change` may run again if another change got in first.
+fn change_live(change: impl Fn(&mut Vec<AutoMount>)) -> Arc<Vec<AutoMount>> {
+    LIVE.rcu(|mounts| {
+        let mut mounts = Vec::clone(mounts);
+        change(&mut mounts);
+        mounts
+    });
+    LIVE.load_full()
 }
 
 fn mark_loaded(transport: Transport) {
@@ -349,11 +355,11 @@ pub fn loaded_transports() -> Vec<Transport> {
 }
 
 fn register_mount(mount: AutoMount) {
-    with_live(|mounts| mounts.push(mount));
+    change_live(|mounts| mounts.push(mount.clone()));
 }
 
 fn unregister_mountpoint(mountpoint: &Path) {
-    with_live(|mounts| mounts.retain(|mount| mount.mountpoint() != mountpoint));
+    change_live(|mounts| mounts.retain(|mount| mount.mountpoint() != mountpoint));
 }
 
 /// Facade-created live FUSE/9P mounts, plus all live NFS mounts once this
@@ -361,10 +367,7 @@ fn unregister_mountpoint(mountpoint: &Path) {
 /// no process-wide registry, so direct mounts made through those crates remain
 /// intentionally outside this result rather than being misreported.
 pub fn live_mounts() -> Vec<AutoMount> {
-    let mut mounts = with_live(|local| {
-        local.retain(AutoMount::active);
-        local.clone()
-    });
+    let mut mounts = Vec::clone(&change_live(|local| local.retain(AutoMount::active)));
 
     if loaded(Transport::Nfs) {
         for mount in mount_rs_nfs::live_nfs_mounts() {
@@ -399,7 +402,7 @@ pub async fn unmount_all() -> Vec<AutoMountError> {
         );
     }
 
-    let mounts = with_live(|mounts| mounts.clone());
+    let mounts = Vec::clone(&LIVE.load());
     for mount in mounts {
         if mount.transport() == Transport::Nfs && loaded(Transport::Nfs) {
             continue;
@@ -408,7 +411,7 @@ pub async fn unmount_all() -> Vec<AutoMountError> {
             failures.push(error);
         }
     }
-    with_live(|mounts| mounts.retain(AutoMount::active));
+    change_live(|mounts| mounts.retain(AutoMount::active));
     failures
 }
 

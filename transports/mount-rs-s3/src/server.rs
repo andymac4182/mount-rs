@@ -27,8 +27,8 @@ use axum::{
     serve::Listener,
 };
 use futures_core::Stream;
+use mount_rs_core::append_log::AppendLog;
 use mount_rs_core::take_cell::TakeCell;
-use mount_rs_core::turn_cell::TurnCell;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
@@ -146,29 +146,21 @@ impl ConnectionShutdown {
 
 #[derive(Default)]
 struct ConnectionShutdowns {
-    entries: TurnCell<Vec<Weak<ConnectionShutdown>>>,
+    /// Only added to, by the accept loop; read once, when a drain times out.
+    entries: AppendLog<Weak<ConnectionShutdown>>,
 }
 
 impl ConnectionShutdowns {
     fn register(&self, shutdown: &Arc<ConnectionShutdown>) {
-        self.entries
-            .lock()
-            .expect("S3 connection shutdown registry")
-            .push(Arc::downgrade(shutdown));
+        self.entries.push(Arc::downgrade(shutdown));
     }
 
     fn cancel_all(&self) {
-        let mut entries = self
-            .entries
-            .lock()
-            .expect("S3 connection shutdown registry");
-        entries.retain(|entry| {
-            let Some(shutdown) = entry.upgrade() else {
-                return false;
-            };
+        // A connection accepted after this snapshot belongs to a listener
+        // that is being aborted, as it did when a lock ordered the two.
+        for shutdown in self.entries.snapshot().iter().filter_map(Weak::upgrade) {
             shutdown.cancel();
-            true
-        });
+        }
     }
 }
 

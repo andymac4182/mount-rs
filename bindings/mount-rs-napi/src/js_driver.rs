@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::Poll;
 
+use mount_rs_core::append_log::AppendLog;
 use mount_rs_core::take_cell::TakeCell;
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FileType, FsDriver, FsError,
@@ -331,7 +331,8 @@ impl WaiterRegistry {
 
 struct Lifecycle {
     closed: AtomicBool,
-    callbacks: TurnCell<Vec<Weak<dyn CallbackControl>>>,
+    /// Only added to; read once, at shutdown.
+    callbacks: AppendLog<Weak<dyn CallbackControl>>,
     waiters: WaiterRegistry,
 }
 
@@ -339,7 +340,7 @@ impl Lifecycle {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             closed: AtomicBool::new(false),
-            callbacks: TurnCell::new(Vec::new()),
+            callbacks: AppendLog::new(),
             waiters: WaiterRegistry::new(),
         })
     }
@@ -354,9 +355,7 @@ impl Lifecycle {
     {
         let erased: Arc<dyn CallbackControl> = callback.clone();
         let weak = Arc::downgrade(&erased);
-        if let Ok(mut callbacks) = self.callbacks.lock() {
-            callbacks.push(weak);
-        }
+        self.callbacks.push(weak);
     }
 
     fn shutdown(&self) {
@@ -364,12 +363,7 @@ impl Lifecycle {
             return;
         }
         self.waiters.cancel_all();
-        let callbacks = self
-            .callbacks
-            .lock()
-            .map(|mut callbacks| std::mem::take(&mut *callbacks))
-            .unwrap_or_default();
-        for callback in callbacks {
+        for callback in self.callbacks.snapshot() {
             if let Some(callback) = callback.upgrade() {
                 callback.abort();
             }

@@ -1768,6 +1768,7 @@ dependencies = [
 name = "mount-rs-auto"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "libc",
  "mount-rs-9p",
@@ -1829,6 +1830,7 @@ dependencies = [
 name = "mount-rs-cli"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "getrandom 0.3.4",
  "http",
@@ -2348,6 +2350,7 @@ dependencies = [
 name = "mount-rs-sqlite"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-io",
  "async-trait",
  "crossbeam-queue",

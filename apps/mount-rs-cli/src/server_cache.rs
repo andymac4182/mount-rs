@@ -192,15 +192,17 @@ impl CacheServiceConfig {
     }
 }
 
+use arc_swap::ArcSwap;
 use mount_rs_blob_cache::{
     CachedBlockStore, DistributedRuntime, IntegrityPolicy, LocalCache, ScopeIdentity,
 };
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{Result, storage::BlockStore};
 use mount_rs_sdk::{BlockStoreDecorator, StoreConfig};
 use std::sync::Arc;
+// Added to once per drive opened and read once at shutdown, so each insert
+// replaces the map with a copy.
 type DriveMetrics =
-    Arc<TurnCell<BTreeMap<(String, String), Arc<mount_rs_blob_cache::CacheMetrics>>>>;
+    Arc<ArcSwap<BTreeMap<(String, String), Arc<mount_rs_blob_cache::CacheMetrics>>>>;
 
 pub(crate) struct DriveCacheDecorator {
     pub cache: Arc<LocalCache>,
@@ -235,13 +237,13 @@ impl BlockStoreDecorator for DriveCacheDecorator {
         };
         let store = CachedBlockStore::new(store, self.cache.clone(), self.identity.clone(), policy)
             .with_runtime(self.runtime.clone());
-        self.metrics
-            .lock()
-            .map_err(|_| mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio))?
-            .insert(
-                (self.identity.partition.clone(), self.identity.drive.clone()),
-                store.metrics(),
-            );
+        let drive = (self.identity.partition.clone(), self.identity.drive.clone());
+        let drive_metrics = store.metrics();
+        self.metrics.rcu(|metrics| {
+            let mut metrics = BTreeMap::clone(metrics);
+            metrics.insert(drive.clone(), drive_metrics.clone());
+            metrics
+        });
         Ok(Arc::new(store))
     }
 }
@@ -416,7 +418,7 @@ impl ServerCache {
             runtime,
             peers,
             cluster: config.cluster.clone(),
-            metrics: Arc::new(TurnCell::new(BTreeMap::new())),
+            metrics: Arc::default(),
         })
     }
     pub(crate) fn decorator(&self, partition: &str, drive: &str) -> DriveCacheDecorator {
@@ -435,14 +437,8 @@ impl ServerCache {
         self.runtime.shutdown().await;
         self.peers.shutdown().await;
         self.local.shutdown().await;
-        // Copy the entries out so the cell is not held across stderr writes.
-        let metrics = self.metrics.lock().map(|metrics| {
-            metrics
-                .iter()
-                .map(|(key, metrics)| (key.clone(), Arc::clone(metrics)))
-                .collect::<Vec<_>>()
-        });
-        if let Ok(metrics) = metrics {
+        {
+            let metrics = self.metrics.load_full();
             for ((partition, drive), metrics) in metrics.iter() {
                 let stats = metrics.snapshot();
                 eprintln!(
@@ -536,7 +532,7 @@ mod tests {
             DistributedConfig::default(),
         )
         .unwrap();
-        let metrics = Arc::new(TurnCell::new(BTreeMap::new()));
+        let metrics = DriveMetrics::default();
         let decorator = DriveCacheDecorator {
             cache,
             runtime: runtime.clone(),
@@ -579,7 +575,7 @@ mod tests {
             view.read_file("/data").await.unwrap(),
             b"durable cached bytes"
         );
-        let stats = metrics.lock().unwrap().values().next().unwrap().snapshot();
+        let stats = metrics.load().values().next().unwrap().snapshot();
         assert!(stats.local_hits > 0);
         assert_eq!(stats.backing_fetches, 0);
         second.shutdown().await.unwrap();

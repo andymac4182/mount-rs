@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use mount_rs_core::Result;
 use mount_rs_core::drain_gate::DrainGate;
 use mount_rs_core::storage::{BlockId, BlockStore};
+use mount_rs_core::turn_gate::TurnGate;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,7 +82,7 @@ struct Fill {
     key: AtomicU64,
     /// Held exclusively by whichever miss is reading the backing store; the
     /// others queue here and find the block cached when their turn comes.
-    turn: DrainGate,
+    turn: TurnGate,
     /// Misses currently using this slot. Zero means the slot is free.
     sharers: std::sync::atomic::AtomicUsize,
 }
@@ -660,7 +661,7 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             None
         };
         let _turn = match &fill {
-            Some(share) => Some(share.fill.turn.write().await),
+            Some(share) => Some(share.fill.turn.lock().await),
             None => None,
         };
         // Another miss or put may have populated this entry while we waited.
