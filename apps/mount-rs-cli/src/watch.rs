@@ -248,6 +248,10 @@ impl FsDriver for WatchedDriver {
         self.inner.capabilities()
     }
 
+    fn health(&self) -> Result<()> {
+        self.inner.health()
+    }
+
     fn supports_guarded_mutations(&self) -> bool {
         self.inner.supports_guarded_mutations()
     }

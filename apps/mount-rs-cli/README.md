@@ -260,36 +260,116 @@ deployment's recovery objective.
 
 ## Unmounted HTTP service
 
-Run the HTTP service with a dedicated configuration file:
+`serve-http` serves named drives over HTTP without creating a FUSE, 9P or NFS
+mount.
 
     mount-rs serve-http --config apps/mount-rs-cli/examples/config-http.json
 
+The full documentation is in three places:
+
+- API guide for consumers: [`transports/mount-rs-http/README.md`](../../transports/mount-rs-http/README.md)
+- OpenAPI 3.1 contract: [`transports/mount-rs-http/openapi.yaml`](../../transports/mount-rs-http/openapi.yaml)
+- Operator runbook (config reference, proxy, health, shutdown, recovery):
+  [`docs/serve-http-runbook.md`](../../docs/serve-http-runbook.md)
+
+The v1 launch contract is plain `serve-http` with `remote_sessions: false` and
+no `forwarding` block. The session and forwarding features described later in
+this file are experimental and are not part of that contract.
+
+### Configuration
+
 An HTTP config has the same top-level `version` as native configs and an
-`http` object instead of native mount fields. The `http.drives` array is
-required and must contain at least one named drive. Every drive has an `id`, a
-bearer-token environment reference, and one of the existing `driver` shapes
-(`memory`, `host`, `sqlite`, or `splitstore`). Relative paths are resolved
-relative to the HTTP config file, just as they are for native configs. The
-service defaults to loopback (`127.0.0.1`), an ephemeral port (`0`), bounded
-request/chunk sizes, 256 active connections, a 30-second request timeout, and
-a five-second shutdown drain. Directory listings are capped at 4,096 entries
-and 8 MiB by default; all values can be overridden in the `http`
-object. Only loopback hosts are accepted; remote customers must terminate TLS
-and authenticate at a reverse proxy before forwarding to this listener.
+`http` object instead of native mount fields. `serve-http` accepts only
+`--config <path>`. A config with an `http` object is rejected by the native
+mount commands. Unknown keys are rejected. Relative paths resolve against the
+config file's directory.
 
-The public listener serves HTTP/1.1 by default. Set `http.http2_prior_knowledge` to `true` for a cleartext HTTP/2-only listener. Configure the upstream proxy to send the HTTP/2 connection preface on its target connection. TLS termination remains at the proxy. The server-to-server forwarding connection uses its own transport configuration.
+`http.drives` is required and must contain at least one drive. Each drive has:
 
-`http.tcp_nodelay` defaults to `true`, disabling TCP packet coalescing to reduce
-streaming-response latency. Set it to the boolean `false` to restore coalescing.
+- `id`: 1-64 characters from `A-Z a-z 0-9 - _ .`, unique, used in URLs;
+- `token`: `{"env": "NAME"}`, the environment variable that holds the drive's
+  bearer token;
+- `driver`: a `memory`, `host`, `sqlite` or `splitstore` driver object in the
+  same shape as native configs. `remote` drivers are rejected.
+
+Listener and limit keys, all optional:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `host` | `127.0.0.1` | Loopback hosts only (`127.0.0.1`, `::1`, `localhost`). Anything else is a config error. |
+| `port` | `0` | `0` selects an ephemeral port, printed in the readiness line. |
+| `max_request_bytes` | 8388608 | Largest `PUT` body and JSON body; the largest uploadable file. |
+| `max_buffered_upload_bytes` | 4 x `max_request_bytes` | Total upload bytes buffered across requests; uploads beyond it wait. Must be >= `max_request_bytes`. |
+| `max_response_bytes` | 8388608 | Largest directory listing. |
+| `max_directory_entries` | 4096 | Largest listable directory. |
+| `read_chunk_bytes` | 65536 | Download read size. |
+| `request_timeout_ms` | 30000 | Per-request, header-read, idle keep-alive and stalled-download timeout. |
+| `drain_timeout_ms` | 35000 | Shutdown drain. Keep it above `request_timeout_ms`. |
+| `max_connections` | 256 | Concurrent connections; excess connections are closed. |
+| `tcp_nodelay` | `true` | Set `false` to restore TCP packet coalescing. |
+| `http2_prior_knowledge` | `false` | `true` makes the listener cleartext HTTP/2 only; the proxy must then send the HTTP/2 preface upstream. |
+
+Numeric values must be positive integers. The runbook lists the remaining keys
+(`cache_capacity`, `disk_cache_budget`, `tidb_metadata_pool_limit`,
+`cache_report_interval_seconds`, `remote_sessions`, `forwarding`).
 
 Split storage accepts `read_parallelism` only as `1` (the default): block reads
 within a file read are sequential. Parallel block fetches are not supported.
 
-The token value is read from the named environment variable only when the
-service starts and is never printed or stored in the config. Each token is
-authorized only for its configured drive. The service is unmounted: it does
-not create a FUSE, 9P, or NFS mount, and it does not add a distributed cache.
-The readiness line reports the selected address and drive IDs. Ctrl-C and, on Unix, SIGTERM initiate graceful shutdown. The server drains HTTP connections and writable sessions before shutting down the configured providers.
+### Tokens
+
+The token value is read from the named environment variable once, when the
+service starts. It is never printed and never stored in the config. It must be
+non-empty and contain no whitespace. Each token is valid only for its own
+drive; a request for an unknown drive gets the same `401` as a wrong token.
+Changing a token requires a restart.
+
+### Network exposure
+
+The listener is cleartext HTTP/1.1 on loopback. It has no TLS. Remote clients
+must go through a TLS reverse proxy that runs in the same network namespace.
+The runbook has the proxy requirements and reference nginx and Caddy
+configurations.
+
+### Lifecycle
+
+After every drive is open and the socket is bound, the process prints:
+
+    http listening at http://127.0.0.1:PORT (drives: memory, sqlite)
+    Press Ctrl-C to stop.
+
+`GET /healthz` reports that the process is alive. `GET /readyz` returns `200`
+with `{"status":"ready","drives":N}` and `503` with
+`{"status":"not_ready","drives":N,"failed":M}` when a drive has failed closed.
+Only split-store drives report health.
+
+Ctrl-C and, on Unix, SIGTERM start a graceful shutdown: the listener stops
+accepting, in-flight requests get up to `drain_timeout_ms`, the drives are
+shut down (which releases split-store writer leases), and the process prints
+`http stopped` and exits `0`. If the drain deadline passes, in-flight requests
+are aborted, the drives are still shut down, and the process exits `1` with
+`HTTP server close timed out` on stderr and no `http stopped` line.
+
+Exit codes: `0` clean stop; `1` runtime failure (missing token variable, drive
+could not be opened, bind failure, signal during startup, listener failure,
+drain deadline exceeded); `2` usage or configuration error.
+
+A split-store drive is served by exactly one process. After an unclean exit
+(SIGKILL, crash) its writer lease remains until it expires (`lease_ttl_ms`,
+240 seconds by default for a structured `storage` object). Until then a
+restart fails at once with `EAGAIN: resource temporarily unavailable, acquire
+writer` and exit code `1`; it does not wait, so restart it with back-off.
+
+### Write semantics
+
+`PUT /v1/drives/{id}/fs/{path}` is atomic and durable before `200`: the body
+is received in full and published in one step; a failed or aborted upload
+leaves the previous content unchanged and no partial file. (A `memory` drive
+is volatile, and a split-store drive with `writeback` acknowledges before the
+data is durable.) One `PUT` carries
+one file of at most `max_request_bytes`; larger files are not supported.
+`DELETE` is not recursive. See the API guide for the status codes, retry rules
+and limits.
 
 See `examples/config-http.json` for a memory drive and a durable SQLite drive
 with isolated tokens.
@@ -309,21 +389,26 @@ MOUNT_RS_SQLITE_TOKEN=demo-sqlite \
 In a second terminal, use the address printed by the service:
 
 ```sh
+curl http://127.0.0.1:PORT/readyz
 curl -H 'Authorization: Bearer demo-memory' \
   -X PUT --data-binary 'hello from mount-rs' \
   http://127.0.0.1:PORT/v1/drives/memory/fs/hello.txt
 curl -H 'Authorization: Bearer demo-memory' \
   http://127.0.0.1:PORT/v1/drives/memory/fs/hello.txt
+curl -H 'Authorization: Bearer demo-memory' \
+  http://127.0.0.1:PORT/v1/drives/memory/entries
+curl -H 'Authorization: Bearer demo-memory' \
+  http://127.0.0.1:PORT/v1/drives/memory/stat/hello.txt
 curl -H 'Authorization: Bearer demo-sqlite' \
   -X PUT --data-binary 'durable split-store data' \
   http://127.0.0.1:PORT/v1/drives/sqlite/fs/persisted.txt
 ```
 
 The SQLite drive uses independent metadata and block databases under the
-example's `state/` directory. Stop and restart the service, then GET the same
-`persisted.txt` path to verify reopen persistence; the memory drive is expected
-to reset. The CLI creates missing SQLite parent directories, and generated
-demo state should be removed when finished.
+example's `state/` directory. Stop the service with Ctrl-C, start it again,
+then GET the same `persisted.txt` path to verify reopen persistence; the memory
+drive is expected to reset. The CLI creates missing SQLite parent directories,
+and generated demo state should be removed when finished.
 
 For a SQLite database hosted through this process's loopback NFS server, add
 `--sqlite-single-host` with `--transport nfs` or `--transport auto`. The flag

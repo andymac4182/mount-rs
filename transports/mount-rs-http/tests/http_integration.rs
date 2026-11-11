@@ -298,7 +298,7 @@ async fn observability_records_request_timeout_as_http_error() {
         .send()
         .await
         .expect("timed-out PUT response");
-    assert_eq!(response.status(), reqwest::StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(response.status(), reqwest::StatusCode::GATEWAY_TIMEOUT);
 
     let snapshot = telemetry.snapshot();
     assert_eq!(snapshot.operations, 1);
@@ -683,7 +683,8 @@ async fn real_http_exposes_isolated_memory_and_sqlite_drives() {
         .send()
         .await
         .expect("unknown drive response");
-    assert_eq!(unknown_drive.status(), reqwest::StatusCode::NOT_FOUND);
+    // Indistinguishable from a wrong token: drive ids are not enumerable.
+    assert_eq!(unknown_drive.status(), reqwest::StatusCode::UNAUTHORIZED);
 
     let deleted = client
         .delete(format!("{base}/v1/drives/sqlite/fs/record.bin"))
@@ -759,11 +760,8 @@ async fn request_body_limit_is_enforced_without_unbounded_buffering() {
         .send()
         .await
         .expect("partial PUT inspection");
-    assert_eq!(partial.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        partial.bytes().await.expect("partial PUT body").as_ref(),
-        b"hello"
-    );
+    // A rejected upload publishes nothing, not its accepted prefix.
+    assert_eq!(partial.status(), reqwest::StatusCode::NOT_FOUND);
     server.close().await.expect("server close");
 }
 
@@ -805,8 +803,8 @@ async fn stalled_request_body_is_terminated_by_the_request_timeout() {
         .expect("stalled PUT timeout response")
         .expect("stalled PUT response read");
     let response = String::from_utf8_lossy(&response);
-    assert!(response.starts_with("HTTP/1.1 408"), "response: {response}");
-    assert!(response.contains("\"code\":\"EIO\""));
+    assert!(response.starts_with("HTTP/1.1 504"), "response: {response}");
+    assert!(response.contains("\"code\":\"ETIMEDOUT\""));
     assert!(response.contains("connection: close"));
 
     server.close().await.expect("server close");

@@ -219,6 +219,26 @@ pub trait FsDriver: Send + Sync {
         false
     }
 
+    /// Whether this filesystem can still serve requests, answered from
+    /// state already in memory: no I/O and no waiting. A driver that fails
+    /// closed (for example after losing its writer lease) returns the error
+    /// its operations now return, so a readiness probe can take the process
+    /// out of rotation. Wrappers must forward this to the driver they wrap.
+    fn health(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether [`FsDriver::write_file`] replaces the file in one step, so
+    /// that readers, concurrent writers and a crash see either the previous
+    /// content or the new content and never a mixture or a prefix, and
+    /// returns only once the new content is as durable as this driver makes
+    /// anything. The default open/write/close implementation is not: callers
+    /// that need an atomic replace must write a sibling and rename it.
+    /// Wrappers must forward this to the driver they wrap.
+    fn write_file_is_atomic(&self) -> bool {
+        false
+    }
+
     async fn guarded_mutation(&self, _request: GuardedMutation) -> Result<GuardedMutationResult> {
         Err(crate::error::FsError::enotsup("guarded mutation"))
     }

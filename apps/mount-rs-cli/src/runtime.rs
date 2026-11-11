@@ -1067,16 +1067,34 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
         _ = report_cache_stats(http, &runtimes), if http.cache_report_interval_seconds.is_some() => unreachable!(),
         result = ctrl_c.wait() => result,
         reason = async {
+            let mut accept_failures = 0;
             loop {
                 if let Some(reason) = server.failure() { break reason; }
+                let failures = server.accept_failures();
+                if failures != accept_failures {
+                    // The listener retries by itself; this is the only sign
+                    // that connections are being turned away meanwhile.
+                    accept_failures = failures;
+                    let record = serde_json::json!({"event":"http_accept_failed", "total":failures});
+                    let _ = writeln!(std::io::stderr().lock(), "{record}");
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         } => Err(CliError::runtime(reason)),
     };
-    // Keep SDK ownership alive through successful listener/session drain.
-    // An unsuccessful drain is not permission to release the writer lease.
-    server.close().await?;
-    shutdown_runtimes(&runtimes, &metadata_pools).await?;
+    // Keep SDK ownership alive through the listener/session drain.
+    let closed = server.close().await;
+    if closed.is_err() && !server.releases_drives_after_failed_drain() {
+        // Sessions and peers may still be using the drives: an unsuccessful
+        // drain is not permission to release their writer leases.
+        return closed;
+    }
+    // A plain listener that ran out of drain time has aborted what it was
+    // still serving. Release the drives regardless, so the writer lease is
+    // free for the replacement process, and still exit with the failure.
+    let released = shutdown_runtimes(&runtimes, &metadata_pools).await;
+    closed?;
+    released?;
     signal_result?;
     println!("http stopped");
     Ok(())
@@ -1139,6 +1157,7 @@ fn http_server_options(
         drain_timeout: Duration::from_millis(config.drain_timeout_ms),
         max_connections: config.max_connections,
         request_timeout: Duration::from_millis(config.request_timeout_ms),
+        max_buffered_upload_bytes: Some(config.max_buffered_upload_bytes),
         #[cfg(feature = "observability")]
         telemetry,
     }
