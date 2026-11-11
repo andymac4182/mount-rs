@@ -47,6 +47,8 @@ async fn pooled_http3_filesystem_authorization_fencing_and_shutdown() {
     run_case(false).await;
 }
 
+// Read only by the CLI ingress exercise, which needs Unix process control.
+#[cfg(unix)]
 static DIRECT_WRITE_BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 // The load phases model 100 independent clients; a single-threaded runtime
@@ -1189,6 +1191,7 @@ async fn exercise_cli_ingress(
     }
     drop(owner_address);
     let (owner_process, owner_url, _owner_lines) = launch("owner.json").await;
+    #[cfg(unix)]
     let _ = DIRECT_WRITE_BASE.set(owner_url.clone());
     let single_server_load =
         load && std::env::var_os("MOUNT_RS_TEST_CLI_SINGLE_SERVER_LOAD").is_some();
@@ -1377,6 +1380,8 @@ async fn exercise_forwarder(
     if let Some(binary) = std::env::var_os("MOUNT_RS_TEST_INGRESS_BINARY") {
         exercise_cli_ingress(binary, &namespace, route, pin, certificates).await;
     }
+    #[cfg(not(unix))]
+    let _ = certificates;
     registration.advertise().await.unwrap();
     let peers = Arc::new(
         PeerDirectory::new(vec![TrustedPeer {
