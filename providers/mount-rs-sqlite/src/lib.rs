@@ -2,6 +2,7 @@
 
 mod changes;
 mod io_diagnostics;
+mod owner;
 mod storage;
 pub use io_diagnostics::{connection_page_diagnostics, sqlite_io_diagnostics};
 pub use storage::{SqliteBlockStore, SqliteMetadataStore};

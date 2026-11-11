@@ -6,9 +6,9 @@
 #[path = "direct_io_benchmark.rs"]
 mod direct_io_benchmark;
 
+use super::owner::{Owner, State};
 use async_trait::async_trait;
 use mount_rs_core::diagnostics::profile::{self, Event};
-use mount_rs_core::park_cell::{ParkCell, ParkCellGuard};
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
@@ -274,19 +274,19 @@ fn require_local_concurrent_backing(
 
 #[derive(Clone)]
 struct Database {
-    connection: Arc<ParkCell<Connection>>,
+    /// The thread that owns the connection (see `owner`). Everything done
+    /// with the connection is a job sent to it; jobs run one at a time in
+    /// arrival order. The thread also keeps the namespace last stored or
+    /// loaded here, and any trace-callback counters, which it drops after
+    /// it has closed the connection. Dropping the last clone waits for the
+    /// connection to close.
+    owner: Arc<Owner>,
     /// Set for the metadata database: its namespace can have change rows on
     /// top of the stored document (see `changes`).
     namespace_changes: bool,
-    /// The namespace last stored or loaded here. Used only with the
-    /// connection locked.
-    published: Arc<super::changes::Slot>,
-    // Kept alive after the connection field drops, so trace callback contexts
-    // remain valid throughout connection closure. Never installed by default.
-    _io_diagnostics: Option<Arc<super::io_diagnostics::Counts>>,
     durable: bool,
     #[cfg(unix)]
-    opened_file: Option<OpenedFile>,
+    opened_file: Option<Arc<OpenedFile>>,
     #[cfg(unix)]
     local_file_qualified: Arc<AtomicBool>,
 }
@@ -380,7 +380,6 @@ fn encode_auxiliary_path(path: &Path) -> String {
 }
 
 #[cfg(unix)]
-#[derive(Clone)]
 struct OpenedFile {
     // SQLite does not expose its file descriptor through rusqlite. These
     // paths and stamps reject ordinary copy/restore and stable retargeting;
@@ -490,13 +489,13 @@ impl Database {
                     .with_syscall("open SQLite backing")
                     .with_message("SQLite file changed while opening"));
             }
-            Some(OpenedFile {
+            Some(Arc::new(OpenedFile {
                 auxiliary_path: encode_auxiliary_path(&canonical),
                 requested,
                 canonical,
                 stamp,
                 created_by_open,
-            })
+            }))
         } else {
             None
         };
@@ -509,13 +508,11 @@ impl Database {
         connection.execute_batch(schema).map_err(backend_error)?;
         // Empty paths and :memory: are not durable even when passed to open().
         let durable = connection.path().is_some_and(|path| !path.is_empty());
-        let connection = Arc::new(ParkCell::new(connection));
-        let diagnostics = super::io_diagnostics::register(&connection)?;
+        let owner = Owner::start(connection)?;
+        super::io_diagnostics::register(&owner)?;
         Ok(Self {
-            connection,
+            owner,
             namespace_changes: schema == METADATA_SCHEMA,
-            published: Arc::new(super::changes::Slot::new()),
-            _io_diagnostics: diagnostics,
             durable,
             #[cfg(unix)]
             opened_file,
@@ -607,69 +604,123 @@ impl Database {
         Ok(())
     }
 
-    /// The connection, with the namespace in its plain single-document
-    /// form: change rows are folded into the document first. Everything
-    /// that reads or replaces the namespace column relies on that, and may
-    /// change the namespace, so the copy kept for comparison is dropped.
-    fn lock(&self) -> Result<ParkCellGuard<'_, Connection>> {
-        let connection = self.lock_unfolded()?;
-        if self.namespace_changes {
-            self.published.take();
-            fold_namespace_changes(&connection)?;
-        }
-        Ok(connection)
-    }
-
-    /// The connection as it is. For the operations that understand change
-    /// rows (`publish`, `load`, `load_if_changed`) and the ones that never
-    /// look at the namespace or its revision (renewing and releasing the
-    /// writer lease, `flush`). Acquiring the lease folds: a new writer then
-    /// starts from a store without rows, and only the lease holder adds any.
-    fn lock_unfolded(&self) -> Result<ParkCellGuard<'_, Connection>> {
-        // Rarely waited for on the session path: the block store's users
-        // take turns before they get here (`BlockTurns`), and the metadata
-        // store is used by one publication at a time. A flush, a verify or
-        // a diagnostics sample can still arrive during a disk sync, so a
-        // waiter parks instead of spinning.
-        self.connection
-            .lock()
-            .map_err(|()| backend_error("SQLite storage lock poisoned"))
-    }
-
-    #[cfg(unix)]
-    fn with_concurrent_publish_timeout<T>(
-        &self,
-        operation: impl FnOnce(&mut Connection) -> Result<T>,
-    ) -> Result<T> {
-        let mut connection = self.lock()?;
-        let original_ms: i64 = connection
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
-            .map_err(backend_error)?;
-        let original_ms = u64::try_from(original_ms)
-            .map_err(|_| backend_error("SQLite busy timeout is negative"))?;
-        connection
-            .busy_timeout(CONCURRENT_PUBLISH_BUSY_TIMEOUT)
-            .map_err(backend_error)?;
-        let result = operation(&mut connection);
-        // Restore under the same mutex even when the CAS fails. If restoration
-        // fails after a commit, fail closed instead of reporting a success
-        // while the connection has an unexpected contention policy.
-        connection
-            .busy_timeout(Duration::from_millis(original_ms))
-            .map_err(backend_error)?;
-        result
-    }
-
-    fn flush(&self) -> Result<()> {
-        // Every modifying statement is an autocommit transaction with FULL
-        // synchronous durability. There are no deferred writes to flush.
-        let connection = self.lock_unfolded()?;
-        if !connection.is_autocommit() {
-            return Err(backend_error(
-                "SQLite storage has an unfinished transaction",
-            ));
+    /// What a job does first unless it asked for the connection as it is:
+    /// puts the namespace in its plain single-document form, by folding the
+    /// change rows into the document. Everything that reads or replaces the
+    /// namespace column relies on that, and may change the namespace, so
+    /// the copy kept for comparison is dropped.
+    fn fold(namespace_changes: bool, state: &mut State) -> Result<()> {
+        if namespace_changes {
+            state.published = None;
+            fold_namespace_changes(&state.connection)?;
         }
         Ok(())
+    }
+
+    /// Runs `work` as one job on the connection, with the namespace folded
+    /// first in the same job. The caller waits without holding its thread.
+    /// If the caller stops waiting, the job still runs to its end.
+    async fn run<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let namespace_changes = self.namespace_changes;
+        self.owner
+            .run(move |state| {
+                Self::fold(namespace_changes, state)?;
+                work(&mut state.connection)
+            })
+            .await?
+    }
+
+    /// Runs `work` as one job on the connection as it is. For the
+    /// operations that understand change rows (`publish`, `load`,
+    /// `load_if_changed`), which also get the namespace last stored or
+    /// loaded here, and the ones that never look at the namespace or its
+    /// revision (renewing and releasing the writer lease, `flush`).
+    /// Acquiring the lease folds: a new writer then starts from a store
+    /// without rows, and only the lease holder adds any.
+    async fn run_unfolded<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut Connection, &mut Option<super::changes::Published>) -> Result<T>
+        + Send
+        + 'static,
+    ) -> Result<T> {
+        self.owner
+            .run(move |state| work(&mut state.connection, &mut state.published))
+            .await?
+    }
+
+    /// `run` for callers that are not async: blocks the calling thread
+    /// until the job has finished. `work` may borrow from the caller.
+    fn run_blocking<T: Send>(
+        &self,
+        work: impl FnOnce(&mut Connection) -> Result<T> + Send,
+    ) -> Result<T> {
+        let namespace_changes = self.namespace_changes;
+        self.owner.run_blocking(move |state| {
+            Self::fold(namespace_changes, state)?;
+            work(&mut state.connection)
+        })?
+    }
+
+    /// `run`, with the shorter busy timeout of a concurrent publication
+    /// around `operation`, all in one job.
+    #[cfg(unix)]
+    async fn with_concurrent_publish_timeout<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.run(move |connection| {
+            let original_ms: i64 = connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .map_err(backend_error)?;
+            let original_ms = u64::try_from(original_ms)
+                .map_err(|_| backend_error("SQLite busy timeout is negative"))?;
+            connection
+                .busy_timeout(CONCURRENT_PUBLISH_BUSY_TIMEOUT)
+                .map_err(backend_error)?;
+            let result = operation(connection);
+            // Restore in the same job even when the CAS fails. If
+            // restoration fails after a commit, fail closed instead of
+            // reporting a success while the connection has an unexpected
+            // contention policy.
+            connection
+                .busy_timeout(Duration::from_millis(original_ms))
+                .map_err(backend_error)?;
+            result
+        })
+        .await
+    }
+
+    /// For tests: one blocking job with the namespace folded, given the
+    /// connection directly. A panic in `work` poisons the database.
+    #[cfg(test)]
+    fn with<T: Send>(&self, work: impl FnOnce(&mut Connection) -> T + Send) -> T {
+        self.run_blocking(|connection| Ok(work(connection)))
+            .unwrap()
+    }
+
+    /// For tests: `with`, on the connection as it is.
+    #[cfg(test)]
+    fn with_unfolded<T: Send>(&self, work: impl FnOnce(&mut Connection) -> T + Send) -> T {
+        self.owner
+            .run_blocking(|state| work(&mut state.connection))
+            .unwrap()
+    }
+
+    async fn flush(&self) -> Result<()> {
+        // Every modifying statement is an autocommit transaction with FULL
+        // synchronous durability. There are no deferred writes to flush.
+        self.run_unfolded(|connection, _| {
+            if !connection.is_autocommit() {
+                return Err(backend_error(
+                    "SQLite storage has an unfinished transaction",
+                ));
+            }
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -1014,7 +1065,10 @@ fn require_authority_primary_key(connection: &Connection) -> Result<()> {
 }
 
 fn initialize_block_schema(database: &Database) -> Result<()> {
-    let mut connection = database.lock()?;
+    database.run_blocking(|connection| initialize_block_schema_on(database, connection))
+}
+
+fn initialize_block_schema_on(database: &Database, connection: &mut Connection) -> Result<()> {
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(backend_error)?;
@@ -1120,7 +1174,7 @@ fn initialize_block_schema(database: &Database) -> Result<()> {
             require_matching_auxiliary_path(database, path.as_deref())?;
         }
         #[cfg(not(unix))]
-        let _ = path;
+        let _ = (database, path);
     }
     drop(rows);
     drop(statement);
@@ -1128,7 +1182,10 @@ fn initialize_block_schema(database: &Database) -> Result<()> {
 }
 
 fn initialize_version_schema(database: &Database) -> Result<()> {
-    let mut connection = database.lock()?;
+    database.run_blocking(|connection| initialize_version_schema_on(database, connection))
+}
+
+fn initialize_version_schema_on(database: &Database, connection: &mut Connection) -> Result<()> {
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(backend_error)?;
@@ -1297,7 +1354,7 @@ fn initialize_version_schema(database: &Database) -> Result<()> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (&physical_dev, &physical_ino, &physical_path);
+        let _ = (database, &physical_dev, &physical_ino, &physical_path);
         if matches!(
             mode.as_deref(),
             Some(BOUND_WRITE_MODE | DELEGATED_WRITE_MODE | INODE_WRITE_MODE)
@@ -1649,14 +1706,15 @@ fn incompatible_schema(message: impl Into<String>) -> FsError {
 }
 
 fn load_volume_id(database: &Database) -> Result<VolumeId> {
-    let value: String = database
-        .lock()?
-        .query_row(
-            "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(backend_error)?;
+    let value: String = database.run_blocking(|connection| {
+        connection
+            .query_row(
+                "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend_error)
+    })?;
     VolumeId::new(value)
 }
 
@@ -1683,35 +1741,37 @@ impl SqliteMetadataStore {
     /// The current namespace, or `None` when its revision is still `known`.
     /// Reads the document and its change rows in one transaction and keeps a
     /// copy for the next publication to be compared with.
-    fn load_stored(&self, known: Option<i64>) -> Result<Option<LoadedMetadata>> {
-        let connection = self.0.lock_unfolded()?;
-        let transaction = connection.unchecked_transaction().map_err(backend_error)?;
-        let stored = StoredNamespace::read(&transaction, known)?;
-        drop(transaction);
-        if stored.mode.as_deref() == Some(INODE_WRITE_MODE) {
-            return Err(stale());
-        }
-        if known.is_some_and(|known| {
-            stored.revision != 0 && u64::try_from(known) == Ok(stored.revision)
-        }) {
-            return Ok(None);
-        }
-        if stored.document.is_some() {
-            profile::add(Event::NamespaceReturned, stored.bytes() as u64);
-        }
-        let (namespace, log) = stored.decode()?.unzip();
-        match namespace
-            .as_ref()
-            .zip(log)
-            .and_then(|(namespace, log)| stored.published(namespace, log))
-        {
-            Some(published) => self.0.published.put(published),
-            None => drop(self.0.published.take()),
-        }
-        Ok(Some(LoadedMetadata {
-            revision: stored.revision,
-            namespace,
-        }))
+    async fn load_stored(&self, known: Option<i64>) -> Result<Option<LoadedMetadata>> {
+        self.0
+            .run_unfolded(move |connection, published| {
+                let transaction = connection.unchecked_transaction().map_err(backend_error)?;
+                let stored = StoredNamespace::read(&transaction, known)?;
+                drop(transaction);
+                if stored.mode.as_deref() == Some(INODE_WRITE_MODE) {
+                    return Err(stale());
+                }
+                if known.is_some_and(|known| {
+                    stored.revision != 0 && u64::try_from(known) == Ok(stored.revision)
+                }) {
+                    return Ok(None);
+                }
+                if stored.document.is_some() {
+                    profile::add(Event::NamespaceReturned, stored.bytes() as u64);
+                }
+                let (namespace, log) = stored.decode()?.unzip();
+                // Kept in the same job as the read, so the copy always matches
+                // what this connection last saw, whether or not the caller is
+                // still waiting.
+                *published = namespace
+                    .as_ref()
+                    .zip(log)
+                    .and_then(|(namespace, log)| stored.published(namespace, log));
+                Ok(Some(LoadedMetadata {
+                    revision: stored.revision,
+                    namespace,
+                }))
+            })
+            .await
     }
 }
 
@@ -1765,11 +1825,15 @@ impl SqliteBlockStore {
 
     /// One block in its own transaction, retried while SQLite reports that
     /// another writer kept it from committing.
-    async fn put_alone(&self, bytes: &[u8]) -> Result<BlockId> {
+    async fn put_alone(&self, waiting: &Arc<WaitingPut>) -> Result<BlockId> {
         let started = Instant::now();
         for attempt in 0..MAX_SQLITE_BUSY_RETRIES {
-            match self.put_once(&[bytes]) {
-                Ok(mut ids) => return Ok(ids.remove(0)),
+            match self.put_once(vec![Arc::clone(waiting)]).await {
+                Ok(()) => {
+                    return waiting.stored.get().cloned().unwrap_or_else(|| {
+                        Err(backend_error("SQLite block put was not answered"))
+                    });
+                }
                 Err(error) if error.code == ErrorCode::Eagain => {
                     if attempt + 1 == MAX_SQLITE_BUSY_RETRIES
                         || started.elapsed() >= SQLITE_BUSY_RETRY_BUDGET
@@ -1778,8 +1842,9 @@ impl SqliteBlockStore {
                             "SQLite block writer remained busy after bounded retries",
                         ));
                     }
-                    // Each put_once releases the SQLite connection lock before
-                    // yielding, so another writer can finish its transaction.
+                    // Each put_once is a job of its own, so the connection
+                    // is free between attempts and another writer can
+                    // finish its transaction.
                     sqlite_busy_backoff(attempt).await;
                 }
                 Err(error) => return Err(error),
@@ -1801,25 +1866,83 @@ impl SqliteBlockStore {
     }
 
     /// Answers every queued read. For the holder of the turn.
-    fn serve_reads(&self) {
-        let reading = &self.1.reading;
-        if reading.is_empty() {
+    async fn serve_reads(&self) {
+        if self.1.reading.is_empty() {
             return;
         }
-        let connection = self.0.lock();
-        while let Some(waiting) = reading.pop() {
-            let block = match &connection {
-                Ok(connection) => Self::get_once(connection, &waiting.id),
-                Err(error) => Err(error.clone()),
-            };
-            let _ = waiting.block.set(block);
-            waiting.served.mark();
+        // The job takes the reads off the queue itself, so a read is
+        // answered once it is taken even if this caller has stopped waiting.
+        let group = Arc::clone(&self.1);
+        let served = self
+            .0
+            .run(move |connection| {
+                while let Some(waiting) = group.reading.pop() {
+                    let _ = waiting.block.set(Self::get_once(connection, &waiting.id));
+                    waiting.served.mark();
+                }
+                Ok(())
+            })
+            .await;
+        if let Err(error) = served {
+            while let Some(waiting) = self.1.reading.pop() {
+                let _ = waiting.block.set(Err(error.clone()));
+                waiting.served.mark();
+            }
         }
     }
 
-    /// Stores `blocks` in one transaction: all of them, or none.
-    fn put_once(&self, blocks: &[&[u8]]) -> Result<Vec<BlockId>> {
-        let mut connection = self.0.lock()?;
+    /// Stores `blocks` in one transaction: all of them, or none. The
+    /// outcome is recorded on each block's `stored` in the same job, so a
+    /// put whose block was stored finds out even if the caller that had the
+    /// turn has stopped waiting. A block that an earlier job already
+    /// answered is left alone: the caller that sent that job gave up, and
+    /// the job ran all the same. Contention known not to have committed is
+    /// not recorded; it is returned for the caller to retry.
+    async fn put_once(&self, blocks: Vec<Arc<WaitingPut>>) -> Result<()> {
+        let unanswered = blocks.clone();
+        let stored = self
+            .0
+            .run(move |connection| {
+                let blocks: Vec<_> = blocks
+                    .into_iter()
+                    .filter(|waiting| waiting.stored.get().is_none())
+                    .collect();
+                if blocks.is_empty() {
+                    return Ok(());
+                }
+                match Self::put_once_on(connection, &blocks) {
+                    Ok(ids) => {
+                        for (waiting, id) in blocks.iter().zip(ids) {
+                            let _ = waiting.stored.set(Ok(id));
+                        }
+                        Ok(())
+                    }
+                    Err(error) => {
+                        if error.code != ErrorCode::Eagain {
+                            for waiting in &blocks {
+                                let _ = waiting.stored.set(Err(error.clone()));
+                            }
+                        }
+                        Err(error)
+                    }
+                }
+            })
+            .await;
+        // The job did not run, or could not fold: nothing was stored.
+        if let Err(error) = &stored
+            && error.code != ErrorCode::Eagain
+        {
+            for waiting in &unanswered {
+                let _ = waiting.stored.set(Err(error.clone()));
+            }
+        }
+        stored
+    }
+
+    fn put_once_on(
+        connection: &mut Connection,
+        blocks: &[Arc<WaitingPut>],
+    ) -> Result<Vec<BlockId>> {
         let was_autocommit = connection.is_autocommit();
         let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
         {
@@ -1832,7 +1955,8 @@ impl SqliteBlockStore {
             }
         };
         let mut ids = Vec::with_capacity(blocks.len());
-        for bytes in blocks {
+        for waiting in blocks {
+            let bytes = &waiting.bytes;
             // Database-generated random identities avoid accidental aliasing when
             // namespaces use distinct block databases. Collisions fail, never overwrite.
             let id: String = transaction
@@ -2138,19 +2262,20 @@ fn load_delegated(
 
 #[cfg(unix)]
 impl SqliteMetadataStore {
-    fn mutate_delegation<T>(
+    async fn mutate_delegation<T: Send + 'static>(
         &self,
         backing: ConcurrentBackingId,
         expected: Option<u64>,
-        mutation: impl FnOnce(&mut DelegatedRow) -> Result<T>,
+        mutation: impl FnOnce(&mut DelegatedRow) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.0.with_concurrent_publish_timeout(|connection| {
+        let this = self.clone();
+        self.0.with_concurrent_publish_timeout(move |connection| {
             let was_autocommit = connection.is_autocommit();
             let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
                 Ok(tx) => tx,
                 Err(error) => return Err(sqlite_busy_known_noncommit(&error, was_autocommit, "mutate delegated SQLite metadata").unwrap_or_else(|| backend_error(error))),
             };
-            let mut row = load_delegated(&self.0, &tx, Some(backing))?;
+            let mut row = load_delegated(&this.0, &tx, Some(backing))?;
             if expected.is_some_and(|expected| row.revision != expected) { return Err(FsError::new(ErrorCode::Eagain)); }
             let previous = (row.revision, serde_json::to_string(&row.namespace).map_err(backend_error)?, serde_json::to_string(&row.state).map_err(backend_error)?);
             let result = mutation(&mut row)?;
@@ -2162,13 +2287,13 @@ impl SqliteMetadataStore {
                 let changed = tx.execute("UPDATE mount_rs_metadata SET revision=?1, namespace=?2, delegation_state=?3 WHERE id=1 AND write_mode='MRC3'", params![revision, namespace_json, state_json]).map_err(backend_error)?;
                 if changed != 1 { return Err(backend_error("SQLite delegation update returned zero rows")); }
             }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             if let Err(error) = tx.commit() {
                 return Err(sqlite_busy_known_noncommit(&error, connection.is_autocommit(), "mutate delegated SQLite metadata").unwrap_or_else(|| backend_error(error)));
             }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             Ok(result)
-        })
+        }).await
     }
 }
 
@@ -2340,7 +2465,8 @@ impl MetadataStore for SqliteMetadataStore {
 
     async fn load(&self) -> Result<LoadedMetadata> {
         Ok(self
-            .load_stored(None)?
+            .load_stored(None)
+            .await?
             .expect("a load without a known revision returns the namespace"))
     }
 
@@ -2354,18 +2480,22 @@ impl MetadataStore for SqliteMetadataStore {
             if !self.0.durable {
                 return Err(FsError::new(ErrorCode::Enotsup));
             }
-            let connection = self.0.lock()?;
-            let mode: Option<String> = connection
-                .query_row(
-                    "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(backend_error)?;
-            if mode.as_deref() != Some(DELEGATED_WRITE_MODE) {
-                return Ok(None);
-            }
-            Ok(Some(load_delegated(&self.0, &connection, None)?.state))
+            let this = self.clone();
+            self.0
+                .run(move |connection| {
+                    let mode: Option<String> = connection
+                        .query_row(
+                            "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .map_err(backend_error)?;
+                    if mode.as_deref() != Some(DELEGATED_WRITE_MODE) {
+                        return Ok(None);
+                    }
+                    Ok(Some(load_delegated(&this.0, connection, None)?.state))
+                })
+                .await
         }
     }
 
@@ -2384,7 +2514,8 @@ impl MetadataStore for SqliteMetadataStore {
             if !self.0.durable {
                 return Err(FsError::new(ErrorCode::Enotsup));
             }
-            let mut connection = self.0.lock()?;
+            let this = self.clone();
+            self.0.run(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(backend_error)?;
@@ -2393,7 +2524,7 @@ impl MetadataStore for SqliteMetadataStore {
                 |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)),
             ).map_err(backend_error)?;
             if mode.as_deref() == Some(DELEGATED_WRITE_MODE) {
-                let current = load_delegated(&self.0, &tx, Some(backing))?;
+                let current = load_delegated(&this.0, &tx, Some(backing))?;
                 return if current.revision == expected_revision {
                     Ok(())
                 } else {
@@ -2414,7 +2545,7 @@ impl MetadataStore for SqliteMetadataStore {
                 return Err(FsError::new(ErrorCode::Eagain));
             }
             require_matching_metadata_stamp(
-                &self.0,
+                &this.0,
                 dev.as_deref(),
                 ino.as_deref(),
                 path.as_deref(),
@@ -2442,10 +2573,11 @@ impl MetadataStore for SqliteMetadataStore {
                     "SQLite delegation enrollment returned zero rows",
                 ));
             }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             tx.commit().map_err(backend_error)?;
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             Ok(())
+            }).await
         }
     }
 
@@ -2457,10 +2589,12 @@ impl MetadataStore for SqliteMetadataStore {
         }
         #[cfg(unix)]
         {
-            self.mutate_delegation(request.backing, None, |row| {
+            let request = request.clone();
+            self.mutate_delegation(request.backing, None, move |row| {
                 row.state
                     .checkout(&row.namespace, request.root, &request.owner)
             })
+            .await
         }
     }
 
@@ -2476,10 +2610,11 @@ impl MetadataStore for SqliteMetadataStore {
         }
         #[cfg(unix)]
         {
+            let publication = publication.clone();
             self.mutate_delegation(
                 publication.backing,
                 Some(publication.expected_revision),
-                |row| {
+                move |row| {
                     row.state
                         .authorize_publish(&row.namespace, &namespace, &publication.token)?;
                     row.revision = row
@@ -2491,6 +2626,7 @@ impl MetadataStore for SqliteMetadataStore {
                     Ok(row.revision)
                 },
             )
+            .await
         }
     }
 
@@ -2502,7 +2638,8 @@ impl MetadataStore for SqliteMetadataStore {
         }
         #[cfg(unix)]
         {
-            self.mutate_delegation(release.backing, None, |row| {
+            let release = release.clone();
+            self.mutate_delegation(release.backing, None, move |row| {
                 if row.state.retired.contains(&release.token) {
                     return Ok(());
                 }
@@ -2511,6 +2648,7 @@ impl MetadataStore for SqliteMetadataStore {
                 }
                 row.state.checkin(&release.token, &row.namespace)
             })
+            .await
         }
     }
 
@@ -2522,7 +2660,8 @@ impl MetadataStore for SqliteMetadataStore {
         }
         #[cfg(unix)]
         {
-            self.mutate_delegation(recovery.backing, None, |row| {
+            let recovery = recovery.clone();
+            self.mutate_delegation(recovery.backing, None, move |row| {
                 let old_namespace = serde_json::to_string(&row.namespace).map_err(backend_error)?;
                 row.state
                     .recover(recovery.root, recovery.expected_fence, &mut row.namespace)?;
@@ -2535,40 +2674,46 @@ impl MetadataStore for SqliteMetadataStore {
                 }
                 Ok(())
             })
+            .await
         }
     }
 
     async fn load_if_changed(&self, known_revision: u64) -> Result<Option<LoadedMetadata>> {
         // Out-of-range caller revisions cannot match SQLite's integer domain.
         self.load_stored(Some(i64::try_from(known_revision).unwrap_or(-1)))
+            .await
     }
 
     async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
-        let mut connection = self.0.lock()?;
-        let tx = connection.transaction().map_err(backend_error)?;
-        let mode: Option<String> = tx
-            .query_row(
-                "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(backend_error)?;
-        if mode.as_deref() != Some(INODE_WRITE_MODE) {
-            return Ok(None);
-        }
-        let backing: String = tx
-            .query_row(
-                "SELECT backing_id FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(backend_error)?;
-        let backing = ConcurrentBackingId::from_hex(&backing).map_err(backend_error)?;
-        let structural_generation = inode_authority(&self.0, &tx, backing)?;
-        Ok(Some(InodeModeState {
-            backing,
-            structural_generation,
-        }))
+        let this = self.clone();
+        self.0
+            .run(move |connection| {
+                let tx = connection.transaction().map_err(backend_error)?;
+                let mode: Option<String> = tx
+                    .query_row(
+                        "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(backend_error)?;
+                if mode.as_deref() != Some(INODE_WRITE_MODE) {
+                    return Ok(None);
+                }
+                let backing: String = tx
+                    .query_row(
+                        "SELECT backing_id FROM mount_rs_metadata WHERE id=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(backend_error)?;
+                let backing = ConcurrentBackingId::from_hex(&backing).map_err(backend_error)?;
+                let structural_generation = inode_authority(&this.0, &tx, backing)?;
+                Ok(Some(InodeModeState {
+                    backing,
+                    structural_generation,
+                }))
+            })
+            .await
     }
 
     async fn prepare_inode_mode(
@@ -2583,13 +2728,14 @@ impl MetadataStore for SqliteMetadataStore {
         }
         #[cfg(unix)]
         {
-            self.0.with_concurrent_publish_timeout(|connection| {
+            let this = self.clone();
+            self.0.with_concurrent_publish_timeout(move |connection| {
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(backend_error)?;
                 let (mode, stored, owner, fence, expires, revision, dev, ino, path): MetadataPublicationRow = tx.query_row(
                     "SELECT write_mode, backing_id, owner, fence, expires, revision, physical_dev, physical_ino, physical_path FROM mount_rs_metadata WHERE id=1", [],
                     |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?))).map_err(backend_error)?;
                 if mode.as_deref() != Some(BOUND_WRITE_MODE) || stored.as_deref() != Some(backing.to_hex().as_str()) { return Err(stale()); }
-                require_matching_metadata_stamp(&self.0,dev.as_deref(),ino.as_deref(),path.as_deref())?;
+                require_matching_metadata_stamp(&this.0,dev.as_deref(),ino.as_deref(),path.as_deref())?;
                 if owner.is_some() || fence != CONCURRENT_FENCE_SENTINEL || expires != 0 { return Err(incompatible_schema("invalid MRC4 enrollment fence")); }
                 if revision <= 0 || u64::try_from(revision).ok() != Some(expected_revision) { return Err(inode_conflict()); }
                 let json: String = tx.query_row("SELECT namespace FROM mount_rs_metadata WHERE id=1",[],|row|row.get(0)).map_err(backend_error)?;
@@ -2602,11 +2748,11 @@ impl MetadataStore for SqliteMetadataStore {
                 let wrapped = String::from_utf8(wrapped).map_err(backend_error)?;
                 rebuild_inode_guards(&tx, next as u64, &namespace)?;
                 if tx.execute("UPDATE mount_rs_metadata SET write_mode='MRC4', revision=?1, namespace=?2 WHERE id=1 AND write_mode='MRC2' AND revision=?3",params![next,wrapped,expected_revision]).map_err(backend_error)? != 1 { return Err(stale()); }
-                self.0.current_file_stamp()?;
+                this.0.current_file_stamp()?;
                 tx.commit().map_err(backend_error)?;
-                self.0.current_file_stamp()?;
+                this.0.current_file_stamp()?;
                 Ok(())
-            })
+            }).await
         }
     }
 
@@ -2614,9 +2760,10 @@ impl MetadataStore for SqliteMetadataStore {
         &self,
         backing: ConcurrentBackingId,
     ) -> Result<InodeMetadataSnapshot> {
-        let mut connection = self.0.lock()?;
+        let this = self.clone();
+        self.0.run(move |connection| {
         let tx = connection.transaction().map_err(backend_error)?;
-        let structural_generation = inode_authority(&self.0, &tx, backing)?;
+        let structural_generation = inode_authority(&this.0, &tx, backing)?;
         let json: String = tx
             .query_row(
                 "SELECT namespace FROM mount_rs_metadata WHERE id=1",
@@ -2654,6 +2801,7 @@ impl MetadataStore for SqliteMetadataStore {
         };
         snapshot.validate()?;
         Ok(snapshot)
+        }).await
     }
 
     async fn load_inode(&self, backing: ConcurrentBackingId, inode: u64) -> Result<LoadedInode> {
@@ -2676,56 +2824,61 @@ impl MetadataStore for SqliteMetadataStore {
         #[cfg(unix)]
         {
             self.0.require_fresh_inode_read_file()?;
-            let connection = self.0.lock()?;
-            let known_generation =
-                known.and_then(|version| i64::try_from(version.structural_generation).ok());
-            let known_revision =
-                known.and_then(|version| i64::try_from(version.inode_revision).ok());
-            // One statement reads root authority and the selected guard from
-            // the same SQLite snapshot. CASE avoids fetching the JSON overflow
-            // pages entirely on an exact token match.
-            let (authority, guard): InodeConditionalRow = connection
-                .query_row(
-                    INODE_CONDITIONAL_SQL,
-                    params![inode.to_string(), known_generation, known_revision],
-                    |row| {
-                        Ok((
-                            (
-                                row.get(0)?,
-                                row.get(1)?,
-                                row.get(2)?,
-                                row.get(3)?,
-                                row.get(4)?,
-                                row.get(5)?,
-                                row.get(6)?,
-                                row.get(7)?,
-                                row.get(8)?,
-                            ),
-                            (row.get(9)?, row.get(10)?, row.get(11)?),
-                        ))
-                    },
-                )
-                .map_err(backend_error)?;
-            let generation = validate_inode_authority_fields(&self.0, backing, authority)?;
-            self.0.require_fresh_inode_read_file()?;
-            let (structural_generation, inode_revision, json) = guard;
-            let structural_generation = structural_generation.ok_or_else(stale)?;
-            let inode_revision = inode_revision.ok_or_else(stale)?;
-            if structural_generation != generation {
-                return Err(incompatible_schema("MRC4 inode generation mismatch"));
-            }
-            let version = InodeVersion {
-                structural_generation,
-                inode_revision,
-            };
-            if known == Some(version) {
-                return Ok(None);
-            }
-            let json = json.ok_or_else(|| incompatible_schema("MRC4 inode payload missing"))?;
-            Ok(Some(LoadedInode {
-                version,
-                node: decode_inode_guard(inode, &json)?,
-            }))
+            let this = self.clone();
+            self.0
+                .run(move |connection| {
+                    let known_generation =
+                        known.and_then(|version| i64::try_from(version.structural_generation).ok());
+                    let known_revision =
+                        known.and_then(|version| i64::try_from(version.inode_revision).ok());
+                    // One statement reads root authority and the selected guard from
+                    // the same SQLite snapshot. CASE avoids fetching the JSON overflow
+                    // pages entirely on an exact token match.
+                    let (authority, guard): InodeConditionalRow = connection
+                        .query_row(
+                            INODE_CONDITIONAL_SQL,
+                            params![inode.to_string(), known_generation, known_revision],
+                            |row| {
+                                Ok((
+                                    (
+                                        row.get(0)?,
+                                        row.get(1)?,
+                                        row.get(2)?,
+                                        row.get(3)?,
+                                        row.get(4)?,
+                                        row.get(5)?,
+                                        row.get(6)?,
+                                        row.get(7)?,
+                                        row.get(8)?,
+                                    ),
+                                    (row.get(9)?, row.get(10)?, row.get(11)?),
+                                ))
+                            },
+                        )
+                        .map_err(backend_error)?;
+                    let generation = validate_inode_authority_fields(&this.0, backing, authority)?;
+                    this.0.require_fresh_inode_read_file()?;
+                    let (structural_generation, inode_revision, json) = guard;
+                    let structural_generation = structural_generation.ok_or_else(stale)?;
+                    let inode_revision = inode_revision.ok_or_else(stale)?;
+                    if structural_generation != generation {
+                        return Err(incompatible_schema("MRC4 inode generation mismatch"));
+                    }
+                    let version = InodeVersion {
+                        structural_generation,
+                        inode_revision,
+                    };
+                    if known == Some(version) {
+                        return Ok(None);
+                    }
+                    let json =
+                        json.ok_or_else(|| incompatible_schema("MRC4 inode payload missing"))?;
+                    Ok(Some(LoadedInode {
+                        version,
+                        node: decode_inode_guard(inode, &json)?,
+                    }))
+                })
+                .await
         }
     }
 
@@ -2743,13 +2896,14 @@ impl MetadataStore for SqliteMetadataStore {
         }
         #[cfg(unix)]
         {
-            self.0.with_concurrent_publish_timeout(|connection| {
+            let this = self.clone();
+            self.0.with_concurrent_publish_timeout(move |connection| {
                 let was_autocommit = connection.is_autocommit();
                 let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
                     Ok(tx) => tx,
                     Err(error) => return Err(sqlite_busy_known_noncommit(&error,was_autocommit,"publish SQLite inode").unwrap_or_else(||backend_error(error))),
                 };
-                let generation = inode_authority(&self.0,&tx,backing)?;
+                let generation = inode_authority(&this.0,&tx,backing)?;
                 if generation != expected.structural_generation { return Err(inode_conflict()); }
                 let row: Option<(u64,u64,String)> = tx.query_row("SELECT structural_generation,inode_revision,node FROM mount_rs_inode_guards WHERE inode=?1",params![inode.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(backend_error)?;
                 let (stored_generation,revision,json) = row.ok_or_else(stale)?;
@@ -2761,11 +2915,11 @@ impl MetadataStore for SqliteMetadataStore {
                 let json = serde_json::to_string(&node).map_err(backend_error)?;
                 profile::add(Event::InodeSerialized, json.len() as u64);
                 if tx.execute("UPDATE mount_rs_inode_guards SET inode_revision=?1,node=?2 WHERE inode=?3 AND structural_generation=?4 AND inode_revision=?5",params![next,json,inode.to_string(),generation,revision]).map_err(backend_error)? != 1 { return Err(inode_conflict()); }
-                self.0.current_file_stamp()?;
+                this.0.current_file_stamp()?;
                 if let Err(error) = tx.commit() { return Err(sqlite_busy_known_noncommit(&error,connection.is_autocommit(),"publish SQLite inode").unwrap_or_else(||backend_error(error))); }
-                self.0.current_file_stamp()?;
+                this.0.current_file_stamp()?;
                 Ok(InodeVersion { structural_generation:generation,inode_revision:next as u64 })
-            })
+            }).await
         }
     }
 
@@ -2793,13 +2947,16 @@ impl MetadataStore for SqliteMetadataStore {
             let json =
                 String::from_utf8(encode_inode_namespace(&namespace)?).map_err(backend_error)?;
             profile::add(Event::NamespaceSerialized, json.len() as u64);
-            self.0.with_concurrent_publish_timeout(|connection| {
+            let this = self.clone();
+            let expected_inode_revisions = expected_inode_revisions.clone();
+            self.0.with_concurrent_publish_timeout(move |connection| {
+                let expected_inode_revisions = &expected_inode_revisions;
                 let was_autocommit = connection.is_autocommit();
                 let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
                     Ok(tx) => tx,
                     Err(error) => return Err(sqlite_busy_known_noncommit(&error,was_autocommit,"publish SQLite structure").unwrap_or_else(||backend_error(error))),
                 };
-                if inode_authority(&self.0,&tx,backing)? != expected_generation { return Err(inode_conflict()); }
+                if inode_authority(&this.0,&tx,backing)? != expected_generation { return Err(inode_conflict()); }
                 let base: String = tx.query_row("SELECT namespace FROM mount_rs_metadata WHERE id=1", [], |row| row.get(0)).map_err(backend_error)?;
                 profile::add(Event::NamespaceReturned, base.len() as u64);
                 let mut base = decode_inode_namespace(base.as_bytes())?;
@@ -2809,16 +2966,19 @@ impl MetadataStore for SqliteMetadataStore {
                 if tx.execute("UPDATE mount_rs_metadata SET revision=?1,namespace=?2 WHERE id=1 AND write_mode='MRC4' AND revision=?3",params![next,json,expected_generation]).map_err(backend_error)? != 1 { return Err(inode_conflict()); }
                 tx.execute("DELETE FROM mount_rs_inode_guards",[]).map_err(backend_error)?;
                 rebuild_inode_guards(&tx,next as u64,&namespace)?;
-                self.0.current_file_stamp()?;
+                this.0.current_file_stamp()?;
                 if let Err(error) = tx.commit() { return Err(sqlite_busy_known_noncommit(&error,connection.is_autocommit(),"publish SQLite structure").unwrap_or_else(||backend_error(error))); }
-                self.0.current_file_stamp()?;
+                this.0.current_file_stamp()?;
                 Ok(next as u64)
-            })
+            }).await
         }
     }
 
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
-        let connection = self.0.lock()?;
+        let this = self.clone();
+        self.0.run(move |connection| {
+        #[cfg(not(unix))]
+        let _ = &this;
         let (mode, backing, physical_dev, physical_ino, physical_path):
             (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) = connection
             .query_row(
@@ -2834,7 +2994,7 @@ impl MetadataStore for SqliteMetadataStore {
                 #[cfg(unix)]
                 {
                     require_matching_metadata_stamp(
-                        &self.0,
+                        &this.0,
                         physical_dev.as_deref(),
                         physical_ino.as_deref(),
                         physical_path.as_deref(),
@@ -2855,6 +3015,7 @@ impl MetadataStore for SqliteMetadataStore {
                 "invalid SQLite concurrent mode and backing ID",
             )),
         }
+        }).await
     }
 
     async fn preflight_new_bound_mode(&self) -> Result<()> {
@@ -2871,7 +3032,8 @@ impl MetadataStore for SqliteMetadataStore {
         }
         #[cfg(unix)]
         {
-            let connection = self.0.lock()?;
+            let this = self.clone();
+            self.0.run(move |connection| {
             let (mode, backing, revision, namespace, owner, fence, expires, dev, ino, path):
                 MetadataClaimRow = connection
                 .query_row(
@@ -2899,7 +3061,7 @@ impl MetadataStore for SqliteMetadataStore {
                     .with_syscall("preflight new bound SQLite metadata"));
             }
             require_matching_metadata_stamp(
-                &self.0,
+                &this.0,
                 dev.as_deref(),
                 ino.as_deref(),
                 path.as_deref(),
@@ -2928,8 +3090,9 @@ impl MetadataStore for SqliteMetadataStore {
                         "a populated or fenced Legacy volume needs an offline migration",
                     ));
             }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             Ok(())
+            }).await
         }
     }
 
@@ -2950,7 +3113,8 @@ impl MetadataStore for SqliteMetadataStore {
         }
         #[cfg(unix)]
         {
-            let mut connection = self.0.lock()?;
+            let this = self.clone();
+            self.0.run(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(backend_error)?;
@@ -2964,7 +3128,7 @@ impl MetadataStore for SqliteMetadataStore {
                     return Err(stale());
                 }
                 require_matching_metadata_stamp(
-                    &self.0,
+                    &this.0,
                     physical_dev.as_deref(),
                     physical_ino.as_deref(),
                     physical_path.as_deref(),
@@ -2985,7 +3149,7 @@ impl MetadataStore for SqliteMetadataStore {
                 ));
             }
             let physical = require_matching_metadata_stamp(
-                &self.0,
+                &this.0,
                 physical_dev.as_deref(),
                 physical_ino.as_deref(),
                 physical_path.as_deref(),
@@ -3016,10 +3180,11 @@ impl MetadataStore for SqliteMetadataStore {
             if changed != 1 {
                 return Err(backend_error("SQLite bound mode update returned zero rows"));
             }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             tx.commit().map_err(backend_error)?;
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             Ok(())
+            }).await
         }
     }
 
@@ -3033,60 +3198,67 @@ impl MetadataStore for SqliteMetadataStore {
             WHERE id=1 AND write_mode IS NULL AND (owner IS NULL OR expires<={NOW})
               AND fence<9223372036854775807 AND ?2<=9223372036854775807-{NOW}"
         );
-        let mut connection = self.0.lock()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(backend_error)?;
-        let changed = tx
-            .execute(&sql, params![owner, ttl])
-            .map_err(backend_error)?;
-        if changed > 1 {
-            return Err(backend_error(
-                "SQLite writer acquisition changed multiple rows",
-            ));
-        }
-        let lease = if changed == 1 {
-            let (fence, expires_at_ms): (u64, u64) = tx
-                .query_row(
-                    "SELECT fence, expires FROM mount_rs_metadata WHERE id=1 AND owner=?1",
-                    params![owner],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(backend_error)?;
-            Some(WriterLease {
-                owner: owner.to_owned(),
-                fence,
-                expires_at_ms,
+        let owner = owner.to_owned();
+        self.0
+            .run(move |connection| {
+                let owner = owner.as_str();
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(backend_error)?;
+                let changed = tx
+                    .execute(&sql, params![owner, ttl])
+                    .map_err(backend_error)?;
+                if changed > 1 {
+                    return Err(backend_error(
+                        "SQLite writer acquisition changed multiple rows",
+                    ));
+                }
+                let lease = if changed == 1 {
+                    let (fence, expires_at_ms): (u64, u64) = tx
+                        .query_row(
+                            "SELECT fence, expires FROM mount_rs_metadata WHERE id=1 AND owner=?1",
+                            params![owner],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(backend_error)?;
+                    Some(WriterLease {
+                        owner: owner.to_owned(),
+                        fence,
+                        expires_at_ms,
+                    })
+                } else {
+                    None
+                };
+                let mode: Option<String> = if lease.is_none() {
+                    tx.query_row(
+                        "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(backend_error)?
+                } else {
+                    None
+                };
+                tx.commit().map_err(backend_error)?;
+                if let Some(lease) = lease {
+                    return Ok(lease);
+                }
+                if mode.is_some() {
+                    return Err(FsError::new(ErrorCode::Ebusy)
+                        .with_syscall("acquire writer")
+                        .with_message("SQLite volume is in concurrent write mode"));
+                }
+                Err(FsError::new(ErrorCode::Eagain).with_syscall("acquire writer"))
             })
-        } else {
-            None
-        };
-        let mode: Option<String> = if lease.is_none() {
-            tx.query_row(
-                "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(backend_error)?
-        } else {
-            None
-        };
-        tx.commit().map_err(backend_error)?;
-        if let Some(lease) = lease {
-            return Ok(lease);
-        }
-        if mode.is_some() {
-            return Err(FsError::new(ErrorCode::Ebusy)
-                .with_syscall("acquire writer")
-                .with_message("SQLite volume is in concurrent write mode"));
-        }
-        Err(FsError::new(ErrorCode::Eagain).with_syscall("acquire writer"))
+            .await
     }
 
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
         let ttl = ttl_ms(ttl)?;
         let (fence, expires) = lease_numbers(lease)?;
-        let mut connection = self.0.lock_unfolded()?;
+        let lease = lease.clone();
+        self.0.run_unfolded(move |connection, _published| {
+            let lease = &lease;
         let sql = format!(
             "UPDATE mount_rs_metadata SET expires={NOW}+?4
             WHERE id=1 AND write_mode IS NULL AND owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
@@ -3119,11 +3291,14 @@ impl MetadataStore for SqliteMetadataStore {
             expires_at_ms: expiry,
             ..lease.clone()
         })
+        }).await
     }
 
     async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
         let (fence, expires) = lease_numbers(lease)?;
-        let connection = self.0.lock_unfolded()?;
+        let lease = lease.clone();
+        self.0.run_unfolded(move |connection, _published| {
+            let lease = &lease;
         let changed = connection
             .execute(
                 &format!(
@@ -3137,6 +3312,7 @@ impl MetadataStore for SqliteMetadataStore {
             return Err(stale());
         }
         Ok(())
+        }).await
     }
 
     async fn publish(
@@ -3151,164 +3327,171 @@ impl MetadataStore for SqliteMetadataStore {
             .checked_add(1)
             .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
         let (fence, expires) = lease_numbers(lease)?;
-        let mut connection = self.0.lock_unfolded()?;
-        // What this connection stored or loaded at the expected revision, if
-        // it did: the publication is then the difference from it.
-        let mut prior = self
-            .0
-            .published
-            .take()
-            .filter(|prior| prior.revision == expected_revision);
-        let append = match &prior {
-            Some(prior) => super::changes::encode(prior, &namespace)?
-                .filter(|append| prior.appends(append.row.len())),
-            None => None,
-        };
-        if let Some(append) = append {
-            profile::add(Event::NamespaceSerialized, append.row.len() as u64);
-            let base = prior.as_ref().map(|prior| prior.base_revision as i64);
-            // The fenced conditional INSERT decides the publication, as the
-            // conditional UPDATE does for a whole document. The covering
-            // index answers the fence without touching the row that holds
-            // the document. The document must also be the one the rows kept
-            // here were counted against: another connection may have folded
-            // them into it since.
-            let insert = |connection: &Connection| {
-                connection
-                    .prepare_cached(&format!(
-                        "INSERT INTO mount_rs_namespace_changes(revision, changes)
+        let lease = lease.clone();
+        // One job from taking the copy to putting the new one back: the
+        // copy always describes what this connection stored, whether or
+        // not the caller is still waiting when the statement commits.
+        self.0
+            .run_unfolded(move |connection, published| {
+                let lease = &lease;
+                // What this connection stored or loaded at the expected revision, if
+                // it did: the publication is then the difference from it.
+                let mut prior = published
+                    .take()
+                    .filter(|prior| prior.revision == expected_revision);
+                let append = match &prior {
+                    Some(prior) => super::changes::encode(prior, &namespace)?
+                        .filter(|append| prior.appends(append.row.len())),
+                    None => None,
+                };
+                if let Some(append) = append {
+                    profile::add(Event::NamespaceSerialized, append.row.len() as u64);
+                    let base = prior.as_ref().map(|prior| prior.base_revision as i64);
+                    // The fenced conditional INSERT decides the publication, as the
+                    // conditional UPDATE does for a whole document. The covering
+                    // index answers the fence without touching the row that holds
+                    // the document. The document must also be the one the rows kept
+                    // here were counted against: another connection may have folded
+                    // them into it since.
+                    let insert = |connection: &Connection| {
+                        connection
+                            .prepare_cached(&format!(
+                                "INSERT INTO mount_rs_namespace_changes(revision, changes)
                          SELECT ?1, ?2 FROM mount_rs_metadata INDEXED BY mount_rs_inode_authority
                          WHERE id=1 AND write_mode IS NULL AND {CURRENT_REVISION}=?3 AND owner=?4
                            AND fence=?5 AND expires=?6 AND expires>{NOW} AND revision=?7"
-                    ))
-                    .and_then(|mut statement| {
-                        statement.execute(params![
-                            next,
-                            append.row,
-                            expected,
-                            lease.owner,
-                            fence,
-                            expires,
-                            base
-                        ])
-                    })
-                    .map_err(backend_error)
-            };
-            let changed = if append.dead.is_empty() {
-                // One autocommit statement, as for a whole document.
-                insert(&connection)?
-            } else {
-                // The rows this one supersedes go in the same transaction.
-                let transaction = connection
-                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    .map_err(backend_error)?;
-                let changed = insert(&transaction)?;
-                if changed == 1 {
-                    {
-                        let mut delete = transaction
-                            .prepare_cached(
-                                "DELETE FROM mount_rs_namespace_changes WHERE revision=?1",
-                            )
+                            ))
+                            .and_then(|mut statement| {
+                                statement.execute(params![
+                                    next,
+                                    append.row,
+                                    expected,
+                                    lease.owner,
+                                    fence,
+                                    expires,
+                                    base
+                                ])
+                            })
+                            .map_err(backend_error)
+                    };
+                    let changed = if append.dead.is_empty() {
+                        // One autocommit statement, as for a whole document.
+                        insert(connection)?
+                    } else {
+                        // The rows this one supersedes go in the same transaction.
+                        let transaction = connection
+                            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                             .map_err(backend_error)?;
-                        for revision in &append.dead {
-                            delete
-                                .execute(params![*revision as i64])
-                                .map_err(backend_error)?;
+                        let changed = insert(&transaction)?;
+                        if changed == 1 {
+                            {
+                                let mut delete = transaction
+                                    .prepare_cached(
+                                        "DELETE FROM mount_rs_namespace_changes WHERE revision=?1",
+                                    )
+                                    .map_err(backend_error)?;
+                                for revision in &append.dead {
+                                    delete
+                                        .execute(params![*revision as i64])
+                                        .map_err(backend_error)?;
+                                }
+                            }
+                            transaction.commit().map_err(backend_error)?;
                         }
+                        changed
+                    };
+                    if changed == 1
+                        && let Some(mut prior) = prior.take()
+                    {
+                        prior.log.stored(next as u64, append);
+                        prior.revision = next as u64;
+                        prior.namespace = namespace;
+                        *published = Some(prior);
+                        return Ok(next as u64);
                     }
-                    transaction.commit().map_err(backend_error)?;
+                    // Refused. The whole-document path below finds out why, and
+                    // stores the document if the only reason is that the rows are
+                    // not the ones known here.
+                    prior = None;
                 }
-                changed
-            };
-            if changed == 1
-                && let Some(mut prior) = prior.take()
-            {
-                prior.log.stored(next as u64, append);
-                prior.revision = next as u64;
-                prior.namespace = namespace;
-                self.0.published.put(prior);
-                return Ok(next as u64);
-            }
-            // Refused. The whole-document path below finds out why, and
-            // stores the document if the only reason is that the rows are
-            // not the ones known here.
-            prior = None;
-        }
-        let document = serde_json::to_string(&namespace).map_err(backend_error)?;
-        profile::add(Event::NamespaceSerialized, document.len() as u64);
-        // `at` is the revision the metadata row holds, which is the
-        // document's.
-        let publish = |connection: &Connection, at: i64| {
-            connection
-                .prepare_cached(&format!(
-                    "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
+                let document = serde_json::to_string(&namespace).map_err(backend_error)?;
+                profile::add(Event::NamespaceSerialized, document.len() as u64);
+                // `at` is the revision the metadata row holds, which is the
+                // document's.
+                let publish = |connection: &Connection, at: i64| {
+                    connection
+                        .prepare_cached(&format!(
+                            "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
                      WHERE id=1 AND write_mode IS NULL AND revision=?3 AND owner=?4 AND fence=?5
                        AND expires=?6 AND expires>{NOW}"
-                ))
-                .and_then(|mut statement| {
-                    statement.execute(params![next, document, at, lease.owner, fence, expires])
-                })
-                .map_err(backend_error)
-        };
-        let changed = if prior.as_ref().is_some_and(|prior| prior.log.is_empty()) {
-            // The successful publication path is one fenced conditional UPDATE.
-            // SQLite makes a single autocommit statement atomic and durable under
-            // the configured synchronous policy, so avoid opening and committing
-            // a second explicit transaction for the common case. A zero-row
-            // result opens the Immediate transaction only for the locked
-            // stale/revision classification below.
-            publish(&connection, expected)?
-        } else {
-            // There are change rows, or there may be (this connection has
-            // not seen the stored namespace at this revision). The document
-            // replaces them, in one transaction.
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(backend_error)?;
-            // With rows, the current revision is the last row's and the
-            // metadata row still holds the document's. Compare the first
-            // here, and let the conditional statement match the second once
-            // the rows are gone: nothing else can write in between.
-            let (document_revision, current): (i64, i64) = transaction
-                .query_row(
-                    &format!(
-                        "SELECT revision, {CURRENT_REVISION} FROM mount_rs_metadata
+                        ))
+                        .and_then(|mut statement| {
+                            statement.execute(params![
+                                next,
+                                document,
+                                at,
+                                lease.owner,
+                                fence,
+                                expires
+                            ])
+                        })
+                        .map_err(backend_error)
+                };
+                let changed = if prior.as_ref().is_some_and(|prior| prior.log.is_empty()) {
+                    // The successful publication path is one fenced conditional UPDATE.
+                    // SQLite makes a single autocommit statement atomic and durable under
+                    // the configured synchronous policy, so avoid opening and committing
+                    // a second explicit transaction for the common case. A zero-row
+                    // result opens the Immediate transaction only for the locked
+                    // stale/revision classification below.
+                    publish(connection, expected)?
+                } else {
+                    // There are change rows, or there may be (this connection has
+                    // not seen the stored namespace at this revision). The document
+                    // replaces them, in one transaction.
+                    let transaction = connection
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                        .map_err(backend_error)?;
+                    // With rows, the current revision is the last row's and the
+                    // metadata row still holds the document's. Compare the first
+                    // here, and let the conditional statement match the second once
+                    // the rows are gone: nothing else can write in between.
+                    let (document_revision, current): (i64, i64) = transaction
+                        .query_row(
+                            &format!(
+                                "SELECT revision, {CURRENT_REVISION} FROM mount_rs_metadata
                          INDEXED BY mount_rs_inode_authority WHERE id=1"
-                    ),
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(backend_error)?;
-            let changed = if current == expected {
-                transaction
-                    .execute_batch(CLEAR_NAMESPACE_CHANGES)
-                    .map_err(backend_error)?;
-                publish(&transaction, document_revision)?
-            } else {
-                0
-            };
-            if changed == 1 {
-                transaction.commit().map_err(backend_error)?;
-            }
-            changed
-        };
-        if changed != 1 {
-            return Err(publish_refusal(
-                &mut connection,
-                lease,
-                fence,
-                expires,
-                expected,
-            ));
-        }
-        self.0.published.put(super::changes::Published {
-            revision: next as u64,
-            base_revision: next as u64,
-            base_bytes: document.len(),
-            log: super::changes::Log::new(&namespace),
-            namespace,
-        });
-        Ok(next as u64)
+                            ),
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(backend_error)?;
+                    let changed = if current == expected {
+                        transaction
+                            .execute_batch(CLEAR_NAMESPACE_CHANGES)
+                            .map_err(backend_error)?;
+                        publish(&transaction, document_revision)?
+                    } else {
+                        0
+                    };
+                    if changed == 1 {
+                        transaction.commit().map_err(backend_error)?;
+                    }
+                    changed
+                };
+                if changed != 1 {
+                    return Err(publish_refusal(connection, lease, fence, expires, expected));
+                }
+                *published = Some(super::changes::Published {
+                    revision: next as u64,
+                    base_revision: next as u64,
+                    base_bytes: document.len(),
+                    log: super::changes::Log::new(&namespace),
+                    namespace,
+                });
+                Ok(next as u64)
+            })
+            .await
     }
 
     async fn publish_bound_if_revision(
@@ -3335,7 +3518,8 @@ impl MetadataStore for SqliteMetadataStore {
             let namespace_json = serde_json::to_string(&namespace).map_err(backend_error)?;
             profile::add(Event::NamespaceSerialized, namespace_json.len() as u64);
             let backing_text = backing.to_hex();
-            self.0.with_concurrent_publish_timeout(|connection| {
+            let this = self.clone();
+            self.0.with_concurrent_publish_timeout(move |connection| {
             let was_autocommit = connection.is_autocommit();
             let tx = match connection.transaction_with_behavior(TransactionBehavior::Immediate) {
                 Ok(tx) => tx,
@@ -3353,7 +3537,7 @@ impl MetadataStore for SqliteMetadataStore {
                 return Err(stale());
             }
             let physical = require_matching_metadata_stamp(
-                &self.0,
+                &this.0,
                 physical_dev.as_deref(),
                 physical_ino.as_deref(),
                 physical_path.as_deref(),
@@ -3372,15 +3556,15 @@ impl MetadataStore for SqliteMetadataStore {
                 params![next, namespace_json, backing_text, CONCURRENT_FENCE_SENTINEL, expected, physical.dev.to_string(), physical.ino.to_string(), physical_path],
             ).map_err(backend_error)?;
             if changed != 1 { return Err(stale()); }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             if let Err(error) = tx.commit() {
                 return Err(sqlite_busy_known_noncommit(
                     &error, connection.is_autocommit(), "publish bound concurrent SQLite metadata"
                 ).unwrap_or_else(|| backend_error(error)));
             }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             Ok(next as u64)
-        })
+        }).await
         }
     }
 
@@ -3405,7 +3589,8 @@ impl MetadataStore for SqliteMetadataStore {
         {
             let expected =
                 i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
-            let mut connection = self.0.lock()?;
+            let this = self.clone();
+            self.0.run(move |connection| {
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(backend_error)?;
@@ -3419,7 +3604,7 @@ impl MetadataStore for SqliteMetadataStore {
                     return Err(stale());
                 }
                 require_matching_metadata_stamp(
-                    &self.0,
+                    &this.0,
                     physical_dev.as_deref(),
                     physical_ino.as_deref(),
                     physical_path.as_deref(),
@@ -3450,7 +3635,7 @@ impl MetadataStore for SqliteMetadataStore {
                     .with_syscall("migrate concurrent SQLite metadata"));
             }
             let physical = require_matching_metadata_stamp(
-                &self.0,
+                &this.0,
                 physical_dev.as_deref(),
                 physical_ino.as_deref(),
                 physical_path.as_deref(),
@@ -3483,10 +3668,11 @@ impl MetadataStore for SqliteMetadataStore {
             if changed != 1 {
                 return Err(stale());
             }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             tx.commit().map_err(backend_error)?;
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             Ok(())
+            }).await
         }
     }
 
@@ -3507,7 +3693,8 @@ impl MetadataStore for SqliteMetadataStore {
         {
             let expected =
                 i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
-            let connection = self.0.lock()?;
+            let this = self.clone();
+            self.0.run(move |connection| {
             let (mode, backing, revision, owner, fence, expires, dev, ino, path):
                 MetadataMigrationRow = connection
                 .query_row(
@@ -3545,7 +3732,7 @@ impl MetadataStore for SqliteMetadataStore {
                 );
             }
             require_matching_metadata_stamp(
-                &self.0,
+                &this.0,
                 dev.as_deref(),
                 ino.as_deref(),
                 path.as_deref(),
@@ -3564,8 +3751,9 @@ impl MetadataStore for SqliteMetadataStore {
                     .with_syscall("preflight MRC1 SQLite metadata")
                     .with_message("version state prevents concurrent backing migration"));
             }
-            self.0.current_file_stamp()?;
+            this.0.current_file_stamp()?;
             Ok(())
+            }).await
         }
     }
 
@@ -3589,8 +3777,10 @@ impl MetadataStore for SqliteMetadataStore {
         {
             let expected =
                 i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
-            let connection = self.0.lock()?;
-            let (mode, backing, revision, owner, fence, expires, volume, dev, ino, path):
+            let this = self.clone();
+            self.0
+                .run(move |connection| {
+                    let (mode, backing, revision, owner, fence, expires, volume, dev, ino, path):
                 TrustedMrc1MigrationRow = connection
                 .query_row(
                     "SELECT write_mode, backing_id, revision, owner, fence, expires,
@@ -3613,47 +3803,53 @@ impl MetadataStore for SqliteMetadataStore {
                     },
                 )
                 .map_err(backend_error)?;
-            if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
-                || backing.is_some()
-                || owner.is_some()
-                || fence != CONCURRENT_FENCE_SENTINEL
-                || expires != 0
-            {
-                return Err(FsError::new(ErrorCode::Ebusy)
-                    .with_syscall("preflight trusted SQLite MRC1 reenrollment"));
-            }
-            if revision != expected {
-                return Err(FsError::new(ErrorCode::Eagain)
-                    .with_syscall("preflight trusted SQLite MRC1 reenrollment"));
-            }
-            if volume != expected_volume.as_str() {
-                return Err(FsError::new(ErrorCode::Estale)
-                    .with_syscall("preflight trusted SQLite MRC1 reenrollment")
-                    .with_message("expected SQLite volume ID selects a different timeline"));
-            }
-            if FileStamp::from_text(dev.as_deref(), ino.as_deref())?.is_some() || path.is_some() {
-                return Err(FsError::new(ErrorCode::Enotsup)
-                    .with_syscall("preflight trusted SQLite MRC1 reenrollment")
-                    .with_message("stamped MRC1 metadata uses ordinary migration"));
-            }
-            self.0.require_concurrent_local_file("metadata")?;
-            self.0.current_auxiliary_path()?;
-            let (head, versions, pins): (Option<String>, i64, i64) = connection
-                .query_row(
-                    "SELECT head_id, (SELECT count(*) FROM mount_rs_versions),
+                    if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
+                        || backing.is_some()
+                        || owner.is_some()
+                        || fence != CONCURRENT_FENCE_SENTINEL
+                        || expires != 0
+                    {
+                        return Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("preflight trusted SQLite MRC1 reenrollment"));
+                    }
+                    if revision != expected {
+                        return Err(FsError::new(ErrorCode::Eagain)
+                            .with_syscall("preflight trusted SQLite MRC1 reenrollment"));
+                    }
+                    if volume != expected_volume.as_str() {
+                        return Err(FsError::new(ErrorCode::Estale)
+                            .with_syscall("preflight trusted SQLite MRC1 reenrollment")
+                            .with_message(
+                                "expected SQLite volume ID selects a different timeline",
+                            ));
+                    }
+                    if FileStamp::from_text(dev.as_deref(), ino.as_deref())?.is_some()
+                        || path.is_some()
+                    {
+                        return Err(FsError::new(ErrorCode::Enotsup)
+                            .with_syscall("preflight trusted SQLite MRC1 reenrollment")
+                            .with_message("stamped MRC1 metadata uses ordinary migration"));
+                    }
+                    this.0.require_concurrent_local_file("metadata")?;
+                    this.0.current_auxiliary_path()?;
+                    let (head, versions, pins): (Option<String>, i64, i64) = connection
+                        .query_row(
+                            "SELECT head_id, (SELECT count(*) FROM mount_rs_versions),
                         (SELECT count(*) FROM mount_rs_version_pins)
                  FROM mount_rs_version_state WHERE id=1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .map_err(backend_error)?;
-            if head.is_some() || versions != 0 || pins != 0 {
-                return Err(FsError::new(ErrorCode::Ebusy)
-                    .with_syscall("preflight trusted SQLite MRC1 reenrollment")
-                    .with_message("version state prevents trusted reenrollment"));
-            }
-            self.0.current_file_stamp()?;
-            Ok(())
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .map_err(backend_error)?;
+                    if head.is_some() || versions != 0 || pins != 0 {
+                        return Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("preflight trusted SQLite MRC1 reenrollment")
+                            .with_message("version state prevents trusted reenrollment"));
+                    }
+                    this.0.current_file_stamp()?;
+                    Ok(())
+                })
+                .await
         }
     }
 
@@ -3678,11 +3874,13 @@ impl MetadataStore for SqliteMetadataStore {
         {
             let expected =
                 i64::try_from(expected_revision).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
-            let mut connection = self.0.lock()?;
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(backend_error)?;
-            let (mode, stored, revision, owner, fence, expires, volume, dev, ino, path):
+            let this = self.clone();
+            self.0
+                .run(move |connection| {
+                    let tx = connection
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .map_err(backend_error)?;
+                    let (mode, stored, revision, owner, fence, expires, volume, dev, ino, path):
                 TrustedMrc1MigrationRow = tx
                 .query_row(
                     "SELECT write_mode, backing_id, revision, owner, fence, expires,
@@ -3705,77 +3903,83 @@ impl MetadataStore for SqliteMetadataStore {
                     },
                 )
                 .map_err(backend_error)?;
-            if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
-                || stored.is_some()
-                || owner.is_some()
-                || fence != CONCURRENT_FENCE_SENTINEL
-                || expires != 0
-            {
-                return Err(FsError::new(ErrorCode::Ebusy)
-                    .with_syscall("migrate trusted SQLite MRC1 metadata"));
-            }
-            if revision != expected {
-                return Err(FsError::new(ErrorCode::Eagain)
-                    .with_syscall("migrate trusted SQLite MRC1 metadata"));
-            }
-            if volume != expected_volume.as_str() {
-                return Err(FsError::new(ErrorCode::Estale)
-                    .with_syscall("migrate trusted SQLite MRC1 metadata")
-                    .with_message("expected SQLite volume ID selects a different timeline"));
-            }
-            if FileStamp::from_text(dev.as_deref(), ino.as_deref())?.is_some() || path.is_some() {
-                return Err(FsError::new(ErrorCode::Enotsup)
-                    .with_syscall("migrate trusted SQLite MRC1 metadata")
-                    .with_message("stamped MRC1 metadata uses ordinary migration"));
-            }
-            let physical = self.0.require_concurrent_local_file("metadata")?;
-            let physical_path = self.0.current_auxiliary_path()?;
-            let (head, versions, pins): (Option<String>, i64, i64) = tx
-                .query_row(
-                    "SELECT head_id, (SELECT count(*) FROM mount_rs_versions),
+                    if mode.as_deref() != Some(CONCURRENT_WRITE_MODE)
+                        || stored.is_some()
+                        || owner.is_some()
+                        || fence != CONCURRENT_FENCE_SENTINEL
+                        || expires != 0
+                    {
+                        return Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("migrate trusted SQLite MRC1 metadata"));
+                    }
+                    if revision != expected {
+                        return Err(FsError::new(ErrorCode::Eagain)
+                            .with_syscall("migrate trusted SQLite MRC1 metadata"));
+                    }
+                    if volume != expected_volume.as_str() {
+                        return Err(FsError::new(ErrorCode::Estale)
+                            .with_syscall("migrate trusted SQLite MRC1 metadata")
+                            .with_message(
+                                "expected SQLite volume ID selects a different timeline",
+                            ));
+                    }
+                    if FileStamp::from_text(dev.as_deref(), ino.as_deref())?.is_some()
+                        || path.is_some()
+                    {
+                        return Err(FsError::new(ErrorCode::Enotsup)
+                            .with_syscall("migrate trusted SQLite MRC1 metadata")
+                            .with_message("stamped MRC1 metadata uses ordinary migration"));
+                    }
+                    let physical = this.0.require_concurrent_local_file("metadata")?;
+                    let physical_path = this.0.current_auxiliary_path()?;
+                    let (head, versions, pins): (Option<String>, i64, i64) = tx
+                        .query_row(
+                            "SELECT head_id, (SELECT count(*) FROM mount_rs_versions),
                         (SELECT count(*) FROM mount_rs_version_pins)
                  FROM mount_rs_version_state WHERE id=1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .map_err(backend_error)?;
-            if head.is_some() || versions != 0 || pins != 0 {
-                return Err(FsError::new(ErrorCode::Ebusy)
-                    .with_syscall("migrate trusted SQLite MRC1 metadata")
-                    .with_message("version state prevents trusted reenrollment"));
-            }
-            let changed = tx
-                .execute(
-                    "UPDATE mount_rs_metadata SET write_mode='MRC2', backing_id=?1,
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .map_err(backend_error)?;
+                    if head.is_some() || versions != 0 || pins != 0 {
+                        return Err(FsError::new(ErrorCode::Ebusy)
+                            .with_syscall("migrate trusted SQLite MRC1 metadata")
+                            .with_message("version state prevents trusted reenrollment"));
+                    }
+                    let changed = tx
+                        .execute(
+                            "UPDATE mount_rs_metadata SET write_mode='MRC2', backing_id=?1,
                         physical_dev=?2, physical_ino=?3, physical_path=?4
                  WHERE id=1 AND write_mode='MRC1' AND backing_id IS NULL
                    AND revision=?5 AND volume_id=?6 AND owner IS NULL
                    AND fence=?7 AND expires=0
                    AND physical_dev IS NULL AND physical_ino IS NULL AND physical_path IS NULL",
-                    params![
-                        backing.to_hex(),
-                        physical.dev.to_string(),
-                        physical.ino.to_string(),
-                        physical_path,
-                        expected,
-                        expected_volume.as_str(),
-                        CONCURRENT_FENCE_SENTINEL
-                    ],
-                )
-                .map_err(backend_error)?;
-            if changed != 1 {
-                return Err(FsError::new(ErrorCode::Eagain)
-                    .with_syscall("migrate trusted SQLite MRC1 metadata"));
-            }
-            self.0.current_file_stamp()?;
-            tx.commit().map_err(backend_error)?;
-            self.0.current_file_stamp()?;
-            Ok(())
+                            params![
+                                backing.to_hex(),
+                                physical.dev.to_string(),
+                                physical.ino.to_string(),
+                                physical_path,
+                                expected,
+                                expected_volume.as_str(),
+                                CONCURRENT_FENCE_SENTINEL
+                            ],
+                        )
+                        .map_err(backend_error)?;
+                    if changed != 1 {
+                        return Err(FsError::new(ErrorCode::Eagain)
+                            .with_syscall("migrate trusted SQLite MRC1 metadata"));
+                    }
+                    this.0.current_file_stamp()?;
+                    tx.commit().map_err(backend_error)?;
+                    this.0.current_file_stamp()?;
+                    Ok(())
+                })
+                .await
         }
     }
 
     async fn flush(&self) -> Result<()> {
-        self.0.flush()
+        self.0.flush().await
     }
 }
 
@@ -3786,91 +3990,110 @@ impl VersionedMetadataStore for SqliteMetadataStore {
     }
 
     async fn version_head(&self) -> Result<Option<VersionHead>> {
-        let mut connection = self.0.lock()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(backend_error)?;
-        let revision: i64 = tx
-            .query_row(
-                "SELECT revision FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(backend_error)?;
-        let head_id: Option<String> = tx
-            .query_row(
-                "SELECT head_id FROM mount_rs_version_state WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(backend_error)?;
-        let head = if let Some(id) = head_id {
-            let version = VersionId::decode(&id).map_err(|_| {
-                FsError::new(ErrorCode::Eio)
-                    .with_syscall("version head")
-                    .with_message("stored version head is malformed")
-            })?;
-            if version.volume != self.1 {
-                return Err(FsError::new(ErrorCode::Eio)
-                    .with_syscall("version head")
-                    .with_message("stored version head belongs to another volume"));
-            }
-            if !stored_version_is_loadable(&tx, &version)? {
-                return Err(FsError::new(ErrorCode::Eio)
-                    .with_syscall("version head")
-                    .with_message("stored version head references an unreadable version"));
-            }
-            Some(VersionHead {
-                version,
-                revision: u64::try_from(revision).map_err(|_| FsError::new(ErrorCode::Eio))?,
+        let this = self.clone();
+        self.0
+            .run(move |connection| {
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Deferred)
+                    .map_err(backend_error)?;
+                let revision: i64 = tx
+                    .query_row(
+                        "SELECT revision FROM mount_rs_metadata WHERE id=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(backend_error)?;
+                let head_id: Option<String> = tx
+                    .query_row(
+                        "SELECT head_id FROM mount_rs_version_state WHERE id=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(backend_error)?;
+                let head = if let Some(id) = head_id {
+                    let version = VersionId::decode(&id).map_err(|_| {
+                        FsError::new(ErrorCode::Eio)
+                            .with_syscall("version head")
+                            .with_message("stored version head is malformed")
+                    })?;
+                    if version.volume != this.1 {
+                        return Err(FsError::new(ErrorCode::Eio)
+                            .with_syscall("version head")
+                            .with_message("stored version head belongs to another volume"));
+                    }
+                    if !stored_version_is_loadable(&tx, &version)? {
+                        return Err(FsError::new(ErrorCode::Eio)
+                            .with_syscall("version head")
+                            .with_message("stored version head references an unreadable version"));
+                    }
+                    Some(VersionHead {
+                        version,
+                        revision: u64::try_from(revision)
+                            .map_err(|_| FsError::new(ErrorCode::Eio))?,
+                    })
+                } else {
+                    None
+                };
+                tx.commit().map_err(backend_error)?;
+                Ok(head)
             })
-        } else {
-            None
-        };
-        tx.commit().map_err(backend_error)?;
-        Ok(head)
+            .await
     }
 
     async fn load_version(&self, id: &VersionId) -> Result<VersionInfo> {
         if id.volume != self.1 {
             return Err(FsError::new(ErrorCode::Enoent).with_syscall("load version"));
         }
-        let connection = self.0.lock()?;
-        load_version_from_connection(&connection, id)
+        let id = id.clone();
+        self.0
+            .run(move |connection| {
+                let id = &id;
+                load_version_from_connection(connection, id)
+            })
+            .await
     }
 
     async fn list_versions(&self) -> Result<Vec<VersionInfo>> {
-        let connection = self.0.lock()?;
-        let mut statement = connection
-            .prepare(&format!("{VERSION_SELECT} ORDER BY sequence"))
-            .map_err(backend_error)?;
-        let rows = statement
-            .query_map([], raw_version)
-            .map_err(backend_error)?;
-        let mut versions = Vec::new();
-        for row in rows {
-            let version = decode_raw_version(row.map_err(backend_error)?)?;
-            version.validate_for_volume(&self.1)?;
-            versions.push(version);
-        }
-        Ok(versions)
+        let this = self.clone();
+        self.0
+            .run(move |connection| {
+                let mut statement = connection
+                    .prepare(&format!("{VERSION_SELECT} ORDER BY sequence"))
+                    .map_err(backend_error)?;
+                let rows = statement
+                    .query_map([], raw_version)
+                    .map_err(backend_error)?;
+                let mut versions = Vec::new();
+                for row in rows {
+                    let version = decode_raw_version(row.map_err(backend_error)?)?;
+                    version.validate_for_volume(&this.1)?;
+                    versions.push(version);
+                }
+                Ok(versions)
+            })
+            .await
     }
 
     async fn find_publication(&self, operation_id: &PublicationId) -> Result<Option<VersionInfo>> {
-        let connection = self.0.lock()?;
-        let id: Option<String> = connection
-            .query_row(
-                "SELECT id FROM mount_rs_versions WHERE operation_id=?1",
-                params![operation_id.0],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(backend_error)?;
-        id.map(|id| {
-            let version = VersionId::decode(&id)?;
-            load_version_from_connection(&connection, &version)
-        })
-        .transpose()
+        let operation_id = operation_id.clone();
+        self.0
+            .run(move |connection| {
+                let operation_id = &operation_id;
+                let id: Option<String> = connection
+                    .query_row(
+                        "SELECT id FROM mount_rs_versions WHERE operation_id=?1",
+                        params![operation_id.0],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(backend_error)?;
+                id.map(|id| {
+                    let version = VersionId::decode(&id)?;
+                    load_version_from_connection(connection, &version)
+                })
+                .transpose()
+            })
+            .await
     }
 
     async fn publish_version(
@@ -3878,7 +4101,10 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         lease: &WriterLease,
         publication: VersionPublication,
     ) -> Result<VersionInfo> {
-        let mut connection = self.0.lock()?;
+        let this = self.clone();
+        let lease = lease.clone();
+        self.0.run(move |connection| {
+            let lease = &lease;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend_error)?;
@@ -3900,7 +4126,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
                 )
                 .map_err(backend_error)?;
             let existing = decode_raw_version(raw)?;
-            existing.validate_for_volume(&self.1)?;
+            existing.validate_for_volume(&this.1)?;
             if !publication.matches_committed(&existing)? {
                 return Err(FsError::new(ErrorCode::Eexist)
                     .with_syscall("publish version")
@@ -3913,8 +4139,8 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         // Only a new publication reaches the writer-lease and CAS checks.
         // A committed operation is immutable and may be reconciled after the
         // original writer lease has expired.
-        publication.validate(&self.1)?;
-        if publication.durable && !self.0.durable {
+        publication.validate(&this.1)?;
+        if publication.durable && !this.0.durable {
             return Err(FsError::new(ErrorCode::Enotsup)
                 .with_syscall("publish version")
                 .with_message("in-memory SQLite cannot publish a durable version"));
@@ -3957,7 +4183,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
                     .with_syscall("publish version")
                     .with_message("stored version head is malformed")
             })?;
-            if head.volume != self.1 || !stored_version_is_loadable(&tx, &head)? {
+            if head.volume != this.1 || !stored_version_is_loadable(&tx, &head)? {
                 return Err(FsError::new(ErrorCode::Eio)
                     .with_syscall("publish version")
                     .with_message("stored version head references an unreadable version"));
@@ -3979,7 +4205,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
             .map_err(backend_error)?;
         let sequence = u64::try_from(next_sequence)
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("invalid version sequence"))?;
-        let id = VersionId::new(self.1.clone(), sequence)?;
+        let id = VersionId::new(this.1.clone(), sequence)?;
         let created_at_ms: i64 = tx
             .query_row(NOW_SELECT, [], |row| row.get(0))
             .map_err(backend_error)?;
@@ -3994,7 +4220,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id.encode(),
-                self.1.0,
+                this.1.0,
                 i64::try_from(sequence).map_err(|_| FsError::new(ErrorCode::Eoverflow))?,
                 parent_id,
                 restored_from,
@@ -4062,6 +4288,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
             created_at_ms,
             durable: publication.durable,
         })
+        }).await
     }
 
     async fn open_view_pin(&self, id: &VersionId, request: ReadLeaseRequest) -> Result<ReadLease> {
@@ -4070,63 +4297,70 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         if id.volume != self.1 {
             return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
         }
-        let mut connection = self.0.lock()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(backend_error)?;
-        let raw = raw_version_from_connection(&tx, id)?;
-        let Some(raw) = raw else {
-            return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
-        };
-        decode_version_for_id(raw, id).map_err(|_| {
-            FsError::new(ErrorCode::Eio)
-                .with_syscall("open version view")
-                .with_message("stored version is unreadable")
-        })?;
-        let now_ms: i64 = tx
-            .query_row(NOW_SELECT, [], |row| row.get(0))
-            .map_err(backend_error)?;
-        let next_fence: i64 = tx
-            .query_row(
-                "SELECT next_read_fence FROM mount_rs_version_state WHERE id=1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(backend_error)?
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let expires = now_ms
-            .checked_add(ttl_ms)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
-        let view_id = format!("{}-view-{next_fence}", self.1);
-        tx.execute(
-            "UPDATE mount_rs_version_state SET next_read_fence=?1 WHERE id=1",
-            params![next_fence],
-        )
-        .map_err(backend_error)?;
-        tx.execute(
-            "INSERT INTO mount_rs_version_pins
+        let this = self.clone();
+        let id = id.clone();
+        self.0
+            .run(move |connection| {
+                let id = &id;
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(backend_error)?;
+                let raw = raw_version_from_connection(&tx, id)?;
+                let Some(raw) = raw else {
+                    return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
+                };
+                decode_version_for_id(raw, id).map_err(|_| {
+                    FsError::new(ErrorCode::Eio)
+                        .with_syscall("open version view")
+                        .with_message("stored version is unreadable")
+                })?;
+                let now_ms: i64 = tx
+                    .query_row(NOW_SELECT, [], |row| row.get(0))
+                    .map_err(backend_error)?;
+                let next_fence: i64 = tx
+                    .query_row(
+                        "SELECT next_read_fence FROM mount_rs_version_state WHERE id=1",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(backend_error)?
+                    .checked_add(1)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                let expires = now_ms
+                    .checked_add(ttl_ms)
+                    .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+                let view_id = format!("{}-view-{next_fence}", this.1);
+                tx.execute(
+                    "UPDATE mount_rs_version_state SET next_read_fence=?1 WHERE id=1",
+                    params![next_fence],
+                )
+                .map_err(backend_error)?;
+                tx.execute(
+                    "INSERT INTO mount_rs_version_pins
              (view_id, volume_id, version_id, owner, fence, expires)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                view_id,
-                self.1.0,
-                id.encode(),
-                request.owner,
-                next_fence,
-                expires
-            ],
-        )
-        .map_err(backend_error)?;
-        tx.commit().map_err(backend_error)?;
-        Ok(ReadLease {
-            volume: self.1.clone(),
-            version: id.clone(),
-            view_id,
-            owner: request.owner,
-            fence: u64::try_from(next_fence).map_err(|_| FsError::new(ErrorCode::Eio))?,
-            expires_at_ms: u64::try_from(expires).map_err(|_| FsError::new(ErrorCode::Eio))?,
-        })
+                    params![
+                        view_id,
+                        this.1.0,
+                        id.encode(),
+                        request.owner,
+                        next_fence,
+                        expires
+                    ],
+                )
+                .map_err(backend_error)?;
+                tx.commit().map_err(backend_error)?;
+                Ok(ReadLease {
+                    volume: this.1.clone(),
+                    version: id.clone(),
+                    view_id,
+                    owner: request.owner,
+                    fence: u64::try_from(next_fence).map_err(|_| FsError::new(ErrorCode::Eio))?,
+                    expires_at_ms: u64::try_from(expires)
+                        .map_err(|_| FsError::new(ErrorCode::Eio))?,
+                })
+            })
+            .await
     }
 
     async fn renew_view_pin(
@@ -4142,108 +4376,121 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         let fence = i64::try_from(lease.fence).map_err(|_| FsError::new(ErrorCode::Estale))?;
         let expires =
             i64::try_from(lease.expires_at_ms).map_err(|_| FsError::new(ErrorCode::Estale))?;
-        let mut connection = self.0.lock()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(backend_error)?;
-        let current: Option<(String, String, String, i64, i64)> = tx
-            .query_row(
-                "SELECT volume_id, version_id, owner, fence, expires
+        let this = self.clone();
+        let lease = lease.clone();
+        self.0
+            .run(move |connection| {
+                let lease = &lease;
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(backend_error)?;
+                let current: Option<(String, String, String, i64, i64)> = tx
+                    .query_row(
+                        "SELECT volume_id, version_id, owner, fence, expires
                  FROM mount_rs_version_pins WHERE view_id=?1",
-                params![lease.view_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(backend_error)?;
-        let Some((volume, version, owner, current_fence, current_expires)) = current else {
-            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
-        };
-        let now_ms: i64 = tx
-            .query_row(NOW_SELECT, [], |row| row.get(0))
-            .map_err(backend_error)?;
-        let next_expires = plan_view_pin_renewal(
-            PinRenewalIdentity {
-                volume_matches: volume == self.1.0,
-                version_matches: version == lease.version.encode(),
-                request_owner_matches: owner == request.owner,
-                lease_owner_matches: owner == lease.owner,
-            },
-            PinRenewalToken {
-                fence: current_fence,
-                expires_at_ms: current_expires,
-            },
-            PinRenewalToken {
-                fence,
-                expires_at_ms: expires,
-            },
-            now_ms,
-            ttl_ms,
-        )?;
-        tx.execute(
-            "UPDATE mount_rs_version_pins SET expires=?1 WHERE view_id=?2
+                        params![lease.view_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(backend_error)?;
+                let Some((volume, version, owner, current_fence, current_expires)) = current else {
+                    return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+                };
+                let now_ms: i64 = tx
+                    .query_row(NOW_SELECT, [], |row| row.get(0))
+                    .map_err(backend_error)?;
+                let next_expires = plan_view_pin_renewal(
+                    PinRenewalIdentity {
+                        volume_matches: volume == this.1.0,
+                        version_matches: version == lease.version.encode(),
+                        request_owner_matches: owner == request.owner,
+                        lease_owner_matches: owner == lease.owner,
+                    },
+                    PinRenewalToken {
+                        fence: current_fence,
+                        expires_at_ms: current_expires,
+                    },
+                    PinRenewalToken {
+                        fence,
+                        expires_at_ms: expires,
+                    },
+                    now_ms,
+                    ttl_ms,
+                )?;
+                tx.execute(
+                    "UPDATE mount_rs_version_pins SET expires=?1 WHERE view_id=?2
              AND fence=?3 AND expires=?4",
-            params![next_expires, lease.view_id, fence, expires],
-        )
-        .map_err(backend_error)?;
-        tx.commit().map_err(backend_error)?;
-        Ok(ReadLease {
-            expires_at_ms: u64::try_from(next_expires).map_err(|_| FsError::new(ErrorCode::Eio))?,
-            ..lease.clone()
-        })
+                    params![next_expires, lease.view_id, fence, expires],
+                )
+                .map_err(backend_error)?;
+                tx.commit().map_err(backend_error)?;
+                Ok(ReadLease {
+                    expires_at_ms: u64::try_from(next_expires)
+                        .map_err(|_| FsError::new(ErrorCode::Eio))?,
+                    ..lease.clone()
+                })
+            })
+            .await
     }
 
     async fn close_view_pin(&self, lease: &ReadLease) -> Result<()> {
         let fence = i64::try_from(lease.fence).map_err(|_| FsError::new(ErrorCode::Estale))?;
         let expires =
             i64::try_from(lease.expires_at_ms).map_err(|_| FsError::new(ErrorCode::Estale))?;
-        let mut connection = self.0.lock()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(backend_error)?;
-        let changed = tx
-            .execute(
-                "DELETE FROM mount_rs_version_pins
+        let this = self.clone();
+        let lease = lease.clone();
+        self.0
+            .run(move |connection| {
+                let lease = &lease;
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(backend_error)?;
+                let changed = tx
+                    .execute(
+                        "DELETE FROM mount_rs_version_pins
                  WHERE view_id=?1 AND volume_id=?2 AND version_id=?3 AND owner=?4
                    AND fence=?5 AND expires=?6 AND ?7=?2 AND ?8=?2",
-                params![
-                    lease.view_id,
-                    self.1.0,
-                    lease.version.encode(),
-                    lease.owner,
-                    fence,
-                    expires,
-                    lease.volume.0,
-                    lease.version.volume.0,
-                ],
-            )
-            .map_err(backend_error)?;
-        if changed == 1 {
-            tx.commit().map_err(backend_error)?;
-            return Ok(());
-        }
-        let exists: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM mount_rs_version_pins WHERE view_id=?1)",
-                params![lease.view_id],
-                |row| row.get(0),
-            )
-            .map_err(backend_error)?;
-        tx.commit().map_err(backend_error)?;
-        if exists {
-            Err(FsError::new(ErrorCode::Estale).with_syscall("close view"))
-        } else {
-            // Missing pins are intentionally idempotent so cleanup after a
-            // provider expiry or an earlier close does not fail the caller.
-            Ok(())
-        }
+                        params![
+                            lease.view_id,
+                            this.1.0,
+                            lease.version.encode(),
+                            lease.owner,
+                            fence,
+                            expires,
+                            lease.volume.0,
+                            lease.version.volume.0,
+                        ],
+                    )
+                    .map_err(backend_error)?;
+                if changed == 1 {
+                    tx.commit().map_err(backend_error)?;
+                    return Ok(());
+                }
+                let exists: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM mount_rs_version_pins WHERE view_id=?1)",
+                        params![lease.view_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(backend_error)?;
+                tx.commit().map_err(backend_error)?;
+                if exists {
+                    Err(FsError::new(ErrorCode::Estale).with_syscall("close view"))
+                } else {
+                    // Missing pins are intentionally idempotent so cleanup after a
+                    // provider expiry or an earlier close does not fail the caller.
+                    Ok(())
+                }
+            })
+            .await
     }
 
     async fn delete_version(&self, lease: &WriterLease, id: &VersionId) -> Result<()> {
@@ -4251,7 +4498,11 @@ impl VersionedMetadataStore for SqliteMetadataStore {
             return Err(FsError::new(ErrorCode::Enoent).with_syscall("delete version"));
         }
         let (fence, expires) = lease_numbers(lease)?;
-        let mut connection = self.0.lock()?;
+        let lease = lease.clone();
+        let id = id.clone();
+        self.0.run(move |connection| {
+            let lease = &lease;
+            let id = &id;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend_error)?;
@@ -4306,6 +4557,7 @@ impl VersionedMetadataStore for SqliteMetadataStore {
         }
         tx.commit().map_err(backend_error)?;
         Ok(())
+        }).await
     }
 }
 
@@ -4344,9 +4596,12 @@ impl BlockStore for SqliteBlockStore {
         let physical = self.0.current_file_stamp()?;
         #[cfg(unix)]
         let physical_path = self.0.current_auxiliary_path()?;
-        let mut connection = self.0.lock()?;
+        let this = self.clone();
+        self.0.run(move |connection| {
+        #[cfg(not(unix))]
+        let _ = &this;
         #[cfg(unix)]
-        self.0.current_file_stamp()?;
+        this.0.current_file_stamp()?;
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(backend_error)?;
@@ -4381,20 +4636,24 @@ impl BlockStore for SqliteBlockStore {
                 .with_message("SQLite block authority belongs to another physical file"));
         }
         #[cfg(unix)]
-        require_matching_auxiliary_path(&self.0, stored_path.as_deref())?;
+        require_matching_auxiliary_path(&this.0, stored_path.as_deref())?;
         #[cfg(not(unix))]
         let _ = (stored_dev, stored_ino, stored_path);
         #[cfg(unix)]
-        self.0.current_file_stamp()?;
+        this.0.current_file_stamp()?;
         tx.commit().map_err(backend_error)?;
         Ok(id)
+        }).await
     }
 
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
         self.require_concurrent_local_backing()?;
-        let connection = self.0.lock()?;
+        let this = self.clone();
+        self.0.run(move |connection| {
+        #[cfg(not(unix))]
+        let _ = &this;
         #[cfg(unix)]
-        let physical = self.0.current_file_stamp()?;
+        let physical = this.0.current_file_stamp()?;
         let row: Option<(String, Option<String>, Option<String>, Option<String>)> = connection
             .query_row(
                 "SELECT backing_id, physical_dev, physical_ino, physical_path FROM mount_rs_block_authority WHERE id=1",
@@ -4404,7 +4663,7 @@ impl BlockStore for SqliteBlockStore {
             .optional()
             .map_err(backend_error)?;
         #[cfg(unix)]
-        self.0.current_file_stamp()?;
+        this.0.current_file_stamp()?;
         #[cfg(unix)]
         let matches = row.as_ref().is_some_and(|(id, dev, ino, _)| {
             id == &expected.to_hex()
@@ -4413,13 +4672,14 @@ impl BlockStore for SqliteBlockStore {
         });
         #[cfg(unix)]
         if let Some((_, _, _, stored_path)) = row.as_ref() {
-            require_matching_auxiliary_path(&self.0, stored_path.as_deref())?;
+            require_matching_auxiliary_path(&this.0, stored_path.as_deref())?;
         }
         #[cfg(not(unix))]
         let matches = row
             .as_ref()
             .is_some_and(|(id, _, _, _)| id == &expected.to_hex());
         if matches { Ok(()) } else { Err(stale()) }
+        }).await
     }
 
     async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
@@ -4428,21 +4688,23 @@ impl BlockStore for SqliteBlockStore {
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let group = &self.1;
-        // Nothing in progress: there is nothing to share a transaction
-        // with, and no reason to copy the block.
-        if let Some(_turn) = group.turn.try_lock() {
-            self.serve_reads();
-            let stored = self.put_alone(bytes).await;
-            self.serve_reads();
-            return stored;
-        }
+        // The job that stores the block runs on the connection's thread
+        // and may outlive this call, so it has its own copy of the bytes.
         let mine = Arc::new(WaitingPut {
             bytes: bytes.to_vec(),
             stored: std::sync::OnceLock::new(),
         });
+        // Nothing in progress: there is nothing to share a transaction
+        // with.
+        if let Some(_turn) = group.turn.try_lock() {
+            self.serve_reads().await;
+            let stored = self.put_alone(&mine).await;
+            self.serve_reads().await;
+            return stored;
+        }
         group.waiting.push(Arc::clone(&mine));
         let _turn = group.turn.lock().await;
-        self.serve_reads();
+        self.serve_reads().await;
         if let Some(stored) = mine.stored.get() {
             return stored.clone();
         }
@@ -4452,31 +4714,22 @@ impl BlockStore for SqliteBlockStore {
             batch.push(waiting);
         }
         // A put that gave up while it had the turn leaves the ones it had
-        // taken off the queue unanswered. They store their own block here.
+        // taken off the queue unanswered, unless its job had stored them.
+        // They store their own block here.
         if !batch.iter().any(|waiting| Arc::ptr_eq(waiting, &mine)) {
             batch.push(Arc::clone(&mine));
         }
-        let blocks: Vec<&[u8]> = batch.iter().map(|waiting| &*waiting.bytes).collect();
-        match self.put_once(&blocks) {
-            Ok(ids) => {
-                for (waiting, id) in batch.iter().zip(ids) {
-                    let _ = waiting.stored.set(Ok(id));
-                }
-            }
-            // Known not to have committed: each block goes on its own, with
-            // the ordinary bounded retries.
-            Err(error) if error.code == ErrorCode::Eagain => {
-                for waiting in &batch {
-                    let _ = waiting.stored.set(self.put_alone(&waiting.bytes).await);
-                }
-            }
-            Err(error) => {
-                for waiting in &batch {
-                    let _ = waiting.stored.set(Err(error.clone()));
-                }
+        // Known not to have committed: each block goes on its own, with
+        // the ordinary bounded retries. Every other outcome was recorded
+        // on the blocks by `put_once`.
+        if let Err(error) = self.put_once(batch.clone()).await
+            && error.code == ErrorCode::Eagain
+        {
+            for waiting in &batch {
+                let _ = waiting.stored.set(self.put_alone(waiting).await);
             }
         }
-        self.serve_reads();
+        self.serve_reads().await;
         mine.stored
             .get()
             .cloned()
@@ -4487,8 +4740,12 @@ impl BlockStore for SqliteBlockStore {
         let group = &self.1;
         // Nothing in progress: read it now.
         if let Some(_turn) = group.turn.try_lock() {
-            self.serve_reads();
-            return Self::get_once(&*self.0.lock()?, id);
+            self.serve_reads().await;
+            let id = id.clone();
+            return self
+                .0
+                .run(move |connection| Self::get_once(connection, &id))
+                .await;
         }
         let mine = Arc::new(WaitingGet {
             id: id.clone(),
@@ -4500,7 +4757,7 @@ impl BlockStore for SqliteBlockStore {
         // comes and it answers itself along with the reads queued since.
         let turn = group.turn.lock_unless(&mine.served).await;
         if turn.is_some() {
-            self.serve_reads();
+            self.serve_reads().await;
         }
         drop(turn);
         match Arc::try_unwrap(mine) {
@@ -4512,17 +4769,21 @@ impl BlockStore for SqliteBlockStore {
     }
 
     async fn flush(&self) -> Result<()> {
-        self.0.flush()
+        self.0.flush().await
     }
 
     async fn delete(&self, id: &BlockId) -> Result<()> {
         let _turn = self.1.turn.lock().await;
-        self.serve_reads();
+        self.serve_reads().await;
+        let id = id.clone();
         self.0
-            .lock()?
-            .execute("DELETE FROM mount_rs_blocks WHERE id=?1", params![id.0])
-            .map_err(backend_error)?;
-        Ok(())
+            .run(move |connection| {
+                connection
+                    .execute("DELETE FROM mount_rs_blocks WHERE id=?1", params![id.0])
+                    .map_err(backend_error)?;
+                Ok(())
+            })
+            .await
     }
 }
 
@@ -4741,24 +5002,12 @@ mod tests {
         storage::{ConcurrentBackingId, NodeData, NodeMetadata},
     };
     use mount_rs_memfs::MemoryFs;
-    use std::{
-        collections::BTreeMap,
-        future::Future,
-        sync::Barrier,
-        task::{Context, Poll, Waker},
-        thread,
-        time::Instant,
-    };
+    use std::{collections::BTreeMap, future::Future, sync::Barrier, thread, time::Instant};
 
+    /// Waits for a store operation. Each one is a job on the connection's
+    /// thread, so its future is pending until that thread has answered.
     fn run<T>(future: impl Future<Output = T>) -> T {
-        let mut future = Box::pin(future);
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(value) => value,
-            Poll::Pending => panic!("SQLite operations must complete synchronously"),
-        }
+        futures_lite::future::block_on(future)
     }
 
     #[test]
@@ -4791,8 +5040,7 @@ mod tests {
         std::fs::create_dir(&owned.0).unwrap();
         let path = owned.0.join("blocks.sqlite");
         let first = SqliteBlockStore::open(&path).unwrap();
-        {
-            let connection = first.0.lock().unwrap();
+        first.0.with(|connection| {
             let journal: String = connection
                 .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
                 .unwrap();
@@ -4800,13 +5048,11 @@ mod tests {
             connection
                 .execute_batch("PRAGMA wal_autocheckpoint=0")
                 .unwrap();
-        }
+        });
         let second = SqliteBlockStore::open(&path).unwrap();
         second
             .0
-            .lock()
-            .unwrap()
-            .execute_batch("PRAGMA wal_autocheckpoint=0")
+            .with(|connection| connection.execute_batch("PRAGMA wal_autocheckpoint=0"))
             .unwrap();
         let initial = b"before the pinned reader".to_vec();
         let initial_id = futures_lite::future::block_on(first.put(&initial)).unwrap();
@@ -4891,14 +5137,19 @@ mod tests {
             for index in 0..64_u8 {
                 let store = if index % 2 == 0 { &first } else { &second };
                 {
-                    let connection = store.0.lock().unwrap();
-                    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    store
+                        .0
+                        .with(|connection| connection.execute_batch("BEGIN IMMEDIATE"))
+                        .unwrap();
                     round_tx.send(usize::from(index)).unwrap();
                     assert_eq!(
                         completed_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
                         usize::from(index),
                     );
-                    connection.execute_batch("ROLLBACK").unwrap();
+                    store
+                        .0
+                        .with(|connection| connection.execute_batch("ROLLBACK"))
+                        .unwrap();
                 }
                 let bytes = vec![index; 4096];
                 let id = futures_lite::future::block_on(store.put(&bytes)).unwrap();
@@ -4966,12 +5217,12 @@ mod tests {
         // remain the audit path for out-of-band payload changes.
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET namespace='not-json' WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET namespace='not-json' WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
         assert!(run(store.load_if_changed(1)).unwrap().is_none());
         assert!(run(store.load()).unwrap_err().is(ErrorCode::Eio));
@@ -4989,12 +5240,12 @@ mod tests {
         let expected = namespace();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET revision=2, namespace=?1 WHERE id=1",
-                params![serde_json::to_string(&expected).unwrap()],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET revision=2, namespace=?1 WHERE id=1",
+                    params![serde_json::to_string(&expected).unwrap()],
+                )
+            })
             .unwrap();
         let changed = run(store.load_if_changed(1)).unwrap().unwrap();
         assert_eq!(changed.revision, 2);
@@ -5011,19 +5262,17 @@ mod tests {
         let store = SqliteMetadataStore::in_memory().unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute_batch("PRAGMA ignore_check_constraints=ON")
+            .with(|connection| connection.execute_batch("PRAGMA ignore_check_constraints=ON"))
             .unwrap();
         for revision in ["-1", "'invalid'", "X'31'"] {
             store
                 .0
-                .lock()
-                .unwrap()
-                .execute(
-                    &format!("UPDATE mount_rs_metadata SET revision={revision} WHERE id=1"),
-                    [],
-                )
+                .with(|connection| {
+                    connection.execute(
+                        &format!("UPDATE mount_rs_metadata SET revision={revision} WHERE id=1"),
+                        [],
+                    )
+                })
                 .unwrap();
             assert!(
                 run(store.load_if_changed(1))
@@ -5033,9 +5282,7 @@ mod tests {
         }
         store
             .0
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM mount_rs_metadata WHERE id=1", [])
+            .with(|connection| connection.execute("DELETE FROM mount_rs_metadata WHERE id=1", []))
             .unwrap();
         assert!(
             run(store.load_if_changed(1))
@@ -5259,15 +5506,13 @@ mod tests {
         let snapshot = run(store.load_inode_snapshot(backing)).unwrap();
         let inode = snapshot.namespace.root + 1;
         let loaded = run(store.load_inode(backing, inode)).unwrap();
-        {
-            let connection = store.0.lock().unwrap();
+        store.0.with(|connection| {
             connection
                 .execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
                 .unwrap();
-        }
+        });
         assert!(run(store.load_inode_if_changed(backing, inode, Some(loaded.version))).is_err());
-        {
-            let connection = store.0.lock().unwrap();
+        store.0.with(|connection| {
             connection
                 .execute(
                     "UPDATE mount_rs_metadata SET fence=?1 WHERE id=1",
@@ -5275,7 +5520,7 @@ mod tests {
                 )
                 .unwrap();
             connection.execute_batch("CREATE TRIGGER abort_inode_rebuild BEFORE INSERT ON mount_rs_inode_guards BEGIN SELECT RAISE(ABORT,'injected structure failure'); END;").unwrap();
-        }
+        });
         assert!(
             run(store.publish_structure_if_versions(
                 backing,
@@ -5285,12 +5530,11 @@ mod tests {
             ))
             .is_err()
         );
-        {
-            let connection = store.0.lock().unwrap();
+        store.0.with(|connection| {
             connection
                 .execute_batch("DROP TRIGGER abort_inode_rebuild")
                 .unwrap();
-        }
+        });
         drop(store);
         let reopened = SqliteMetadataStore::open(&path).unwrap();
         let after = run(reopened.load_inode_snapshot(backing)).unwrap();
@@ -5336,8 +5580,7 @@ mod tests {
         });
         let invalid_layout = serde_json::to_string(&invalid).unwrap();
         for corrupt in ["not JSON".to_owned(), invalid_layout] {
-            let before: (u64, String) = {
-                let connection = store.0.lock().unwrap();
+            let before: (u64, String) = store.0.with(|connection| {
                 connection
                     .execute(
                         "UPDATE mount_rs_inode_guards SET node=?1 WHERE inode=?2",
@@ -5351,7 +5594,7 @@ mod tests {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .unwrap()
-            };
+            });
             assert!(
                 run(store.publish_structure_if_versions(
                     backing,
@@ -5361,7 +5604,7 @@ mod tests {
                 ))
                 .is_err()
             );
-            let connection = store.0.lock().unwrap();
+            store.0.with(|connection| {
             let after: (u64, String) = connection
                 .query_row(
                     "SELECT revision,namespace FROM mount_rs_metadata WHERE id=1",
@@ -5372,6 +5615,7 @@ mod tests {
             let guard: (u64,u64,String) = connection.query_row("SELECT structural_generation,inode_revision,node FROM mount_rs_inode_guards WHERE inode=?1",params![inode.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
             assert_eq!(after, before);
             assert_eq!(guard, (2, 0, corrupt));
+            });
         }
     }
 
@@ -5381,26 +5625,27 @@ mod tests {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
         prepare_inode_metadata(&store);
-        let connection = store.0.lock().unwrap();
-        let mut statement = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {INODE_CONDITIONAL_SQL}"))
-            .unwrap();
-        let plan: Vec<String> = statement
-            .query_map(params!["2", 1, 0], |row| row.get(3))
-            .unwrap()
-            .map(|row| row.unwrap())
-            .collect();
-        assert!(
-            plan.iter()
-                .any(|line| line.contains("COVERING INDEX mount_rs_inode_authority")),
-            "{plan:?}"
-        );
-        assert!(
-            plan.iter()
-                .any(|line| line.contains("SEARCH g USING INDEX")),
-            "{plan:?}"
-        );
-        assert!(!plan.iter().any(|line| line.contains("SCAN")), "{plan:?}");
+        store.0.with(|connection| {
+            let mut statement = connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {INODE_CONDITIONAL_SQL}"))
+                .unwrap();
+            let plan: Vec<String> = statement
+                .query_map(params!["2", 1, 0], |row| row.get(3))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect();
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains("COVERING INDEX mount_rs_inode_authority")),
+                "{plan:?}"
+            );
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains("SEARCH g USING INDEX")),
+                "{plan:?}"
+            );
+            assert!(!plan.iter().any(|line| line.contains("SCAN")), "{plan:?}");
+        });
     }
 
     #[cfg(unix)]
@@ -5424,15 +5669,14 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        {
-            let connection = store.0.lock().unwrap();
+        store.0.with(|connection| {
             connection
                 .execute(
                     "UPDATE mount_rs_metadata SET physical_path='00' WHERE id=1",
                     [],
                 )
                 .unwrap();
-        }
+        });
         assert!(
             run(store.load_inode_if_changed(backing, inode, Some(version)))
                 .unwrap_err()
@@ -5449,7 +5693,7 @@ mod tests {
         let old_revision =
             run(store.publish_bound_if_revision(backing, 0, inode_namespace())).unwrap();
         run(store.prepare_inode_mode(backing, old_revision)).unwrap();
-        let connection = store.0.lock().unwrap();
+        store.0.with(|connection| {
         // Exact pre-MRC4 query: it has no write_mode check. The transition
         // must change the revision and return an old-format-incompatible body.
         let (revision, namespace): (u64, Option<String>) = connection.query_row(
@@ -5467,7 +5711,7 @@ mod tests {
             .unwrap();
         assert!(serde_json::from_str::<Namespace>(&unconditional).is_err());
         assert!(decode_inode_namespace(unconditional.as_bytes()).is_ok());
-        drop(connection);
+        });
         let snapshot = run(store.load_inode_snapshot(backing)).unwrap();
         assert_eq!(snapshot.structural_generation, old_revision + 1);
         let next = run(store.publish_structure_if_versions(
@@ -5477,17 +5721,18 @@ mod tests {
             snapshot.namespace,
         ))
         .unwrap();
-        let connection = store.0.lock().unwrap();
-        let (revision, json): (u64, String) = connection
-            .query_row(
-                "SELECT revision,namespace FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(revision, next);
-        assert!(serde_json::from_str::<Namespace>(&json).is_err());
-        assert!(decode_inode_namespace(json.as_bytes()).is_ok());
+        store.0.with(|connection| {
+            let (revision, json): (u64, String) = connection
+                .query_row(
+                    "SELECT revision,namespace FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(revision, next);
+            assert!(serde_json::from_str::<Namespace>(&json).is_err());
+            assert!(decode_inode_namespace(json.as_bytes()).is_ok());
+        });
     }
 
     #[cfg(unix)]
@@ -5758,9 +6003,7 @@ mod tests {
         // A rollback-journal reader permits BEGIN IMMEDIATE but prevents COMMIT.
         store
             .0
-            .lock()
-            .unwrap()
-            .execute_batch("PRAGMA journal_mode=DELETE")
+            .with(|connection| connection.execute_batch("PRAGMA journal_mode=DELETE"))
             .unwrap();
         let reader = Connection::open(&path).unwrap();
         reader
@@ -5825,16 +6068,14 @@ mod tests {
         let store = SqliteMetadataStore::open(&path).unwrap();
         let backing = prepare_bound_metadata(&store);
         run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap();
-        store.0.lock().unwrap().execute_batch("CREATE TRIGGER ignore_delegation BEFORE UPDATE ON mount_rs_metadata BEGIN SELECT RAISE(IGNORE); END").unwrap();
+        store.0.with(|connection| connection.execute_batch("CREATE TRIGGER ignore_delegation BEFORE UPDATE ON mount_rs_metadata BEGIN SELECT RAISE(IGNORE); END")).unwrap();
         assert!(run(store.prepare_delegated_mode(backing, 1)).is_err());
         store
             .0
-            .lock()
-            .unwrap()
-            .execute_batch("DROP TRIGGER ignore_delegation")
+            .with(|connection| connection.execute_batch("DROP TRIGGER ignore_delegation"))
             .unwrap();
         run(store.prepare_delegated_mode(backing, 1)).unwrap();
-        store.0.lock().unwrap().execute_batch("CREATE TRIGGER ignore_delegation BEFORE UPDATE ON mount_rs_metadata BEGIN SELECT RAISE(IGNORE); END").unwrap();
+        store.0.with(|connection| connection.execute_batch("CREATE TRIGGER ignore_delegation BEFORE UPDATE ON mount_rs_metadata BEGIN SELECT RAISE(IGNORE); END")).unwrap();
         assert!(
             run(store.checkout(&CheckoutRequest {
                 backing,
@@ -5872,35 +6113,35 @@ mod tests {
         let store = SqliteMetadataStore::open(&path).unwrap();
         let volume: String = store
             .0
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
             .unwrap();
         let volume = VolumeId::new(volume).unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807,
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=9223372036854775807,
                 physical_dev=NULL, physical_ino=NULL, physical_path=NULL WHERE id=1",
-                [],
-            )
+                    [],
+                )
+            })
             .unwrap();
         run(store.preflight_trusted_unstamped_mrc1(0, volume.clone())).unwrap();
         // A stamp appearing after advisory preflight must never be overwritten.
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET physical_path='2f6f6c642d70617468' WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET physical_path='2f6f6c642d70617468' WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
         assert_eq!(
             run(store.preflight_trusted_unstamped_mrc1(0, volume.clone()))
@@ -5916,23 +6157,23 @@ mod tests {
         );
         let row: (String, Option<String>, String) = store
             .0
-            .lock()
-            .unwrap()
-            .query_row(
+            .with(|connection| {
+                connection.query_row(
                 "SELECT write_mode, backing_id, physical_path FROM mount_rs_metadata WHERE id=1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
+            })
             .unwrap();
         assert_eq!(row, ("MRC1".into(), None, "2f6f6c642d70617468".into()));
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET physical_path=NULL, revision=1 WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET physical_path=NULL, revision=1 WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
         assert_eq!(
             run(store.migrate_trusted_unstamped_mrc1(test_backing_id(), 0, volume.clone()))
@@ -5943,13 +6184,13 @@ mod tests {
         run(store.migrate_trusted_unstamped_mrc1(test_backing_id(), 1, volume.clone())).unwrap();
         let row: (String, i64, String) = store
             .0
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT volume_id, revision, physical_path FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT volume_id, revision, physical_path FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
             .unwrap();
         assert_eq!(
             row,
@@ -5977,16 +6218,14 @@ mod tests {
         assert_eq!(
             store
                 .0
-                .lock()
-                .unwrap()
-                .execute(
+                .with(|connection| connection.execute(
                     "UPDATE mount_rs_metadata
                      SET write_mode='MRC1', fence=?1, revision=?2, namespace=?3
                      WHERE id=1 AND write_mode IS NULL AND backing_id IS NULL
                        AND revision=0 AND namespace IS NULL AND owner IS NULL
                        AND fence=0 AND expires=0",
                     params![CONCURRENT_FENCE_SENTINEL, revision, namespace],
-                )
+                ))
                 .unwrap(),
             1
         );
@@ -6044,10 +6283,10 @@ mod tests {
         );
         let rows: i64 = first
             .0
-            .lock()
-            .unwrap()
-            .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
-                row.get(0)
+            .with(|connection| {
+                connection.query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+                    row.get(0)
+                })
             })
             .unwrap();
         assert_eq!(rows, 1);
@@ -6108,10 +6347,15 @@ mod tests {
     fn malformed_mrc2_marker_fails_schema_validation() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
-        store.0.lock().unwrap().execute(
+        store
+            .0
+            .with(|connection| {
+                connection.execute(
             "UPDATE mount_rs_metadata SET write_mode='MRC2', backing_id=NULL, fence=?1 WHERE id=1",
             params![CONCURRENT_FENCE_SENTINEL]
-        ).unwrap();
+        )
+            })
+            .unwrap();
         drop(store);
         assert!(SqliteMetadataStore::open(&path).is_err());
         std::fs::remove_file(path).unwrap();
@@ -6157,12 +6401,12 @@ mod tests {
         );
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_version_state SET head_id='occupied' WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_version_state SET head_id='occupied' WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
         assert_eq!(
             run(store.migrate_mrc1_to_bound_mode(id, 1))
@@ -6172,12 +6416,12 @@ mod tests {
         );
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_version_state SET head_id=NULL WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_version_state SET head_id=NULL WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
         run(store.migrate_mrc1_to_bound_mode(id, 1)).unwrap();
         assert_eq!(run(store.load()).unwrap().revision, 1);
@@ -6197,12 +6441,12 @@ mod tests {
         let store = SqliteMetadataStore::in_memory().unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=?1 WHERE id=1",
-                params![CONCURRENT_FENCE_SENTINEL],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=?1 WHERE id=1",
+                    params![CONCURRENT_FENCE_SENTINEL],
+                )
+            })
             .unwrap();
         let id = ConcurrentBackingId::from_bytes([5; 16]).unwrap();
         assert_eq!(
@@ -6298,12 +6542,12 @@ mod tests {
         run(store.prepare_bound_concurrent_mode(id)).unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET owner='stale', fence=0, expires=123 WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET owner='stale', fence=0, expires=123 WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
         assert!(run(store.migrate_mrc1_to_bound_mode(id, 0)).is_err());
         drop(store);
@@ -6341,10 +6585,10 @@ mod tests {
         );
         let markers: i64 = store
             .0
-            .lock()
-            .unwrap()
-            .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
-                row.get(0)
+            .with(|connection| {
+                connection.query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
+                    row.get(0)
+                })
             })
             .unwrap();
         assert_eq!(markers, 0, "rejected alias must not claim authority");
@@ -6377,9 +6621,9 @@ mod tests {
         let store = SqliteMetadataStore::open(&original_path).unwrap();
         let journal: String = store
             .0
-            .lock()
-            .unwrap()
-            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .with(|connection| {
+                connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            })
             .unwrap();
         assert_eq!(journal.to_ascii_lowercase(), "wal");
         let backing = test_backing_id();
@@ -6432,12 +6676,10 @@ mod tests {
         run(store.prepare_bound_concurrent_mode(backing)).unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
+            .with(|connection| connection.execute(
                 "UPDATE mount_rs_metadata SET physical_path=lower(hex(CAST(?1 AS BLOB))) WHERE id=1",
                 params!["/private/tmp/mount-rs-bind-alias.db"],
-            )
+            ))
             .unwrap();
 
         assert_eq!(
@@ -6458,13 +6700,13 @@ mod tests {
         );
         let row: (String, i64) = store
             .0
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT physical_path, revision FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT physical_path, revision FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
             .unwrap();
         assert_eq!(row.1, 0);
         drop(store);
@@ -6494,12 +6736,10 @@ mod tests {
         let backing = run(store.prepare_concurrent_backing()).unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
+            .with(|connection| connection.execute(
                 "UPDATE mount_rs_block_authority SET physical_path=lower(hex(CAST(?1 AS BLOB))) WHERE id=1",
                 params!["/private/tmp/mount-rs-bind-alias.db"],
-            )
+            ))
             .unwrap();
 
         assert_eq!(
@@ -6514,13 +6754,13 @@ mod tests {
         );
         let row: (String, String) = store
             .0
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT backing_id, physical_path FROM mount_rs_block_authority WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT backing_id, physical_path FROM mount_rs_block_authority WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
             .unwrap();
         drop(store);
         match SqliteBlockStore::open(&path) {
@@ -6552,21 +6792,21 @@ mod tests {
         run(metadata.prepare_bound_concurrent_mode(backing)).unwrap();
         metadata
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET physical_path=NULL WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET physical_path=NULL WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
         blocks
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_block_authority SET physical_path=NULL WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_block_authority SET physical_path=NULL WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
 
         assert_eq!(
@@ -6695,49 +6935,50 @@ mod tests {
         let path = super::super::tests::unique_database_path();
         let _cleanup = OwnedFile(path.clone());
         let metadata = SqliteMetadataStore::open(&path).unwrap();
-        let mut connection = metadata.0.lock().unwrap();
-        connection
-            .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA locking_mode=NORMAL;")
-            .unwrap();
-        connection.busy_timeout(Duration::ZERO).unwrap();
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
-        let probe = |expect_busy: bool| {
-            let output = run_linux_sqlite_worker(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--ignored",
-                        "--exact",
-                        "storage::tests::linux_reserved_lock_probe_worker",
-                        "--nocapture",
-                    ])
-                    .env("MOUNT_RS_SQLITE_RESERVED_LOCK_PROBE", &path)
-                    .env(
-                        "MOUNT_RS_SQLITE_LOCK_EXPECT_BUSY",
-                        if expect_busy { "1" } else { "0" },
-                    ),
-            );
+        // One job holds the transaction open across the probes.
+        metadata.0.with(|connection| {
+            connection
+                .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA locking_mode=NORMAL;")
+                .unwrap();
+            connection.busy_timeout(Duration::ZERO).unwrap();
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let probe = |expect_busy: bool| {
+                let output = run_linux_sqlite_worker(
+                    std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--ignored",
+                            "--exact",
+                            "storage::tests::linux_reserved_lock_probe_worker",
+                            "--nocapture",
+                        ])
+                        .env("MOUNT_RS_SQLITE_RESERVED_LOCK_PROBE", &path)
+                        .env(
+                            "MOUNT_RS_SQLITE_LOCK_EXPECT_BUSY",
+                            if expect_busy { "1" } else { "0" },
+                        ),
+                );
+                assert!(
+                    output.status.success(),
+                    "reserved lock probe failed: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            probe(true);
+            metadata
+                .0
+                .require_concurrent_local_file("metadata")
+                .unwrap();
             assert!(
-                output.status.success(),
-                "reserved lock probe failed: {} {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+                !tx.is_autocommit(),
+                "inspection must preserve the SQLite transaction"
             );
-        };
-        probe(true);
-        metadata
-            .0
-            .require_concurrent_local_file("metadata")
-            .unwrap();
-        assert!(
-            !tx.is_autocommit(),
-            "inspection must preserve the SQLite transaction"
-        );
-        probe(true);
-        tx.rollback().unwrap();
-        probe(false);
-        drop(connection);
+            probe(true);
+            tx.rollback().unwrap();
+            probe(false);
+        });
         drop(metadata);
         std::fs::remove_file(path).unwrap();
     }
@@ -6820,10 +7061,12 @@ mod tests {
         let count = || {
             blocks
                 .0
-                .lock()
-                .unwrap()
-                .query_row("SELECT count(*) FROM mount_rs_block_authority", [], |row| {
-                    row.get::<_, i64>(0)
+                .with(|connection| {
+                    connection.query_row(
+                        "SELECT count(*) FROM mount_rs_block_authority",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
                 })
                 .unwrap()
         };
@@ -6860,13 +7103,13 @@ mod tests {
         );
         let row: (Option<String>, Option<String>, i64, Option<String>) = metadata
             .0
-            .lock()
-            .unwrap()
-            .query_row(
+            .with(|connection| {
+                connection.query_row(
                 "SELECT write_mode,backing_id,revision,namespace FROM mount_rs_metadata WHERE id=1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
+            })
             .unwrap();
         assert_eq!(
             row,
@@ -6987,16 +7230,17 @@ mod tests {
         let metadata = SqliteMetadataStore::open(&metadata_path).unwrap();
         let blocks = SqliteBlockStore::open(&blocks_path).unwrap();
         for database in [&metadata.0, &blocks.0] {
-            let connection = database.lock().unwrap();
-            connection
-                .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
-                .unwrap();
-            let checkpoint: (i64, i64, i64) = connection
-                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })
-                .unwrap();
-            assert_eq!(checkpoint, (0, 0, 0));
+            database.with(|connection| {
+                connection
+                    .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+                    .unwrap();
+                let checkpoint: (i64, i64, i64) = connection
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .unwrap();
+                assert_eq!(checkpoint, (0, 0, 0));
+            });
         }
         let backing = run(blocks.prepare_concurrent_backing()).unwrap();
         run(metadata.prepare_bound_concurrent_mode(backing)).unwrap();
@@ -7125,13 +7369,11 @@ mod tests {
         let row: (Option<String>, Option<String>, Option<String>, Option<String>, i64, i64) =
             store
                 .0
-                .lock()
-                .unwrap()
-                .query_row(
+                .with(|connection| connection.query_row(
                     "SELECT write_mode, backing_id, physical_dev, physical_ino, revision, fence FROM mount_rs_metadata WHERE id=1",
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-                )
+                ))
                 .unwrap();
         assert_eq!(row, (None, None, None, None, 0, 0));
         let lease =
@@ -7152,12 +7394,12 @@ mod tests {
         let store = SqliteMetadataStore::open(&path).unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=?1 WHERE id=1",
-                params![CONCURRENT_FENCE_SENTINEL],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET write_mode='MRC1', fence=?1 WHERE id=1",
+                    params![CONCURRENT_FENCE_SENTINEL],
+                )
+            })
             .unwrap();
         assert_eq!(
             run(store.concurrent_mode_state()).unwrap(),
@@ -7171,13 +7413,11 @@ mod tests {
         );
         let row: (String, Option<String>, Option<String>, Option<String>, i64, i64) = store
             .0
-            .lock()
-            .unwrap()
-            .query_row(
+            .with(|connection| connection.query_row(
                 "SELECT write_mode, backing_id, physical_dev, physical_ino, revision, fence FROM mount_rs_metadata WHERE id=1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-            )
+            ))
             .unwrap();
         assert_eq!(
             row,
@@ -7240,16 +7480,14 @@ mod tests {
         let backing = prepare_bound_metadata(&store);
         store
             .0
-            .lock()
-            .unwrap()
-            .busy_timeout(Duration::from_millis(40))
+            .with(|connection| connection.busy_timeout(Duration::from_millis(40)))
             .unwrap();
         let holder = Connection::open(&path).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
 
         let error = run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap_err();
         assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
-        assert!(store.0.lock().unwrap().is_autocommit());
+        assert!(store.0.with(|connection| connection.is_autocommit()));
         holder.execute_batch("ROLLBACK").unwrap();
         let unloaded = run(store.load()).unwrap();
         assert_eq!(unloaded.revision, 0);
@@ -7272,9 +7510,7 @@ mod tests {
         let backing = prepare_bound_metadata(&store);
         store
             .0
-            .lock()
-            .unwrap()
-            .busy_timeout(Duration::from_millis(40))
+            .with(|connection| connection.busy_timeout(Duration::from_millis(40)))
             .unwrap();
         let reader = Connection::open(&path).unwrap();
         reader.execute_batch("BEGIN").unwrap();
@@ -7289,7 +7525,7 @@ mod tests {
 
         let error = run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap_err();
         assert_eq!(error.code, ErrorCode::Eagain, "{error:?}");
-        assert!(store.0.lock().unwrap().is_autocommit());
+        assert!(store.0.with(|connection| connection.is_autocommit()));
         reader.execute_batch("ROLLBACK").unwrap();
         let unloaded = run(store.load()).unwrap();
         assert_eq!(unloaded.revision, 0);
@@ -7322,9 +7558,7 @@ mod tests {
         );
         let timeout: i64 = store
             .0
-            .lock()
-            .unwrap()
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .with(|connection| connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0)))
             .unwrap();
         assert_eq!(timeout, 5000, "scoped CAS timeout must be restored");
         holder.execute_batch("ROLLBACK").unwrap();
@@ -7364,12 +7598,10 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "one CAS contention attempt should be shorter than the default 5s"
         );
-        assert!(store.0.lock().unwrap().is_autocommit());
+        assert!(store.0.with(|connection| connection.is_autocommit()));
         let timeout: i64 = store
             .0
-            .lock()
-            .unwrap()
-            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .with(|connection| connection.query_row("PRAGMA busy_timeout", [], |row| row.get(0)))
             .unwrap();
         assert_eq!(timeout, 5000, "scoped CAS timeout must be restored");
         reader.execute_batch("ROLLBACK").unwrap();
@@ -7423,9 +7655,7 @@ mod tests {
         // Deterministic provider-clock expiration: no timing-sensitive sleeps.
         store
             .0
-            .lock()
-            .unwrap()
-            .execute("UPDATE mount_rs_metadata SET expires=0", [])
+            .with(|connection| connection.execute("UPDATE mount_rs_metadata SET expires=0", []))
             .unwrap();
         assert!(
             run(store.renew_writer(&renewed, Duration::from_secs(60)))
@@ -7461,14 +7691,13 @@ mod tests {
     fn acquire_writer_does_not_acknowledge_a_lease_before_rollback_journal_commit() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
-        {
-            let connection = store.0.lock().unwrap();
+        store.0.with(|connection| {
             let journal: String = connection
                 .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(journal, "delete");
             connection.busy_timeout(Duration::from_millis(40)).unwrap();
-        }
+        });
         let reader = Connection::open(&path).unwrap();
         reader.execute_batch("BEGIN").unwrap();
         let initial: (Option<String>, i64, i64) = reader
@@ -7506,14 +7735,13 @@ mod tests {
         let path = super::super::tests::unique_database_path();
         let store = SqliteMetadataStore::open(&path).unwrap();
         let lease = run(store.acquire_writer("original-owner", Duration::from_secs(30))).unwrap();
-        {
-            let connection = store.0.lock().unwrap();
+        store.0.with(|connection| {
             let journal: String = connection
                 .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(journal, "delete");
             connection.busy_timeout(Duration::from_millis(40)).unwrap();
-        }
+        });
         let reader = Connection::open(&path).unwrap();
         reader.execute_batch("BEGIN").unwrap();
         let initial_expiry: i64 = reader
@@ -7585,28 +7813,28 @@ mod tests {
         let reopened = SqliteMetadataStore::open(&path).unwrap();
         assert_eq!(run(reopened.load()).unwrap().revision, 2);
         run(reopened.prepare_bound_concurrent_mode(backing)).unwrap();
-        let connection = reopened.0.lock().unwrap();
-        let (mode, fence): (Option<String>, i64) = connection
-            .query_row(
-                "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(mode.as_deref(), Some("MRC2"));
-        assert_eq!(fence, i64::MAX);
-        assert_eq!(
-            connection
-                .execute(
-                    "UPDATE mount_rs_metadata SET owner='old', fence=fence+1
-                     WHERE id=1 AND owner IS NULL AND fence<9223372036854775807",
+        reopened.0.with(|connection| {
+            let (mode, fence): (Option<String>, i64) = connection
+                .query_row(
+                    "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
                     [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .unwrap(),
-            0,
-            "the old acquisition query must stay fenced"
-        );
-        drop(connection);
+                .unwrap();
+            assert_eq!(mode.as_deref(), Some("MRC2"));
+            assert_eq!(fence, i64::MAX);
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE mount_rs_metadata SET owner='old', fence=fence+1
+                     WHERE id=1 AND owner IS NULL AND fence<9223372036854775807",
+                        [],
+                    )
+                    .unwrap(),
+                0,
+                "the old acquisition query must stay fenced"
+            );
+        });
         drop(reopened);
         std::fs::remove_file(path).unwrap();
     }
@@ -7632,13 +7860,13 @@ mod tests {
         );
         let (mode, fence): (Option<String>, i64) = store
             .0
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
             .unwrap();
         assert!(mode.is_none());
         assert_eq!(fence, lease.fence as i64);
@@ -7655,9 +7883,9 @@ mod tests {
 
         store
             .0
-            .lock()
-            .unwrap()
-            .execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
+            .with(|connection| {
+                connection.execute("UPDATE mount_rs_metadata SET fence=0 WHERE id=1", [])
+            })
             .unwrap();
         assert!(
             run(store.publish_bound_if_revision(backing, 0, namespace()))
@@ -7667,18 +7895,16 @@ mod tests {
         assert_eq!(run(store.load()).unwrap().revision, 0);
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET fence=9223372036854775807 WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET fence=9223372036854775807 WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute_batch("PRAGMA query_only=ON")
+            .with(|connection| connection.execute_batch("PRAGMA query_only=ON"))
             .unwrap();
         let error = run(store.publish_bound_if_revision(backing, 0, namespace())).unwrap_err();
         assert!(!error.is(ErrorCode::Eagain));
@@ -7723,12 +7949,12 @@ mod tests {
         .unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_metadata SET write_mode='MRC1' WHERE id=1",
-                [],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_metadata SET write_mode='MRC1' WHERE id=1",
+                    [],
+                )
+            })
             .unwrap();
 
         assert!(
@@ -7767,9 +7993,9 @@ mod tests {
                 let path = super::super::tests::unique_database_path();
                 let old = SqliteMetadataStore::open(&path).unwrap();
                 old.0
-                    .lock()
-                    .unwrap()
-                    .execute_batch(&format!("PRAGMA journal_mode={journal};"))
+                    .with(|connection| {
+                        connection.execute_batch(&format!("PRAGMA journal_mode={journal};"))
+                    })
                     .unwrap();
                 let concurrent = SqliteMetadataStore::open(&path).unwrap();
                 let backing = test_backing_id();
@@ -7830,25 +8056,25 @@ mod tests {
         let store = SqliteMetadataStore::open(&path).unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER suppress_concurrent_mode
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER suppress_concurrent_mode
                  BEFORE UPDATE OF write_mode ON mount_rs_metadata
                  BEGIN SELECT RAISE(IGNORE); END;",
-            )
+                )
+            })
             .unwrap();
         let error = run(store.prepare_bound_concurrent_mode(test_backing_id())).unwrap_err();
         assert!(!error.is(ErrorCode::Eagain));
         let (mode, fence): (Option<String>, i64) = store
             .0
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT write_mode, fence FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
             .unwrap();
         assert!(mode.is_none());
         assert_eq!(fence, 0);
@@ -7888,8 +8114,7 @@ mod tests {
     fn block_put_does_not_acknowledge_a_returning_row_before_rollback_journal_commit() {
         let path = super::super::tests::unique_database_path();
         let blocks = SqliteBlockStore::open(&path).unwrap();
-        {
-            let connection = blocks.0.lock().unwrap();
+        blocks.0.with(|connection| {
             connection
                 .execute_batch("PRAGMA journal_mode=DELETE;")
                 .unwrap();
@@ -7898,7 +8123,7 @@ mod tests {
                 .query_row("PRAGMA journal_mode", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(journal, "delete");
-        }
+        });
 
         let reader = Connection::open(&path).unwrap();
         reader.execute_batch("BEGIN;").unwrap();
@@ -7920,9 +8145,9 @@ mod tests {
         let reopened = SqliteBlockStore::open(&path).unwrap();
         let committed_count: i64 = reopened
             .0
-            .lock()
-            .unwrap()
-            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .with(|connection| {
+                connection.query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            })
             .unwrap();
         drop(reopened);
         std::fs::remove_file(&path).unwrap();
@@ -7943,9 +8168,7 @@ mod tests {
         let blocks = SqliteBlockStore::open(&path).unwrap();
         blocks
             .0
-            .lock()
-            .unwrap()
-            .busy_timeout(Duration::from_millis(40))
+            .with(|connection| connection.busy_timeout(Duration::from_millis(40)))
             .unwrap();
         let holder = Connection::open(&path).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -7970,9 +8193,7 @@ mod tests {
         let blocks = SqliteBlockStore::open(&path).unwrap();
         blocks
             .0
-            .lock()
-            .unwrap()
-            .busy_timeout(Duration::from_millis(40))
+            .with(|connection| connection.busy_timeout(Duration::from_millis(40)))
             .unwrap();
         let reader = Connection::open(&path).unwrap();
         reader.execute_batch("BEGIN").unwrap();
@@ -7995,9 +8216,9 @@ mod tests {
         assert_eq!(run(reopened.get(&id)).unwrap(), b"commit-busy-retry");
         let durable_count: i64 = reopened
             .0
-            .lock()
-            .unwrap()
-            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .with(|connection| {
+                connection.query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            })
             .unwrap();
         assert_eq!(
             durable_count, 1,
@@ -8014,9 +8235,7 @@ mod tests {
         let blocks = SqliteBlockStore::open(&path).unwrap();
         blocks
             .0
-            .lock()
-            .unwrap()
-            .busy_timeout(Duration::from_millis(40))
+            .with(|connection| connection.busy_timeout(Duration::from_millis(40)))
             .unwrap();
         let holder = Connection::open(&path).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -8030,14 +8249,14 @@ mod tests {
             "short SQLite busy timeout must bound retries; elapsed_ms={}",
             elapsed.as_millis()
         );
-        assert!(blocks.0.lock().unwrap().is_autocommit());
+        assert!(blocks.0.with(|connection| connection.is_autocommit()));
         holder.execute_batch("ROLLBACK").unwrap();
         let reopened = SqliteBlockStore::open(&path).unwrap();
         let count: i64 = reopened
             .0
-            .lock()
-            .unwrap()
-            .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            .with(|connection| {
+                connection.query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+            })
             .unwrap();
         assert_eq!(count, 0);
         drop(reopened);
@@ -8063,13 +8282,13 @@ mod tests {
         assert!(run(other.get(&b)).unwrap_err().is(ErrorCode::Enoent));
         let tables: u64 = blocks
             .0
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE name='mount_rs_metadata'",
-                [],
-                |row| row.get(0),
-            )
+            .with(|connection| {
+                connection.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name='mount_rs_metadata'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
             .unwrap();
         assert_eq!(tables, 0);
     }
@@ -8111,39 +8330,39 @@ mod tests {
 
         let reopened = SqliteMetadataStore::open(&path).unwrap();
         assert_eq!(reopened.volume_id(), volume);
-        let connection = reopened.0.lock().unwrap();
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT schema_version FROM mount_rs_schema_versions
+        reopened.0.with(|connection| {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT schema_version FROM mount_rs_schema_versions
                      WHERE schema_name=?1",
-                    params![VERSION_SCHEMA_NAME],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            VERSION_SCHEMA_BASE_VERSION
-        );
-        assert!(
-            connection
-                .query_row(
-                    "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
-                    [],
-                    |row| { row.get::<_, Option<String>>(0) }
-                )
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT count(*) FROM mount_rs_version_state WHERE id=1",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            1
-        );
-        drop(connection);
+                        params![VERSION_SCHEMA_NAME],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                VERSION_SCHEMA_BASE_VERSION
+            );
+            assert!(
+                connection
+                    .query_row(
+                        "SELECT write_mode FROM mount_rs_metadata WHERE id=1",
+                        [],
+                        |row| { row.get::<_, Option<String>>(0) }
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM mount_rs_version_state WHERE id=1",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        });
         drop(reopened);
         std::fs::remove_file(path).unwrap();
     }
@@ -8185,13 +8404,11 @@ mod tests {
         assert_eq!(
             reopened
                 .0
-                .lock()
-                .unwrap()
-                .query_row(
+                .with(|connection| connection.query_row(
                     "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
                     params![VERSION_SCHEMA_NAME],
                     |row| row.get::<_, i64>(0),
-                )
+                ))
                 .unwrap(),
             VERSION_SCHEMA_BASE_VERSION
         );
@@ -8201,21 +8418,20 @@ mod tests {
         next.kind = VersionKind::NamespacePublication;
         reopened
             .0
-            .lock()
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER fail_namespace_activation
+            .with(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_namespace_activation
                  BEFORE UPDATE OF revision ON mount_rs_metadata
                  BEGIN SELECT RAISE(ABORT, 'injected activation failure'); END;",
-            )
+                )
+            })
             .unwrap();
         assert!(
             run(reopened.publish_version(&lease, next.clone()))
                 .unwrap_err()
                 .is(ErrorCode::Eio)
         );
-        {
-            let connection = reopened.0.lock().unwrap();
+        reopened.0.with(|connection| {
             assert_eq!(
                 connection
                     .query_row(
@@ -8239,31 +8455,31 @@ mod tests {
             connection
                 .execute_batch("DROP TRIGGER fail_namespace_activation")
                 .unwrap();
-        }
+        });
         let second = run(reopened.publish_version(&lease, next)).unwrap();
         run(reopened.release_writer(&lease)).unwrap();
-        let connection = reopened.0.lock().unwrap();
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
-                    params![VERSION_SCHEMA_NAME],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            VERSION_SCHEMA_VERSION
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT kind FROM mount_rs_versions WHERE id=?1",
-                    params![second.id.encode()],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-            "namespace-publication"
-        );
-        drop(connection);
+        reopened.0.with(|connection| {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
+                        params![VERSION_SCHEMA_NAME],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                VERSION_SCHEMA_VERSION
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT kind FROM mount_rs_versions WHERE id=?1",
+                        params![second.id.encode()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                "namespace-publication"
+            );
+        });
         drop(reopened);
         std::fs::remove_file(path).unwrap();
     }
@@ -8410,13 +8626,13 @@ mod tests {
         let store = SqliteMetadataStore::open(&path).unwrap();
         store
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_schema_versions SET schema_version=99
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_schema_versions SET schema_version=99
                  WHERE schema_name=?1",
-                params![VERSION_SCHEMA_NAME],
-            )
+                    params![VERSION_SCHEMA_NAME],
+                )
+            })
             .unwrap();
         drop(store);
 
@@ -8484,12 +8700,12 @@ mod tests {
 
         metadata
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_version_state SET head_id=?1 WHERE id=1",
-                params![format!("{}:999", metadata.volume_id())],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_version_state SET head_id=?1 WHERE id=1",
+                    params![format!("{}:999", metadata.volume_id())],
+                )
+            })
             .unwrap();
         assert!(run(metadata.version_head()).unwrap_err().is(ErrorCode::Eio));
     }
@@ -8510,12 +8726,12 @@ mod tests {
         );
         metadata
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_versions SET sequence=sequence+1 WHERE id=?1",
-                params![version.id.encode()],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_versions SET sequence=sequence+1 WHERE id=?1",
+                    params![version.id.encode()],
+                )
+            })
             .unwrap();
 
         assert!(run(metadata.version_head()).unwrap_err().is(ErrorCode::Eio));
@@ -8538,12 +8754,12 @@ mod tests {
             .unwrap();
         metadata
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_versions SET sequence=sequence+1 WHERE id=?1",
-                params![version.id.encode()],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_versions SET sequence=sequence+1 WHERE id=?1",
+                    params![version.id.encode()],
+                )
+            })
             .unwrap();
         let result = run(metadata.publish_version(
             &writer,
@@ -8564,12 +8780,12 @@ mod tests {
             .unwrap();
         metadata
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_versions SET namespace='not-json' WHERE id=?1",
-                params![first.id.encode()],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_versions SET namespace='not-json' WHERE id=?1",
+                    params![first.id.encode()],
+                )
+            })
             .unwrap();
         assert!(run(metadata.version_head()).unwrap_err().is(ErrorCode::Eio));
         assert!(
@@ -8606,12 +8822,12 @@ mod tests {
         .unwrap();
         metadata
             .0
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE mount_rs_versions SET namespace='not-json' WHERE id=?1",
-                params![first.id.encode()],
-            )
+            .with(|connection| {
+                connection.execute(
+                    "UPDATE mount_rs_versions SET namespace='not-json' WHERE id=?1",
+                    params![first.id.encode()],
+                )
+            })
             .unwrap();
         assert!(
             run(metadata.open_view_pin(&first.id, reader_request()))
@@ -8620,10 +8836,10 @@ mod tests {
         );
         let pins: i64 = metadata
             .0
-            .lock()
-            .unwrap()
-            .query_row("SELECT count(*) FROM mount_rs_version_pins", [], |row| {
-                row.get(0)
+            .with(|connection| {
+                connection.query_row("SELECT count(*) FROM mount_rs_version_pins", [], |row| {
+                    row.get(0)
+                })
             })
             .unwrap();
         assert_eq!(pins, 0);
@@ -8864,9 +9080,8 @@ mod tests {
         assert_eq!(
             reopened
                 .0
-                .lock()
-                .unwrap()
-                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .with(|connection| connection
+                    .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)))
                 .unwrap(),
             "ok"
         );
@@ -8902,39 +9117,39 @@ mod tests {
     fn change_rows(store: &SqliteMetadataStore) -> i64 {
         store
             .0
-            .lock_unfolded()
-            .unwrap()
-            .query_row(
-                "SELECT count(*) FROM mount_rs_namespace_changes",
-                [],
-                |row| row.get(0),
-            )
+            .with_unfolded(|connection| {
+                connection.query_row(
+                    "SELECT count(*) FROM mount_rs_namespace_changes",
+                    [],
+                    |row| row.get(0),
+                )
+            })
             .unwrap()
     }
 
     fn versioning_schema(store: &SqliteMetadataStore) -> i64 {
         store
             .0
-            .lock_unfolded()
-            .unwrap()
-            .query_row(
-                "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
-                params![VERSION_SCHEMA_NAME],
-                |row| row.get(0),
-            )
+            .with_unfolded(|connection| {
+                connection.query_row(
+                    "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
+                    params![VERSION_SCHEMA_NAME],
+                    |row| row.get(0),
+                )
+            })
             .unwrap()
     }
 
     fn stored_document(store: &SqliteMetadataStore) -> Namespace {
         let json: String = store
             .0
-            .lock_unfolded()
-            .unwrap()
-            .query_row(
-                "SELECT namespace FROM mount_rs_metadata WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
+            .with_unfolded(|connection| {
+                connection.query_row(
+                    "SELECT namespace FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
             .unwrap();
         serde_json::from_str(&json).unwrap()
     }
@@ -9059,10 +9274,12 @@ mod tests {
         assert_eq!(run(store.load()).unwrap().revision, 2);
 
         // Nothing may replace the document underneath the rows.
-        let replaced = store.0.lock_unfolded().unwrap().execute(
-            "UPDATE mount_rs_metadata SET revision=3, namespace='{}' WHERE id=1",
-            [],
-        );
+        let replaced = store.0.with_unfolded(|connection| {
+            connection.execute(
+                "UPDATE mount_rs_metadata SET revision=3, namespace='{}' WHERE id=1",
+                [],
+            )
+        });
         assert!(replaced.unwrap_err().to_string().contains("not folded"));
         assert_eq!(run(store.load()).unwrap().revision, 2);
 
@@ -9079,13 +9296,13 @@ mod tests {
         assert_eq!(change_rows(&store), 1);
         store
             .0
-            .lock_unfolded()
-            .unwrap()
-            .execute(
-                "INSERT INTO mount_rs_namespace_changes(revision, changes)
+            .with_unfolded(|connection| {
+                connection.execute(
+                    "INSERT INTO mount_rs_namespace_changes(revision, changes)
                  SELECT 1, changes FROM mount_rs_namespace_changes",
-                [],
-            )
+                    [],
+                )
+            })
             .unwrap();
         assert!(run(store.load()).unwrap_err().is(ErrorCode::Enotsup));
         assert!(
@@ -9251,7 +9468,7 @@ mod tests {
             std::thread::yield_now();
         }
         // The holder answers both without giving the turn up.
-        store.serve_reads();
+        run(store.serve_reads());
         let mut answers: Vec<_> = readers
             .into_iter()
             .map(|reader| reader.join().unwrap())
@@ -9300,6 +9517,162 @@ mod tests {
         });
         assert!(store.1.reading.is_empty() && store.1.waiting.is_empty());
         drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Keeps the connection's thread busy until the returned sender is
+    /// used, so that jobs sent meanwhile stay queued.
+    fn hold_connection(database: &Database) -> std::sync::mpsc::Sender<()> {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (started, wait_started) = std::sync::mpsc::channel();
+        drop(database.owner.run(move |_| {
+            started.send(()).unwrap();
+            let _ = held.recv();
+        }));
+        wait_started.recv().unwrap();
+        release
+    }
+
+    fn poll_once<T>(future: &mut std::pin::Pin<Box<impl Future<Output = T>>>) -> bool {
+        use std::task::{Context, Waker};
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_ready()
+    }
+
+    #[test]
+    fn a_publication_whose_caller_gave_up_is_still_stored_whole() {
+        let store = SqliteMetadataStore::in_memory().unwrap();
+        let lease = run(store.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let release = hold_connection(&store.0);
+        let mut publication = Box::pin(store.publish(0, &lease, namespace()));
+        assert!(!poll_once(&mut publication));
+        // Cancelled while its job is queued.
+        drop(publication);
+        release.send(()).unwrap();
+        let loaded = run(store.load()).unwrap();
+        assert_eq!(loaded.revision, 1);
+        assert!(loaded.namespace.is_some());
+        // The copy kept for comparison follows what was stored: the next
+        // publication is accepted at the revision the abandoned one made.
+        assert!(
+            run(store.publish(0, &lease, namespace()))
+                .unwrap_err()
+                .is(ErrorCode::Eagain)
+        );
+        assert_eq!(run(store.publish(1, &lease, namespace())).unwrap(), 2);
+        assert_eq!(run(store.load()).unwrap().revision, 2);
+    }
+
+    #[test]
+    fn puts_taken_by_a_holder_that_gave_up_are_stored_once() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteBlockStore::open(&path).unwrap();
+        // The first put queues behind a turn held here; a second joins it.
+        let turn = store.1.turn.try_lock().unwrap();
+        let mut first = Box::pin(store.put(b"first"));
+        assert!(!poll_once(&mut first));
+        let second = {
+            let store = store.clone();
+            thread::spawn(move || futures_lite::future::block_on(store.put(b"second")))
+        };
+        while store.1.waiting.len() < 2 {
+            thread::yield_now();
+        }
+        // The first put gets the turn, takes both blocks and sends one job
+        // for them, which waits behind the held connection.
+        let release = hold_connection(&store.0);
+        drop(turn);
+        assert!(!poll_once(&mut first));
+        assert!(store.1.waiting.is_empty());
+        // It gives up. The turn passes to the second put, which finds its
+        // block unanswered and sends a job of its own.
+        drop(first);
+        release.send(()).unwrap();
+        let second = second.join().unwrap().unwrap();
+        assert_eq!(run(store.get(&second)).unwrap(), b"second");
+        // The abandoned job stored both; the second put's job stored
+        // nothing again.
+        let stored: Vec<Vec<u8>> = store.0.with(|connection| {
+            let mut statement = connection
+                .prepare("SELECT bytes FROM mount_rs_blocks ORDER BY bytes")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect()
+        });
+        assert_eq!(stored, [b"first".to_vec(), b"second".to_vec()]);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_panic_on_the_connection_fails_later_operations_instead_of_hanging_them() {
+        let metadata = SqliteMetadataStore::in_memory().unwrap();
+        let blocks = SqliteBlockStore::in_memory().unwrap();
+        for database in [&metadata.0, &blocks.0] {
+            assert!(
+                database
+                    .owner
+                    .run_blocking(|_| panic!("injected job panic"))
+                    .is_err()
+            );
+        }
+        let poisoned = backend_error("SQLite storage lock poisoned").to_string();
+        assert_eq!(run(metadata.load()).unwrap_err().to_string(), poisoned);
+        assert_eq!(
+            run(metadata.acquire_writer("writer", Duration::from_secs(60)))
+                .unwrap_err()
+                .to_string(),
+            poisoned
+        );
+        assert_eq!(
+            run(MetadataStore::flush(&metadata))
+                .unwrap_err()
+                .to_string(),
+            poisoned
+        );
+        assert_eq!(run(blocks.put(b"block")).unwrap_err().to_string(), poisoned);
+        assert_eq!(
+            run(blocks.get(&BlockId("missing".into())))
+                .unwrap_err()
+                .to_string(),
+            poisoned
+        );
+        // Dropping a poisoned store still ends its thread.
+        drop((metadata, blocks));
+    }
+
+    #[test]
+    fn dropping_the_last_store_handle_closes_the_database_file() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteMetadataStore::open(&path).unwrap();
+        store.0.with(|connection| {
+            let journal: String = connection
+                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal, "wal");
+        });
+        let lease = run(store.acquire_writer("writer", Duration::from_secs(60))).unwrap();
+        let clone = store.clone();
+        // An operation nobody waits for is still finished before the close.
+        let mut abandoned = Box::pin(clone.publish(0, &lease, namespace()));
+        assert!(!poll_once(&mut abandoned));
+        drop(abandoned);
+        drop(clone);
+        let mut wal = path.clone().into_os_string();
+        wal.push("-wal");
+        assert!(Path::new(&wal).exists());
+        drop(store);
+        // The last connection to a WAL database removes the WAL as it
+        // closes, so the close has finished by now.
+        assert!(!Path::new(&wal).exists());
+        let reopened = SqliteMetadataStore::open(&path).unwrap();
+        assert_eq!(run(reopened.load()).unwrap().revision, 1);
+        drop(reopened);
         std::fs::remove_file(path).unwrap();
     }
 }

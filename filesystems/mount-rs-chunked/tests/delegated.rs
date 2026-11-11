@@ -260,7 +260,8 @@ impl MetadataStore for AmbiguousMetadata {
         request: &mount_rs_core::storage::DelegatedCheckin,
     ) -> mount_rs_core::Result<()> {
         self.inner.checkin(request).await?;
-        if self.suspend_release.load(Ordering::SeqCst) {
+        // Clearing the flag tells the test that this point was reached.
+        if self.suspend_release.swap(false, Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
         if self.checkin_error.swap(false, Ordering::SeqCst) {
@@ -395,7 +396,8 @@ impl mount_rs_core::storage::BlockStore for FailedFlushBlocks {
         self.inner.delete(id).await
     }
     async fn flush(&self) -> mount_rs_core::Result<()> {
-        if self.suspend.load(Ordering::SeqCst) {
+        // Clearing the flag tells the test that this point was reached.
+        if self.suspend.swap(false, Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
         if self.fail.load(Ordering::SeqCst) {
@@ -552,11 +554,16 @@ fn actual_future_cancellation_during_checkin_flush_and_release_retries_safely() 
         let grant = fs.delegation_status().await.unwrap().unwrap();
         blocks.suspend.store(true, Ordering::SeqCst);
         let mut checking_in = Box::pin(fs.checkin_scope());
-        assert!(
-            futures_lite::future::poll_once(&mut checking_in)
-                .await
-                .is_none()
-        );
+        // Store operations before the suspended flush are pending until
+        // their provider answers, so poll until the flush is reached.
+        while blocks.suspend.load(Ordering::SeqCst) {
+            assert!(
+                futures_lite::future::poll_once(&mut checking_in)
+                    .await
+                    .is_none()
+            );
+            std::thread::yield_now();
+        }
         drop(checking_in);
         assert_eq!(
             metadata
@@ -578,11 +585,14 @@ fn actual_future_cancellation_during_checkin_flush_and_release_retries_safely() 
         let grant = fs.checkout_scope("/").await.unwrap();
         metadata.suspend_release.store(true, Ordering::SeqCst);
         let mut checking_in = Box::pin(fs.checkin_scope());
-        assert!(
-            futures_lite::future::poll_once(&mut checking_in)
-                .await
-                .is_none()
-        );
+        while metadata.suspend_release.load(Ordering::SeqCst) {
+            assert!(
+                futures_lite::future::poll_once(&mut checking_in)
+                    .await
+                    .is_none()
+            );
+            std::thread::yield_now();
+        }
         drop(checking_in);
         let authority = metadata.inner.delegation_state().await.unwrap().unwrap();
         assert!(authority.grants.is_empty());

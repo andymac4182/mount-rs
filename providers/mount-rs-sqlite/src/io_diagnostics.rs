@@ -1,6 +1,6 @@
 //! Optional SQLite engine counters. These are pager operations, not device IOPS.
+use super::owner::Owner;
 use arc_swap::ArcSwap;
-use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::{Result, backend_error};
 use rusqlite::{Connection, ffi};
 use std::{
@@ -19,8 +19,9 @@ const CATEGORIES: [&str; 9] = [
 const OTHER: usize = 4;
 const PRAGMA: usize = 5;
 
-// Statements run, and samples are taken, with the connection held, so a trace
-// and a sample of one connection never overlap: these need no lock of their own.
+// Statements run, and samples are taken, on the thread that owns the
+// connection, so a trace and a sample of one connection never overlap: these
+// need no lock of their own.
 #[derive(Default)]
 pub(crate) struct Counts {
     sql: [AtomicU64; CATEGORIES.len()],
@@ -31,8 +32,7 @@ pub(crate) struct Counts {
 #[derive(Clone)]
 struct Entry {
     id: u64,
-    connection: Weak<ParkCell<Connection>>,
-    counts: Weak<Counts>,
+    owner: Weak<Owner>,
 }
 // Connections register rarely and only when profiling is on, so each change
 // replaces the list with a copy and the sampler reads it without waiting.
@@ -47,7 +47,7 @@ unsafe extern "C" fn trace(
     if mask != ffi::SQLITE_TRACE_STMT {
         return 0;
     }
-    // Counts is held by every Database clone until after its connection drops.
+    // The connection's thread holds Counts until after it closed the connection.
     let counts = unsafe { &*context.cast::<Counts>() };
     let sql = unsafe { ffi::sqlite3_sql(statement.cast()) };
     let category = if sql.is_null() {
@@ -68,26 +68,26 @@ unsafe extern "C" fn trace(
     counts.seen.fetch_or(1 << category, Ordering::Relaxed);
     0
 }
-/// The entries whose connection and counters are both still alive.
+/// The entries whose connection is still open.
 fn live_entries(entries: &[Entry]) -> Vec<Entry> {
     entries
         .iter()
-        .filter(|entry| entry.connection.strong_count() != 0 && entry.counts.strong_count() != 0)
+        .filter(|entry| entry.owner.strong_count() != 0)
         .cloned()
         .collect()
 }
-pub(crate) fn register(connection: &Arc<ParkCell<Connection>>) -> Result<Option<Arc<Counts>>> {
+/// Installs the statement trace on the owner's connection when profiling is
+/// on. The counters stay with the connection's thread, which drops them
+/// after it has closed the connection.
+pub(crate) fn register(owner: &Arc<Owner>) -> Result<()> {
     if std::env::var("MOUNT_RS_PROFILE_IO").as_deref() != Ok("1") {
-        return Ok(None);
+        return Ok(());
     }
-    let counts = Arc::new(Counts::default());
-    {
-        let connection = connection
-            .lock()
-            .map_err(|()| backend_error("SQLite storage lock poisoned"))?;
+    owner.run_blocking(|state| {
+        let counts = Arc::new(Counts::default());
         let rc = unsafe {
             ffi::sqlite3_trace_v2(
-                connection.handle(),
+                state.connection.handle(),
                 ffi::SQLITE_TRACE_STMT,
                 Some(trace),
                 Arc::as_ptr(&counts).cast_mut().cast(),
@@ -98,11 +98,12 @@ pub(crate) fn register(connection: &Arc<ParkCell<Connection>>) -> Result<Option<
                 "SQLite trace registration failed: {rc}"
             )));
         }
-    }
+        state.counts = Some(counts);
+        Ok(())
+    })??;
     let entry = Entry {
         id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
-        connection: Arc::downgrade(connection),
-        counts: Arc::downgrade(&counts),
+        owner: Arc::downgrade(owner),
     };
     // Registration must stay bounded even when diagnostics are never sampled.
     REGISTRY.rcu(|entries| {
@@ -110,7 +111,7 @@ pub(crate) fn register(connection: &Arc<ParkCell<Connection>>) -> Result<Option<
         entries.push(entry.clone());
         entries
     });
-    Ok(Some(counts))
+    Ok(())
 }
 
 /// Sample/reset SQLite connection pager counters. Byte estimates exclude journal
@@ -159,17 +160,18 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
     let mut samples = Vec::new();
     let mut closed = false;
     for entry in entries.iter() {
-        let mut sample_entry = || {
-            let (Some(connection), Some(counts)) =
-                (entry.connection.upgrade(), entry.counts.upgrade())
-            else {
-                return false;
-            };
-            let Ok(connection) = connection.lock() else {
-                samples.push(serde_json::json!({"error":"SQLite connection poisoned"}));
-                return true;
-            };
-            let sample = connection_page_diagnostics(&connection, reset);
+        // The owner is gone once its last handle was dropped.
+        let Some(owner) = entry.owner.upgrade() else {
+            closed = true;
+            continue;
+        };
+        let id = entry.id;
+        // The sample is one job: nothing else runs on the connection, and
+        // so nothing is traced, between reading the counters and resetting
+        // them.
+        let sample = owner.run_blocking(move |state| {
+            let counts = state.counts.as_ref()?;
+            let sample = connection_page_diagnostics(&state.connection, reset);
             let seen = counts.seen.load(Ordering::Relaxed);
             // Exclude the observer's own PRAGMA page_size statement.
             if sample.is_ok() && seen & (1 << PRAGMA) != 0 {
@@ -188,7 +190,7 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
                 Err(error) => serde_json::json!({"error":error.to_string()}),
             };
             value["sql_statements"] = serde_json::json!(sql.values().sum::<u64>());
-            value["connection_id"] = serde_json::json!(entry.id);
+            value["connection_id"] = serde_json::json!(id);
             value["sql_categories"] = serde_json::json!(sql);
             if reset {
                 for count in &counts.sql {
@@ -196,10 +198,14 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
                 }
                 counts.seen.store(0, Ordering::Relaxed);
             }
-            samples.push(value);
-            true
-        };
-        closed |= !sample_entry();
+            Some(value)
+        });
+        match sample {
+            Ok(Some(value)) => samples.push(value),
+            // Registered entries always have counters.
+            Ok(None) => closed = true,
+            Err(_) => samples.push(serde_json::json!({"error":"SQLite connection poisoned"})),
+        }
     }
     if closed {
         REGISTRY.rcu(|entries| live_entries(entries));
