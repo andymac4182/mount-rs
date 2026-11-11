@@ -757,6 +757,11 @@ struct VfsFileHandle {
     base: ffi::sqlite3_file,
     file: Option<Box<dyn VfsFile>>,
     level: LockLevel,
+    /// A lock upgrade failed part-way, so the file may hold more than
+    /// `level`: an upgrade takes its locks one step at a time and keeps the
+    /// steps it won. SQLite still believes it holds `level`, and releases
+    /// the remainder by unlocking to that same level.
+    upgrade_failed: bool,
     wal_scope: WalScope,
     require_full_sync: bool,
     file_lease: Option<FileLease>,
@@ -895,6 +900,7 @@ unsafe extern "C" fn x_open(
             },
             file: Some(file),
             level: LockLevel::None,
+            upgrade_failed: false,
             wal_scope: app.options.wal_scope,
             require_full_sync: app.options.require_full_sync,
             file_lease: Some(file_lease),
@@ -1350,9 +1356,13 @@ unsafe extern "C" fn x_lock(file: *mut ffi::sqlite3_file, requested: c_int) -> c
         match file_impl.lock(level) {
             Ok(()) => {
                 file.level = level;
+                file.upgrade_failed = false;
                 ffi::SQLITE_OK
             }
-            Err(error) => map_error(error, ffi::SQLITE_IOERR_LOCK),
+            Err(error) => {
+                file.upgrade_failed = true;
+                map_error(error, ffi::SQLITE_IOERR_LOCK)
+            }
         }
     })
 }
@@ -1369,7 +1379,12 @@ unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, requested: c_int) ->
             Ok(operation) => operation,
             Err(error) => return map_error(error, ffi::SQLITE_IOERR_UNLOCK),
         };
-        if level >= file.level {
+        // Unlocking to the level already held is a no-op, except after a
+        // failed upgrade: then it is how SQLite gives back the locks the
+        // upgrade won before it failed. Skipping it would leave this handle
+        // holding the reserved lock and the reader gate, so every other
+        // connection sees SQLITE_BUSY until this one closes.
+        if level > file.level || (level == file.level && !file.upgrade_failed) {
             return ffi::SQLITE_OK;
         }
         let Some(file_impl) = file.file.as_mut() else {
@@ -1378,6 +1393,7 @@ unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, requested: c_int) ->
         match file_impl.unlock(level) {
             Ok(()) => {
                 file.level = level;
+                file.upgrade_failed = false;
                 ffi::SQLITE_OK
             }
             Err(error) => map_error(error, ffi::SQLITE_IOERR_UNLOCK),
@@ -2888,6 +2904,7 @@ mod tests {
             },
             file: Some(Box::new(CountingFile(Arc::clone(&calls)))),
             level: LockLevel::None,
+            upgrade_failed: false,
             wal_scope: WalScope::Disabled,
             require_full_sync: true,
             file_lease: Some(lifecycle.acquire_file().unwrap()),
@@ -2916,6 +2933,100 @@ mod tests {
         );
         assert_eq!(calls.reads.load(Ordering::SeqCst), 1);
         assert_eq!(calls.writes.load(Ordering::SeqCst), 1);
+    }
+
+    /// Takes its locks one step at a time, as the real files do, and is
+    /// refused the exclusive lock.
+    struct ContendedFile(Arc<AtomicUsize>);
+
+    impl ContendedFile {
+        fn record(&self, level: LockLevel) {
+            self.0.store(level.as_sqlite() as usize, Ordering::SeqCst);
+        }
+    }
+
+    impl VfsFile for ContendedFile {
+        fn read_at(&mut self, _output: &mut [u8], _offset: u64) -> Result<usize, VfsError> {
+            Ok(0)
+        }
+        fn write_at(&mut self, _input: &[u8], _offset: u64) -> Result<(), VfsError> {
+            Ok(())
+        }
+        fn truncate(&mut self, _size: u64) -> Result<(), VfsError> {
+            Ok(())
+        }
+        fn sync(&mut self, _data_only: bool) -> Result<(), VfsError> {
+            Ok(())
+        }
+        fn size(&mut self) -> Result<u64, VfsError> {
+            Ok(0)
+        }
+        fn lock(&mut self, level: LockLevel) -> Result<(), VfsError> {
+            if level >= LockLevel::Exclusive {
+                self.record(LockLevel::Pending);
+                return Err(VfsError::Busy);
+            }
+            self.record(level);
+            Ok(())
+        }
+        fn unlock(&mut self, level: LockLevel) -> Result<(), VfsError> {
+            self.record(level);
+            Ok(())
+        }
+        fn check_reserved_lock(&mut self) -> Result<bool, VfsError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn a_failed_upgrade_gives_back_what_it_took_when_sqlite_unlocks() {
+        let backend = Arc::new(HostDirectory::new(std::env::temp_dir()).unwrap());
+        let lifecycle = LifecycleState::new(backend);
+        let held = Arc::new(AtomicUsize::new(0));
+        let mut file = VfsFileHandle {
+            base: ffi::sqlite3_file {
+                pMethods: &IO_METHODS,
+            },
+            file: Some(Box::new(ContendedFile(Arc::clone(&held)))),
+            level: LockLevel::None,
+            upgrade_failed: false,
+            wal_scope: WalScope::Disabled,
+            require_full_sync: true,
+            file_lease: Some(lifecycle.acquire_file().unwrap()),
+        };
+        let file_ptr = &mut file.base;
+        let held_level = || held.load(Ordering::SeqCst) as c_int;
+
+        assert_eq!(
+            unsafe { x_lock(file_ptr, ffi::SQLITE_LOCK_SHARED) },
+            ffi::SQLITE_OK
+        );
+        // Hot-journal recovery goes from shared straight to exclusive. Other
+        // readers are present, so it fails holding the reader gate.
+        assert_eq!(
+            unsafe { x_lock(file_ptr, ffi::SQLITE_LOCK_EXCLUSIVE) },
+            ffi::SQLITE_BUSY
+        );
+        assert_eq!(held_level(), ffi::SQLITE_LOCK_PENDING);
+
+        // SQLite still holds shared as far as it knows, and says so.
+        assert_eq!(
+            unsafe { x_unlock(file_ptr, ffi::SQLITE_LOCK_SHARED) },
+            ffi::SQLITE_OK
+        );
+        assert_eq!(
+            held_level(),
+            ffi::SQLITE_LOCK_SHARED,
+            "the reader gate and reserved lock must not outlive the failed upgrade"
+        );
+
+        // With nothing left over, the same unlock is a no-op again.
+        held.store(usize::MAX, Ordering::SeqCst);
+        assert_eq!(
+            unsafe { x_unlock(file_ptr, ffi::SQLITE_LOCK_SHARED) },
+            ffi::SQLITE_OK
+        );
+        assert_eq!(held.load(Ordering::SeqCst), usize::MAX);
     }
 
     #[test]
