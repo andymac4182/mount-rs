@@ -337,52 +337,30 @@ where
     }
 }
 
-trait CancelWaiter: Send + Sync {
-    fn cancel(&self);
-}
-
-impl<T> CancelWaiter for Completion<T>
-where
-    T: Send + 'static,
-{
-    fn cancel(&self) {
-        self.finish(Err(JsDriverError::closed()));
-    }
-}
-
+/// Cancels every call that is waiting on JavaScript when it fires.
+///
+/// A call subscribes for as long as it waits and holds nothing here, so the
+/// registry does not grow with the number of calls made. Each firing is a
+/// new generation: calls that start afterwards are unaffected, which lets a
+/// handle whose close failed carry on.
 struct WaiterRegistry {
-    waiters: TurnCell<Vec<Weak<dyn CancelWaiter>>>,
+    cancelled: tokio::sync::watch::Sender<u64>,
 }
 
 impl WaiterRegistry {
     fn new() -> Self {
         Self {
-            waiters: TurnCell::new(Vec::new()),
+            cancelled: tokio::sync::watch::Sender::new(0),
         }
     }
 
-    fn add<T>(&self, waiter: &Arc<Completion<T>>)
-    where
-        T: Send + 'static,
-    {
-        let erased: Arc<dyn CancelWaiter> = waiter.clone();
-        let weak = Arc::downgrade(&erased);
-        if let Ok(mut waiters) = self.waiters.lock() {
-            waiters.push(weak);
-        }
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.cancelled.subscribe()
     }
 
     fn cancel_all(&self) {
-        let waiters = self
-            .waiters
-            .lock()
-            .map(|mut waiters| std::mem::take(&mut *waiters))
-            .unwrap_or_default();
-        for waiter in waiters {
-            if let Some(waiter) = waiter.upgrade() {
-                waiter.cancel();
-            }
-        }
+        self.cancelled
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 }
 
@@ -517,7 +495,12 @@ where
         return Err(JsDriverError::closed());
     }
     let completion = Arc::new(Completion::new());
-    owner.add(&completion);
+    let mut cancelled = owner.subscribe();
+    // A shutdown that fired between the check above and subscribing was
+    // missed by this subscription.
+    if lifecycle.is_closed() {
+        return Err(JsDriverError::closed());
+    }
     let completion_for_callback = Arc::clone(&completion);
     let parse_for_callback = Arc::clone(&parse);
     let status = callback.callback.call_with_return_value(
@@ -564,7 +547,18 @@ where
     if status != Status::Ok {
         completion.finish(Err(JsDriverError::new(operation).with_code("EBADF")));
     }
-    CompletionFuture(completion).await
+    let mut completed = std::pin::pin!(CompletionFuture(completion));
+    let mut cancel = std::pin::pin!(cancelled.changed());
+    std::future::poll_fn(move |context| {
+        if let Poll::Ready(result) = completed.as_mut().poll(context) {
+            return Poll::Ready(result);
+        }
+        if cancel.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Err(JsDriverError::closed()));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 fn value_object<'env>(
@@ -2414,8 +2408,8 @@ pub fn create_driver(driver: Object<'_>) -> napi::Result<super::Filesystem> {
             capabilities,
         })),
         shutdown: Some(shutdown),
-        reconcile: TurnCell::new(None),
-        delegation: TurnCell::new(None),
+        reconcile: arc_swap::ArcSwapOption::empty(),
+        delegation: arc_swap::ArcSwapOption::empty(),
         delegated_ownership: false,
         native_delegation_mounts: Arc::new(TurnLock::new(super::DelegatedNativeState::default())),
     })

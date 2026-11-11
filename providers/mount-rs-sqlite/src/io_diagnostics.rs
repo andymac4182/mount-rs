@@ -7,13 +7,25 @@ use std::{
     ffi::{CStr, c_void},
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU16, AtomicU64, Ordering},
     },
 };
 
+/// The statement categories, in the order they are reported.
+const CATEGORIES: [&str; 9] = [
+    "BEGIN", "COMMIT", "DELETE", "INSERT", "OTHER", "PRAGMA", "ROLLBACK", "SELECT", "UPDATE",
+];
+const OTHER: usize = 4;
+const PRAGMA: usize = 5;
+
+// Statements run, and samples are taken, with the connection held, so a trace
+// and a sample of one connection never overlap: these need no lock of their own.
 #[derive(Default)]
 pub(crate) struct Counts {
-    sql: TurnCell<BTreeMap<&'static str, u64>>,
+    sql: [AtomicU64; CATEGORIES.len()],
+    /// One bit per category traced since the last reset: a category is
+    /// reported once seen, even at a count of zero.
+    seen: AtomicU16,
 }
 struct Entry {
     id: u64,
@@ -35,29 +47,21 @@ unsafe extern "C" fn trace(
     let counts = unsafe { &*context.cast::<Counts>() };
     let sql = unsafe { ffi::sqlite3_sql(statement.cast()) };
     let category = if sql.is_null() {
-        "OTHER"
+        OTHER
     } else {
         let text = unsafe { CStr::from_ptr(sql) }.to_bytes();
         let token = text
             .split(|byte| byte.is_ascii_whitespace())
             .next()
             .unwrap_or_default();
-        match token {
-            b"SELECT" => "SELECT",
-            b"INSERT" => "INSERT",
-            b"UPDATE" => "UPDATE",
-            b"DELETE" => "DELETE",
-            b"BEGIN" => "BEGIN",
-            b"COMMIT" => "COMMIT",
-            b"ROLLBACK" => "ROLLBACK",
-            b"PRAGMA" => "PRAGMA",
-            _ => "OTHER",
-        }
+        CATEGORIES
+            .iter()
+            .position(|category| category.as_bytes() == token)
+            .unwrap_or(OTHER)
     };
     // No SQL text, bound values, namespaces, paths, or credentials are retained.
-    if let Ok(mut map) = counts.sql.lock() {
-        *map.entry(category).or_default() += 1;
-    }
+    counts.sql[category].fetch_add(1, Ordering::Relaxed);
+    counts.seen.fetch_or(1 << category, Ordering::Relaxed);
     0
 }
 pub(crate) fn register(connection: &Arc<TurnCell<Connection>>) -> Result<Option<Arc<Counts>>> {
@@ -157,25 +161,31 @@ pub fn sqlite_io_diagnostics(reset: bool) -> serde_json::Value {
             return true;
         };
         let sample = connection_page_diagnostics(&connection, reset);
-        let Ok(mut sql) = counts.sql.lock() else {
-            samples.push(serde_json::json!({"error":"SQLite trace counters poisoned"}));
-            return true;
-        };
+        let seen = counts.seen.load(Ordering::Relaxed);
         // Exclude the observer's own PRAGMA page_size statement.
-        if sample.is_ok()
-            && let Some(count) = sql.get_mut("PRAGMA")
-        {
-            *count = count.saturating_sub(1);
+        if sample.is_ok() && seen & (1 << PRAGMA) != 0 {
+            let count = counts.sql[PRAGMA].load(Ordering::Relaxed);
+            counts.sql[PRAGMA].store(count.saturating_sub(1), Ordering::Relaxed);
         }
+        let sql: BTreeMap<&'static str, u64> = CATEGORIES
+            .iter()
+            .zip(&counts.sql)
+            .enumerate()
+            .filter(|(category, _)| seen & (1 << category) != 0)
+            .map(|(_, (name, count))| (*name, count.load(Ordering::Relaxed)))
+            .collect();
         let mut value = match sample {
             Ok(value) => value,
             Err(error) => serde_json::json!({"error":error.to_string()}),
         };
         value["sql_statements"] = serde_json::json!(sql.values().sum::<u64>());
         value["connection_id"] = serde_json::json!(entry.id);
-        value["sql_categories"] = serde_json::json!(*sql);
+        value["sql_categories"] = serde_json::json!(sql);
         if reset {
-            sql.clear();
+            for count in &counts.sql {
+                count.store(0, Ordering::Relaxed);
+            }
+            counts.seen.store(0, Ordering::Relaxed);
         }
         samples.push(value);
         true

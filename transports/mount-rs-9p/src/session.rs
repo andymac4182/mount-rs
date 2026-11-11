@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use mount_rs_core::drain_gate::DrainGate;
@@ -104,6 +104,52 @@ pub struct P9SessionStats {
     pub messages: HashMap<String, u64>,
 }
 
+/// The counters behind [`P9SessionStats`], each its own atomic so that
+/// counting a message takes no lock. Each counter is exact; a snapshot reads
+/// them one after another.
+struct StatCounters {
+    requests: AtomicU64,
+    replies: AtomicU64,
+    errors: AtomicU64,
+    dropped: AtomicU64,
+    flushed: AtomicU64,
+    assertions: AtomicU64,
+    /// Indexed by the message type byte; named when a snapshot is built.
+    messages: [AtomicU64; 256],
+}
+
+impl StatCounters {
+    fn new() -> Self {
+        Self {
+            requests: AtomicU64::new(0),
+            replies: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            flushed: AtomicU64::new(0),
+            assertions: AtomicU64::new(0),
+            messages: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    fn snapshot(&self) -> P9SessionStats {
+        P9SessionStats {
+            requests: self.requests.load(Ordering::Relaxed),
+            replies: self.replies.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            flushed: self.flushed.load(Ordering::Relaxed),
+            assertions: self.assertions.load(Ordering::Relaxed),
+            // A message type appears once it has been received.
+            messages: (0..=u8::MAX)
+                .filter_map(|type_| {
+                    let count = self.messages[usize::from(type_)].load(Ordering::Relaxed);
+                    (count > 0).then(|| (message_name(type_), count))
+                })
+                .collect(),
+        }
+    }
+}
+
 struct SessionState {
     msize: Option<u32>,
     generation: u64,
@@ -125,7 +171,7 @@ struct SessionInner {
     inflight: TurnCell<HashMap<u16, Arc<Pending>>>,
     path_lock: DrainGate,
     locks: P9LockClient,
-    stats: TurnCell<P9SessionStats>,
+    stats: StatCounters,
     hooks: P9SessionHooks,
     assertions: TurnCell<Vec<String>>,
 }
@@ -181,7 +227,7 @@ impl P9Session {
                 inflight: TurnCell::new(HashMap::new()),
                 path_lock: DrainGate::new(),
                 locks,
-                stats: TurnCell::new(P9SessionStats::default()),
+                stats: StatCounters::new(),
                 hooks,
                 assertions: TurnCell::new(Vec::new()),
             }),
@@ -230,11 +276,7 @@ impl P9Session {
     }
 
     pub fn stats(&self) -> P9SessionStats {
-        self.inner
-            .stats
-            .lock()
-            .expect("9P session mutex poisoned")
-            .clone()
+        self.inner.stats.snapshot()
     }
 
     /// Return debug-mode assertion failures in occurrence order.
@@ -771,28 +813,18 @@ impl P9Session {
     }
 
     fn count_request(&self, _type_: Option<u8>) {
-        self.inner
-            .stats
-            .lock()
-            .expect("9P stats mutex poisoned")
-            .requests += 1;
+        self.inner.stats.requests.fetch_add(1, Ordering::Relaxed);
     }
     fn count_dropped(&self) {
-        self.inner
-            .stats
-            .lock()
-            .expect("9P stats mutex poisoned")
-            .dropped += 1;
+        self.inner.stats.dropped.fetch_add(1, Ordering::Relaxed);
     }
     fn count_message(&self, type_: u8) {
-        let mut stats = self.inner.stats.lock().expect("9P stats mutex poisoned");
-        *stats.messages.entry(message_name(type_)).or_default() += 1;
+        self.inner.stats.messages[usize::from(type_)].fetch_add(1, Ordering::Relaxed);
     }
     fn count_reply(&self, error: bool) {
-        let mut stats = self.inner.stats.lock().expect("9P stats mutex poisoned");
-        stats.replies += 1;
+        self.inner.stats.replies.fetch_add(1, Ordering::Relaxed);
         if error {
-            stats.errors += 1;
+            self.inner.stats.errors.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -806,10 +838,7 @@ impl P9Session {
         if !self.inner.options.debug {
             return;
         }
-        {
-            let mut stats = self.inner.stats.lock().expect("9P stats mutex poisoned");
-            stats.assertions += 1;
-        }
+        self.inner.stats.assertions.fetch_add(1, Ordering::Relaxed);
         self.inner
             .assertions
             .lock()
@@ -829,11 +858,7 @@ impl P9Session {
             .get(&oldtag)
             .cloned();
         if let Some(pending) = pending {
-            self.inner
-                .stats
-                .lock()
-                .expect("9P stats mutex poisoned")
-                .flushed += 1;
+            self.inner.stats.flushed.fetch_add(1, Ordering::Relaxed);
             loop {
                 let notified = pending.notify.notified();
                 tokio::pin!(notified);

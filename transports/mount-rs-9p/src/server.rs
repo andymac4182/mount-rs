@@ -9,8 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use mount_rs_core::FsDriver;
 use mount_rs_core::turn_cell::TurnCell;
@@ -254,7 +254,8 @@ pub struct P9Server {
     serving: AtomicBool,
     next_id: AtomicU64,
     connections: Arc<TurnCell<HashMap<u64, P9Connection>>>,
-    tcp_addr: TurnCell<Option<SocketAddr>>,
+    /// Set once, by the constructor that binds the TCP listener.
+    tcp_addr: OnceLock<SocketAddr>,
     #[cfg(target_os = "linux")]
     adoption: TurnLock<()>,
 }
@@ -318,7 +319,7 @@ impl P9Server {
             serving: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             connections: Arc::new(TurnCell::new(HashMap::new())),
-            tcp_addr: TurnCell::new(None),
+            tcp_addr: OnceLock::new(),
             #[cfg(target_os = "linux")]
             adoption: TurnLock::new(()),
         }
@@ -451,8 +452,8 @@ impl P9Server {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.tcp_addr
-            .lock()
-            .map_err(|_| io::Error::other("TCP address lock poisoned"))?
+            .get()
+            .copied()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "server is not TCP"))
     }
 
@@ -607,10 +608,7 @@ impl P9Server {
         let address = bind_address(&self.options.host, self.options.port);
         let listener = TcpListener::bind(&address).await?;
         let local = listener.local_addr()?;
-        *self
-            .tcp_addr
-            .lock()
-            .map_err(|_| io::Error::other("TCP address lock poisoned"))? = Some(local);
+        let _ = self.tcp_addr.set(local);
         *self.listener.lock().await = Some(P9Listener::Tcp(listener));
         Ok(())
     }

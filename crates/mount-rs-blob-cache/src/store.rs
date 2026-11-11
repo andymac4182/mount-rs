@@ -1,4 +1,5 @@
 use crate::*;
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use mount_rs_core::storage::{BlockReconcileReport, BlockStore};
 use mount_rs_core::turn_cell::TurnCell;
@@ -73,7 +74,9 @@ pub struct DistributedRuntime {
     flights: TurnCell<BTreeMap<String, Weak<TurnLock<()>>>>,
     stopping: AtomicBool,
     stop: tokio::sync::watch::Sender<bool>,
-    worker: TurnCell<Option<tokio::task::JoinHandle<()>>>,
+    // Set once and only ever swapped out, never loaded, so whoever takes it
+    // holds the last pointer.
+    worker: ArcSwapOption<tokio::task::JoinHandle<()>>,
 }
 impl DistributedRuntime {
     pub fn new(
@@ -157,7 +160,7 @@ impl DistributedRuntime {
             advertisement_period,
             stopping: AtomicBool::new(false),
             stop,
-            worker: TurnCell::new(Some(worker)),
+            worker: ArcSwapOption::from_pointee(worker),
         }))
     }
     fn touch(&self, cache: &LocalCache, scope: &Arc<CacheScope>, id: &BlockId, key: &CacheKey) {
@@ -227,7 +230,7 @@ impl DistributedRuntime {
     pub async fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
         let _ = self.stop.send(true);
-        let worker = self.worker.lock().ok().and_then(|mut w| w.take());
+        let worker = self.worker.swap(None).and_then(Arc::into_inner);
         if let Some(mut worker) = worker
             && timeout(self.config.deadline + Duration::from_secs(1), &mut worker)
                 .await
@@ -241,9 +244,7 @@ impl DistributedRuntime {
 impl Drop for DistributedRuntime {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
-        if let Ok(mut worker) = self.worker.lock()
-            && let Some(worker) = worker.take()
-        {
+        if let Some(worker) = self.worker.swap(None).and_then(Arc::into_inner) {
             worker.abort();
         }
     }

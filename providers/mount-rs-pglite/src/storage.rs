@@ -8,6 +8,7 @@
 //! This provider never makes a host-safe-mount claim about the server's data
 //! directory.
 
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use mount_rs_core::diagnostics::profile::{self, Event};
@@ -150,7 +151,7 @@ impl Default for PgliteStorageOptions {
 #[derive(Clone)]
 struct Database {
     client: Arc<TurnLock<Option<Client>>>,
-    connection: Arc<TurnLock<Option<JoinHandle<()>>>>,
+    connection: Arc<ArcSwapOption<JoinHandle<()>>>,
     close_gate: CloseGate,
     volume_key: String,
     durable: bool,
@@ -176,7 +177,7 @@ impl Database {
         });
         let database = Self {
             client: Arc::new(TurnLock::new(Some(client))),
-            connection: Arc::new(TurnLock::new(Some(connection))),
+            connection: Arc::new(ArcSwapOption::from_pointee(connection)),
             close_gate: CloseGate::new(),
             volume_key: options.volume_key,
             durable: options.durable,
@@ -225,7 +226,9 @@ impl Database {
     async fn finish_close(&self) {
         let client = self.client.lock().await.take();
         drop(client);
-        let connection = self.connection.lock().await.take();
+        // Only this one teardown ever reaches the handle, so the swapped-out
+        // pointer is the last one.
+        let connection = self.connection.swap(None).and_then(Arc::into_inner);
         if let Some(connection) = connection {
             let _ = connection.await;
         }

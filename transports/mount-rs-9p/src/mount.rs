@@ -210,11 +210,16 @@ struct MountState {
     /// released. Holding the lock is the release in progress, so the
     /// connection monitor, `wait_closed` and `unmount` run it one at a time
     /// and a caller that arrives second waits for the first to finish.
-    released: TurnLock<bool>,
+    release: TurnLock<Release>,
     server: Arc<P9Server>,
     socket_dir: Option<PathBuf>,
-    serve_task: TurnLock<Option<JoinHandle<io::Result<()>>>>,
     timeout: Option<Duration>,
+}
+
+struct Release {
+    done: bool,
+    /// Joined by the release, which is the only thing that touches it.
+    serve_task: Option<JoinHandle<io::Result<()>>>,
 }
 
 impl P9Mount {
@@ -259,12 +264,12 @@ impl MountState {
     /// Release the server resources once. A failure leaves them marked
     /// unreleased so a later call tries again.
     async fn finish_resources(&self) -> io::Result<()> {
-        let mut released = self.released.lock().await;
-        if *released {
+        let mut release = self.release.lock().await;
+        if release.done {
             return Ok(());
         }
         let server_result = self.server.close().await;
-        if let Some(task) = self.serve_task.lock().await.take() {
+        if let Some(task) = release.serve_task.take() {
             match task.await {
                 Ok(Ok(())) | Ok(Err(_)) | Err(_) => {}
             }
@@ -277,7 +282,7 @@ impl MountState {
             }
         }
         server_result?;
-        *released = true;
+        release.done = true;
         Ok(())
     }
 }
@@ -631,10 +636,12 @@ where
     let state = Arc::new(MountState {
         stopping: AtomicBool::new(false),
         unmount_lock: TurnLock::new(()),
-        released: TurnLock::new(false),
+        release: TurnLock::new(Release {
+            done: false,
+            serve_task,
+        }),
         server: Arc::clone(&server),
         socket_dir,
-        serve_task: TurnLock::new(serve_task),
         timeout: options.unmount_timeout,
     });
     let monitor_state = Arc::clone(&state);

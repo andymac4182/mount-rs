@@ -16,20 +16,24 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
+use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 
 #[cfg(target_os = "linux")]
+use arc_swap::ArcSwapOption;
+#[cfg(target_os = "linux")]
 use futures_util::FutureExt;
 #[cfg(target_os = "linux")]
 use mount_rs_core::ErrorCode;
+#[cfg(target_os = "linux")]
+use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{FsDriver, FsError};
 #[cfg(target_os = "linux")]
 use mount_rs_core::{S_IFDIR, S_IFMT};
-#[cfg(target_os = "linux")]
-use mount_rs_core::{turn_cell::TurnCell, turn_gate::TurnLock};
 #[cfg(target_os = "linux")]
 use tokio::sync::{Notify, watch};
 
@@ -569,8 +573,11 @@ struct MountState {
     helper: Option<PathBuf>,
     lifecycle: watch::Sender<Lifecycle>,
     stop: StopLatch,
-    task: TurnCell<Option<tokio::task::JoinHandle<()>>>,
-    transport_error: TurnCell<Option<String>>,
+    /// Stored once by `set_task` and taken by whichever teardown path gets
+    /// there first; nothing reads it in place, so a swap is enough.
+    task: ArcSwapOption<tokio::task::JoinHandle<()>>,
+    /// The first transport error; later ones do not replace it.
+    transport_error: OnceLock<String>,
     transport_error_reported: AtomicBool,
     hooks: FuseMountHooks,
 }
@@ -595,8 +602,8 @@ impl MountState {
                 mounted: true,
             }),
             stop: StopLatch::new(),
-            task: TurnCell::new(None),
-            transport_error: TurnCell::new(None),
+            task: ArcSwapOption::empty(),
+            transport_error: OnceLock::new(),
             transport_error_reported: AtomicBool::new(false),
             hooks,
         }
@@ -634,10 +641,7 @@ impl MountState {
     }
 
     fn record_transport_error(&self, error: FuseTransportError) {
-        self.transport_error
-            .lock()
-            .expect("transport error lock poisoned")
-            .get_or_insert_with(|| error.message.clone());
+        self.transport_error.get_or_init(|| error.message.clone());
         if self.transport_error_reported.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -647,7 +651,7 @@ impl MountState {
     }
 
     fn set_task(&self, task: tokio::task::JoinHandle<()>) {
-        *self.task.lock().expect("mount task lock poisoned") = Some(task);
+        self.task.store(Some(Arc::new(task)));
     }
 
     fn request_stop(&self) {
@@ -655,7 +659,7 @@ impl MountState {
     }
 
     fn abort_task(&self) {
-        if let Some(task) = self.task.lock().expect("mount task lock poisoned").take() {
+        if let Some(task) = self.task.swap(None).and_then(Arc::into_inner) {
             task.abort();
         }
         // Aborting the owner task drops the device descriptor without giving
@@ -692,9 +696,8 @@ impl MountState {
         }
         Err(self
             .transport_error
-            .lock()
-            .expect("transport error lock poisoned")
-            .clone()
+            .get()
+            .cloned()
             .unwrap_or_else(|| "FUSE session closed before FUSE_INIT".to_owned()))
     }
 
@@ -763,7 +766,7 @@ impl MountState {
                 // lazy detach so a blocked backend future cannot deadlock the
                 // forced phase behind the same request.
                 self.request_stop();
-                let task = self.task.lock().expect("mount task lock poisoned").take();
+                let task = self.task.swap(None).and_then(Arc::into_inner);
                 // Keep the forced phase within the same bounded teardown
                 // contract as the graceful attempt. A third of the
                 // configured timeout leaves margin below the timeout plus
@@ -818,7 +821,7 @@ impl MountState {
                 // handoff; unrelated helper failures remain ordinary errors.
                 self.request_stop();
                 let forced_phase_deadline = Instant::now() + FORCED_STOP_GRACE;
-                let task = self.task.lock().expect("mount task lock poisoned").take();
+                let task = self.task.swap(None).and_then(Arc::into_inner);
                 if let Some(task) = task {
                     // The normal helper returned EBUSY before the session
                     // descriptor had necessarily been dropped. Drain the
@@ -867,7 +870,7 @@ impl MountState {
         };
 
         self.request_stop();
-        let task = self.task.lock().expect("mount task lock poisoned").take();
+        let task = self.task.swap(None).and_then(Arc::into_inner);
         if let Some(task) = task {
             drain_session_task(&self, task, forced_deadline).await;
         }
@@ -2250,11 +2253,7 @@ mod tests {
         assert!(observed[0].message.contains("FUSE"));
         assert!(state.is_closed());
         assert_eq!(
-            state
-                .transport_error
-                .lock()
-                .expect("transport error lock")
-                .as_deref(),
+            state.transport_error.get().map(String::as_str),
             Some(observed[0].message.as_str())
         );
     }
@@ -2417,11 +2416,7 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::Acquire), 1);
         assert_eq!(
-            state
-                .transport_error
-                .lock()
-                .expect("transport error lock")
-                .as_deref(),
+            state.transport_error.get().map(String::as_str),
             Some("first transport failure")
         );
     }
@@ -2793,11 +2788,7 @@ mod tests {
         assert!(!state.is_active());
         assert!(state.is_closed());
         assert_eq!(
-            state
-                .transport_error
-                .lock()
-                .expect("transport error lock")
-                .as_deref(),
+            state.transport_error.get().map(String::as_str),
             Some("FUSE session task panicked")
         );
     }
@@ -3172,13 +3163,7 @@ mod tests {
                 .expect("callback observation lock")
                 .is_empty()
         );
-        assert!(
-            state
-                .transport_error
-                .lock()
-                .expect("transport error lock")
-                .is_none()
-        );
+        assert!(state.transport_error.get().is_none());
     }
 
     #[cfg(target_os = "linux")]

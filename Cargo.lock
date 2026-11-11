@@ -1792,6 +1792,7 @@ dependencies = [
 name = "mount-rs-blob-cache"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "bytes",
  "libc",
@@ -1964,6 +1965,7 @@ dependencies = [
 name = "mount-rs-fuse"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "futures-util",
  "libc",
@@ -2042,6 +2044,7 @@ dependencies = [
 name = "mount-rs-napi"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "mount-rs-9p",
  "mount-rs-auto",
@@ -2075,6 +2078,7 @@ dependencies = [
 name = "mount-rs-nfs"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "mount-rs-chunked",
  "mount-rs-core",
@@ -2131,6 +2135,7 @@ dependencies = [
 name = "mount-rs-pglite"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "md-5 0.10.6",
  "mount-rs-core",
@@ -2243,7 +2248,9 @@ dependencies = [
 name = "mount-rs-s3"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "atomic-waker",
  "axum",
  "base64 0.22.1",
  "chrono",

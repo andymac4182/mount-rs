@@ -32,7 +32,7 @@ use crate::rpc::{
 };
 use crate::session::{
     NfsRequestContext, NfsSessionError, NfsSessionHooks, NfsSessionOptions, NfsSessionStats,
-    SharedNfsState, SharedStats,
+    ProcedureSlot, SharedNfsState, SharedStats,
 };
 use crate::xdr::{XdrError, XdrReader, XdrWriter};
 
@@ -1858,7 +1858,7 @@ impl Nfs4Session {
     }
 
     pub fn stats(&self) -> NfsSessionStats {
-        self.stats.0.lock().expect("NFS stats lock").clone()
+        self.stats.snapshot()
     }
 
     pub fn destroyed(&self) -> bool {
@@ -1870,8 +1870,7 @@ impl Nfs4Session {
     }
 
     fn record_stat_error(&self) {
-        let mut stats = self.stats.0.lock().expect("NFS stats lock");
-        stats.errors = stats.errors.saturating_add(1);
+        self.stats.record_error();
     }
 
     fn destroyed_rpc_reply(&self, xid: u32, peer: Option<&str>) -> Vec<u8> {
@@ -1991,31 +1990,21 @@ impl Nfs4Session {
     pub async fn handle_call(&self, message: &[u8], context: NfsRequestContext) -> Option<Vec<u8>> {
         self.record_request(message);
         let reply = self.handle_call_inner(message, context).await;
-        let mut stats = self.stats.0.lock().expect("NFS stats lock");
         if reply.is_some() {
-            stats.replies = stats.replies.saturating_add(1);
+            self.stats.record_reply();
         } else {
-            stats.dropped = stats.dropped.saturating_add(1);
+            self.stats.record_dropped();
         }
         reply
     }
 
     fn record_request(&self, message: &[u8]) {
-        let mut stats = self.stats.0.lock().expect("NFS stats lock");
-        stats.requests = stats.requests.saturating_add(1);
-        let name = decode_call(message)
-            .ok()
-            .map(|(call, _)| match call.procedure {
-                NFSPROC4_NULL => "NFS4:NULL".to_owned(),
-                NFSPROC4_COMPOUND => "NFS4:COMPOUND".to_owned(),
-                procedure => format!("NFS4:{procedure}"),
-            });
-        if let Some(name) = name {
-            stats
-                .procedures
-                .entry(name)
-                .and_modify(|count| *count = count.saturating_add(1))
-                .or_insert(1);
+        self.stats.record_request();
+        // A procedure number is the client's to choose: every one the
+        // service does not define shares a counter.
+        if let Ok((call, _)) = decode_call(message) {
+            self.stats
+                .record_procedure(ProcedureSlot::v4(call.procedure));
         }
     }
 
@@ -5661,5 +5650,33 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].1, Some(45));
         assert!(observed[0].0.contains("COMPOUND.tag"));
+    }
+
+    #[tokio::test]
+    async fn unknown_procedure_numbers_share_one_stats_bucket() {
+        let session = Nfs4Session::new(MemoryFs::empty(), NfsSessionOptions::default());
+        for procedure in [super::NFSPROC4_NULL, super::NFSPROC4_COMPOUND] {
+            let request = encode_call(1, NFS4_PROGRAM, NFS_V4, procedure, None, None, &[]);
+            session
+                .handle_call(&request, crate::NfsRequestContext::default())
+                .await;
+        }
+        for procedure in 2..66_u32 {
+            let request = encode_call(procedure, NFS4_PROGRAM, NFS_V4, procedure, None, None, &[]);
+            session
+                .handle_call(&request, crate::NfsRequestContext::default())
+                .await;
+        }
+        let stats = session.stats();
+        assert_eq!(stats.requests, 66);
+        // Client-chosen procedure numbers must not each add a key.
+        assert_eq!(
+            stats.procedures,
+            HashMap::from([
+                ("NFS4:NULL".to_owned(), 1),
+                ("NFS4:COMPOUND".to_owned(), 1),
+                ("NFS4:unknown".to_owned(), 64),
+            ])
+        );
     }
 }

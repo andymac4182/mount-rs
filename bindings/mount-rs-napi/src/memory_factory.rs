@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use napi::bindgen_prelude::{Env, Function, JsObjectValue, Object};
@@ -78,8 +77,8 @@ pub fn create_memory_driver(
             root_mode,
         }))),
         shutdown: None,
-        reconcile: TurnCell::new(None),
-        delegation: TurnCell::new(None),
+        reconcile: arc_swap::ArcSwapOption::empty(),
+        delegation: arc_swap::ArcSwapOption::empty(),
         delegated_ownership: false,
         native_delegation_mounts: Arc::new(TurnLock::new(super::DelegatedNativeState::default())),
     })

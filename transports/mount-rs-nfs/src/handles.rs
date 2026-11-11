@@ -681,16 +681,23 @@ pub struct DirectorySnapshot {
 
 #[derive(Clone)]
 pub struct DirectorySnapshots {
-    inner: Arc<TurnCell<HashMap<u64, DirectorySnapshot>>>,
-    order: Arc<TurnCell<VecDeque<u64>>>,
+    state: Arc<TurnCell<SnapshotState>>,
     max: usize,
+}
+
+/// The listings and their least-recently-used order, under one cell so that
+/// every operation changes both together: an id is in `order` exactly when
+/// it is in `map`.
+#[derive(Debug, Default)]
+struct SnapshotState {
+    map: HashMap<u64, Arc<DirectorySnapshot>>,
+    order: VecDeque<u64>,
 }
 
 impl std::fmt::Debug for DirectorySnapshots {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DirectorySnapshots")
-            .field("inner", &CellDebug(&self.inner))
-            .field("order", &CellDebug(&self.order))
+            .field("state", &CellDebug(&self.state))
             .field("max", &self.max)
             .finish()
     }
@@ -699,61 +706,54 @@ impl std::fmt::Debug for DirectorySnapshots {
 impl DirectorySnapshots {
     pub fn new(max: usize) -> Self {
         Self {
-            inner: Arc::new(TurnCell::new(HashMap::new())),
-            order: Arc::new(TurnCell::new(VecDeque::new())),
+            state: Arc::new(TurnCell::new(SnapshotState::default())),
             max: max.max(1),
         }
     }
 
     pub fn set(&self, id: u64, names: Vec<String>) -> DirectorySnapshot {
         let verifier = cookie_verifier(&names);
-        let snapshot = DirectorySnapshot { names, verifier };
-        let mut inner = self.inner.lock().expect("directory snapshot lock");
-        let mut order = self.order.lock().expect("directory snapshot order lock");
-        if inner.contains_key(&id) {
-            order.retain(|candidate| *candidate != id);
-        } else if inner.len() >= self.max
-            && let Some(oldest) = order.pop_front()
+        let snapshot = Arc::new(DirectorySnapshot { names, verifier });
         {
-            inner.remove(&oldest);
+            let mut state = self.state.lock().expect("directory snapshot lock");
+            let state = &mut *state;
+            if state.map.contains_key(&id) {
+                state.order.retain(|candidate| *candidate != id);
+            } else if state.map.len() >= self.max
+                && let Some(oldest) = state.order.pop_front()
+            {
+                state.map.remove(&oldest);
+            }
+            state.map.insert(id, Arc::clone(&snapshot));
+            state.order.push_back(id);
         }
-        inner.insert(id, snapshot.clone());
-        order.push_back(id);
-        snapshot
+        // The listing is copied for the caller after the cell is released.
+        Arc::unwrap_or_clone(snapshot)
     }
 
     pub fn get(&self, id: u64) -> Option<DirectorySnapshot> {
-        let snapshot = self
-            .inner
-            .lock()
-            .expect("directory snapshot lock")
-            .get(&id)
-            .cloned();
-        if snapshot.is_some() {
-            let mut order = self.order.lock().expect("directory snapshot order lock");
-            order.retain(|candidate| *candidate != id);
-            order.push_back(id);
-        }
-        snapshot
+        let snapshot = {
+            let mut state = self.state.lock().expect("directory snapshot lock");
+            let snapshot = state.map.get(&id).cloned()?;
+            state.order.retain(|candidate| *candidate != id);
+            state.order.push_back(id);
+            snapshot
+        };
+        // As in `set`: only the pointer is cloned while the cell is held.
+        Some(Arc::unwrap_or_clone(snapshot))
     }
 
     pub fn invalidate(&self, id: u64) {
-        self.inner
-            .lock()
-            .expect("directory snapshot lock")
-            .remove(&id);
-        self.order
-            .lock()
-            .expect("directory snapshot order lock")
-            .retain(|candidate| *candidate != id);
+        let mut state = self.state.lock().expect("directory snapshot lock");
+        if state.map.remove(&id).is_some() {
+            state.order.retain(|candidate| *candidate != id);
+        }
     }
 
     pub fn clear(&self) {
-        self.inner.lock().expect("directory snapshot lock").clear();
-        self.order
-            .lock()
-            .expect("directory snapshot order lock")
-            .clear();
+        let mut state = self.state.lock().expect("directory snapshot lock");
+        state.map.clear();
+        state.order.clear();
     }
 }
 

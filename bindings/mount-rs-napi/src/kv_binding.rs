@@ -13,7 +13,7 @@ use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use mount_rs_core::turn_cell::TurnCell;
+use arc_swap::ArcSwapOption;
 use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_kv::{KeyValueMetadata, KeyValueStore, UnstorageOptions};
 use napi::bindgen_prelude::{
@@ -398,7 +398,7 @@ struct Callbacks {
 }
 
 struct CallbackSet {
-    callbacks: TurnCell<Option<Callbacks>>,
+    callbacks: ArcSwapOption<Callbacks>,
     closed: AtomicBool,
 }
 
@@ -420,7 +420,7 @@ impl CallbackSet {
             None
         };
         Ok(Self {
-            callbacks: TurnCell::new(Some(Callbacks {
+            callbacks: ArcSwapOption::from_pointee(Callbacks {
                 has_item: Arc::new(build_callback(store, "hasItem")?),
                 get_item_raw: Arc::new(build_callback(store, "getItemRaw")?),
                 set_item_raw: Arc::new(build_callback(store, "setItemRaw")?),
@@ -428,32 +428,27 @@ impl CallbackSet {
                 get_keys: Arc::new(build_callback(store, "getKeys")?),
                 get_keys_bounded,
                 get_meta,
-            })),
+            }),
             closed: AtomicBool::new(false),
         })
     }
 
     fn release(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        // Take the callbacks out and let go of the cell before dropping
-        // them. Once `closed` is set nothing reads the cell again.
-        let callbacks = self
-            .callbacks
-            .lock()
-            .ok()
-            .and_then(|mut callbacks| callbacks.take());
-        drop(callbacks);
+        // A call that already loaded the callbacks keeps them alive until it
+        // has finished with them.
+        drop(self.callbacks.swap(None));
     }
 
     fn callback<T>(&self, get: impl FnOnce(&Callbacks) -> T) -> Result<T, JsStoreError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(JsStoreError::closed());
         }
-        let callbacks = self.callbacks.lock().map_err(|_| JsStoreError {
-            operation: "store",
-            reason: "callback mutex is poisoned".to_owned(),
-        })?;
-        callbacks.as_ref().map(get).ok_or_else(JsStoreError::closed)
+        self.callbacks
+            .load()
+            .as_deref()
+            .map(get)
+            .ok_or_else(JsStoreError::closed)
     }
 }
 
@@ -701,8 +696,8 @@ pub fn create_unstorage_driver(
     Ok(super::Filesystem {
         driver: super::instrument_driver(Arc::new(filesystem)),
         shutdown: Some(shutdown),
-        reconcile: TurnCell::new(None),
-        delegation: TurnCell::new(None),
+        reconcile: arc_swap::ArcSwapOption::empty(),
+        delegation: arc_swap::ArcSwapOption::empty(),
         delegated_ownership: false,
         native_delegation_mounts: Arc::new(TurnLock::new(super::DelegatedNativeState::default())),
     })
