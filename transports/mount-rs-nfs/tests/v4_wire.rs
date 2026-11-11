@@ -4757,6 +4757,130 @@ fn nfs_v4_session_state_is_process_local_after_server_restart() {
 }
 
 #[test]
+fn nfs_v4_client_restart_retires_the_old_instance_when_confirmed() {
+    fn exchange_with_verifier(verifier: &[u8; 8]) -> Vec<u8> {
+        op(OP_EXCHANGE_ID, |writer| {
+            writer.fixed_opaque(verifier, 8);
+            writer.var_opaque(b"mount-rs-v4-restart");
+            writer.u32(0);
+            writer.u32(0);
+            writer.u32(0);
+        })
+    }
+
+    std::thread::Builder::new()
+        .name("nfs-v4-client-restart-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 client restart test runtime")
+                .block_on(async {
+                    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen restart test server");
+                    let mut stream = TcpStream::connect(address)
+                        .await
+                        .expect("connect restart test client");
+                    let first_id = parse_exchange(
+                        rpc(
+                            &mut stream,
+                            601,
+                            compound("exchange", &[exchange_with_verifier(b"boot-one")]),
+                        )
+                        .await,
+                    );
+                    let first_session = parse_create_session(
+                        rpc(
+                            &mut stream,
+                            602,
+                            compound("create-session", &[create_session_args(first_id)]),
+                        )
+                        .await,
+                    );
+                    let mut first = Client {
+                        session: first_session,
+                        clientid: first_id,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    let mut response = rpc(
+                        &mut stream,
+                        603,
+                        compound("first-live", &[sequence(&first)]),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 1), 0);
+
+                    // The same owner comes back with a new boot verifier.
+                    let second_id = parse_exchange(
+                        rpc(
+                            &mut stream,
+                            604,
+                            compound("exchange-restart", &[exchange_with_verifier(b"boot-two")]),
+                        )
+                        .await,
+                    );
+                    assert_ne!(second_id, first_id);
+
+                    // Until the new instance is confirmed, the old one keeps
+                    // working: an EXCHANGE_ID alone must not discard it.
+                    first.sequence = 2;
+                    let mut response = rpc(
+                        &mut stream,
+                        605,
+                        compound("first-still-live", &[sequence(&first)]),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 1), 0);
+
+                    let second_session = parse_create_session(
+                        rpc(
+                            &mut stream,
+                            606,
+                            compound("create-second-session", &[create_session_args(second_id)]),
+                        )
+                        .await,
+                    );
+                    let second = Client {
+                        session: second_session,
+                        clientid: second_id,
+                        sequence: 1,
+                        slot: 0,
+                    };
+
+                    // Confirming the new instance retires the old one and
+                    // everything it held, including its session.
+                    first.sequence = 3;
+                    let mut response = rpc(
+                        &mut stream,
+                        607,
+                        compound("first-retired", &[sequence(&first)]),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 0),
+                        NFS4ERR_BADSESSION,
+                        "the restarted client's old session must not outlive it"
+                    );
+                    let mut response = rpc(
+                        &mut stream,
+                        608,
+                        compound("second-live", &[sequence(&second)]),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 1), 0);
+                    server.close().await.expect("close restart test server");
+                });
+        })
+        .expect("spawn v4 client restart test thread")
+        .join()
+        .expect("v4 client restart test thread");
+}
+
+#[test]
 fn nfs_v4_expired_lease_sweeps_session_state() {
     std::thread::Builder::new()
         .name("nfs-v4-lease-expiry-test".into())

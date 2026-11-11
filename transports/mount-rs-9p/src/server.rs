@@ -186,9 +186,13 @@ impl ConnectionControl {
     }
 
     async fn wait(&self) {
-        while !self.done.load(Ordering::Acquire) {
-            self.closed.notified().await;
+        // Create the waiter before reading the flag: `notify_waiters` keeps
+        // no permit, but it does reach every `Notified` that already exists.
+        let notified = self.closed.notified();
+        if self.done.load(Ordering::Acquire) {
+            return;
         }
+        notified.await;
     }
 }
 

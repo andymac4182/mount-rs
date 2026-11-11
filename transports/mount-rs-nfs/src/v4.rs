@@ -701,7 +701,6 @@ struct V4State {
     next_session: u64,
     next_stateid: u64,
     clients: HashMap<u64, ClientState>,
-    owners: HashMap<Vec<u8>, u64>,
     sessions: HashMap<[u8; NFS4_SESSIONID_SIZE], SessionState>,
     opens: HashMap<[u8; NFS4_OTHER_SIZE], OpenState>,
     locks: HashMap<[u8; NFS4_OTHER_SIZE], LockState>,
@@ -714,7 +713,61 @@ impl V4State {
         self.next_stateid = token.checked_add(1)?;
         Some(server_stateid(1, self.seed, token))
     }
+
+    /// Remove a client and everything it holds: its sessions, locks and
+    /// opens. Lease expiry, a client restart and DESTROY_CLIENTID all end a
+    /// client here, so none of them can leave state behind that keeps
+    /// blocking other clients. The opens' backend handles are returned for
+    /// the caller to release once the state lock is dropped.
+    fn retire_client(&mut self, clientid: u64, released: &mut RetiredOpens) -> bool {
+        if self.clients.remove(&clientid).is_none() {
+            return false;
+        }
+        self.sessions
+            .retain(|_, session| session.clientid != clientid);
+        self.locks.retain(|_, lock| lock.clientid != clientid);
+        let open_ids = self
+            .opens
+            .iter()
+            .filter_map(|(other, open)| (open.clientid == clientid).then_some(*other))
+            .collect::<Vec<_>>();
+        for other in open_ids {
+            if let Some(open) = self.opens.remove(&other) {
+                released.push((open.handle_id, open.into_handles()));
+            }
+        }
+        true
+    }
+
+    /// Retire every other record of `owner`, optionally only unconfirmed
+    /// ones. A client instance is identified by its owner string and boot
+    /// verifier; at most one confirmed and one unconfirmed instance of an
+    /// owner exist at a time.
+    fn retire_other_instances(
+        &mut self,
+        owner: &[u8],
+        keep: Option<u64>,
+        only_unconfirmed: bool,
+        released: &mut RetiredOpens,
+    ) {
+        let stale = self
+            .clients
+            .values()
+            .filter(|client| {
+                client.owner == owner
+                    && Some(client.id) != keep
+                    && !(only_unconfirmed && client.confirmed)
+            })
+            .map(|client| client.id)
+            .collect::<Vec<_>>();
+        for clientid in stale {
+            self.retire_client(clientid, released);
+        }
+    }
 }
+
+/// Pinned handle id and backend handles of each open a retired client held.
+type RetiredOpens = Vec<(u64, Vec<Arc<dyn FileHandle>>)>;
 
 #[derive(Debug, Clone)]
 struct ExclusiveV4 {
@@ -1867,38 +1920,27 @@ impl Nfs4Session {
                     self.expired(client.renewed, now).then_some(*clientid)
                 })
                 .collect::<Vec<_>>();
-            let mut handles = Vec::new();
+            let mut handles = RetiredOpens::new();
             let mut removed = 0;
             for clientid in expired {
-                if state.clients.remove(&clientid).is_none() {
-                    continue;
+                if state.retire_client(clientid, &mut handles) {
+                    removed += 1;
                 }
-                state.owners.retain(|_, owner| *owner != clientid);
-                state
-                    .sessions
-                    .retain(|_, session| session.clientid != clientid);
-                state.locks.retain(|_, lock| lock.clientid != clientid);
-                let open_ids = state
-                    .opens
-                    .iter()
-                    .filter_map(|(other, open)| (open.clientid == clientid).then_some(*other))
-                    .collect::<Vec<_>>();
-                for other in open_ids {
-                    if let Some(open) = state.opens.remove(&other) {
-                        handles.push((open.handle_id, open.into_handles()));
-                    }
-                }
-                removed += 1;
             }
             (removed, handles)
         };
-        for (handle_id, backend_handles) in handles {
+        self.release_opens(handles).await;
+        removed
+    }
+
+    /// Unpin and close the backend handles of opens removed from the state.
+    async fn release_opens(&self, released: RetiredOpens) {
+        for (handle_id, backend_handles) in released {
             self.handles.unpin(handle_id);
             for handle in backend_handles {
                 let _ = handle.close().await;
             }
         }
-        removed
     }
 
     /// Sweep expired NFSv4 clients and release their process-local state.
@@ -1917,7 +1959,6 @@ impl Nfs4Session {
         let open_handles = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             state.clients.clear();
-            state.owners.clear();
             state.sessions.clear();
             let open_handles = state
                 .opens
@@ -2648,19 +2689,24 @@ impl Nfs4Session {
         if owner.is_empty() {
             return V4OpResult::new(OP_EXCHANGE_ID, NFS4ERR_BADOWNER);
         }
+        let mut released = RetiredOpens::new();
         let (clientid, confirmed) = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
-            if let Some(existing) = state.owners.get(owner).copied()
-                && let Some(client) = state.clients.get(&existing)
-                && client.verifier == *verifier
+            if let Some(client) = state
+                .clients
+                .values()
+                .find(|client| client.owner == *owner && client.verifier == *verifier)
             {
-                (existing, client.confirmed)
+                (client.id, client.confirmed)
             } else {
                 let id = seeded_counter(state.seed, state.next_clientid);
                 state.next_clientid = state.next_clientid.saturating_add(1).max(1);
-                if let Some(previous) = state.owners.insert(owner.clone(), id) {
-                    state.clients.remove(&previous);
-                }
+                // A new verifier is a new instance of this owner. It replaces
+                // an unconfirmed instance at once. A confirmed instance keeps
+                // its state until the new one is confirmed by CREATE_SESSION
+                // (RFC 8881 section 18.35.5), so an unauthenticated
+                // EXCHANGE_ID alone cannot discard a working client.
+                state.retire_other_instances(owner, None, true, &mut released);
                 state.clients.insert(
                     id,
                     ClientState {
@@ -2677,6 +2723,7 @@ impl Nfs4Session {
                 (id, false)
             }
         };
+        self.release_opens(released).await;
         let mut body = XdrWriter::with_capacity(128 + owner.len());
         body.u64(clientid);
         body.u32(1);
@@ -2712,7 +2759,8 @@ impl Nfs4Session {
         // flags and returns csr_flags=0 because this server implements no
         // persistent session cache, callback channel, or RDMA transport.
         let response_flags = *flags & SERVER_CREATE_SESSION_FLAGS;
-        {
+        let mut released = RetiredOpens::new();
+        let result = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let Some(client) = state.clients.get(clientid) else {
                 return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_STALE_CLIENTID);
@@ -2762,9 +2810,16 @@ impl Nfs4Session {
                 .clients
                 .get_mut(clientid)
                 .expect("validated client while holding state lock");
+            let newly_confirmed = !client.confirmed;
             client.confirmed = true;
             client.sequence = client.sequence.wrapping_add(1);
             client.renewed = self.now();
+            if newly_confirmed {
+                // Confirming this instance ends every earlier instance of the
+                // same owner, together with the state it left behind.
+                let owner = client.owner.clone();
+                state.retire_other_instances(&owner, Some(*clientid), false, &mut released);
+            }
             let counter = state.next_session;
             state.next_session = state.next_session.saturating_add(1).max(1);
             let id = session_id(self.options.nfs4.seed, &self.write_verifier, counter);
@@ -2841,7 +2896,9 @@ impl Nfs4Session {
                 result: result.clone(),
             });
             result
-        }
+        };
+        self.release_opens(released).await;
+        result
     }
 
     async fn destroy_session(&self, raw_id: &[u8]) -> V4OpResult {
@@ -2898,6 +2955,7 @@ impl Nfs4Session {
     }
 
     async fn destroy_clientid(&self, clientid: u64) -> V4OpResult {
+        let mut released = RetiredOpens::new();
         let status = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             if state
@@ -2907,13 +2965,13 @@ impl Nfs4Session {
                 || state.locks.values().any(|lock| lock.clientid == clientid)
             {
                 NFS4ERR_CLIENTID_BUSY
-            } else if let Some(client) = state.clients.remove(&clientid) {
-                state.owners.remove(&client.owner);
+            } else if state.retire_client(clientid, &mut released) {
                 NFS4_OK
             } else {
                 NFS4ERR_STALE_CLIENTID
             }
         };
+        self.release_opens(released).await;
         V4OpResult::new(OP_DESTROY_CLIENTID, status)
     }
 

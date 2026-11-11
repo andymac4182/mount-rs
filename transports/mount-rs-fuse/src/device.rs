@@ -23,6 +23,10 @@ pub const fn read_buffer_size(max_request: usize) -> usize {
 
 /// A single FUSE device connection.
 pub struct FuseDevice {
+    // Declared before `io` so the descriptor leaves the registry before it
+    // is closed and its number can be reused.
+    #[cfg(target_os = "linux")]
+    _registered: RegisteredDevice,
     #[cfg(target_os = "linux")]
     io: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
     max_frame: usize,
@@ -33,6 +37,67 @@ impl std::fmt::Debug for FuseDevice {
         f.debug_struct("FuseDevice")
             .field("max_frame", &self.max_frame)
             .finish_non_exhaustive()
+    }
+}
+
+/// Descriptor numbers of the FUSE devices this process has open, so a child
+/// can drop its inherited copies before `exec`.
+///
+/// `O_CLOEXEC` is not enough. `exec` closes close-on-exec descriptors one at
+/// a time in ascending order, and closing a file that lives on a FUSE mount
+/// sends `FUSE_FLUSH` and waits for the answer. If that mount's session has
+/// stopped, the request can only end when the connection is aborted, which
+/// happens when the last copy of its device descriptor is closed. A child
+/// that inherited both the file and a higher-numbered device descriptor
+/// would wait on the flush while holding the descriptor that keeps the
+/// connection alive: it never reaches `exec`, and the unmount helper it was
+/// meant to become never runs.
+#[cfg(target_os = "linux")]
+static OPEN_DEVICES: [std::sync::atomic::AtomicI32; MAX_REGISTERED_DEVICES] =
+    [const { std::sync::atomic::AtomicI32::new(-1) }; MAX_REGISTERED_DEVICES];
+
+/// Devices beyond this many are not registered and keep the old behavior.
+#[cfg(target_os = "linux")]
+const MAX_REGISTERED_DEVICES: usize = 256;
+
+/// One slot of [`OPEN_DEVICES`], released on drop.
+#[cfg(target_os = "linux")]
+struct RegisteredDevice(Option<usize>);
+
+#[cfg(target_os = "linux")]
+impl RegisteredDevice {
+    fn new(fd: std::os::fd::RawFd) -> Self {
+        use std::sync::atomic::Ordering;
+        Self(OPEN_DEVICES.iter().position(|slot| {
+            slot.compare_exchange(-1, fd, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for RegisteredDevice {
+    fn drop(&mut self) {
+        if let Some(slot) = self.0 {
+            OPEN_DEVICES[slot].store(-1, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// Close this process's copies of every registered FUSE device.
+///
+/// Call it only in a forked child before `exec`: it closes descriptors the
+/// parent still uses. It reads atomics and calls `close(2)`, both of which
+/// are async-signal-safe.
+#[cfg(target_os = "linux")]
+pub(crate) fn close_inherited_devices() {
+    for slot in &OPEN_DEVICES {
+        let fd = slot.load(std::sync::atomic::Ordering::Acquire);
+        if fd >= 0 {
+            // SAFETY: the child owns its copy of the descriptor table, and
+            // nothing in the child uses these descriptors before `exec`.
+            unsafe { libc::close(fd) };
+        }
     }
 }
 
@@ -51,7 +116,8 @@ impl FuseDevice {
             let path = path_to_cstring(path.as_ref())?;
             // FUSE is a Linux character device.  O_NONBLOCK is required by
             // AsyncFd; O_CLOEXEC prevents a helper or unrelated child from
-            // keeping the kernel connection alive.
+            // keeping the kernel connection alive once it has run `exec`.
+            // `close_inherited_devices` covers the time before that.
             let fd = unsafe {
                 libc::open(
                     path.as_ptr(),
@@ -85,8 +151,13 @@ impl FuseDevice {
 
         validate_max_frame(max_frame)?;
         set_nonblocking(fd.as_raw_fd())?;
+        let registered = RegisteredDevice::new(fd.as_raw_fd());
         let io = tokio::io::unix::AsyncFd::new(fd)?;
-        Ok(Self { io, max_frame })
+        Ok(Self {
+            _registered: registered,
+            io,
+            max_frame,
+        })
     }
 
     /// Maximum number of bytes accepted from one device read.

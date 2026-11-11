@@ -16,7 +16,6 @@ use mount_rs_core::FsDriver;
 use mount_rs_core::turn_gate::TurnLock;
 #[cfg(target_os = "linux")]
 use tokio::process::Command;
-use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 #[cfg(target_os = "linux")]
 use tokio::time::timeout;
@@ -206,11 +205,12 @@ pub struct P9Mount {
 
 struct MountState {
     stopping: AtomicBool,
-    teardown_started: AtomicBool,
     unmount_lock: TurnLock<()>,
-    done: AtomicBool,
-    complete: Notify,
-    failure: TurnLock<Option<String>>,
+    /// Whether the server, its serve task and the socket directory have been
+    /// released. Holding the lock is the release in progress, so the
+    /// connection monitor, `wait_closed` and `unmount` run it one at a time
+    /// and a caller that arrives second waits for the first to finish.
+    released: TurnLock<bool>,
     server: Arc<P9Server>,
     socket_dir: Option<PathBuf>,
     serve_task: TurnLock<Option<JoinHandle<io::Result<()>>>>,
@@ -228,16 +228,8 @@ impl P9Mount {
     pub async fn wait_closed(&self) {
         self.connection.wait_closed().await;
         self.state.stopping.store(true, Ordering::Release);
-        if self
-            .state
-            .teardown_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            let result = self.state.finish_resources().await;
-            self.state.record_result(result).await;
-        }
-        self.wait_completion().await;
+        // A failed release is reported by `unmount`, which retries it.
+        let _ = self.state.finish_resources().await;
     }
 
     /// Unmount idempotently, including after [`P9Mount::wait_closed`] has
@@ -249,14 +241,11 @@ impl P9Mount {
         self.state.stopping.store(true, Ordering::Release);
         let result = self.unmount_once().await;
         if let Err(error) = &result {
-            self.state.failure.lock().await.replace(error.to_string());
             // The mount is still live, so keep answering it and allow a later
             // call to retry after the process holding the mount lets go.
             self.state.stopping.store(false, Ordering::Release);
             return Err(io::Error::other(error.to_string()));
         }
-        self.state.done.store(true, Ordering::Release);
-        self.state.complete.notify_waiters();
         result
     }
 
@@ -267,7 +256,13 @@ impl P9Mount {
 }
 
 impl MountState {
+    /// Release the server resources once. A failure leaves them marked
+    /// unreleased so a later call tries again.
     async fn finish_resources(&self) -> io::Result<()> {
+        let mut released = self.released.lock().await;
+        if *released {
+            return Ok(());
+        }
         let server_result = self.server.close().await;
         if let Some(task) = self.serve_task.lock().await.take() {
             match task.await {
@@ -281,23 +276,9 @@ impl MountState {
                 Err(error) => return Err(error),
             }
         }
-        server_result
-    }
-
-    async fn record_result(&self, result: io::Result<()>) {
-        if let Err(error) = result {
-            self.failure.lock().await.replace(error.to_string());
-        }
-        self.done.store(true, Ordering::Release);
-        self.complete.notify_waiters();
-    }
-}
-
-impl P9Mount {
-    async fn wait_completion(&self) {
-        while !self.state.done.load(Ordering::Acquire) {
-            self.state.complete.notified().await;
-        }
+        server_result?;
+        *released = true;
+        Ok(())
     }
 }
 
@@ -649,11 +630,8 @@ where
     let connection_for_monitor = connection.clone();
     let state = Arc::new(MountState {
         stopping: AtomicBool::new(false),
-        teardown_started: AtomicBool::new(false),
         unmount_lock: TurnLock::new(()),
-        done: AtomicBool::new(false),
-        complete: Notify::new(),
-        failure: TurnLock::new(None),
+        released: TurnLock::new(false),
         server: Arc::clone(&server),
         socket_dir,
         serve_task: TurnLock::new(serve_task),
@@ -662,15 +640,8 @@ where
     let monitor_state = Arc::clone(&state);
     tokio::spawn(async move {
         connection_for_monitor.wait_closed().await;
-        if monitor_state
-            .teardown_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            monitor_state.stopping.store(true, Ordering::Release);
-            let result = monitor_state.finish_resources().await;
-            monitor_state.record_result(result).await;
-        }
+        monitor_state.stopping.store(true, Ordering::Release);
+        let _ = monitor_state.finish_resources().await;
     });
     let mount = P9Mount {
         mountpoint,
