@@ -219,8 +219,11 @@ counterexamples are below. A lock with no counterexample was removed.
 `python3 scripts/lock-inventory.py` lists every lock field, static and
 type alias in production code and fails if one is not named in a row for
 its crate below, so a new lock cannot be added without a reason written
-here. Production code has no standard-library, `parking_lot` or `tokio`
-lock; every mention of one is in test code. One lock is not a field and
+here. It also fails on any production line that names a standard-library
+or `parking_lot` lock at all, whether or not the line is a field, so a
+local variable or a renamed import is caught too. CI runs it. Production
+code has no standard-library, `parking_lot` or `tokio` lock; every mention
+of one is in test code. One lock is not a field and
 is listed by hand: the Node 9P fid table.
 
 **Kind** says what the lock is for:

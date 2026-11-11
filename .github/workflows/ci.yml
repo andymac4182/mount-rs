@@ -791,6 +791,11 @@ jobs:
       - name: Check every lock file matches its manifest
         if: runner.os == 'Linux'
         run: sh scripts/check-lockfiles.sh
+      # A lock added to production code must be named, with its reason, in
+      # docs/production-readiness.md; a standard-library lock is refused.
+      - name: Check every lock is accounted for
+        if: runner.os == 'Linux'
+        run: python3 scripts/lock-inventory.py
       # Native optional providers have separate client/runtime gates. Keeping
       # this matrix feature-off prevents a client-free macOS/Linux runner from
       # attempting to link libfdb_c while still checking every workspace target.
