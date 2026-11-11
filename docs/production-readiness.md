@@ -145,32 +145,83 @@ nothing a cheaper primitive could not guard was removed.
 | Peer listener counter registry, blob-cache active scope | An atomic pointer to a replaced-whole value |
 | Node JavaScript call result and waker | A one-shot channel whose sender is taken once |
 | Node shutdown state machine | A compare-and-swap between phases, with the callback in its own slot |
+| 9P and S3 assertion logs | `AppendLog`, a push-only list read without a lock |
+| Blob-cache flush gate | Nothing: the write gate already orders flushes, and cache fills are keyed by a content-checked id |
+| PGlite state-store client | An atomic pointer; closing swaps it out and waits for the connection to end |
 
 Fixed keys mean a client can no longer grow a counter map: undefined NFS and
 MOUNT procedure numbers are counted as `unknown`, and WebDAV counts at most
 64 distinct method names before using `OTHER`.
 
 **Every lock that remains** was then re-read, access site by access site,
-by two independent reviews told to look for a replacement first. They found
-seven more, which are in the table above. Each of the rest is kept for one
-of four reasons:
+by two independent reviews told to look for a replacement first. What they
+found removable is in the table above, including four that were first kept
+as a matter of judgment. Each lock left is listed here with the reason it
+must stay:
 
-| Reason it must stay | Fields |
-|---------------------|--------|
-| Several values change together and must agree | 9P: lock table, session state, in-flight tags. NFS: handle table, directory snapshots, exclusive creates, retained and provisional handles, NFSv4 state. WebDAV lock table. Chunked runtime state, memory filesystem, key-value state and open files, memory metadata, object-store block cache, blob-cache local index, fault injector, session handles, SQLite VFS WAL state, Node path lock, Node 9P server state and fid table, peer turnover counts, refusal log windows, QUIC token caches |
-| A collection that concurrent callers insert into and remove from, where a check and the change must be one step | Connection tables (9P, NFS, WebDAV, S3 shutdowns, peer server), live-mount registries, mount records, blob-cache flights and pending writes, CLI drive metrics, Node callback list, S3 conditional-put locks, peer dial locks and draining list, SQLite VFS registry and WAL regions, SQLite trace registry, 9P and S3 assertion logs, WebDAV method counts |
-| Held across an await on purpose, so a second caller waits for the first to finish or one exchange owns a connection | Unmount, release, adoption, listen and lifecycle gates (9P, NFS, WebDAV, HTTP, Node); FUSE and NFS reply writers; close gates; save gate; versioned view state; SlateDB state; SQLite VFS volume state; Redis and peer connections; policy cache; single-flight and per-key gates; CLI worker and task handles; Node FUSE session, response body streams and delegated mounts; FoundationDB network start and stop; peer pool writer |
-| A resource that is not safe to share | SQLite connections (provider, storage, catalog); the PGlite storage client, whose transactions need exclusive use; host file handle |
+- **S**: several values change together and must agree.
+- **C**: a collection where a check and the change must be one step.
+- **A**: held across an await or a blocking call on purpose, so a second
+  caller waits for the first or one exchange owns a connection.
+- **R**: a resource that is not safe to share.
 
-Three were judged removable in form but are kept, because removing them
-changes behaviour:
-
-- **Blob-cache `flush_gate`**: without it two flushes could fill the cache
-  out of order, so an older write of a block could land after a newer one.
-- **PGlite state-store client**: without it statements would be pipelined
-  on one socket to a server that runs one statement at a time.
-- **9P and S3 assertion logs**: the only lock-free form copies the whole
-  list on every append.
+| Crate | Lock | Why | Evidence |
+|-------|------|-----|----------|
+| apps/mount-rs-cli | `OwnerService.task`, `RemoteRuntime.worker` | A | Held across the join, so a second close waits and a cancelled close leaves the handle to abort or retry |
+| apps/mount-rs-cli | `DriveMetrics` map | C | Concurrent inserts, read once at shutdown |
+| bindings/mount-rs-napi | `FuseSession.inner` | A | Session used through `&mut` across each request, in order |
+| bindings/mount-rs-napi | `Lifecycle.callbacks` | C | List pushed per opened handle, drained at shutdown |
+| bindings/mount-rs-napi | `HandleState.close_gate` | A | Held across the JavaScript close call |
+| bindings/mount-rs-napi | `native_delegation_mounts` | A | Held across mount and unmount; two fields change around them |
+| bindings/mount-rs-napi | 9P fid table (`Standalone`), `P9Server.state` | S | Fid table; server and serve task set and taken as a pair with the closed check |
+| bindings/mount-rs-napi | `S3BodyStream.inner`, `WebdavBodyStream.inner` | A | Held across the next-chunk read so two pulls cannot advance the stream twice |
+| bindings/mount-rs-napi | `WebdavServer.lifecycle` | A | Serialises listen against close |
+| bindings/mount-rs-napi | `NativePathLock` state (three handles to one cell) | S | The body of a reader/writer path lock |
+| bindings/mount-rs-sqlite-vfs | `REGISTRY` | C | Name check, SQLite registration and both maps are one step |
+| bindings/mount-rs-sqlite-vfs | volume `state` | A | Held across provider round trips |
+| bindings/mount-rs-sqlite-vfs | `wal_regions`, `ProcessWalRegion.state` | C, S | One region per database; lock ranges checked then applied |
+| crates/mount-rs-blob-cache | `RedisDiscovery.connection`, peer `connections` | A | One exchange owns the socket; one dial per peer |
+| crates/mount-rs-blob-cache | `LocalCache.state` | S | Index, byte accounting and scope counts |
+| crates/mount-rs-blob-cache | `LocalCache.disk_io` | A | Held across blocking file writes against the index re-check |
+| crates/mount-rs-blob-cache | `flights` and each flight gate | C, A | Get-or-insert; one fetch per key |
+| crates/mount-rs-blob-cache | `pending` | C | Pushed by puts, taken by flush, filtered by delete |
+| crates/mount-rs-fault-injection | `FaultInjector.state` | S | Plan, counters and event list advance per decision |
+| crates/mount-rs-service | `CatalogAuthenticator.cache` | A | Held across the key fetch to allow one refresh per policy |
+| crates/mount-rs-service | catalog `connections`, `SessionHandles.state` | R, S | SQLite connection; id, closed flag, revision and handle map |
+| filesystems/mount-rs-chunked | `StateCell.mutex` | S | Namespace, revisions, open references; reads already use an atomic mirror |
+| filesystems/mount-rs-chunked | block cache `Index` turn | S | Entries, order and byte total; arrivals already queue lock-free |
+| filesystems/mount-rs-host | `HostHandle.state` | A | Guard moves into the blocking worker; one operation at a time on the file cursor |
+| filesystems/mount-rs-host | disk cache `Shared` turn | S | Disk index; commits already queue lock-free |
+| filesystems/mount-rs-kv | `Inner.state`, each `OpenFile` | S | Attribute map, directory set, open files; file data, references and dirty flag |
+| filesystems/mount-rs-memfs | `MemoryFs.inner` | S | Inode table and quota |
+| filesystems/mount-rs-persist | `SaveGate.lock` | A | Held across the save so an older save cannot overwrite a newer one |
+| filesystems/mount-rs-versioned | `ViewLifetime.state` | A | Held across the pin renewal |
+| providers/mount-rs-foundationdb | `CLIENT_NETWORK`, `CLIENT_NETWORK_STOPPING` | A | Held across the one-time native start and the thread join |
+| providers/mount-rs-memory | `state` | S | Revision, namespace, lease and pins |
+| providers/mount-rs-object-store-blocks | cache `state` | S | Entries, recency and byte total; hits are already lock-free |
+| providers/mount-rs-pglite | storage `client` | R | Transactions need exclusive use of the one connection |
+| providers/mount-rs-slatedb | `state` | A | Held across the persisted write |
+| providers/mount-rs-sqlite | both `connection`s | R | SQLite connection |
+| providers/mount-rs-sqlite | trace `REGISTRY` | C | Pushed and pruned by registrations, walked by the sampler |
+| transports/mount-rs-9p | `P9LockTable.state`, `SessionInner.state` | S | Byte-range locks per path; fid table and users against the generation |
+| transports/mount-rs-9p | `SessionInner.inflight`, server `connections` | C | Duplicate-tag check and insert; insert rechecks closed |
+| transports/mount-rs-9p | `unmount_lock`, `release`, `adoption` | A | Unmount and rollback; server close and task join; the client-set comparison around the mount command |
+| transports/mount-rs-auto | `LIVE` | C | Registry of live mounts |
+| transports/mount-rs-fskit | `handles` | C | Handle table |
+| transports/mount-rs-fuse | reply `writer` | A | Held across the frame write so replies do not interleave |
+| transports/mount-rs-http | `HttpServer.task` | A | Held across the join so the outcome is cached with the handle |
+| transports/mount-rs-nfs | `FileHandleTable.state`, `DirectorySnapshots.state`, `exclusive_creates`, `provisional`, NFSv4 `state` | S | Tables whose maps, order lists and counters must agree |
+| transports/mount-rs-nfs | `clients`, `mounts`, `by_id`, `LIVE_MOUNTS` | C | Inserted and removed by concurrent connections and calls |
+| transports/mount-rs-nfs | `listen_lock`, native `unmount_lock`, connection reply writer | A | Bind against close; unmount; record frames must not interleave |
+| transports/mount-rs-s3 | `ConnectionShutdowns.entries`, conditional-put `locks` | C | A registration is either seen by cancel-all or added after it; get-or-insert and remove-if-unused |
+| transports/mount-rs-s3 | per-key conditional-put gate | A | Held for the whole check-then-write |
+| transports/mount-rs-webdav | `close_gate`, `lifecycle` | A | Held across close; listen against close |
+| transports/mount-rs-webdav | `ConnectionRegistry.tasks`, `methods` | C | Spawn and insert together so abort-all cannot miss one; the key cap check and insert |
+| transports/mount-rs-webdav | `locks` (lock table) | S | Locks, issued tokens and order, with expiry on read |
+| vendor/tunnel-transport | `ConnectionTurnover.counts`, `RefusalLogLimiter.keys` | S | Paired counters; per-key window |
+| vendor/tunnel-transport | `dial_locks`, `draining`, server `connections` | C | Check-then-insert with a bound |
+| vendor/tunnel-transport | per-destination dial gate, `PublishedPool.writer` | A, S | One dial per destination; directory and slot writes must not interleave |
+| vendor/quinn-proto | `TokenMemoryCache`, `BloomTokenLog`, `QlogStream` | S, R | Map with its order list; two filters with their period; a writer used through `&mut` |
 
 **Spinning locks held for too long** (found by the audit, not fixed):
 

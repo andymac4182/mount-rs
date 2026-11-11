@@ -265,7 +265,6 @@ pub struct CachedBlockStore {
     distributed: Option<Arc<DistributedRuntime>>,
     metrics: Arc<CacheMetrics>,
     pending: TurnCell<Vec<PendingBlob>>,
-    flush_gate: TurnLock<()>,
     write_gate: mount_rs_core::drain_gate::DrainGate,
     dirty: AtomicBool,
 }
@@ -285,7 +284,6 @@ impl CachedBlockStore {
             distributed: None,
             metrics: Arc::new(CacheMetrics::default()),
             pending: TurnCell::new(Vec::new()),
-            flush_gate: TurnLock::new(()),
             write_gate: mount_rs_core::drain_gate::DrainGate::new(),
             dirty: AtomicBool::new(false),
         }
@@ -617,7 +615,10 @@ impl BlockStore for CachedBlockStore {
         })
     }
     async fn flush(&self) -> Result<()> {
-        let _gate = self.flush_gate.lock().await;
+        // The write gate makes each flush take its batch and reach the
+        // backing store in turn. The cache fills after it may overlap
+        // another flush's: a block's id is checked against its bytes before
+        // it is queued, so the same id always carries the same bytes.
         let writes = self.write_gate.write().await;
         // Take the batch before the barrier: puts completed afterwards wait for a later flush.
         let pending = std::mem::take(&mut *self.pending.lock().map_err(|_| error())?);

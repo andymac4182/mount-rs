@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use mount_rs_core::append_log::AppendLog;
 use mount_rs_core::drain_gate::DrainGate;
 use mount_rs_core::path::join_path;
 use mount_rs_core::turn_cell::TurnCell;
@@ -173,7 +174,7 @@ struct SessionInner {
     locks: P9LockClient,
     stats: StatCounters,
     hooks: P9SessionHooks,
-    assertions: TurnCell<Vec<String>>,
+    assertions: AppendLog<String>,
 }
 
 #[derive(Clone)]
@@ -229,7 +230,7 @@ impl P9Session {
                 locks,
                 stats: StatCounters::new(),
                 hooks,
-                assertions: TurnCell::new(Vec::new()),
+                assertions: AppendLog::new(),
             }),
         }
     }
@@ -281,11 +282,7 @@ impl P9Session {
 
     /// Return debug-mode assertion failures in occurrence order.
     pub fn assertions(&self) -> Vec<String> {
-        self.inner
-            .assertions
-            .lock()
-            .expect("9P assertions mutex poisoned")
-            .clone()
+        self.inner.assertions.snapshot()
     }
 
     pub fn user_for(&self, fid: u32) -> Option<P9User> {
@@ -839,11 +836,7 @@ impl P9Session {
             return;
         }
         self.inner.stats.assertions.fetch_add(1, Ordering::Relaxed);
-        self.inner
-            .assertions
-            .lock()
-            .expect("9P assertions mutex poisoned")
-            .push(message.clone());
+        self.inner.assertions.push(message.clone());
         if let Some(hook) = &self.inner.hooks.on_assertion {
             hook(message);
         }
