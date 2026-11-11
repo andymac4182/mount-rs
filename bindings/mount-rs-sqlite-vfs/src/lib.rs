@@ -35,7 +35,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Component, Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -51,7 +51,8 @@ use std::os::windows::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 
-use mount_rs_core::turn_cell::TurnCell;
+use arc_swap::ArcSwap;
+use mount_rs_core::append_log::AppendLog;
 use rusqlite::ffi;
 use rusqlite::{Connection, OpenFlags};
 
@@ -404,11 +405,8 @@ impl SqliteVfs {
                 "WAL full synchronization requires a durable backend",
             ));
         }
-        let registry = registered_vfs_registry();
-        let mut registry = registry
-            .lock()
-            .map_err(|_| VfsError::Other("SQLite VFS registry lock poisoned".to_owned()))?;
-        if registry.active.contains_key(&name_string) {
+        // Cheap refusal before anything is built; the claim below decides.
+        if ACTIVE_VFS.load().contains_key(&name_string) {
             return Err(VfsError::Other(
                 "SQLite VFS name is already registered".to_owned(),
             ));
@@ -425,6 +423,14 @@ impl SqliteVfs {
         registration.vfs = make_vfs(&registration.name, &registration.app);
 
         let registration: Arc<RegisteredVfs> = registration.into();
+        // The name is claimed before SQLite is told about it, so two
+        // registrations of one name never both reach
+        // `sqlite3_vfs_register`, and SQLite is called with nothing held.
+        if !claim_vfs_name(&name_string, &registration) {
+            return Err(VfsError::Other(
+                "SQLite VFS name is already registered".to_owned(),
+            ));
+        }
         let rc = unsafe {
             ffi::sqlite3_vfs_register(
                 &registration.vfs as *const ffi::sqlite3_vfs as *mut ffi::sqlite3_vfs,
@@ -432,14 +438,11 @@ impl SqliteVfs {
             )
         };
         if rc != ffi::SQLITE_OK {
+            release_vfs_name(&name_string, &registration);
             return Err(VfsError::Other(format!(
                 "sqlite3_vfs_register failed: {rc}"
             )));
         }
-
-        registry
-            .active
-            .insert(name_string, Arc::clone(&registration));
 
         Ok(Self { registration })
     }
@@ -464,10 +467,9 @@ impl SqliteVfs {
             return Ok(());
         }
 
-        let registry = registered_vfs_registry();
-        let mut registry = registry
-            .lock()
-            .map_err(|_| VfsError::Other("SQLite VFS registry lock poisoned".to_owned()))?;
+        // `begin_close` admitted this caller alone. The name stays claimed
+        // until SQLite has dropped the VFS, so a new registration of the
+        // name cannot reach SQLite while the old one is still listed.
         let rc = unsafe {
             ffi::sqlite3_vfs_unregister(
                 &self.registration.vfs as *const ffi::sqlite3_vfs as *mut ffi::sqlite3_vfs,
@@ -480,13 +482,11 @@ impl SqliteVfs {
             )));
         }
 
-        let retired = registry
-            .active
-            .remove(&name)
-            .expect("active VFS registration disappeared before close");
-        assert!(Arc::ptr_eq(&retired, &self.registration));
-        registry.retired.push(retired);
-        drop(registry);
+        assert!(
+            release_vfs_name(&name, &self.registration),
+            "active VFS registration disappeared before close"
+        );
+        RETIRED_VFS.push(Arc::clone(&self.registration));
 
         drop(state.finish_close());
         Ok(())
@@ -738,18 +738,51 @@ struct RegisteredVfs {
 unsafe impl Send for RegisteredVfs {}
 unsafe impl Sync for RegisteredVfs {}
 
-#[derive(Default)]
-struct VfsRegistry {
-    active: HashMap<String, Arc<RegisteredVfs>>,
-    // SQLite may still call a raw callback pointer that it obtained just
-    // before unregistering the VFS. Keep the callback allocation alive, but
-    // release its backend through SqliteVfs::close.
-    retired: Vec<Arc<RegisteredVfs>>,
+/// The registered VFS names. This is only a uniqueness set: a name is
+/// claimed here before `sqlite3_vfs_register` and released after
+/// `sqlite3_vfs_unregister`. The map is replaced whole on each change, which
+/// happens once per VFS registration or close.
+static ACTIVE_VFS: LazyLock<ArcSwap<HashMap<String, Arc<RegisteredVfs>>>> =
+    LazyLock::new(ArcSwap::default);
+
+// SQLite may still call a raw callback pointer that it obtained just before
+// unregistering the VFS. Keep the callback allocation alive for the life of
+// the process, but release its backend through SqliteVfs::close.
+static RETIRED_VFS: AppendLog<Arc<RegisteredVfs>> = AppendLog::new();
+
+/// Claim `name` for `registration`; false when the name is already claimed.
+fn claim_vfs_name(name: &str, registration: &Arc<RegisteredVfs>) -> bool {
+    loop {
+        let current = ACTIVE_VFS.load_full();
+        if current.contains_key(name) {
+            return false;
+        }
+        let mut next = HashMap::clone(&current);
+        next.insert(name.to_owned(), Arc::clone(registration));
+        let previous = ACTIVE_VFS.compare_and_swap(&current, Arc::new(next));
+        if Arc::ptr_eq(&previous, &current) {
+            return true;
+        }
+    }
 }
 
-fn registered_vfs_registry() -> &'static TurnCell<VfsRegistry> {
-    static REGISTRY: OnceLock<TurnCell<VfsRegistry>> = OnceLock::new();
-    REGISTRY.get_or_init(TurnCell::default)
+/// Release `registration`'s claim on `name`; false when it did not hold it.
+fn release_vfs_name(name: &str, registration: &Arc<RegisteredVfs>) -> bool {
+    loop {
+        let current = ACTIVE_VFS.load_full();
+        if !current
+            .get(name)
+            .is_some_and(|claimed| Arc::ptr_eq(claimed, registration))
+        {
+            return false;
+        }
+        let mut next = HashMap::clone(&current);
+        next.remove(name);
+        let previous = ACTIVE_VFS.compare_and_swap(&current, Arc::new(next));
+        if Arc::ptr_eq(&previous, &current) {
+            return true;
+        }
+    }
 }
 
 #[repr(C)]
@@ -2890,6 +2923,62 @@ mod tests {
         }
         fn check_reserved_lock(&mut self) -> Result<bool, VfsError> {
             Ok(false)
+        }
+    }
+
+    /// Registrations racing for one name: exactly one reaches SQLite, the
+    /// rest are refused, and the name is free again once the winner closes.
+    #[test]
+    fn racing_registrations_of_one_name_admit_exactly_one() {
+        const THREADS: usize = 8;
+        let name = format!("mount-rs-race-{}", std::process::id());
+        for _ in 0..50 {
+            let barrier = std::sync::Barrier::new(THREADS);
+            let results: Vec<Result<SqliteVfs, VfsError>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let (name, barrier) = (&name, &barrier);
+                        scope.spawn(move || {
+                            let backend =
+                                Arc::new(HostDirectory::new(std::env::temp_dir()).unwrap());
+                            barrier.wait();
+                            SqliteVfs::new(name, backend)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect()
+            });
+            let mut winners = Vec::new();
+            for result in results {
+                match result {
+                    Ok(vfs) => winners.push(vfs),
+                    Err(error) => assert!(error.to_string().contains("already registered")),
+                }
+            }
+            assert_eq!(winners.len(), 1, "one registration per name");
+            let winner = winners.pop().unwrap();
+            let c_name = CString::new(name.as_str()).unwrap();
+            let listed = unsafe { ffi::sqlite3_vfs_find(c_name.as_ptr()) };
+            assert!(ptr::eq(
+                listed.cast_const(),
+                &winner.registration.vfs as *const ffi::sqlite3_vfs
+            ));
+            // Closers racing: one does the close; another is told it is
+            // busy while that runs, or that it is already done.
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| match winner.close() {
+                        Ok(()) | Err(VfsError::Busy) => {}
+                        Err(error) => panic!("close failed: {error}"),
+                    });
+                }
+            });
+            winner.close().unwrap();
+            assert!(unsafe { ffi::sqlite3_vfs_find(c_name.as_ptr()) }.is_null());
+            assert!(!ACTIVE_VFS.load().contains_key(&name));
         }
     }
 

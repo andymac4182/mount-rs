@@ -3,8 +3,8 @@ use std::fmt;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -17,7 +17,6 @@ use hyper::header;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
 #[cfg(feature = "observability")]
 use mount_rs_observability::Telemetry;
@@ -26,7 +25,7 @@ use mount_rs_observability::extract_headers;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, watch};
 
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -298,6 +297,8 @@ struct RuntimeControl {
 enum CloseOutcome {
     Success,
     Join(Arc<tokio::task::JoinError>),
+    /// The runtime went away before the accept task's result was published.
+    Abandoned,
 }
 
 impl CloseOutcome {
@@ -305,13 +306,51 @@ impl CloseOutcome {
         match self {
             Self::Success => Ok(()),
             Self::Join(error) => Err(HttpServerError::Join(Arc::clone(error))),
+            Self::Abandoned => Err(HttpServerError::Timeout),
         }
     }
 }
 
-enum ListenerState {
-    Running(tokio::task::JoinHandle<()>),
-    Finished(CloseOutcome),
+/// The one listener a server ever has. Its accept task is joined by a
+/// supervisor task that publishes the result, so any number of closes can
+/// wait for it, and a close that is cancelled takes nothing with it.
+struct ListenerHandle {
+    /// `None` for a server with no TCP listener.
+    abort: Option<tokio::task::AbortHandle>,
+    /// The port the listener is bound to, when there is one.
+    port: Option<u16>,
+    /// `Some` once the accept task has ended.
+    done: watch::Receiver<Option<CloseOutcome>>,
+}
+
+impl ListenerHandle {
+    /// Supervise `task` as the accept task of a listener bound to `port`.
+    fn supervise(task: tokio::task::JoinHandle<()>, port: Option<u16>) -> Self {
+        let abort = task.abort_handle();
+        let (publish, done) = watch::channel(None);
+        tokio::spawn(async move {
+            let outcome = match task.await {
+                Ok(()) => CloseOutcome::Success,
+                Err(error) => CloseOutcome::Join(Arc::new(error)),
+            };
+            publish.send_replace(Some(outcome));
+        });
+        Self {
+            abort: Some(abort),
+            port,
+            done,
+        }
+    }
+
+    /// A listener that was never opened and has already ended cleanly.
+    fn unbound() -> Self {
+        let (_publish, done) = watch::channel(Some(CloseOutcome::Success));
+        Self {
+            abort: None,
+            port: None,
+            done,
+        }
+    }
 }
 
 /// A running multi-drive HTTP server.
@@ -321,7 +360,6 @@ pub struct HttpServer {
     requested_port: u16,
     tcp_nodelay: bool,
     http2_prior_knowledge: bool,
-    actual_port: AtomicU16,
     drain_timeout: Duration,
     shutdown: Arc<Notify>,
     closing: Arc<AtomicUsize>,
@@ -329,9 +367,8 @@ pub struct HttpServer {
     state_changed: Notify,
     /// Set once, by the close that finishes draining.
     close_outcome: std::sync::OnceLock<CloseOutcome>,
-    /// Held across the wait for the listener, so concurrent closes queue
-    /// here; an asynchronous turn, not a mutex.
-    task: TurnLock<Option<ListenerState>>,
+    /// Set once, by the `listen` whose listener is kept.
+    listener: OnceLock<ListenerHandle>,
     connections: Arc<AtomicUsize>,
     connection_permits: Arc<Semaphore>,
 }
@@ -400,14 +437,13 @@ impl HttpServer {
             requested_port: options.port,
             tcp_nodelay: options.tcp_nodelay,
             http2_prior_knowledge: options.http2_prior_knowledge,
-            actual_port: AtomicU16::new(options.port),
             drain_timeout: options.drain_timeout,
             shutdown,
             closing,
             drained,
             state_changed: Notify::new(),
             close_outcome: std::sync::OnceLock::new(),
-            task: TurnLock::new(None),
+            listener: OnceLock::new(),
             connections: Arc::new(AtomicUsize::new(0)),
             connection_permits: Arc::new(Semaphore::new(options.max_connections.max(1))),
         }
@@ -416,9 +452,9 @@ impl HttpServer {
     /// Construct the HTTP application without opening a TCP listener.
     /// Alternate transports must call `close` after draining their requests.
     pub fn unbound(registry: DriveRegistry, options: HttpServerOptions) -> Self {
-        let mut server = Self::new(registry, options);
+        let server = Self::new(registry, options);
         // There is deliberately no listener task to await during close.
-        server.task = TurnLock::new(Some(ListenerState::Finished(CloseOutcome::Success)));
+        let _ = server.listener.set(ListenerHandle::unbound());
         server
     }
 
@@ -443,8 +479,14 @@ impl HttpServer {
         &self.host
     }
 
+    /// The bound port once a listener is up, and the requested port before.
+    /// It comes from the listener that was kept, so a `listen` that lost to a
+    /// concurrent one never shows through here.
     pub fn port(&self) -> u16 {
-        self.actual_port.load(Ordering::Acquire)
+        self.listener
+            .get()
+            .and_then(|listener| listener.port)
+            .unwrap_or(self.requested_port)
     }
 
     pub fn url(&self) -> String {
@@ -461,7 +503,7 @@ impl HttpServer {
     }
 
     pub async fn listen(&self) -> Result<(), HttpServerError> {
-        if self.task.lock().await.is_some() {
+        if self.listener.get().is_some() {
             return Ok(());
         }
 
@@ -473,7 +515,6 @@ impl HttpServer {
             .await
             .map_err(HttpServerError::Bind)?;
         let port = listener.local_addr().map_err(HttpServerError::Io)?.port();
-        self.actual_port.store(port, Ordering::Release);
 
         let state = Arc::clone(&self.state);
         let shutdown = Arc::clone(&self.shutdown);
@@ -580,23 +621,32 @@ impl HttpServer {
                 }
             }
         });
-        let mut task_slot = self.task.lock().await;
-        if task_slot.is_none() {
-            *task_slot = Some(ListenerState::Running(task));
-            self.state_changed.notify_waiters();
-        } else {
-            task.abort();
-        }
+        self.adopt_listener(task, Some(port));
         Ok(())
+    }
+
+    /// Keep `task` as this server's listener, or abort it when a concurrent
+    /// `listen` got there first.
+    fn adopt_listener(&self, task: tokio::task::JoinHandle<()>, port: Option<u16>) {
+        let handle = ListenerHandle::supervise(task, port);
+        match self.listener.set(handle) {
+            Ok(()) => self.state_changed.notify_waiters(),
+            Err(lost) => {
+                if let Some(abort) = &lost.abort {
+                    abort.abort();
+                }
+            }
+        }
     }
 
     /// Report an accept task that terminated before shutdown was requested.
     /// Checking the join handle leaves it available for the normal drain path.
     pub fn listener_failed(&self) -> bool {
-        self.task.try_lock().is_some_and(|slot| {
-            matches!(slot.as_ref(), Some(ListenerState::Running(task)) if task.is_finished())
-                && self.closing.load(Ordering::Acquire) == 0
-        })
+        self.listener
+            .get()
+            .and_then(|listener| listener.abort.as_ref())
+            .is_some_and(tokio::task::AbortHandle::is_finished)
+            && self.closing.load(Ordering::Acquire) == 0
     }
 
     pub async fn close(&self) -> Result<(), HttpServerError> {
@@ -637,33 +687,24 @@ impl HttpServer {
     }
 
     async fn await_listener(&self) -> CloseOutcome {
-        loop {
-            let mut task_slot = self.task.lock().await;
-            let Some(state) = task_slot.as_mut() else {
-                drop(task_slot);
-                let notified = self.state_changed.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if self.task.lock().await.is_some() {
-                    continue;
-                }
-                notified.await;
-                continue;
-            };
-            let outcome = match state {
-                ListenerState::Finished(outcome) => return outcome.clone(),
-                ListenerState::Running(task) => match task.await {
-                    Ok(()) => CloseOutcome::Success,
-                    Err(error) => CloseOutcome::Join(Arc::new(error)),
-                },
-            };
-            // This assignment is deliberately adjacent to the await while
-            // the same mutex guard is held.  A cancelled close can therefore
-            // leave only Running or Finished, never a consumed JoinHandle
-            // without its cached outcome.
-            *task_slot = Some(ListenerState::Finished(outcome.clone()));
-            self.state_changed.notify_waiters();
-            return outcome;
+        let listener = loop {
+            if let Some(listener) = self.listener.get() {
+                break listener;
+            }
+            let notified = self.state_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(listener) = self.listener.get() {
+                break listener;
+            }
+            notified.await;
+        };
+        // Every close waits on its own receiver, so cancelling one leaves
+        // the published result where the others and a retry will find it.
+        let mut done = listener.done.clone();
+        match done.wait_for(Option::is_some).await {
+            Ok(outcome) => outcome.clone().unwrap_or(CloseOutcome::Abandoned),
+            Err(_) => CloseOutcome::Abandoned,
         }
     }
 }
@@ -672,10 +713,12 @@ impl Drop for HttpServer {
     fn drop(&mut self) {
         self.closing.store(1, Ordering::Release);
         self.shutdown.notify_waiters();
-        if let Some(mut task) = self.task.try_lock()
-            && let Some(ListenerState::Running(task)) = task.as_mut()
+        if let Some(abort) = self
+            .listener
+            .get()
+            .and_then(|listener| listener.abort.as_ref())
         {
-            task.abort();
+            abort.abort();
         }
     }
 }
@@ -2773,12 +2816,145 @@ mod tests {
         .expect("cancelled handle cleanup did not drain");
     }
 
+    /// Wait until a spawned `close` has announced itself and had turns to
+    /// reach its wait for the listener.
+    async fn wait_until_close_is_waiting(server: &HttpServer) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while server.closing.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("close did not start");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    /// `listen` calls racing for an ephemeral port each bind one. The ones
+    /// that lose are aborted, and their ports must not be the one reported.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_listens_report_the_port_of_the_listener_that_was_kept() {
+        const LISTENS: usize = 4;
+        for _ in 0..200 {
+            let server = Arc::new(HttpServer::new(
+                DriveRegistry::new(),
+                HttpServerOptions::default(),
+            ));
+            let start = Arc::new(tokio::sync::Barrier::new(LISTENS));
+            let mut listens = Vec::new();
+            for _ in 0..LISTENS {
+                let server = Arc::clone(&server);
+                let start = Arc::clone(&start);
+                listens.push(tokio::spawn(async move {
+                    start.wait().await;
+                    server.listen().await
+                }));
+            }
+            for listen in listens {
+                listen.await.expect("listen task").unwrap();
+            }
+            // The kept listener is the one behind the reported port: its
+            // accept task holds the only socket still bound.
+            let kept = server.listener.get().expect("a listener was kept");
+            assert_eq!(Some(server.port()), kept.port);
+            let stream = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::net::TcpStream::connect(("127.0.0.1", server.port())),
+            )
+            .await
+            .expect("the reported port did not answer")
+            .expect("the reported port is not the live listener");
+            // A socket of an aborted listener may still accept at the TCP
+            // level for a moment; only the live one serves a request.
+            drop(stream);
+            let response = tokio::time::timeout(
+                Duration::from_secs(5),
+                reqwest::get(format!("http://127.0.0.1:{}/missing", server.port())),
+            )
+            .await
+            .expect("the reported port did not serve a request")
+            .expect("the reported port is not the live listener");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+            server.close().await.unwrap();
+        }
+    }
+
+    /// Many closes, some cancelled while waiting, all share the listener's
+    /// one result, and the accept task is never detached unjoined.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_and_cancelled_closes_all_see_the_listener_result() {
+        for _ in 0..50 {
+            let server = Arc::new(HttpServer::new(
+                DriveRegistry::new(),
+                HttpServerOptions {
+                    drain_timeout: Duration::from_secs(5),
+                    ..HttpServerOptions::default()
+                },
+            ));
+            let release = Arc::new(Notify::new());
+            let wait = Arc::clone(&release);
+            server.adopt_listener(
+                tokio::spawn(async move {
+                    wait.notified().await;
+                    panic!("injected listener failure");
+                }),
+                None,
+            );
+            let mut cancelled = Vec::new();
+            let mut closes = Vec::new();
+            for index in 0..12 {
+                let closing = Arc::clone(&server);
+                let close = tokio::spawn(async move { closing.close().await });
+                if index % 3 == 0 {
+                    cancelled.push(close);
+                } else {
+                    closes.push(close);
+                }
+            }
+            wait_until_close_is_waiting(&server).await;
+            for close in &cancelled {
+                close.abort();
+            }
+            assert!(!server.listener.get().unwrap().done.borrow().is_some());
+            release.notify_one();
+            let mut errors = Vec::new();
+            for close in closes {
+                match close.await.expect("close task") {
+                    Err(HttpServerError::Join(error)) => errors.push(error),
+                    other => panic!("unexpected close result: {other:?}"),
+                }
+            }
+            assert!(errors.iter().all(|error| Arc::ptr_eq(error, &errors[0])));
+            assert!(errors[0].is_panic());
+            match server.close().await {
+                Err(HttpServerError::Join(error)) => assert!(Arc::ptr_eq(&error, &errors[0])),
+                other => panic!("unexpected repeat close result: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unbound_server_closes_without_a_listener() {
+        let options = HttpServerOptions {
+            port: 4321,
+            ..HttpServerOptions::default()
+        };
+        let server = HttpServer::unbound(DriveRegistry::new(), options);
+        server.listen().await.unwrap();
+        assert_eq!(server.port(), 4321, "no listener was bound");
+        assert!(!server.listener_failed());
+        tokio::time::timeout(Duration::from_secs(1), server.close())
+            .await
+            .expect("close waited for a listener that does not exist")
+            .unwrap();
+        server.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn unexpected_listener_exit_is_visible_before_close() {
         let server = HttpServer::new(DriveRegistry::new(), HttpServerOptions::default());
         let (release, wait) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move { wait.await.unwrap() });
-        *server.task.lock().await = Some(ListenerState::Running(task));
+        server.adopt_listener(task, None);
         assert!(!server.listener_failed());
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -2812,7 +2988,7 @@ mod tests {
             task_started.notify_waiters();
             task_release.notified().await;
         });
-        *server.task.lock().await = Some(ListenerState::Running(task));
+        server.adopt_listener(task, None);
 
         let drain_guard = TaskGuard::new(
             Arc::clone(&server.state.config.control.background_tasks),
@@ -2823,16 +2999,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), &mut started)
             .await
             .expect("listener task did not start");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if server.task.try_lock().is_none() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("first close did not own the shared listener wait");
+        wait_until_close_is_waiting(&server).await;
 
         first_close.abort();
         assert!(
@@ -2900,7 +3067,7 @@ mod tests {
         let task = tokio::spawn(async move {
             task_release.notified().await;
         });
-        *server.task.lock().await = Some(ListenerState::Running(task));
+        server.adopt_listener(task, None);
         let drain_guard = TaskGuard::new(
             Arc::clone(&server.state.config.control.background_tasks),
             Arc::clone(&server.state.config.control.drained),
@@ -2908,32 +3075,17 @@ mod tests {
 
         let first_server = Arc::clone(&server);
         let first_close = tokio::spawn(async move { first_server.close().await });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if server.task.try_lock().is_none() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("close did not begin waiting for the listener");
+        wait_until_close_is_waiting(&server).await;
 
-        let published = server.state_changed.notified();
-        tokio::pin!(published);
-        published.as_mut().enable();
+        let mut published = server.listener.get().expect("listener").done.clone();
         listener_release.notify_one();
-        tokio::time::timeout(Duration::from_secs(1), &mut published)
-            .await
-            .expect("completed listener result was not published");
-        let task_slot = tokio::time::timeout(Duration::from_secs(1), server.task.lock())
-            .await
-            .expect("published listener state remained locked");
-        assert!(matches!(
-            task_slot.as_ref(),
-            Some(ListenerState::Finished(CloseOutcome::Success))
-        ));
-        drop(task_slot);
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(1), published.wait_for(Option::is_some))
+                .await
+                .expect("completed listener result was not published")
+                .expect("listener supervisor went away")
+                .clone();
+        assert!(matches!(outcome, Some(CloseOutcome::Success)));
 
         assert!(
             !first_close.is_finished(),
@@ -2965,7 +3117,7 @@ mod tests {
         let task = tokio::spawn(async {
             panic!("injected listener failure");
         });
-        *server.task.lock().await = Some(ListenerState::Running(task));
+        server.adopt_listener(task, None);
 
         let first_server = Arc::clone(&server);
         let second_server = Arc::clone(&server);

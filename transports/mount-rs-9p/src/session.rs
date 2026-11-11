@@ -2,14 +2,16 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
+
+use arc_swap::ArcSwapOption;
 
 use mount_rs_core::append_log::AppendLog;
 use mount_rs_core::drain_gate::DrainGate;
+use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::path::join_path;
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{
     ErrorCode, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, Result as FsResult, S_IFMT,
     S_IFREG, Stats,
@@ -152,9 +154,6 @@ impl StatCounters {
 }
 
 struct SessionState {
-    msize: Option<u32>,
-    generation: u64,
-    destroyed: bool,
     fids: FidTable,
     users: HashMap<u32, P9User>,
 }
@@ -165,11 +164,127 @@ struct Pending {
     notify: Notify,
 }
 
+impl Pending {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            completed: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            notify: Notify::new(),
+        })
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
+const INFLIGHT_PAGE: usize = 256;
+
+type InflightPage = [ArcSwapOption<Pending>; INFLIGHT_PAGE];
+
+/// The calls in flight, one slot per tag.
+///
+/// A tag is 16 bits, so the table is a fixed two-level array rather than a
+/// map: claiming a tag is one compare-and-swap on its slot, which is what
+/// makes "a tag is in flight at most once" hold without a lock and without
+/// allocating per request. A page of slots is created the first time a tag
+/// in its range is used and then lives as long as the session; a client
+/// that numbers its tags from zero touches one or two pages.
+///
+/// Clearing the table visits one slot at a time, so it is not one step: a
+/// call that claims a slot behind the sweep stays, exactly as if it had
+/// claimed it after the sweep finished.
+struct Inflight {
+    pages: [OnceLock<Box<InflightPage>>; 256],
+}
+
+impl Inflight {
+    fn new() -> Self {
+        Self {
+            pages: std::array::from_fn(|_| OnceLock::new()),
+        }
+    }
+
+    fn slot(&self, tag: u16) -> Option<&ArcSwapOption<Pending>> {
+        self.pages[usize::from(tag >> 8)]
+            .get()
+            .map(|page| &page[usize::from(tag & 0xff)])
+    }
+
+    fn slot_or_create(&self, tag: u16) -> &ArcSwapOption<Pending> {
+        let page = self.pages[usize::from(tag >> 8)]
+            .get_or_init(|| Box::new(std::array::from_fn(|_| ArcSwapOption::empty())));
+        &page[usize::from(tag & 0xff)]
+    }
+
+    /// Claim `tag` for `pending`. `false` if a call already holds it.
+    fn register(&self, tag: u16, pending: &Arc<Pending>) -> bool {
+        self.slot_or_create(tag)
+            .compare_and_swap(&None::<Arc<Pending>>, Some(Arc::clone(pending)))
+            .is_none()
+    }
+
+    /// Give `tag` to `pending` whoever holds it, returning that holder.
+    fn replace(&self, tag: u16, pending: &Arc<Pending>) -> Option<Arc<Pending>> {
+        self.slot_or_create(tag).swap(Some(Arc::clone(pending)))
+    }
+
+    /// Free `tag` if `pending` still holds it. A call that was replaced or
+    /// cleared must not free the slot of the call that came after it.
+    fn complete(&self, tag: u16, pending: &Arc<Pending>) {
+        if let Some(slot) = self.slot(tag) {
+            slot.compare_and_swap(pending, None);
+        }
+    }
+
+    fn get(&self, tag: u16) -> Option<Arc<Pending>> {
+        self.slot(tag)?.load_full()
+    }
+
+    /// Empty every slot but `keep`'s, returning the calls that held them.
+    fn drain_except(&self, keep: Option<u16>) -> Vec<Arc<Pending>> {
+        let mut drained = Vec::new();
+        for (high, page) in self.pages.iter().enumerate() {
+            let Some(page) = page.get() else {
+                continue;
+            };
+            for (low, slot) in page.iter().enumerate() {
+                if keep.is_some_and(|tag| usize::from(tag) == (high << 8 | low)) {
+                    continue;
+                }
+                // Most slots are empty; only swap the ones that are not.
+                if slot.load().is_some() {
+                    drained.extend(slot.swap(None));
+                }
+            }
+        }
+        drained
+    }
+
+    fn len(&self) -> usize {
+        self.pages
+            .iter()
+            .filter_map(OnceLock::get)
+            .flat_map(|page| page.iter())
+            .filter(|slot| slot.load().is_some())
+            .count()
+    }
+}
+
 struct SessionInner {
     driver: Loopback,
     options: P9SessionOptions,
-    state: TurnCell<SessionState>,
-    inflight: TurnCell<HashMap<u16, Arc<Pending>>>,
+    /// A park cell: a walk scans the known qids and a directory read copies
+    /// a listing while holding it.
+    state: ParkCell<SessionState>,
+    /// The negotiated message size, zero until a Tversion agrees one. With
+    /// `generation` and `destroyed`, written only inside a `state` section
+    /// and read without it: every request reads them several times.
+    msize: AtomicU32,
+    generation: AtomicU64,
+    destroyed: AtomicBool,
+    inflight: Inflight,
     path_lock: DrainGate,
     locks: P9LockClient,
     stats: StatCounters,
@@ -217,15 +332,15 @@ impl P9Session {
         Self {
             inner: Arc::new(SessionInner {
                 driver: Loopback::from_arc(driver),
-                state: TurnCell::new(SessionState {
-                    msize: None,
-                    generation: 0,
-                    destroyed: false,
+                state: ParkCell::new(SessionState {
                     fids: FidTable::new(options.use_driver_ino),
                     users: HashMap::new(),
                 }),
+                msize: AtomicU32::new(0),
+                generation: AtomicU64::new(0),
+                destroyed: AtomicBool::new(false),
                 options,
-                inflight: TurnCell::new(HashMap::new()),
+                inflight: Inflight::new(),
                 path_lock: DrainGate::new(),
                 locks,
                 stats: StatCounters::new(),
@@ -241,11 +356,10 @@ impl P9Session {
     }
 
     pub fn msize(&self) -> Option<u32> {
-        self.inner
-            .state
-            .lock()
-            .expect("9P session mutex poisoned")
-            .msize
+        match self.inner.msize.load(Ordering::SeqCst) {
+            0 => None,
+            msize => Some(msize),
+        }
     }
 
     pub fn version(&self) -> Option<&'static str> {
@@ -253,27 +367,15 @@ impl P9Session {
     }
 
     pub fn generation(&self) -> u64 {
-        self.inner
-            .state
-            .lock()
-            .expect("9P session mutex poisoned")
-            .generation
+        self.inner.generation.load(Ordering::SeqCst)
     }
 
     pub fn destroyed(&self) -> bool {
-        self.inner
-            .state
-            .lock()
-            .expect("9P session mutex poisoned")
-            .destroyed
+        self.inner.destroyed.load(Ordering::SeqCst)
     }
 
     pub fn inflight(&self) -> usize {
-        self.inner
-            .inflight
-            .lock()
-            .expect("9P session mutex poisoned")
-            .len()
+        self.inner.inflight.len()
     }
 
     pub fn stats(&self) -> P9SessionStats {
@@ -517,96 +619,68 @@ impl P9Session {
             return Some(reply);
         }
 
-        let pending = Arc::new(Pending {
-            completed: AtomicBool::new(false),
-            cancelled: AtomicBool::new(false),
-            notify: Notify::new(),
-        });
+        let pending = Pending::new();
         let valid_version =
             header.type_ == P9_TVERSION && decode_message_as(bytes, read_tversion).is_ok();
-        let replaced =
-            {
-                let mut inflight = self
-                    .inner
-                    .inflight
-                    .lock()
-                    .expect("9P session mutex poisoned");
-                if valid_version {
-                    // A valid Tversion aborts every old call, including one that
-                    // used the version tag. Pending completion is tied to its Arc,
-                    // so a late old handler cannot remove this new entry.
-                    let replaced = inflight.drain().map(|(_, old)| old).collect::<Vec<_>>();
-                    inflight.insert(header.tag, Arc::clone(&pending));
-                    replaced
-                } else if let std::collections::hash_map::Entry::Vacant(slot) =
-                    inflight.entry(header.tag)
-                {
-                    slot.insert(Arc::clone(&pending));
-                    Vec::new()
-                } else {
-                    let message = format!(
-                        "tag {} is already in flight ({})",
-                        header.tag,
-                        message_name(header.type_)
-                    );
-                    self.assertion(message);
-                    return Some(self.error_reply(
-                        header,
-                        FsError::new(ErrorCode::Eproto).with_message(format!(
-                            "EPROTO: tag {} is already in flight",
-                            header.tag
-                        )),
-                    ));
-                }
-            };
-        for old in replaced {
-            old.cancelled.store(true, Ordering::Release);
-            old.notify.notify_waiters();
+        if valid_version {
+            // A valid Tversion aborts every old call, including one that
+            // used the version tag. Pending completion is tied to its Arc,
+            // so a late old handler cannot remove this new entry.
+            let replaced = self.inner.inflight.replace(header.tag, &pending);
+            for old in self.inner.inflight.drain_except(Some(header.tag)) {
+                old.cancel();
+            }
+            if let Some(old) = replaced {
+                old.cancel();
+            }
+        } else if !self.inner.inflight.register(header.tag, &pending) {
+            // No cell is held here: the assertion hook is the embedder's
+            // code and may call back into this session.
+            let message = format!(
+                "tag {} is already in flight ({})",
+                header.tag,
+                message_name(header.type_)
+            );
+            self.assertion(message);
+            return Some(
+                self.error_reply(
+                    header,
+                    FsError::new(ErrorCode::Eproto)
+                        .with_message(format!("EPROTO: tag {} is already in flight", header.tag)),
+                ),
+            );
         }
 
         let generation = self.generation();
         let reply = self.run(header, body, generation).await;
         pending.completed.store(true, Ordering::Release);
         pending.notify.notify_waiters();
-        let mut inflight = self
-            .inner
-            .inflight
-            .lock()
-            .expect("9P session mutex poisoned");
-        if inflight
-            .get(&header.tag)
-            .is_some_and(|active| Arc::ptr_eq(active, &pending))
-        {
-            inflight.remove(&header.tag);
-        }
+        self.inner.inflight.complete(header.tag, &pending);
         Some(reply)
     }
 
     pub async fn destroy(&self) {
         let (handles, pending) = {
             let mut state = self.inner.state.lock().expect("9P session mutex poisoned");
-            if state.destroyed {
+            // `destroyed` is only written here, inside the section, so
+            // this check and the store below are one step for destroyers.
+            if self.inner.destroyed.load(Ordering::SeqCst) {
                 return;
             }
-            state.destroyed = true;
-            state.generation = state.generation.wrapping_add(1);
+            // Set before the generation moves: a call that sees the new
+            // generation must also see why.
+            self.inner.destroyed.store(true, Ordering::SeqCst);
+            self.inner.generation.fetch_add(1, Ordering::SeqCst);
             let handles = state.fids.open_handles();
             state.fids.clear();
             state.users.clear();
-            state.msize = None;
-            let pending = self
-                .inner
-                .inflight
-                .lock()
-                .expect("9P session mutex poisoned")
-                .drain()
-                .map(|(_, pending)| pending)
-                .collect::<Vec<_>>();
+            self.inner.msize.store(0, Ordering::SeqCst);
+            // Inside the section so the generation moves before the drain.
+            let pending = self.inner.inflight.drain_except(None);
             (handles, pending)
         };
         for pending in pending {
-            pending.cancelled.store(true, Ordering::Release);
-            pending.notify.notify_waiters();
+            pending.cancel();
         }
         self.inner.locks.release_all();
         for (_, handle) in handles {
@@ -843,14 +917,7 @@ impl P9Session {
     }
 
     async fn flush(&self, header: P9Header, oldtag: u16) -> FsResult<Vec<u8>> {
-        let pending = self
-            .inner
-            .inflight
-            .lock()
-            .expect("9P session mutex poisoned")
-            .get(&oldtag)
-            .cloned();
-        if let Some(pending) = pending {
+        if let Some(pending) = self.inner.inflight.get(oldtag) {
             self.inner.stats.flushed.fetch_add(1, Ordering::Relaxed);
             loop {
                 let notified = pending.notify.notified();
@@ -876,9 +943,10 @@ impl P9Session {
         let msize = request.msize.min(ceiling);
         let agreed = request.version == P9_VERSION_DOTL && msize >= P9_MIN_MSIZE;
         if agreed {
-            let mut state = self.inner.state.lock().expect("9P session mutex poisoned");
-            if !state.destroyed {
-                state.msize = Some(msize);
+            // Taken so this cannot land after a destroy or reset cleared it.
+            let _state = self.inner.state.lock().expect("9P session mutex poisoned");
+            if !self.inner.destroyed.load(Ordering::SeqCst) {
+                self.inner.msize.store(msize, Ordering::SeqCst);
             }
         }
         self.frame(header, P9_RVERSION, 32, |writer| {
@@ -899,29 +967,16 @@ impl P9Session {
     async fn reset(&self, version_tag: u16) {
         let (handles, pending) = {
             let mut state = self.inner.state.lock().expect("9P session mutex poisoned");
-            state.generation = state.generation.wrapping_add(1);
+            self.inner.generation.fetch_add(1, Ordering::SeqCst);
             let handles = state.fids.open_handles();
             state.fids.clear();
             state.users.clear();
-            state.msize = None;
-            let mut pending = Vec::new();
-            self.inner
-                .inflight
-                .lock()
-                .expect("9P session mutex poisoned")
-                .retain(|tag, request| {
-                    if *tag == version_tag {
-                        true
-                    } else {
-                        pending.push(Arc::clone(request));
-                        false
-                    }
-                });
+            self.inner.msize.store(0, Ordering::SeqCst);
+            let pending = self.inner.inflight.drain_except(Some(version_tag));
             (handles, pending)
         };
         for request in pending {
-            request.cancelled.store(true, Ordering::Release);
-            request.notify.notify_waiters();
+            request.cancel();
         }
         self.inner.locks.release_all();
         for (_, handle) in handles {
@@ -2047,12 +2102,7 @@ mod tests {
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
         });
-        session
-            .inner
-            .state
-            .lock()
-            .expect("9P session mutex poisoned")
-            .msize = Some(8192);
+        session.inner.msize.store(8192, Ordering::SeqCst);
         session
             .fid_create(1, "/")
             .expect("create a direct-session fid");
@@ -2096,25 +2146,8 @@ mod tests {
     #[tokio::test]
     async fn destroy_releases_flush_waiters_and_clears_inflight() {
         let session = P9Session::new(MemoryFs::empty());
-        session
-            .inner
-            .state
-            .lock()
-            .expect("9P session mutex poisoned")
-            .msize = Some(8192);
-        session
-            .inner
-            .inflight
-            .lock()
-            .expect("9P session mutex poisoned")
-            .insert(
-                41,
-                Arc::new(Pending {
-                    completed: AtomicBool::new(false),
-                    cancelled: AtomicBool::new(false),
-                    notify: Notify::new(),
-                }),
-            );
+        session.inner.msize.store(8192, Ordering::SeqCst);
+        assert!(session.inner.inflight.register(41, &Pending::new()));
         let request = encode_message(P9_TFLUSH, 42, 256, |writer| {
             write_tflush(writer, Tflush { oldtag: 41 });
             Ok(())
@@ -2176,19 +2209,7 @@ mod tests {
                 })),
             },
         );
-        session
-            .inner
-            .inflight
-            .lock()
-            .expect("9P session mutex poisoned")
-            .insert(
-                7,
-                Arc::new(Pending {
-                    completed: AtomicBool::new(false),
-                    cancelled: AtomicBool::new(false),
-                    notify: Notify::new(),
-                }),
-            );
+        assert!(session.inner.inflight.register(7, &Pending::new()));
         let request = encode_message(P9_TCLUNK, 7, 256, |writer| {
             write_fid_request(writer, FidRequest { fid: 1 });
             Ok(())
@@ -2264,5 +2285,210 @@ mod tests {
             .expect("first call receives a reply");
         assert_eq!(decode_message(&first_reply).unwrap().0.type_, P9_RLERROR);
         assert_eq!(session.inflight(), 0);
+    }
+
+    /// However many calls claim one tag at once, one of them gets it, and
+    /// the tag is free again only when that call completes.
+    #[test]
+    fn a_tag_is_claimed_by_one_call_at_a_time() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 2_000;
+        let inflight = Inflight::new();
+        let holders = std::sync::atomic::AtomicUsize::new(0);
+        let claimed = std::sync::atomic::AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let (inflight, holders, claimed, barrier) =
+                    (&inflight, &holders, &claimed, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for round in 0..ROUNDS {
+                        // A tag every thread fights over, and one of its own
+                        // on another page.
+                        let own = 0x4000 + (thread as u16) * 0x100 + (round % 256) as u16;
+                        let pending = Pending::new();
+                        assert!(inflight.register(own, &pending));
+                        assert!(!inflight.register(own, &Pending::new()));
+                        if inflight.register(7, &pending) {
+                            assert_eq!(
+                                holders.fetch_add(1, Ordering::SeqCst),
+                                0,
+                                "two calls hold tag 7"
+                            );
+                            claimed.fetch_add(1, Ordering::Relaxed);
+                            assert!(Arc::ptr_eq(&inflight.get(7).unwrap(), &pending));
+                            // A call that does not hold the tag cannot free it.
+                            inflight.complete(7, &Pending::new());
+                            assert!(inflight.get(7).is_some());
+                            holders.fetch_sub(1, Ordering::SeqCst);
+                            inflight.complete(7, &pending);
+                        }
+                        inflight.complete(own, &pending);
+                        assert!(inflight.get(own).is_none());
+                    }
+                });
+            }
+        });
+        assert!(claimed.load(Ordering::Relaxed) > 0);
+        assert_eq!(inflight.len(), 0);
+    }
+
+    /// A clear racing claims hands back each call it removed exactly once
+    /// and never the kept tag; whatever is left afterwards is still claimed.
+    #[test]
+    fn clearing_returns_each_removed_call_once() {
+        const THREADS: usize = 6;
+        const PER_THREAD: usize = 2_000;
+        let inflight = Inflight::new();
+        let kept = Pending::new();
+        assert!(inflight.register(P9_NOTAG, &kept));
+        let done = AtomicBool::new(false);
+        let barrier = std::sync::Barrier::new(THREADS + 1);
+        let (registered, drained) = std::thread::scope(|scope| {
+            let claimers = (0..THREADS)
+                .map(|thread| {
+                    let (inflight, barrier) = (&inflight, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let mut mine = Vec::new();
+                        for index in 0..PER_THREAD {
+                            let tag = (thread * PER_THREAD + index) as u16;
+                            let pending = Pending::new();
+                            assert!(inflight.register(tag, &pending), "tags are distinct");
+                            mine.push((tag, pending));
+                        }
+                        mine
+                    })
+                })
+                .collect::<Vec<_>>();
+            let sweeper = {
+                let (inflight, barrier, done) = (&inflight, &barrier, &done);
+                scope.spawn(move || {
+                    barrier.wait();
+                    let mut drained = Vec::new();
+                    while !done.load(Ordering::Acquire) {
+                        drained.extend(inflight.drain_except(Some(P9_NOTAG)));
+                    }
+                    drained
+                })
+            };
+            let registered = claimers
+                .into_iter()
+                .flat_map(|claimer| claimer.join().unwrap())
+                .collect::<Vec<_>>();
+            done.store(true, Ordering::Release);
+            (registered, sweeper.join().unwrap())
+        });
+        assert!(!drained.iter().any(|pending| Arc::ptr_eq(pending, &kept)));
+        let mut remaining = 0;
+        for (tag, pending) in &registered {
+            let times = drained
+                .iter()
+                .filter(|other| Arc::ptr_eq(other, pending))
+                .count();
+            let still_claimed = inflight
+                .get(*tag)
+                .is_some_and(|current| Arc::ptr_eq(&current, pending));
+            assert_eq!(
+                times + usize::from(still_claimed),
+                1,
+                "a call is either removed once or still in flight"
+            );
+            remaining += usize::from(still_claimed);
+        }
+        assert_eq!(drained.len() + remaining, registered.len());
+        assert_eq!(inflight.len(), remaining + 1);
+        let rest = inflight.drain_except(None);
+        assert_eq!(rest.len(), remaining + 1);
+        assert_eq!(inflight.len(), 0);
+    }
+
+    /// Concurrent calls that reuse a tag still in flight are all refused,
+    /// and the assertion hook runs with no session cell held: it reads the
+    /// session back, which would never return if one were.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_duplicate_tags_are_all_refused_and_the_hook_may_reenter() {
+        const DUPLICATES: usize = 32;
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let reentered = Arc::new(Mutex::new(Vec::new()));
+        let hook_session = Arc::new(std::sync::OnceLock::<P9Session>::new());
+        let (sink, hook_target) = (Arc::clone(&reentered), Arc::clone(&hook_session));
+        let session = P9Session::with_options_and_hooks(
+            Arc::new(BlockingErrorDriver {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            P9SessionOptions {
+                debug: true,
+                ..P9SessionOptions::default()
+            },
+            P9SessionHooks {
+                on_error: None,
+                on_assertion: Some(Arc::new(move |_| {
+                    let session = hook_target.get().expect("hook session");
+                    sink.lock().expect("hook sink").push((
+                        session.inflight(),
+                        session.generation(),
+                        session.user_for(1).is_none(),
+                    ));
+                })),
+            },
+        );
+        assert!(hook_session.set(session.clone()).is_ok());
+        session.inner.msize.store(8192, Ordering::SeqCst);
+        session.fid_create(1, "/").unwrap();
+        let request = encode_message(P9_TGETATTR, 7, 32, |writer| {
+            write_tgetattr(
+                writer,
+                Tgetattr {
+                    fid: 1,
+                    request_mask: P9_GETATTR_BASIC,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let (first_session, first_request) = (session.clone(), request.clone());
+        let first = tokio::spawn(async move { first_session.handle_call(&first_request).await });
+        timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("first call reaches the blocked driver");
+
+        let duplicates = (0..DUPLICATES)
+            .map(|_| {
+                let (session, request) = (session.clone(), request.clone());
+                tokio::spawn(async move { session.handle_call(&request).await.unwrap() })
+            })
+            .collect::<Vec<_>>();
+        for duplicate in duplicates {
+            let reply = timeout(Duration::from_secs(5), duplicate)
+                .await
+                .expect("a refused duplicate returns")
+                .unwrap();
+            assert_eq!(decode_message(&reply).unwrap().0.type_, P9_RLERROR);
+        }
+        assert_eq!(session.inflight(), 1, "only the first call holds the tag");
+        assert_eq!(session.stats().assertions, DUPLICATES as u64);
+        let reentered = reentered.lock().expect("hook sink").clone();
+        assert_eq!(reentered.len(), DUPLICATES);
+        assert!(reentered.iter().all(|seen| *seen == (1, 0, true)));
+
+        release.notify_waiters();
+        timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first call resumes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.inflight(), 0);
+        // The tag is free again.
+        let clunk = encode_message(P9_TCLUNK, 7, 32, |writer| {
+            write_fid_request(writer, FidRequest { fid: 1 });
+            Ok(())
+        })
+        .unwrap();
+        let reply = session.handle_call(&clunk).await.unwrap();
+        assert_eq!(decode_message(&reply).unwrap().0.type_, P9_RCLUNK);
     }
 }

@@ -50,7 +50,6 @@
 //! or payload is retained.
 
 use arc_swap::ArcSwap;
-use mount_rs_core::turn_cell::TurnCell;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -314,13 +313,21 @@ fn random_u64() -> u64 {
     hasher.finish()
 }
 
-#[derive(Debug, Default)]
-struct TurnoverCounts {
-    requests: u64,
-    episode: u64,
-    requests_before_episode: u64,
-    recycled: bool,
-}
+// One connection's turnover counters, packed into one word so a request
+// and a recycle decision are each a single compare-and-swap:
+//
+//   bit 63        recycled
+//   bits 20..63   the pressure episode last seen (43 bits)
+//   bits 0..20    requests counted since that episode was first seen,
+//                 saturating
+//
+// The request field holds every valid `max_requests` (at most 1,000,000,
+// see `ListenerTurnover::validate`), so a saturated count still recycles.
+const SERVED_BITS: u32 = 20;
+const SERVED_MASK: u64 = (1 << SERVED_BITS) - 1;
+const EPISODE_MASK: u64 = (1 << 43) - 1;
+const RECYCLED: u64 = 1 << 63;
+const _: () = assert!(SERVED_MASK >= MAX_TURNOVER_MAX_REQUESTS);
 
 /// One served connection's turnover state.
 #[derive(Debug)]
@@ -330,7 +337,7 @@ pub(crate) struct ConnectionTurnover {
     age_budget: Duration,
     pressure: Arc<ListenerPressure>,
     started_ms: u64,
-    counts: TurnCell<TurnoverCounts>,
+    counts: AtomicU64,
     /// Cancelled once an HTTP/2 connection is to send GOAWAY.
     pub(crate) goaway: CancellationToken,
 }
@@ -342,15 +349,18 @@ impl ConnectionTurnover {
             age_budget: jittered_age(policy.max_age, random_u64()),
             pressure,
             started_ms: now_mark(),
-            counts: TurnCell::new(TurnoverCounts::default()),
+            counts: AtomicU64::new(0),
             goaway: CancellationToken::new(),
         })
     }
 
     /// Count one dispatched request.
     pub(crate) fn on_request(&self) {
-        let mut counts = self.counts.lock_recovered();
-        counts.requests = counts.requests.saturating_add(1);
+        let _ = self
+            .counts
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |word| {
+                (word & SERVED_MASK != SERVED_MASK).then_some(word + 1)
+            });
     }
 
     /// Whether this connection is to close after the response now being
@@ -360,28 +370,40 @@ impl ConnectionTurnover {
         let Some((episode, episode_start)) = self.pressure.current(now) else {
             return false;
         };
-        let mut counts = self.counts.lock_recovered();
-        if counts.recycled {
-            return false;
-        }
-        if counts.episode != episode {
-            // First response this connection returns in this episode: the
-            // request being answered is the first counted in it.
-            counts.episode = episode;
-            counts.requests_before_episode = counts.requests.saturating_sub(1);
-        }
+        let episode = episode & EPISODE_MASK;
         let from = self.started_ms.max(episode_start);
         let age = Duration::from_millis(now.saturating_sub(from));
-        let served = counts
-            .requests
-            .saturating_sub(counts.requests_before_episode);
-        if age < self.age_budget && served < self.policy.max_requests {
-            return false;
+        let mut word = self.counts.load(Ordering::Acquire);
+        loop {
+            if word & RECYCLED != 0 {
+                return false;
+            }
+            let mut next = word;
+            if (word >> SERVED_BITS) & EPISODE_MASK != episode {
+                // First response this connection returns in this episode: the
+                // request being answered is the first counted in it.
+                next = (episode << SERVED_BITS) | 1;
+            }
+            let recycle =
+                age >= self.age_budget || (next & SERVED_MASK) >= self.policy.max_requests;
+            if recycle {
+                next |= RECYCLED;
+            } else if next == word {
+                return false;
+            }
+            match self
+                .counts
+                .compare_exchange_weak(word, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                // Only the caller whose exchange set the bit reports it.
+                Ok(_) if recycle => {
+                    self.pressure.record_recycle();
+                    return true;
+                }
+                Ok(_) => return false,
+                Err(current) => word = current,
+            }
         }
-        counts.recycled = true;
-        drop(counts);
-        self.pressure.record_recycle();
-        true
     }
 }
 
@@ -438,6 +460,72 @@ mod tests {
         assert!(turnover.recycle_now(), "the third request in the episode");
         turnover.on_request();
         assert!(!turnover.recycle_now(), "recycled twice");
+    }
+
+    /// Many streams of one connection finishing at once: exactly one of
+    /// them is told to recycle, at the request budget and not before, and
+    /// the listener counts one recycle.
+    #[test]
+    fn concurrent_responses_recycle_a_connection_exactly_once() {
+        const THREADS: u64 = 8;
+        const MAX_REQUESTS: u64 = 400;
+        for _ in 0..200 {
+            let pressure = ListenerPressure::new("fairness-concurrent", None);
+            let before = pressure.named.recycled.load(Ordering::Acquire);
+            let turnover = ConnectionTurnover::new(
+                ListenerTurnover {
+                    max_age: Duration::from_secs(3_600),
+                    max_requests: MAX_REQUESTS,
+                },
+                pressure.clone(),
+            );
+            // Requests before the episode are not counted in it.
+            for _ in 0..50 {
+                turnover.on_request();
+            }
+            pressure.record_full();
+            let barrier = std::sync::Barrier::new(THREADS as usize);
+            let recycled_at: Vec<u64> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        let (turnover, barrier) = (&turnover, &barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            let mut hits = Vec::new();
+                            for _ in 0..MAX_REQUESTS {
+                                turnover.on_request();
+                                if turnover.recycle_now() {
+                                    hits.push(turnover.counts.load(Ordering::Acquire));
+                                }
+                            }
+                            hits
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|handle| handle.join().unwrap())
+                    .collect()
+            });
+            assert_eq!(recycled_at.len(), 1, "recycled {recycled_at:?}");
+            assert!(
+                recycled_at[0] & SERVED_MASK >= MAX_REQUESTS,
+                "recycled before the request budget"
+            );
+            assert_eq!(pressure.named.recycled.load(Ordering::Acquire), before + 1);
+        }
+    }
+
+    /// The packed request count saturates instead of carrying into the
+    /// episode field.
+    #[test]
+    fn the_packed_request_count_saturates() {
+        let pressure = ListenerPressure::new("fairness-saturate", None);
+        let turnover = ConnectionTurnover::new(ListenerTurnover::default(), pressure);
+        turnover.counts.store(SERVED_MASK - 1, Ordering::Release);
+        turnover.on_request();
+        turnover.on_request();
+        assert_eq!(turnover.counts.load(Ordering::Acquire), SERVED_MASK);
     }
 
     /// M6-C193 review (B2): each connection's age budget is drawn uniformly

@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
-use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
 
 use crate::constants::{
@@ -16,7 +16,7 @@ use crate::constants::{
     MS_AUTHOR_VIA, READ_CHUNK_BYTES, RESOURCE_CONTENT_TYPE, status_for_error,
 };
 use crate::locks::{
-    DavLock, DavLockGrant, DavLockRequest, DavLockTable, DavLockTableOptions, LockDepth,
+    DavLock, DavLockRequest, DavLockTable, DavLockTableOptions, LockDepth, LockRefusal,
 };
 use crate::protocol::{
     DavFault, DavPropertyName, Depth, FileBody, MultistatusEntry, PropfindRequest,
@@ -142,12 +142,25 @@ impl Drop for MutationFileCloseGuard {
 /// Lock table cleanup is synchronous, so dropping a cancelled future removes
 /// the grant before another request can observe it.
 struct LockGrantGuard {
-    locks: Arc<TurnCell<DavLockTable>>,
+    locks: Arc<ArcSwap<DavLockTable>>,
     token: Option<String>,
 }
 
+/// Publish the table without `token`. The closure only builds a value, so
+/// `rcu` may run it again when another writer published first.
+fn remove_lock(locks: &ArcSwap<DavLockTable>, token: &str) {
+    locks.rcu(|current| {
+        if !current.holds(token) {
+            return Arc::clone(current);
+        }
+        let mut next = DavLockTable::clone(current);
+        next.remove(token);
+        Arc::new(next)
+    });
+}
+
 impl LockGrantGuard {
-    fn new(locks: Arc<TurnCell<DavLockTable>>, token: String) -> Self {
+    fn new(locks: Arc<ArcSwap<DavLockTable>>, token: String) -> Self {
         Self {
             locks,
             token: Some(token),
@@ -164,8 +177,7 @@ impl Drop for LockGrantGuard {
         let Some(token) = self.token.take() else {
             return;
         };
-        let mut locks = self.locks.lock_recovered();
-        locks.remove(&token);
+        remove_lock(&self.locks, &token);
     }
 }
 
@@ -274,16 +286,23 @@ struct PropertyOutcome {
 /// connection for a server, so its lock table is the share's lock table.
 pub struct WebdavSession {
     pub driver: Arc<dyn FsDriver>,
-    pub locks: Arc<TurnCell<DavLockTable>>,
+    /// The share's lock table, replaced whole on every change. A request
+    /// reads one loaded snapshot and takes no lock; expired locks are skipped
+    /// by readers and dropped by the next change.
+    pub locks: Arc<ArcSwap<DavLockTable>>,
     pub options: WebdavSessionOptions,
     hooks: WebdavSessionHooks,
     requests: AtomicU64,
     replies: AtomicU64,
     errors: AtomicU64,
-    /// Requests by method, keyed by the client's own method string. The
-    /// scalar counters above are atomics, so a snapshot may show a request
-    /// this map does not yet count.
-    methods: TurnCell<BTreeMap<String, u64>>,
+    /// Requests by method, keyed by the client's own method string. A slot
+    /// is claimed by the first method to reach it and never changes key, so
+    /// counting is a scan of claimed slots and one atomic add. The scalar
+    /// counters above are atomics too, so a snapshot may show a request these
+    /// do not yet count.
+    methods: [OnceLock<(String, AtomicU64)>; METHOD_KEY_LIMIT],
+    /// Requests whose method arrived after every slot was claimed.
+    other_methods: AtomicU64,
 }
 
 /// How many distinct method strings are counted under their own name. The
@@ -312,26 +331,37 @@ impl WebdavSession {
     ) -> Self {
         Self {
             driver,
-            locks: Arc::new(TurnCell::new(DavLockTable::new(options.locks.clone()))),
+            locks: Arc::new(ArcSwap::from_pointee(DavLockTable::new(
+                options.locks.clone(),
+            ))),
             options,
             hooks,
             requests: AtomicU64::new(0),
             replies: AtomicU64::new(0),
             errors: AtomicU64::new(0),
-            methods: TurnCell::new(BTreeMap::new()),
+            methods: [const { OnceLock::new() }; METHOD_KEY_LIMIT],
+            other_methods: AtomicU64::new(0),
         }
     }
 
     pub fn stats(&self) -> WebdavSessionStats {
+        let mut methods = BTreeMap::new();
+        for (method, count) in self.methods.iter().filter_map(OnceLock::get) {
+            let count = count.load(Ordering::Relaxed);
+            if count != 0 {
+                methods.insert(method.clone(), count);
+            }
+        }
+        let other = self.other_methods.load(Ordering::Relaxed);
+        if other != 0 {
+            // A client may send the literal method "OTHER"; it shares the key.
+            *methods.entry(OTHER_METHODS.to_owned()).or_default() += other;
+        }
         WebdavSessionStats {
             requests: self.requests.load(Ordering::Relaxed),
             replies: self.replies.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
-            methods: self
-                .methods
-                .lock()
-                .map(|methods| methods.clone())
-                .unwrap_or_default(),
+            methods,
             // The session records no assertions.
             assertions: 0,
         }
@@ -342,16 +372,9 @@ impl WebdavSession {
         Vec::new()
     }
 
-    fn lock_table(&self) -> Result<TurnCellGuard<'_, DavLockTable>, WebdavError> {
-        self.locks
-            .lock()
-            .map_err(|_| WebdavError::Body("lock table poisoned".to_owned()))
-    }
-
     pub fn lock_count(&self) -> usize {
         let now = self.now();
-        let mut locks = self.locks.lock_recovered();
-        locks.size(now)
+        self.locks.load().size_at(now)
     }
 
     /// Return the active write locks in this session after expiring stale
@@ -360,8 +383,12 @@ impl WebdavSession {
     /// parity inspection.
     pub fn lock_records(&self) -> Vec<DavLock> {
         let now = self.now();
-        let mut locks = self.locks.lock_recovered();
-        locks.all(now)
+        self.locks
+            .load()
+            .all_at(now)
+            .iter()
+            .map(|lock| DavLock::clone(lock))
+            .collect()
     }
 
     /// Answer one request and never reject.  Driver and protocol errors become
@@ -472,15 +499,20 @@ impl WebdavSession {
 
     fn count_request(&self, method: &str) {
         self.requests.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut methods) = self.methods.lock() {
-            let method = method.to_ascii_uppercase();
-            let key = if methods.len() < METHOD_KEY_LIMIT || methods.contains_key(&method) {
-                method
-            } else {
-                OTHER_METHODS.to_owned()
+        for slot in &self.methods {
+            // Slots are claimed in order, so the first unclaimed one ends the
+            // scan: either this request claims it or it lost to another
+            // method and moves on. The key is only allocated for a claim.
+            let (key, count) = match slot.get() {
+                Some(claimed) => claimed,
+                None => slot.get_or_init(|| (method.to_ascii_uppercase(), AtomicU64::new(0))),
             };
-            *methods.entry(key).or_default() += 1;
+            if key.eq_ignore_ascii_case(method) {
+                count.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
         }
+        self.other_methods.fetch_add(1, Ordering::Relaxed);
     }
 
     fn count_reply(&self, status: u16) {
@@ -1371,10 +1403,7 @@ impl WebdavSession {
             }
             "supportedlock" => Some(supported_lock_node()),
             "lockdiscovery" => {
-                let locks = {
-                    let mut table = self.lock_table()?;
-                    table.covering(path, now)
-                };
+                let locks = self.locks.load().covering_at(path, now);
                 Some(lock_discovery_node(&locks, now))
             }
             "quota-available-bytes" | "quota-used-bytes" => self.quota(name, path).await?,
@@ -1534,9 +1563,10 @@ impl WebdavSession {
             }
         };
         let existing = self.stat_or_absent(path).await?;
-        if let Some(conflict) = self
-            .lock_table()?
-            .conflict(path, depth, info.exclusive, guard.now)
+        if let Some(conflict) =
+            self.locks
+                .load()
+                .conflict_at(path, depth, info.exclusive, guard.now)
         {
             return Err(self.conflicting_lock(&conflict).into());
         }
@@ -1545,8 +1575,8 @@ impl WebdavSession {
             self.require_collection(&parent(path)).await?;
             self.require_writable(path, guard, true)?;
         }
-        let grant = self.lock_table()?.create(
-            DavLockRequest {
+        let grant = self.create_lock(
+            &DavLockRequest {
                 path: path.to_owned(),
                 collection,
                 depth,
@@ -1557,9 +1587,11 @@ impl WebdavSession {
             guard.now,
         );
         let lock = match grant {
-            DavLockGrant::Granted(lock) => lock,
-            DavLockGrant::Conflict(lock) => return Err(self.conflicting_lock(&lock).into()),
-            DavLockGrant::Full => {
+            Ok(lock) => lock,
+            Err(LockRefusal::Conflict(lock)) => {
+                return Err(self.conflicting_lock(&lock).into());
+            }
+            Err(LockRefusal::Full) => {
                 return Err(refuse(503).with_message("the lock table is full").into());
             }
         };
@@ -1608,11 +1640,11 @@ impl WebdavSession {
                 .into());
         }
         let current = {
-            let mut locks = self.lock_table()?;
+            let locks = self.locks.load();
             guard
                 .submitted
                 .iter()
-                .filter_map(|token| locks.find(token, guard.now))
+                .filter_map(|token| locks.find_at(token, guard.now))
                 .collect::<Vec<_>>()
         };
         if current.len() > 1 {
@@ -1631,12 +1663,22 @@ impl WebdavSession {
                 .into());
         }
         self.require_if(guard, path).await?;
-        let lock = self
-            .lock_table()?
-            .refresh(&lock.token, timeout, guard.now)
-            .ok_or_else(|| {
-                refuse(412).with_condition("lock-token-matches-request-uri", Vec::new())
-            })?;
+        let mut refreshed = None;
+        self.locks.rcu(
+            |current| match current.with_refreshed(&lock.token, timeout, guard.now) {
+                Some((next, lock)) => {
+                    refreshed = Some(lock);
+                    Arc::new(next)
+                }
+                None => {
+                    refreshed = None;
+                    Arc::clone(current)
+                }
+            },
+        );
+        let lock = refreshed.ok_or_else(|| {
+            refuse(412).with_condition("lock-token-matches-request-uri", Vec::new())
+        })?;
         Ok(crate::protocol::xml_body(
             200,
             &encode_lock_response(&lock, guard.now),
@@ -1652,18 +1694,42 @@ impl WebdavSession {
                 .into());
         };
         let now = self.now();
-        let mut locks = self.lock_table()?;
-        let lock = locks.find(&token, now);
-        if lock
-            .as_ref()
-            .is_none_or(|lock| !DavLockTable::in_scope(lock, path))
-        {
+        // The check and the removal are one published change: a table that
+        // changed in between is checked again.
+        let mut unlocked = false;
+        self.locks.rcu(|current| {
+            unlocked = current
+                .find_at(&token, now)
+                .is_some_and(|lock| DavLockTable::in_scope(&lock, path));
+            if !unlocked {
+                return Arc::clone(current);
+            }
+            let mut next = DavLockTable::clone(current);
+            next.remove(&token);
+            Arc::new(next)
+        });
+        if !unlocked {
             return Err(refuse(409)
                 .with_condition("lock-token-matches-request-uri", Vec::new())
                 .into());
         }
-        locks.remove(&token);
         Ok(WebdavResponse::empty(204))
+    }
+
+    /// Grant `request` and publish the table holding it. A table another
+    /// request changed first is tried again; the configured token generator
+    /// is the embedder's callback, so its value is kept across those attempts
+    /// and it runs at most once here.
+    fn create_lock(&self, request: &DavLockRequest, now: i64) -> Result<Arc<DavLock>, LockRefusal> {
+        let mut memo = None;
+        loop {
+            let current = self.locks.load_full();
+            let (next, lock) = current.with_created(request, now, &mut memo)?;
+            let previous = self.locks.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return Ok(lock);
+            }
+        }
     }
 
     fn conflicting_lock(&self, lock: &DavLock) -> DavFault {
@@ -1733,14 +1799,13 @@ impl WebdavSession {
                     cached.clone()
                 } else {
                     let stats = self.stat_or_absent(resource).await?;
-                    let tokens = {
-                        let mut locks = self.lock_table()?;
-                        locks
-                            .covering(resource, now)
-                            .into_iter()
-                            .map(|lock| lock.token)
-                            .collect()
-                    };
+                    let tokens = self
+                        .locks
+                        .load()
+                        .covering_at(resource, now)
+                        .iter()
+                        .map(|lock| lock.token.clone())
+                        .collect();
                     let state = ResourceState {
                         tokens,
                         etag: stats
@@ -1769,15 +1834,16 @@ impl WebdavSession {
         guard: &Guard,
         membership: bool,
     ) -> Result<(), WebdavError> {
-        let mut locks = self.lock_table()?;
+        // One snapshot answers for the path and its parent.
+        let locks = self.locks.load();
         let mut blocking = locks
-            .covering(path, guard.now)
+            .covering_at(path, guard.now)
             .into_iter()
             .filter(|lock| !guard.submitted.contains(&lock.token))
             .collect::<Vec<_>>();
         if membership && path != "/" {
             let parent = parent(path);
-            for lock in locks.covering(&parent, guard.now) {
+            for lock in locks.covering_at(&parent, guard.now) {
                 if !guard.submitted.contains(&lock.token)
                     && !blocking.iter().any(|existing| existing.token == lock.token)
                 {
@@ -1801,15 +1867,16 @@ impl WebdavSession {
     }
 
     fn locked_members(&self, path: &str, guard: &Guard) -> Result<Vec<Failure>, WebdavError> {
-        let mut locks = self.lock_table()?;
-        Ok(locks
-            .within(path, guard.now)
+        Ok(self
+            .locks
+            .load()
+            .within_at(path, guard.now)
             .into_iter()
             .filter(|lock| {
                 lock.path != path && !guard.submitted.iter().any(|token| token == &lock.token)
             })
             .map(|lock| Failure {
-                path: lock.path,
+                path: lock.path.clone(),
                 collection: lock.collection,
                 status: 423,
             })
@@ -1818,16 +1885,13 @@ impl WebdavSession {
 
     async fn discard_unmapped(&self, path: &str) -> Result<(), WebdavError> {
         let now = self.now();
-        let locks = {
-            let mut table = self.lock_table()?;
-            table.within(path, now)
-        };
+        let locks = self.locks.load().within_at(path, now);
         for lock in locks {
             // A provider error leaves the namespace unknown. Retain the lock
             // until absence is confirmed instead of treating an I/O failure
             // as proof that its root was unmapped.
             if matches!(self.stat_or_absent(&lock.path).await, Ok(None)) {
-                let _ = self.lock_table()?.remove(&lock.token);
+                remove_lock(&self.locks, &lock.token);
             }
         }
         Ok(())
@@ -2173,5 +2237,74 @@ mod method_stats_tests {
             Some(&(1_001 - METHOD_KEY_LIMIT as u64))
         );
         assert_eq!(stats.methods.values().sum::<u64>(), 1_002);
+    }
+
+    /// Threads racing to claim counters never lose a request and never give
+    /// one method two counters.
+    #[test]
+    fn racing_methods_are_each_counted_exactly_once() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 2_000;
+        // Fewer names than slots: every name keeps its own counter.
+        const NAMES: usize = METHOD_KEY_LIMIT - 4;
+        // With these as well there are more names than slots.
+        const EXTRA: usize = 40;
+
+        let session =
+            WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+        let start = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let session = &session;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    for round in 0..ROUNDS {
+                        let name = (thread * 7 + round) % NAMES;
+                        // Mixed case reaches the same counter.
+                        if round % 2 == 0 {
+                            session.count_request(&format!("n{name}"));
+                        } else {
+                            session.count_request(&format!("N{name}"));
+                        }
+                    }
+                });
+            }
+        });
+        let stats = session.stats();
+        let total = (THREADS * ROUNDS) as u64;
+        assert_eq!(stats.requests, total);
+        assert_eq!(stats.methods.len(), NAMES);
+        assert_eq!(stats.methods.values().sum::<u64>(), total);
+        let mut expected = BTreeMap::new();
+        for thread in 0..THREADS {
+            for round in 0..ROUNDS {
+                *expected
+                    .entry(format!("N{}", (thread * 7 + round) % NAMES))
+                    .or_insert(0u64) += 1;
+            }
+        }
+        assert_eq!(stats.methods, expected);
+
+        // Racing for the last slots: whoever loses is counted as OTHER.
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let session = &session;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    for round in 0..ROUNDS {
+                        session.count_request(&format!("X{}", (thread + round) % EXTRA));
+                    }
+                });
+            }
+        });
+        let stats = session.stats();
+        assert_eq!(stats.requests, 2 * total);
+        assert_eq!(stats.methods.len(), METHOD_KEY_LIMIT + 1);
+        assert_eq!(stats.methods.values().sum::<u64>(), 2 * total);
+        for (name, count) in &expected {
+            assert_eq!(stats.methods.get(name), Some(count));
+        }
     }
 }

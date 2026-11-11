@@ -14,7 +14,6 @@ use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwapOption;
 use mount_rs_core::FsDriver;
-use mount_rs_core::turn_cell::TurnCell;
 #[cfg(target_os = "linux")]
 use mount_rs_core::turn_gate::TurnLock;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -231,6 +230,66 @@ impl P9Connection {
     }
 }
 
+/// The live connections of one server, replaced whole on each change.
+///
+/// `None` means the server closed: `close` takes the map and leaves `None`
+/// in one swap, so there is no moment at which a connection can be added
+/// that close will not see.
+struct ConnectionRegistry(ArcSwapOption<HashMap<u64, P9Connection>>);
+
+impl ConnectionRegistry {
+    fn new() -> Self {
+        Self(ArcSwapOption::from_pointee(HashMap::new()))
+    }
+
+    /// Add a connection. `false` once the server has closed.
+    fn insert(&self, connection: &P9Connection) -> bool {
+        self.0
+            .rcu(|current| {
+                current.as_ref().map(|current| {
+                    let mut next = HashMap::clone(current);
+                    next.insert(connection.id, connection.clone());
+                    Arc::new(next)
+                })
+            })
+            .is_some()
+    }
+
+    fn remove(&self, id: u64) {
+        self.0.rcu(|current| match current {
+            Some(connections) if connections.contains_key(&id) => {
+                let mut next = HashMap::clone(connections);
+                next.remove(&id);
+                Some(Arc::new(next))
+            }
+            unchanged => unchanged.clone(),
+        });
+    }
+
+    /// Close the registry and return the connections it held.
+    fn close(&self) -> Vec<P9Connection> {
+        self.0
+            .swap(None)
+            .map(|connections| connections.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn snapshot(&self) -> Vec<P9Connection> {
+        self.0
+            .load()
+            .as_ref()
+            .map(|connections| connections.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn len(&self) -> usize {
+        self.0
+            .load()
+            .as_ref()
+            .map_or(0, |connections| connections.len())
+    }
+}
+
 trait P9Duplex: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T> P9Duplex for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 
@@ -257,7 +316,7 @@ pub struct P9Server {
     closed: AtomicBool,
     serving: AtomicBool,
     next_id: AtomicU64,
-    connections: Arc<TurnCell<HashMap<u64, P9Connection>>>,
+    connections: Arc<ConnectionRegistry>,
     /// Set once, by the constructor that binds the TCP listener.
     tcp_addr: OnceLock<SocketAddr>,
     #[cfg(target_os = "linux")]
@@ -322,7 +381,7 @@ impl P9Server {
             closed: AtomicBool::new(false),
             serving: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
-            connections: Arc::new(TurnCell::new(HashMap::new())),
+            connections: Arc::new(ConnectionRegistry::new()),
             tcp_addr: OnceLock::new(),
             #[cfg(target_os = "linux")]
             adoption: TurnLock::new(()),
@@ -490,23 +549,13 @@ impl P9Server {
 
     /// Return live connections in arrival order.
     pub fn clients(&self) -> io::Result<Vec<P9Connection>> {
-        let mut clients = self
-            .connections
-            .lock()
-            .map_err(|_| io::Error::other("connection lock poisoned"))?
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut clients = self.connections.snapshot();
         clients.sort_by_key(P9Connection::id);
         Ok(clients)
     }
 
     pub fn connection_count(&self) -> io::Result<usize> {
-        Ok(self
-            .connections
-            .lock()
-            .map_err(|_| io::Error::other("connection lock poisoned"))?
-            .len())
+        Ok(self.connections.len())
     }
 
     /// Close every client and unlink a Unix listener path. The serve task, if
@@ -514,7 +563,11 @@ impl P9Server {
     pub async fn close(&self) -> io::Result<()> {
         if !self.closed.swap(true, Ordering::AcqRel) {
             self.shutdown();
-            let clients = self.clients()?;
+            // Taking the registry closes it in the same step: an attach
+            // either got its connection in before this, and is closed here,
+            // or finds the registry closed and is refused.
+            let mut clients = self.connections.close();
+            clients.sort_by_key(P9Connection::id);
             for client in clients {
                 let _ = client.close().await;
             }
@@ -766,21 +819,18 @@ impl P9Server {
             id,
             control: Arc::clone(&control),
         };
-        let mut connections = self
-            .connections
-            .lock()
-            .map_err(|_| io::Error::other("connection lock poisoned"))?;
-        // Recheck under the same lock used by close(). This closes the race
-        // where close observes an empty client map just before attach inserts
-        // the new connection.
-        if self.closed.load(Ordering::Acquire) || self.shutdown_requested.load(Ordering::Acquire) {
+        // The registry itself refuses once close() has taken it, which
+        // closes the race where close observes an empty client map just
+        // before attach inserts the new connection.
+        if self.closed.load(Ordering::Acquire)
+            || self.shutdown_requested.load(Ordering::Acquire)
+            || !self.connections.insert(&connection)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "9P server is closed",
             ));
         }
-        connections.insert(id, connection.clone());
-        drop(connections);
         let server_shutdown = Arc::clone(&self.shutdown);
         let server_shutdown_requested = Arc::clone(&self.shutdown_requested);
         let connections = Arc::clone(&self.connections);
@@ -815,7 +865,7 @@ struct ConnectionRuntime {
     control: Arc<ConnectionControl>,
     server_shutdown: Arc<Notify>,
     server_shutdown_requested: Arc<AtomicBool>,
-    connections: Arc<TurnCell<HashMap<u64, P9Connection>>>,
+    connections: Arc<ConnectionRegistry>,
     hooks: P9ServerHooks,
     reported: Arc<AtomicBool>,
     own: bool,
@@ -947,10 +997,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
                     error.to_string(),
                 ),
             );
-            connections
-                .lock()
-                .ok()
-                .map(|mut map| map.remove(&connection.id));
+            connections.remove(connection.id);
             control.finish();
             return;
         }
@@ -1362,10 +1409,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
         let _ = writer.shutdown().await;
     }
     let _ = session.destroy().await;
-    connections
-        .lock()
-        .ok()
-        .map(|mut map| map.remove(&connection.id));
+    connections.remove(connection.id);
     control.finish();
 }
 
@@ -1525,5 +1569,135 @@ mod tests {
         assert_eq!(queue.len(), 12_000 - 4_096);
         assert_eq!(assembler.pending(), 0);
         assert_eq!(queued_bytes, queue.len() * frame.len());
+    }
+
+    /// Streams attached while the server closes: each is either refused or
+    /// closed by that close. None is left running on a closed server.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_connection_attached_during_close_is_closed_or_refused() {
+        const ATTACHERS: usize = 8;
+        const PER_ATTACHER: usize = 8;
+        let mut refused = 0;
+        let mut accepted = 0;
+        for round in 0..40 {
+            let server = Arc::new(P9Server::new(
+                mount_rs_memfs::MemoryFs::empty(),
+                P9ServerOptions::default(),
+            ));
+            let barrier = Arc::new(tokio::sync::Barrier::new(ATTACHERS + 1));
+            let attachers = (0..ATTACHERS)
+                .map(|_| {
+                    let (server, barrier) = (Arc::clone(&server), Arc::clone(&barrier));
+                    tokio::spawn(async move {
+                        barrier.wait().await;
+                        let mut outcomes = Vec::new();
+                        for _ in 0..PER_ATTACHER {
+                            let (stream, peer) = tokio::io::duplex(1024);
+                            outcomes
+                                .push((server.attach(stream, P9AttachOptions::default()), peer));
+                            tokio::task::yield_now().await;
+                        }
+                        outcomes
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait().await;
+            for _ in 0..round % 4 {
+                tokio::task::yield_now().await;
+            }
+            server.close().await.unwrap();
+            // Close has returned: whatever it took is closed already, and
+            // nothing attached after it took the registry.
+            assert_eq!(server.connection_count().unwrap(), 0);
+            assert!(server.clients().unwrap().is_empty());
+            let mut ids = Vec::new();
+            for attacher in attachers {
+                for (outcome, _peer) in attacher.await.unwrap() {
+                    match outcome {
+                        Ok(connection) => {
+                            accepted += 1;
+                            ids.push(connection.id());
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                connection.wait_closed(),
+                            )
+                            .await
+                            .expect("an attached connection is closed by close");
+                            assert!(connection.is_closed());
+                            assert!(connection.session.destroyed());
+                        }
+                        Err(error) => {
+                            refused += 1;
+                            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+                        }
+                    }
+                }
+            }
+            let attached = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(ids.len(), attached, "connection ids are unique");
+            assert!(
+                server
+                    .attach(tokio::io::duplex(64).0, P9AttachOptions::default())
+                    .is_err()
+            );
+        }
+        assert_eq!(accepted + refused, 40 * ATTACHERS * PER_ATTACHER);
+        assert!(
+            refused > 0,
+            "some attach must have lost the race with close"
+        );
+    }
+
+    #[test]
+    fn registry_keeps_every_concurrent_insert_until_it_closes() {
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 100;
+        let server = P9Server::new(
+            mount_rs_memfs::MemoryFs::empty(),
+            P9ServerOptions::default(),
+        );
+        let registry = ConnectionRegistry::new();
+        let connection = |id: u64| P9Connection {
+            session: P9Session::with_options(Arc::clone(&server.driver), server.session_options()),
+            peer: None,
+            id,
+            control: Arc::new(ConnectionControl::new()),
+        };
+        let barrier = std::sync::Barrier::new(THREADS as usize);
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let (registry, barrier, connection) = (&registry, &barrier, &connection);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for index in 0..PER_THREAD {
+                        let id = thread * PER_THREAD + index;
+                        assert!(registry.insert(&connection(id)));
+                        if id % 2 == 1 {
+                            registry.remove(id);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(registry.len() as u64, THREADS * PER_THREAD / 2);
+        let mut ids = registry
+            .close()
+            .iter()
+            .map(P9Connection::id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            (0..THREADS * PER_THREAD)
+                .filter(|id| id % 2 == 0)
+                .collect::<Vec<_>>()
+        );
+        assert!(!registry.insert(&connection(u64::MAX)));
+        registry.remove(0);
+        assert_eq!(registry.len(), 0);
+        assert!(registry.snapshot().is_empty());
+        assert!(registry.close().is_empty());
     }
 }

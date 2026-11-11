@@ -15,12 +15,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use mount_rs_core::chunking::ChunkerConfig;
+use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::storage::{
     BlockExtent, BlockStore, DirectoryEntry, FileLayout, InodeId, LoadedMetadata, MetadataStore,
     NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata, WriterLease,
 };
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::types::{S_IFDIR, S_IFREG, Stats, now_ms};
 use mount_rs_core::{ErrorCode, FsError};
 use rusqlite::ffi;
@@ -242,7 +243,7 @@ where
                 options,
                 state: mount_rs_core::turn_gate::TurnLock::new(VolumeState::default()),
                 next_handle: AtomicU64::new(1),
-                wal_regions: TurnCell::new(HashMap::new()),
+                wal_regions: ArcSwap::default(),
             }),
         })
     }
@@ -362,7 +363,10 @@ where
     options: StorageOptions,
     state: mount_rs_core::turn_gate::TurnLock<VolumeState>,
     next_handle: AtomicU64,
-    wal_regions: TurnCell<HashMap<Vec<u8>, Arc<ProcessWalRegion>>>,
+    /// One region per database name. Entries are added on a database's
+    /// first WAL connection and never removed, so a connection normally
+    /// finds its region with one load.
+    wal_regions: ArcSwap<HashMap<Vec<u8>, Arc<ProcessWalRegion>>>,
 }
 
 #[derive(Default)]
@@ -398,7 +402,34 @@ struct ProcessWalState {
 }
 
 struct ProcessWalRegion {
-    state: TurnCell<ProcessWalState>,
+    // A waiter parks instead of spinning: mapping a page allocates and
+    // zeroes it, and taking a lock inserts into a set, with the cell held.
+    state: ParkCell<ProcessWalState>,
+}
+
+/// The region of `database_name`, created on first use. Callers racing on a
+/// new name each offer a region; one is published and all of them receive
+/// that one, so every connection to a database shares its WAL-index memory.
+fn wal_region(
+    regions: &ArcSwap<HashMap<Vec<u8>, Arc<ProcessWalRegion>>>,
+    database_name: Vec<u8>,
+) -> Arc<ProcessWalRegion> {
+    if let Some(region) = regions.load().get(&database_name) {
+        return Arc::clone(region);
+    }
+    let fresh = Arc::new(ProcessWalRegion::new());
+    loop {
+        let current = regions.load_full();
+        if let Some(region) = current.get(&database_name) {
+            return Arc::clone(region);
+        }
+        let mut next = HashMap::clone(&current);
+        next.insert(database_name.clone(), Arc::clone(&fresh));
+        let previous = regions.compare_and_swap(&current, Arc::new(next));
+        if Arc::ptr_eq(&previous, &current) {
+            return fresh;
+        }
+    }
 }
 
 struct ProcessWalConnection {
@@ -410,7 +441,7 @@ struct ProcessWalConnection {
 impl ProcessWalRegion {
     fn new() -> Self {
         Self {
-            state: TurnCell::new(ProcessWalState {
+            state: ParkCell::new(ProcessWalState {
                 region_size: None,
                 regions: Vec::new(),
                 slots: std::array::from_fn(|_| ProcessShmSlot::default()),
@@ -704,14 +735,10 @@ where
             .strip_suffix(b"-wal")
             .unwrap_or(database_name)
             .to_vec();
-        let mut regions = self
-            .wal_regions
-            .lock()
-            .map_err(|_| VfsError::Other("storage WAL registry lock poisoned".to_owned()))?;
-        let region = regions
-            .entry(database_name)
-            .or_insert_with(|| Arc::new(ProcessWalRegion::new()));
-        Ok(ProcessWalConnection::new(Arc::clone(region), handle_id))
+        Ok(ProcessWalConnection::new(
+            wal_region(&self.wal_regions, database_name),
+            handle_id,
+        ))
     }
 
     fn ensure_healthy_state(state: &VolumeState) -> Result<(), VfsError> {
@@ -1564,6 +1591,46 @@ mod tests {
                 self.0 = true;
                 context.waker().wake_by_ref();
                 Poll::Pending
+            }
+        }
+    }
+
+    /// Connections racing to open the WAL index of one new database all
+    /// share one region, and all map the same memory for a page.
+    #[test]
+    fn racing_wal_connections_share_one_region_and_one_page() {
+        const THREADS: usize = 8;
+        for round in 0..300_u32 {
+            let regions: ArcSwap<HashMap<Vec<u8>, Arc<ProcessWalRegion>>> = ArcSwap::default();
+            let barrier = std::sync::Barrier::new(THREADS);
+            let mapped: Vec<(usize, usize)> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|thread| {
+                        let (regions, barrier) = (&regions, &barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            let name = format!("db-{}", thread % 2).into_bytes();
+                            let region = wal_region(regions, name);
+                            let mut connection =
+                                ProcessWalConnection::new(Arc::clone(&region), thread as u64);
+                            let page = connection.map(0, 32 * 1024, true).unwrap();
+                            (thread % 2, page as usize)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect()
+            });
+            assert_eq!(regions.load().len(), 2, "round {round}");
+            for database in 0..2 {
+                let pages: BTreeSet<usize> = mapped
+                    .iter()
+                    .filter(|(name, _)| *name == database)
+                    .map(|(_, page)| *page)
+                    .collect();
+                assert_eq!(pages.len(), 1, "one WAL-index page per database");
             }
         }
     }

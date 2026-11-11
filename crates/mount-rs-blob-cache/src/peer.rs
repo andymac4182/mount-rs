@@ -1,7 +1,8 @@
 use crate::*;
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use bytes::Bytes;
-use mount_rs_core::turn_gate::TurnLock;
+use mount_rs_core::turn_gate::TurnGate;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -64,11 +65,28 @@ pub struct QuicPeerConfig {
     pub transfer_bytes: usize,
     pub deadline: Duration,
 }
+/// The connection to one trusted peer. A request on a live connection reads
+/// `live` and takes no lock; `dial` only keeps callers that find it missing
+/// or closed from each opening their own.
+struct PeerLink {
+    live: ArcSwapOption<quinn::Connection>,
+    dial: TurnGate,
+}
+impl PeerLink {
+    fn open(&self) -> Option<quinn::Connection> {
+        let live = self.live.load();
+        let connection = live.as_deref()?;
+        connection
+            .close_reason()
+            .is_none()
+            .then(|| connection.clone())
+    }
+}
 pub struct QuicPeerTransport {
     endpoint: quinn::Endpoint,
     config: QuicPeerConfig,
     cache: Arc<LocalCache>,
-    connections: BTreeMap<PeerId, Arc<TurnLock<Option<quinn::Connection>>>>,
+    connections: BTreeMap<PeerId, PeerLink>,
     permits: Arc<Semaphore>,
     inbound: Arc<Semaphore>,
     streams: Arc<Semaphore>,
@@ -156,7 +174,15 @@ impl QuicPeerTransport {
         let connections = config
             .trusted
             .keys()
-            .map(|peer| (peer.clone(), Arc::new(TurnLock::new(None))))
+            .map(|peer| {
+                (
+                    peer.clone(),
+                    PeerLink {
+                        live: ArcSwapOption::empty(),
+                        dial: TurnGate::new(),
+                    },
+                )
+            })
             .collect();
         let result = Arc::new(Self {
             endpoint,
@@ -206,12 +232,15 @@ impl QuicPeerTransport {
     }
     async fn connection(&self, id: &PeerId) -> Result<quinn::Connection> {
         let peer = self.config.trusted.get(id).ok_or_else(error)?;
-        let slot = self.connections.get(id).ok_or_else(error)?;
-        let mut slot = slot.lock().await;
-        if let Some(connection) = slot.as_ref()
-            && connection.close_reason().is_none()
-        {
-            return Ok(connection.clone());
+        let link = self.connections.get(id).ok_or_else(error)?;
+        if let Some(connection) = link.open() {
+            return Ok(connection);
+        }
+        // Only the holder of the dial turn stores a connection, so whoever
+        // waited here finds the one the previous holder opened.
+        let _turn = link.dial.lock().await;
+        if let Some(connection) = link.open() {
+            return Ok(connection);
         }
         let connection = self
             .endpoint
@@ -223,7 +252,7 @@ impl QuicPeerTransport {
             connection.close(1u32.into(), b"untrusted peer");
             return Err(error());
         }
-        *slot = Some(connection.clone());
+        link.live.store(Some(Arc::new(connection.clone())));
         Ok(connection)
     }
     async fn accept(self: Arc<Self>, incoming: quinn::Incoming) -> Result<()> {
@@ -830,6 +859,130 @@ mod tests {
         let mut denied = s;
         denied.identity.partition = "other".into();
         assert!(a.get(&peer, &denied, &id).await.is_err());
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_requests_dial_a_peer_once_and_replace_a_closed_connection_once() {
+        let mut params = rcgen::CertificateParams::new(vec!["cache-ca".into()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        let (ac, ak) = cert(&ca);
+        let (bc, bk) = cert(&ca);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let scope = CacheScope {
+            identity: ScopeIdentity {
+                cluster: "c".into(),
+                partition: "p".into(),
+                drive: "d".into(),
+            },
+            backing: ConcurrentBackingId::from_bytes([2; 16]).unwrap(),
+        };
+        let cache = |d: &std::path::Path| {
+            let cache = LocalCache::new(LocalCacheConfig {
+                directory: d.to_owned(),
+                memory_bytes: 1024,
+                disk_bytes: 2048,
+                max_entries: 10,
+                max_blob_bytes: 1024,
+            })
+            .unwrap();
+            cache
+                .register_scope(scope.clone(), IntegrityPolicy::Opaque)
+                .unwrap();
+            cache
+        };
+        let addr = || {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket.local_addr().unwrap()
+        };
+        let aa = addr();
+        let ba = addr();
+        let ep = |address, cert: &CertificateDer<'static>| PeerEndpoint {
+            address,
+            server_name: "localhost".into(),
+            certificate_sha256: Sha256::digest(cert.as_ref()).into(),
+            partitions: BTreeSet::from(["p".into()]),
+        };
+        let config = |local: &str, bind, cert, key, trusted| QuicPeerConfig {
+            local: PeerId(local.into()),
+            bind,
+            certificates: vec![cert],
+            private_key: key,
+            roots: roots.clone(),
+            trusted,
+            max_blob_bytes: 1024,
+            max_inflight: 128,
+            transfer_bytes: 128 * 1024 * 1024,
+            deadline: Duration::from_secs(5),
+        };
+        let peer = PeerId("b".into());
+        let a = QuicPeerTransport::bind(
+            config(
+                "a",
+                aa,
+                ac.clone(),
+                ak,
+                BTreeMap::from([(peer.clone(), ep(ba, &bc))]),
+            ),
+            cache(ad.path()),
+        )
+        .unwrap();
+        let b = QuicPeerTransport::bind(
+            config(
+                "b",
+                ba,
+                bc,
+                bk,
+                BTreeMap::from([(PeerId("a".into()), ep(aa, &ac))]),
+            ),
+            cache(bd.path()),
+        )
+        .unwrap();
+        let id = BlockId("opaque".into());
+        // Every caller of one round must come back holding the same
+        // connection: a second dial would hand its caller a different one.
+        let round = || async {
+            let barrier = Arc::new(tokio::sync::Barrier::new(64));
+            let mut callers = tokio::task::JoinSet::new();
+            for _ in 0..64 {
+                let a = a.clone();
+                let peer = peer.clone();
+                let scope = scope.clone();
+                let id = id.clone();
+                let barrier = barrier.clone();
+                callers.spawn(async move {
+                    barrier.wait().await;
+                    let connection = a.connection(&peer).await.unwrap();
+                    assert!(a.get(&peer, &scope, &id).await.unwrap().is_none());
+                    connection.stable_id()
+                });
+            }
+            let mut ids = BTreeSet::new();
+            while let Some(id) = callers.join_next().await {
+                ids.insert(id.unwrap());
+            }
+            ids
+        };
+        let first = round().await;
+        assert_eq!(first.len(), 1, "concurrent callers dialled more than once");
+        let again = round().await;
+        assert_eq!(again, first, "a live connection was replaced");
+        a.connection(&peer)
+            .await
+            .unwrap()
+            .close(0u32.into(), b"test");
+        let replaced = round().await;
+        assert_eq!(replaced.len(), 1, "a closed connection was replaced twice");
+        assert_ne!(replaced, first, "a closed connection was handed out");
+        assert_eq!(
+            a.connections[&peer].open().map(|c| c.stable_id()),
+            replaced.first().copied()
+        );
         a.shutdown().await;
         b.shutdown().await;
     }

@@ -11,15 +11,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_core::Stream;
 use md5::{Digest as Md5Digest, Md5};
 use mount_rs_core::append_log::AppendLog;
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
 use mount_rs_core::{
     FileType, FsDriver, MkdirOptions, Stats,
@@ -115,93 +115,142 @@ struct RequestTicket {
     answered: AtomicBool,
 }
 
+/// One key's gate and the number of requests using it: waiting for the
+/// gate or holding it.
+struct ConditionalPutEntry {
+    gate: Arc<TurnLock<()>>,
+    /// [`CONDITIONAL_PUT_ENTRY_DEAD`] once the last user has left. That is
+    /// final: a dead entry is only ever removed, so a request that finds one
+    /// starts a new entry instead of joining a gate nobody else will see.
+    users: AtomicUsize,
+}
+
+const CONDITIONAL_PUT_ENTRY_DEAD: usize = usize::MAX;
+
+type ConditionalPutEntries = HashMap<String, Arc<ConditionalPutEntry>>;
+
+/// The gates of the keys with a conditional PUT in flight. The map is
+/// replaced whole, so finding a key's gate takes no lock; it only holds keys
+/// in use, so a replacement copies a handful of pointers.
 struct ConditionalPutLockRegistry {
-    // Both guards below reach it from `Drop`, which also runs while a
-    // panicking request unwinds; taking the cell then does not abandon it.
-    locks: TurnCell<HashMap<String, Arc<TurnLock<()>>>>,
+    locks: ArcSwap<ConditionalPutEntries>,
 }
 
 impl ConditionalPutLockRegistry {
     fn new() -> Self {
         Self {
-            locks: TurnCell::new(HashMap::new()),
+            locks: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
     async fn acquire(self: &Arc<Self>, key: String) -> ConditionalPutLockGuard {
-        let registration = {
-            let mut locks = self.locks.lock().expect("conditional PUT lock registry");
-            let lock = locks
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(TurnLock::new(())))
-                .clone();
-            ConditionalPutLockRegistration {
-                registry: Arc::clone(self),
-                key: key.clone(),
-                lock,
-                active: true,
-            }
-        };
-        let guard = Arc::clone(&registration.lock).lock_owned().await;
-        let registry = Arc::clone(&registration.registry);
-        let guard_key = registration.key.clone();
-        let lock = Arc::clone(&registration.lock);
-        registration.disarm();
+        // The registration leaves the entry again if this future is dropped
+        // while it waits for the gate.
+        let registration = self.register(key);
+        let gate = Arc::clone(&registration.entry.gate).lock_owned().await;
         ConditionalPutLockGuard {
-            registry,
-            key: guard_key,
-            lock,
-            guard: Some(guard),
+            _gate: gate,
+            _registration: registration,
         }
     }
 
-    fn remove_if_unused(&self, key: &str, lock: &Arc<TurnLock<()>>) {
-        let Ok(mut locks) = self.locks.lock() else {
-            return;
-        };
-        if Arc::strong_count(lock) == 2
-            && locks
-                .get(key)
-                .is_some_and(|current| Arc::ptr_eq(current, lock))
-        {
-            locks.remove(key);
+    /// Count this request into the key's entry, creating the entry when the
+    /// key has none.
+    fn register(self: &Arc<Self>, key: String) -> ConditionalPutLockRegistration {
+        let mut fresh: Option<Arc<ConditionalPutEntry>> = None;
+        loop {
+            let current = self.locks.load_full();
+            if let Some(entry) = current.get(&key) {
+                let joined =
+                    entry
+                        .users
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |users| {
+                            (users != CONDITIONAL_PUT_ENTRY_DEAD).then(|| users + 1)
+                        });
+                if joined.is_ok() {
+                    return ConditionalPutLockRegistration {
+                        registry: Arc::clone(self),
+                        entry: Arc::clone(entry),
+                        key,
+                    };
+                }
+                // Its last user is still on the way to removing it.
+                self.remove_dead(&key, entry);
+                continue;
+            }
+            // Publish an entry already counting this request. It is only
+            // ever added to the snapshot it was absent from, so there is at
+            // most one live entry for a key.
+            let entry = Arc::clone(fresh.get_or_insert_with(|| {
+                Arc::new(ConditionalPutEntry {
+                    gate: Arc::new(TurnLock::new(())),
+                    users: AtomicUsize::new(1),
+                })
+            }));
+            let mut next = ConditionalPutEntries::clone(&current);
+            next.insert(key.clone(), Arc::clone(&entry));
+            let previous = self.locks.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return ConditionalPutLockRegistration {
+                    registry: Arc::clone(self),
+                    entry,
+                    key,
+                };
+            }
         }
+    }
+
+    /// One user leaves `entry`. The last one out marks it dead, unless a
+    /// request joined in between, and then takes it out of the map.
+    fn release(&self, key: &str, entry: &Arc<ConditionalPutEntry>) {
+        if entry.users.fetch_sub(1, Ordering::SeqCst) == 1
+            && entry
+                .users
+                .compare_exchange(
+                    0,
+                    CONDITIONAL_PUT_ENTRY_DEAD,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+        {
+            self.remove_dead(key, entry);
+        }
+    }
+
+    fn remove_dead(&self, key: &str, entry: &Arc<ConditionalPutEntry>) {
+        self.locks.rcu(|current| {
+            if !current
+                .get(key)
+                .is_some_and(|published| Arc::ptr_eq(published, entry))
+            {
+                return Arc::clone(current);
+            }
+            let mut next = ConditionalPutEntries::clone(current);
+            next.remove(key);
+            Arc::new(next)
+        });
     }
 }
 
+/// One request's count in a key's entry.
 struct ConditionalPutLockRegistration {
     registry: Arc<ConditionalPutLockRegistry>,
     key: String,
-    lock: Arc<TurnLock<()>>,
-    active: bool,
-}
-
-impl ConditionalPutLockRegistration {
-    fn disarm(mut self) {
-        self.active = false;
-    }
+    entry: Arc<ConditionalPutEntry>,
 }
 
 impl Drop for ConditionalPutLockRegistration {
     fn drop(&mut self) {
-        if self.active {
-            self.registry.remove_if_unused(&self.key, &self.lock);
-        }
+        self.registry.release(&self.key, &self.entry);
     }
 }
 
+/// Fields drop in order: the gate is left before the entry is, so an entry
+/// is never retired while a request still holds its gate.
 struct ConditionalPutLockGuard {
-    registry: Arc<ConditionalPutLockRegistry>,
-    key: String,
-    lock: Arc<TurnLock<()>>,
-    guard: Option<OwnedTurnLockGuard<()>>,
-}
-
-impl Drop for ConditionalPutLockGuard {
-    fn drop(&mut self) {
-        drop(self.guard.take());
-        self.registry.remove_if_unused(&self.key, &self.lock);
-    }
+    _gate: OwnedTurnLockGuard<()>,
+    _registration: ConditionalPutLockRegistration,
 }
 
 /// Remove a private staging path if the owning request is cancelled before it
@@ -4528,6 +4577,101 @@ fn sigv4_error(failure: SigV4Failure, presigned: bool) -> protocol::S3Error {
 mod tests {
     use super::*;
     use mount_rs_core::{ErrorCode, FileHandle, FsError, Result as FsResult, Stats};
+
+    /// Many requests take the gates of a few keys, some giving up while
+    /// they wait. A key's gate never has two holders, and every entry is gone
+    /// once the last request has left.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn conditional_put_gates_admit_one_holder_and_leave_no_entry() {
+        const TASKS: usize = 32;
+        const ROUNDS: usize = 300;
+        const KEYS: usize = 3;
+
+        let registry = Arc::new(ConditionalPutLockRegistry::new());
+        let holders: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..KEYS).map(|_| AtomicUsize::new(0)).collect());
+        let held = Arc::new(AtomicUsize::new(0));
+        let abandoned = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for task in 0..TASKS {
+            let registry = Arc::clone(&registry);
+            let holders = Arc::clone(&holders);
+            let held = Arc::clone(&held);
+            let abandoned = Arc::clone(&abandoned);
+            tasks.push(tokio::spawn(async move {
+                for round in 0..ROUNDS {
+                    let index = (task * 5 + round) % KEYS;
+                    let key = format!("bucket/key-{index}");
+                    if (task + round) % 7 == 0 {
+                        // Poll the acquire once and drop it: a request
+                        // cancelled while it waits, or just after it got in.
+                        let mut acquire = std::pin::pin!(registry.acquire(key));
+                        let polled = poll_fn(|cx| Poll::Ready(acquire.as_mut().poll(cx))).await;
+                        if polled.is_pending() {
+                            abandoned.fetch_add(1, Ordering::SeqCst);
+                        }
+                        continue;
+                    }
+                    let guard = registry.acquire(key).await;
+                    assert_eq!(
+                        holders[index].fetch_add(1, Ordering::SeqCst),
+                        0,
+                        "two conditional PUTs hold the gate of key {index}"
+                    );
+                    held.fetch_add(1, Ordering::SeqCst);
+                    if round % 3 == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                    assert_eq!(holders[index].fetch_sub(1, Ordering::SeqCst), 1);
+                    drop(guard);
+                    if round % 11 == 0 {
+                        // Let the map empty out so entries are retired and
+                        // recreated, not only shared.
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.expect("conditional PUT task");
+        }
+        assert!(held.load(Ordering::SeqCst) > 0);
+        assert!(
+            registry.locks.load().is_empty(),
+            "entries were left behind: {:?}",
+            registry.locks.load().keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The entry of a key is retired when its last user leaves and a later
+    /// request starts a new one; a request arriving in between joins it.
+    #[tokio::test]
+    async fn conditional_put_entries_are_shared_while_used_and_retired_after() {
+        let registry = Arc::new(ConditionalPutLockRegistry::new());
+        let first = registry.acquire("k".to_owned()).await;
+        let entry = Arc::clone(&first._registration.entry);
+        let mut second = std::pin::pin!(registry.acquire("k".to_owned()));
+        assert!(
+            poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending(),
+            "the gate admitted a second holder"
+        );
+        assert_eq!(entry.users.load(Ordering::SeqCst), 2);
+        drop(first);
+        assert_eq!(registry.locks.load().len(), 1, "the waiter keeps the entry");
+        let second = second.await;
+        assert!(Arc::ptr_eq(&second._registration.entry, &entry));
+        drop(second);
+        assert!(registry.locks.load().is_empty());
+        assert_eq!(
+            entry.users.load(Ordering::SeqCst),
+            CONDITIONAL_PUT_ENTRY_DEAD
+        );
+
+        let third = registry.acquire("k".to_owned()).await;
+        assert!(!Arc::ptr_eq(&third._registration.entry, &entry));
+    }
     use mount_rs_memfs::MemoryFs;
 
     #[test]

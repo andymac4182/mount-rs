@@ -1,7 +1,9 @@
 //! Immutable-byte cache. The backing store remains the sole durability authority.
 mod distributed;
+mod flights;
 mod local;
 mod peer;
+mod pending;
 mod store;
 pub use distributed::*;
 pub use local::*;

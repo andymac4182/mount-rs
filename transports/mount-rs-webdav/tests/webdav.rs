@@ -3288,61 +3288,66 @@ async fn lock_cleanup_retains_lock_when_provider_stat_fails() {
     assert_eq!(session.lock_records()[0].path, "/locked");
 }
 
+fn bare(method: &str, target: &str) -> WebdavRequestHead {
+    WebdavRequestHead {
+        method: method.to_owned(),
+        target: target.to_owned(),
+        headers: Default::default(),
+    }
+}
+
+const EXCLUSIVE_LOCK: &[u8] = br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#;
+
+/// The lock table is a published value with no lock to abandon: a token
+/// generator that panics takes down its own request and nothing else.
 #[tokio::test]
-async fn poisoned_lock_table_fails_closed_without_mutating_resource() {
-    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
-    let created = session
-        .handle_request(
-            WebdavRequestHead {
-                method: "PUT".to_owned(),
-                target: "/locked".to_owned(),
-                headers: Default::default(),
+async fn a_panicking_token_generator_leaves_the_lock_table_usable() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let generator_calls = Arc::clone(&calls);
+    let session = Arc::new(WebdavSession::new(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions {
+            locks: DavLockTableOptions {
+                new_token: Some(Arc::new(move || {
+                    if generator_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        panic!("the first token is never produced");
+                    }
+                    "urn:uuid:second-token".to_owned()
+                })),
+                ..DavLockTableOptions::default()
             },
-            b"before".as_slice(),
-        )
+            ..WebdavSessionOptions::default()
+        },
+    ));
+    let created = session
+        .handle_request(bare("PUT", "/locked"), b"before".as_slice())
         .await;
     assert_eq!(created.status, 201);
 
+    let panicking = Arc::clone(&session);
+    let panicked = tokio::spawn(async move {
+        panicking
+            .handle_request(bare("LOCK", "/locked"), EXCLUSIVE_LOCK)
+            .await
+            .status
+    })
+    .await;
+    assert!(panicked.expect_err("the generator panics").is_panic());
+    assert_eq!(session.lock_count(), 0);
+
     let locked = session
-        .handle_request(
-            WebdavRequestHead {
-                method: "LOCK".to_owned(),
-                target: "/locked".to_owned(),
-                headers: Default::default(),
-            },
-            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
-        )
+        .handle_request(bare("LOCK", "/locked"), EXCLUSIVE_LOCK)
         .await;
     assert_eq!(locked.status, 200);
-
-    let lock_table = Arc::clone(&session.locks);
-    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = lock_table.lock().expect("lock table should start healthy");
-        panic!("poison the WebDAV lock table");
-    }));
-    assert!(poisoned.is_err());
+    assert_eq!(session.lock_count(), 1);
 
     let rejected = session
-        .handle_request(
-            WebdavRequestHead {
-                method: "PUT".to_owned(),
-                target: "/locked".to_owned(),
-                headers: Default::default(),
-            },
-            b"after".as_slice(),
-        )
+        .handle_request(bare("PUT", "/locked"), b"after".as_slice())
         .await;
-    assert_eq!(rejected.status, 500);
+    assert_eq!(rejected.status, 423);
 
     let unchanged = session
-        .handle_request(
-            WebdavRequestHead {
-                method: "GET".to_owned(),
-                target: "/locked".to_owned(),
-                headers: Default::default(),
-            },
-            &[] as &[u8],
-        )
+        .handle_request(bare("GET", "/locked"), &[] as &[u8])
         .await;
     assert_eq!(unchanged.status, 200);
     assert_eq!(
@@ -3354,6 +3359,220 @@ async fn poisoned_lock_table_fails_closed_without_mutating_resource() {
             .expect("GET bytes"),
         b"before"
     );
+}
+
+/// Readers skip an expired lock without touching the published table; the
+/// next change is what drops it.
+#[tokio::test]
+async fn reading_past_an_expiry_does_not_republish_the_lock_table() {
+    let clock = Arc::new(AtomicI64::new(1_000));
+    let now = Arc::clone(&clock);
+    let session = WebdavSession::new(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions {
+            now: Some(Arc::new(move || now.load(Ordering::SeqCst))),
+            ..WebdavSessionOptions::default()
+        },
+    );
+    for path in ["/a", "/b"] {
+        let created = session
+            .handle_request(bare("PUT", path), b"x".as_slice())
+            .await;
+        assert_eq!(created.status, 201);
+    }
+    let mut head = bare("LOCK", "/a");
+    head.headers
+        .insert("timeout".to_owned(), "Second-1".to_owned());
+    let locked = session.handle_request(head, EXCLUSIVE_LOCK).await;
+    assert_eq!(locked.status, 200);
+    assert_eq!(session.lock_count(), 1);
+    let published = session.locks.load_full();
+
+    assert_eq!(
+        session
+            .handle_request(bare("PUT", "/a"), b"y".as_slice())
+            .await
+            .status,
+        423
+    );
+    clock.store(10_000, Ordering::SeqCst);
+    assert_eq!(session.lock_count(), 0);
+    assert!(session.lock_records().is_empty());
+    assert_eq!(
+        session
+            .handle_request(bare("PUT", "/a"), b"z".as_slice())
+            .await
+            .status,
+        204
+    );
+    assert!(
+        Arc::ptr_eq(&published, &session.locks.load_full()),
+        "requests that only read the lock table must not replace it"
+    );
+
+    // A change publishes a table without the expired lock.
+    let locked = session
+        .handle_request(bare("LOCK", "/b"), EXCLUSIVE_LOCK)
+        .await;
+    assert_eq!(locked.status, 200);
+    let mut table = DavLockTable::clone(&session.locks.load());
+    assert_eq!(table.all(0).len(), 1, "the expired lock was dropped");
+    assert_eq!(table.all(0)[0].path, "/b");
+}
+
+/// Many requests race to lock a few paths, write under their lock and unlock.
+/// Each path is held by one request at a time, the configured generator runs
+/// at most once per request however often publishing is retried, and the
+/// table is empty at the end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn racing_locks_grant_one_holder_and_generate_one_token_per_request() {
+    const TASKS: usize = 16;
+    const ROUNDS: usize = 40;
+    const PATHS: usize = 3;
+
+    let generated = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&generated);
+    let session = Arc::new(WebdavSession::new(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions {
+            locks: DavLockTableOptions {
+                new_token: Some(Arc::new(move || {
+                    format!("urn:uuid:race-{}", counter.fetch_add(1, Ordering::SeqCst))
+                })),
+                max_locks: mount_rs_webdav::MAX_LOCKS,
+                ..DavLockTableOptions::default()
+            },
+            ..WebdavSessionOptions::default()
+        },
+    ));
+    for path in 0..PATHS {
+        let created = session
+            .handle_request(bare("PUT", &format!("/p{path}")), b"x".as_slice())
+            .await;
+        assert_eq!(created.status, 201);
+    }
+    let holders: Arc<Vec<AtomicUsize>> =
+        Arc::new((0..PATHS).map(|_| AtomicUsize::new(0)).collect());
+    let grants = Arc::new(AtomicUsize::new(0));
+    let conflicts = Arc::new(AtomicUsize::new(0));
+    let granted = Arc::new(Mutex::new(Vec::new()));
+    let mut tasks = Vec::new();
+    for task in 0..TASKS {
+        let session = Arc::clone(&session);
+        let holders = Arc::clone(&holders);
+        let grants = Arc::clone(&grants);
+        let conflicts = Arc::clone(&conflicts);
+        let granted = Arc::clone(&granted);
+        tasks.push(tokio::spawn(async move {
+            for round in 0..ROUNDS {
+                let index = (task + round) % PATHS;
+                let path = format!("/p{index}");
+                let locked = session
+                    .handle_request(bare("LOCK", &path), EXCLUSIVE_LOCK)
+                    .await;
+                if locked.status == 423 {
+                    conflicts.fetch_add(1, Ordering::SeqCst);
+                    // Readers run against whatever table is published.
+                    assert!(session.lock_count() <= PATHS);
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                assert_eq!(locked.status, 200);
+                grants.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    holders[index].fetch_add(1, Ordering::SeqCst),
+                    0,
+                    "two requests hold an exclusive lock on {path}"
+                );
+                let token = locked.headers.get("lock-token").cloned().expect("token");
+                granted.lock().unwrap().push(token.clone());
+                let mut put = bare("PUT", &path);
+                put.headers.insert("if".to_owned(), format!("({token})"));
+                assert_eq!(
+                    session.handle_request(put, b"y".as_slice()).await.status,
+                    204
+                );
+                assert_eq!(
+                    session
+                        .handle_request(bare("PUT", &path), b"n".as_slice())
+                        .await
+                        .status,
+                    423
+                );
+                tokio::task::yield_now().await;
+                holders[index].fetch_sub(1, Ordering::SeqCst);
+                let mut unlock = bare("UNLOCK", &path);
+                unlock.headers.insert("lock-token".to_owned(), token);
+                assert_eq!(
+                    session.handle_request(unlock, &[] as &[u8]).await.status,
+                    204
+                );
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("lock task");
+    }
+    let grants = grants.load(Ordering::SeqCst);
+    assert!(grants > 0);
+    assert_eq!(grants + conflicts.load(Ordering::SeqCst), TASKS * ROUNDS);
+    // A grant uses the one value its request generated: none was generated
+    // twice for a retry, and none was replaced by the repeat fallback.
+    let generated = generated.load(Ordering::SeqCst);
+    assert!(
+        (grants..=TASKS * ROUNDS).contains(&generated),
+        "{generated} tokens generated for {grants} grants"
+    );
+    let mut granted = granted.lock().unwrap().clone();
+    assert_eq!(granted.len(), grants);
+    assert!(granted.iter().all(|token| token.contains("urn:uuid:race-")));
+    granted.sort();
+    granted.dedup();
+    assert_eq!(granted.len(), grants, "a token was granted twice");
+    assert_eq!(session.lock_count(), 0);
+}
+
+/// A shut-down server stays down: a `listen` racing the shutdown either came
+/// up first and was closed by it, or is refused. Nothing is listening once
+/// `shutdown` has returned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_is_terminal_for_a_racing_listen() {
+    for _ in 0..50 {
+        let fs = Arc::new(MemoryFs::empty());
+        fs.write_file("/marker", b"this server").await.unwrap();
+        let server = Arc::new(
+            create_webdav_server(fs, WebdavServerOptions::default()).expect("loopback bind"),
+        );
+        let listener = Arc::clone(&server);
+        let listening = tokio::spawn(async move { listener.listen().await });
+        let marked = AtomicBool::new(false);
+        server
+            .shutdown(|| marked.store(true, Ordering::SeqCst))
+            .await
+            .expect("shutdown");
+        assert!(marked.load(Ordering::SeqCst));
+        let listened = listening.await.expect("listen task");
+        if let Err(error) = &listened {
+            assert_eq!(error.to_string(), "server is closed");
+        }
+        // Whichever order they ran in, the accept loop is gone.
+        let port = server.port();
+        if port != 0 {
+            // Another test's server may have been given the freed port, so a
+            // refused connection is not required: only that this server is
+            // not the one answering.
+            if let Ok(response) = reqwest::get(format!("http://127.0.0.1:{port}/marker")).await {
+                assert_ne!(
+                    response.bytes().await.unwrap_or_default().as_ref(),
+                    b"this server",
+                    "a listener is up after shutdown returned"
+                );
+            }
+        }
+        let again = server.listen().await.expect_err("listen after shutdown");
+        assert_eq!(again.to_string(), "server is closed");
+        server.close().await.expect("close after shutdown");
+    }
 }
 
 #[tokio::test]

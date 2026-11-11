@@ -183,9 +183,9 @@ mod tests {
         let token = registry.create("alice").await.unwrap();
         let session = registry.lookup("alice", &token).unwrap();
         let handle = session.open("/file", "w+", 0o600).await.unwrap();
-        // Hold the join lock to deterministically suspend shutdown at an await
+        // Hold the join to deterministically suspend shutdown at an await
         // boundary without relying on a slow disk or a sleeping backend.
-        let retained = supervisor.task.turn.lock().await;
+        supervisor.task.hold.store(true, Ordering::Release);
         let error = supervisor
             .shutdown_with_timeout(Duration::from_millis(10))
             .await
@@ -198,7 +198,7 @@ mod tests {
             registry.create("alice").await.unwrap_err().code,
             ErrorCode::Ebadf
         );
-        drop(retained);
+        supervisor.task.hold.store(false, Ordering::Release);
         supervisor
             .shutdown_with_timeout(Duration::from_secs(1))
             .await

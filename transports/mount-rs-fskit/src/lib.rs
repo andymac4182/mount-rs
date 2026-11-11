@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{
     Capabilities, DirEntry, FileHandle, FsDriver, FsError, MkdirOptions, Stats, StatsFs,
 };
@@ -813,7 +812,9 @@ type DriverShutdown =
 
 pub struct DriverWorker {
     driver: Arc<dyn FsDriver>,
-    handles: TurnCell<HashMap<u64, Arc<dyn FileHandle>>>,
+    /// Owned outright: dispatch takes the worker by `&mut`, and the one
+    /// caller, the XPC listener queue, sends it one frame at a time.
+    handles: HashMap<u64, Arc<dyn FileHandle>>,
     next_handle: AtomicU64,
     read_only: AtomicBool,
     configured_read_only: bool,
@@ -825,7 +826,7 @@ impl DriverWorker {
     pub fn new(driver: Arc<dyn FsDriver>, read_only: bool) -> Self {
         Self {
             driver,
-            handles: TurnCell::new(HashMap::new()),
+            handles: HashMap::new(),
             next_handle: AtomicU64::new(1),
             read_only: AtomicBool::new(read_only),
             configured_read_only: read_only,
@@ -841,7 +842,7 @@ impl DriverWorker {
     ) -> Self {
         Self {
             driver,
-            handles: TurnCell::new(HashMap::new()),
+            handles: HashMap::new(),
             next_handle: AtomicU64::new(1),
             read_only: AtomicBool::new(read_only),
             configured_read_only: read_only,
@@ -867,7 +868,7 @@ impl DriverWorker {
     /// Dispatch one already-decoded frame. A malformed operation body gets a
     /// typed protocol error frame; a malformed outer frame remains a transport
     /// error and is returned by [`Self::dispatch_encoded`].
-    pub async fn dispatch(&self, request: Frame) -> Result<Frame, FrameError> {
+    pub async fn dispatch(&mut self, request: Frame) -> Result<Frame, FrameError> {
         match request.kind {
             MessageKind::Hello => Frame::reply(request.request_id, PROTOCOL_VERSION.to_le_bytes()),
             MessageKind::Shutdown => match self.shutdown().await {
@@ -924,7 +925,7 @@ impl DriverWorker {
         }
     }
 
-    pub async fn dispatch_encoded(&self, request: &[u8]) -> Result<Vec<u8>, DispatchError> {
+    pub async fn dispatch_encoded(&mut self, request: &[u8]) -> Result<Vec<u8>, DispatchError> {
         let request = Frame::decode(request).map_err(DispatchError::MalformedRequest)?;
         let response = self
             .dispatch(request)
@@ -938,51 +939,39 @@ impl DriverWorker {
     }
 
     fn handle(&self, id: u64) -> std::result::Result<Arc<dyn FileHandle>, FsError> {
-        self.handles
-            .lock()
-            .map_err(|_| FsError::backend("worker handle table is poisoned"))?
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| {
-                FsError::new(mount_rs_core::ErrorCode::Ebadf)
-                    .with_syscall("fskit-worker")
-                    .with_message(format!("EBADF: unknown worker handle {id}"))
-            })
+        self.handles.get(&id).cloned().ok_or_else(|| {
+            FsError::new(mount_rs_core::ErrorCode::Ebadf)
+                .with_syscall("fskit-worker")
+                .with_message(format!("EBADF: unknown worker handle {id}"))
+        })
     }
 
-    fn allocate_handle(&self, handle: Arc<dyn FileHandle>) -> std::result::Result<u64, FsError> {
+    fn allocate_handle(
+        &mut self,
+        handle: Arc<dyn FileHandle>,
+    ) -> std::result::Result<u64, FsError> {
         let id = self
             .next_handle
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 value.checked_add(1)
             })
             .map_err(|_| FsError::new(mount_rs_core::ErrorCode::Emfile).with_syscall("open"))?;
-        self.handles
-            .lock()
-            .map_err(|_| FsError::backend("worker handle table is poisoned"))?
-            .insert(id, handle);
+        self.handles.insert(id, handle);
         Ok(id)
     }
 
-    async fn close_handle(&self, id: u64) -> std::result::Result<(), FsError> {
-        let handle = self
-            .handles
-            .lock()
-            .map_err(|_| FsError::backend("worker handle table is poisoned"))?
-            .remove(&id)
-            .ok_or_else(|| {
-                FsError::new(mount_rs_core::ErrorCode::Ebadf)
-                    .with_syscall("close")
-                    .with_message(format!("EBADF: unknown worker handle {id}"))
-            })?;
+    async fn close_handle(&mut self, id: u64) -> std::result::Result<(), FsError> {
+        let handle = self.handles.remove(&id).ok_or_else(|| {
+            FsError::new(mount_rs_core::ErrorCode::Ebadf)
+                .with_syscall("close")
+                .with_message(format!("EBADF: unknown worker handle {id}"))
+        })?;
         handle.close().await
     }
 
-    async fn shutdown(&self) -> std::result::Result<(), FsError> {
+    async fn shutdown(&mut self) -> std::result::Result<(), FsError> {
         let handles = self
             .handles
-            .lock()
-            .map_err(|_| FsError::backend("worker handle table is poisoned"))?
             .drain()
             .map(|(_, handle)| handle)
             .collect::<Vec<_>>();
@@ -1009,7 +998,7 @@ impl DriverWorker {
     }
 
     async fn dispatch_operation(
-        &self,
+        &mut self,
         operation: OperationRequest,
     ) -> std::result::Result<OperationResponse, FsError> {
         use OperationRequest as Request;
@@ -1442,7 +1431,7 @@ mod tests {
     use super::*;
 
     fn operation_response(
-        worker: &DriverWorker,
+        worker: &mut DriverWorker,
         request_id: u64,
         request: OperationRequest,
     ) -> OperationResponse {
@@ -1751,9 +1740,9 @@ mod tests {
 
     #[test]
     fn driver_worker_dispatches_real_fsdriver_namespace_and_io() {
-        let worker = DriverWorker::memory(false);
+        let mut worker = DriverWorker::memory(false);
 
-        let capabilities = operation_response(&worker, 30, OperationRequest::Capabilities);
+        let capabilities = operation_response(&mut worker, 30, OperationRequest::Capabilities);
         let OperationResponse::Capabilities { capabilities } = capabilities else {
             panic!("capabilities response expected");
         };
@@ -1761,7 +1750,7 @@ mod tests {
         assert!(capabilities.symlinks);
 
         let _ = operation_response(
-            &worker,
+            &mut worker,
             31,
             OperationRequest::Open {
                 path: "/hello.txt".to_owned(),
@@ -1770,7 +1759,7 @@ mod tests {
             },
         );
         let open = operation_response(
-            &worker,
+            &mut worker,
             32,
             OperationRequest::Open {
                 path: "/hello.txt".to_owned(),
@@ -1782,7 +1771,7 @@ mod tests {
             panic!("open response expected");
         };
         let written = operation_response(
-            &worker,
+            &mut worker,
             33,
             OperationRequest::Write {
                 handle,
@@ -1792,7 +1781,7 @@ mod tests {
         );
         assert!(matches!(written, OperationResponse::Write { count: 5 }));
         let read = operation_response(
-            &worker,
+            &mut worker,
             34,
             OperationRequest::Read {
                 handle,
@@ -1802,12 +1791,12 @@ mod tests {
         );
         assert!(matches!(read, OperationResponse::Read { data, count: 5 } if data == b"hello"));
         assert!(matches!(
-            operation_response(&worker, 35, OperationRequest::Close { handle }),
+            operation_response(&mut worker, 35, OperationRequest::Close { handle }),
             OperationResponse::Ok
         ));
 
         let entries = operation_response(
-            &worker,
+            &mut worker,
             36,
             OperationRequest::Readdir {
                 path: "/".to_owned(),
@@ -1834,12 +1823,12 @@ mod tests {
             read_only: false,
         };
         let runtime = Runtime::new().expect("test runtime");
-        let worker = runtime
+        let mut worker = runtime
             .block_on(build_driver_worker(config))
             .expect("host worker");
 
         let OperationResponse::Open { handle, .. } = operation_response(
-            &worker,
+            &mut worker,
             37,
             OperationRequest::Open {
                 path: "/shared.txt".to_owned(),
@@ -1852,7 +1841,7 @@ mod tests {
         let payload = b"FSKit and NFS share this rooted path".to_vec();
         assert!(matches!(
             operation_response(
-                &worker,
+                &mut worker,
                 38,
                 OperationRequest::Write {
                     handle,
@@ -1863,7 +1852,7 @@ mod tests {
             OperationResponse::Write { count } if count == payload.len()
         ));
         assert!(matches!(
-            operation_response(&worker, 39, OperationRequest::Close { handle }),
+            operation_response(&mut worker, 39, OperationRequest::Close { handle }),
             OperationResponse::Ok
         ));
         assert_eq!(
@@ -1906,7 +1895,7 @@ mod tests {
 
     #[test]
     fn driver_worker_preserves_provider_errno_and_read_only_policy() {
-        let worker = DriverWorker::memory(true);
+        let mut worker = DriverWorker::memory(true);
         let body = serde_json::to_vec(&OperationRequest::Open {
             path: "/new.txt".to_owned(),
             flags: "w".to_owned(),
@@ -1936,7 +1925,7 @@ mod tests {
 
     #[test]
     fn driver_worker_rejects_bad_operation_and_closes_handles_on_shutdown() {
-        let worker = DriverWorker::memory(false);
+        let mut worker = DriverWorker::memory(false);
         let runtime = Runtime::new().expect("test runtime");
         let malformed = runtime
             .block_on(worker.dispatch(frame(MessageKind::Operation, 50, b"not-json")))
@@ -1985,12 +1974,12 @@ mod tests {
             read_only: false,
         };
         let runtime = Runtime::new().expect("test runtime");
-        let worker = runtime
+        let mut worker = runtime
             .block_on(build_driver_worker(config.clone()))
             .expect("split SQLite worker");
 
         let OperationResponse::Open { handle, .. } = operation_response(
-            &worker,
+            &mut worker,
             60,
             OperationRequest::Open {
                 path: "/partial.bin".to_owned(),
@@ -2004,7 +1993,7 @@ mod tests {
         let second = vec![0x00_u8, 0x80, 0xff, 0x42];
         assert!(matches!(
             operation_response(
-                &worker,
+                &mut worker,
                 61,
                 OperationRequest::Write {
                     handle,
@@ -2016,7 +2005,7 @@ mod tests {
         ));
         assert!(matches!(
             operation_response(
-                &worker,
+                &mut worker,
                 62,
                 OperationRequest::Write {
                     handle,
@@ -2027,7 +2016,7 @@ mod tests {
             OperationResponse::Write { count: 4 }
         ));
         assert!(matches!(
-            operation_response(&worker, 63, OperationRequest::Close { handle }),
+            operation_response(&mut worker, 63, OperationRequest::Close { handle }),
             OperationResponse::Ok
         ));
         let shutdown = runtime
@@ -2036,11 +2025,11 @@ mod tests {
         assert_eq!(shutdown.kind, MessageKind::Reply);
         drop(worker);
 
-        let reopened = runtime
+        let mut reopened = runtime
             .block_on(build_driver_worker(config))
             .expect("reopened split SQLite worker");
         let OperationResponse::Open { handle, stats } = operation_response(
-            &reopened,
+            &mut reopened,
             65,
             OperationRequest::Open {
                 path: "/partial.bin".to_owned(),
@@ -2052,7 +2041,7 @@ mod tests {
         };
         assert_eq!(stats.size, 4096 + second.len() as u64);
         let OperationResponse::Read { data, count } = operation_response(
-            &reopened,
+            &mut reopened,
             66,
             OperationRequest::Read {
                 handle,
@@ -2068,7 +2057,7 @@ mod tests {
         assert_eq!(count, expected.len());
         assert_eq!(data, expected);
         assert!(matches!(
-            operation_response(&reopened, 67, OperationRequest::Close { handle }),
+            operation_response(&mut reopened, 67, OperationRequest::Close { handle }),
             OperationResponse::Ok
         ));
         let shutdown = runtime
@@ -2078,5 +2067,49 @@ mod tests {
 
         let _ = std::fs::remove_file(metadata_path);
         let _ = std::fs::remove_file(blocks_path);
+    }
+
+    /// The handle table is a plain map behind `&mut`: a burst of opens,
+    /// reads and closes through the single dispatch entry keeps every handle
+    /// distinct, forgets a closed one, and shutdown closes what is left.
+    #[test]
+    fn driver_worker_handle_table_tracks_opens_and_closes_without_a_lock() {
+        let runtime = Runtime::new().expect("test runtime");
+        let mut worker = DriverWorker::memory(false);
+        let mut open = Vec::new();
+        for index in 0..64u64 {
+            let OperationResponse::Open { handle, .. } = operation_response(
+                &mut worker,
+                100 + index,
+                OperationRequest::Open {
+                    path: format!("/file-{index}"),
+                    flags: "w".to_owned(),
+                    mode: 0o600,
+                },
+            ) else {
+                panic!("open returns a handle")
+            };
+            assert!(!open.contains(&handle), "handle {handle} was issued twice");
+            open.push(handle);
+        }
+        assert_eq!(worker.handles.len(), 64);
+        for handle in open.drain(..32) {
+            assert!(matches!(
+                operation_response(&mut worker, 200, OperationRequest::Close { handle }),
+                OperationResponse::Ok
+            ));
+            let body = serde_json::to_vec(&OperationRequest::Close { handle }).unwrap();
+            let again = runtime
+                .block_on(worker.dispatch(frame(MessageKind::Operation, 201, &body)))
+                .expect("response frame");
+            assert_eq!(again.kind, MessageKind::Error, "a closed handle is gone");
+        }
+        assert_eq!(worker.handles.len(), 32);
+        let shutdown = runtime
+            .block_on(worker.dispatch(frame(MessageKind::Shutdown, 300, &[])))
+            .expect("response frame");
+        assert_eq!(shutdown.kind, MessageKind::Reply);
+        assert!(worker.handles.is_empty());
+        assert!(worker.is_shutting_down());
     }
 }

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::{
     ErrorCode, FileHandle, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, S_IFBLK, S_IFCHR,
     S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats, StatsFs,
@@ -668,7 +668,7 @@ struct AdmittedSession {
 }
 
 struct InFlightSlot {
-    state: Arc<TurnCell<V4State>>,
+    state: Arc<ParkCell<V4State>>,
     sessionid: [u8; NFS4_SESSIONID_SIZE],
     slot: usize,
     sequence: u32,
@@ -1775,7 +1775,7 @@ pub struct Nfs4Session {
     owns_handle_table: bool,
     stats: SharedStats,
     snapshots: DirectorySnapshots,
-    state: Arc<TurnCell<V4State>>,
+    state: Arc<ParkCell<V4State>>,
     destroyed: Arc<AtomicBool>,
     path_lock: Arc<mount_rs_core::drain_gate::DrainGate>,
     hooks: NfsSessionHooks,
@@ -1844,7 +1844,7 @@ impl Nfs4Session {
             owns_handle_table: false,
             stats: shared.stats.clone(),
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
-            state: Arc::new(TurnCell::new(V4State {
+            state: Arc::new(ParkCell::new(V4State {
                 seed: options.nfs4.seed,
                 next_clientid: 1,
                 next_session: 1,
@@ -4024,8 +4024,16 @@ impl Nfs4Session {
         if is_invalid_stateid(stateid) {
             return Err(NFS4ERR_BAD_STATEID);
         }
-        let state = self.state.lock().expect("NFSv4 state lock");
-        let Some(open) = state.opens.get(&stateid.other).cloned() else {
+        // Every check below reads this copy of the open, so the section ends
+        // here rather than spanning the handle table's own cell.
+        let open = self
+            .state
+            .lock()
+            .expect("NFSv4 state lock")
+            .opens
+            .get(&stateid.other)
+            .cloned();
+        let Some(open) = open else {
             return Err(NFS4ERR_BAD_STATEID);
         };
         if cursor.clientid != Some(open.clientid) {
@@ -4515,7 +4523,7 @@ impl Nfs4Session {
             }
             return V4OpResult::new(OP_OPEN, NFS4ERR_SHARE_DENIED);
         }
-        let (stateid, resource_exhausted) = {
+        let (stateid, resource_exhausted, joined_existing) = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let existing_key = state
                 .opens
@@ -4527,7 +4535,6 @@ impl Nfs4Session {
                 })
                 .map(|(key, _)| *key);
             if let Some(key) = existing_key {
-                self.handles.unpin(entry.id);
                 let open = state
                     .opens
                     .get_mut(&key)
@@ -4546,7 +4553,7 @@ impl Nfs4Session {
                 open.access |= access;
                 open.deny |= args.share_deny;
                 open.stateid.seqid = bump_stateid_seq(open.stateid.seqid);
-                (Some(open.stateid.clone()), false)
+                (Some(open.stateid.clone()), false, true)
             } else {
                 let open_count = state
                     .opens
@@ -4554,7 +4561,7 @@ impl Nfs4Session {
                     .filter(|open| open.file_id == entry.fileid)
                     .count();
                 if open_count >= self.options.nfs4.max_opens_per_file.max(1) {
-                    (None, true)
+                    (None, true, false)
                 } else if let Some(stateid) = state.allocate_stateid() {
                     if should_create
                         && exclusive
@@ -4583,12 +4590,18 @@ impl Nfs4Session {
                             owner: args.owner.clone(),
                         }
                     });
-                    (Some(stateid), false)
+                    (Some(stateid), false, false)
                 } else {
-                    (None, true)
+                    (None, true, false)
                 }
             }
         };
+        if joined_existing {
+            // The open this joined already holds a pin; drop the one taken
+            // above. Done after the state section: until then the entry is
+            // only pinned once more than needed, which nothing observes.
+            self.handles.unpin(entry.id);
+        }
         if resource_exhausted {
             self.handles.unpin(entry.id);
             if let Some(handle) = handle.take() {

@@ -1759,6 +1759,7 @@ name = "mount-rs-9p"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "im",
  "mount-rs-core",
  "mount-rs-memfs",
  "tokio",
@@ -1937,6 +1938,7 @@ dependencies = [
 name = "mount-rs-fault-injection"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "mount-rs-chunked",
  "mount-rs-core",
@@ -2376,6 +2378,7 @@ dependencies = [
 name = "mount-rs-sqlite-vfs"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "libc",
  "mount-rs-core",
@@ -2424,6 +2427,7 @@ dependencies = [
 name = "mount-rs-webdav"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "bytes",

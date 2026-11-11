@@ -3,10 +3,11 @@
 use mount_rs_core::diagnostics::profile::{Event, Span};
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::turn_gate::TurnLock;
+use arc_swap::ArcSwapOption;
 use mount_rs_core::{FileHandle, FsDriver, MkdirOptions};
 use mount_rs_remote_protocol::binary::{IoRequest, IoResult};
 use mount_rs_remote_protocol::{Operation, OperationName, WireError};
@@ -27,17 +28,58 @@ pub struct SessionIdentity {
     pub expires_at: i64,
 }
 
+/// The most handles one session may hold open.
+const HANDLE_LIMIT: usize = 1024;
+
+/// One session's open handles, with no lock on any path. A handle lives in
+/// the slot its id selects, so a lookup is one atomic load and an id check.
+/// Ids only grow and are never reused; an id whose slot is still held by an
+/// older handle is skipped.
+///
+/// An insert publishes its entry and then re-reads `closed` and `revision`;
+/// `close_all` and `refresh_revision` set those and then sweep the slots.
+/// One side therefore always sees the other. An entry leaves its slot by one
+/// atomic swap, and only the caller whose swap removed it closes the handle.
 #[derive(Default)]
 pub struct SessionHandles {
-    state: TurnLock<HandleState>,
+    /// The last id handed out.
+    next: AtomicU64,
+    /// Handles admitted: published entries plus inserts still publishing.
+    len: AtomicUsize,
+    closed: AtomicBool,
+    /// The catalog revision plus one; zero until the first refresh.
+    revision: AtomicU64,
+    /// Allocated by the first insert, so a session that opens no handle
+    /// allocates nothing.
+    slots: OnceLock<Box<[ArcSwapOption<Entry>]>>,
 }
 
-#[derive(Default)]
-struct HandleState {
-    next: u64,
-    closed: bool,
-    revision: Option<u64>,
-    entries: BTreeMap<u64, (String, u64, Arc<dyn FileHandle>)>,
+struct Entry {
+    id: u64,
+    drive: String,
+    revision: u64,
+    handle: Arc<dyn FileHandle>,
+}
+
+type Slot = ArcSwapOption<Entry>;
+
+fn stored_revision(revision: u64) -> u64 {
+    revision.saturating_add(1)
+}
+
+fn slot_of(slots: &[Slot], id: u64) -> &Slot {
+    &slots[(id % slots.len() as u64) as usize]
+}
+
+/// Empties `slot` if it still holds exactly the entry `seen`. True only for
+/// the one caller whose swap removed it.
+fn take_seen(slot: &Slot, seen: &arc_swap::Guard<Option<Arc<Entry>>>) -> bool {
+    let Some(expected) = seen.as_ref() else {
+        return false;
+    };
+    slot.compare_and_swap(seen, None)
+        .as_ref()
+        .is_some_and(|held| Arc::ptr_eq(held, expected))
 }
 
 fn handle_matches(
@@ -82,65 +124,178 @@ fn admit_handle(
     if current != Some(revision) {
         return Err(HandleRejection::Stale);
     }
-    if count >= 1024 {
+    if count >= HANDLE_LIMIT {
         return Err(HandleRejection::Full);
     }
     next.checked_add(1).ok_or(HandleRejection::Full)
 }
 
 impl SessionHandles {
+    fn current_revision(&self) -> Option<u64> {
+        self.revision.load(Ordering::SeqCst).checked_sub(1)
+    }
+
     async fn insert(
         &self,
         drive: &str,
         revision: u64,
         handle: Arc<dyn FileHandle>,
     ) -> Result<u64, WireError> {
-        let mut state = self.state.lock().await;
-        let next = match admit_handle(
-            state.closed,
-            state.revision,
+        match self.publish(drive, revision, &handle) {
+            Ok(id) => Ok(id),
+            Err((reason, close)) => {
+                if close {
+                    let _ = handle.close().await;
+                }
+                Err(error(reason.code()))
+            }
+        }
+    }
+
+    /// Publishes `handle` under a new id. On rejection the flag says whether
+    /// the caller still owns the handle and must close it; it is false when a
+    /// concurrent `close_all` or revision change already took and closed it.
+    fn publish(
+        &self,
+        drive: &str,
+        revision: u64,
+        handle: &Arc<dyn FileHandle>,
+    ) -> Result<u64, (HandleRejection, bool)> {
+        admit_handle(
+            self.closed.load(Ordering::SeqCst),
+            self.current_revision(),
             revision,
-            state.entries.len(),
-            state.next,
-        ) {
-            Ok(next) => next,
-            Err(reason) => {
-                drop(state);
-                let _ = handle.close().await;
-                return Err(error(reason.code()));
+            self.len.load(Ordering::SeqCst),
+            self.next.load(Ordering::SeqCst),
+        )
+        .map_err(|reason| (reason, true))?;
+        if self.len.fetch_add(1, Ordering::SeqCst) >= HANDLE_LIMIT {
+            self.len.fetch_sub(1, Ordering::SeqCst);
+            return Err((HandleRejection::Full, true));
+        }
+        let slots = self
+            .slots
+            .get_or_init(|| (0..HANDLE_LIMIT).map(|_| Slot::empty()).collect());
+        // Fewer handles than slots are admitted, so a free slot exists.
+        let (id, slot, entry) = loop {
+            let Ok(previous) = self
+                .next
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next| {
+                    next.checked_add(1)
+                })
+            else {
+                self.len.fetch_sub(1, Ordering::SeqCst);
+                return Err((HandleRejection::Full, true));
+            };
+            let id = previous + 1;
+            let slot = slot_of(slots, id);
+            let current = slot.load();
+            if current.is_some() {
+                continue;
+            }
+            let entry = Arc::new(Entry {
+                id,
+                drive: drive.to_owned(),
+                revision,
+                handle: Arc::clone(handle),
+            });
+            if slot
+                .compare_and_swap(&current, Some(Arc::clone(&entry)))
+                .is_none()
+            {
+                break (id, slot, entry);
             }
         };
-        state.next = next;
-        let id = state.next;
-        state
-            .entries
-            .insert(id, (drive.to_owned(), revision, handle));
-        Ok(id)
+        // Published. A shutdown or revision change that began before this
+        // point may have swept past the slot already, so look again.
+        let reason = if self.closed.load(Ordering::SeqCst) {
+            HandleRejection::Closed
+        } else if self.revision.load(Ordering::SeqCst) != stored_revision(revision) {
+            HandleRejection::Stale
+        } else {
+            return Ok(id);
+        };
+        let current = slot.load();
+        let mine = current
+            .as_ref()
+            .is_some_and(|held| Arc::ptr_eq(held, &entry))
+            && take_seen(slot, &current);
+        if mine {
+            self.len.fetch_sub(1, Ordering::SeqCst);
+        }
+        Err((reason, mine))
+    }
+
+    /// The handle `id` names, if it was opened on `drive` at `revision`.
+    /// With `remove`, also takes it out of the table; `None` then means
+    /// another caller removed it first.
+    fn lookup(
+        &self,
+        id: u64,
+        drive: &str,
+        revision: u64,
+        remove: bool,
+    ) -> Option<Arc<dyn FileHandle>> {
+        let slot = slot_of(self.slots.get()?, id);
+        let current = slot.load();
+        let entry = current.as_ref()?;
+        if entry.id != id || !handle_matches(&entry.drive, drive, entry.revision, revision) {
+            return None;
+        }
+        let handle = Arc::clone(&entry.handle);
+        if remove {
+            if !take_seen(slot, &current) {
+                return None;
+            }
+            self.len.fetch_sub(1, Ordering::SeqCst);
+        }
+        Some(handle)
+    }
+
+    /// Removes every entry older than `revision` (all of them for `None`)
+    /// and returns the handles this caller removed.
+    fn sweep(&self, older_than: Option<u64>) -> Vec<Arc<dyn FileHandle>> {
+        let mut removed = Vec::new();
+        let Some(slots) = self.slots.get() else {
+            return removed;
+        };
+        for slot in slots.iter() {
+            let current = slot.load();
+            let Some(entry) = current.as_ref() else {
+                continue;
+            };
+            if older_than.is_some_and(|revision| entry.revision >= revision) {
+                continue;
+            }
+            if take_seen(slot, &current) {
+                self.len.fetch_sub(1, Ordering::SeqCst);
+                removed.push(Arc::clone(&entry.handle));
+            }
+        }
+        removed
     }
 
     async fn refresh_revision(&self, revision: u64) {
-        let mut state = self.state.lock().await;
-        if state.closed || state.revision.is_some_and(|current| current >= revision) {
+        let stored = stored_revision(revision);
+        // The common case, an unchanged revision, is one load and no write.
+        if self.closed.load(Ordering::SeqCst) || self.revision.load(Ordering::SeqCst) >= stored {
             return;
         }
-        state.revision = Some(revision);
-        let entries = std::mem::take(&mut state.entries);
-        drop(state);
-        for (_, (_, _, handle)) in entries {
+        if self.revision.fetch_max(stored, Ordering::SeqCst) >= stored {
+            return;
+        }
+        for handle in self.sweep(Some(revision)) {
             let _ = handle.close().await;
         }
     }
 
     pub(crate) async fn is_closed(&self) -> bool {
-        self.state.lock().await.closed
+        self.closed.load(Ordering::SeqCst)
     }
 
     pub async fn close_all(&self) {
-        let mut state = self.state.lock().await;
-        state.closed = true;
-        let entries = std::mem::take(&mut state.entries);
-        drop(state);
-        for (_, (_, _, handle)) in entries {
+        self.closed.store(true, Ordering::SeqCst);
+        for handle in self.sweep(None) {
             let _ = handle.close().await;
         }
     }
@@ -463,18 +618,15 @@ impl DriveDispatcher {
                         }
                     };
                     let wait_profile = Span::new(Event::HandleWait);
-                    let mut state = handles.state.lock().await;
+                    let handle = handles
+                        .lookup(
+                            id,
+                            drive_id,
+                            catalog.revision,
+                            operation.name == OperationName::HandleClose,
+                        )
+                        .ok_or_else(|| error("EBADF"))?;
                     drop(wait_profile);
-                    let (drive, revision, handle) =
-                        state.entries.get(&id).ok_or_else(|| error("EBADF"))?;
-                    if !handle_matches(drive, drive_id, *revision, catalog.revision) {
-                        return Err(error("EBADF"));
-                    }
-                    let handle = Arc::clone(handle);
-                    if operation.name == OperationName::HandleClose {
-                        state.entries.remove(&id);
-                    }
-                    drop(state);
                     match operation.name {
                         OperationName::HandleRead => {
                             let (length, read_position) = match mode {
@@ -910,7 +1062,6 @@ fn validate_guarded_mutation(request: &mount_rs_core::GuardedMutation) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountedHandle(Arc<AtomicUsize>);
     #[async_trait::async_trait]
     impl FileHandle for CountedHandle {
@@ -943,7 +1094,7 @@ mod tests {
         assert_eq!(result.unwrap_err().code, "ESTALE");
         assert_eq!(closed.load(Ordering::SeqCst), 1);
         handles.refresh_revision(1).await;
-        assert_eq!(handles.state.lock().await.revision, Some(2));
+        assert_eq!(handles.current_revision(), Some(2));
         handles.close_all().await;
         let result = handles
             .insert("data", 2, Arc::new(CountedHandle(closed.clone())))
@@ -974,7 +1125,7 @@ mod tests {
         assert_eq!(closed.load(Ordering::SeqCst), 1);
         handles.refresh_revision(2).await;
         assert_eq!(closed.load(Ordering::SeqCst), 1025);
-        handles.state.lock().await.next = u64::MAX;
+        handles.next.store(u64::MAX, Ordering::SeqCst);
         assert_eq!(
             handles
                 .insert("data", 2, Arc::new(CountedHandle(closed.clone())))
@@ -997,7 +1148,8 @@ mod tests {
             .unwrap();
         handles.refresh_revision(2).await;
         assert_eq!(closed.load(Ordering::SeqCst), 1);
-        assert!(!handles.state.lock().await.entries.contains_key(&old));
+        assert!(handles.lookup(old, "data", 1, false).is_none());
+        assert_eq!(handles.len.load(Ordering::SeqCst), 0);
         let new = handles
             .insert("data", 2, Arc::new(CountedHandle(closed.clone())))
             .await
@@ -1007,6 +1159,218 @@ mod tests {
         assert_eq!(closed.load(Ordering::SeqCst), 1);
         handles.close_all().await;
         assert_eq!(closed.load(Ordering::SeqCst), 2);
+    }
+
+    fn counted() -> (Arc<AtomicUsize>, Arc<dyn FileHandle>) {
+        let closed = Arc::new(AtomicUsize::new(0));
+        (closed.clone(), Arc::new(CountedHandle(closed)))
+    }
+
+    #[tokio::test]
+    async fn an_id_whose_slot_is_still_held_is_skipped() {
+        let handles = SessionHandles::default();
+        handles.refresh_revision(1).await;
+        let (_, first) = counted();
+        let old = handles.insert("data", 1, first).await.unwrap();
+        // The next id would land on the slot `old` still holds.
+        handles
+            .next
+            .store(old + HANDLE_LIMIT as u64 - 1, Ordering::SeqCst);
+        let (_, second) = counted();
+        let new = handles.insert("data", 1, second).await.unwrap();
+        assert_eq!(new, old + HANDLE_LIMIT as u64 + 1);
+        assert!(handles.lookup(old, "data", 1, false).is_some());
+        assert!(handles.lookup(new, "data", 1, false).is_some());
+        assert!(
+            handles
+                .lookup(old + HANDLE_LIMIT as u64, "data", 1, false)
+                .is_none()
+        );
+        assert!(handles.lookup(old, "other", 1, false).is_none());
+        assert!(handles.lookup(old, "data", 2, false).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inserts_racing_close_all_leave_every_handle_closed_exactly_once() {
+        for _ in 0..200 {
+            let handles = Arc::new(SessionHandles::default());
+            handles.refresh_revision(1).await;
+            let start = Arc::new(tokio::sync::Barrier::new(9));
+            let mut inserters = Vec::new();
+            for _ in 0..8 {
+                let handles = handles.clone();
+                let start = start.clone();
+                inserters.push(tokio::spawn(async move {
+                    start.wait().await;
+                    let mut counters = Vec::new();
+                    for _ in 0..16 {
+                        let (closed, handle) = counted();
+                        let result = handles.insert("data", 1, handle).await;
+                        if let Err(error) = &result {
+                            assert_eq!(error.code, "EBADF");
+                            // Closed by this insert, or about to be by the
+                            // close_all that swept it out; never twice.
+                            assert!(closed.load(Ordering::SeqCst) <= 1);
+                        }
+                        counters.push(closed);
+                        tokio::task::yield_now().await;
+                    }
+                    counters
+                }));
+            }
+            start.wait().await;
+            tokio::task::yield_now().await;
+            handles.close_all().await;
+            for inserter in inserters {
+                for closed in inserter.await.unwrap() {
+                    assert_eq!(closed.load(Ordering::SeqCst), 1);
+                }
+            }
+            assert_eq!(handles.len.load(Ordering::SeqCst), 0);
+            assert!(handles.sweep(None).is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inserts_racing_a_revision_change_never_leave_a_stale_handle_open() {
+        for _ in 0..200 {
+            let handles = Arc::new(SessionHandles::default());
+            handles.refresh_revision(1).await;
+            let start = Arc::new(tokio::sync::Barrier::new(9));
+            let mut inserters = Vec::new();
+            for _ in 0..8 {
+                let handles = handles.clone();
+                let start = start.clone();
+                inserters.push(tokio::spawn(async move {
+                    start.wait().await;
+                    let mut old = Vec::new();
+                    let mut new = Vec::new();
+                    for _ in 0..16 {
+                        let (closed, handle) = counted();
+                        match handles.insert("data", 1, handle).await {
+                            Ok(id) => old.push((closed, Some(id))),
+                            Err(error) => {
+                                assert_eq!(error.code, "ESTALE");
+                                // Closed by this insert, or about to be by
+                                // the refresh that swept it out.
+                                assert!(closed.load(Ordering::SeqCst) <= 1);
+                                old.push((closed, None));
+                            }
+                        }
+                        let (closed, handle) = counted();
+                        match handles.insert("data", 2, handle).await {
+                            Ok(id) => new.push((closed, id)),
+                            Err(error) => {
+                                assert_eq!(error.code, "ESTALE");
+                                assert_eq!(closed.load(Ordering::SeqCst), 1);
+                            }
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    (old, new)
+                }));
+            }
+            start.wait().await;
+            tokio::task::yield_now().await;
+            handles.refresh_revision(2).await;
+            // A second refresh to the same revision must close nothing more.
+            handles.refresh_revision(2).await;
+            let mut open = 0;
+            for inserter in inserters {
+                let (old, new) = inserter.await.unwrap();
+                for (closed, id) in old {
+                    assert_eq!(closed.load(Ordering::SeqCst), 1);
+                    if let Some(id) = id {
+                        assert!(handles.lookup(id, "data", 1, false).is_none());
+                        assert!(handles.lookup(id, "data", 2, false).is_none());
+                    }
+                }
+                for (closed, id) in new {
+                    assert_eq!(closed.load(Ordering::SeqCst), 0);
+                    assert!(handles.lookup(id, "data", 2, false).is_some());
+                    open += 1;
+                }
+            }
+            assert_eq!(handles.len.load(Ordering::SeqCst), open);
+            assert_eq!(handles.sweep(None).len(), open);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_closes_of_one_id_have_exactly_one_winner() {
+        let handles = Arc::new(SessionHandles::default());
+        handles.refresh_revision(1).await;
+        for _ in 0..500 {
+            let (closed, handle) = counted();
+            let id = handles.insert("data", 1, handle).await.unwrap();
+            let start = Arc::new(std::sync::Barrier::new(4));
+            let closers: Vec<_> = (0..4)
+                .map(|_| {
+                    let handles = handles.clone();
+                    let start = start.clone();
+                    tokio::task::spawn_blocking(move || {
+                        start.wait();
+                        // What HandleClose does: a lost race is EBADF.
+                        handles.lookup(id, "data", 1, true)
+                    })
+                })
+                .collect();
+            let mut winners = 0;
+            for closer in closers {
+                if let Some(handle) = closer.await.unwrap() {
+                    handle.close().await.unwrap();
+                    winners += 1;
+                }
+            }
+            assert_eq!(winners, 1);
+            assert_eq!(closed.load(Ordering::SeqCst), 1);
+            assert_eq!(handles.len.load(Ordering::SeqCst), 0);
+        }
+        // Every close released its slot, so the cap is still the full 1024.
+        for _ in 0..HANDLE_LIMIT {
+            let (_, handle) = counted();
+            handles.insert("data", 1, handle).await.unwrap();
+        }
+        let (closed, handle) = counted();
+        assert_eq!(
+            handles.insert("data", 1, handle).await.unwrap_err().code,
+            "EMFILE"
+        );
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_inserts_never_exceed_the_handle_cap() {
+        let handles = Arc::new(SessionHandles::default());
+        handles.refresh_revision(1).await;
+        let inserters: Vec<_> = (0..8)
+            .map(|_| {
+                let handles = handles.clone();
+                tokio::spawn(async move {
+                    let mut ids = Vec::new();
+                    for _ in 0..200 {
+                        let (closed, handle) = counted();
+                        match handles.insert("data", 1, handle).await {
+                            Ok(id) => ids.push(id),
+                            Err(error) => {
+                                assert_eq!(error.code, "EMFILE");
+                                assert_eq!(closed.load(Ordering::SeqCst), 1);
+                            }
+                        }
+                    }
+                    ids
+                })
+            })
+            .collect();
+        let mut ids = Vec::new();
+        for inserter in inserters {
+            ids.extend(inserter.await.unwrap());
+        }
+        assert_eq!(ids.len(), HANDLE_LIMIT);
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), HANDLE_LIMIT);
+        assert_eq!(handles.len.load(Ordering::SeqCst), HANDLE_LIMIT);
     }
 }
 

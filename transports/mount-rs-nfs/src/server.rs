@@ -13,9 +13,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use mount_rs_core::diagnostics::RequestTrace;
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{FsDriver, Loopback};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -203,7 +202,9 @@ pub struct NfsServer {
     /// it is told to stop. Aborting it instead drops the set, which aborts
     /// every connection.
     accept_task: ArcSwapOption<JoinHandle<JoinSet<()>>>,
-    clients: Arc<TurnCell<HashMap<u64, NfsConnection>>>,
+    /// Live connections, replaced whole on each change: the accept loop
+    /// inserts, a finishing connection removes, and readers load.
+    clients: Arc<ArcSwap<HashMap<u64, NfsConnection>>>,
     next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicUsize>,
     listen_lock: Arc<TurnLock<()>>,
@@ -278,7 +279,7 @@ impl NfsServer {
             address: Arc::new(OnceLock::new()),
             shutdown: ArcSwapOption::empty(),
             accept_task: ArcSwapOption::empty(),
-            clients: Arc::new(TurnCell::new(HashMap::new())),
+            clients: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             active_connections: Arc::new(AtomicUsize::new(0)),
             listen_lock: Arc::new(TurnLock::new(())),
@@ -320,13 +321,7 @@ impl NfsServer {
 
     /// Return live accepted clients in arrival order.
     pub fn clients(&self) -> io::Result<Vec<NfsConnection>> {
-        let mut clients = self
-            .clients
-            .lock()
-            .map_err(|_| io::Error::other("NFS connection lock poisoned"))?
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut clients = self.clients.load().values().cloned().collect::<Vec<_>>();
         clients.sort_by_key(NfsConnection::id);
         Ok(clients)
     }
@@ -392,10 +387,7 @@ impl NfsServer {
                             id,
                             control: Arc::clone(&control),
                         };
-                        clients
-                            .lock()
-                            .expect("NFS connection lock")
-                            .insert(id, connection);
+                        insert_client(&clients, connection);
                         active_connections.fetch_add(1, Ordering::AcqRel);
                         let guard = ConnectionGuard {
                             counter: active_connections,
@@ -512,18 +504,34 @@ struct NfsTcpConnectionRuntime {
 
 struct ConnectionGuard {
     counter: Arc<AtomicUsize>,
-    clients: Arc<TurnCell<HashMap<u64, NfsConnection>>>,
+    clients: Arc<ArcSwap<HashMap<u64, NfsConnection>>>,
     control: Arc<NfsConnectionControl>,
     id: u64,
+}
+
+fn insert_client(clients: &ArcSwap<HashMap<u64, NfsConnection>>, connection: NfsConnection) {
+    clients.rcu(|current| {
+        let mut next = HashMap::clone(current);
+        next.insert(connection.id, connection.clone());
+        next
+    });
+}
+
+fn remove_client(clients: &ArcSwap<HashMap<u64, NfsConnection>>, id: u64) {
+    clients.rcu(|current| {
+        if !current.contains_key(&id) {
+            return Arc::clone(current);
+        }
+        let mut next = HashMap::clone(current);
+        next.remove(&id);
+        Arc::new(next)
+    });
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
-        self.clients
-            .lock()
-            .expect("NFS connection lock")
-            .remove(&self.id);
+        remove_client(&self.clients, self.id);
         self.control.finish();
     }
 }
@@ -952,6 +960,120 @@ mod tests {
         assert!(server.clients().unwrap().is_empty());
         server.close().await.unwrap();
         assert_eq!(server.connections(), 0);
+    }
+
+    /// Connections coming and going from many threads at once never lose
+    /// an insert or resurrect a removed entry in the copy-on-write registry.
+    #[test]
+    fn client_registry_keeps_every_concurrent_insert_and_remove() {
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 200;
+        let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+        let clients = Arc::clone(&server.clients);
+        let connection = |id: u64| NfsConnection {
+            session: server.session.clone(),
+            v4_session: server.v4_session.clone(),
+            peer: None,
+            id,
+            control: Arc::new(NfsConnectionControl::new()),
+        };
+        let barrier = std::sync::Barrier::new(THREADS as usize);
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let clients = &clients;
+                let barrier = &barrier;
+                let connection = &connection;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for index in 0..PER_THREAD {
+                        let id = thread * PER_THREAD + index;
+                        insert_client(clients, connection(id));
+                        assert!(clients.load().contains_key(&id));
+                        // Odd ids end at once, as a refused peer does.
+                        if id % 2 == 1 {
+                            remove_client(clients, id);
+                            assert!(!clients.load().contains_key(&id));
+                        }
+                    }
+                });
+            }
+        });
+        let mut ids = server
+            .clients()
+            .unwrap()
+            .iter()
+            .map(NfsConnection::id)
+            .collect::<Vec<_>>();
+        let expected = (0..THREADS * PER_THREAD)
+            .filter(|id| id % 2 == 0)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, expected);
+        // Removing an absent id leaves the same map in place.
+        let before = clients.load_full();
+        remove_client(&clients, u64::MAX);
+        assert!(Arc::ptr_eq(&before, &clients.load_full()));
+    }
+
+    /// Real connections opened and dropped concurrently are each listed
+    /// while live and gone once their serving task ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_tcp_clients_are_all_listed_and_all_forgotten() {
+        let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+        let address = server.listen().await.unwrap();
+        let connects = (0..32)
+            .map(|_| tokio::spawn(async move { TcpStream::connect(address).await.unwrap() }))
+            .collect::<Vec<_>>();
+        let mut streams = Vec::new();
+        for connect in connects {
+            streams.push(connect.await.unwrap());
+        }
+        timeout(Duration::from_secs(5), async {
+            while server.clients().unwrap().len() != 32 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("every accepted client is listed");
+        let ids = server
+            .clients()
+            .unwrap()
+            .iter()
+            .map(NfsConnection::id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, (1..=32).collect::<Vec<_>>());
+        let kept = streams.split_off(16);
+        // Drop half while as many again connect.
+        let drops = streams
+            .into_iter()
+            .map(|stream| tokio::spawn(async move { drop(stream) }))
+            .collect::<Vec<_>>();
+        let connects = (0..16)
+            .map(|_| tokio::spawn(async move { TcpStream::connect(address).await.unwrap() }))
+            .collect::<Vec<_>>();
+        let mut later = Vec::new();
+        for connect in connects {
+            later.push(connect.await.unwrap());
+        }
+        for dropped in drops {
+            dropped.await.unwrap();
+        }
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let clients = server.clients().unwrap();
+                if clients.len() == 32 && clients.iter().filter(|c| c.id() > 32).count() == 16 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped clients leave and new ones are listed");
+        assert_eq!(server.connections(), 32);
+        server.close().await.unwrap();
+        assert!(server.clients().unwrap().is_empty());
+        assert_eq!(server.connections(), 0);
+        drop((kept, later));
     }
 
     #[derive(Clone)]

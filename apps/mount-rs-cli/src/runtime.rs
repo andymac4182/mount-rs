@@ -183,34 +183,30 @@ enum Backend {
 struct RemoteRuntime {
     filesystem: mount_rs_remote::RemoteFs,
     stop: tokio::sync::watch::Sender<bool>,
-    worker: mount_rs_core::turn_gate::TurnLock<Option<tokio::task::JoinHandle<FsResult<()>>>>,
+    worker: crate::joined::JoinedTask<FsError>,
 }
 
 impl RemoteRuntime {
     fn new(filesystem: mount_rs_remote::RemoteFs) -> Self {
         let (stop, receiver) = tokio::sync::watch::channel(false);
         let worker_fs = filesystem.clone();
-        let worker = tokio::spawn(async move { worker_fs.run_keepalive(receiver).await });
+        let worker = crate::joined::JoinedTask::spawn(
+            async move { worker_fs.run_keepalive(receiver).await },
+            || FsError::new(ErrorCode::Eio).with_syscall("keepalive"),
+        );
         Self {
             filesystem,
             stop,
-            worker: mount_rs_core::turn_gate::TurnLock::new(Some(worker)),
+            worker,
         }
     }
 
     async fn shutdown(&self) -> FsResult<()> {
         let _ = self.stop.send(true);
-        let mut worker = self.worker.lock().await;
-        let result = match worker.as_mut() {
-            Some(task) => task
-                .await
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("keepalive"))
-                .and_then(|result| result),
-            None => Ok(()),
-        };
-        worker.take();
-        // Cleanup is attempted even when refreshing failed. Keep the handle in
-        // the mutex until joined so cancellation cannot detach a running task.
+        // A caller cancelled here has taken nothing: the worker stays owned
+        // by `self`, so the next caller joins it and `Drop` can abort it.
+        let result = self.worker.join().await;
+        // Cleanup is attempted even when refreshing failed.
         let close = self.filesystem.shutdown().await;
         result.and(close)
     }
@@ -219,9 +215,7 @@ impl RemoteRuntime {
 impl Drop for RemoteRuntime {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
-        if let Some(worker) = self.worker.get_mut().take() {
-            worker.abort();
-        }
+        self.worker.abort();
         // Unexpected drop cannot await session cleanup; server expiry owns it.
     }
 }
@@ -2039,7 +2033,9 @@ mod tests {
         }
         assert_eq!(file.stat().await.unwrap().size, 0);
         runtime.shutdown().await.unwrap();
-        assert!(remote.worker.lock().await.is_none());
+        assert!(remote.worker.reported(), "the keepalive result was taken");
+        // A second shutdown has no worker result left to report.
+        remote.worker.join().await.unwrap();
         let next = mount_rs_remote::RemoteFs::connect(
             &server.url(),
             "volume",

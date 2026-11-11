@@ -292,6 +292,7 @@ dependencies = [
 name = "mount-rs-fault-injection"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "mount-rs-core",
 ]
@@ -319,6 +320,7 @@ dependencies = [
 name = "mount-rs-sqlite"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-io",
  "async-trait",
  "crossbeam-queue",
