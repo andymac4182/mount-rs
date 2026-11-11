@@ -3,8 +3,6 @@
 #[cfg(feature = "io-profiling")]
 use mount_rs_core::diagnostics::profile;
 use mount_rs_core::diagnostics::profile::{Event, Span};
-#[cfg(unix)]
-use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -256,14 +254,132 @@ pub struct SqliteCatalog {
 }
 
 struct CatalogConnections {
+    state: Arc<CatalogState>,
+    #[cfg(unix)]
+    owners: ConnectionOwners,
+}
+
+/// What a catalog job reads besides its connection. Jobs hold this and never
+/// the owners, so the last handle to the owners is never dropped by a job.
+struct CatalogState {
     path: PathBuf,
     current: ArcSwapOption<CachedSnapshot>,
     #[cfg(unix)]
     identity: FileIdentity,
-    #[cfg(unix)]
-    connections: Vec<Arc<TurnLock<Connection>>>,
-    #[cfg(unix)]
+}
+
+/// One unit of work for an owner thread: a whole load or a whole
+/// compare-and-swap transaction, so a transaction never spans two jobs.
+#[cfg(unix)]
+type Job = Box<dyn FnOnce(&mut Connection) + Send>;
+
+/// A thread that owns one SQLite connection and runs the jobs it is sent, one
+/// at a time and in arrival order.
+#[cfg(unix)]
+struct ConnectionOwner {
+    jobs: Option<std::sync::mpsc::Sender<Job>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The pooled connections, each on its own thread. A caller picks one
+/// round-robin, sends it a job, and waits for the reply without holding a
+/// runtime thread.
+#[cfg(unix)]
+struct ConnectionOwners {
+    owners: Vec<ConnectionOwner>,
     next: AtomicUsize,
+}
+
+#[cfg(unix)]
+impl ConnectionOwners {
+    fn start(connections: Vec<Connection>) -> Result<Self, CatalogError> {
+        let mut owners = Vec::with_capacity(connections.len());
+        for connection in connections {
+            let (jobs, queue) = std::sync::mpsc::channel::<Job>();
+            // On failure the owners already started are dropped, which joins them.
+            let thread = std::thread::Builder::new()
+                .name("mount-rs-catalog".into())
+                .spawn(move || {
+                    let mut connection = connection;
+                    for job in queue {
+                        job(&mut connection);
+                    }
+                    // Every sender is gone: close the connection here.
+                    let _profile = Span::new(Event::CatalogClose);
+                    drop(connection);
+                })
+                .map_err(|_| CatalogError::Invalid("cannot start catalog connection thread"))?;
+            owners.push(ConnectionOwner {
+                jobs: Some(jobs),
+                thread: Some(thread),
+            });
+        }
+        Ok(Self {
+            owners,
+            next: AtomicUsize::new(0),
+        })
+    }
+
+    /// Runs `work` on the next connection and returns its result.
+    ///
+    /// A caller that goes away before its job starts cancels it: the job is
+    /// skipped. Once started, a job runs to its end. A panic in `work` is
+    /// reported to its caller as the task failure a blocking task would have
+    /// produced, and the connection keeps serving later jobs (a transaction
+    /// open in `work` rolls back as the panic unwinds through it).
+    async fn run<R, F>(&self, work: F) -> Result<R, CatalogError>
+    where
+        R: Send + 'static,
+        F: FnOnce(&mut Connection) -> R + Send + 'static,
+    {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.owners.len();
+        let wait_profile = Span::new(Event::CatalogPoolWait);
+        let (reply, outcome) = tokio::sync::oneshot::channel::<std::thread::Result<R>>();
+        let job: Job = Box::new(move |connection| {
+            drop(wait_profile);
+            if reply.is_closed() {
+                return;
+            }
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(connection)));
+            let _ = reply.send(outcome);
+        });
+        if let Some(jobs) = &self.owners[index].jobs {
+            // A failed send drops the job and with it the reply sender.
+            let _ = jobs.send(job);
+        }
+        match outcome.await {
+            Ok(Ok(value)) => Ok(value),
+            // Re-raise on a blocking thread to report the same error value as
+            // when the work itself ran there. This does not print the panic again.
+            Ok(Err(panic)) => {
+                match tokio::task::spawn_blocking(move || std::panic::resume_unwind(panic)).await {
+                    Err(error) => Err(CatalogError::Task(error)),
+                    Ok(never) => match never {},
+                }
+            }
+            Err(_) => Err(CatalogError::Invalid("catalog connection closed")),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ConnectionOwners {
+    fn drop(&mut self) {
+        // One connection at a time, as when the pool was a list of
+        // connections: two that close together each see the other still open
+        // and neither checkpoints and removes the write-ahead log. When this
+        // returns every connection is closed.
+        let current = std::thread::current().id();
+        for owner in &mut self.owners {
+            owner.jobs = None;
+            if let Some(thread) = owner.thread.take()
+                && thread.thread().id() != current
+            {
+                let _ = thread.join();
+            }
+        }
+    }
 }
 
 struct CachedSnapshot {
@@ -323,23 +439,13 @@ impl fmt::Debug for SqliteCatalog {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         output
             .debug_struct("SqliteCatalog")
-            .field("path", &self.shared.path)
+            .field("path", &self.shared.state.path)
             .finish()
     }
 }
 
-impl Drop for CatalogConnections {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            let _profile = Span::new(Event::CatalogClose);
-            drop(std::mem::take(&mut self.connections));
-        }
-    }
-}
-
 #[cfg(unix)]
-impl CatalogConnections {
+impl CatalogState {
     fn verify_backing(&self) -> Result<(), CatalogError> {
         let _profile = Span::new(Event::CatalogBackingVerify);
         if file_identity(&self.path)? != self.identity {
@@ -347,13 +453,35 @@ impl CatalogConnections {
         }
         Ok(())
     }
+}
 
-    /// One of the pooled connections, waited for without holding a thread:
-    /// the caller takes it before it moves to a blocking thread.
-    async fn connection(&self) -> OwnedTurnLockGuard<Connection> {
-        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.connections.len();
-        let _wait_profile = Span::new(Event::CatalogPoolWait);
-        Arc::clone(&self.connections[index]).lock_owned().await
+impl CatalogConnections {
+    /// Runs `work` with the shared state and a connection, off the caller's
+    /// runtime thread: on a pooled connection's own thread on Unix, and on a
+    /// blocking thread with a fresh connection elsewhere.
+    async fn run<R, F>(&self, work: F) -> Result<R, CatalogError>
+    where
+        R: Send + 'static,
+        F: FnOnce(&CatalogState, &mut Connection) -> Result<R, CatalogError> + Send + 'static,
+    {
+        let state = Arc::clone(&self.state);
+        #[cfg(unix)]
+        {
+            self.owners
+                .run(move |connection| work(&state, connection))
+                .await?
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::task::spawn_blocking(move || {
+                let mut connection = connect(&state.path)?;
+                let result = work(&state, &mut connection);
+                let _close_profile = Span::new(Event::CatalogClose);
+                drop(connection);
+                result
+            })
+            .await?
+        }
     }
 }
 
@@ -385,7 +513,7 @@ impl SqliteCatalog {
                 return Err(CatalogError::Invalid("catalog backing file changed"));
             }
             let mut connections = Vec::with_capacity(CONNECTION_POOL_SIZE);
-            connections.push(Arc::new(TurnLock::new(connection)));
+            connections.push(connection);
             for _ in 1..CONNECTION_POOL_SIZE {
                 if file_identity(&setup_path)? != identity {
                     return Err(CatalogError::Invalid("catalog backing file changed"));
@@ -394,20 +522,26 @@ impl SqliteCatalog {
                 if file_identity(&setup_path)? != identity {
                     return Err(CatalogError::Invalid("catalog backing file changed"));
                 }
-                connections.push(Arc::new(TurnLock::new(connection)));
+                connections.push(connection);
             }
             Ok(CatalogConnections {
-                path: setup_path,
-                current: ArcSwapOption::empty(),
-                identity,
-                connections,
-                next: AtomicUsize::new(0),
+                state: Arc::new(CatalogState {
+                    path: setup_path,
+                    current: ArcSwapOption::empty(),
+                    identity,
+                }),
+                owners: ConnectionOwners::start(connections)?,
             })
             }
             #[cfg(not(unix))]
             {
                 drop(connection);
-                Ok(CatalogConnections { path: setup_path, current: ArcSwapOption::empty() })
+                Ok(CatalogConnections {
+                    state: Arc::new(CatalogState {
+                        path: setup_path,
+                        current: ArcSwapOption::empty(),
+                    }),
+                })
             }
         })
         .await??;
@@ -444,15 +578,10 @@ impl CatalogStore for SqliteCatalog {
     async fn load_shared_current(&self) -> Result<Arc<CatalogSnapshot>, CatalogError> {
         let _load_profile = Span::new(Event::CatalogLoad);
         let queue_profile = Span::new(Event::CatalogQueue);
-        let shared = Arc::clone(&self.shared);
-        #[cfg(unix)]
-        let connection = shared.connection().await;
-        tokio::task::spawn_blocking(move || {
+        self.shared.run(move |shared, connection| {
             drop(queue_profile);
             #[cfg(unix)]
             shared.verify_backing()?;
-            #[cfg(not(unix))]
-            let connection = connect(&shared.path)?;
             // The row itself is read every time.
             let current = &shared.current;
             let mut query_profile = Span::new(Event::CatalogQuery);
@@ -479,7 +608,7 @@ impl CatalogStore for SqliteCatalog {
             drop(query_profile);
             #[cfg(feature = "io-profiling")]
             if profile::enabled() {
-                let sample = mount_rs_sqlite::connection_page_diagnostics(&connection, true);
+                let sample = mount_rs_sqlite::connection_page_diagnostics(connection, true);
                 match sample.ok().and_then(|pages| {
                     Some((
                         pages["pager"]["cache_hits"].as_u64()?,
@@ -497,14 +626,9 @@ impl CatalogStore for SqliteCatalog {
             }
             #[cfg(unix)]
             shared.verify_backing()?;
-            #[cfg(not(unix))]
-            {
-                let _close_profile = Span::new(Event::CatalogClose);
-                drop(connection);
-            }
             result
         })
-        .await?
+        .await
     }
 
     async fn compare_and_swap(
@@ -522,52 +646,48 @@ impl CatalogStore for SqliteCatalog {
         if document.len() > MAX_DOCUMENT_BYTES {
             return Err(CatalogError::Invalid("catalog document too large"));
         }
-        let shared = Arc::clone(&self.shared);
-        #[cfg(unix)]
-        let mut connection = shared.connection().await;
-        tokio::task::spawn_blocking(move || {
-            #[cfg(unix)]
-            shared.verify_backing()?;
-            #[cfg(not(unix))]
-            let mut connection = connect(&shared.path)?;
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let previous: i64 = transaction.query_row(
-                "SELECT revision FROM service_catalog WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )?;
-            if u64::try_from(previous).ok() != Some(expected_revision) {
-                return Err(CatalogError::Conflict);
-            }
-            let prior_document: Vec<u8> = transaction.query_row(
-                "SELECT document FROM service_catalog WHERE singleton=1",
-                [],
-                |row| row.get(0),
-            )?;
-            let prior = decode_snapshot(previous, &prior_document)?;
-            for (id, partition) in &prior.partitions {
-                if !next.partitions.contains_key(id)
-                    && (!partition.drives.is_empty()
-                        || prior.grants.values().any(|g| g.partition_id == *id))
-                {
-                    return Err(CatalogError::Invalid(
-                        "Partition must be empty before deletion",
-                    ));
+        self.shared
+            .run(move |shared, connection| {
+                #[cfg(unix)]
+                shared.verify_backing()?;
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let previous: i64 = transaction.query_row(
+                    "SELECT revision FROM service_catalog WHERE singleton = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if u64::try_from(previous).ok() != Some(expected_revision) {
+                    return Err(CatalogError::Conflict);
                 }
-            }
-            let revision_sql =
-                i64::try_from(revision).map_err(|_| CatalogError::Invalid("revision overflow"))?;
-            transaction.execute(
-                "UPDATE service_catalog SET revision = ?1, document = ?2 WHERE singleton = 1",
-                params![revision_sql, document],
-            )?;
-            transaction.commit()?;
-            #[cfg(unix)]
-            shared.verify_backing()?;
-            Ok(revision)
-        })
-        .await?
+                let prior_document: Vec<u8> = transaction.query_row(
+                    "SELECT document FROM service_catalog WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let prior = decode_snapshot(previous, &prior_document)?;
+                for (id, partition) in &prior.partitions {
+                    if !next.partitions.contains_key(id)
+                        && (!partition.drives.is_empty()
+                            || prior.grants.values().any(|g| g.partition_id == *id))
+                    {
+                        return Err(CatalogError::Invalid(
+                            "Partition must be empty before deletion",
+                        ));
+                    }
+                }
+                let revision_sql = i64::try_from(revision)
+                    .map_err(|_| CatalogError::Invalid("revision overflow"))?;
+                transaction.execute(
+                    "UPDATE service_catalog SET revision = ?1, document = ?2 WHERE singleton = 1",
+                    params![revision_sql, document],
+                )?;
+                transaction.commit()?;
+                #[cfg(unix)]
+                shared.verify_backing()?;
+                Ok(revision)
+            })
+            .await
     }
 }
 
@@ -914,5 +1034,280 @@ mod reuse_tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod owner_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    fn pool(path: &Path, size: usize) -> ConnectionOwners {
+        let connections = (0..size).map(|_| connect(path).unwrap()).collect();
+        ConnectionOwners::start(connections).unwrap()
+    }
+
+    #[tokio::test]
+    async fn each_connection_runs_its_jobs_one_at_a_time_in_arrival_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let owners = Arc::new(pool(&directory.path().join("pool.sqlite"), 4));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let running = Arc::new(AtomicUsize::new(0));
+        // A current-thread runtime polls these in spawn order, so job `n` is
+        // sent `n`th and lands on connection `n % 4`.
+        let tasks: Vec<_> = (0..256_usize)
+            .map(|sequence| {
+                let owners = Arc::clone(&owners);
+                let seen = Arc::clone(&seen);
+                let running = Arc::clone(&running);
+                tokio::spawn(async move {
+                    owners
+                        .run(move |connection| {
+                            // The connection's own address marks which one ran the job.
+                            let connection = std::ptr::from_ref(connection) as usize;
+                            let overlap = running.fetch_add(1, Ordering::SeqCst);
+                            seen.lock().unwrap().push((
+                                std::thread::current().id(),
+                                connection,
+                                sequence,
+                            ));
+                            std::thread::yield_now();
+                            running.fetch_sub(1, Ordering::SeqCst);
+                            overlap
+                        })
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect();
+        for task in tasks {
+            assert!(task.await.unwrap() < 4);
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 256);
+        let mut by_thread = BTreeMap::new();
+        for (thread, connection, sequence) in seen.iter() {
+            by_thread
+                .entry(format!("{thread:?}"))
+                .or_insert_with(Vec::new)
+                .push((*connection, *sequence));
+        }
+        assert_eq!(by_thread.len(), 4);
+        for jobs in by_thread.values() {
+            assert_eq!(jobs.len(), 64);
+            assert!(jobs.iter().all(|job| job.0 == jobs[0].0));
+            assert!(jobs.iter().all(|job| job.1 % 4 == jobs[0].1 % 4));
+            assert!(jobs.windows(2).all(|pair| pair[0].1 < pair[1].1));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_job_fails_its_caller_and_leaves_the_connection_usable() {
+        let directory = tempfile::tempdir().unwrap();
+        let owners = pool(&directory.path().join("pool.sqlite"), 1);
+        owners
+            .run(|connection| {
+                connection
+                    .execute_batch("CREATE TABLE t (v INTEGER); INSERT INTO t VALUES (1);")
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+        let failed = owners
+            .run(|connection| {
+                let transaction = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                transaction.execute("UPDATE t SET v = 2", []).unwrap();
+                std::panic::resume_unwind(Box::new("catalog job failed"));
+                #[allow(unreachable_code)]
+                transaction.commit().unwrap()
+            })
+            .await;
+        match failed {
+            Err(CatalogError::Task(error)) => {
+                assert!(error.is_panic());
+                assert_eq!(
+                    *error.into_panic().downcast::<&str>().unwrap(),
+                    "catalog job failed"
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        // The same connection serves the next job, with the transaction rolled back.
+        let value: i64 = owners
+            .run(|connection| {
+                assert!(connection.is_autocommit());
+                connection
+                    .query_row("SELECT v FROM t", [], |row| row.get(0))
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        assert_eq!(value, 1);
+    }
+
+    #[tokio::test]
+    async fn a_job_whose_caller_left_before_it_started_is_skipped() {
+        let directory = tempfile::tempdir().unwrap();
+        let owners = Arc::new(pool(&directory.path().join("pool.sqlite"), 1));
+        let (started, has_started) = tokio::sync::oneshot::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let blocker = tokio::spawn({
+            let owners = Arc::clone(&owners);
+            async move {
+                owners
+                    .run(move |_| {
+                        started.send(()).unwrap();
+                        released.recv().unwrap();
+                    })
+                    .await
+            }
+        });
+        has_started.await.unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let (sent, was_sent) = tokio::sync::oneshot::channel::<()>();
+        let victim = tokio::spawn({
+            let owners = Arc::clone(&owners);
+            let ran = Arc::clone(&ran);
+            async move {
+                let job = owners.run(move |_| ran.store(true, Ordering::SeqCst));
+                tokio::pin!(job);
+                // Poll once so the job is queued, then report and keep waiting.
+                assert!(
+                    std::future::poll_fn(|context| {
+                        std::task::Poll::Ready(job.as_mut().poll(context).is_pending())
+                    })
+                    .await
+                );
+                drop(sent);
+                job.await
+            }
+        });
+        assert!(was_sent.await.is_err());
+        victim.abort();
+        assert!(victim.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        // The owner reached this job, so it has already passed the skipped one.
+        owners.run(|_| ()).await.unwrap();
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_pool_waits_until_every_connection_is_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pool.sqlite");
+        let owners = pool(&path, 3);
+        // Every connection touches the database, so each has the write-ahead
+        // log open. SQLite removes the log when the last one closes, and only
+        // if no other is closing at that moment.
+        for value in 0..3 {
+            owners
+                .run(move |connection| {
+                    connection
+                        .execute_batch("CREATE TABLE IF NOT EXISTS t (v INTEGER);")
+                        .unwrap();
+                    connection
+                        .execute("INSERT INTO t VALUES (?1)", params![value])
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+        }
+        let log = directory.path().join("pool.sqlite-wal");
+        assert!(log.exists());
+        drop(owners);
+        // No wait: the drop above returned only after the three closes.
+        assert!(!log.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_swaps_and_loads_keep_one_winner_per_revision() {
+        const WRITERS: usize = 12;
+        const SWAPS: u64 = 8;
+        let directory = tempfile::tempdir().unwrap();
+        let catalog = SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+            .await
+            .unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..8)
+            .map(|_| {
+                let catalog = catalog.clone();
+                let done = Arc::clone(&done);
+                tokio::spawn(async move {
+                    let mut last = 0;
+                    while !done.load(Ordering::SeqCst) {
+                        let snapshot = catalog.load_shared_current().await.unwrap();
+                        assert!(snapshot.revision >= last, "a load went back in time");
+                        last = snapshot.revision;
+                    }
+                })
+            })
+            .collect();
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let catalog = catalog.clone();
+                tokio::spawn(async move {
+                    let mut won = Vec::new();
+                    while (won.len() as u64) < SWAPS {
+                        let current = catalog.load_current().await.unwrap();
+                        let mut next = current.clone();
+                        next.partitions.insert(
+                            format!("writer-{writer}-{}", won.len()),
+                            PartitionDefinition {
+                                drives: BTreeMap::new(),
+                            },
+                        );
+                        match catalog.compare_and_swap(current.revision, next).await {
+                            Ok(revision) => {
+                                assert_eq!(revision, current.revision + 1);
+                                won.push(revision);
+                            }
+                            Err(CatalogError::Conflict) => {}
+                            Err(error) => panic!("swap failed: {error:?}"),
+                        }
+                    }
+                    won
+                })
+            })
+            .collect();
+        let mut won = Vec::new();
+        for writer in writers {
+            won.extend(writer.await.unwrap());
+        }
+        done.store(true, Ordering::SeqCst);
+        for reader in readers {
+            reader.await.unwrap();
+        }
+        // Every revision was granted to exactly one writer, and no winning
+        // swap was lost: each added one partition to the one before it.
+        won.sort_unstable();
+        let total = WRITERS as u64 * SWAPS;
+        assert_eq!(won, (1..=total).collect::<Vec<_>>());
+        let last = catalog.load_current().await.unwrap();
+        assert_eq!(last.revision, total);
+        assert_eq!(last.partitions.len() as u64, total);
+    }
+
+    #[tokio::test]
+    async fn the_last_catalog_handle_can_be_dropped_while_calls_are_queued() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.sqlite");
+        let catalog = SqliteCatalog::open(&path).await.unwrap();
+        let calls: Vec<_> = (0..64)
+            .map(|_| {
+                let catalog = catalog.clone();
+                tokio::spawn(async move { catalog.load_shared_current().await.map(|_| ()) })
+            })
+            .collect();
+        drop(catalog);
+        for call in calls {
+            call.await.unwrap().unwrap();
+        }
+        // Every handle is gone, so every pooled connection is closed.
+        let reopened = SqliteCatalog::open(&path).await.unwrap();
+        assert_eq!(reopened.load_current().await.unwrap().revision, 0);
     }
 }

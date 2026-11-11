@@ -29,8 +29,6 @@ use arc_swap::ArcSwapOption;
 use futures_util::FutureExt;
 #[cfg(target_os = "linux")]
 use mount_rs_core::ErrorCode;
-#[cfg(target_os = "linux")]
-use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{FsDriver, FsError};
 #[cfg(target_os = "linux")]
 use mount_rs_core::{S_IFDIR, S_IFMT};
@@ -990,21 +988,18 @@ type ReadTaskResult = (u64, Result<(), FuseTransportError>);
 #[cfg(target_os = "linux")]
 async fn write_reply_until_stop(
     device: Arc<FuseDevice>,
-    writer: Arc<TurnLock<()>>,
     state: Arc<MountState>,
     reply: Vec<u8>,
 ) -> Result<(), FuseTransportError> {
     if state.stop.is_set() {
         return Ok(());
     }
-    let _guard = tokio::select! {
-        _ = state.stop.wait() => return Ok(()),
-        guard = writer.lock() => guard,
-    };
-    if state.stop.is_set() {
-        return Ok(());
-    }
+    // The device keeps concurrent replies whole by itself (see
+    // `device::Framing`): no lock on the kernel device. `biased` checks the
+    // stop signal before every poll of the write, so a reply that waited
+    // its turn on a byte-stream descriptor is still dropped after a stop.
     tokio::select! {
+        biased;
         _ = state.stop.wait() => Ok(()),
         result = device.write_frame(&reply) => result.map_err(|error| {
             FuseTransportError::from_io(FuseTransportErrorKind::Write, &error)
@@ -1015,10 +1010,8 @@ async fn write_reply_until_stop(
 #[cfg(target_os = "linux")]
 async fn write_terminal_reply(
     device: Arc<FuseDevice>,
-    writer: Arc<TurnLock<()>>,
     reply: Vec<u8>,
 ) -> Result<(), FuseTransportError> {
-    let _guard = writer.lock().await;
     device
         .write_frame(&reply)
         .await
@@ -1068,17 +1061,15 @@ fn spawn_prepared_read(
     prepared: PreparedRead,
     permit: tokio::sync::OwnedSemaphorePermit,
     device: &Arc<FuseDevice>,
-    writer: &Arc<TurnLock<()>>,
     state: &Arc<MountState>,
 ) {
     let unique = prepared.unique();
     let device = Arc::clone(device);
-    let writer = Arc::clone(writer);
     let state = Arc::clone(state);
     let abort = read_tasks.spawn(async move {
         let _permit = permit;
         let reply = prepared_read_reply(prepared, Arc::clone(&state)).await;
-        (unique, write_terminal_reply(device, writer, reply).await)
+        (unique, write_terminal_reply(device, reply).await)
     });
     in_flight.insert(unique, abort);
 }
@@ -1115,7 +1106,6 @@ async fn run_session_loop(
     state: Arc<MountState>,
 ) -> Option<FuseTransportError> {
     let mut failure = None;
-    let writer = Arc::new(TurnLock::new(()));
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_READS));
     let mut read_tasks = tokio::task::JoinSet::<ReadTaskResult>::new();
     let mut in_flight: std::collections::HashMap<u64, tokio::task::AbortHandle> =
@@ -1140,7 +1130,6 @@ async fn run_session_loop(
                 prepared,
                 permit,
                 &device,
-                &writer,
                 &state,
             );
         }
@@ -1222,20 +1211,14 @@ async fn run_session_loop(
                         prepared,
                         permit,
                         &device,
-                        &writer,
                         &state,
                     );
                 } else if pending_reads.len() < MAX_PENDING_READS {
                     pending_reads.push_back(prepared);
                 } else {
                     let reply = crate::error_reply(prepared.unique(), ErrorCode::Eagain).to_vec();
-                    if let Err(error) = write_reply_until_stop(
-                        Arc::clone(&device),
-                        Arc::clone(&writer),
-                        Arc::clone(&state),
-                        reply,
-                    )
-                    .await
+                    if let Err(error) =
+                        write_reply_until_stop(Arc::clone(&device), Arc::clone(&state), reply).await
                     {
                         failure = Some(error);
                         break;
@@ -1289,13 +1272,8 @@ async fn run_session_loop(
             },
         };
         if let Some(reply) = reply
-            && let Err(error) = write_reply_until_stop(
-                Arc::clone(&device),
-                Arc::clone(&writer),
-                Arc::clone(&state),
-                reply,
-            )
-            .await
+            && let Err(error) =
+                write_reply_until_stop(Arc::clone(&device), Arc::clone(&state), reply).await
         {
             failure = Some(error);
             break;
@@ -4300,5 +4278,280 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(MountError::UnsupportedPlatform)));
+    }
+
+    /// Kinds of socket pair the reply-writer benchmark and race tests run on.
+    #[cfg(target_os = "linux")]
+    fn typed_socket_pair(kind: libc::c_int) -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+        use std::os::fd::FromRawFd;
+        let mut fds = [-1; 2];
+        let result = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                kind | libc::SOCK_CLOEXEC,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
+        assert_eq!(result, 0, "socketpair: {}", io::Error::last_os_error());
+        // SAFETY: socketpair initialized both descriptors and ownership is
+        // transferred immediately.
+        (
+            unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) },
+            unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) },
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn blocking_send(fd: &std::os::fd::OwnedFd, frame: &[u8]) {
+        use std::os::fd::AsRawFd;
+        let written = unsafe {
+            libc::write(
+                fd.as_raw_fd(),
+                frame.as_ptr().cast::<libc::c_void>(),
+                frame.len(),
+            )
+        };
+        assert_eq!(
+            written,
+            frame.len() as isize,
+            "send request: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    /// Read one reply on the blocking peer end. A stream socket needs the
+    /// length prefix to find the end of the reply; a message socket returns
+    /// exactly one reply per call.
+    #[cfg(target_os = "linux")]
+    fn blocking_recv_reply(fd: &std::os::fd::OwnedFd, stream: bool, buffer: &mut [u8]) -> usize {
+        use std::os::fd::AsRawFd;
+        let receive = |target: &mut [u8], flags: libc::c_int| -> usize {
+            let bytes = unsafe {
+                libc::recv(
+                    fd.as_raw_fd(),
+                    target.as_mut_ptr().cast::<libc::c_void>(),
+                    target.len(),
+                    flags,
+                )
+            };
+            assert!(bytes > 0, "receive reply: {}", io::Error::last_os_error());
+            bytes as usize
+        };
+        if !stream {
+            let length = receive(buffer, 0);
+            assert_eq!(
+                u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize,
+                length,
+                "a message socket must deliver exactly one whole reply"
+            );
+            return length;
+        }
+        let header = receive(&mut buffer[..crate::OUT_HEADER_SIZE], libc::MSG_WAITALL);
+        assert_eq!(header, crate::OUT_HEADER_SIZE);
+        let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
+        if length > crate::OUT_HEADER_SIZE {
+            let body = receive(
+                &mut buffer[crate::OUT_HEADER_SIZE..length],
+                libc::MSG_WAITALL,
+            );
+            assert_eq!(body, length - crate::OUT_HEADER_SIZE);
+        }
+        length
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy)]
+    enum BenchRequest {
+        /// Answered inline by the session loop.
+        Getattr,
+        /// Answered by a spawned positional-read worker.
+        Read,
+    }
+
+    /// Drive `ops` request/reply round trips through `run_session`, keeping
+    /// `window` requests outstanding, and return (ops/s, p50, p99).
+    #[cfg(target_os = "linux")]
+    fn reply_round_trips(
+        kind: libc::c_int,
+        request: BenchRequest,
+        window: usize,
+        ops: usize,
+    ) -> (f64, Duration, Duration) {
+        let stream = kind == libc::SOCK_STREAM;
+        assert!(!stream || window == 1, "a stream socket coalesces requests");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("benchmark runtime");
+        let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
+        runtime.block_on(async {
+            let file = inner.open("/file", "w", 0o644).await.expect("create file");
+            file.write(b"data", Some(0)).await.expect("seed file");
+            file.close().await.expect("close seed file");
+        });
+        let (device_fd, peer) = typed_socket_pair(kind);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-reply-bench"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks::default(),
+        ));
+        let task = {
+            let _enter = runtime.enter();
+            let device = FuseDevice::from_owned_fd(device_fd, DEFAULT_MAX_FRAME)
+                .expect("socket descriptor should satisfy the device boundary");
+            runtime.spawn(run_session(
+                FuseSession::new(inner),
+                device,
+                Arc::clone(&state),
+            ))
+        };
+
+        let mut buffer = vec![0_u8; 4096];
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        blocking_send(&peer, &test_frame(26, 1, 0, &init));
+        assert_eq!(blocking_recv_reply(&peer, stream, &mut buffer), 80);
+        blocking_send(&peer, &test_frame(1, 2, 1, b"file\0"));
+        blocking_recv_reply(&peer, stream, &mut buffer);
+        assert_eq!(i32::from_le_bytes(buffer[4..8].try_into().unwrap()), 0);
+        let nodeid = u64::from_le_bytes(buffer[16..24].try_into().unwrap());
+        blocking_send(&peer, &test_frame(14, 3, nodeid, &[0; 8]));
+        blocking_recv_reply(&peer, stream, &mut buffer);
+        assert_eq!(i32::from_le_bytes(buffer[4..8].try_into().unwrap()), 0);
+        let handle = u64::from_le_bytes(buffer[16..24].try_into().unwrap());
+
+        const FIRST_UNIQUE: u64 = 100;
+        let mut frame = match request {
+            BenchRequest::Getattr => test_frame(3, 0, nodeid, &[0; 16]),
+            BenchRequest::Read => test_frame(15, 0, nodeid, &read_body(handle)),
+        };
+        let mut send = |index: usize| {
+            frame[8..16].copy_from_slice(&(FIRST_UNIQUE + index as u64).to_le_bytes());
+            blocking_send(&peer, &frame);
+        };
+        let start = Instant::now();
+        let mut sent_at = vec![start; ops];
+        let mut latencies = vec![Duration::ZERO; ops];
+        let mut next = 0;
+        while next < window.min(ops) {
+            sent_at[next] = Instant::now();
+            send(next);
+            next += 1;
+        }
+        for _ in 0..ops {
+            let length = blocking_recv_reply(&peer, stream, &mut buffer);
+            let now = Instant::now();
+            assert_eq!(
+                i32::from_le_bytes(buffer[4..8].try_into().unwrap()),
+                0,
+                "benchmark request failed"
+            );
+            let index =
+                (u64::from_le_bytes(buffer[8..16].try_into().unwrap()) - FIRST_UNIQUE) as usize;
+            if matches!(request, BenchRequest::Read) {
+                assert_eq!(&buffer[16..length], b"data");
+            }
+            latencies[index] = now.duration_since(sent_at[index]);
+            if next < ops {
+                sent_at[next] = Instant::now();
+                send(next);
+                next += 1;
+            }
+        }
+        let elapsed = start.elapsed();
+
+        state.request_stop();
+        runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), task).await })
+            .expect("stop should close the benchmark session")
+            .expect("benchmark session task should finish");
+        latencies.sort_unstable();
+        (
+            ops as f64 / elapsed.as_secs_f64(),
+            latencies[ops / 2],
+            latencies[ops * 99 / 100],
+        )
+    }
+
+    /// Parallel read workers and the session loop reply on a message-framed
+    /// descriptor with no lock between them. Every reply must arrive whole
+    /// (`blocking_recv_reply` checks one message is one reply) and carry the
+    /// data of its own request.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parallel_read_replies_stay_whole_without_a_reply_lock() {
+        reply_round_trips(libc::SOCK_SEQPACKET, BenchRequest::Read, 16, 20_000);
+        reply_round_trips(libc::SOCK_DGRAM, BenchRequest::Read, 16, 5_000);
+        reply_round_trips(libc::SOCK_SEQPACKET, BenchRequest::Getattr, 1, 2_000);
+        reply_round_trips(libc::SOCK_STREAM, BenchRequest::Read, 1, 2_000);
+    }
+
+    /// Reply-path benchmark: request/reply round trips through the session
+    /// loop over a socket pair. `seqpacket` is message framed like
+    /// `/dev/fuse`; `stream` is the byte-stream path.
+    ///
+    /// ```sh
+    /// cargo test --release -p mount-rs-fuse --lib bench_reply_writer_round_trips -- --ignored --nocapture
+    /// ```
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "benchmark: run with --release --ignored --nocapture"]
+    fn bench_reply_writer_round_trips() {
+        let ops = std::env::var("MOUNT_RS_FUSE_BENCH_OPS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(200_000);
+        let cases = [
+            (
+                "seqpacket getattr inline  window=1 ",
+                libc::SOCK_SEQPACKET,
+                BenchRequest::Getattr,
+                1,
+            ),
+            (
+                "seqpacket read    worker  window=1 ",
+                libc::SOCK_SEQPACKET,
+                BenchRequest::Read,
+                1,
+            ),
+            (
+                "seqpacket read    worker  window=4 ",
+                libc::SOCK_SEQPACKET,
+                BenchRequest::Read,
+                4,
+            ),
+            (
+                "seqpacket read    worker  window=16",
+                libc::SOCK_SEQPACKET,
+                BenchRequest::Read,
+                16,
+            ),
+            (
+                "stream    getattr inline  window=1 ",
+                libc::SOCK_STREAM,
+                BenchRequest::Getattr,
+                1,
+            ),
+            (
+                "stream    read    worker  window=1 ",
+                libc::SOCK_STREAM,
+                BenchRequest::Read,
+                1,
+            ),
+        ];
+        for (label, kind, request, window) in cases {
+            let (rate, p50, p99) = reply_round_trips(kind, request, window, ops);
+            println!(
+                "reply-bench {label} {rate:>10.0} ops/s  p50 {:>7.1}us  p99 {:>7.1}us",
+                p50.as_secs_f64() * 1e6,
+                p99.as_secs_f64() * 1e6,
+            );
+        }
     }
 }

@@ -32,7 +32,6 @@ use mount_rs_9p::{
 };
 use mount_rs_core::take_cell::TakeCell;
 use mount_rs_core::turn_cell::TurnCell;
-use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, OpenFlags, Stats};
 use mount_rs_fuse::{
     FuseMountHooks as TransportFuseMountHooks, FuseTransportError as TransportFuseError,
@@ -74,7 +73,7 @@ use mount_rs_webdav::{
 };
 use napi::bindgen_prelude::{
     BigInt, Buffer, Either, Env, FnArgs, FromNapiValue, Function, JsObjectValue, Object,
-    ReadableStream, Reader, Reference, Unknown,
+    PromiseRaw, ReadableStream, Reader, Reference, Unknown,
 };
 use napi::futures_core::Stream as FuturesStream;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -83,6 +82,7 @@ use napi_derive::napi;
 
 use super::nfs_codec::{NfsRpcCall, from_call as from_nfs_call};
 use super::p9_codec::{NativeP9Header, NativeP9Qid};
+use super::serial::{self, Request, Serial};
 use super::{FileHandle, FileHandle as JsFileHandle, Filesystem, MountDriver};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -4032,7 +4032,7 @@ enum S3ResponseBodyState {
 #[derive(Clone)]
 #[napi]
 pub struct S3BodyStream {
-    inner: Arc<TurnLock<S3ResponseBodyState>>,
+    inner: Arc<Serial<S3ResponseBodyState>>,
 }
 
 impl S3BodyStream {
@@ -4042,21 +4042,20 @@ impl S3BodyStream {
             TransportS3StreamBody::Stream(stream) => S3ResponseBodyState::Stream(Some(stream)),
         };
         Self {
-            inner: Arc::new(TurnLock::new(state)),
+            inner: Serial::new(state),
         }
     }
 }
 
-#[napi]
-impl S3BodyStream {
-    /// Read one response chunk, or `null` after EOF. A single mutex prevents
-    /// concurrent JavaScript pulls from advancing the transport stream twice.
-    #[napi]
-    pub async fn read_chunk(&self) -> napi::Result<Option<Buffer>> {
-        let mut state = self.inner.lock().await;
-        let current = std::mem::replace(&mut *state, S3ResponseBodyState::Closed);
+struct S3ReadChunk;
+
+impl Request<S3ResponseBodyState> for S3ReadChunk {
+    type Reply = napi::Result<Option<Vec<u8>>>;
+
+    async fn run(self, state: &mut S3ResponseBodyState) -> Self::Reply {
+        let current = std::mem::replace(state, S3ResponseBodyState::Closed);
         match current {
-            S3ResponseBodyState::Bytes(Some(bytes)) => Ok(Some(Buffer::from(bytes))),
+            S3ResponseBodyState::Bytes(Some(bytes)) => Ok(Some(bytes)),
             S3ResponseBodyState::Bytes(None)
             | S3ResponseBodyState::Stream(None)
             | S3ResponseBodyState::Closed => Ok(None),
@@ -4066,22 +4065,44 @@ impl S3BodyStream {
                     None => Ok(None),
                     Some(Ok(bytes)) => {
                         *state = S3ResponseBodyState::Stream(Some(stream));
-                        Ok(Some(Buffer::from(bytes)))
+                        Ok(Some(bytes))
                     }
                     Some(Err(error)) => Err(transport_error("S3 response body", error)),
                 }
             }
         }
     }
+}
+
+struct S3CloseBody;
+
+impl Request<S3ResponseBodyState> for S3CloseBody {
+    type Reply = ();
+
+    async fn run(self, state: &mut S3ResponseBodyState) {
+        *state = S3ResponseBodyState::Closed;
+    }
+}
+
+#[napi]
+impl S3BodyStream {
+    /// Read one response chunk, or `null` after EOF. Pulls and closes take
+    /// their place in the order JavaScript calls them and run one at a time:
+    /// two pulls made at once get consecutive chunks in call order, and a
+    /// close runs after every pull made before it.
+    #[napi(ts_return_type = "Promise<Buffer | null>")]
+    pub fn read_chunk(&self, env: Env) -> napi::Result<PromiseRaw<'static, Option<Buffer>>> {
+        serial::promise(env, self.inner.submit(S3ReadChunk).reply(), |chunk| {
+            chunk.map(|chunk| chunk.map(Buffer::from))
+        })
+    }
 
     /// Close an unread or partially-read response body. The JavaScript
     /// async-iterator facade calls this from `return()` on cancellation;
     /// dropping the transport stream also signals file-reader cancellation.
-    #[napi]
-    pub async fn close(&self) -> napi::Result<()> {
-        let mut state = self.inner.lock().await;
-        let _ = std::mem::replace(&mut *state, S3ResponseBodyState::Closed);
-        Ok(())
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn close(&self, env: Env) -> napi::Result<PromiseRaw<'static, ()>> {
+        serial::promise(env, self.inner.submit(S3CloseBody).reply(), Ok)
     }
 }
 
@@ -4701,8 +4722,13 @@ enum WebdavResponseBodyState {
 #[derive(Clone)]
 #[napi]
 pub struct WebdavBodyStream {
-    inner: Arc<TurnLock<WebdavResponseBodyState>>,
+    inner: Arc<Serial<WebdavResponseBody>>,
 }
+
+/// The body state, which closes a file it still holds when the last
+/// reference to it goes away: the JavaScript object and every call still in
+/// flight.
+struct WebdavResponseBody(WebdavResponseBodyState);
 
 impl WebdavBodyStream {
     fn new(body: TransportWebdavBody) -> Self {
@@ -4716,7 +4742,7 @@ impl WebdavBodyStream {
             },
         };
         Self {
-            inner: Arc::new(TurnLock::new(state)),
+            inner: Serial::new(WebdavResponseBody(state)),
         }
     }
 
@@ -4728,12 +4754,9 @@ impl WebdavBodyStream {
     }
 }
 
-impl Drop for WebdavBodyStream {
+impl Drop for WebdavResponseBody {
     fn drop(&mut self) {
-        let Some(mutex) = Arc::get_mut(&mut self.inner) else {
-            return;
-        };
-        let state = std::mem::replace(mutex.get_mut(), WebdavResponseBodyState::Closed);
+        let state = std::mem::replace(&mut self.0, WebdavResponseBodyState::Closed);
         let WebdavResponseBodyState::File { handle, .. } = state else {
             return;
         };
@@ -4745,16 +4768,16 @@ impl Drop for WebdavBodyStream {
     }
 }
 
-#[napi]
-impl WebdavBodyStream {
-    /// Read one response chunk, or `null` after EOF. A single mutex protects
-    /// the positional file read and makes concurrent JavaScript pulls safe.
-    #[napi]
-    pub async fn read_chunk(&self) -> napi::Result<Option<Buffer>> {
-        let mut state = self.inner.lock().await;
-        let current = std::mem::replace(&mut *state, WebdavResponseBodyState::Closed);
+struct WebdavReadChunk;
+
+impl Request<WebdavResponseBody> for WebdavReadChunk {
+    type Reply = napi::Result<Option<Vec<u8>>>;
+
+    async fn run(self, body: &mut WebdavResponseBody) -> Self::Reply {
+        let state = &mut body.0;
+        let current = std::mem::replace(state, WebdavResponseBodyState::Closed);
         match current {
-            WebdavResponseBodyState::Bytes(Some(bytes)) => Ok(Some(Buffer::from(bytes))),
+            WebdavResponseBodyState::Bytes(Some(bytes)) => Ok(Some(bytes)),
             WebdavResponseBodyState::Bytes(None) | WebdavResponseBodyState::Closed => Ok(None),
             WebdavResponseBodyState::File {
                 handle,
@@ -4762,7 +4785,7 @@ impl WebdavBodyStream {
                 end,
                 chunk_size: _,
             } if position >= end => {
-                Self::close_handle(handle).await?;
+                WebdavBodyStream::close_handle(handle).await?;
                 Ok(None)
             }
             WebdavResponseBodyState::File {
@@ -4796,21 +4819,47 @@ impl WebdavBodyStream {
                     chunk_size,
                 };
                 bytes.truncate(count);
-                Ok(Some(Buffer::from(bytes)))
+                Ok(Some(bytes))
             }
         }
+    }
+}
+
+struct WebdavCloseBody;
+
+impl Request<WebdavResponseBody> for WebdavCloseBody {
+    type Reply = napi::Result<()>;
+
+    async fn run(self, body: &mut WebdavResponseBody) -> Self::Reply {
+        let current = std::mem::replace(&mut body.0, WebdavResponseBodyState::Closed);
+        if let WebdavResponseBodyState::File { handle, .. } = current {
+            WebdavBodyStream::close_handle(handle).await?;
+        }
+        Ok(())
+    }
+}
+
+#[napi]
+impl WebdavBodyStream {
+    /// Read one response chunk, or `null` after EOF. Pulls and closes take
+    /// their place in the order JavaScript calls them and run one at a time:
+    /// two pulls made at once get consecutive chunks in call order (the
+    /// position advances by what the earlier pull actually read), and a
+    /// close runs after every pull made before it.
+    #[napi(ts_return_type = "Promise<Buffer | null>")]
+    pub fn read_chunk(&self, env: Env) -> napi::Result<PromiseRaw<'static, Option<Buffer>>> {
+        serial::promise(env, self.inner.submit(WebdavReadChunk).reply(), |chunk| {
+            chunk.map(|chunk| chunk.map(Buffer::from))
+        })
     }
 
     /// Close an unread or partially-read response body. The JavaScript
     /// async-iterator facade calls this from `return()` on cancellation.
-    #[napi]
-    pub async fn close(&self) -> napi::Result<()> {
-        let mut state = self.inner.lock().await;
-        let current = std::mem::replace(&mut *state, WebdavResponseBodyState::Closed);
-        if let WebdavResponseBodyState::File { handle, .. } = current {
-            Self::close_handle(handle).await?;
-        }
-        Ok(())
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn close(&self, env: Env) -> napi::Result<PromiseRaw<'static, ()>> {
+        serial::promise(env, self.inner.submit(WebdavCloseBody).reply(), |closed| {
+            closed
+        })
     }
 }
 

@@ -19,7 +19,7 @@ use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{FsDriver, Loopback};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, Semaphore, oneshot};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, decode_call, frame_record};
@@ -591,7 +591,8 @@ async fn serve_tcp_connection(runtime: NfsTcpConnectionRuntime) {
 async fn serve_connection<R, W>(runtime: NfsConnectionRuntime<R, W>)
 where
     R: AsyncRead + Send + Unpin + 'static,
-    W: AsyncWrite + Send + Unpin + 'static,
+    // `Sync` because the write half travels between calls inside an `Arc`.
+    W: AsyncWrite + Send + Sync + Unpin + 'static,
 {
     let NfsConnectionRuntime {
         reader,
@@ -607,10 +608,17 @@ where
     } = runtime;
     let peer_name = peer.ip().to_string();
     let mut reader = reader;
-    let writer = Arc::new(TurnLock::new(writer));
     let permits = Arc::new(Semaphore::new(max_in_flight.max(1)));
     let stop = Arc::new(Notify::new());
     let mut workers = JoinSet::new();
+    let replies = Arc::new(ReplyWriter::new(
+        writer,
+        max_in_flight.max(1),
+        hooks.clone(),
+        reported.clone(),
+        peer_name.clone(),
+        stop.clone(),
+    ));
     let mut assembler = RecordAssembler::new(record_limit);
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
@@ -724,14 +732,13 @@ where
             };
             let session = session.clone();
             let v4_session = v4_session.clone();
-            let writer = writer.clone();
+            let replies = replies.clone();
             let peer = peer_name.clone();
             let error_peer = peer_name.clone();
             let hooks = hooks.clone();
             let reported = reported.clone();
             let stop = stop.clone();
             workers.spawn(async move {
-                let _permit = permit;
                 let context = NfsRequestContext { peer: Some(peer) };
                 trace.stage("dispatch", format_args!("{rpc}"));
                 let reply = route_nfs_call(&session, &v4_session, &record, context).await;
@@ -757,42 +764,210 @@ where
                         return;
                     }
                 };
-                trace.stage("socket_lock_wait", format_args!("{rpc}"));
-                let mut writer = writer.lock().await;
-                trace.stage(
-                    "socket_write_start",
-                    format_args!("{rpc} bytes={}", framed.len()),
-                );
-                let result = match writer.write_all(&framed).await {
-                    Ok(()) => writer.flush().await,
-                    Err(error) => Err(error),
-                };
-                trace.finish(format_args!(
-                    "{rpc} outcome={} os_code={:?}",
-                    if result.is_ok() {
-                        "written"
-                    } else {
-                        "write_error"
-                    },
-                    result.as_ref().err().and_then(io::Error::raw_os_error),
-                ));
-                if let Err(error) = result {
-                    if !is_expected_disconnect(&error) {
-                        report_once(
-                            &hooks,
-                            &reported,
-                            NfsTransportError::from_io(
-                                NfsTransportErrorKind::Write,
-                                Some(error_peer),
-                                &error,
-                            ),
-                        );
-                    }
-                    stop.notify_one();
-                }
+                trace.stage("socket_queue", format_args!("{rpc}"));
+                replies
+                    .send(QueuedReply {
+                        framed,
+                        trace,
+                        rpc,
+                        _permit: permit,
+                    })
+                    .await;
             });
         }
     }
+}
+
+/// A framed reply waiting for the connection's socket.
+struct QueuedReply {
+    framed: Vec<u8>,
+    trace: RequestTrace,
+    rpc: String,
+    /// The call's in-flight slot, released only once the frame is written
+    /// (or the connection ends). A peer that stops reading therefore stops
+    /// new calls from being dispatched instead of growing the queue.
+    _permit: OwnedSemaphorePermit,
+}
+
+/// How many queued replies one socket write may carry.
+const REPLY_BATCH: usize = 16;
+
+/// The write half of a connection, shared by its calls without a lock.
+///
+/// Record frames from concurrent calls must not interleave. Each call puts
+/// its framed reply on a queue and then tries to take the write half, which
+/// sits in an atomic slot. The call that gets it writes everything queued,
+/// its own reply and those of calls that found the slot empty, then puts the
+/// write half back. A call that finds the slot empty returns at once: the
+/// holder writes its reply for it. Nobody waits for the write half, and a
+/// lone call writes its own reply without handing it to another task.
+///
+/// The queue is bounded by the in-flight limit. A queued reply holds its
+/// call's permit, so there are never more queued replies than permits and
+/// the queue never makes a sender wait.
+struct ReplyWriter<W> {
+    queue: mpsc::Sender<QueuedReply>,
+    /// `Some` while no call is writing.
+    idle: ArcSwapOption<ReplySocket<W>>,
+    hooks: NfsServerHooks,
+    reported: Arc<AtomicBool>,
+    peer: String,
+    stop: Arc<Notify>,
+}
+
+/// What the writing call owns: the write half and the queue's receiving end.
+struct ReplySocket<W> {
+    writer: W,
+    queued: mpsc::Receiver<QueuedReply>,
+    batch: Vec<QueuedReply>,
+}
+
+impl<W> ReplyWriter<W>
+where
+    W: AsyncWrite + Send + Sync + Unpin + 'static,
+{
+    fn new(
+        writer: W,
+        max_in_flight: usize,
+        hooks: NfsServerHooks,
+        reported: Arc<AtomicBool>,
+        peer: String,
+        stop: Arc<Notify>,
+    ) -> Self {
+        let (queue, queued) = mpsc::channel(max_in_flight);
+        Self {
+            queue,
+            idle: ArcSwapOption::from_pointee(ReplySocket {
+                writer,
+                queued,
+                batch: Vec::with_capacity(REPLY_BATCH),
+            }),
+            hooks,
+            reported,
+            peer,
+            stop,
+        }
+    }
+
+    /// Queue `reply` and write the queue unless another call is doing so.
+    async fn send(&self, reply: QueuedReply) {
+        if let Err(mpsc::error::SendError(mut unsent)) = self.queue.send(reply).await {
+            // A write failed and its call dropped the socket, having
+            // reported the failure; the connection is closing.
+            unsent
+                .trace
+                .finish(format_args!("{} outcome=writer_stopped", unsent.rpc));
+            return;
+        }
+        loop {
+            let Some(mut socket) = self.idle.swap(None) else {
+                // Another call holds the socket. It looks at the queue again
+                // after putting the socket back, so it will see this reply.
+                return;
+            };
+            let owned = Arc::get_mut(&mut socket).expect("a taken socket has one owner");
+            let mut wrote = false;
+            loop {
+                while owned.batch.len() < REPLY_BATCH
+                    && let Ok(reply) = owned.queued.try_recv()
+                {
+                    owned.batch.push(reply);
+                }
+                if owned.batch.is_empty() {
+                    break;
+                }
+                wrote = true;
+                if !self.write_batch(owned).await {
+                    // Dropping the socket closes the queue: later senders
+                    // fail, and the replies still queued are discarded.
+                    return;
+                }
+            }
+            self.idle.store(Some(socket));
+            // A reply queued while this call held the socket was left by a
+            // sender that found the slot empty and returned. Its frame holds
+            // queue capacity until it is received, so look once more now
+            // that the socket is back; a sender that queues after this check
+            // finds the socket itself.
+            if self.queue.capacity() == self.queue.max_capacity() {
+                return;
+            }
+            if !wrote {
+                // A sender has reserved its place but not yet stored its
+                // reply. It takes the socket itself when it has; give it
+                // the chance instead of spinning.
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    /// Write and flush the batch as whole frames. Returns `false` after a
+    /// failed write, which it reports and which stops the connection.
+    async fn write_batch(&self, socket: &mut ReplySocket<W>) -> bool {
+        for reply in &mut socket.batch {
+            reply.trace.stage(
+                "socket_write_start",
+                format_args!("{} bytes={}", reply.rpc, reply.framed.len()),
+            );
+        }
+        let result = match write_frames(&mut socket.writer, &socket.batch).await {
+            Ok(()) => socket.writer.flush().await,
+            Err(error) => Err(error),
+        };
+        // Draining the batch releases its in-flight permits: only now, after
+        // the frames have left, may the calls behind them be dispatched.
+        for mut reply in socket.batch.drain(..) {
+            reply.trace.finish(format_args!(
+                "{} outcome={} os_code={:?}",
+                reply.rpc,
+                if result.is_ok() {
+                    "written"
+                } else {
+                    "write_error"
+                },
+                result.as_ref().err().and_then(io::Error::raw_os_error),
+            ));
+        }
+        let Err(error) = result else {
+            return true;
+        };
+        if !is_expected_disconnect(&error) {
+            report_once(
+                &self.hooks,
+                &self.reported,
+                NfsTransportError::from_io(
+                    NfsTransportErrorKind::Write,
+                    Some(self.peer.clone()),
+                    &error,
+                ),
+            );
+        }
+        self.stop.notify_one();
+        false
+    }
+}
+
+/// Write every frame of `batch` completely, in order.
+async fn write_frames<W>(writer: &mut W, batch: &[QueuedReply]) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if let [reply] = batch {
+        return writer.write_all(&reply.framed).await;
+    }
+    let mut slices = [io::IoSlice::new(&[]); REPLY_BATCH];
+    for (slice, reply) in slices.iter_mut().zip(batch) {
+        *slice = io::IoSlice::new(&reply.framed);
+    }
+    let mut remaining = &mut slices[..batch.len()];
+    while !remaining.is_empty() {
+        let written = writer.write_vectored(remaining).await?;
+        if written == 0 {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        io::IoSlice::advance_slices(&mut remaining, written);
+    }
+    Ok(())
 }
 
 /// Wait for the next connection, outliving failed accepts.
@@ -1335,6 +1510,226 @@ mod tests {
         .expect("concurrent NFS write failures return");
         events.wait_for(1).await;
         assert_eq!(events.snapshot().len(), 1);
+    }
+
+    /// A writer that accepts a few bytes at a time, across buffer
+    /// boundaries, and is sometimes not ready: any two frames written
+    /// without exclusion, or a frame resumed at the wrong offset, would show
+    /// in the bytes it collects.
+    struct ChoppyWriter {
+        written: Arc<Mutex<Vec<u8>>>,
+        calls: usize,
+    }
+
+    impl ChoppyWriter {
+        fn accept(&mut self, cx: &mut Context<'_>, buffers: &[&[u8]]) -> Poll<io::Result<usize>> {
+            self.calls += 1;
+            if self.calls.is_multiple_of(5) {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let mut budget = 1 + (self.calls * 37) % 301;
+            let mut total = 0;
+            let mut written = self.written.lock().expect("choppy writer lock");
+            for buffer in buffers {
+                let count = buffer.len().min(budget);
+                written.extend_from_slice(&buffer[..count]);
+                total += count;
+                budget -= count;
+                if budget == 0 {
+                    break;
+                }
+            }
+            Poll::Ready(Ok(total))
+        }
+    }
+
+    impl AsyncWrite for ChoppyWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.get_mut().accept(cx, &[buffer])
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffers: &[io::IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            let buffers = buffers.iter().map(|buffer| &**buffer).collect::<Vec<_>>();
+            self.get_mut().accept(cx, &buffers)
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Many calls hand replies to one connection's writer at once. Every
+    /// frame reaches the socket whole and exactly once, and none is left
+    /// queued when the last call returns: a call that finds another one
+    /// writing leaves its reply behind, and the writing call must pick it
+    /// up however the two interleave.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_replies_are_written_whole_and_none_is_stranded() {
+        const TASKS: u32 = 8;
+        const PER_TASK: u32 = 1_500;
+        const IN_FLIGHT: usize = 24;
+        for _ in 0..4 {
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let (events, hooks) = FaultEvents::new();
+            let replies = Arc::new(ReplyWriter::new(
+                ChoppyWriter {
+                    written: Arc::clone(&written),
+                    calls: 0,
+                },
+                IN_FLIGHT,
+                hooks,
+                Arc::new(AtomicBool::new(false)),
+                "127.0.0.1".to_owned(),
+                Arc::new(Notify::new()),
+            ));
+            let permits = Arc::new(Semaphore::new(IN_FLIGHT));
+            let tasks = (0..TASKS)
+                .map(|task| {
+                    let replies = Arc::clone(&replies);
+                    let permits = Arc::clone(&permits);
+                    tokio::spawn(async move {
+                        for sequence in 0..PER_TASK {
+                            let id = task * PER_TASK + sequence;
+                            // The body repeats the id, so a frame cut by
+                            // another is not mistaken for a whole one.
+                            let words = 1 + (id as usize * 7) % 190;
+                            let body = id.to_be_bytes().repeat(words);
+                            let permit = permits.clone().acquire_owned().await.unwrap();
+                            replies
+                                .send(QueuedReply {
+                                    framed: frame_record(&body).unwrap(),
+                                    trace: RequestTrace::new("nfs", "rpc"),
+                                    rpc: String::new(),
+                                    _permit: permit,
+                                })
+                                .await;
+                            if sequence % 64 == 0 {
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            for task in tasks {
+                timeout(Duration::from_secs(30), task)
+                    .await
+                    .expect("reply senders finish")
+                    .unwrap();
+            }
+            // No call is running any more, so nothing may still be queued
+            // and every in-flight slot must be free again.
+            assert_eq!(permits.available_permits(), IN_FLIGHT);
+            assert!(replies.idle.load().is_some(), "the socket was put back");
+            let written = written.lock().unwrap();
+            let mut seen = vec![false; (TASKS * PER_TASK) as usize];
+            for record in RecordAssembler::new(DEFAULT_RECORD_LIMIT)
+                .push(&written)
+                .expect("written bytes are whole record frames")
+            {
+                let id = u32::from_be_bytes(record[..4].try_into().unwrap());
+                assert_eq!(record.len(), 4 * (1 + (id as usize * 7) % 190));
+                assert!(record.chunks(4).all(|word| word == id.to_be_bytes()));
+                assert!(
+                    !std::mem::replace(&mut seen[id as usize], true),
+                    "duplicate"
+                );
+            }
+            assert!(seen.iter().all(|seen| *seen), "a reply was never written");
+            assert!(events.snapshot().is_empty());
+        }
+    }
+
+    /// The same through the connection loop: pipelined calls with replies
+    /// of two sizes, answered concurrently over a writer that takes a few
+    /// bytes at a time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pipelined_calls_get_whole_replies_through_a_choppy_socket() {
+        const CALLS: u32 = 600;
+        let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+        let mut input = Vec::new();
+        for xid in 1..=CALLS {
+            if xid % 3 == 0 {
+                input.extend(
+                    frame_record(&encode_call(
+                        xid,
+                        MOUNT_PROGRAM,
+                        MOUNT_V3,
+                        crate::constants::MOUNTPROC3_MNT,
+                        None,
+                        None,
+                        &crate::xdr::encode_xdr(|writer| writer.string("/")),
+                    ))
+                    .unwrap(),
+                );
+            } else {
+                input.extend(null_call(xid));
+            }
+        }
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let control = Arc::new(NfsConnectionControl::new());
+        let (events, hooks) = FaultEvents::new();
+        let task = tokio::spawn(serve_connection(NfsConnectionRuntime {
+            reader: FaultStream::new(input, None, None, None),
+            writer: ChoppyWriter {
+                written: Arc::clone(&written),
+                calls: 0,
+            },
+            peer: SocketAddr::from(([127, 0, 0, 1], 12345)),
+            session: server.session.clone(),
+            v4_session: server.v4_session.clone(),
+            record_limit: DEFAULT_RECORD_LIMIT,
+            max_in_flight: 16,
+            hooks,
+            reported: Arc::new(AtomicBool::new(false)),
+            control: Arc::clone(&control),
+        }));
+        let replies = timeout(Duration::from_secs(30), async {
+            loop {
+                let records = RecordAssembler::new(DEFAULT_RECORD_LIMIT)
+                    .push(&written.lock().unwrap())
+                    .expect("replies are whole record frames");
+                if records.len() == CALLS as usize {
+                    return records;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("every pipelined call is answered");
+        let mut sizes = std::collections::HashMap::new();
+        let mut xids = std::collections::HashSet::new();
+        for record in &replies {
+            let (reply, _) = decode_reply(record).expect("decode reply");
+            assert_eq!(reply.accept_stat, Some(0));
+            assert!(xids.insert(reply.xid), "duplicate reply");
+            let size = sizes.entry(reply.xid % 3 == 0).or_insert(record.len());
+            assert_eq!(*size, record.len(), "replies of one kind have one size");
+        }
+        assert_eq!(xids.len(), CALLS as usize);
+        assert_ne!(sizes[&true], sizes[&false]);
+        control.stop();
+        timeout(Duration::from_secs(5), task)
+            .await
+            .expect("connection stops")
+            .unwrap();
+        assert!(events.snapshot().is_empty());
     }
 
     #[tokio::test]

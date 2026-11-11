@@ -2020,7 +2020,9 @@ dependencies = [
 name = "mount-rs-kv"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
+ "im",
  "libc",
  "mount-rs-core",
  "serde_json",
@@ -2052,6 +2054,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bytes",
+ "crossbeam-queue",
  "mount-rs-9p",
  "mount-rs-auto",
  "mount-rs-chunked",
