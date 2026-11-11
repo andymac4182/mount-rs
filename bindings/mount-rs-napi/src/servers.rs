@@ -3713,30 +3713,42 @@ impl P9Server {
         let serve_task: P9ServeFuture = Box::pin(async move {
             let _ = task.await;
         });
-        if self.closed.load(Ordering::Acquire) {
+        // `close` sets `closed` and takes the server under this same lock,
+        // so either it finds the server stored here or this sees `closed`.
+        // Checking outside the lock lets a close slip between the check and
+        // the store and leave a listener nothing will ever close.
+        let closed_while_binding = {
+            let mut state = self.state.lock().expect("9P state lock");
+            if self.closed.load(Ordering::Acquire) {
+                Some((server, serve_task))
+            } else {
+                state.server = Some(server);
+                state.serve_task = Some(serve_task);
+                None
+            }
+        };
+        self.binding.store(false, Ordering::Release);
+        if let Some((server, serve_task)) = closed_while_binding {
             server
                 .close()
                 .await
                 .map_err(|error| transport_error("9P close", error))?;
             serve_task.await;
-            self.binding.store(false, Ordering::Release);
             return Err(transport_error(
                 "9P listen",
                 "server was closed while binding",
             ));
         }
-        {
-            let mut state = self.state.lock().expect("9P state lock");
-            state.server = Some(server);
-            state.serve_task = Some(serve_task);
-        }
-        self.binding.store(false, Ordering::Release);
         Ok(())
     }
 
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
-        self.closed.store(true, Ordering::Release);
+        let (server, task) = {
+            let mut state = self.state.lock().expect("9P state lock");
+            self.closed.store(true, Ordering::Release);
+            (state.server.take(), state.serve_task.take())
+        };
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
@@ -3746,15 +3758,14 @@ impl P9Server {
         if let Some(callback) = &self.assertion {
             callback.release();
         }
-        let (server, task) = {
+        if let Some(server) = server
+            && let Err(error) = server.close().await
+        {
+            // Keep the server so a later close can try again.
             let mut state = self.state.lock().expect("9P state lock");
-            (state.server.take(), state.serve_task.take())
-        };
-        if let Some(server) = server {
-            server
-                .close()
-                .await
-                .map_err(|error| transport_error("9P close", error))?;
+            state.server = Some(server);
+            state.serve_task = task;
+            return Err(transport_error("9P close", error));
         }
         if let Some(task) = task {
             task.await;
@@ -4432,19 +4443,29 @@ impl S3Server {
         .map_err(|error| transport_error("S3 listen", error));
         match result {
             Ok(server) => {
-                if self.closed.load(Ordering::Acquire) {
+                // `close` sets `closed` and takes the server under this same
+                // lock, so a close cannot slip between the check and the
+                // store and leave a listener nothing will ever close.
+                let closed_while_binding = {
+                    let mut running = self.running.lock().expect("S3 server lock");
+                    if self.closed.load(Ordering::Acquire) {
+                        Some(server)
+                    } else {
+                        *running = Some(server);
+                        None
+                    }
+                };
+                self.binding.store(false, Ordering::Release);
+                if let Some(server) = closed_while_binding {
                     server
                         .close()
                         .await
                         .map_err(|error| transport_error("S3 close", error))?;
-                    self.binding.store(false, Ordering::Release);
                     return Err(transport_error(
                         "S3 listen",
                         "server was closed while binding",
                     ));
                 }
-                *self.running.lock().expect("S3 server lock") = Some(server);
-                self.binding.store(false, Ordering::Release);
                 Ok(())
             }
             Err(error) => {
@@ -4456,17 +4477,21 @@ impl S3Server {
 
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
-        self.closed.store(true, Ordering::Release);
+        let running = {
+            let mut running = self.running.lock().expect("S3 server lock");
+            self.closed.store(true, Ordering::Release);
+            running.take()
+        };
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
         self.callbacks.release();
-        let running = self.running.lock().expect("S3 server lock").take();
         if let Some(server) = running {
-            server
-                .close()
-                .await
-                .map_err(|error| transport_error("S3 close", error))?;
+            if let Err(error) = server.close().await {
+                // Keep the server so a later close can try again.
+                *self.running.lock().expect("S3 server lock") = Some(server);
+                return Err(transport_error("S3 close", error));
+            }
         } else {
             self.session
                 .close()

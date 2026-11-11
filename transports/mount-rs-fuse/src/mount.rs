@@ -31,7 +31,7 @@ use mount_rs_core::{S_IFDIR, S_IFMT};
 #[cfg(target_os = "linux")]
 use mount_rs_core::{turn_cell::TurnCell, turn_gate::TurnLock};
 #[cfg(target_os = "linux")]
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use crate::device::DEFAULT_MAX_FRAME;
 #[cfg(target_os = "linux")]
@@ -257,129 +257,35 @@ impl FuseMount {
 
     /// Whether the session task is still serving requests.
     pub fn is_active(&self) -> bool {
-        self.state.active.load(Ordering::Acquire)
+        self.state.is_active()
     }
 
     /// Wait until the device loop has destroyed its session and dropped the
     /// device descriptor.
     pub async fn wait_closed(&self) {
-        loop {
-            let notified = self.state.closed_notify.notified();
-            tokio::pin!(notified);
-            // Register before checking the state. `notify_waiters()` does not
-            // retain a permit for a future created after the notification.
-            notified.as_mut().enable();
-            if self.state.closed.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
+        self.state
+            .wait_for(|lifecycle| lifecycle.session == SessionPhase::Closed)
+            .await;
     }
 
     /// Unmount this mount exactly once. Concurrent callers share the same
     /// operation; a failed graceful unmount leaves the mount live and permits
     /// a later retry.
     pub async fn unmount(&self) -> Result<(), MountError> {
-        // The result of a failed attempt is intentionally retained until the
-        // caller that joined that attempt observes it. Do not start another
-        // attempt after the notification wakes this caller: doing so resets
-        // the result to `None` and can leave every waiter spinning forever.
-        // A later invocation starts a fresh attempt because it gets its own
-        // `started_or_joined` flag and `start_unmount()` clears the old result
-        // when the previous operation has made the mount retryable.
-        let mut started_or_joined = false;
-        loop {
-            let notified = self.state.unmount_notify.notified();
-            tokio::pin!(notified);
-            // Register before checking the result. `notify_waiters()` does not
-            // retain a permit for a future created after the notification.
-            notified.as_mut().enable();
-            if !started_or_joined {
-                self.start_unmount();
-                started_or_joined = true;
-            }
-            if let Some(result) = self
-                .state
-                .unmount_result
-                .lock()
-                .expect("mount result lock poisoned")
-                .clone()
-            {
-                return result.map_err(MountError::Lifecycle);
-            }
-            notified.await;
-        }
-    }
-
-    fn start_unmount(&self) {
-        if !self.state.mounted.load(Ordering::Acquire) {
-            let mut result = self
-                .state
-                .unmount_result
-                .lock()
-                .expect("mount result lock poisoned");
-            if result.is_none() {
-                *result = Some(Ok(()));
-                self.state.unmount_notify.notify_waiters();
-            }
-            return;
-        }
-        if self.state.unmount_started.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        // Match the mount lifecycle contract used by the other native
-        // transports: active becomes false as soon as teardown owns the
-        // operation, not only after the kernel helper returns or the session
-        // task happens to observe the stop request.
-        self.state.active.store(false, Ordering::Release);
-        *self
+        // Join the running attempt or start one, then wait for a published
+        // result. A result left by an earlier attempt is replaced by
+        // `Running` when this call starts a new one, so the value read here
+        // is never older than this call.
+        MountState::start_unmount(&self.state);
+        let lifecycle = self
             .state
-            .unmount_result
-            .lock()
-            .expect("mount result lock poisoned") = None;
-        let state = Arc::clone(&self.state);
-        let spawn = tokio::runtime::Handle::try_current();
-        if let Ok(handle) = spawn {
-            handle.spawn(async move {
-                let operation_state = Arc::clone(&state);
-                let result = state
-                    .perform_unmount()
-                    .await
-                    .map_err(|error| error.to_string());
-                if result.is_err() && operation_state.mounted.load(Ordering::Acquire) {
-                    operation_state
-                        .unmount_started
-                        .store(false, Ordering::Release);
-                    // A graceful helper failure leaves the mount live and
-                    // retryable. Publish that fact so a later attempt does
-                    // not leave an otherwise healthy mount permanently
-                    // reported as inactive.
-                    // A forced teardown has already closed the session task,
-                    // so a still-present kernel mount must remain inactive
-                    // until a later unmount retry removes it.
-                    if !operation_state.closed.load(Ordering::Acquire) {
-                        operation_state.active.store(true, Ordering::Release);
-                    }
-                }
-                *operation_state
-                    .unmount_result
-                    .lock()
-                    .expect("mount result lock poisoned") = Some(result);
-                operation_state.unmount_notify.notify_waiters();
-            });
-        } else {
-            // A destructor can run after a runtime has gone away. We cannot
-            // issue a blocking unmount there, but closing the session task's fd
-            // still aborts the kernel connection and avoids an fd leak.
-            state.request_stop();
-            state.abort_task();
-            *state
-                .unmount_result
-                .lock()
-                .expect("mount result lock poisoned") = Some(Err(
-                "cannot unmount after the Tokio runtime has stopped".to_owned(),
-            ));
-            state.unmount_notify.notify_waiters();
+            .wait_for(|lifecycle| matches!(lifecycle.unmount, UnmountPhase::Finished(_)))
+            .await;
+        match lifecycle.unmount {
+            UnmountPhase::Finished(result) => result.map_err(MountError::Lifecycle),
+            UnmountPhase::Idle | UnmountPhase::Running => {
+                unreachable!("wait_for returned an unfinished unmount")
+            }
         }
     }
 }
@@ -402,20 +308,7 @@ impl FuseMount {
 #[cfg(target_os = "linux")]
 impl Drop for FuseMount {
     fn drop(&mut self) {
-        if self.state.mounted.load(Ordering::Acquire)
-            && !self.state.unmount_started.swap(true, Ordering::AcqRel)
-        {
-            self.state.active.store(false, Ordering::Release);
-            let state = Arc::clone(&self.state);
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    let _ = state.perform_unmount().await;
-                });
-            } else {
-                state.request_stop();
-                state.abort_task();
-            }
-        }
+        MountState::start_unmount(&self.state);
     }
 }
 
@@ -558,24 +451,125 @@ async fn mount_linux(
     }
 }
 
+/// Whether the session task is serving the device.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionPhase {
+    /// The task is running but `FUSE_INIT` has not been answered.
+    Initialising,
+    Serving,
+    /// The task has finished, or was aborted, and the device is closed.
+    Closed,
+}
+
+/// The unmount operation. Only [`MountState::start_unmount`] moves this to
+/// `Running`, and only the operation it started moves it to `Finished`, so
+/// two unmount operations never overlap.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UnmountPhase {
+    Idle,
+    Running,
+    Finished(Result<(), String>),
+}
+
+/// Everything a lifecycle observer can ask about a mount, published as one
+/// value so no observer sees a mixture of two transitions.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+struct Lifecycle {
+    session: SessionPhase,
+    unmount: UnmountPhase,
+    /// Whether the kernel mount is believed to be present.
+    mounted: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Lifecycle {
+    /// A mount is active while its session is alive and no teardown owns it.
+    /// A failed graceful unmount leaves the session alive, so the mount is
+    /// active again once that attempt finishes.
+    fn active(&self) -> bool {
+        self.session != SessionPhase::Closed && self.unmount != UnmountPhase::Running
+    }
+
+    /// Claim the unmount operation. Returns whether the caller now owns it.
+    fn begin_unmount(&mut self) -> bool {
+        match (&self.unmount, self.mounted) {
+            (UnmountPhase::Running, _) => false,
+            (UnmountPhase::Idle, false) => {
+                self.unmount = UnmountPhase::Finished(Ok(()));
+                false
+            }
+            (UnmountPhase::Finished(_), false) => false,
+            (UnmountPhase::Idle | UnmountPhase::Finished(_), true) => {
+                self.unmount = UnmountPhase::Running;
+                true
+            }
+        }
+    }
+
+    /// Publish the result of the running unmount. `torn_down` carries whether
+    /// the kernel mount is still present when the attempt stopped the
+    /// session; `None` means the attempt failed before touching either.
+    fn finish_unmount(&mut self, result: Result<(), String>, torn_down: Option<bool>) {
+        if let Some(mounted) = torn_down {
+            self.session = SessionPhase::Closed;
+            self.mounted = mounted;
+        }
+        self.unmount = UnmountPhase::Finished(result);
+    }
+}
+
+/// A one-way stop signal. The flag is the state; the notifier only wakes
+/// waiters. No permit is ever stored, so one waiter cannot consume a wakeup
+/// meant for another.
+#[cfg(target_os = "linux")]
+struct StopLatch {
+    set: AtomicBool,
+    notify: Notify,
+}
+
+#[cfg(target_os = "linux")]
+impl StopLatch {
+    fn new() -> Self {
+        Self {
+            set: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    fn is_set(&self) -> bool {
+        self.set.load(Ordering::Acquire)
+    }
+
+    fn trigger(&self) {
+        self.set.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Resolve once the latch is set, including when it was set before this
+    /// call. The waiter is created before the flag is read: Tokio delivers
+    /// `notify_waiters()` to every `Notified` that already exists, polled or
+    /// not, so a trigger between the read and the await is not lost.
+    async fn wait(&self) {
+        let notified = self.notify.notified();
+        if self.is_set() {
+            return;
+        }
+        notified.await;
+    }
+}
+
 #[cfg(target_os = "linux")]
 struct MountState {
     mode: MountMode,
     mountpoint: PathBuf,
     options: MountOptions,
     helper: Option<PathBuf>,
-    active: AtomicBool,
-    mounted: AtomicBool,
-    closed: AtomicBool,
-    ready: AtomicBool,
-    stop: AtomicBool,
-    unmount_started: AtomicBool,
+    lifecycle: watch::Sender<Lifecycle>,
+    stop: StopLatch,
     task: TurnCell<Option<tokio::task::JoinHandle<()>>>,
-    ready_notify: Notify,
-    closed_notify: Notify,
-    stop_notify: Notify,
-    unmount_notify: Notify,
-    unmount_result: TurnCell<Option<Result<(), String>>>,
     transport_error: TurnCell<Option<String>>,
     transport_error_reported: AtomicBool,
     hooks: FuseMountHooks,
@@ -595,22 +589,48 @@ impl MountState {
             mountpoint,
             options,
             helper,
-            active: AtomicBool::new(true),
-            mounted: AtomicBool::new(true),
-            closed: AtomicBool::new(false),
-            ready: AtomicBool::new(false),
-            stop: AtomicBool::new(false),
-            unmount_started: AtomicBool::new(false),
+            lifecycle: watch::Sender::new(Lifecycle {
+                session: SessionPhase::Initialising,
+                unmount: UnmountPhase::Idle,
+                mounted: true,
+            }),
+            stop: StopLatch::new(),
             task: TurnCell::new(None),
-            ready_notify: Notify::new(),
-            closed_notify: Notify::new(),
-            stop_notify: Notify::new(),
-            unmount_notify: Notify::new(),
-            unmount_result: TurnCell::new(None),
             transport_error: TurnCell::new(None),
             transport_error_reported: AtomicBool::new(false),
             hooks,
         }
+    }
+
+    fn is_active(&self) -> bool {
+        self.lifecycle.borrow().active()
+    }
+
+    #[cfg(test)]
+    fn is_closed(&self) -> bool {
+        self.lifecycle.borrow().session == SessionPhase::Closed
+    }
+
+    #[cfg(test)]
+    fn is_mounted(&self) -> bool {
+        self.lifecycle.borrow().mounted
+    }
+
+    /// Tell a synthetic test mount that there is no kernel mount to remove.
+    #[cfg(test)]
+    fn forget_mount(&self) {
+        self.lifecycle
+            .send_modify(|lifecycle| lifecycle.mounted = false);
+    }
+
+    /// Wait until the lifecycle satisfies `condition` and return that value.
+    async fn wait_for(&self, condition: impl FnMut(&Lifecycle) -> bool) -> Lifecycle {
+        let mut lifecycle = self.lifecycle.subscribe();
+        lifecycle
+            .wait_for(condition)
+            .await
+            .expect("the mount state owns the lifecycle sender")
+            .clone()
     }
 
     fn record_transport_error(&self, error: FuseTransportError) {
@@ -631,14 +651,7 @@ impl MountState {
     }
 
     fn request_stop(&self) {
-        self.stop.store(true, Ordering::Release);
-        // Wake every currently waiting lifecycle/read future, and retain one
-        // permit for a request loop that is between select! polls.  The
-        // atomic flag is the source of truth; the retained permit closes the
-        // Notify race where notify_waiters() can otherwise be lost before the
-        // loop registers its next waiter.
-        self.stop_notify.notify_waiters();
-        self.stop_notify.notify_one();
+        self.stop.trigger();
     }
 
     fn abort_task(&self) {
@@ -652,37 +665,72 @@ impl MountState {
         self.mark_closed();
     }
 
+    fn mark_serving(&self) {
+        self.lifecycle.send_if_modified(|lifecycle| {
+            let initialising = lifecycle.session == SessionPhase::Initialising;
+            if initialising {
+                lifecycle.session = SessionPhase::Serving;
+            }
+            initialising
+        });
+    }
+
     fn mark_closed(&self) {
-        self.active.store(false, Ordering::Release);
-        self.closed.store(true, Ordering::Release);
-        self.closed_notify.notify_waiters();
-        self.ready_notify.notify_waiters();
+        self.lifecycle.send_if_modified(|lifecycle| {
+            let open = lifecycle.session != SessionPhase::Closed;
+            lifecycle.session = SessionPhase::Closed;
+            open
+        });
     }
 
     async fn wait_ready(&self) -> Result<(), String> {
-        loop {
-            let notified = self.ready_notify.notified();
-            tokio::pin!(notified);
-            // The session can notify while the state is being checked. Enable
-            // the waiter first so that wakeup cannot be lost in that gap.
-            notified.as_mut().enable();
-            if self.ready.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            if self.closed.load(Ordering::Acquire) {
-                return Err(self
-                    .transport_error
-                    .lock()
-                    .expect("transport error lock poisoned")
-                    .clone()
-                    .unwrap_or_else(|| "FUSE session closed before FUSE_INIT".to_owned()));
-            }
-            notified.await;
+        let lifecycle = self
+            .wait_for(|lifecycle| lifecycle.session != SessionPhase::Initialising)
+            .await;
+        if lifecycle.session == SessionPhase::Serving {
+            return Ok(());
+        }
+        Err(self
+            .transport_error
+            .lock()
+            .expect("transport error lock poisoned")
+            .clone()
+            .unwrap_or_else(|| "FUSE session closed before FUSE_INIT".to_owned()))
+    }
+
+    /// Start the unmount operation unless one is running or there is nothing
+    /// mounted. The transition and the claim are one step, so concurrent
+    /// callers, a retry and `Drop` cannot start a second operation.
+    fn start_unmount(state: &Arc<Self>) {
+        let mut claimed = false;
+        state.lifecycle.send_if_modified(|lifecycle| {
+            let before = lifecycle.unmount.clone();
+            claimed = lifecycle.begin_unmount();
+            lifecycle.unmount != before
+        });
+        if !claimed {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(Arc::clone(state).perform_unmount());
+        } else {
+            // A destructor can run after a runtime has gone away. We cannot
+            // issue a blocking unmount there, but closing the session task's fd
+            // still aborts the kernel connection and avoids an fd leak.
+            state.request_stop();
+            state.abort_task();
+            state.lifecycle.send_modify(|lifecycle| {
+                lifecycle.finish_unmount(
+                    Err("cannot unmount after the Tokio runtime has stopped".to_owned()),
+                    None,
+                );
+            });
         }
     }
 
-    #[cfg(target_os = "linux")]
-    async fn perform_unmount(self: Arc<Self>) -> Result<(), MountError> {
+    /// Run the unmount this task claimed in `start_unmount` and publish its
+    /// result.
+    async fn perform_unmount(self: Arc<Self>) {
         let timeout = self.options.unmount_timeout;
         let mut forced_deadline = None;
         let mut forced_mount_present = None;
@@ -707,7 +755,7 @@ impl MountState {
                 graceful.await
             }
         };
-        let result = match graceful_attempt {
+        let result: Result<(), MountError> = match graceful_attempt {
             UnmountAttempt::Done => Ok(()),
             UnmountAttempt::TimedOut => {
                 // A graceful native unmount can wait for an in-flight kernel
@@ -809,8 +857,12 @@ impl MountState {
             }
             UnmountAttempt::Failed(_error) if !mounted_at(&self.mountpoint) => Ok(()),
             UnmountAttempt::Failed(error) => {
-                self.unmount_started.store(false, Ordering::Release);
-                return Err(error);
+                // The helper failed and the mount is still there: the session
+                // keeps serving and a later call may retry.
+                self.lifecycle.send_modify(|lifecycle| {
+                    lifecycle.finish_unmount(Err(error.to_string()), None);
+                });
+                return;
             }
         };
 
@@ -819,19 +871,16 @@ impl MountState {
         if let Some(task) = task {
             drain_session_task(&self, task, forced_deadline).await;
         }
-        // A normal task exit publishes this state from `run_session`; the
+        // A normal task exit closes the session from `run_session`; the
         // timeout/cancellation branches above do not necessarily get there.
-        // Make the terminal state idempotent so wait_closed() is guaranteed
-        // to complete after every bounded teardown path.
-        self.mark_closed();
-        self.mounted
-            .store(forced_mount_present.unwrap_or(false), Ordering::Release);
-        result
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    async fn perform_unmount(self: Arc<Self>) -> Result<(), MountError> {
-        Err(MountError::UnsupportedPlatform)
+        // Publishing the closed session, the mount's presence and the result
+        // together means no observer sees a result for a session that still
+        // looks open.
+        let mounted = forced_mount_present.unwrap_or(false);
+        let result = result.map_err(|error| error.to_string());
+        self.lifecycle.send_modify(|lifecycle| {
+            lifecycle.finish_unmount(result, Some(mounted));
+        });
     }
 }
 
@@ -942,18 +991,18 @@ async fn write_reply_until_stop(
     state: Arc<MountState>,
     reply: Vec<u8>,
 ) -> Result<(), FuseTransportError> {
-    if state.stop.load(Ordering::Acquire) {
+    if state.stop.is_set() {
         return Ok(());
     }
     let _guard = tokio::select! {
-        _ = state.stop_notify.notified() => return Ok(()),
+        _ = state.stop.wait() => return Ok(()),
         guard = writer.lock() => guard,
     };
-    if state.stop.load(Ordering::Acquire) {
+    if state.stop.is_set() {
         return Ok(());
     }
     tokio::select! {
-        _ = state.stop_notify.notified() => Ok(()),
+        _ = state.stop.wait() => Ok(()),
         result = device.write_frame(&reply) => result.map_err(|error| {
             FuseTransportError::from_io(FuseTransportErrorKind::Write, &error)
         }),
@@ -976,14 +1025,11 @@ async fn write_terminal_reply(
 #[cfg(target_os = "linux")]
 async fn prepared_read_reply(prepared: PreparedRead, state: Arc<MountState>) -> Vec<u8> {
     let unique = prepared.unique();
-    let stopped = state.stop_notify.notified();
-    tokio::pin!(stopped);
-    stopped.as_mut().enable();
-    if state.stop.load(Ordering::Acquire) {
+    if state.stop.is_set() {
         crate::error_reply(unique, ErrorCode::Eio).to_vec()
     } else {
         tokio::select! {
-            _ = &mut stopped => crate::error_reply(unique, ErrorCode::Eio).to_vec(),
+            _ = state.stop.wait() => crate::error_reply(unique, ErrorCode::Eio).to_vec(),
             reply = prepared.reply() => reply,
         }
     }
@@ -1072,8 +1118,9 @@ async fn run_session_loop(
     let mut in_flight: std::collections::HashMap<u64, tokio::task::AbortHandle> =
         std::collections::HashMap::new();
     let mut pending_reads = std::collections::VecDeque::<PreparedRead>::new();
+    let mut serving = false;
     loop {
-        if state.stop.load(Ordering::Acquire) {
+        if state.stop.is_set() {
             break;
         }
         while let Some(prepared) = pending_reads.pop_front() {
@@ -1094,11 +1141,11 @@ async fn run_session_loop(
                 &state,
             );
         }
-        if state.stop.load(Ordering::Acquire) {
+        if state.stop.is_set() {
             break;
         }
         let frame = tokio::select! {
-            _ = state.stop_notify.notified() => break,
+            _ = state.stop.wait() => break,
             task = read_tasks.join_next(), if !read_tasks.is_empty() => {
                 match task {
                     Some(Ok((unique, Ok(())))) => {
@@ -1132,7 +1179,7 @@ async fn run_session_loop(
                 break;
             }
         };
-        if state.stop.load(Ordering::Acquire) {
+        if state.stop.is_set() {
             break;
         }
         let destroy = match session.is_destroy_frame(&frame) {
@@ -1226,7 +1273,7 @@ async fn run_session_loop(
             }
         }
         let reply = tokio::select! {
-            _ = state.stop_notify.notified() => break,
+            _ = state.stop.wait() => break,
             result = session.handle(&frame) => match result {
                 Ok(reply) => reply,
                 Err(error) => {
@@ -1250,8 +1297,9 @@ async fn run_session_loop(
             failure = Some(error);
             break;
         }
-        if session.negotiated.is_some() && !state.ready.swap(true, Ordering::AcqRel) {
-            state.ready_notify.notify_waiters();
+        if !serving && session.negotiated.is_some() {
+            serving = true;
+            state.mark_serving();
         }
     }
     pending_reads.clear();
@@ -1512,6 +1560,8 @@ async fn mount_rootless(
     // already happens to be three.
     unsafe {
         command.as_std_mut().pre_exec(move || {
+            // Before the dup2: `comm_fd` may reuse a device's number.
+            crate::device::close_inherited_devices();
             if libc::dup2(child_fd, comm_fd) < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -1735,6 +1785,7 @@ async fn run_child(
     arguments: &[PathBuf],
     timeout: Duration,
 ) -> Result<Option<ChildOutcome>, MountError> {
+    use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use tokio::io::AsyncReadExt;
 
@@ -1745,6 +1796,15 @@ async fn run_child(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Without this the child can hang before it ever becomes the helper: see
+    // `close_inherited_devices`.
+    // SAFETY: the hook only reads atomics and calls close(2).
+    unsafe {
+        command.as_std_mut().pre_exec(|| {
+            crate::device::close_inherited_devices();
+            Ok(())
+        });
+    }
     let mut child = command.spawn().map_err(|error| {
         MountError::Native(format!(
             "could not run {}: {error}",
@@ -2188,7 +2248,7 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].kind, FuseTransportErrorKind::Protocol);
         assert!(observed[0].message.contains("FUSE"));
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(state.is_closed());
         assert_eq!(
             state
                 .transport_error
@@ -2257,8 +2317,8 @@ mod tests {
         let observed = observed.lock().expect("callback observation lock");
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].kind, FuseTransportErrorKind::Write);
-        assert!(!state.active.load(Ordering::Acquire));
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.is_active());
+        assert!(state.is_closed());
     }
 
     #[cfg(target_os = "linux")]
@@ -2322,8 +2382,8 @@ mod tests {
         let observed = observed.lock().expect("callback observation lock");
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].kind, FuseTransportErrorKind::Read);
-        assert!(!state.active.load(Ordering::Acquire));
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.is_active());
+        assert!(state.is_closed());
     }
 
     #[cfg(target_os = "linux")]
@@ -2387,11 +2447,11 @@ mod tests {
             .await
             .expect("aborted session should publish closed state");
         assert!(!mount.is_active());
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(state.is_closed());
 
         // The test did not create a real native mount. Prevent Drop from
         // attempting the production unmount fallback for this synthetic state.
-        state.mounted.store(false, Ordering::Release);
+        state.forget_mount();
     }
 
     #[cfg(target_os = "linux")]
@@ -2417,7 +2477,7 @@ mod tests {
         let first = tokio::spawn(async move { first_mount.wait_closed().await });
         let second = tokio::spawn(async move { second_mount.wait_closed().await });
         tokio::task::yield_now().await;
-        assert!(!state.closed.load(Ordering::Acquire));
+        assert!(!state.is_closed());
 
         state.mark_closed();
         tokio::time::timeout(Duration::from_secs(1), first)
@@ -2429,7 +2489,7 @@ mod tests {
             .expect("second wait_closed observer should wake")
             .expect("second wait_closed task should finish");
 
-        state.mounted.store(false, Ordering::Release);
+        state.forget_mount();
     }
 
     #[cfg(target_os = "linux")]
@@ -2456,7 +2516,83 @@ mod tests {
             mount.mountpoint(),
             Path::new("/tmp/mount-rs-fuse-source-test")
         );
-        state.mounted.store(false, Ordering::Release);
+        state.forget_mount();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stop_reaches_every_waiter_whenever_it_starts_waiting() {
+        let latch = Arc::new(StopLatch::new());
+        // A waiter that exists before the trigger but has not been polled,
+        // which is where the session loop sits between its flag check and
+        // its next `select!`.
+        let unpolled = latch.wait();
+        let polled = tokio::spawn({
+            let latch = Arc::clone(&latch);
+            async move { latch.wait().await }
+        });
+        tokio::task::yield_now().await;
+
+        latch.trigger();
+
+        // Earlier waiters finishing must not use up the signal for later ones.
+        for _ in 0..4 {
+            tokio::time::timeout(Duration::from_secs(1), latch.wait())
+                .await
+                .expect("a waiter that starts after the trigger still sees it");
+        }
+        tokio::time::timeout(Duration::from_secs(1), unpolled)
+            .await
+            .expect("an unpolled waiter sees the trigger");
+        tokio::time::timeout(Duration::from_secs(1), polled)
+            .await
+            .expect("a parked waiter sees the trigger")
+            .expect("waiter task");
+        assert!(latch.is_set());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_one_unmount_runs_and_only_a_live_mount_can_be_retried() {
+        let mut lifecycle = Lifecycle {
+            session: SessionPhase::Serving,
+            unmount: UnmountPhase::Idle,
+            mounted: true,
+        };
+        assert!(lifecycle.active());
+
+        assert!(lifecycle.begin_unmount(), "the first caller owns teardown");
+        assert!(!lifecycle.active());
+        assert!(!lifecycle.begin_unmount(), "a second caller joins it");
+
+        // A helper failure leaves the session serving and the mount active.
+        lifecycle.finish_unmount(Err("helper failed".to_owned()), None);
+        assert!(lifecycle.active());
+        assert!(lifecycle.begin_unmount(), "a live mount can be retried");
+
+        // A forced teardown that leaves the kernel mount behind closes the
+        // session: retryable, but never active again.
+        lifecycle.finish_unmount(Err("timed out".to_owned()), Some(true));
+        assert!(!lifecycle.active());
+        assert!(lifecycle.begin_unmount());
+        assert!(!lifecycle.active());
+
+        lifecycle.finish_unmount(Ok(()), Some(false));
+        assert!(!lifecycle.begin_unmount(), "nothing is left to unmount");
+        assert_eq!(lifecycle.unmount, UnmountPhase::Finished(Ok(())));
+        assert!(!lifecycle.active());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unmounting_a_mount_that_is_already_gone_reports_success() {
+        let mut lifecycle = Lifecycle {
+            session: SessionPhase::Closed,
+            unmount: UnmountPhase::Idle,
+            mounted: false,
+        };
+        assert!(!lifecycle.begin_unmount());
+        assert_eq!(lifecycle.unmount, UnmountPhase::Finished(Ok(())));
     }
 
     #[cfg(target_os = "linux")]
@@ -2477,7 +2613,7 @@ mod tests {
             mountpoint: PathBuf::from("/tmp/mount-rs-fuse-active-transition-test"),
         };
 
-        mount.start_unmount();
+        MountState::start_unmount(&state);
         assert!(
             !mount.is_active(),
             "teardown should publish inactive immediately"
@@ -2486,8 +2622,8 @@ mod tests {
             .await
             .expect("unmount helper should settle")
             .expect("a non-mounted synthetic path should be idempotent");
-        assert!(state.closed.load(Ordering::Acquire));
-        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(state.is_closed());
+        assert!(!state.is_mounted());
     }
 
     #[cfg(target_os = "linux")]
@@ -2512,8 +2648,8 @@ mod tests {
         assert!(first.is_ok(), "first unmount failed: {first:?}");
         assert!(second.is_ok(), "second unmount failed: {second:?}");
         assert!(!mount.is_active());
-        assert!(state.closed.load(Ordering::Acquire));
-        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(state.is_closed());
+        assert!(!state.is_mounted());
     }
 
     #[cfg(target_os = "linux")]
@@ -2542,8 +2678,8 @@ mod tests {
             .unmount()
             .await
             .expect("later unmount should remain idempotent");
-        assert!(state.closed.load(Ordering::Acquire));
-        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(state.is_closed());
+        assert!(!state.is_mounted());
     }
 
     #[cfg(target_os = "linux")]
@@ -2654,8 +2790,8 @@ mod tests {
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].kind, FuseTransportErrorKind::Task);
         assert_eq!(observed[0].message, "FUSE session task panicked");
-        assert!(!state.active.load(Ordering::Acquire));
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.is_active());
+        assert!(state.is_closed());
         assert_eq!(
             state
                 .transport_error
@@ -2848,7 +2984,7 @@ mod tests {
             .expect("blocking close must not keep the session alive")
             .expect("session task should finish after bounded cleanup");
 
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(state.is_closed());
         let observed = observed.lock().expect("callback observation lock");
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].kind, FuseTransportErrorKind::Task);
@@ -2956,7 +3092,7 @@ mod tests {
             .await
             .expect("destroy must remain serviceable at the read limit")
             .expect("saturated session task should finish");
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(state.is_closed());
         assert!(
             observed
                 .lock()
@@ -3028,8 +3164,8 @@ mod tests {
             .expect("stop should cancel the in-flight request")
             .expect("session task should finish after cancellation");
 
-        assert!(!state.active.load(Ordering::Acquire));
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.is_active());
+        assert!(state.is_closed());
         assert!(
             observed
                 .lock()
@@ -3317,7 +3453,7 @@ mod tests {
             .await
             .expect("stop should close the read session")
             .expect("read session task should finish");
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(state.is_closed());
         assert!(
             observed
                 .lock()
@@ -3422,14 +3558,14 @@ mod tests {
             .expect("interrupt reply");
         assert_eq!(i32::from_le_bytes(interrupt[4..8].try_into().unwrap()), -11);
         assert_eq!(u64::from_le_bytes(interrupt[8..16].try_into().unwrap()), 5);
-        assert!(!state.closed.load(Ordering::Acquire));
+        assert!(!state.is_closed());
 
         state.request_stop();
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .expect("stop should close the interrupted session")
             .expect("interrupted session task should finish");
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(state.is_closed());
         assert!(
             observed
                 .lock()
@@ -3539,7 +3675,7 @@ mod tests {
         );
         assert_eq!(driver.max_active.load(Ordering::SeqCst), 1);
         assert_eq!(driver.active.load(Ordering::SeqCst), 0);
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(state.is_closed());
         assert!(
             observed
                 .lock()
@@ -3626,7 +3762,7 @@ mod tests {
             .await
             .expect("stop should cancel a blocked read before the next frame")
             .expect("stopped read session should finish");
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(state.is_closed());
         assert!(
             observed
                 .lock()
@@ -3863,24 +3999,25 @@ mod tests {
         state.set_task(tokio::spawn(std::future::pending::<()>()));
 
         let started = std::time::Instant::now();
-        let result = Arc::clone(&state).perform_unmount().await;
+        Arc::clone(&state).perform_unmount().await;
         let elapsed = started.elapsed();
         let _ = std::fs::remove_file(&helper);
 
-        assert!(matches!(
-            result,
-            Err(MountError::Timeout {
+        assert_eq!(
+            state.lifecycle.borrow().unmount,
+            UnmountPhase::Finished(Err(MountError::Timeout {
                 operation: "unmount",
-                after
-            }) if after == timeout
-        ));
+                after: timeout,
+            }
+            .to_string()))
+        );
         assert!(
             elapsed < timeout + timeout / 2,
             "forced teardown spent an extra full task timeout: {elapsed:?}"
         );
-        assert!(!state.active.load(Ordering::Acquire));
-        assert!(state.closed.load(Ordering::Acquire));
-        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(!state.is_active());
+        assert!(state.is_closed());
+        assert!(!state.is_mounted());
         let observed = observed
             .lock()
             .expect("forced teardown callback observation");
@@ -3933,30 +4070,19 @@ mod tests {
         let task_state = Arc::clone(&state);
         let task_marker = marker.clone();
         state.set_task(tokio::spawn(async move {
-            loop {
-                let notified = task_state.stop_notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if task_state.stop.load(Ordering::Acquire) {
-                    break;
-                }
-                notified.await;
-            }
+            task_state.stop.wait().await;
             std::fs::write(task_marker, b"stopped").expect("write stop marker");
         }));
 
-        let result = Arc::clone(&state).perform_unmount().await;
+        Arc::clone(&state).perform_unmount().await;
 
         assert!(matches!(
-            result,
-            Err(MountError::Timeout {
-                operation: "unmount",
-                ..
-            })
+            state.lifecycle.borrow().unmount,
+            UnmountPhase::Finished(Err(_))
         ));
-        assert!(state.stop.load(Ordering::Acquire));
-        assert!(state.closed.load(Ordering::Acquire));
-        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(state.stop.is_set());
+        assert!(state.is_closed());
+        assert!(!state.is_mounted());
         assert!(
             forced_marker.exists(),
             "lazy detach must start only after the session stop request"
@@ -4013,16 +4139,19 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            state.mounted.load(Ordering::Acquire),
+            state.is_mounted(),
             "forced teardown must not claim a still-present kernel mount is gone"
         );
-        assert!(!state.active.load(Ordering::Acquire));
-        assert!(state.closed.load(Ordering::Acquire));
-        assert!(!state.unmount_started.load(Ordering::Acquire));
+        assert!(!state.is_active());
+        assert!(state.is_closed());
+        assert!(matches!(
+            state.lifecycle.borrow().unmount,
+            UnmountPhase::Finished(Err(_))
+        ));
 
         // This synthetic test deliberately leaves `/` mounted. Prevent the
         // mount object's Drop fallback from starting another helper attempt.
-        state.mounted.store(false, Ordering::Release);
+        state.forget_mount();
     }
 
     #[cfg(target_os = "linux")]
@@ -4081,17 +4210,20 @@ mod tests {
 
         let first = mount.unmount().await;
         assert!(first.is_err(), "first helper attempt should fail");
-        assert!(state.mounted.load(Ordering::Acquire));
-        assert!(state.active.load(Ordering::Acquire));
-        assert!(!state.unmount_started.load(Ordering::Acquire));
+        assert!(state.is_mounted());
+        assert!(state.is_active());
+        assert!(matches!(
+            state.lifecycle.borrow().unmount,
+            UnmountPhase::Finished(Err(_))
+        ));
 
         let second = mount.unmount().await;
         assert!(
             second.is_ok(),
             "retry helper attempt should succeed: {second:?}"
         );
-        assert!(!state.mounted.load(Ordering::Acquire));
-        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.is_mounted());
+        assert!(state.is_closed());
 
         let _ = std::fs::remove_file(&helper);
         let _ = std::fs::remove_file(helper.with_extension("marker"));

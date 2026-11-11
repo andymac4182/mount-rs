@@ -1270,6 +1270,56 @@ async fn concurrent_cas_backoff(attempt: usize, owner: &str) {
     async_io::Timer::after(delay).await;
 }
 
+/// The lease the lock-free paths may trust: a fence and the wall-clock
+/// millisecond before which it needs no provider round trip. Either the pair
+/// is trusted or neither value means anything.
+///
+/// One writer at a time publishes or withdraws (the lease gate). Readers take
+/// no lock, so `fence` reads the fence on both sides of the deadline and
+/// rejects the pair if it changed underneath them.
+#[derive(Default)]
+struct LeaseTrust {
+    /// Zero is never a granted fence; it marks "nothing trusted".
+    fence: std::sync::atomic::AtomicU64,
+    /// Expiry minus the renewal margin. Zero means "take the serialized
+    /// path".
+    until_ms: std::sync::atomic::AtomicU64,
+}
+
+impl LeaseTrust {
+    fn publish(&self, fence: u64, until_ms: u64) {
+        // Withdraw the old deadline before the fence changes, so a deadline
+        // is only ever stored beside the fence it was published for.
+        if self.fence.load(Ordering::Acquire) != fence {
+            self.until_ms.store(0, Ordering::Release);
+            self.fence.store(fence, Ordering::Release);
+        }
+        self.until_ms.store(until_ms, Ordering::Release);
+    }
+
+    fn withdraw(&self) {
+        self.until_ms.store(0, Ordering::Release);
+        self.fence.store(0, Ordering::Release);
+    }
+
+    fn is_trusted(&self, now_ms: u64) -> bool {
+        self.until_ms.load(Ordering::Acquire) > now_ms
+    }
+
+    /// The trusted fence at `now_ms`, or `None` when the caller must take the
+    /// serialized path.
+    fn fence(&self, now_ms: u64) -> Option<u64> {
+        let fence = self.fence.load(Ordering::Acquire);
+        if fence == 0 || !self.is_trusted(now_ms) {
+            return None;
+        }
+        // A reader that stalled after the first load may be looking at the
+        // deadline of a later lease. The fence only moves forward, so reading
+        // the same value again means it did not change in between.
+        (self.fence.load(Ordering::Acquire) == fence).then_some(fence)
+    }
+}
+
 struct ChunkedInner<M, B>
 where
     M: MetadataStore,
@@ -1290,12 +1340,9 @@ where
     lease: arc_swap::ArcSwapOption<WriterLease>,
     lease_gate: AsyncGate,
     lease_renewed: AtomicBool,
-    /// Wall-clock millisecond before which the cached exclusive lease needs
-    /// no provider round trip (expiry minus the renewal margin). Zero means
-    /// "take the serialized path". Written only while `lease` is updated.
-    lease_cached_until_ms: std::sync::atomic::AtomicU64,
-    /// Fence of the lease `lease_cached_until_ms` vouches for; zero if none.
-    lease_fence: std::sync::atomic::AtomicU64,
+    /// What the lock-free paths may trust about `lease`. Written only while
+    /// `lease` is updated.
+    lease_trust: LeaseTrust,
     preparing_mutations: Arc<AtomicUsize>,
     mutations: MutationQueue,
     /// Optional idle-owner heartbeat; aborted under `lease_gate` on shutdown.
@@ -1460,8 +1507,7 @@ where
                 lease: arc_swap::ArcSwapOption::empty(),
                 lease_gate: AsyncGate::new(),
                 lease_renewed: AtomicBool::new(false),
-                lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
-                lease_fence: std::sync::atomic::AtomicU64::new(0),
+                lease_trust: LeaseTrust::default(),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: MutationQueue::new(),
                 lease_worker: arc_swap::ArcSwapOption::empty(),
@@ -1642,6 +1688,12 @@ where
         let _gate = self.inner.gate.lock().await;
         drop(gate_profile);
         let Some(grant) = self.local_grant()? else {
+            // Draining only means something while a grant is held. Clearing
+            // it here keeps "no grant, still draining" from outliving a
+            // checkin that failed after it released the grant.
+            self.inner
+                .delegation_draining
+                .store(false, Ordering::SeqCst);
             return Ok(());
         };
         if !self.inner.delegation_draining.load(Ordering::SeqCst) {
@@ -1711,6 +1763,13 @@ where
         let loaded = self.inner.metadata.load().await?;
         loaded.validate()?;
         let expected_revision = loaded.revision;
+        // Everything that can fail runs before the grant is dropped, so the
+        // grant, the generation and the draining flag change together below.
+        let namespace = Arc::new(
+            loaded
+                .namespace
+                .ok_or_else(|| FsError::backend("delegated namespace missing"))?,
+        );
         self.inner
             .metadata
             .checkin(&DelegatedCheckin {
@@ -1722,18 +1781,16 @@ where
                 expected_revision,
             })
             .await?;
+        // A failure here leaves the grant held and draining, which a retry
+        // resolves: the provider reports the token as retired.
+        let mut state = self.lock_state()?;
         self.inner
             .delegation_generation
             .store(generation, Ordering::SeqCst);
         self.inner.delegation.store(None);
-        let mut state = self.lock_state()?;
         state.orphans.clear();
         state.clear_pending_atimes();
-        state.namespace = Arc::new(
-            loaded
-                .namespace
-                .ok_or_else(|| FsError::backend("delegated namespace missing"))?,
-        );
+        state.namespace = namespace;
         state.revision = expected_revision;
         state.persisted_revision = expected_revision;
         self.inner
@@ -2005,8 +2062,7 @@ where
                         lease: arc_swap::ArcSwapOption::empty(),
                         lease_gate: AsyncGate::new(),
                         lease_renewed: AtomicBool::new(false),
-                        lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
-                        lease_fence: std::sync::atomic::AtomicU64::new(0),
+                        lease_trust: LeaseTrust::default(),
                         preparing_mutations: Arc::new(AtomicUsize::new(0)),
                         mutations: MutationQueue::new(),
                         lease_worker: arc_swap::ArcSwapOption::empty(),
@@ -2091,8 +2147,7 @@ where
                 lease: arc_swap::ArcSwapOption::from_pointee(lease.clone()),
                 lease_gate: AsyncGate::new(),
                 lease_renewed: AtomicBool::new(false),
-                lease_cached_until_ms: std::sync::atomic::AtomicU64::new(0),
-                lease_fence: std::sync::atomic::AtomicU64::new(0),
+                lease_trust: LeaseTrust::default(),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: MutationQueue::new(),
                 lease_worker: arc_swap::ArcSwapOption::empty(),
@@ -2171,13 +2226,13 @@ where
         // Session admission runs this before every request; it must not wait
         // behind a publication holding the lease gate while the cached lease
         // is still valid.
+        let locked_reads = self.inner.state.locked_reads.load(Ordering::Acquire);
+        if !locked_reads && let Some(fence) = self.trusted_fence() {
+            return Ok(fence);
+        }
         self.read_lease(false).await?;
-        if !self.inner.state.locked_reads.load(Ordering::Acquire) {
-            // Zero is never a granted fence; it marks "no cached lease".
-            let fence = self.inner.lease_fence.load(Ordering::Acquire);
-            if fence != 0 && self.lease_is_cached() {
-                return Ok(fence);
-            }
+        if !locked_reads && let Some(fence) = self.trusted_fence() {
+            return Ok(fence);
         }
         {
             let state = self.lock_state()?;
@@ -3108,21 +3163,15 @@ where
     /// answer without `lease_gate`. Callers hold `lease_gate` or are the only
     /// task able to change the lease.
     fn cache_lease_deadline(&self, lease: Option<&WriterLease>) {
-        let margin = self.inner.options.lease_ttl.min(LEASE_RENEWAL_MARGIN);
-        let margin_ms = u64::try_from(margin.as_millis()).unwrap_or(u64::MAX);
-        let deadline = lease.map_or(0, |lease| lease.expires_at_ms.saturating_sub(margin_ms));
-        // Publish the fence before the deadline that vouches for it, and
-        // withdraw the deadline first. Only an expired lease is reacquired
-        // with a new fence, so a reader never pairs a live deadline with a
-        // fence this owner did not hold at that time.
-        if let Some(lease) = lease {
-            self.inner.lease_fence.store(lease.fence, Ordering::Release);
-        }
-        self.inner
-            .lease_cached_until_ms
-            .store(deadline, Ordering::Release);
-        if lease.is_none() {
-            self.inner.lease_fence.store(0, Ordering::Release);
+        match lease {
+            Some(lease) => {
+                let margin = self.inner.options.lease_ttl.min(LEASE_RENEWAL_MARGIN);
+                let margin_ms = u64::try_from(margin.as_millis()).unwrap_or(u64::MAX);
+                self.inner
+                    .lease_trust
+                    .publish(lease.fence, lease.expires_at_ms.saturating_sub(margin_ms));
+            }
+            None => self.inner.lease_trust.withdraw(),
         }
     }
 
@@ -3130,8 +3179,16 @@ where
     /// one atomic load. It must stay equivalent to that predicate: a
     /// serialized renewal in flight does not shorten the lease it replaces.
     fn lease_is_cached(&self) -> bool {
-        let now = u64::try_from(now_ms()).unwrap_or(0);
-        self.inner.lease_cached_until_ms.load(Ordering::Acquire) > now
+        self.inner
+            .lease_trust
+            .is_trusted(u64::try_from(now_ms()).unwrap_or(0))
+    }
+
+    /// The fence of the cached lease, if it needs no provider round trip.
+    fn trusted_fence(&self) -> Option<u64> {
+        self.inner
+            .lease_trust
+            .fence(u64::try_from(now_ms()).unwrap_or(0))
     }
 
     /// Exclusive, non-delegated owners publish every namespace change by
@@ -7983,6 +8040,35 @@ fn with_context(error: FsError, syscall: &str, path: Option<&str>) -> FsError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lease_trust_never_pairs_a_fence_with_another_leases_deadline() {
+        let trust = super::LeaseTrust::default();
+        assert_eq!(trust.fence(0), None);
+
+        trust.publish(7, 100);
+        assert_eq!(trust.fence(99), Some(7));
+        assert_eq!(trust.fence(100), None, "the deadline itself is not trusted");
+
+        // A renewal keeps the fence and moves the deadline.
+        trust.publish(7, 200);
+        assert_eq!(trust.fence(150), Some(7));
+
+        // A reader that loaded fence 7 and then stalled past a reacquire sees
+        // the new deadline; the second fence load is what rejects the pair.
+        let stale = trust.fence.load(std::sync::atomic::Ordering::Acquire);
+        trust.publish(8, 400);
+        assert!(trust.is_trusted(300));
+        assert_ne!(
+            trust.fence.load(std::sync::atomic::Ordering::Acquire),
+            stale
+        );
+        assert_eq!(trust.fence(300), Some(8));
+
+        trust.withdraw();
+        assert!(!trust.is_trusted(0));
+        assert_eq!(trust.fence(0), None);
+    }
+
     use super::*;
     use async_trait::async_trait;
     use mount_rs_core::storage::{LoadedMetadata, MetadataStore, NodeData, WriterLease};
