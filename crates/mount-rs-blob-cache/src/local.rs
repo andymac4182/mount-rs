@@ -1,4 +1,5 @@
 use crate::*;
+use arc_swap::ArcSwap;
 use mount_rs_core::park_cell::ParkCell;
 use std::{
     collections::BTreeMap,
@@ -41,8 +42,14 @@ struct State {
     tick: u64,
     generation: u64,
     quarantined: BTreeMap<String, usize>,
-    scopes: BTreeMap<CacheKey, (CacheScope, IntegrityPolicy, usize)>,
 }
+/// A registered scope: its policy and how many registrations hold it.
+#[derive(Clone)]
+struct ScopeEntry {
+    policy: IntegrityPolicy,
+    registrations: usize,
+}
+type Scopes = BTreeMap<CacheKey, ScopeEntry>;
 pub struct PendingReservation {
     used: Arc<AtomicUsize>,
     bytes: usize,
@@ -57,6 +64,9 @@ impl Drop for PendingReservation {
 pub struct LocalCache {
     config: LocalCacheConfig,
     state: ParkCell<State>,
+    /// Read for every inbound peer stream; replaced whole, by
+    /// compare-and-swap, when a drive registers or unregisters.
+    scopes: ArcSwap<Scopes>,
     /// Held across disk I/O by threads that may block, which park for it.
     disk_io: mount_rs_core::turn_gate::TurnLock<()>,
     root: File,
@@ -175,6 +185,7 @@ impl LocalCache {
         Ok(Arc::new(Self {
             config,
             state: ParkCell::new(state),
+            scopes: ArcSwap::from_pointee(Scopes::new()),
             disk_io: mount_rs_core::turn_gate::TurnLock::new(()),
             root,
             _lock: lock,
@@ -240,39 +251,60 @@ impl LocalCache {
         {
             return Err(error());
         }
-        let mut state = self.state.lock().map_err(|_| error())?;
         let key = Self::scope_hash(&scope);
-        if let Some((_, old, count)) = state.scopes.get_mut(&key) {
-            if *old != policy {
-                return Err(error());
+        loop {
+            let current = self.scopes.load();
+            let mut next = Scopes::clone(&current);
+            match next.get_mut(&key) {
+                Some(entry) => {
+                    if entry.policy != policy {
+                        return Err(error());
+                    }
+                    entry.registrations = entry.registrations.checked_add(1).ok_or_else(error)?;
+                }
+                None => {
+                    if next.len() >= self.config.max_entries {
+                        return Err(error());
+                    }
+                    next.insert(
+                        key,
+                        ScopeEntry {
+                            policy,
+                            registrations: 1,
+                        },
+                    );
+                }
             }
-            *count = count.checked_add(1).ok_or_else(error)?;
-            return Ok(());
+            let previous = self.scopes.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return Ok(());
+            }
         }
-        if state.scopes.len() >= self.config.max_entries {
-            return Err(error());
-        }
-        state.scopes.insert(key, (scope, policy, 1));
-        Ok(())
     }
     pub fn unregister_scope(&self, scope: &CacheScope) {
-        if let Ok(mut state) = self.state.lock() {
-            let key = Self::scope_hash(scope);
-            if let Some((_, _, count)) = state.scopes.get_mut(&key) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    state.scopes.remove(&key);
-                }
+        let key = Self::scope_hash(scope);
+        loop {
+            let current = self.scopes.load();
+            let Some(entry) = current.get(&key) else {
+                return;
+            };
+            let mut next = Scopes::clone(&current);
+            if entry.registrations <= 1 {
+                next.remove(&key);
+            } else if let Some(entry) = next.get_mut(&key) {
+                entry.registrations -= 1;
+            }
+            let previous = self.scopes.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return;
             }
         }
     }
     pub fn scope_policy(&self, scope: &CacheScope) -> Option<IntegrityPolicy> {
-        self.state
-            .lock()
-            .ok()?
-            .scopes
+        self.scopes
+            .load()
             .get(&Self::scope_hash(scope))
-            .map(|v| v.1)
+            .map(|entry| entry.policy)
     }
     pub fn path_for(&self, scope: &CacheScope, id: &BlockId) -> PathBuf {
         self.config.directory.join(hex_key(&Self::key(scope, id)))
@@ -899,6 +931,84 @@ mod tests {
             max_entries: 3,
             max_blob_bytes: 16,
         }
+    }
+    #[test]
+    fn concurrent_scope_registrations_are_all_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LocalCache::new(cfg(dir.path())).unwrap();
+        let shared = scope("shared");
+        // While a thread holds a registration the scope must stay visible: a
+        // lost count would let another thread's unregister remove it.
+        std::thread::scope(|threads| {
+            for _ in 0..8 {
+                threads.spawn(|| {
+                    for _ in 0..2_000 {
+                        cache
+                            .register_scope(shared.clone(), IntegrityPolicy::Opaque)
+                            .unwrap();
+                        assert_eq!(cache.scope_policy(&shared), Some(IntegrityPolicy::Opaque));
+                        assert!(
+                            cache
+                                .register_scope(shared.clone(), IntegrityPolicy::Sha256Prefixed)
+                                .is_err()
+                        );
+                        cache.unregister_scope(&shared);
+                    }
+                });
+            }
+        });
+        assert_eq!(cache.scope_policy(&shared), None);
+        assert!(cache.scopes.load().is_empty());
+        // Registrations taken together are each counted, and it takes that
+        // many releases, however they interleave, to remove the scope.
+        std::thread::scope(|threads| {
+            for _ in 0..8 {
+                threads.spawn(|| {
+                    for _ in 0..500 {
+                        cache
+                            .register_scope(shared.clone(), IntegrityPolicy::Opaque)
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            cache.scopes.load()[&LocalCache::scope_hash(&shared)].registrations,
+            4_000
+        );
+        std::thread::scope(|threads| {
+            for thread in 0..8 {
+                let (cache, shared) = (&cache, &shared);
+                threads.spawn(move || {
+                    for n in 0..500 {
+                        if (thread, n) != (0, 0) {
+                            cache.unregister_scope(shared);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(cache.scope_policy(&shared), Some(IntegrityPolicy::Opaque));
+        cache.unregister_scope(&shared);
+        assert_eq!(cache.scope_policy(&shared), None);
+        cache.unregister_scope(&shared);
+        // The bound on distinct scopes holds when they arrive together.
+        let admitted = AtomicUsize::new(0);
+        std::thread::scope(|threads| {
+            for n in 0..8 {
+                let (cache, admitted) = (&cache, &admitted);
+                threads.spawn(move || {
+                    if cache
+                        .register_scope(scope(&format!("drive-{n}")), IntegrityPolicy::Opaque)
+                        .is_ok()
+                    {
+                        admitted.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        assert_eq!(admitted.load(Ordering::Relaxed), 3);
+        assert_eq!(cache.scopes.load().len(), 3);
     }
     #[test]
     fn ram_hit_does_not_wait_for_a_blocked_disk_open() {

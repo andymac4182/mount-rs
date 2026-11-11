@@ -12,6 +12,16 @@ struct MemoryStore {
     bounded_limits: Arc<Mutex<Vec<usize>>>,
     lexical_listing: Arc<Mutex<bool>>,
     fail_next_set: Arc<Mutex<bool>>,
+    held_set: Arc<HeldSet>,
+}
+
+/// Holds the next `set_item_raw` before it reaches the values, so a later
+/// one can be issued while it is in flight.
+#[derive(Default)]
+struct HeldSet {
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +46,14 @@ impl KeyValueStore for MemoryStore {
     }
 
     async fn set_item_raw(&self, key: &str, value: Vec<u8>) -> Result<(), Self::Error> {
+        if self
+            .held_set
+            .armed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.held_set.entered.notify_one();
+            self.held_set.resume.notified().await;
+        }
         let mut fail_next_set = self.fail_next_set.lock().expect("failure lock");
         if *fail_next_set {
             *fail_next_set = false;
@@ -687,5 +705,114 @@ async fn keeps_special_node_mknod_explicitly_unsupported() {
         assert_eq!(error.syscall.as_deref(), Some("mknod"));
         assert_eq!(error.path, None);
         assert_eq!(store.bytes(name), None);
+    }
+}
+
+#[tokio::test]
+async fn overlapping_flushes_of_one_file_reach_the_store_in_order() {
+    let (store, fs) = setup();
+    fs.write_file("/f", b"....").await.expect("write");
+    let first = fs.open("/f", "r+", 0).await.expect("open first");
+    let second = fs.open("/f", "r+", 0).await.expect("open second");
+    first.write(b"old.", Some(0)).await.expect("older write");
+
+    // The older save is on its way to the store when the newer one starts.
+    store
+        .held_set
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let syncing = first.clone();
+    let older = tokio::spawn(async move { syncing.sync().await });
+    store.held_set.entered.notified().await;
+    second.write(b"new!", Some(0)).await.expect("newer write");
+    let syncing = second.clone();
+    let newer = tokio::spawn(async move { syncing.sync().await });
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    // The newer save has not overtaken the older one.
+    assert_eq!(store.bytes("f"), Some(b"....".to_vec()));
+    assert!(!newer.is_finished());
+    store.held_set.resume.notify_one();
+    older.await.expect("join older").expect("older sync");
+    newer.await.expect("join newer").expect("newer sync");
+    // Both syncs succeeded, so the store holds the latest contents.
+    assert_eq!(store.bytes("f"), Some(b"new!".to_vec()));
+    first.close().await.expect("close first");
+    second.close().await.expect("close second");
+    assert_eq!(store.bytes("f"), Some(b"new!".to_vec()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opens_racing_the_last_close_share_one_buffer_and_lose_no_write() {
+    const TASKS: usize = 4;
+    const ROUNDS: usize = 4000;
+    let (store, fs) = setup();
+    let fs = Arc::new(fs);
+    fs.write_file("/f", &vec![0; TASKS * ROUNDS])
+        .await
+        .expect("write");
+    let mut tasks = Vec::new();
+    for task in 0..TASKS {
+        let fs = Arc::clone(&fs);
+        tasks.push(tokio::spawn(async move {
+            for round in 0..ROUNDS {
+                // Each open may find the buffer another task is closing.
+                let handle = fs.open("/f", "r+", 0).await.expect("open");
+                let offset = (round * TASKS + task) as u64;
+                handle.write(&[1], Some(offset)).await.expect("write");
+                handle.close().await.expect("close");
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("join");
+    }
+    let stored = store.bytes("f").expect("stored");
+    let lost = stored.iter().filter(|byte| **byte == 0).count();
+    assert_eq!(lost, 0, "{lost} acknowledged writes are missing");
+    assert_eq!(read(&fs, "/f").await, stored);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_never_lands_on_a_buffer_the_last_close_dropped() {
+    const TASKS: usize = 3;
+    const ROUNDS: usize = 40;
+    // Many short trials: the tasks collide most when they start together.
+    for trial in 0..800 {
+        let (_store, fs) = setup();
+        let fs = Arc::new(fs);
+        fs.write_file("/f", &[0; TASKS]).await.expect("write");
+        let start = Arc::new(tokio::sync::Barrier::new(TASKS));
+        let mut tasks = Vec::new();
+        for task in 0..TASKS {
+            let (fs, start) = (Arc::clone(&fs), Arc::clone(&start));
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                for round in 0..ROUNDS {
+                    // This open may find the buffer another task is closing.
+                    let writer = fs.open("/f", "r+", 0).await.expect("open");
+                    let tag = [round as u8 + 1];
+                    writer.write(&tag, Some(task as u64)).await.expect("write");
+                    // While it is open, every other open shares its buffer
+                    // and so sees the write before any save.
+                    let reader = fs.open("/f", "r", 0).await.expect("open again");
+                    let mut seen = [0];
+                    reader
+                        .read(&mut seen, Some(task as u64))
+                        .await
+                        .expect("read");
+                    assert_eq!(
+                        seen, tag,
+                        "trial {trial} round {round}: a second buffer for one file"
+                    );
+                    reader.close().await.expect("close reader");
+                    writer.close().await.expect("close writer");
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.expect("join");
+        }
     }
 }

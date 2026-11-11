@@ -11,22 +11,22 @@
 //!
 //! A plan's `seed` is trace metadata, not a scheduler seed: this crate does not
 //! randomize or control concurrent task scheduling. For concurrent calls, the
-//! trace sequence records the order in which reservations acquire the injector
-//! lock; replaying that ordering requires the caller to control invocation
+//! trace sequence records the order in which reservations commit to the injector
+//! state; replaying that ordering requires the caller to control invocation
 //! order or its scheduler separately.
 
+use arc_swap::{ArcSwap, Guard};
 use async_trait::async_trait;
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
     LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{ErrorCode, FsError, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 pub const COMMIT_UNKNOWN_SYSCALL: &str = "fault-injection:commit-unknown";
@@ -448,11 +448,27 @@ impl FaultTrace {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+const BOUNDARY_COUNT: usize = 2;
+const OPERATION_COUNT: usize = 9;
+const PHASE_COUNT: usize = 2;
+/// One occurrence counter per boundary/operation/phase. The table is a small
+/// fixed array so a state snapshot is a bounded copy, never a map clone.
+const SELECTOR_SLOTS: usize = BOUNDARY_COUNT * OPERATION_COUNT * PHASE_COUNT;
+
+#[derive(Debug, Clone, Copy)]
 struct Selector {
     boundary: FaultBoundary,
     operation: FaultOperation,
     phase: FaultPhase,
+}
+
+impl Selector {
+    /// Dense index into the occurrence table. The counts above must cover
+    /// every variant; `selector_slots_are_distinct_and_in_range` checks it.
+    const fn slot(self) -> usize {
+        (self.boundary as usize * OPERATION_COUNT + self.operation as usize) * PHASE_COUNT
+            + self.phase as usize
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -466,31 +482,78 @@ struct Invocation {
     action: FaultAction,
 }
 
-struct EngineState {
-    plan: FaultPlan,
-    occurrences: BTreeMap<Selector, u64>,
+/// One selected-fault event in an immutable, newest-first list. The decision
+/// that created it never changes; only the terminal outcome is filled in
+/// later, once.
+struct EventNode {
+    invocation: Invocation,
+    /// Unset means [`FaultOutcome::Pending`].
+    outcome: OnceLock<FaultOutcome>,
+    next: Option<Arc<EventNode>>,
+}
+
+impl Drop for EventNode {
+    fn drop(&mut self) {
+        // Unlink the tail in a loop: the default recursive drop would use one
+        // stack frame per event and a full budget is a million events.
+        let mut next = self.next.take();
+        while let Some(node) = next {
+            // `into_inner` yields the node only to the last owner, so a tail
+            // still shared with a newer snapshot or a pending guard is left
+            // for that owner to unlink.
+            next = Arc::into_inner(node).and_then(|mut node| node.next.take());
+        }
+    }
+}
+
+/// Everything a decision reads and writes, replaced as one value so a
+/// decision, its sequence number and its event are a single atomic step.
+#[derive(Clone)]
+struct Snapshot {
+    occurrences: [u64; SELECTOR_SLOTS],
     fired: u32,
     next_sequence: u64,
-    events: Vec<FaultEvent>,
+    events: Option<Arc<EventNode>>,
+}
+
+struct Engine {
+    plan: FaultPlan,
+    /// Slots that at least one rule selects. A call on any other slot can
+    /// never fire and its occurrence count is never read, so it skips the
+    /// state entirely.
+    watched: [bool; SELECTOR_SLOTS],
+    state: ArcSwap<Snapshot>,
 }
 
 /// Shared plan state for one explicitly configured wrapper set.
 #[derive(Clone)]
 pub struct FaultInjector {
-    state: Arc<TurnCell<EngineState>>,
+    engine: Arc<Engine>,
 }
 
 impl FaultInjector {
     pub fn new(plan: FaultPlan) -> std::result::Result<Self, PlanError> {
         plan.validate()?;
+        let mut watched = [false; SELECTOR_SLOTS];
+        for rule in &plan.rules {
+            let selector = Selector {
+                boundary: rule.boundary,
+                operation: rule.operation,
+                phase: rule.phase,
+            };
+            watched[selector.slot()] = true;
+        }
         Ok(Self {
-            state: Arc::new(TurnCell::new(EngineState {
+            engine: Arc::new(Engine {
                 plan,
-                occurrences: BTreeMap::new(),
-                fired: 0,
-                next_sequence: 0,
-                events: Vec::new(),
-            })),
+                watched,
+                state: ArcSwap::from_pointee(Snapshot {
+                    occurrences: [0; SELECTOR_SLOTS],
+                    fired: 0,
+                    next_sequence: 0,
+                    events: None,
+                }),
+            }),
         })
     }
 
@@ -499,29 +562,43 @@ impl FaultInjector {
     }
 
     pub fn plan(&self) -> FaultPlan {
-        self.state
-            .lock()
-            .expect("fault injector state lock poisoned")
-            .plan
-            .clone()
+        self.engine.plan.clone()
     }
 
+    /// Events reserved so far, in sequence order. This reads one published
+    /// list head and walks it; it never delays a concurrent decision.
     pub fn trace(&self) -> FaultTrace {
-        let state = self
-            .state
-            .lock()
-            .expect("fault injector state lock poisoned");
-        let mut events = state.events.clone();
-        events.sort_by_key(|event| event.sequence);
-        FaultTrace {
-            seed: state.plan.seed,
-            events,
+        let seed = self.engine.plan.seed;
+        let (head, count) = {
+            let state = self.engine.state.load();
+            (state.events.clone(), state.fired as usize)
+        };
+        let mut events = Vec::with_capacity(count);
+        let mut cursor = head.as_deref();
+        while let Some(node) = cursor {
+            let invocation = node.invocation;
+            events.push(FaultEvent {
+                sequence: invocation.sequence,
+                seed,
+                boundary: invocation.boundary,
+                operation: invocation.operation,
+                phase: invocation.phase,
+                occurrence: invocation.occurrence,
+                rule_index: invocation.rule_index,
+                action: invocation.action,
+                outcome: node.outcome.get().copied().unwrap_or(FaultOutcome::Pending),
+            });
+            cursor = node.next.as_deref();
         }
+        // The list is newest first and sequence numbers are issued in the
+        // same step that links a node, so reversing sorts by sequence.
+        events.reverse();
+        FaultTrace { seed, events }
     }
 
     /// Apply a before-operation rule, if selected.
     pub async fn before(&self, boundary: FaultBoundary, operation: FaultOperation) -> Result<()> {
-        let invocation = self.prepare(boundary, operation, FaultPhase::Before)?;
+        let invocation = self.prepare(boundary, operation, FaultPhase::Before);
         match invocation {
             None => Ok(()),
             Some((invocation, pending)) => self.apply_before(invocation, pending).await,
@@ -530,8 +607,8 @@ impl FaultInjector {
 
     /// Reserve an after-operation rule before invoking `call`, then apply it
     /// to the provider result. Reservation before the await records a pending
-    /// event and operation ordering without holding a mutex across user/provider
-    /// code. If this future is cancelled, the event is finalized as
+    /// event and operation ordering without holding anything across
+    /// user/provider code. If this future is cancelled, the event is finalized as
     /// [`FaultOutcome::Cancelled`] rather than disappearing from the trace.
     pub async fn after<T, F, Fut>(
         &self,
@@ -543,7 +620,7 @@ impl FaultInjector {
         F: FnOnce() -> Fut + Send,
         Fut: Future<Output = Result<T>> + Send,
     {
-        let invocation = self.prepare(boundary, operation, FaultPhase::After)?;
+        let invocation = self.prepare(boundary, operation, FaultPhase::After);
         let result = call().await;
         match invocation {
             None => result,
@@ -551,81 +628,83 @@ impl FaultInjector {
         }
     }
 
+    /// Count this call and, if a rule selects it, reserve the fault: budget,
+    /// sequence number and pending event are published in one
+    /// compare-and-swap. The outcome for a given order of committed calls is
+    /// the same as if the calls had run one after another.
     fn prepare(
         &self,
         boundary: FaultBoundary,
         operation: FaultOperation,
         phase: FaultPhase,
-    ) -> Result<Option<(Invocation, PendingEventGuard)>> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("fault-injection state"))?;
-        let selector = Selector {
+    ) -> Option<(Invocation, PendingEventGuard)> {
+        let engine = &*self.engine;
+        let slot = Selector {
             boundary,
             operation,
             phase,
-        };
-        let occurrence = {
-            let count = state.occurrences.entry(selector).or_insert(0);
-            *count = count.saturating_add(1);
-            *count
-        };
-        if state.fired >= state.plan.budget {
-            return Ok(None);
         }
-        let Some((rule_index, action)) = state
-            .plan
-            .rules
-            .iter()
-            .enumerate()
-            .find(|(_, rule)| {
-                rule.boundary == boundary
-                    && rule.operation == operation
-                    && rule.phase == phase
-                    && rule.occurrence.matches(occurrence)
-            })
-            .map(|(rule_index, rule)| (rule_index, rule.action))
-        else {
-            return Ok(None);
-        };
-        state.fired += 1;
-        state.next_sequence += 1;
-        let invocation = Invocation {
-            sequence: state.next_sequence,
-            rule_index,
-            boundary,
-            operation,
-            phase,
-            occurrence,
-            action,
-        };
-        let seed = state.plan.seed;
-        state.events.push(FaultEvent {
-            sequence: invocation.sequence,
-            seed,
-            boundary: invocation.boundary,
-            operation: invocation.operation,
-            phase: invocation.phase,
-            occurrence: invocation.occurrence,
-            rule_index: invocation.rule_index,
-            action: invocation.action,
-            outcome: FaultOutcome::Pending,
-        });
-        Ok(Some((
-            invocation,
-            PendingEventGuard {
-                injector: self.clone(),
-                sequence: invocation.sequence,
-                armed: true,
-            },
-        )))
+        .slot();
+        if !engine.watched[slot] {
+            return None;
+        }
+        let mut current = engine.state.load_full();
+        loop {
+            // The budget never refills, so once it is spent no occurrence
+            // count is read again and there is nothing left to record.
+            if current.fired >= engine.plan.budget {
+                return None;
+            }
+            // Everything from here to the swap is recomputed from `current`
+            // on a lost race; it has no effect outside `next`.
+            let occurrence = current.occurrences[slot].saturating_add(1);
+            let mut next = Snapshot::clone(&current);
+            next.occurrences[slot] = occurrence;
+            let selected = engine
+                .plan
+                .rules
+                .iter()
+                .enumerate()
+                .find(|(_, rule)| {
+                    rule.boundary == boundary
+                        && rule.operation == operation
+                        && rule.phase == phase
+                        && rule.occurrence.matches(occurrence)
+                })
+                .map(|(rule_index, rule)| {
+                    next.fired += 1;
+                    next.next_sequence += 1;
+                    let invocation = Invocation {
+                        sequence: next.next_sequence,
+                        rule_index,
+                        boundary,
+                        operation,
+                        phase,
+                        occurrence,
+                        action: rule.action,
+                    };
+                    let node = Arc::new(EventNode {
+                        invocation,
+                        outcome: OnceLock::new(),
+                        next: next.events.take(),
+                    });
+                    next.events = Some(Arc::clone(&node));
+                    (invocation, node)
+                });
+            let previous = engine.state.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return selected.map(|(invocation, node)| {
+                    (invocation, PendingEventGuard { node, armed: true })
+                });
+            }
+            current = Guard::into_inner(previous);
+        }
     }
 
     async fn apply_before(&self, invocation: Invocation, pending: PendingEventGuard) -> Result<()> {
         match invocation.action {
             FaultAction::Error(code) => {
-                pending.finish(FaultOutcome::InjectedError { code })?;
+                pending.finish(FaultOutcome::InjectedError { code });
                 Err(injected_error(
                     invocation.boundary,
                     invocation.operation,
@@ -633,24 +712,24 @@ impl FaultInjector {
                 ))
             }
             FaultAction::LeaseFailure => {
-                pending.finish(FaultOutcome::LeaseFailure)?;
+                pending.finish(FaultOutcome::LeaseFailure);
                 Err(lease_failure_error())
             }
             FaultAction::CasConflict => {
-                pending.finish(FaultOutcome::CasConflict)?;
+                pending.finish(FaultOutcome::CasConflict);
                 Err(cas_conflict_error())
             }
             FaultAction::LostAcknowledgment => {
-                pending.finish(FaultOutcome::InvalidPlan)?;
+                pending.finish(FaultOutcome::InvalidPlan);
                 Err(invalid_runtime_plan_error())
             }
             FaultAction::DelayMs(milliseconds) => match self.delay(milliseconds).await {
                 Ok(()) => {
-                    pending.finish(FaultOutcome::Delayed)?;
+                    pending.finish(FaultOutcome::Delayed);
                     Ok(())
                 }
                 Err(error) => {
-                    pending.finish(FaultOutcome::DelegateError { code: error.code })?;
+                    pending.finish(FaultOutcome::DelegateError { code: error.code });
                     Err(error)
                 }
             },
@@ -665,14 +744,14 @@ impl FaultInjector {
     ) -> Result<T> {
         let value = match result {
             Err(error) => {
-                pending.finish(FaultOutcome::DelegateError { code: error.code })?;
+                pending.finish(FaultOutcome::DelegateError { code: error.code });
                 return Err(error);
             }
             Ok(value) => value,
         };
         match invocation.action {
             FaultAction::Error(code) => {
-                pending.finish(FaultOutcome::InjectedError { code })?;
+                pending.finish(FaultOutcome::InjectedError { code });
                 Err(injected_error(
                     invocation.boundary,
                     invocation.operation,
@@ -680,24 +759,24 @@ impl FaultInjector {
                 ))
             }
             FaultAction::LeaseFailure => {
-                pending.finish(FaultOutcome::LeaseFailure)?;
+                pending.finish(FaultOutcome::LeaseFailure);
                 Err(lease_failure_error())
             }
             FaultAction::CasConflict => {
-                pending.finish(FaultOutcome::CasConflict)?;
+                pending.finish(FaultOutcome::CasConflict);
                 Err(cas_conflict_error())
             }
             FaultAction::LostAcknowledgment => {
-                pending.finish(FaultOutcome::CommitUnknown)?;
+                pending.finish(FaultOutcome::CommitUnknown);
                 Err(commit_unknown_error())
             }
             FaultAction::DelayMs(milliseconds) => match self.delay(milliseconds).await {
                 Ok(()) => {
-                    pending.finish(FaultOutcome::Delayed)?;
+                    pending.finish(FaultOutcome::Delayed);
                     Ok(value)
                 }
                 Err(error) => {
-                    pending.finish(FaultOutcome::DelegateError { code: error.code })?;
+                    pending.finish(FaultOutcome::DelegateError { code: error.code });
                     Err(error)
                 }
             },
@@ -716,57 +795,27 @@ impl FaultInjector {
             Err(FsError::new(ErrorCode::Enotsup).with_syscall("fault-injection delay"))
         }
     }
-
-    fn finish(&self, sequence: u64, outcome: FaultOutcome) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("fault-injection state"))?;
-        let Some(event) = state
-            .events
-            .iter_mut()
-            .find(|event| event.sequence == sequence)
-        else {
-            return Err(FsError::new(ErrorCode::Eio).with_syscall("fault-injection event"));
-        };
-        event.outcome = outcome;
-        Ok(())
-    }
-
-    fn cancel(&self, sequence: u64) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        if let Some(event) = state
-            .events
-            .iter_mut()
-            .find(|event| event.sequence == sequence)
-        {
-            event.outcome = FaultOutcome::Cancelled;
-        }
-    }
 }
 
+/// Owns the terminal outcome of one reserved event. Dropping it unfinished
+/// (the wrapper future was cancelled) records [`FaultOutcome::Cancelled`].
 struct PendingEventGuard {
-    injector: FaultInjector,
-    sequence: u64,
+    node: Arc<EventNode>,
     armed: bool,
 }
 
 impl PendingEventGuard {
-    fn finish(mut self, outcome: FaultOutcome) -> Result<()> {
-        let result = self.injector.finish(self.sequence, outcome);
-        if result.is_ok() {
-            self.armed = false;
-        }
-        result
+    fn finish(mut self, outcome: FaultOutcome) {
+        // This guard is the only writer of its node's outcome.
+        let _ = self.node.outcome.set(outcome);
+        self.armed = false;
     }
 }
 
 impl Drop for PendingEventGuard {
     fn drop(&mut self) {
         if self.armed {
-            self.injector.cancel(self.sequence);
+            let _ = self.node.outcome.set(FaultOutcome::Cancelled);
         }
     }
 }
@@ -1095,5 +1144,350 @@ where
         // data-plane operation, so fault plans do not silently change its
         // safety boundary. The wrapped provider still retains its capability.
         self.inner.reconcile(live, grace).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    const BOUNDARIES: [FaultBoundary; BOUNDARY_COUNT] =
+        [FaultBoundary::Metadata, FaultBoundary::Blocks];
+    const OPERATIONS: [FaultOperation; OPERATION_COUNT] = [
+        FaultOperation::Load,
+        FaultOperation::AcquireWriter,
+        FaultOperation::RenewWriter,
+        FaultOperation::ReleaseWriter,
+        FaultOperation::Publish,
+        FaultOperation::Flush,
+        FaultOperation::Put,
+        FaultOperation::Get,
+        FaultOperation::Delete,
+    ];
+    const PHASES: [FaultPhase; PHASE_COUNT] = [FaultPhase::Before, FaultPhase::After];
+
+    fn rule(
+        boundary: FaultBoundary,
+        operation: FaultOperation,
+        phase: FaultPhase,
+        occurrence: FaultOccurrence,
+    ) -> FaultRule {
+        FaultRule::new(
+            boundary,
+            operation,
+            phase,
+            occurrence,
+            FaultAction::Error(ErrorCode::Eio),
+        )
+    }
+
+    #[test]
+    fn selector_slots_are_distinct_and_in_range() {
+        let mut seen = BTreeSet::new();
+        for boundary in BOUNDARIES {
+            for operation in OPERATIONS {
+                for phase in PHASES {
+                    let slot = Selector {
+                        boundary,
+                        operation,
+                        phase,
+                    }
+                    .slot();
+                    assert!(slot < SELECTOR_SLOTS);
+                    assert!(seen.insert(slot), "slot {slot} is used twice");
+                }
+            }
+        }
+        assert_eq!(seen.len(), SELECTOR_SLOTS);
+    }
+
+    /// Hammer `prepare` from several threads over three ruled selectors and
+    /// one unruled one, then check what a single lock used to guarantee.
+    /// Returns every reservation the threads observed plus the final trace.
+    fn hammer(
+        injector: &FaultInjector,
+        threads: usize,
+        rounds: usize,
+    ) -> (Vec<Invocation>, FaultTrace) {
+        let calls = [
+            (
+                FaultBoundary::Metadata,
+                FaultOperation::Load,
+                FaultPhase::Before,
+            ),
+            (
+                FaultBoundary::Blocks,
+                FaultOperation::Put,
+                FaultPhase::Before,
+            ),
+            (
+                FaultBoundary::Blocks,
+                FaultOperation::Get,
+                FaultPhase::After,
+            ),
+            (
+                FaultBoundary::Blocks,
+                FaultOperation::Delete,
+                FaultPhase::Before,
+            ),
+        ];
+        let barrier = Barrier::new(threads);
+        let mut reserved = Vec::new();
+        thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|worker| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        let mut mine = Vec::new();
+                        barrier.wait();
+                        for round in 0..rounds {
+                            for (boundary, operation, phase) in calls {
+                                let Some((invocation, pending)) =
+                                    injector.prepare(boundary, operation, phase)
+                                else {
+                                    continue;
+                                };
+                                // Alternate a finished outcome with a
+                                // dropped (cancelled) reservation.
+                                if (worker + round) % 2 == 0 {
+                                    pending.finish(FaultOutcome::Delayed);
+                                } else {
+                                    drop(pending);
+                                }
+                                mine.push(invocation);
+                            }
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            for worker in workers {
+                reserved.extend(worker.join().expect("worker panicked"));
+            }
+        });
+        (reserved, injector.trace())
+    }
+
+    fn assert_serial_equivalent(
+        plan: &FaultPlan,
+        reserved: &[Invocation],
+        trace: &FaultTrace,
+        expected_fired: usize,
+    ) {
+        assert_eq!(reserved.len(), expected_fired);
+        assert_eq!(trace.events.len(), expected_fired);
+
+        // Every sequence number 1..=fired is issued exactly once.
+        let sequences: BTreeSet<u64> = reserved.iter().map(|inv| inv.sequence).collect();
+        assert_eq!(sequences.len(), reserved.len());
+        assert_eq!(
+            sequences.first().copied(),
+            (expected_fired > 0).then_some(1)
+        );
+        assert_eq!(
+            sequences.last().copied(),
+            (expected_fired > 0).then_some(expected_fired as u64)
+        );
+
+        // The trace holds exactly one event per decision, in sequence order,
+        // with a terminal outcome, and agrees with what the caller was told.
+        let mut by_sequence: Vec<&Invocation> = reserved.iter().collect();
+        by_sequence.sort_by_key(|inv| inv.sequence);
+        for (index, (event, invocation)) in trace.events.iter().zip(by_sequence).enumerate() {
+            assert_eq!(event.sequence, index as u64 + 1);
+            assert_eq!(event.sequence, invocation.sequence);
+            assert_eq!(event.rule_index, invocation.rule_index);
+            assert_eq!(event.occurrence, invocation.occurrence);
+            assert_eq!(event.boundary, invocation.boundary);
+            assert_eq!(event.operation, invocation.operation);
+            assert_eq!(event.phase, invocation.phase);
+            assert!(
+                matches!(
+                    event.outcome,
+                    FaultOutcome::Delayed | FaultOutcome::Cancelled
+                ),
+                "event {} left {:?}",
+                event.sequence,
+                event.outcome
+            );
+        }
+
+        // Serial equivalence: within one rule, occurrences fire in order with
+        // no gaps (a later matching occurrence never fires while an earlier
+        // one is skipped), and each fired occurrence matches its rule.
+        for (rule_index, rule) in plan.rules.iter().enumerate() {
+            let fired: Vec<u64> = trace
+                .events
+                .iter()
+                .filter(|event| event.rule_index == rule_index)
+                .map(|event| event.occurrence)
+                .collect();
+            let expected: Vec<u64> = match rule.occurrence {
+                FaultOccurrence::Once => vec![1],
+                FaultOccurrence::Nth(nth) => vec![nth],
+                FaultOccurrence::Every(period) => {
+                    (1..=fired.len() as u64).map(|n| n * period).collect()
+                }
+            };
+            assert_eq!(
+                fired,
+                expected[..fired.len().min(expected.len())],
+                "rule {rule_index} fired out of order or with gaps"
+            );
+            assert!(fired.len() <= expected.len());
+        }
+    }
+
+    fn concurrent_plan(budget: u32) -> FaultPlan {
+        FaultPlan::new(
+            7,
+            budget,
+            vec![
+                rule(
+                    FaultBoundary::Metadata,
+                    FaultOperation::Load,
+                    FaultPhase::Before,
+                    FaultOccurrence::Every(1),
+                ),
+                rule(
+                    FaultBoundary::Blocks,
+                    FaultOperation::Put,
+                    FaultPhase::Before,
+                    FaultOccurrence::Every(3),
+                ),
+                rule(
+                    FaultBoundary::Blocks,
+                    FaultOperation::Get,
+                    FaultPhase::After,
+                    FaultOccurrence::Nth(7),
+                ),
+            ],
+        )
+        .expect("valid plan")
+    }
+
+    #[test]
+    fn concurrent_decisions_stop_exactly_at_the_budget() {
+        let plan = concurrent_plan(1_000);
+        let injector = FaultInjector::new(plan.clone()).expect("valid plan");
+        let (reserved, trace) = hammer(&injector, 8, 2_000);
+        assert_serial_equivalent(&plan, &reserved, &trace, 1_000);
+        // Once the budget is spent nothing else fires.
+        assert!(
+            injector
+                .prepare(
+                    FaultBoundary::Metadata,
+                    FaultOperation::Load,
+                    FaultPhase::Before
+                )
+                .is_none()
+        );
+        assert_eq!(injector.trace().events.len(), 1_000);
+    }
+
+    #[test]
+    fn concurrent_decisions_fire_every_matching_occurrence_once() {
+        let threads = 8;
+        let rounds = 1_500;
+        let per_selector = threads * rounds;
+        let plan = concurrent_plan(MAX_BUDGET);
+        let injector = FaultInjector::new(plan.clone()).expect("valid plan");
+        let (reserved, trace) = hammer(&injector, threads, rounds);
+        // Every(1) fires on each call, Every(3) on each third, Nth(7) once.
+        let expected = per_selector + per_selector / 3 + 1;
+        assert_serial_equivalent(&plan, &reserved, &trace, expected);
+        let fired_by_rule = |rule_index: usize| {
+            trace
+                .events
+                .iter()
+                .filter(|event| event.rule_index == rule_index)
+                .count()
+        };
+        assert_eq!(fired_by_rule(0), per_selector);
+        assert_eq!(fired_by_rule(1), per_selector / 3);
+        assert_eq!(fired_by_rule(2), 1);
+    }
+
+    #[test]
+    fn large_trace_does_not_block_decisions_or_overflow_on_drop() {
+        const PREFILL: usize = 200_000;
+        const EXTRA_PER_THREAD: usize = 500;
+        const DECIDERS: usize = 4;
+        let plan = FaultPlan::new(
+            1,
+            MAX_BUDGET,
+            vec![rule(
+                FaultBoundary::Blocks,
+                FaultOperation::Put,
+                FaultPhase::Before,
+                FaultOccurrence::Every(1),
+            )],
+        )
+        .expect("valid plan");
+        let injector = FaultInjector::new(plan).expect("valid plan");
+        let decide = |injector: &FaultInjector| {
+            let (_, pending) = injector
+                .prepare(
+                    FaultBoundary::Blocks,
+                    FaultOperation::Put,
+                    FaultPhase::Before,
+                )
+                .expect("budget remains");
+            pending.finish(FaultOutcome::Delayed);
+        };
+        for _ in 0..PREFILL {
+            decide(&injector);
+        }
+
+        let stop = AtomicBool::new(false);
+        let traces_taken = thread::scope(|scope| {
+            let tracer = scope.spawn(|| {
+                let mut taken = 0usize;
+                let mut last_len = PREFILL;
+                loop {
+                    let done = stop.load(Ordering::SeqCst);
+                    let trace = injector.trace();
+                    assert!(trace.events.len() >= last_len, "trace went backwards");
+                    last_len = trace.events.len();
+                    for (index, event) in trace.events.iter().enumerate() {
+                        assert_eq!(event.sequence, index as u64 + 1);
+                    }
+                    taken += 1;
+                    if done {
+                        return taken;
+                    }
+                }
+            });
+            let deciders: Vec<_> = (0..DECIDERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        for _ in 0..EXTRA_PER_THREAD {
+                            decide(&injector);
+                        }
+                    })
+                })
+                .collect();
+            for decider in deciders {
+                decider.join().expect("decider panicked");
+            }
+            stop.store(true, Ordering::SeqCst);
+            tracer.join().expect("tracer panicked")
+        });
+        assert!(traces_taken >= 1);
+        let total = PREFILL + DECIDERS * EXTRA_PER_THREAD;
+        assert_eq!(injector.trace().events.len(), total);
+
+        // Drop the whole list on a stack far too small for one frame per
+        // event; a recursive drop of 200k nodes would overflow it.
+        thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || drop(injector))
+            .expect("spawn drop thread")
+            .join()
+            .expect("dropping a large event list overflowed the stack");
     }
 }

@@ -5,7 +5,7 @@
 //! through an explicit limit, buffers only bounded XML bodies, and hands the
 //! normalized request to the same session used by unit tests.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -22,10 +22,9 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use mount_rs_core::FsDriver;
-use mount_rs_core::turn_cell::TurnCell;
-use mount_rs_core::turn_gate::TurnLock;
+use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 use crate::constants::{DEFAULT_HOST, DEFAULT_MAX_REQUEST_BYTES};
 use crate::protocol::{DavFault, WebdavError, WebdavRequestHead, WebdavResponse};
@@ -151,6 +150,9 @@ impl WebdavServerOptions {
 /// putting an `Arc` wrapper inside another `Arc`.
 struct ServerState {
     task: Option<tokio::task::JoinHandle<()>>,
+    /// Set by [`WebdavServer::shutdown`] and never cleared: `listen` reads
+    /// it under the same lock, so a server shut down stays down.
+    closed: bool,
 }
 
 #[derive(Clone)]
@@ -163,18 +165,17 @@ struct StreamControl {
 
 struct ConnectionRegistry {
     active: AtomicUsize,
-    next_id: AtomicUsize,
-    // `ConnectionGuard::drop` takes it while a panicking connection task
-    // unwinds; taking the cell then does not abandon it.
-    tasks: TurnCell<HashMap<usize, tokio::task::AbortHandle>>,
+    /// Bumped to abort every connection task spawned so far. Each task
+    /// watches the generation it was spawned under, so nothing is registered
+    /// per connection and nothing is removed when one ends.
+    abort: watch::Sender<u64>,
 }
 
 impl Default for ConnectionRegistry {
     fn default() -> Self {
         Self {
             active: AtomicUsize::new(0),
-            next_id: AtomicUsize::new(0),
-            tasks: TurnCell::new(HashMap::new()),
+            abort: watch::Sender::new(0),
         }
     }
 }
@@ -184,29 +185,29 @@ impl ConnectionRegistry {
         self.active.load(Ordering::Acquire)
     }
 
-    fn next_id(&self) -> usize {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Register the task while holding the task map lock. A connection guard
-    /// is moved into the future before it is spawned, so aborting a task before
+    /// Spawn a connection task that `abort_all` can stop. The receiver is
+    /// taken before the task exists, so an abort that follows this call is
+    /// seen even if the task has not been polled yet. A connection guard is
+    /// moved into the future before it is spawned, so stopping a task before
     /// its first poll still decrements the active count on future drop.
-    fn spawn<F>(&self, id: usize, future: F)
+    fn spawn<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let mut tasks = self.tasks.lock_recovered();
-        let task = tokio::spawn(future);
-        tasks.insert(id, task.abort_handle());
+        let mut aborted = self.abort.subscribe();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                // The sender lives in the registry the future's guard holds,
+                // so this only resolves for a new generation.
+                _ = aborted.changed() => {}
+                _ = future => {}
+            }
+        });
     }
 
     fn abort_all(&self) {
-        let tasks = self.tasks.lock_recovered();
-        let handles = tasks.values().cloned().collect::<Vec<_>>();
-        drop(tasks);
-        for task in handles {
-            task.abort();
-        }
+        self.abort.send_modify(|generation| *generation += 1);
     }
 }
 
@@ -261,7 +262,10 @@ impl WebdavServer {
             closing: Arc::new(AtomicUsize::new(0)),
             drained: Arc::new(Notify::new()),
             background_tasks: Arc::new(AtomicUsize::new(0)),
-            lifecycle: TurnLock::new(ServerState { task: None }),
+            lifecycle: TurnLock::new(ServerState {
+                task: None,
+                closed: false,
+            }),
             connections: Arc::new(ConnectionRegistry::default()),
             hooks,
         }
@@ -290,6 +294,11 @@ impl WebdavServer {
 
     pub async fn listen(&self) -> Result<(), WebdavServerError> {
         let mut lifecycle = self.lifecycle.lock().await;
+        if lifecycle.closed {
+            return Err(WebdavServerError::Io(std::io::Error::other(
+                "server is closed",
+            )));
+        }
         let running = task_is_running(lifecycle.task.as_ref());
         let closing = self.closing.load(Ordering::Acquire) != 0;
         if closing {
@@ -349,14 +358,12 @@ impl WebdavServer {
                         let hooks = hooks_for_task.clone();
                         let stream_control = stream_control_for_task.clone();
                         let peer = peer.to_string();
-                        let connection_id = connections.next_id();
                         connections.active.fetch_add(1, Ordering::AcqRel);
                         let guard = ConnectionGuard {
                             connections: Arc::clone(&connections),
-                            id: connection_id,
                             drained,
                         };
-                        connections.spawn(connection_id, async move {
+                        connections.spawn(async move {
                             let _guard = guard;
                             let service = service_fn(move |request| {
                                 handle_request(
@@ -409,6 +416,30 @@ impl WebdavServer {
 
     pub async fn close(&self) -> Result<(), WebdavServerError> {
         let mut lifecycle = self.lifecycle.lock().await;
+        self.close_locked(&mut lifecycle).await
+    }
+
+    /// Close the server for good: a `listen` that has not started fails with
+    /// "server is closed" from here on, whether or not the close succeeds.
+    ///
+    /// The mark is made under the lock `listen` and `close` already hold, so
+    /// no listener can come up once this has returned. `on_closed` runs under
+    /// that lock too, after the mark and before the listener stops, for an
+    /// embedder that must stop its own reporting at exactly that point.
+    pub async fn shutdown<F>(&self, on_closed: F) -> Result<(), WebdavServerError>
+    where
+        F: FnOnce(),
+    {
+        let mut lifecycle = self.lifecycle.lock().await;
+        lifecycle.closed = true;
+        on_closed();
+        self.close_locked(&mut lifecycle).await
+    }
+
+    async fn close_locked(
+        &self,
+        lifecycle: &mut TurnLockGuard<'_, ServerState>,
+    ) -> Result<(), WebdavServerError> {
         let task = lifecycle.task.take();
         if task.is_none() && self.closing.load(Ordering::Acquire) == 0 {
             return Ok(());
@@ -470,15 +501,12 @@ impl Drop for WebdavServer {
 
 struct ConnectionGuard {
     connections: Arc<ConnectionRegistry>,
-    id: usize,
     drained: Arc<Notify>,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.connections.active.fetch_sub(1, Ordering::AcqRel);
-        let mut tasks = self.connections.tasks.lock_recovered();
-        tasks.remove(&self.id);
         self.drained.notify_waiters();
     }
 }
@@ -943,6 +971,120 @@ fn report(hooks: &WebdavServerHooks, error: WebdavTransportError) {
 #[cfg(test)]
 mod tests {
     use super::task_is_running;
+    use super::{Arc, AtomicUsize, ConnectionGuard, ConnectionRegistry, Notify, Ordering};
+
+    /// `abort_all` stops every connection spawned before it, polled or not,
+    /// while connections are still being spawned and ending; one spawned
+    /// after it runs to completion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn abort_all_stops_every_connection_spawned_before_it() {
+        const SPAWNERS: usize = 4;
+        const EACH: usize = 200;
+
+        for _ in 0..20 {
+            let registry = Arc::new(ConnectionRegistry::default());
+            let drained = Arc::new(Notify::new());
+            let finished = Arc::new(AtomicUsize::new(0));
+            let mut spawners = Vec::new();
+            for _ in 0..SPAWNERS {
+                let registry = Arc::clone(&registry);
+                let drained = Arc::clone(&drained);
+                let finished = Arc::clone(&finished);
+                spawners.push(tokio::spawn(async move {
+                    for index in 0..EACH {
+                        registry.active.fetch_add(1, Ordering::AcqRel);
+                        let guard = ConnectionGuard {
+                            connections: Arc::clone(&registry),
+                            drained: Arc::clone(&drained),
+                        };
+                        let finished = Arc::clone(&finished);
+                        registry.spawn(async move {
+                            let _guard = guard;
+                            if index % 2 == 0 {
+                                // Ends by itself, like a closed connection.
+                                tokio::task::yield_now().await;
+                                finished.fetch_add(1, Ordering::SeqCst);
+                            } else {
+                                std::future::pending::<()>().await;
+                            }
+                        });
+                        if index % 16 == 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                }));
+            }
+            for spawner in spawners {
+                spawner.await.expect("spawner");
+            }
+            // Half of them never end by themselves.
+            registry.abort_all();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while registry.active() != 0 {
+                    let notified = drained.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if registry.active() == 0 {
+                        break;
+                    }
+                    notified.await;
+                }
+            })
+            .await
+            .expect("every aborted connection released its guard");
+            assert!(finished.load(Ordering::SeqCst) <= SPAWNERS * EACH / 2);
+
+            // An earlier abort does not reach a later connection.
+            let (done, wait) = tokio::sync::oneshot::channel();
+            registry.active.fetch_add(1, Ordering::AcqRel);
+            let guard = ConnectionGuard {
+                connections: Arc::clone(&registry),
+                drained: Arc::clone(&drained),
+            };
+            registry.spawn(async move {
+                let _guard = guard;
+                tokio::task::yield_now().await;
+                let _ = done.send(());
+            });
+            wait.await
+                .expect("a connection spawned after an abort runs");
+        }
+    }
+
+    /// An abort racing the spawns still stops everything spawned before it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_abort_racing_spawns_leaves_no_connection_from_before_it() {
+        for _ in 0..200 {
+            let registry = Arc::new(ConnectionRegistry::default());
+            let drained = Arc::new(Notify::new());
+            let spawning = Arc::clone(&registry);
+            let spawn_drained = Arc::clone(&drained);
+            let spawner = tokio::spawn(async move {
+                for _ in 0..64 {
+                    spawning.active.fetch_add(1, Ordering::AcqRel);
+                    let guard = ConnectionGuard {
+                        connections: Arc::clone(&spawning),
+                        drained: Arc::clone(&spawn_drained),
+                    };
+                    spawning.spawn(async move {
+                        let _guard = guard;
+                        std::future::pending::<()>().await;
+                    });
+                }
+            });
+            registry.abort_all();
+            spawner.await.expect("spawner");
+            // Whatever the first abort missed was spawned after it.
+            registry.abort_all();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while registry.active() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("no connection outlives the abort that follows its spawn");
+        }
+    }
 
     #[tokio::test]
     async fn a_failed_accept_is_reported_and_the_listener_keeps_accepting() {

@@ -3095,9 +3095,25 @@ fn p9_options(options: Option<P9ServerOptions>) -> Result<P9OptionValues, Error>
 
 type P9ServeFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-struct P9State {
-    server: Option<Arc<TransportP9Server>>,
-    serve_task: Option<P9ServeFuture>,
+/// A bound 9P listener as `P9Server` publishes it. It stays published until
+/// a close of it has succeeded, so a failed close leaves it for a retry
+/// without anything having to put it back.
+struct P9Running {
+    server: Arc<TransportP9Server>,
+    /// Taken by the close that succeeded.
+    serve_task: TakeCell<P9ServeFuture>,
+    /// Claimed by the one caller closing this listener at a time.
+    closing: AtomicBool,
+}
+
+impl P9Running {
+    fn new(server: Arc<TransportP9Server>, serve_task: TakeCell<P9ServeFuture>) -> Arc<Self> {
+        Arc::new(Self {
+            server,
+            serve_task,
+            closing: AtomicBool::new(false),
+        })
+    }
 }
 
 #[napi]
@@ -3426,7 +3442,10 @@ pub struct P9Server {
     options: TransportP9ServerOptions,
     host: String,
     requested_port: u16,
-    state: TurnCell<P9State>,
+    /// The listener, if one is up. Readers load it; `listen` is the only
+    /// writer of `Some` (one at a time, by `binding`), and only the closer
+    /// that closed the listener clears it.
+    state: ArcSwapOption<P9Running>,
     binding: AtomicBool,
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
@@ -3446,10 +3465,7 @@ impl P9Server {
             host: options.host.clone(),
             requested_port: options.port,
             options,
-            state: TurnCell::new(P9State {
-                server: Some(server),
-                serve_task: None,
-            }),
+            state: ArcSwapOption::new(Some(P9Running::new(server, TakeCell::empty()))),
             binding: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             transport_error: None,
@@ -3463,10 +3479,13 @@ impl P9Server {
     /// second listener: the mount must adopt the same server policy, lock
     /// table, callbacks, and client set that the caller configured.
     pub(crate) fn transport_server(&self) -> Result<Arc<TransportP9Server>, Error> {
-        let state = self.state.lock().expect("9P state lock");
-        state.server.as_ref().cloned().ok_or_else(|| {
-            config_error("9P mount server must be listening before it can be mounted")
-        })
+        self.state
+            .load()
+            .as_ref()
+            .map(|running| Arc::clone(&running.server))
+            .ok_or_else(|| {
+                config_error("9P mount server must be listening before it can be mounted")
+            })
     }
 }
 
@@ -3538,30 +3557,28 @@ impl P9Server {
 
     #[napi(getter)]
     pub fn port(&self) -> u32 {
-        let state = self.state.lock().expect("9P state lock");
-        state
-            .server
+        self.state
+            .load()
             .as_ref()
-            .and_then(|server| server.local_addr().ok())
+            .and_then(|running| running.server.local_addr().ok())
             .map_or(self.requested_port, |address| address.port()) as u32
     }
 
     #[napi(getter)]
     pub fn connections(&self) -> u32 {
-        let state = self.state.lock().expect("9P state lock");
-        state
-            .server
+        self.state
+            .load()
             .as_ref()
-            .and_then(|server| server.connection_count().ok())
+            .and_then(|running| running.server.connection_count().ok())
             .unwrap_or(0) as u32
     }
 
     #[napi]
     pub fn address(&self) -> Option<String> {
-        let state = self.state.lock().expect("9P state lock");
-        let Some(server) = state.server.as_ref() else {
+        let Some(running) = self.state.load_full() else {
             return self.path();
         };
+        let server = &running.server;
         if let Some(path) = server.unix_path() {
             return Some(path.to_string_lossy().into_owned());
         }
@@ -3570,9 +3587,11 @@ impl P9Server {
 
     #[napi(getter)]
     pub fn clients(&self) -> napi::Result<Vec<P9Connection>> {
-        let state = self.state.lock().expect("9P state lock");
-        state.server.as_ref().map_or(Ok(Vec::new()), |server| {
-            server
+        // Loaded, not locked: collecting the clients is the transport's work
+        // and nothing here waits for it.
+        self.state.load_full().map_or(Ok(Vec::new()), |running| {
+            running
+                .server
                 .clients()
                 .map(|clients| {
                     clients
@@ -3589,14 +3608,11 @@ impl P9Server {
 
     #[napi]
     pub async fn listen(&self) -> napi::Result<()> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::SeqCst) {
             return Err(transport_error("9P listen", "server is closed"));
         }
-        {
-            let state = self.state.lock().expect("9P state lock");
-            if state.server.is_some() {
-                return Ok(());
-            }
+        if self.state.load().is_some() {
+            return Ok(());
         }
         if self
             .binding
@@ -3604,6 +3620,12 @@ impl P9Server {
             .is_err()
         {
             return Err(transport_error("9P listen", "server is already starting"));
+        }
+        // The listen that held `binding` before this one may have published
+        // its listener since the check above.
+        if self.state.load().is_some() {
+            self.binding.store(false, Ordering::Release);
+            return Ok(());
         }
         let result = TransportP9Server::bind_arc_with_hooks_and_session_hooks(
             Arc::clone(&self.driver),
@@ -3635,27 +3657,15 @@ impl P9Server {
         let serve_task: P9ServeFuture = Box::pin(async move {
             let _ = task.await;
         });
-        // `close` sets `closed` and takes the server under this same lock,
-        // so either it finds the server stored here or this sees `closed`.
-        // Checking outside the lock lets a close slip between the check and
-        // the store and leave a listener nothing will ever close.
-        let closed_while_binding = {
-            let mut state = self.state.lock().expect("9P state lock");
-            if self.closed.load(Ordering::Acquire) {
-                Some((server, serve_task))
-            } else {
-                state.server = Some(server);
-                state.serve_task = Some(serve_task);
-                None
-            }
-        };
+        // Publish, then look at `closed`; `close` sets `closed`, then looks
+        // here. Both orders are sequentially consistent, so at least one of
+        // them sees the other and no listener is left that nothing will close.
+        // When both do, the `closing` claim picks the one that closes it.
+        let running = P9Running::new(server, TakeCell::new(serve_task));
+        self.state.store(Some(Arc::clone(&running)));
         self.binding.store(false, Ordering::Release);
-        if let Some((server, serve_task)) = closed_while_binding {
-            server
-                .close()
-                .await
-                .map_err(|error| transport_error("9P close", error))?;
-            serve_task.await;
+        if self.closed.load(Ordering::SeqCst) {
+            self.close_running(&running).await?;
             return Err(transport_error(
                 "9P listen",
                 "server was closed while binding",
@@ -3666,11 +3676,8 @@ impl P9Server {
 
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
-        let (server, task) = {
-            let mut state = self.state.lock().expect("9P state lock");
-            self.closed.store(true, Ordering::Release);
-            (state.server.take(), state.serve_task.take())
-        };
+        self.closed.store(true, Ordering::SeqCst);
+        let running = self.state.load_full();
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
@@ -3680,16 +3687,32 @@ impl P9Server {
         if let Some(callback) = &self.assertion {
             callback.release();
         }
-        if let Some(server) = server
-            && let Err(error) = server.close().await
-        {
-            // Keep the server so a later close can try again.
-            let mut state = self.state.lock().expect("9P state lock");
-            state.server = Some(server);
-            state.serve_task = task;
+        match running {
+            Some(running) => self.close_running(&running).await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl P9Server {
+    /// Close `running` unless another caller is already closing it. It is
+    /// unpublished only once it has closed, so a failed close leaves it where
+    /// a later close finds it.
+    async fn close_running(&self, running: &Arc<P9Running>) -> napi::Result<()> {
+        if running.closing.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        if let Err(error) = running.server.close().await {
+            running.closing.store(false, Ordering::Release);
             return Err(transport_error("9P close", error));
         }
-        if let Some(task) = task {
+        // Only this listener is cleared: the claim is kept, so nobody closes
+        // it a second time through a reference loaded before this.
+        self.state.rcu(|current| match current {
+            Some(current) if Arc::ptr_eq(current, running) => None,
+            other => other.clone(),
+        });
+        if let Some(task) = running.serve_task.take() {
             task.await;
         }
         Ok(())
@@ -3719,10 +3742,7 @@ pub fn create_p9_server(
         options,
         host,
         requested_port,
-        state: TurnCell::new(P9State {
-            server: None,
-            serve_task: None,
-        }),
+        state: ArcSwapOption::empty(),
         binding: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         transport_error,
@@ -5040,8 +5060,6 @@ impl WebdavSession {
 pub struct WebdavServer {
     inner: Arc<TransportWebdavServer>,
     host: String,
-    closed: AtomicBool,
-    lifecycle: TurnLock<()>,
     transport_error: Option<Arc<TransportErrorCallback>>,
     session_error: Option<Arc<WebdavErrorCallback>>,
 }
@@ -5077,10 +5095,8 @@ impl WebdavServer {
 
     #[napi]
     pub async fn listen(&self) -> napi::Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(transport_error("WebDAV listen", "server is closed"));
-        }
+        // The transport orders `listen` against `close` itself and refuses a
+        // server that was shut down, under the one lock it holds for both.
         self.inner
             .listen()
             .await
@@ -5089,16 +5105,18 @@ impl WebdavServer {
 
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.closed.store(true, Ordering::Release);
-        if let Some(callback) = &self.transport_error {
-            callback.release();
-        }
-        if let Some(callback) = &self.session_error {
-            callback.release();
-        }
+        // Closing here is final. The transport marks itself closed and runs
+        // the callback release under its lifecycle lock, where this binding's
+        // own lock used to do both.
         self.inner
-            .close()
+            .shutdown(|| {
+                if let Some(callback) = &self.transport_error {
+                    callback.release();
+                }
+                if let Some(callback) = &self.session_error {
+                    callback.release();
+                }
+            })
             .await
             .map_err(|error| transport_error("WebDAV close", error))
     }
@@ -5125,8 +5143,6 @@ pub fn create_webdav_server(
     Ok(WebdavServer {
         inner: Arc::new(inner),
         host,
-        closed: AtomicBool::new(false),
-        lifecycle: TurnLock::new(()),
         transport_error: transport_error_callback,
         session_error: session_error_callback,
     })

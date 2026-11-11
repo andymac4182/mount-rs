@@ -298,7 +298,7 @@ struct RuntimeState {
     pending_atime: HashMap<InodeId, i64>,
     /// Unlinked inodes remain available to existing handles but are never
     /// published. They are reclaimed on the last close or process restart.
-    orphans: HashMap<InodeId, NodeMetadata>,
+    orphans: Orphans,
     failure: Option<FsError>,
     closed: bool,
 }
@@ -350,13 +350,14 @@ impl ReadLayoutSnapshot {
     }
 }
 
-/// Runtime state behind its mutex, plus a lock-free mirror of the two things
+/// Runtime state behind its mutex (a cell whose waiters queue and park: some
+/// sections copy overlays or walk the open inodes), plus a lock-free mirror of the two things
 /// a read-only operation needs from it: the committed namespace and whether
 /// the runtime is in any condition (failed, closed, selected-inode overlays)
 /// that requires the locked path. The mirror is refreshed whenever a guard is
 /// released, so no mutation site can forget to publish it.
 struct StateCell {
-    mutex: mount_rs_core::turn_cell::TurnCell<RuntimeState>,
+    mutex: mount_rs_core::park_cell::ParkCell<RuntimeState>,
     published: arc_swap::ArcSwap<Namespace>,
     /// `RuntimeState::revision` as of the last mutex release. It is stored
     /// separately from `published`, so the two are only a matched pair for a
@@ -390,72 +391,120 @@ struct StateCell {
 
 /// Coalesced read access times, one slot per inode.
 ///
-/// Recording is a few atomic operations under shared admission. A slot's
-/// inode and time are separate words, so a slot is only ever freed while
-/// recorders are excluded: by a sweep that won exclusive admission, which
-/// only happens under the state mutex. Anyone holding that mutex may
-/// therefore read the table directly; everyone else takes shared admission.
+/// A slot holds a pointer to an immutable inode paired with its latest
+/// access time, so a time can only ever be written against the inode it was
+/// recorded for: a slot changes hands by replacing the pointer, never by
+/// rewriting the inode under a recorder. Recording an inode that already
+/// has a slot is one load and at most one compare-and-swap on that slot's
+/// time; it writes nothing shared with other inodes. The first access to an
+/// inode since the last publication that carried it allocates its slot.
+///
+/// Only the sweep frees slots, and only one sweep runs at a time (under the
+/// state mutex). It closes a slot's time first, which fails if a recorder
+/// raised the time since the sweep read it; a recorder that finds a slot
+/// closed records in another one. So a time is either the one the sweep
+/// read, and the publication carries it, or it survives the sweep.
 struct PendingAtimes {
-    gate: mount_rs_core::drain_gate::DrainGate,
     /// False only when every slot is free, so the per-publication sweep and
     /// the per-mutation listing can skip an empty table. A recorder raises it
     /// after writing its slot; a sweep lowers it before looking and raises it
     /// again if anything is left, so a slot written during the sweep is never
     /// left behind an unraised flag.
     occupied: AtomicBool,
-    /// `(inode + 1, access time)`; a zero key is a free slot.
-    slots: Box<[(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicI64)]>,
+    slots: Box<[arc_swap::ArcSwapOption<AtimeSlot>]>,
+}
+
+struct AtimeSlot {
+    inode: InodeId,
+    /// Only ever raised, until the sweep closes it with `ATIME_CLOSED`.
+    time: std::sync::atomic::AtomicI64,
+}
+
+impl AtimeSlot {
+    /// Raises the time to at least `atime_ms`; `false` when the sweep has
+    /// closed this slot and the time must be recorded elsewhere.
+    fn raise(&self, atime_ms: i64) -> bool {
+        let mut current = self.time.load(Ordering::SeqCst);
+        loop {
+            if current == ATIME_CLOSED {
+                return false;
+            }
+            if current >= atime_ms {
+                return true;
+            }
+            match self
+                .time
+                .compare_exchange(current, atime_ms, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return true,
+                Err(now) => current = now,
+            }
+        }
+    }
 }
 
 const ATIME_SLOTS: usize = 1024;
 const ATIME_PROBES: usize = 8;
-const ATIME_EMPTY: i64 = i64::MIN;
+/// Never a recorded time: the sweep's mark on a slot it is freeing.
+const ATIME_CLOSED: i64 = i64::MIN;
 
 impl PendingAtimes {
     fn new() -> Self {
         Self {
-            gate: mount_rs_core::drain_gate::DrainGate::new(),
             occupied: AtomicBool::new(false),
             slots: (0..ATIME_SLOTS)
-                .map(|_| {
-                    (
-                        std::sync::atomic::AtomicU64::new(0),
-                        std::sync::atomic::AtomicI64::new(ATIME_EMPTY),
-                    )
-                })
+                .map(|_| arc_swap::ArcSwapOption::empty())
                 .collect(),
         }
     }
 
-    fn window(
-        &self,
-        inode: InodeId,
-    ) -> impl Iterator<Item = &(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicI64)> {
+    fn window(&self, inode: InodeId) -> impl Iterator<Item = &arc_swap::ArcSwapOption<AtimeSlot>> {
         let start = (inode.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize;
         (0..ATIME_PROBES).map(move |probe| &self.slots[(start + probe) % ATIME_SLOTS])
     }
 
-    /// Caller holds shared admission or the state mutex.
-    fn record_admitted(&self, inode: InodeId, atime_ms: i64) -> bool {
-        let Some(key) = inode.checked_add(1) else {
-            return false;
-        };
-        for (slot, value) in self.window(inode) {
-            if slot.load(Ordering::SeqCst) == key {
-                value.fetch_max(atime_ms, Ordering::SeqCst);
+    /// Records without the mutex; `false` means the table has no room and
+    /// the caller must record under the mutex instead.
+    fn record(&self, inode: InodeId, atime_ms: i64) -> bool {
+        if atime_ms == ATIME_CLOSED {
+            // Not a time; there is nothing to raise.
+            return true;
+        }
+        // The inode's slot, if it has one that is not being freed.
+        for slot in self.window(inode) {
+            if let Some(held) = slot.load().as_deref()
+                && held.inode == inode
+                && held.raise(atime_ms)
+            {
                 self.mark_occupied();
                 return true;
             }
         }
-        for (slot, value) in self.window(inode) {
-            match slot.compare_exchange(0, key, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => {}
-                Err(current) if current == key => {}
-                Err(_) => continue,
+        // Otherwise a free slot. Losing it to another recorder of the same
+        // inode is as good as winning it.
+        let mut fresh = None;
+        for slot in self.window(inode) {
+            if slot.load().is_some() {
+                continue;
             }
-            value.fetch_max(atime_ms, Ordering::SeqCst);
-            self.mark_occupied();
-            return true;
+            let claim = fresh.take().unwrap_or_else(|| {
+                Arc::new(AtimeSlot {
+                    inode,
+                    time: std::sync::atomic::AtomicI64::new(atime_ms),
+                })
+            });
+            let previous = slot.compare_and_swap(&None::<Arc<AtimeSlot>>, Some(Arc::clone(&claim)));
+            match previous.as_deref() {
+                None => {
+                    self.mark_occupied();
+                    return true;
+                }
+                Some(held) if held.inode == inode && held.raise(atime_ms) => {
+                    self.mark_occupied();
+                    return true;
+                }
+                Some(_) => fresh = Some(claim),
+            }
         }
         false
     }
@@ -468,80 +517,61 @@ impl PendingAtimes {
         }
     }
 
-    /// Caller holds shared admission or the state mutex.
-    fn get_admitted(&self, inode: InodeId) -> Option<i64> {
-        let key = inode.checked_add(1)?;
+    /// The inode's pending access time, if any. Two recorders racing a sweep
+    /// can leave an inode in two slots; the latest time is the one.
+    fn get(&self, inode: InodeId) -> Option<i64> {
         self.window(inode)
-            .filter(|(slot, _)| slot.load(Ordering::SeqCst) == key)
-            .map(|(_, value)| value.load(Ordering::SeqCst))
-            .filter(|value| *value != ATIME_EMPTY)
+            .filter_map(|slot| {
+                let held = slot.load();
+                let held = held.as_deref()?;
+                (held.inode == inode).then(|| held.time.load(Ordering::SeqCst))
+            })
+            .filter(|time| *time != ATIME_CLOSED)
             .max()
     }
 
-    /// Records without the mutex; `false` means the caller must use it.
-    fn record(&self, inode: InodeId, atime_ms: i64) -> bool {
-        self.gate
-            .try_read()
-            .is_some_and(|_admitted| self.record_admitted(inode, atime_ms))
-    }
-
-    /// `Err` means a sweep is running: retry while holding the state mutex.
-    fn get(&self, inode: InodeId) -> std::result::Result<Option<i64>, ()> {
-        let _admitted = self.gate.try_read().ok_or(())?;
-        Ok(self.get_admitted(inode))
-    }
-
-    /// Caller holds the state mutex.
-    fn entries_locked(&self) -> impl Iterator<Item = (InodeId, i64)> {
+    /// Every pending time. An inode may appear twice (see `get`).
+    fn entries(&self) -> impl Iterator<Item = (InodeId, i64)> {
         let slots: &[_] = if self.occupied.load(Ordering::SeqCst) {
             &self.slots
         } else {
             &[]
         };
-        slots.iter().filter_map(|(slot, value)| {
-            let key = slot.load(Ordering::SeqCst);
-            let value = value.load(Ordering::SeqCst);
-            (key != 0 && value != ATIME_EMPTY).then(|| (key - 1, value))
+        slots.iter().filter_map(|slot| {
+            let held = slot.load();
+            let held = held.as_deref()?;
+            let time = held.time.load(Ordering::SeqCst);
+            (time != ATIME_CLOSED).then_some((held.inode, time))
         })
     }
 
     /// Drops every entry `covered` says a publication now carries. Caller
-    /// holds the state mutex. Slots are freed only if no recorder is inside;
-    /// otherwise their times are cleared and the slots are reused or freed by
-    /// a later sweep.
+    /// holds the state mutex, which makes this the only sweep running. A
+    /// time raised after `covered` saw it stays for a later sweep.
     fn sweep_locked(&self, covered: impl Fn(InodeId, i64) -> bool) {
         if !self.occupied.swap(false, Ordering::SeqCst) {
             return;
         }
-        let exclusive = self.gate.try_write();
         let mut left = false;
-        for (slot, value) in self.slots.iter() {
-            let key = slot.load(Ordering::SeqCst);
-            if key == 0 {
+        for slot in self.slots.iter() {
+            let Some(held) = slot.load_full() else {
                 continue;
-            }
-            let current = value.load(Ordering::SeqCst);
-            if current != ATIME_EMPTY && !covered(key - 1, current) {
+            };
+            let time = held.time.load(Ordering::SeqCst);
+            // Closing fails if a recorder raised the time just now. Once
+            // closed, no recorder writes here again, and recorders only
+            // ever fill empty slots, so the slot is still this one.
+            if time != ATIME_CLOSED
+                && (!covered(held.inode, time)
+                    || held
+                        .time
+                        .compare_exchange(time, ATIME_CLOSED, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_err())
+            {
                 left = true;
                 continue;
             }
-            if exclusive.is_some() {
-                value.store(ATIME_EMPTY, Ordering::SeqCst);
-                slot.store(0, Ordering::SeqCst);
-            } else {
-                // The slot stays claimed for a later sweep to free.
-                left = true;
-            }
-            if exclusive.is_none() && current != ATIME_EMPTY {
-                // A recorder may be raising this time right now: clear only
-                // the value that was published.
-                let _ = value.compare_exchange(
-                    current,
-                    ATIME_EMPTY,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
-            }
+            slot.compare_and_swap(&Some(held), None);
         }
         if left {
             self.occupied.store(true, Ordering::SeqCst);
@@ -722,7 +752,7 @@ impl StateCell {
             next_fd: Padded(std::sync::atomic::AtomicU64::new(3)),
             atimes: PendingAtimes::new(),
             atime_overflow: AtomicBool::new(!state.pending_atime.is_empty()),
-            mutex: mount_rs_core::turn_cell::TurnCell::new(state),
+            mutex: mount_rs_core::park_cell::ParkCell::new(state),
         }
     }
 
@@ -781,7 +811,7 @@ impl StateCell {
 }
 
 struct StateGuard<'a> {
-    guard: mount_rs_core::turn_cell::TurnCellGuard<'a, RuntimeState>,
+    guard: mount_rs_core::park_cell::ParkCellGuard<'a, RuntimeState>,
     cell: &'a StateCell,
     seen_namespace: *const Namespace,
     seen_locked_reads: bool,
@@ -820,16 +850,16 @@ impl StateGuard<'_> {
     fn pending_atime_for(&self, inode: InodeId) -> Option<i64> {
         self.cell
             .atimes
-            .get_admitted(inode)
+            .get(inode)
             .max(self.guard.pending_atime.get(&inode).copied())
     }
 
     fn has_pending_atime(&self) -> bool {
-        !self.guard.pending_atime.is_empty() || self.cell.atimes.entries_locked().next().is_some()
+        !self.guard.pending_atime.is_empty() || self.cell.atimes.entries().next().is_some()
     }
 
     fn record_atime(&mut self, inode: InodeId, atime_ms: i64) {
-        if !self.cell.atimes.record_admitted(inode, atime_ms) {
+        if !self.cell.atimes.record(inode, atime_ms) {
             self.guard
                 .pending_atime
                 .entry(inode)
@@ -930,10 +960,79 @@ fn retained_bit(inode: InodeId) -> u64 {
 }
 
 fn retained_filter(state: &RuntimeState) -> u64 {
-    state
-        .orphans
-        .keys()
-        .fold(0, |filter, inode| filter | retained_bit(*inode))
+    state.orphans.filter
+}
+
+/// The retained inodes, with their `retained_bit` filter kept alongside so
+/// that taking and releasing the state lock does not fold over every one of
+/// them. Reads go through `Deref`; the only ways to change which inodes are
+/// present are the methods here, each of which updates the filter.
+struct Orphans {
+    nodes: HashMap<InodeId, NodeMetadata>,
+    /// How many retained inodes map to each filter bit.
+    sharing: [u32; 64],
+    /// The bits whose count is not zero: `retained_bit` of every key.
+    filter: u64,
+}
+
+impl Default for Orphans {
+    fn default() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            sharing: [0; 64],
+            filter: 0,
+        }
+    }
+}
+
+impl std::ops::Deref for Orphans {
+    type Target = HashMap<InodeId, NodeMetadata>;
+    fn deref(&self) -> &Self::Target {
+        &self.nodes
+    }
+}
+
+impl Orphans {
+    fn added(&mut self, inode: InodeId) {
+        let bit = retained_bit(inode);
+        self.sharing[bit.trailing_zeros() as usize] += 1;
+        self.filter |= bit;
+    }
+
+    fn insert(&mut self, inode: InodeId, node: NodeMetadata) -> Option<NodeMetadata> {
+        let replaced = self.nodes.insert(inode, node);
+        if replaced.is_none() {
+            self.added(inode);
+        }
+        replaced
+    }
+
+    fn insert_if_absent(&mut self, inode: InodeId, node: NodeMetadata) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.nodes.entry(inode) {
+            entry.insert(node);
+            self.added(inode);
+        }
+    }
+
+    fn remove(&mut self, inode: &InodeId) -> Option<NodeMetadata> {
+        let removed = self.nodes.remove(inode)?;
+        let bit = retained_bit(*inode);
+        let sharing = &mut self.sharing[bit.trailing_zeros() as usize];
+        *sharing -= 1;
+        if *sharing == 0 {
+            self.filter &= !bit;
+        }
+        Some(removed)
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The node only: the key, and so the filter, cannot change through it.
+    fn get_mut(&mut self, inode: &InodeId) -> Option<&mut NodeMetadata> {
+        self.nodes.get_mut(inode)
+    }
 }
 
 /// How many changed inodes `settles_handle_fate` looks at before it gives
@@ -990,7 +1089,7 @@ fn retain_open_detached(state: &mut StateGuard<'_>, next: &Namespace) {
         })
         .collect();
     for (inode, node) in detached {
-        state.orphans.entry(inode).or_insert(node);
+        state.orphans.insert_if_absent(inode, node);
     }
 }
 
@@ -1502,7 +1601,7 @@ where
                     pending_namespace: false,
                     open_refs: HashMap::new(),
                     pending_atime: HashMap::new(),
-                    orphans: HashMap::new(),
+                    orphans: Orphans::default(),
                     failure: None,
                     closed: false,
                 }),
@@ -2057,7 +2156,7 @@ where
                             pending_namespace: false,
                             open_refs: HashMap::new(),
                             pending_atime: HashMap::new(),
-                            orphans: HashMap::new(),
+                            orphans: Orphans::default(),
                             failure: None,
                             closed: false,
                         }),
@@ -2142,7 +2241,7 @@ where
                     pending_namespace: false,
                     open_refs: HashMap::new(),
                     pending_atime: HashMap::new(),
-                    orphans: HashMap::new(),
+                    orphans: Orphans::default(),
                     failure: None,
                     closed: false,
                 }),
@@ -2402,15 +2501,17 @@ where
         self.validate_lease().await?;
         self.drain_writeback().await?;
         let (namespace, _) = self.snapshot()?;
-        let live = {
+        // The namespace is a private copy: scan it without the state lock,
+        // which is only needed for the retained inodes. The lifecycle and
+        // operation gates held above keep both from changing in between.
+        let mut live = BTreeSet::new();
+        collect_block_roots(&namespace, &mut live);
+        {
             let state = self.lock_state()?;
-            let mut live = BTreeSet::new();
-            collect_block_roots(&namespace, &mut live);
             for node in state.orphans.values() {
                 collect_block_roots_from_node(node, &mut live);
             }
-            live
-        };
+        }
         self.inner.blocks.reconcile(&live, grace).await
     }
 
@@ -2460,7 +2561,7 @@ where
                     .pending_atime
                     .iter()
                     .map(|(inode, atime_ms)| (*inode, *atime_ms))
-                    .chain(state.cell.atimes.entries_locked())
+                    .chain(state.cell.atimes.entries())
                     .collect::<Vec<_>>(),
                 state.revision,
             )
@@ -3263,9 +3364,10 @@ where
             return Ok(());
         }
         let cell = &self.inner.state;
-        let pending = match cell.atimes.get(inode) {
-            Ok(pending) if !cell.atime_overflow.load(Ordering::SeqCst) => pending,
-            _ => self.lock_state()?.pending_atime_for(inode),
+        let pending = if cell.atime_overflow.load(Ordering::SeqCst) {
+            self.lock_state()?.pending_atime_for(inode)
+        } else {
+            cell.atimes.get(inode)
         };
         if let Some(atime_ms) = pending {
             stats.atime_ms = stats.atime_ms.max(atime_ms);
@@ -9746,25 +9848,148 @@ mod tests {
     }
 
     #[test]
+    fn retained_filter_stays_in_step_with_the_orphans() {
+        let folded = |orphans: &Orphans| {
+            orphans
+                .keys()
+                .fold(0, |filter, inode| filter | retained_bit(*inode))
+        };
+        let mut orphans = Orphans::default();
+        let mut random = 0x9e37_79b9_7f4a_7c15_u64;
+        for step in 0..20_000 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            // More inodes than filter bits, so bits are shared.
+            let inode = random % 300;
+            let node = new_directory_node(inode, 0o700, 0, 0);
+            match (random >> 32) % 8 {
+                0..=2 => {
+                    orphans.insert(inode, node);
+                }
+                3 => orphans.insert_if_absent(inode, node),
+                4..=6 => {
+                    orphans.remove(&inode);
+                }
+                _ if step % 97 == 0 => orphans.clear(),
+                _ => {
+                    orphans.get_mut(&inode);
+                }
+            }
+            assert_eq!(orphans.filter, folded(&orphans));
+        }
+    }
+
+    #[test]
     fn pending_atime_sweeps_skip_an_empty_table() {
         let atimes = PendingAtimes::new();
         let occupied = |atimes: &PendingAtimes| atimes.occupied.load(Ordering::SeqCst);
         assert!(!occupied(&atimes));
-        assert_eq!(atimes.entries_locked().count(), 0);
+        assert_eq!(atimes.entries().count(), 0);
         assert!(atimes.record(5, 100));
         assert!(occupied(&atimes));
-        assert_eq!(atimes.entries_locked().collect::<Vec<_>>(), [(5, 100)]);
+        assert_eq!(atimes.entries().collect::<Vec<_>>(), [(5, 100)]);
         // A publication that does not carry the time leaves it pending.
         atimes.sweep_locked(|_, _| false);
         assert!(occupied(&atimes));
-        assert_eq!(atimes.get(5), Ok(Some(100)));
+        assert_eq!(atimes.get(5), Some(100));
         atimes.sweep_locked(|_, _| true);
         assert!(!occupied(&atimes));
-        assert_eq!(atimes.entries_locked().count(), 0);
-        assert_eq!(atimes.get(5), Ok(None));
+        assert_eq!(atimes.entries().count(), 0);
+        assert_eq!(atimes.get(5), None);
         assert!(atimes.record(5, 200));
         assert!(occupied(&atimes));
-        assert_eq!(atimes.get(5), Ok(Some(200)));
+        assert_eq!(atimes.get(5), Some(200));
+    }
+
+    /// Recorders race the sweep. A time carries its inode in its high
+    /// digits, so one filed under another inode would show; and the latest
+    /// time recorded for each inode must end up published or still pending.
+    #[test]
+    fn atime_recorders_racing_the_sweep_keep_every_time_with_its_inode() {
+        use std::sync::atomic::AtomicI64;
+        const INODES: u64 = 3000;
+        const SPAN: i64 = 1 << 32;
+        let atimes = PendingAtimes::new();
+        let published: Vec<AtomicI64> = (0..INODES).map(|_| AtomicI64::new(0)).collect();
+        // What the table had no room for, as `RuntimeState::pending_atime`.
+        let overflow = std::sync::Mutex::new(HashMap::<u64, i64>::new());
+        let clock = AtomicI64::new(1);
+        let stop = AtomicBool::new(false);
+        let check = |inode: u64, time: i64| {
+            assert_eq!(time / SPAN, inode as i64, "time filed under another inode");
+        };
+        let latest = std::thread::scope(|scope| {
+            let recorders: Vec<_> = (0..6_u64)
+                .map(|thread| {
+                    let (atimes, overflow, clock) = (&atimes, &overflow, &clock);
+                    scope.spawn(move || {
+                        let mut latest = HashMap::new();
+                        let mut random = 0x9e37_79b9_7f4a_7c15_u64.wrapping_mul(thread + 1);
+                        for _ in 0..60_000 {
+                            random ^= random << 13;
+                            random ^= random >> 7;
+                            random ^= random << 17;
+                            // A few hot inodes and a long tail that fills
+                            // the probe windows.
+                            let inode = if random & 3 == 0 {
+                                random % INODES
+                            } else {
+                                (random >> 8) % 16
+                            };
+                            let time = inode as i64 * SPAN + clock.fetch_add(1, Ordering::SeqCst);
+                            if !atimes.record(inode, time) {
+                                let mut overflow = overflow.lock().unwrap();
+                                let pending = overflow.entry(inode).or_insert(time);
+                                *pending = (*pending).max(time);
+                            }
+                            latest.insert(inode, time);
+                        }
+                        latest
+                    })
+                })
+                .collect();
+            let sweeper = scope.spawn(|| {
+                while !stop.load(Ordering::SeqCst) {
+                    // As a publication does: capture, publish, then sweep
+                    // what the publication carries.
+                    for (inode, time) in atimes.entries().collect::<Vec<_>>() {
+                        check(inode, time);
+                        published[inode as usize].fetch_max(time, Ordering::SeqCst);
+                    }
+                    atimes.sweep_locked(|inode, time| {
+                        check(inode, time);
+                        published[inode as usize].load(Ordering::SeqCst) >= time
+                    });
+                }
+            });
+            let mut latest = HashMap::<u64, i64>::new();
+            for recorder in recorders {
+                for (inode, time) in recorder.join().unwrap() {
+                    let entry = latest.entry(inode).or_insert(time);
+                    *entry = (*entry).max(time);
+                }
+            }
+            stop.store(true, Ordering::SeqCst);
+            sweeper.join().unwrap();
+            latest
+        });
+        let overflow = overflow.into_inner().unwrap();
+        for (inode, time) in latest {
+            let kept = published[inode as usize]
+                .load(Ordering::SeqCst)
+                .max(atimes.get(inode).unwrap_or(0))
+                .max(overflow.get(&inode).copied().unwrap_or(0));
+            assert!(kept >= time, "inode {inode}: lost {time}, kept {kept}");
+            check(inode, kept);
+        }
+        // Everything left is published by one more round and then freed.
+        for (inode, time) in atimes.entries().collect::<Vec<_>>() {
+            check(inode, time);
+        }
+        atimes.sweep_locked(|_, _| true);
+        assert_eq!(atimes.entries().count(), 0);
+        assert!(!atimes.occupied.load(Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -10005,7 +10230,7 @@ mod tests {
         }
         drop(operation_gate);
         assert!(fs.lock_state().unwrap().pending_atime.is_empty());
-        let recorded = fs.inner.state.atimes.get(inode).unwrap().unwrap();
+        let recorded = fs.inner.state.atimes.get(inode).unwrap();
         assert!(recorded >= before.atime_ms);
         assert_eq!(block_on(handle.stat()).unwrap().atime_ms, recorded);
 
@@ -10014,12 +10239,12 @@ mod tests {
         let later = recorded + 60_000;
         assert!(fs.inner.state.atimes.record(inode, later));
         block_on(fs.publish_namespace(revision, candidate, false)).unwrap();
-        assert_eq!(fs.inner.state.atimes.get(inode), Ok(Some(later)));
+        assert_eq!(fs.inner.state.atimes.get(inode), Some(later));
         assert_eq!(block_on(fs.stat("/file")).unwrap().atime_ms, later);
 
         // The next durability boundary publishes it and frees the slot.
         block_on(fs.syncfs()).unwrap();
-        assert_eq!(fs.inner.state.atimes.get(inode), Ok(None));
+        assert_eq!(fs.inner.state.atimes.get(inode), None);
         assert!(!fs.lock_state().unwrap().has_pending_atime());
         let persisted = block_on(metadata.load()).unwrap().namespace.unwrap();
         assert_eq!(persisted.nodes[&inode].stats.atime_ms, later);

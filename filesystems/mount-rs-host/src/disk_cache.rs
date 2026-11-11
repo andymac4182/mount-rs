@@ -169,8 +169,9 @@ struct Queued {
 /// The index and the commits waiting to be applied to it. There is no lock.
 ///
 /// One thread at a time has the turn, taken with a compare-and-swap, and
-/// nothing done under it touches a file except the rare removal of a corrupt
-/// entry and the invalidations that already exclude every fill and read. A
+/// nothing done under it touches a file: evictions, corrupt entries and
+/// invalidations only drop index entries there, and the files are removed
+/// (and, for an invalidation, the directory synced) once the turn is over. A
 /// commit never waits: it is pushed on a lock-free stack, and its thread
 /// applies the stack if the turn is free; if it is not, whoever has the turn
 /// applies it before or just after leaving. An operation that needs an
@@ -506,15 +507,6 @@ impl Disk {
         }
         self.stats.resident_entries = self.entries.len();
     }
-    fn remove(&mut self, key: &str) -> std::io::Result<()> {
-        match fs::remove_file(self.root.join(key)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        self.forget(key);
-        Ok(())
-    }
     /// Evicts until an entry of `size` bytes fits. `false` means it cannot:
     /// what is left of the budget is reserved by fills still being written.
     /// Eviction here is the index update alone; the files go once the mutex
@@ -564,9 +556,10 @@ impl Disk {
             std::io::ErrorKind::NotFound => self.forget(key),
             std::io::ErrorKind::InvalidData => {
                 self.stats.corruptions += 1;
-                if self.remove(key).is_err() {
-                    self.disable();
-                }
+                // The file goes once the turn is over, like an eviction's;
+                // failing to remove it disables the cache there.
+                self.forget(key);
+                self.evicted.push(key.to_owned());
             }
             _ => self.disable(),
         }
@@ -795,6 +788,38 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
         .await
         .map_err(error)?
     }
+    /// Invalidation: drops the entries `select` names from the index, then
+    /// removes their files and syncs the directory. Only the index update
+    /// has the index's turn; the directory work follows it, in the same
+    /// worker and so still under `guard`, which is the exclusive I/O guard:
+    /// no fill can put a file back and no read can open one meanwhile. The
+    /// inner result is the durable invalidation's; a failure disables the
+    /// cache.
+    async fn invalidate<G: Send + 'static>(
+        &self,
+        guard: G,
+        select: impl FnOnce(&Disk) -> Vec<String> + Send + 'static,
+    ) -> Result<(G, Result<()>)> {
+        let permit = self.workers.clone().acquire_owned().await.map_err(error)?;
+        let (disk, root) = (self.disk.clone(), self.root.clone());
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let keys = with_disk(&disk, |disk| {
+                let keys = select(disk);
+                for key in &keys {
+                    disk.forget(key);
+                }
+                keys
+            })?;
+            let synced = unlink(&root, &keys).and_then(|()| File::open(&*root)?.sync_all());
+            if synced.is_err() {
+                with_disk(&disk, Disk::disable)?;
+            }
+            Ok((guard, synced.map_err(error)))
+        })
+        .await
+        .map_err(error)?
+    }
     async fn read_cached<G: Send + 'static>(
         &self,
         guard: G,
@@ -938,22 +963,9 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
     /// Clear only cached copies. A failure disables cache reads/admission.
     pub async fn clear(&self) -> Result<()> {
         let guard = self.io.clone().write_owned().await;
-        self.disk(guard, |disk| {
-            for key in disk.entries.keys().cloned().collect::<Vec<_>>() {
-                if let Err(e) = disk.remove(&key) {
-                    disk.disable();
-                    return Err(error(e));
-                }
-            }
-            File::open(&disk.root)
-                .and_then(|file| file.sync_all())
-                .map_err(|e| {
-                    disk.disable();
-                    error(e)
-                })
-        })
-        .await?
-        .1
+        self.invalidate(guard, |disk| disk.entries.keys().cloned().collect())
+            .await?
+            .1
     }
 }
 #[async_trait]
@@ -1000,19 +1012,12 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
     async fn delete(&self, id: &BlockId) -> Result<()> {
         let guard = self.io.clone().write_owned().await;
         let key = digest(id.0.as_bytes());
-        let (_guard, invalidation) = self
-            .disk(guard, move |disk| {
-                let result = disk
-                    .remove(&key)
-                    .and_then(|()| File::open(&disk.root)?.sync_all());
-                result.map_err(|e| {
-                    disk.disable();
-                    error(e)
-                })
-            })
-            .await?;
+        // The file is removed whether or not the index names it.
+        let (_guard, invalidation) = self.invalidate(guard, move |_| vec![key]).await?;
         // A restart must not resurrect a cached copy of an authoritative delete.
         // If durable invalidation fails, do not start the backing deletion.
+        // The exclusive guard is kept until that deletion has answered, so no
+        // fill can put the file back between its removal and then.
         invalidation?;
         self.backing.delete(id).await
     }
@@ -1657,6 +1662,47 @@ mod tests {
         assert_eq!(cache.get(&id).await.unwrap(), b"safe");
         assert_eq!(fs::read(outside).unwrap(), b"unchanged");
         assert_eq!(cache.stats().await.unwrap().corruptions, 1);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn invalidation_removes_files_durably_while_the_index_stays_available() {
+        let root = tempfile::tempdir().unwrap();
+        let backing = Arc::new(Backing::default());
+        let cache = DiskCachedBlockStore::open(backing.clone(), root.path(), "scope", 1 << 20, 64)
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for block in 0..32_u32 {
+            ids.push(cache.put(&block.to_le_bytes()).await.unwrap());
+        }
+        // Statistics take the index's turn with no I/O exclusion, so they
+        // run alongside the invalidations' directory work.
+        let watcher = cache.clone();
+        let watching = tokio::spawn(async move {
+            for _ in 0..200 {
+                watcher.stats().await.unwrap();
+            }
+        });
+        for id in &ids[..16] {
+            cache.delete(id).await.unwrap();
+            // Gone from the directory by the time the delete returns.
+            assert!(!cache_path(root.path(), "scope", id).exists());
+            assert!(backing.get(id).await.is_err());
+        }
+        assert_eq!(cache.stats().await.unwrap().resident_entries, 16);
+        cache.clear().await.unwrap();
+        for id in &ids[16..] {
+            assert!(!cache_path(root.path(), "scope", id).exists());
+        }
+        watching.await.unwrap();
+        let stats = cache.stats().await.unwrap();
+        assert_eq!((stats.resident_entries, stats.resident_bytes), (0, 0));
+        assert!(!stats.disabled);
+        // A restart finds nothing to resurrect.
+        drop(cache);
+        let reopened = DiskCachedBlockStore::open(backing, root.path(), "scope", 1 << 20, 64)
+            .await
+            .unwrap();
+        assert_eq!(reopened.stats().await.unwrap().resident_entries, 0);
     }
     #[tokio::test]
     async fn failed_eviction_disables_cache_and_failed_invalidation_preserves_backing() {

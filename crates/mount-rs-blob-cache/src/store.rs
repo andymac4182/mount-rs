@@ -2,12 +2,10 @@ use crate::*;
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use mount_rs_core::storage::{BlockReconcileReport, BlockStore};
-use mount_rs_core::turn_cell::TurnCell;
-use mount_rs_core::turn_gate::TurnLock;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::{
-        Arc, Weak,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -71,7 +69,7 @@ pub struct DistributedRuntime {
     advertisements: mpsc::Sender<Advertisement>,
     advertisement_period: Option<Duration>,
     misses: Arc<Semaphore>,
-    flights: TurnCell<BTreeMap<String, Weak<TurnLock<()>>>>,
+    flights: crate::flights::Flights,
     stopping: AtomicBool,
     stop: tokio::sync::watch::Sender<bool>,
     // Set once and only ever swapped out, never loaded, so whoever takes it
@@ -153,7 +151,7 @@ impl DistributedRuntime {
             transport,
             local,
             misses: Arc::new(Semaphore::new(config.max_inflight_misses)),
-            flights: TurnCell::new(BTreeMap::new()),
+            flights: crate::flights::Flights::new(config.max_inflight_misses),
             config,
             queue,
             advertisements,
@@ -217,16 +215,6 @@ impl DistributedRuntime {
             metrics.maintenance_dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
-    fn flight(&self, key: String) -> Result<Arc<TurnLock<()>>> {
-        let mut flights = self.flights.lock().map_err(|_| error())?;
-        flights.retain(|_, f| f.strong_count() > 0);
-        if let Some(f) = flights.get(&key).and_then(Weak::upgrade) {
-            return Ok(f);
-        }
-        let f = Arc::new(TurnLock::new(()));
-        flights.insert(key, Arc::downgrade(&f));
-        Ok(f)
-    }
     pub async fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
         let _ = self.stop.send(true);
@@ -249,6 +237,7 @@ impl Drop for DistributedRuntime {
         }
     }
 }
+#[derive(Clone)]
 struct PendingBlob {
     scope: Arc<CacheScope>,
     id: BlockId,
@@ -264,7 +253,7 @@ pub struct CachedBlockStore {
     scope: ArcSwapOption<(Arc<CacheScope>, CacheKey)>,
     distributed: Option<Arc<DistributedRuntime>>,
     metrics: Arc<CacheMetrics>,
-    pending: TurnCell<Vec<PendingBlob>>,
+    pending: crate::pending::PendingList<PendingBlob>,
     write_gate: mount_rs_core::drain_gate::DrainGate,
     dirty: AtomicBool,
 }
@@ -283,7 +272,7 @@ impl CachedBlockStore {
             scope: ArcSwapOption::empty(),
             distributed: None,
             metrics: Arc::new(CacheMetrics::default()),
-            pending: TurnCell::new(Vec::new()),
+            pending: crate::pending::PendingList::new(),
             write_gate: mount_rs_core::drain_gate::DrainGate::new(),
             dirty: AtomicBool::new(false),
         }
@@ -348,9 +337,7 @@ impl CachedBlockStore {
         if let Some(previous) = self.scope.swap(None) {
             self.cache.unregister_scope(&previous.0);
         }
-        if let Ok(mut p) = self.pending.lock() {
-            p.clear();
-        }
+        self.pending.clear();
     }
     async fn disk_get(&self, scope: &Arc<CacheScope>, id: &BlockId) -> Option<Vec<u8>> {
         let deadline = self
@@ -569,7 +556,7 @@ impl BlockStore for CachedBlockStore {
             && let Some(reservation) = self.cache.reserve_pending(bytes.len())
             && self.policy.verify(&id, bytes).is_ok()
         {
-            self.pending.lock().map_err(|_| error())?.push(PendingBlob {
+            self.pending.push(PendingBlob {
                 scope,
                 id: id.clone(),
                 bytes: Arc::from(bytes),
@@ -607,8 +594,14 @@ impl BlockStore for CachedBlockStore {
                     .acquire_owned()
                     .await
                     .map_err(|_| error())?;
-                let flight = d.flight(digest(&[scope.digest().as_bytes(), id.0.as_bytes()]))?;
-                let _guard = flight.lock().await;
+                // With no room to share, this miss fetches on its own.
+                let flight = d
+                    .flights
+                    .join(digest(&[scope.digest().as_bytes(), id.0.as_bytes()]));
+                let _turn = match &flight {
+                    Some(flight) => Some(flight.turn().lock().await),
+                    None => None,
+                };
                 return self.fetch(&scope, id).await;
             }
             self.fetch(&scope, id).await
@@ -621,7 +614,7 @@ impl BlockStore for CachedBlockStore {
         // it is queued, so the same id always carries the same bytes.
         let writes = self.write_gate.write().await;
         // Take the batch before the barrier: puts completed afterwards wait for a later flush.
-        let pending = std::mem::take(&mut *self.pending.lock().map_err(|_| error())?);
+        let pending = self.pending.take();
         self.backing.flush().await?;
         self.dirty.store(false, Ordering::Release);
         drop(writes);
@@ -652,10 +645,7 @@ impl BlockStore for CachedBlockStore {
     }
     async fn delete(&self, id: &BlockId) -> Result<()> {
         self.backing.delete(id).await?;
-        self.pending
-            .lock()
-            .map_err(|_| error())?
-            .retain(|b| &b.id != id);
+        self.pending.retain(|b| &b.id != id);
         if let Some(scope) = self.current() {
             let permit = self.cache.io_permit().await?;
             let cache = self.cache.clone();
@@ -675,10 +665,7 @@ impl BlockStore for CachedBlockStore {
         grace: Duration,
     ) -> Result<BlockReconcileReport> {
         let report = self.backing.reconcile(live, grace).await?;
-        self.pending
-            .lock()
-            .map_err(|_| error())?
-            .retain(|b| live.contains(&b.id));
+        self.pending.retain(|b| live.contains(&b.id));
         if let Some(scope) = self.current() {
             let permit = self.cache.io_permit().await?;
             let cache = self.cache.clone();
@@ -696,6 +683,7 @@ impl BlockStore for CachedBlockStore {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     struct Backing {
@@ -908,6 +896,119 @@ mod tests {
         assert_eq!(backing.gets.load(Ordering::Relaxed), 1);
         assert_eq!(store.metrics().snapshot().backing_fetches, 1);
         runtime.shutdown().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_misses_on_several_blocks_fetch_each_once_and_return_its_bytes() {
+        let backing = Backing::new();
+        let mut blocks = Vec::new();
+        for n in 0..6u8 {
+            let bytes = vec![n; 16];
+            blocks.push((backing.put(&bytes).await.unwrap(), bytes));
+        }
+        let (_dir, cache, _unused) = fixture(backing.clone());
+        let runtime = runtime(Arc::new(TestPeer {
+            bytes: None,
+            calls: AtomicU64::new(0),
+        }));
+        let store = Arc::new(
+            CachedBlockStore::new(
+                backing.clone(),
+                cache,
+                ScopeIdentity {
+                    cluster: "test".into(),
+                    partition: "p".into(),
+                    drive: "flights".into(),
+                },
+                IntegrityPolicy::Sha256Prefixed,
+            )
+            .with_runtime(runtime.clone()),
+        );
+        store.prepare_concurrent_backing().await.unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(240));
+        let mut tasks = tokio::task::JoinSet::new();
+        for n in 0..240 {
+            let store = store.clone();
+            let (id, bytes) = blocks[n % blocks.len()].clone();
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                assert_eq!(store.get(&id).await.unwrap(), bytes);
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+        // Fewer keys than a probe window holds, so every miss was shared; a
+        // caller that only just missed sharing finds the block cached.
+        assert_eq!(backing.gets.load(Ordering::Relaxed), 6);
+        runtime.shutdown().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_puts_and_flushes_cache_every_block_and_deletes_stay_deleted() {
+        let backing = Backing::new();
+        let (_dir, cache, store) = fixture(backing.clone());
+        store.prepare_concurrent_backing().await.unwrap();
+        let scope = store.current().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flusher = {
+            let store = store.clone();
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                while !stop.load(Ordering::Relaxed) {
+                    store.flush().await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let mut writers = tokio::task::JoinSet::new();
+        for writer in 0..4u8 {
+            let store = store.clone();
+            writers.spawn(async move {
+                let mut kept = Vec::new();
+                for n in 0..10u8 {
+                    kept.push(store.put(&[writer, n, 0]).await.unwrap());
+                    tokio::task::yield_now().await;
+                }
+                kept
+            });
+        }
+        let mut kept = Vec::new();
+        while let Some(ids) = writers.join_next().await {
+            kept.extend(ids.unwrap());
+        }
+        stop.store(true, Ordering::Relaxed);
+        flusher.await.unwrap();
+        // Deleted before any flush can take them: no flush may cache these.
+        let mut deleted = Vec::new();
+        for n in 0..15u8 {
+            deleted.push(store.put(&[9, n, 1]).await.unwrap());
+        }
+        let mut deleters = tokio::task::JoinSet::new();
+        for id in deleted.clone() {
+            let store = store.clone();
+            deleters.spawn(async move { store.delete(&id).await.unwrap() });
+        }
+        while let Some(result) = deleters.join_next().await {
+            result.unwrap();
+        }
+        store.flush().await.unwrap();
+        for id in &deleted {
+            assert!(
+                cache
+                    .get_memory(&scope, id, IntegrityPolicy::Sha256Prefixed)
+                    .is_none(),
+                "a deleted block was cached by a later flush"
+            );
+        }
+        for id in &kept {
+            assert!(
+                cache
+                    .get_memory(&scope, id, IntegrityPolicy::Sha256Prefixed)
+                    .is_some(),
+                "a flushed block was not cached"
+            );
+        }
+        assert_eq!(backing.gets.load(Ordering::Relaxed), 0);
     }
     #[tokio::test]
     async fn corrupt_peer_content_falls_back_and_opaque_peer_content_is_usable() {

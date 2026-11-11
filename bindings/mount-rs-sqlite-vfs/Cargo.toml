@@ -16,6 +16,7 @@ remote-harness = ["tokio-executor", "dep:mount-rs-pglite", "dep:mount-rs-r2"]
 pglite-harness = ["tokio-executor", "dep:mount-rs-pglite"]
 
 [dependencies]
+arc-swap = "1.9"
 libc = "0.2"
 mount-rs-core = { path = "../.." }
 mount-rs-pglite = { path = "../../providers/mount-rs-pglite", optional = true }

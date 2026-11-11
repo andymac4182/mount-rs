@@ -1434,10 +1434,16 @@ pub fn active_lock_node(lock: &crate::locks::DavLock, now: i64) -> XmlNode {
     node
 }
 
-pub fn lock_discovery_node(locks: &[crate::locks::DavLock], now: i64) -> XmlNode {
+pub fn lock_discovery_node<L>(locks: &[L], now: i64) -> XmlNode
+where
+    L: std::borrow::Borrow<crate::locks::DavLock>,
+{
     let mut root = XmlNode::dav("lockdiscovery");
-    root.children
-        .extend(locks.iter().map(|lock| active_lock_node(lock, now)));
+    root.children.extend(
+        locks
+            .iter()
+            .map(|lock| active_lock_node(lock.borrow(), now)),
+    );
     root
 }
 

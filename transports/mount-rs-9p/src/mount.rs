@@ -205,11 +205,12 @@ pub struct P9Mount {
 
 struct MountState {
     stopping: AtomicBool,
-    unmount_lock: TurnLock<()>,
     /// Whether the server, its serve task and the socket directory have been
     /// released. Holding the lock is the release in progress, so the
     /// connection monitor, `wait_closed` and `unmount` run it one at a time
     /// and a caller that arrives second waits for the first to finish.
+    /// `unmount` holds it from before the kernel unmount until the release
+    /// is done, so it also orders one unmount after another.
     release: TurnLock<Release>,
     server: Arc<P9Server>,
     socket_dir: Option<PathBuf>,
@@ -242,9 +243,14 @@ impl P9Mount {
     /// so the operation can be retried, matching the upstream lifecycle
     /// contract.
     pub async fn unmount(&self) -> io::Result<()> {
-        let _unmount = self.state.unmount_lock.lock().await;
+        // The holder waits only for the unmount helper, the server close and
+        // the serve task; none of them takes this lock.
+        let mut release = self.state.release.lock().await;
         self.state.stopping.store(true, Ordering::Release);
-        let result = self.unmount_once().await;
+        let result = match unmount_path(&self.mountpoint, self.state.timeout).await {
+            Ok(()) => self.state.finish_locked(&mut release).await,
+            Err(error) => Err(error),
+        };
         if let Err(error) = &result {
             // The mount is still live, so keep answering it and allow a later
             // call to retry after the process holding the mount lets go.
@@ -253,11 +259,6 @@ impl P9Mount {
         }
         result
     }
-
-    async fn unmount_once(&self) -> io::Result<()> {
-        unmount_path(&self.mountpoint, self.state.timeout).await?;
-        self.state.finish_resources().await
-    }
 }
 
 impl MountState {
@@ -265,6 +266,11 @@ impl MountState {
     /// unreleased so a later call tries again.
     async fn finish_resources(&self) -> io::Result<()> {
         let mut release = self.release.lock().await;
+        self.finish_locked(&mut release).await
+    }
+
+    /// The release itself, for a caller that already holds `release`.
+    async fn finish_locked(&self, release: &mut Release) -> io::Result<()> {
         if release.done {
             return Ok(());
         }
@@ -635,7 +641,6 @@ where
     let connection_for_monitor = connection.clone();
     let state = Arc::new(MountState {
         stopping: AtomicBool::new(false),
-        unmount_lock: TurnLock::new(()),
         release: TurnLock::new(Release {
             done: false,
             serve_task,

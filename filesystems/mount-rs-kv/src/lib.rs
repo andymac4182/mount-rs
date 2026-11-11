@@ -17,6 +17,7 @@ use mount_rs_core::error::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_core::handle::{OpenFlags, checked_position};
 use mount_rs_core::park_cell::{ParkCell, ParkCellGuard};
 use mount_rs_core::path::{basename, dirname, is_path_inside, normalize_path, split_path};
+use mount_rs_core::turn_gate::TurnGate;
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, now_ms,
 };
@@ -127,6 +128,28 @@ struct OpenFile {
     dirty: bool,
     /// An unlinked/replaced file remains readable but must never reappear.
     orphan: bool,
+    /// Set, under this entry's lock, by the last close as it takes the
+    /// entry out of the open-file table. An open that picked the entry up
+    /// from the table just before must not use it: the next open would build
+    /// a second buffer for the same file and one of their saves would be
+    /// lost. It looks the path up again instead.
+    detached: bool,
+}
+
+/// An open file's buffer, with the turn its saves take.
+struct OpenEntry {
+    file: ParkCell<OpenFile>,
+    /// Held from a save's snapshot of the buffer until the store has
+    /// answered, so two saves of one file reach the store in the order of
+    /// their snapshots: an older save cannot land on top of a newer one.
+    saving: TurnGate,
+}
+
+impl std::ops::Deref for OpenEntry {
+    type Target = ParkCell<OpenFile>;
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
 }
 
 struct State {
@@ -134,7 +157,7 @@ struct State {
     next_fd: u64,
     attributes: HashMap<String, Attributes>,
     empty_directories: HashSet<String>,
-    open_files: HashMap<String, Arc<ParkCell<OpenFile>>>,
+    open_files: HashMap<String, Arc<OpenEntry>>,
 }
 
 struct Inner<S> {
@@ -218,7 +241,7 @@ enum Kind {
 
 struct KvFileHandle<S> {
     inner: Arc<Inner<S>>,
-    entry: Arc<ParkCell<OpenFile>>,
+    entry: Arc<OpenEntry>,
     flags: OpenFlags,
     fd: u64,
     closed: AtomicBool,
@@ -367,7 +390,7 @@ where
         Ok(self.lock_state()?.open_files.contains_key(path))
     }
 
-    fn open_file(&self, path: &str) -> Result<Option<Arc<ParkCell<OpenFile>>>> {
+    fn open_file(&self, path: &str) -> Result<Option<Arc<OpenEntry>>> {
         Ok(self.lock_state()?.open_files.get(path).cloned())
     }
 
@@ -380,16 +403,31 @@ where
         Ok(fd)
     }
 
-    fn remove_open_file_if(&self, path: &str, entry: &Arc<ParkCell<OpenFile>>) -> Result<()> {
+    /// Whether the table held `entry` under `path` and no longer does.
+    fn remove_open_file_if(&self, path: &str, entry: &Arc<OpenEntry>) -> Result<bool> {
         let mut state = self.lock_state()?;
-        if state
+        let held = state
             .open_files
             .get(path)
-            .is_some_and(|current| Arc::ptr_eq(current, entry))
-        {
+            .is_some_and(|current| Arc::ptr_eq(current, entry));
+        if held {
             state.open_files.remove(path);
         }
-        Ok(())
+        Ok(held)
+    }
+
+    /// Counts one more handle on an entry found in the open-file table.
+    /// `false` means the last close took the entry out of the table in the
+    /// meantime, and the caller must look the path up again.
+    fn join_open_file(&self, entry: &Arc<OpenEntry>, syscall: &str) -> Result<bool> {
+        let mut file = entry
+            .lock()
+            .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall(syscall))?;
+        if file.detached {
+            return Ok(false);
+        }
+        file.refs += 1;
+        Ok(true)
     }
 
     fn mark_orphan(&self, path: &str) -> Result<()> {
@@ -403,13 +441,18 @@ where
         Ok(())
     }
 
-    fn remove_closed(&self, entry: &Arc<ParkCell<OpenFile>>) -> Result<()> {
-        let (path, refs, dirty, orphan) = {
-            let file = entry.lock().map_err(|_| FsError::new(ErrorCode::Eio))?;
-            (file.path.clone(), file.refs, file.dirty, file.orphan)
-        };
-        if refs == 0 && (!dirty || orphan) {
-            self.remove_open_file_if(&path, entry)?;
+    fn remove_closed(&self, entry: &Arc<OpenEntry>) -> Result<()> {
+        // The count is read, the entry leaves the table and it is marked
+        // detached all under the entry's lock, which an open must take to
+        // count itself: it either is counted before this looks, and the
+        // entry stays, or finds the mark. Nothing takes this lock while
+        // holding the table's, so nesting them in this order cannot deadlock.
+        let mut file = entry.lock().map_err(|_| FsError::new(ErrorCode::Eio))?;
+        if file.refs == 0
+            && (!file.dirty || file.orphan)
+            && self.remove_open_file_if(&file.path, entry)?
+        {
+            file.detached = true;
         }
         Ok(())
     }
@@ -1549,7 +1592,7 @@ where
         &self,
         path: &str,
         syscall: &str,
-        entry: Option<Arc<ParkCell<OpenFile>>>,
+        entry: Option<Arc<OpenEntry>>,
     ) -> Result<Stats> {
         let attributes = self.attributes_of(path)?;
         let mode = S_IFREG | (attributes.mode.unwrap_or(self.options.file_mode) & 0o7777);
@@ -1608,41 +1651,53 @@ where
         path: &str,
         known: Option<Vec<u8>>,
         syscall: &str,
-    ) -> Result<Arc<ParkCell<OpenFile>>> {
-        if let Some(entry) = self.open_file(path)? {
-            entry
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall(syscall))?
-                .refs += 1;
-            return Ok(entry);
+    ) -> Result<Arc<OpenEntry>> {
+        loop {
+            if let Some(entry) = self.open_file(path)? {
+                if self.join_open_file(&entry, syscall)? {
+                    return Ok(entry);
+                }
+                // Closed under us and out of the table: look again.
+                continue;
+            }
+            // Read again on every pass: the buffer that was just dropped
+            // may have been saved since the last read.
+            let data = match &known {
+                Some(data) => data.clone(),
+                None => self.read_value(path, syscall).await?,
+            };
+            let candidate = Arc::new(OpenEntry {
+                file: ParkCell::new(OpenFile {
+                    path: path.to_owned(),
+                    data,
+                    refs: 1,
+                    dirty: false,
+                    orphan: false,
+                    detached: false,
+                }),
+                saving: TurnGate::new(),
+            });
+            let mut state = self.lock_state()?;
+            if let Some(entry) = state.open_files.get(path).cloned() {
+                drop(state);
+                if self.join_open_file(&entry, syscall)? {
+                    return Ok(entry);
+                }
+                continue;
+            }
+            state
+                .open_files
+                .insert(path.to_owned(), Arc::clone(&candidate));
+            return Ok(candidate);
         }
-        let data = match known {
-            Some(data) => data,
-            None => self.read_value(path, syscall).await?,
-        };
-        let candidate = Arc::new(ParkCell::new(OpenFile {
-            path: path.to_owned(),
-            data,
-            refs: 1,
-            dirty: false,
-            orphan: false,
-        }));
-        let mut state = self.lock_state()?;
-        if let Some(entry) = state.open_files.get(path).cloned() {
-            drop(state);
-            entry
-                .lock()
-                .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall(syscall))?
-                .refs += 1;
-            return Ok(entry);
-        }
-        state
-            .open_files
-            .insert(path.to_owned(), Arc::clone(&candidate));
-        Ok(candidate)
     }
 
-    async fn flush(&self, entry: &Arc<ParkCell<OpenFile>>) -> Result<()> {
+    async fn flush(&self, entry: &Arc<OpenEntry>) -> Result<()> {
+        // Taken before looking at the buffer, even a clean one: a save in
+        // flight has already marked it clean, and whoever sees it clean
+        // (the last close, about to drop the buffer) must find the store
+        // already holding it.
+        let _saving = entry.saving.lock().await;
         let snapshot = {
             let mut file = entry
                 .lock()
@@ -1662,7 +1717,7 @@ where
         Ok(())
     }
 
-    async fn release(&self, entry: &Arc<ParkCell<OpenFile>>) -> Result<()> {
+    async fn release(&self, entry: &Arc<OpenEntry>) -> Result<()> {
         {
             let mut file = entry
                 .lock()

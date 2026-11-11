@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::park_cell::ParkCell;
@@ -40,8 +41,6 @@ struct Entry {
 
 #[derive(Debug)]
 struct HandleState {
-    verifier: [u8; 8],
-    stable_inode_ids: bool,
     next_id: u64,
     by_id: HashMap<u64, Entry>,
     by_path: HashMap<String, u64>,
@@ -69,6 +68,11 @@ impl<T: std::fmt::Debug> std::fmt::Debug for CellDebug<'_, T> {
 #[derive(Clone)]
 pub struct FileHandleTable {
     state: Arc<ParkCell<HandleState>>,
+    /// Fixed for the life of the table, so every clone carries its own copy
+    /// and building or checking a handle does not take the cell.
+    verifier: [u8; 8],
+    /// Set at most once and never cleared; shared by every clone.
+    stable_inode_ids: Arc<AtomicBool>,
     use_driver_ino: bool,
     max_handles: usize,
 }
@@ -77,6 +81,8 @@ impl std::fmt::Debug for FileHandleTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileHandleTable")
             .field("state", &CellDebug(&self.state))
+            .field("verifier", &self.verifier)
+            .field("stable_inode_ids", &self.stable_inode_ids)
             .field("use_driver_ino", &self.use_driver_ino)
             .field("max_handles", &self.max_handles)
             .finish()
@@ -116,8 +122,6 @@ impl FileHandleTable {
         by_id.insert(ROOT_HANDLE_ID, root);
         Self {
             state: Arc::new(ParkCell::new(HandleState {
-                verifier,
-                stable_inode_ids: false,
                 next_id: ROOT_HANDLE_ID + 1,
                 by_id,
                 by_path: HashMap::from([(String::from("/"), ROOT_HANDLE_ID)]),
@@ -125,13 +129,15 @@ impl FileHandleTable {
                 lru: BTreeMap::new(),
                 next_use: 1,
             })),
+            verifier,
+            stable_inode_ids: Arc::new(AtomicBool::new(false)),
             use_driver_ino: options.use_driver_ino,
             max_handles: options.max_handles.filter(|value| *value > 0).unwrap_or(0),
         }
     }
 
     pub fn verifier(&self) -> [u8; 8] {
-        self.state.lock().expect("handle table lock").verifier
+        self.verifier
     }
 
     pub fn size(&self) -> usize {
@@ -141,10 +147,7 @@ impl FileHandleTable {
     /// Trust backend inode keys across remote rename and name replacement.
     /// Enable this only when the driver guarantees IDs cannot be reused.
     pub(crate) fn trust_stable_inode_ids(&self) {
-        self.state
-            .lock()
-            .expect("handle table lock")
-            .stable_inode_ids = true;
+        self.stable_inode_ids.store(true, Ordering::Release);
     }
 
     /// Return one stable snapshot of every live handle, ordered by handle id.
@@ -173,10 +176,9 @@ impl FileHandleTable {
     }
 
     pub fn encode(&self, entry: &HandleEntry) -> Vec<u8> {
-        let verifier = self.verifier();
         let mut handle = vec![0; FH_SIZE];
         handle[0..4].copy_from_slice(&FH_MAGIC.to_be_bytes());
-        handle[4..12].copy_from_slice(&verifier);
+        handle[4..12].copy_from_slice(&self.verifier);
         handle[12..20].copy_from_slice(&entry.id.to_be_bytes());
         handle
     }
@@ -188,8 +190,7 @@ impl FileHandleTable {
         if handle[0..4] != FH_MAGIC.to_be_bytes() {
             return Err(stale("file handle has the wrong magic"));
         }
-        let verifier = self.verifier();
-        if handle[4..12] != verifier {
+        if handle[4..12] != self.verifier {
             return Err(stale("file handle is from a previous server instance"));
         }
         let id = u64::from_be_bytes(handle[12..20].try_into().unwrap());
@@ -380,7 +381,12 @@ impl FileHandleTable {
             // A retained descriptor still owns the old inode even after
             // another mount reuses this name. Keep its opaque handle alive
             // without leaving the new name or inode key bound to it.
-            detach_replaced_locked(&mut state, previous, path);
+            detach_replaced_locked(
+                &mut state,
+                previous,
+                path,
+                self.stable_inode_ids.load(Ordering::Acquire),
+            );
         }
         let bound_key = if let Some(entry) = state.by_id.get_mut(&id) {
             if entry.key.is_none() {
@@ -515,7 +521,12 @@ impl FileHandleTable {
             .map(|(path, id)| (path.clone(), *id))
             .collect();
         for (path, id) in destinations {
-            detach_replaced_locked(&mut state, id, &path);
+            detach_replaced_locked(
+                &mut state,
+                id,
+                &path,
+                self.stable_inode_ids.load(Ordering::Acquire),
+            );
         }
         for (path, id) in affected {
             let suffix = path.strip_prefix(old_path).unwrap_or_default();
@@ -530,7 +541,6 @@ impl FileHandleTable {
     }
 
     pub fn clear(&self) {
-        let verifier = self.verifier();
         let root = Entry {
             id: ROOT_HANDLE_ID,
             fileid: ROOT_HANDLE_ID,
@@ -547,7 +557,6 @@ impl FileHandleTable {
         state.by_path.insert("/".to_owned(), ROOT_HANDLE_ID);
         state.by_key.clear();
         state.lru.clear();
-        state.verifier = verifier;
     }
 }
 
@@ -629,7 +638,7 @@ fn detach_locked(state: &mut HandleState, id: u64, path: &str) {
     }
 }
 
-fn detach_replaced_locked(state: &mut HandleState, id: u64, path: &str) {
+fn detach_replaced_locked(state: &mut HandleState, id: u64, path: &str, stable_inode_ids: bool) {
     detach_preserve_locked(state, id, path);
     let Some(entry) = state.by_id.get(&id) else {
         return;
@@ -637,7 +646,7 @@ fn detach_replaced_locked(state: &mut HandleState, id: u64, path: &str) {
     if !entry.paths.is_empty() || id == ROOT_HANDLE_ID {
         return;
     }
-    if state.stable_inode_ids {
+    if stable_inode_ids {
         // Another server can rename this inode to an unknown alias before
         // placing a new inode at its old name. Its stable key lets a later
         // lookup reconnect the original opaque handle to the moved name.

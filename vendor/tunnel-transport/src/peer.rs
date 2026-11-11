@@ -6,9 +6,8 @@
 //! is evaluated after the peer certificate has been verified and before a
 //! request body is admitted.
 
+use arc_swap::ArcSwap;
 use mount_rs_core::take_cell::TakeCell;
-use mount_rs_core::turn_cell::TurnCell;
-use mount_rs_core::turn_gate::TurnLock;
 use std::{
     collections::HashMap,
     future::Future,
@@ -2238,17 +2237,15 @@ mod peer_pool;
 
 struct PeerPoolState {
     connections: peer_pool::PublishedPool,
-    dial_locks: TurnLock<HashMap<PeerDestination, std::sync::Weak<TurnLock<()>>>>,
+    /// One gate per destination being dialled.  The table is published; the
+    /// gate inside it is still held across the dial, so two callers cannot
+    /// dial one destination at once.
+    dial_locks: peer_pool::DialLocks,
     /// Connections established under a superseded local peer identity that
     /// still carry in-flight streams.  Bounded by
     /// [`MAX_ROTATION_DRAINING_CONNECTIONS`]; each is closed when its streams
     /// finish, at the drain budget, or when its generation is retired.
-    draining: TurnCell<Vec<DrainingConnection>>,
-}
-
-struct DrainingConnection {
-    connection: std::sync::Weak<ClientConnection>,
-    local_generation: u64,
+    draining: peer_pool::DrainSet,
 }
 
 /// The most connections a client keeps draining under a superseded local
@@ -2264,28 +2261,6 @@ struct DrainingConnection {
 /// reached, a destination keeps using its predecessor connection -- whose key
 /// is still approved during the overlap -- instead of tearing it down.
 pub const MAX_ROTATION_DRAINING_CONNECTIONS: usize = 4;
-
-/// The weak marker lives exactly as long as the dialing caller or its waiters.
-/// Cancelled dials therefore cannot retire a gate that still has a waiter.
-fn acquire_dial_entry(
-    locks: &mut HashMap<PeerDestination, std::sync::Weak<TurnLock<()>>>,
-    pool: &peer_pool::PublishedPool,
-    destination: &PeerDestination,
-    max_destinations: usize,
-) -> Result<Arc<TurnLock<()>>, PeerTransportError> {
-    if let Some(gate) = locks.get(destination).and_then(std::sync::Weak::upgrade) {
-        return Ok(gate);
-    }
-    if !locks.contains_key(destination) && locks.len() >= max_destinations {
-        locks.retain(|peer, gate| gate.strong_count() > 0 || pool.get(peer).is_some());
-        if locks.len() >= max_destinations {
-            return Err(PeerTransportError::Capacity);
-        }
-    }
-    let gate = Arc::new(TurnLock::new(()));
-    locks.insert(destination.clone(), Arc::downgrade(&gate));
-    Ok(gate)
-}
 
 /// An on-demand authenticated peer client with one pooled connection and one
 /// in-flight dial per destination.
@@ -2327,8 +2302,8 @@ impl PeerClient {
             connections: Arc::new(Semaphore::new(limits.max_connections)),
             state: Arc::new(PeerPoolState {
                 connections: peer_pool::PublishedPool::default(),
-                dial_locks: TurnLock::new(HashMap::new()),
-                draining: TurnCell::new(Vec::new()),
+                dial_locks: peer_pool::DialLocks::default(),
+                draining: peer_pool::DrainSet::default(),
             }),
             cancel: CancellationToken::new(),
             limits,
@@ -2360,22 +2335,17 @@ impl PeerClient {
     /// is full.  A drained connection closes when its last stream lease is
     /// returned, at the drain budget, or when its generation is retired.
     fn begin_rotation_drain(&self, connection: &Arc<ClientConnection>) -> bool {
-        let mut draining = self.state.draining.lock_recovered();
-        draining.retain(|entry| entry.connection.strong_count() > 0);
-        if draining
-            .iter()
-            .any(|entry| std::ptr::eq(entry.connection.as_ptr(), Arc::as_ptr(connection)))
-        {
-            return true;
+        // The drain task is started only by the caller whose publication
+        // added the connection, so a connection never has two.
+        match self.state.draining.admit(
+            connection,
+            connection.local_generation,
+            MAX_ROTATION_DRAINING_CONNECTIONS,
+        ) {
+            peer_pool::DrainAdmission::Present => return true,
+            peer_pool::DrainAdmission::Full => return false,
+            peer_pool::DrainAdmission::Added => {}
         }
-        if draining.len() >= MAX_ROTATION_DRAINING_CONNECTIONS {
-            return false;
-        }
-        draining.push(DrainingConnection {
-            connection: Arc::downgrade(connection),
-            local_generation: connection.local_generation,
-        });
-        drop(draining);
         let weak = Arc::downgrade(connection);
         let permits = connection.stream_permits.clone();
         let permit_count =
@@ -2401,25 +2371,11 @@ impl PeerClient {
     /// local identity generation older than `generation`, and return how many
     /// were closed.  In-flight streams on them end with a transport error.
     pub async fn retire_local_generations_before(&self, generation: u64) -> usize {
-        let mut retired: Vec<Arc<ClientConnection>> = Vec::new();
-        {
-            let mut draining = self.state.draining.lock_recovered();
-            draining.retain(|entry| {
-                if entry.local_generation < generation {
-                    if let Some(connection) = entry.connection.upgrade() {
-                        retired.push(connection);
-                    }
-                    false
-                } else {
-                    entry.connection.strong_count() > 0
-                }
-            });
-        }
+        let mut retired: Vec<Arc<ClientConnection>> = self.state.draining.retire_before(generation);
         retired.extend(
             self.state
                 .connections
-                .remove_matching(|c| c.local_generation < generation)
-                .await,
+                .remove_matching(|c| c.local_generation < generation),
         );
         let count = retired.len();
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -2433,11 +2389,7 @@ impl PeerClient {
     /// peer identity.  Bounded by [`MAX_ROTATION_DRAINING_CONNECTIONS`].
     #[must_use]
     pub fn draining_connection_count(&self) -> usize {
-        let draining = self.state.draining.lock_recovered();
-        draining
-            .iter()
-            .filter(|entry| entry.connection.strong_count() > 0)
-            .count()
+        self.state.draining.live_count()
     }
 
     /// Return a pooled connection, dialing at most once concurrently for this
@@ -2464,17 +2416,12 @@ impl PeerClient {
             return Ok(PeerConnectionHandle { inner: connection });
         }
         let deadline = Instant::now() + self.limits.handshake_timeout;
-        let entry = {
-            let mut locks =
-                with_checkout_deadline(&self.cancel, deadline, self.state.dial_locks.lock())
-                    .await?;
-            acquire_dial_entry(
-                &mut locks,
-                &self.state.connections,
-                &destination,
-                self.limits.max_destinations,
-            )?
-        };
+        let entry = peer_pool::acquire_dial_entry(
+            &self.state.dial_locks,
+            &self.state.connections,
+            &destination,
+            self.limits.max_destinations,
+        )?;
         let _dial_guard = with_checkout_deadline(&self.cancel, deadline, entry.lock()).await?;
 
         let local_generation = self.local_generation();
@@ -2498,19 +2445,9 @@ impl PeerClient {
             {
                 return Ok(PeerConnectionHandle { inner: connection });
             }
-            with_checkout_deadline(
-                &self.cancel,
-                deadline,
-                self.state.connections.remove(&destination),
-            )
-            .await?;
+            self.state.connections.remove(&destination);
         } else {
-            let previous = with_checkout_deadline(
-                &self.cancel,
-                deadline,
-                self.state.connections.remove(&destination),
-            )
-            .await?;
+            let previous = self.state.connections.remove(&destination);
             if let Some(previous) = previous {
                 previous.shutdown_until(deadline).await?;
             }
@@ -2775,14 +2712,9 @@ impl PeerClient {
             retired: AtomicBool::new(false),
             _connection_permit: connection_permit,
         });
-        with_checkout_deadline(
-            &self.cancel,
-            deadline,
-            self.state
-                .connections
-                .insert(destination, pooled.clone(), &self.cancel),
-        )
-        .await??;
+        self.state
+            .connections
+            .insert(destination, pooled.clone(), &self.cancel)?;
         Ok(PeerConnectionHandle { inner: pooled })
     }
 
@@ -2840,7 +2772,7 @@ impl PeerClient {
         &self,
         destination: &PeerDestination,
     ) -> Result<(), PeerTransportError> {
-        let connection = self.state.connections.remove(destination).await;
+        let connection = self.state.connections.remove(destination);
         if let Some(connection) = connection {
             connection
                 .shutdown_until(Instant::now() + self.limits.drain_timeout)
@@ -2859,8 +2791,7 @@ impl PeerClient {
         let stale = self
             .state
             .connections
-            .remove_matching(|c| !snapshot.contains(c.identity.spki_sha256()))
-            .await;
+            .remove_matching(|c| !snapshot.contains(c.identity.spki_sha256()));
         let count = stale.len();
         let deadline = Instant::now() + self.limits.drain_timeout;
         let mut first_error = None;
@@ -2903,7 +2834,7 @@ impl PeerClient {
     /// Cancel and join every pooled connection driver task.
     pub async fn shutdown(&self) -> Result<(), PeerTransportError> {
         self.cancel.cancel();
-        let connections = self.state.connections.remove_matching(|_| true).await;
+        let connections = self.state.connections.remove_matching(|_| true);
         let deadline = Instant::now() + self.limits.drain_timeout;
         let mut first_error = None;
         for connection in connections {
@@ -3084,7 +3015,7 @@ struct PeerServerConnectionDiagnostics {
 pub struct PeerServerDiagnostics {
     max_connections: usize,
     next_connection_id: AtomicUsize,
-    connections: TurnCell<HashMap<usize, Arc<PeerServerConnectionDiagnostics>>>,
+    connections: ArcSwap<HashMap<usize, Arc<PeerServerConnectionDiagnostics>>>,
 }
 
 impl PeerServerDiagnostics {
@@ -3092,17 +3023,17 @@ impl PeerServerDiagnostics {
         Arc::new(Self {
             max_connections,
             next_connection_id: AtomicUsize::new(1),
-            connections: TurnCell::new(HashMap::new()),
+            connections: ArcSwap::default(),
         })
     }
 
     /// Return a bounded snapshot without exposing request payloads.
     pub fn snapshot(&self) -> PeerServerStats {
-        let connections = match self.connections.lock() {
-            Ok(connections) => connections,
-            Err(_) => return PeerServerStats::default(),
-        };
-        let connections = connections
+        // The quinn statistics read below takes that connection's own
+        // mutex; nothing here is held while it does.
+        let connections = self
+            .connections
+            .load()
             .values()
             .map(|connection| {
                 let stats = connection.connection.stats();
@@ -3147,40 +3078,41 @@ impl PeerServerDiagnostics {
         stream_permits: Arc<Semaphore>,
         max_stream_permits: usize,
     ) -> Option<Arc<PeerServerConnectionDiagnostics>> {
-        let mut connections = self.connections.lock().ok()?;
-        connections.retain(|_, connection| connection.connection.close_reason().is_none());
-        if connections.len() >= self.max_connections {
-            return None;
-        }
-        let observation = Arc::new(PeerServerConnectionDiagnostics {
-            peer_node_id: peer_node_id.to_owned(),
-            observed_server_name: observed_server_name(connection),
-            // Monotonic and non-zero: zero is the callers' "no connection"
-            // sentinel, and a slab-indexed QUIC stable id could be reused by a
-            // later connection while an earlier entry is still being drained.
-            connection_id: self.next_connection_id.fetch_add(1, Ordering::AcqRel),
-            connection: connection.clone(),
-            stream_permits,
-            max_stream_permits,
-            accepted_streams: AtomicU64::new(0),
-            resolving_streams: AtomicU64::new(0),
-            active_streams: AtomicU64::new(0),
-            completed_streams: AtomicU64::new(0),
-            cancelled_streams: AtomicU64::new(0),
-            error_streams: AtomicU64::new(0),
-            planned_goaway_sent: AtomicBool::new(false),
-            forced_stream_cancellation: AtomicBool::new(false),
-            forced_connection_close: AtomicBool::new(false),
-            drain_join_incomplete: AtomicBool::new(false),
-        });
-        connections.insert(observation.connection_id, observation.clone());
-        Some(observation)
+        peer_pool::register_bounded(
+            &self.connections,
+            self.max_connections,
+            |entry| entry.connection.close_reason().is_some(),
+            || {
+                // Monotonic and non-zero: zero is the callers' "no
+                // connection" sentinel, and a slab-indexed QUIC stable id
+                // could be reused by a later connection while an earlier
+                // entry is still being drained.
+                let connection_id = self.next_connection_id.fetch_add(1, Ordering::AcqRel);
+                let observation = Arc::new(PeerServerConnectionDiagnostics {
+                    peer_node_id: peer_node_id.to_owned(),
+                    observed_server_name: observed_server_name(connection),
+                    connection_id,
+                    connection: connection.clone(),
+                    stream_permits,
+                    max_stream_permits,
+                    accepted_streams: AtomicU64::new(0),
+                    resolving_streams: AtomicU64::new(0),
+                    active_streams: AtomicU64::new(0),
+                    completed_streams: AtomicU64::new(0),
+                    cancelled_streams: AtomicU64::new(0),
+                    error_streams: AtomicU64::new(0),
+                    planned_goaway_sent: AtomicBool::new(false),
+                    forced_stream_cancellation: AtomicBool::new(false),
+                    forced_connection_close: AtomicBool::new(false),
+                    drain_join_incomplete: AtomicBool::new(false),
+                });
+                (connection_id, observation)
+            },
+        )
     }
 
     fn unregister(&self, connection_id: usize) {
-        if let Ok(mut connections) = self.connections.lock() {
-            connections.remove(&connection_id);
-        }
+        peer_pool::unregister(&self.connections, connection_id);
     }
 }
 
@@ -4107,6 +4039,7 @@ mod resolver_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::peer_pool::acquire_dial_entry;
     use super::*;
 
     #[tokio::test]
@@ -4339,19 +4272,19 @@ mod tests {
     fn dial_pool_retires_stale_markers_before_enforcing_saturation() {
         let destination = PeerDestination::new("127.0.0.1:1".parse().unwrap(), "peer.test");
         let other = PeerDestination::new("127.0.0.1:2".parse().unwrap(), "peer.test");
-        let mut locks = HashMap::new();
-        let pool = peer_pool::PublishedPool::default();
-        let first = acquire_dial_entry(&mut locks, &pool, &destination, 1).unwrap();
-        let waiter = acquire_dial_entry(&mut locks, &pool, &destination, 1).unwrap();
+        let locks = peer_pool::DialLocks::default();
+        let pool = peer_pool::PublishedPool::<ClientConnection>::default();
+        let first = acquire_dial_entry(&locks, &pool, &destination, 1).unwrap();
+        let waiter = acquire_dial_entry(&locks, &pool, &destination, 1).unwrap();
         assert!(Arc::ptr_eq(&first, &waiter));
         drop(first);
         assert!(matches!(
-            acquire_dial_entry(&mut locks, &pool, &other, 1),
+            acquire_dial_entry(&locks, &pool, &other, 1),
             Err(PeerTransportError::Capacity)
         ));
         drop(waiter);
-        let _replacement = acquire_dial_entry(&mut locks, &pool, &other, 1).unwrap();
-        assert_eq!(locks.len(), 1);
+        let _replacement = acquire_dial_entry(&locks, &pool, &other, 1).unwrap();
+        assert_eq!(locks.load().len(), 1);
     }
 
     #[tokio::test]
@@ -4389,15 +4322,15 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_dial_creator_leaves_one_gate_for_existing_waiters() {
-        let pool = peer_pool::PublishedPool::default();
+        let pool = peer_pool::PublishedPool::<ClientConnection>::default();
         let destination = PeerDestination::new("127.0.0.1:1".parse().unwrap(), "peer.test");
-        let mut locks = HashMap::new();
-        let creator = acquire_dial_entry(&mut locks, &pool, &destination, 1).unwrap();
+        let locks = peer_pool::DialLocks::default();
+        let creator = acquire_dial_entry(&locks, &pool, &destination, 1).unwrap();
         let guard = creator.lock_owned().await;
-        let waiter = acquire_dial_entry(&mut locks, &pool, &destination, 1).unwrap();
+        let waiter = acquire_dial_entry(&locks, &pool, &destination, 1).unwrap();
         assert!(waiter.try_lock().is_none());
         drop(guard);
-        let next = acquire_dial_entry(&mut locks, &pool, &destination, 1).unwrap();
+        let next = acquire_dial_entry(&locks, &pool, &destination, 1).unwrap();
         assert!(Arc::ptr_eq(&waiter, &next));
         let _guard = waiter.try_lock().unwrap();
         assert!(next.try_lock().is_none());

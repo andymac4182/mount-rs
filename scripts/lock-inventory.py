@@ -16,6 +16,7 @@ DEFINING = {"src/turn_cell.rs", "src/park_cell.rs", "src/turn_gate.rs", "src/dra
 QUINN_TURN = re.compile(r"\bTurn<")
 FIELD = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(\w+):\s*(.+?),?\s*(?://.*)?$")
 STATIC = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?static\s+(\w+):\s*(.+?)\s*=")
+ALIAS = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?type\s+(\w+)(?:<[^>]*>)?\s*=\s*(.+?);")
 STRUCT = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+(\w+)(?:<[^>]*>)?(\(.*\);)?")
 TEST_MOD = re.compile(r"^\s*#\[cfg\((?:all\()?test\b")
 
@@ -97,6 +98,12 @@ def fields():
                         # A tuple struct that wraps a lock.
                         if lock_type(path, kind):
                             yield crate_of(path), path, number, owner, "0", kind.strip("();")
+                        continue
+                    # A type alias that hides a lock from the field that uses it.
+                    found = ALIAS.match(line)
+                    if found:
+                        if lock_type(path, found.group(2)):
+                            yield crate_of(path), path, number, "type", found.group(1), found.group(2)
                         continue
                     found = STATIC.match(line)
                     holder = "static"

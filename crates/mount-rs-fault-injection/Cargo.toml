@@ -13,6 +13,7 @@ default = []
 tokio-delay = ["dep:tokio"]
 
 [dependencies]
+arc-swap = "1.9"
 async-trait = "0.1"
 mount-rs-core = { path = "../.." }
 tokio = { version = "1", default-features = false, features = ["time"], optional = true }

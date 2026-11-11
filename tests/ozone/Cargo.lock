@@ -1014,6 +1014,7 @@ dependencies = [
 name = "mount-rs-pglite"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "md-5 0.10.6",
  "mount-rs-core",
@@ -1041,6 +1042,7 @@ dependencies = [
 name = "mount-rs-sqlite"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-io",
  "async-trait",
  "crossbeam-queue",

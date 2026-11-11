@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
+use mount_rs_core::park_cell::{ParkCell, ParkCellGuard};
 use mount_rs_core::types::FileType;
 use napi::bindgen_prelude::{Function, JsObjectValue, Object, Promise, PromiseRaw};
 use napi::{Env, Error as NapiError, JsError, JsRangeError, Status, Unknown, ValueType};
@@ -475,7 +475,9 @@ pub fn is_special_mode(mode: u32) -> bool {
 
 #[derive(Clone, Default)]
 struct NativePathLock {
-    state: Arc<TurnCell<LockState>>,
+    /// A parking cell, not a spinning one: the sections scan the waiter and
+    /// writer lists, so a contender queues instead of burning a core.
+    state: Arc<ParkCell<LockState>>,
 }
 
 #[derive(Default)]
@@ -488,7 +490,7 @@ struct LockState {
     waiters: Vec<Waker>,
 }
 
-fn lock_state(lock: &TurnCell<LockState>) -> TurnCellGuard<'_, LockState> {
+fn lock_state(lock: &ParkCell<LockState>) -> ParkCellGuard<'_, LockState> {
     lock.lock_recovered()
 }
 
@@ -497,7 +499,7 @@ fn take_waiters(state: &mut LockState) -> Vec<Waker> {
 }
 
 struct Acquire {
-    lock: Arc<TurnCell<LockState>>,
+    lock: Arc<ParkCell<LockState>>,
     write: bool,
     writer_ticket: Option<u64>,
     granted: bool,
@@ -575,7 +577,7 @@ impl Drop for Acquire {
 }
 
 struct LockGuard {
-    lock: Arc<TurnCell<LockState>>,
+    lock: Arc<ParkCell<LockState>>,
     write: bool,
 }
 

@@ -1379,6 +1379,8 @@ dependencies = [
 name = "mount-rs-9p"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
+ "im",
  "mount-rs-core",
  "tokio",
 ]
@@ -1387,6 +1389,7 @@ dependencies = [
 name = "mount-rs-auto"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "libc",
  "mount-rs-9p",
  "mount-rs-core",
@@ -1443,6 +1446,7 @@ dependencies = [
 name = "mount-rs-fuse"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "futures-util",
  "libc",
  "mount-rs-core",
@@ -1495,6 +1499,7 @@ dependencies = [
 name = "mount-rs-nfs"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "mount-rs-core",
  "tokio",
 ]
@@ -1527,6 +1532,7 @@ dependencies = [
 name = "mount-rs-pglite"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "md-5 0.10.6",
  "mount-rs-core",
@@ -1599,6 +1605,7 @@ dependencies = [
 name = "mount-rs-sqlite"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-io",
  "async-trait",
  "crossbeam-queue",

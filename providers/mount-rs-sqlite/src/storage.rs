@@ -6,7 +6,7 @@
 #[path = "direct_io_benchmark.rs"]
 mod direct_io_benchmark;
 
-use super::owner::{Owner, State};
+use super::owner::{self, Owner, Settle, State};
 use async_trait::async_trait;
 use mount_rs_core::diagnostics::profile::{self, Event};
 use mount_rs_core::storage::{
@@ -18,7 +18,6 @@ use mount_rs_core::storage::{
 };
 #[cfg(unix)]
 use mount_rs_core::storage::{encode_inode_namespace, validate_inode_publication};
-use mount_rs_core::turn_gate::Served;
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
     VersionPublication, VersionedMetadataStore, VolumeId,
@@ -627,6 +626,21 @@ impl Database {
         let namespace_changes = self.namespace_changes;
         self.owner
             .run(move |state| {
+                Self::fold(namespace_changes, state)?;
+                work(&mut state.connection)
+            })
+            .await?
+    }
+
+    /// `run`, ahead of the jobs that are queued and have not started (see
+    /// `Owner::run_first`). For reads.
+    async fn run_first<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let namespace_changes = self.namespace_changes;
+        self.owner
+            .run_first(move |state| {
                 Self::fold(namespace_changes, state)?;
                 work(&mut state.connection)
             })
@@ -1782,32 +1796,131 @@ pub struct SqliteBlockStore(Database, Arc<PutGroup>);
 /// Puts waiting to share a transaction.
 ///
 /// Every put is durable when it returns, which costs a commit, and commits
-/// on one connection run one at a time. A put that finds another in progress
-/// therefore queues its bytes and waits its turn without holding a thread;
-/// whoever gets the turn commits everything queued in one transaction, and
-/// the others find their block already stored when their turn comes.
+/// on one connection run one at a time, on the connection's thread. A put
+/// leaves its bytes here and sends that thread a job; the job takes
+/// everything that is here when it runs, commits it in one transaction and
+/// answers each put. So the puts that arrive during one commit share the
+/// next, and the jobs sent by the ones already answered find nothing left.
 ///
-/// Reads take the same turn, so a read that arrives during a commit waits
-/// for it without holding a thread either. It does not wait behind the puts
-/// queued ahead of it: it leaves its request in `reading`, and whoever has
-/// the turn answers every queued read before it starts a commit and again
-/// when it has finished one.
+/// There is no turn to take: the thread's queue is the order. A read is
+/// sent to run ahead of the jobs still queued, so it waits for the commit
+/// that is running and not for the ones behind it.
+///
+/// Callers that put in a loop come back a moment after they are answered.
+/// A commit that started the instant the first of them returned would hold
+/// one block, and the rest would wait for it and share the one after: two
+/// commits where one would do. So a job that finds fewer puts than were
+/// in flight when the last transaction committed (the ones it held and the
+/// ones that were waiting behind it) waits for the rest, for at most a
+/// fraction of what that commit took.
 #[derive(Default)]
 struct PutGroup {
-    turn: mount_rs_core::turn_gate::TurnGate,
-    waiting: crossbeam_queue::SegQueue<Arc<WaitingPut>>,
-    reading: crossbeam_queue::SegQueue<Arc<WaitingGet>>,
+    queued: crossbeam_queue::SegQueue<QueuedPut>,
+    /// How many puts were in flight when the last shared transaction
+    /// committed, and how long it took. Written only on the connection's
+    /// thread, and only a hint: nothing depends on its being current.
+    in_flight: std::sync::atomic::AtomicUsize,
+    last_commit_nanos: std::sync::atomic::AtomicU64,
 }
 
-struct WaitingGet {
-    id: BlockId,
-    block: std::sync::OnceLock<Result<Vec<u8>>>,
-    served: Served,
+/// The longest a job waits for more puts, as a divisor of the time the
+/// last shared commit took, and in absolute terms.
+const PUT_GATHER_DIVISOR: u64 = 4;
+const PUT_GATHER_LIMIT: Duration = Duration::from_micros(250);
+
+impl PutGroup {
+    /// Waits for as many puts as were last in flight. Returns at once when
+    /// nothing is queued, when that many already are, or when commits are
+    /// too quick for waiting to save anything.
+    fn gather(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let expected = self.in_flight.load(Relaxed);
+        let queued = self.queued.len();
+        if queued == 0 || queued >= expected {
+            return;
+        }
+        let wait = Duration::from_nanos(self.last_commit_nanos.load(Relaxed) / PUT_GATHER_DIVISOR)
+            .min(PUT_GATHER_LIMIT);
+        let started = Instant::now();
+        while self.queued.len() < expected && started.elapsed() < wait {
+            std::hint::spin_loop();
+        }
+    }
 }
 
-struct WaitingPut {
+struct QueuedPut {
     bytes: Vec<u8>,
-    stored: std::sync::OnceLock<Result<BlockId>>,
+    /// Set on a retry: the block gets a transaction of its own.
+    alone: bool,
+    answer: Settle<PutOutcome>,
+}
+
+enum PutOutcome {
+    Stored(BlockId),
+    Failed(FsError),
+    /// Contention known not to have committed anything. The bytes go back
+    /// to the caller, which waits off the connection's thread and tries
+    /// again.
+    Busy {
+        error: FsError,
+        bytes: Vec<u8>,
+        /// The block was the only one in its transaction.
+        single: bool,
+    },
+}
+
+/// The job a put sends. If it is dropped without running, because the
+/// connection is poisoned or the job could not be sent, it lets go of the
+/// queued puts, whose callers are then told what any caller of a job that
+/// did not run is told.
+struct CommitQueued {
+    group: Arc<PutGroup>,
+    namespace_changes: bool,
+    ran: bool,
+}
+
+impl CommitQueued {
+    fn run(mut self, state: &mut State) {
+        self.ran = true;
+        self.group.gather();
+        let (mut shared, mut alone) = (Vec::new(), Vec::new());
+        while let Some(put) = self.group.queued.pop() {
+            if put.alone {
+                alone.push(put);
+            } else {
+                shared.push(put);
+            }
+        }
+        // Each transaction stores all of its blocks or none, and its puts
+        // are answered here, on the thread that committed it, whether or
+        // not their callers still wait. If this unwinds, the puts it had
+        // taken are dropped unanswered and the connection is poisoned.
+        if !shared.is_empty() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let started = Instant::now();
+            let stored = SqliteBlockStore::store(self.namespace_changes, state, &shared);
+            let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            // Counted before the answers go out, so that a caller that
+            // comes straight back is not counted twice.
+            let in_flight = shared.len() + self.group.queued.len();
+            self.group.in_flight.store(in_flight, Relaxed);
+            self.group.last_commit_nanos.store(nanos, Relaxed);
+            SqliteBlockStore::answer(shared, stored);
+        }
+        for put in alone {
+            let put = vec![put];
+            let stored = SqliteBlockStore::store(self.namespace_changes, state, &put);
+            SqliteBlockStore::answer(put, stored);
+        }
+    }
+}
+
+impl Drop for CommitQueued {
+    fn drop(&mut self) {
+        if !self.ran {
+            while self.group.queued.pop().is_some() {}
+        }
+    }
 }
 
 impl SqliteBlockStore {
@@ -1823,34 +1936,61 @@ impl SqliteBlockStore {
         Ok(Self(database, Arc::default()))
     }
 
-    /// One block in its own transaction, retried while SQLite reports that
-    /// another writer kept it from committing.
-    async fn put_alone(&self, waiting: &Arc<WaitingPut>) -> Result<BlockId> {
-        let started = Instant::now();
-        for attempt in 0..MAX_SQLITE_BUSY_RETRIES {
-            match self.put_once(vec![Arc::clone(waiting)]).await {
-                Ok(()) => {
-                    return waiting.stored.get().cloned().unwrap_or_else(|| {
-                        Err(backend_error("SQLite block put was not answered"))
+    /// Queues `bytes` for the next transaction and waits for the answer
+    /// without holding a thread.
+    async fn put_queued(&self, bytes: Vec<u8>, alone: bool) -> Result<PutOutcome> {
+        let (answer, reply) = owner::reply();
+        // Queued before the job is sent, so some job always runs after the
+        // block is here: this one, if no earlier one takes it.
+        self.1.queued.push(QueuedPut {
+            bytes,
+            alone,
+            answer,
+        });
+        let job = CommitQueued {
+            group: Arc::clone(&self.1),
+            namespace_changes: self.0.namespace_changes,
+            ran: false,
+        };
+        self.0.owner.submit(move |state| job.run(state));
+        reply.await
+    }
+
+    /// Stores `puts` in one transaction: all of them, or none.
+    fn store(
+        namespace_changes: bool,
+        state: &mut State,
+        puts: &[QueuedPut],
+    ) -> Result<Vec<BlockId>> {
+        Database::fold(namespace_changes, state)?;
+        Self::put_once_on(&mut state.connection, puts)
+    }
+
+    /// Tells each of `puts` what became of their transaction. Contention
+    /// known not to have committed is answered as busy.
+    fn answer(puts: Vec<QueuedPut>, stored: Result<Vec<BlockId>>) {
+        let single = puts.len() == 1;
+        match stored {
+            Ok(ids) => {
+                for (put, id) in puts.into_iter().zip(ids) {
+                    put.answer.send(PutOutcome::Stored(id));
+                }
+            }
+            Err(error) if error.code == ErrorCode::Eagain => {
+                for put in puts {
+                    put.answer.send(PutOutcome::Busy {
+                        error: error.clone(),
+                        bytes: put.bytes,
+                        single,
                     });
                 }
-                Err(error) if error.code == ErrorCode::Eagain => {
-                    if attempt + 1 == MAX_SQLITE_BUSY_RETRIES
-                        || started.elapsed() >= SQLITE_BUSY_RETRY_BUDGET
-                    {
-                        return Err(error.with_message(
-                            "SQLite block writer remained busy after bounded retries",
-                        ));
-                    }
-                    // Each put_once is a job of its own, so the connection
-                    // is free between attempts and another writer can
-                    // finish its transaction.
-                    sqlite_busy_backoff(attempt).await;
+            }
+            Err(error) => {
+                for put in puts {
+                    put.answer.send(PutOutcome::Failed(error.clone()));
                 }
-                Err(error) => return Err(error),
             }
         }
-        unreachable!("bounded SQLite block retry loop always returns")
     }
 
     fn get_once(connection: &Connection, id: &BlockId) -> Result<Vec<u8>> {
@@ -1865,84 +2005,7 @@ impl SqliteBlockStore {
             .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("get block"))
     }
 
-    /// Answers every queued read. For the holder of the turn.
-    async fn serve_reads(&self) {
-        if self.1.reading.is_empty() {
-            return;
-        }
-        // The job takes the reads off the queue itself, so a read is
-        // answered once it is taken even if this caller has stopped waiting.
-        let group = Arc::clone(&self.1);
-        let served = self
-            .0
-            .run(move |connection| {
-                while let Some(waiting) = group.reading.pop() {
-                    let _ = waiting.block.set(Self::get_once(connection, &waiting.id));
-                    waiting.served.mark();
-                }
-                Ok(())
-            })
-            .await;
-        if let Err(error) = served {
-            while let Some(waiting) = self.1.reading.pop() {
-                let _ = waiting.block.set(Err(error.clone()));
-                waiting.served.mark();
-            }
-        }
-    }
-
-    /// Stores `blocks` in one transaction: all of them, or none. The
-    /// outcome is recorded on each block's `stored` in the same job, so a
-    /// put whose block was stored finds out even if the caller that had the
-    /// turn has stopped waiting. A block that an earlier job already
-    /// answered is left alone: the caller that sent that job gave up, and
-    /// the job ran all the same. Contention known not to have committed is
-    /// not recorded; it is returned for the caller to retry.
-    async fn put_once(&self, blocks: Vec<Arc<WaitingPut>>) -> Result<()> {
-        let unanswered = blocks.clone();
-        let stored = self
-            .0
-            .run(move |connection| {
-                let blocks: Vec<_> = blocks
-                    .into_iter()
-                    .filter(|waiting| waiting.stored.get().is_none())
-                    .collect();
-                if blocks.is_empty() {
-                    return Ok(());
-                }
-                match Self::put_once_on(connection, &blocks) {
-                    Ok(ids) => {
-                        for (waiting, id) in blocks.iter().zip(ids) {
-                            let _ = waiting.stored.set(Ok(id));
-                        }
-                        Ok(())
-                    }
-                    Err(error) => {
-                        if error.code != ErrorCode::Eagain {
-                            for waiting in &blocks {
-                                let _ = waiting.stored.set(Err(error.clone()));
-                            }
-                        }
-                        Err(error)
-                    }
-                }
-            })
-            .await;
-        // The job did not run, or could not fold: nothing was stored.
-        if let Err(error) = &stored
-            && error.code != ErrorCode::Eagain
-        {
-            for waiting in &unanswered {
-                let _ = waiting.stored.set(Err(error.clone()));
-            }
-        }
-        stored
-    }
-
-    fn put_once_on(
-        connection: &mut Connection,
-        blocks: &[Arc<WaitingPut>],
-    ) -> Result<Vec<BlockId>> {
+    fn put_once_on(connection: &mut Connection, blocks: &[QueuedPut]) -> Result<Vec<BlockId>> {
         let was_autocommit = connection.is_autocommit();
         let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
         {
@@ -4687,85 +4750,54 @@ impl BlockStore for SqliteBlockStore {
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let group = &self.1;
         // The job that stores the block runs on the connection's thread
         // and may outlive this call, so it has its own copy of the bytes.
-        let mine = Arc::new(WaitingPut {
-            bytes: bytes.to_vec(),
-            stored: std::sync::OnceLock::new(),
-        });
-        // Nothing in progress: there is nothing to share a transaction
-        // with.
-        if let Some(_turn) = group.turn.try_lock() {
-            self.serve_reads().await;
-            let stored = self.put_alone(&mine).await;
-            self.serve_reads().await;
-            return stored;
-        }
-        group.waiting.push(Arc::clone(&mine));
-        let _turn = group.turn.lock().await;
-        self.serve_reads().await;
-        if let Some(stored) = mine.stored.get() {
-            return stored.clone();
-        }
-        // This put's turn: commit everything queued behind the last one.
-        let mut batch = Vec::new();
-        while let Some(waiting) = group.waiting.pop() {
-            batch.push(waiting);
-        }
-        // A put that gave up while it had the turn leaves the ones it had
-        // taken off the queue unanswered, unless its job had stored them.
-        // They store their own block here.
-        if !batch.iter().any(|waiting| Arc::ptr_eq(waiting, &mine)) {
-            batch.push(Arc::clone(&mine));
-        }
-        // Known not to have committed: each block goes on its own, with
-        // the ordinary bounded retries. Every other outcome was recorded
-        // on the blocks by `put_once`.
-        if let Err(error) = self.put_once(batch.clone()).await
-            && error.code == ErrorCode::Eagain
-        {
-            for waiting in &batch {
-                let _ = waiting.stored.set(self.put_alone(waiting).await);
+        let mut bytes = bytes.to_vec();
+        // The first attempt shares a transaction with whatever else is
+        // queued. After contention known not to have committed, the block
+        // goes in a transaction of its own, with bounded retries.
+        let mut alone = false;
+        let mut started = Instant::now();
+        let mut attempt = 0;
+        loop {
+            match self.put_queued(bytes, alone).await? {
+                PutOutcome::Stored(id) => return Ok(id),
+                PutOutcome::Failed(error) => return Err(error),
+                PutOutcome::Busy {
+                    error,
+                    bytes: returned,
+                    single,
+                } => {
+                    bytes = returned;
+                    alone = true;
+                    if !single {
+                        // The shared transaction: the bounded retries
+                        // start now.
+                        started = Instant::now();
+                        continue;
+                    }
+                    if attempt + 1 == MAX_SQLITE_BUSY_RETRIES
+                        || started.elapsed() >= SQLITE_BUSY_RETRY_BUDGET
+                    {
+                        return Err(error.with_message(
+                            "SQLite block writer remained busy after bounded retries",
+                        ));
+                    }
+                    // Waited here, not on the connection's thread: the
+                    // connection is free between attempts, for its other
+                    // jobs and for another writer to finish.
+                    sqlite_busy_backoff(attempt).await;
+                    attempt += 1;
+                }
             }
         }
-        self.serve_reads().await;
-        mine.stored
-            .get()
-            .cloned()
-            .expect("this put's block was in the batch")
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
-        let group = &self.1;
-        // Nothing in progress: read it now.
-        if let Some(_turn) = group.turn.try_lock() {
-            self.serve_reads().await;
-            let id = id.clone();
-            return self
-                .0
-                .run(move |connection| Self::get_once(connection, &id))
-                .await;
-        }
-        let mine = Arc::new(WaitingGet {
-            id: id.clone(),
-            block: std::sync::OnceLock::new(),
-            served: Served::new(),
-        });
-        group.reading.push(Arc::clone(&mine));
-        // Either the holder of the turn answers this read, or its own turn
-        // comes and it answers itself along with the reads queued since.
-        let turn = group.turn.lock_unless(&mine.served).await;
-        if turn.is_some() {
-            self.serve_reads().await;
-        }
-        drop(turn);
-        match Arc::try_unwrap(mine) {
-            Ok(mine) => mine.block.into_inner(),
-            // Whoever answered still holds its reference for a moment.
-            Err(mine) => mine.block.get().cloned(),
-        }
-        .unwrap_or_else(|| Err(backend_error("SQLite block read was not answered")))
+        let id = id.clone();
+        self.0
+            .run_first(move |connection| Self::get_once(connection, &id))
+            .await
     }
 
     async fn flush(&self) -> Result<()> {
@@ -4773,8 +4805,6 @@ impl BlockStore for SqliteBlockStore {
     }
 
     async fn delete(&self, id: &BlockId) -> Result<()> {
-        let _turn = self.1.turn.lock().await;
-        self.serve_reads().await;
         let id = id.clone();
         self.0
             .run(move |connection| {
@@ -9385,7 +9415,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_puts_each_get_their_own_block_even_after_an_abandoned_turn() {
+    fn concurrent_puts_each_get_their_own_block() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteBlockStore::open(&path).unwrap();
         let (writers, each) = (8_u8, 40_u8);
@@ -9397,7 +9427,7 @@ mod tests {
                         (0..each)
                             .map(|block| {
                                 let bytes = vec![writer, block, 7];
-                                // A put that waits its turn is pending meanwhile.
+                                // A put that waits for a commit is pending meanwhile.
                                 let id = futures_lite::future::block_on(store.put(&bytes));
                                 (id.unwrap(), bytes)
                             })
@@ -9417,78 +9447,84 @@ mod tests {
         for (id, bytes) in &stored {
             assert_eq!(&run(store.get(id)).unwrap(), bytes);
         }
-        assert!(store.1.waiting.is_empty());
-
-        // A put that gives up while it holds the turn leaves the puts it
-        // had taken unanswered; they store their own blocks.
-        let orphan = Arc::new(WaitingPut {
-            bytes: vec![9, 9, 9],
-            stored: std::sync::OnceLock::new(),
+        assert!(store.1.queued.is_empty());
+        let rows: i64 = store.0.with(|connection| {
+            connection
+                .query_row("SELECT count(*) FROM mount_rs_blocks", [], |row| row.get(0))
+                .unwrap()
         });
-        let turn = store.1.turn.try_lock().unwrap();
-        let waiter = {
-            let store = store.clone();
-            std::thread::spawn(move || {
-                futures_lite::future::block_on(store.put(&[1, 2, 3])).unwrap()
-            })
-        };
-        while store.1.waiting.is_empty() {
-            std::thread::yield_now();
-        }
-        // Take the waiter's entry off the queue, as an abandoned turn would.
-        let taken = store.1.waiting.pop().unwrap();
-        store.1.waiting.push(Arc::clone(&orphan));
-        drop(turn);
-        let id = waiter.join().unwrap();
-        assert_eq!(run(store.get(&id)).unwrap(), [1, 2, 3]);
-        assert_eq!(taken.stored.get().unwrap().as_ref().unwrap(), &id);
-        let other = orphan.stored.get().unwrap().clone().unwrap();
-        assert_eq!(run(store.get(&other)).unwrap(), [9, 9, 9]);
+        assert_eq!(rows, total as i64);
         drop(store);
         std::fs::remove_file(path).unwrap();
     }
 
     #[test]
-    fn reads_take_turns_with_puts_and_the_holder_answers_them() {
+    fn a_read_runs_ahead_of_queued_puts_and_sees_acknowledged_ones() {
+        use std::sync::atomic::AtomicU8;
+        // 0: no commit yet. 1: the read was answered before the commit.
+        // 2: the commit gave up waiting for the read.
+        static READ_ANSWERED: AtomicBool = AtomicBool::new(false);
+        static COMMIT_SAW: AtomicU8 = AtomicU8::new(0);
+        unsafe extern "C" fn before_commit(_: *mut std::ffi::c_void) -> i32 {
+            let started = Instant::now();
+            while !READ_ANSWERED.load(Ordering::SeqCst) {
+                if started.elapsed() > Duration::from_secs(10) {
+                    COMMIT_SAW.store(2, Ordering::SeqCst);
+                    return 0;
+                }
+                thread::yield_now();
+            }
+            COMMIT_SAW.store(1, Ordering::SeqCst);
+            0
+        }
         let path = super::super::tests::unique_database_path();
         let store = SqliteBlockStore::open(&path).unwrap();
         let known = run(store.put(b"known")).unwrap();
+        store.0.with(|connection| unsafe {
+            rusqlite::ffi::sqlite3_commit_hook(
+                connection.handle(),
+                Some(before_commit),
+                std::ptr::null_mut(),
+            );
+        });
 
-        // While another operation has the turn, a read queues its request
-        // and is pending.
-        let turn = store.1.turn.try_lock().unwrap();
+        // A put is queued behind a job that is running, and then a read
+        // arrives. The read is answered before the put's commit starts.
+        let release = hold_connection(&store.0);
+        let writer = {
+            let store = store.clone();
+            thread::spawn(move || futures_lite::future::block_on(store.put(b"queued")))
+        };
+        while store.1.queued.is_empty() {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(20));
         let readers: Vec<_> = [known.clone(), BlockId("missing".into())]
             .into_iter()
             .map(|id| {
                 let store = store.clone();
-                std::thread::spawn(move || futures_lite::future::block_on(store.get(&id)))
+                thread::spawn(move || futures_lite::future::block_on(store.get(&id)))
             })
             .collect();
-        while store.1.reading.len() < 2 {
-            std::thread::yield_now();
-        }
-        // The holder answers both without giving the turn up.
-        run(store.serve_reads());
+        thread::sleep(Duration::from_millis(20));
+        release.send(()).unwrap();
         let mut answers: Vec<_> = readers
             .into_iter()
             .map(|reader| reader.join().unwrap())
             .collect();
+        READ_ANSWERED.store(true, Ordering::SeqCst);
         assert_eq!(answers.remove(0).unwrap(), b"known");
         assert_eq!(answers.remove(0).unwrap_err().code, ErrorCode::Enoent);
-        // A read nobody answered gets the turn and answers itself.
-        let reader = {
-            let (store, id) = (store.clone(), known.clone());
-            std::thread::spawn(move || futures_lite::future::block_on(store.get(&id)))
-        };
-        while store.1.reading.is_empty() {
-            std::thread::yield_now();
-        }
-        drop(turn);
-        assert_eq!(reader.join().unwrap().unwrap(), b"known");
-        assert!(store.1.reading.is_empty());
-        assert!(store.1.turn.try_lock().is_some());
+        let queued = writer.join().unwrap().unwrap();
+        assert_eq!(COMMIT_SAW.load(Ordering::SeqCst), 1);
+        store.0.with(|connection| unsafe {
+            rusqlite::ffi::sqlite3_commit_hook(connection.handle(), None, std::ptr::null_mut());
+        });
+        // A read sent after a put was acknowledged sees the block.
+        assert_eq!(run(store.get(&queued)).unwrap(), b"queued");
 
-        // Readers and writers together: every read sees a whole block.
+        // Readers and writers together: every read sees a whole block, and
+        // every put is readable as soon as it is acknowledged.
         let stored: Vec<(BlockId, Vec<u8>)> = (0..32_u8)
             .map(|block| {
                 let bytes = vec![block; 64];
@@ -9500,7 +9536,10 @@ mod tests {
                 let store = store.clone();
                 scope.spawn(move || {
                     for block in 0..40_u8 {
-                        futures_lite::future::block_on(store.put(&[writer, block, 3])).unwrap();
+                        let bytes = [writer, block, 3];
+                        let id = futures_lite::future::block_on(store.put(&bytes)).unwrap();
+                        let read = futures_lite::future::block_on(store.get(&id)).unwrap();
+                        assert_eq!(read, bytes);
                     }
                 });
             }
@@ -9515,8 +9554,126 @@ mod tests {
                 });
             }
         });
-        assert!(store.1.reading.is_empty() && store.1.waiting.is_empty());
+        assert!(store.1.queued.is_empty());
         drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn block_rows(store: &SqliteBlockStore) -> Vec<Vec<u8>> {
+        store.0.with(|connection| {
+            let mut statement = connection
+                .prepare("SELECT bytes FROM mount_rs_blocks ORDER BY bytes")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect()
+        })
+    }
+
+    /// Starts one put per payload while the connection is held, so that
+    /// all of them are queued for the same transaction, and returns once
+    /// they are.
+    fn queue_puts(
+        store: &SqliteBlockStore,
+        payloads: &[Vec<u8>],
+    ) -> Vec<thread::JoinHandle<Result<BlockId>>> {
+        let puts = payloads
+            .iter()
+            .map(|bytes| {
+                let (store, bytes) = (store.clone(), bytes.clone());
+                thread::spawn(move || futures_lite::future::block_on(store.put(&bytes)))
+            })
+            .collect();
+        while store.1.queued.len() < payloads.len() {
+            thread::yield_now();
+        }
+        puts
+    }
+
+    #[test]
+    fn a_shared_commit_that_fails_acknowledges_no_put_and_stores_nothing() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteBlockStore::open(&path).unwrap();
+        store.0.with(|connection| {
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER refuse_bad BEFORE INSERT ON mount_rs_blocks
+                     WHEN NEW.bytes = x'626164'
+                     BEGIN SELECT RAISE(ABORT, 'refused block'); END",
+                )
+                .unwrap()
+        });
+        for round in 0..20_u8 {
+            // The refused block is somewhere in the middle of the group.
+            let mut payloads: Vec<Vec<u8>> = (0..8_u8).map(|put| vec![round, put, 1]).collect();
+            payloads.insert(usize::from(round % 9), b"bad".to_vec());
+            let release = hold_connection(&store.0);
+            let puts = queue_puts(&store, &payloads);
+            release.send(()).unwrap();
+            for put in puts {
+                let error = put.join().unwrap().unwrap_err();
+                assert!(error.to_string().contains("refused block"), "{error}");
+                assert_ne!(error.code, ErrorCode::Eagain);
+            }
+            assert!(block_rows(&store).is_empty());
+            assert!(store.0.with(|connection| connection.is_autocommit()));
+        }
+        // The connection is not left unusable.
+        let id = run(store.put(b"good")).unwrap();
+        assert_eq!(run(store.get(&id)).unwrap(), b"good");
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn puts_refused_as_busy_are_retried_alone_and_each_is_stored_once() {
+        let path = super::super::tests::unique_database_path();
+        let store = SqliteBlockStore::open(&path).unwrap();
+        store
+            .0
+            .with(|connection| connection.busy_timeout(Duration::from_millis(5)))
+            .unwrap();
+        let other = Connection::open(&path).unwrap();
+        let payloads: Vec<Vec<u8>> = (0..8_u8).map(|put| vec![put, 2]).collect();
+
+        // Another writer keeps the shared transaction from starting. None
+        // of its puts is acknowledged while that lasts.
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = hold_connection(&store.0);
+        let puts = queue_puts(&store, &payloads);
+        release.send(()).unwrap();
+        thread::sleep(Duration::from_millis(60));
+        assert!(puts.iter().all(|put| !put.is_finished()));
+        // The connection is not held between attempts: a read is answered.
+        assert_eq!(
+            run(store.get(&BlockId("missing".into()))).unwrap_err().code,
+            ErrorCode::Enoent
+        );
+        other.execute_batch("COMMIT").unwrap();
+        let ids: BTreeSet<String> = puts
+            .into_iter()
+            .map(|put| put.join().unwrap().unwrap().0)
+            .collect();
+        assert_eq!(ids.len(), payloads.len());
+        assert_eq!(block_rows(&store), payloads);
+
+        // A writer that never lets go: the put fails with the bounded-retry
+        // error and nothing is stored.
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let error = run(store.put(b"never")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain);
+        assert!(
+            error
+                .to_string()
+                .contains("SQLite block writer remained busy after bounded retries"),
+            "{error}"
+        );
+        other.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(block_rows(&store), payloads);
+        assert!(store.1.queued.is_empty());
+        drop((store, other));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -9566,47 +9723,48 @@ mod tests {
     }
 
     #[test]
-    fn puts_taken_by_a_holder_that_gave_up_are_stored_once() {
+    fn a_put_whose_caller_gave_up_is_stored_once_with_the_puts_queued_beside_it() {
         let path = super::super::tests::unique_database_path();
         let store = SqliteBlockStore::open(&path).unwrap();
-        // The first put queues behind a turn held here; a second joins it.
-        let turn = store.1.turn.try_lock().unwrap();
+        // The first put is queued behind a held connection, and a second
+        // joins it.
+        let release = hold_connection(&store.0);
         let mut first = Box::pin(store.put(b"first"));
         assert!(!poll_once(&mut first));
         let second = {
             let store = store.clone();
             thread::spawn(move || futures_lite::future::block_on(store.put(b"second")))
         };
-        while store.1.waiting.len() < 2 {
+        while store.1.queued.len() < 2 {
             thread::yield_now();
         }
-        // The first put gets the turn, takes both blocks and sends one job
-        // for them, which waits behind the held connection.
-        let release = hold_connection(&store.0);
-        drop(turn);
-        assert!(!poll_once(&mut first));
-        assert!(store.1.waiting.is_empty());
-        // It gives up. The turn passes to the second put, which finds its
-        // block unanswered and sends a job of its own.
+        // The first gives up. Its block is still queued, and the job it
+        // sent stores both blocks; the second put's job finds nothing left.
         drop(first);
         release.send(()).unwrap();
         let second = second.join().unwrap().unwrap();
         assert_eq!(run(store.get(&second)).unwrap(), b"second");
-        // The abandoned job stored both; the second put's job stored
-        // nothing again.
-        let stored: Vec<Vec<u8>> = store.0.with(|connection| {
-            let mut statement = connection
-                .prepare("SELECT bytes FROM mount_rs_blocks ORDER BY bytes")
-                .unwrap();
-            statement
-                .query_map([], |row| row.get(0))
-                .unwrap()
-                .map(|row| row.unwrap())
-                .collect()
-        });
-        assert_eq!(stored, [b"first".to_vec(), b"second".to_vec()]);
+        assert_eq!(block_rows(&store), [b"first".to_vec(), b"second".to_vec()]);
         drop(store);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn puts_queued_when_the_connection_is_poisoned_fail_instead_of_hanging() {
+        let store = SqliteBlockStore::in_memory().unwrap();
+        let release = hold_connection(&store.0);
+        // A job that panics is queued first, and puts behind it: their jobs
+        // are never run.
+        drop(store.0.owner.run(|_| panic!("injected job panic")));
+        let puts = queue_puts(&store, &[vec![1], vec![2], vec![3]]);
+        release.send(()).unwrap();
+        let poisoned = backend_error("SQLite storage lock poisoned").to_string();
+        for put in puts {
+            assert_eq!(put.join().unwrap().unwrap_err().to_string(), poisoned);
+        }
+        // Nor is a put that arrives afterwards left waiting.
+        assert_eq!(run(store.put(&[4])).unwrap_err().to_string(), poisoned);
+        assert!(store.1.queued.is_empty());
     }
 
     #[test]

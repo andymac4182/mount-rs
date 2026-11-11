@@ -18,9 +18,14 @@
 //! job: a queued job still runs, a running one finishes, and the result is
 //! discarded.
 //!
+//! A job sent with `run_first` runs ahead of the jobs that are still
+//! queued, after the one that is running. It is for work that changes
+//! nothing and should not wait behind a line of commits: a read.
+//!
 //! The thread ends when the last handle is dropped. That drop waits for the
 //! jobs already sent and for the connection to close, so the database file
 //! can be reopened or removed as soon as the drop returns.
+use crossbeam_queue::SegQueue;
 use mount_rs_core::{FsError, Result, backend_error};
 use rusqlite::Connection;
 use std::{
@@ -51,9 +56,21 @@ pub(crate) struct State {
 
 type Job = Box<dyn FnOnce(&mut State) + Send>;
 
+/// What the thread is sent.
+enum Message {
+    /// A job to run in its turn.
+    Job(Job),
+    /// A job was added to `Owner::first`.
+    First,
+}
+
 /// A handle to the thread. Dropping the last one ends the thread.
 pub(crate) struct Owner {
-    jobs: Option<Sender<Job>>,
+    jobs: Option<Sender<Message>>,
+    /// Jobs to run before the next queued one. Each is followed by a
+    /// `Message::First`, so the thread looks here at least once after every
+    /// push.
+    first: Arc<SegQueue<Job>>,
     thread: Option<JoinHandle<()>>,
     thread_id: ThreadId,
 }
@@ -65,7 +82,9 @@ fn poisoned() -> FsError {
 impl Owner {
     /// Moves `connection` to a new thread that runs jobs on it.
     pub fn start(connection: Connection) -> Result<Arc<Self>> {
-        let (jobs, queue) = channel::<Job>();
+        let (jobs, queue) = channel::<Message>();
+        let first = Arc::new(SegQueue::new());
+        let run_first = Arc::clone(&first);
         let state = State {
             connection,
             published: None,
@@ -73,24 +92,62 @@ impl Owner {
         };
         let thread = thread::Builder::new()
             .name("mount-rs-sqlite".into())
-            .spawn(move || serve(state, queue))
+            .spawn(move || serve(state, queue, &run_first))
             .map_err(backend_error)?;
         Ok(Arc::new(Self {
             jobs: Some(jobs),
+            first,
             thread_id: thread.thread().id(),
             thread: Some(thread),
         }))
     }
 
+    /// Whether the caller may send a job. A job that waited for another
+    /// job would wait for itself: the thread runs one at a time.
+    fn may_send(&self) -> bool {
+        let outside = thread::current().id() != self.thread_id;
+        debug_assert!(outside, "a SQLite job submitted another job");
+        outside
+    }
+
     /// Sends `job`. `None` when it cannot be sent.
     fn send(&self, job: Job) -> Option<()> {
-        // A job that waited for another job would wait for itself: the
-        // thread runs one at a time.
-        if thread::current().id() == self.thread_id {
-            debug_assert!(false, "a SQLite job submitted another job");
+        if !self.may_send() {
             return None;
         }
-        self.jobs.as_ref()?.send(job).ok()
+        self.jobs.as_ref()?.send(Message::Job(job)).ok()
+    }
+
+    /// Sends `job` and does not wait for it. A job that is not run (the
+    /// owner is poisoned, or the job could not be sent) is dropped, which
+    /// is how whatever it owns finds out.
+    pub fn submit(&self, job: impl FnOnce(&mut State) + Send + 'static) {
+        let _ = self.send(Box::new(job));
+    }
+
+    /// `run`, ahead of the jobs that are queued and have not started. For
+    /// work that changes nothing, so that running it early cannot be told
+    /// from its having been sent earlier.
+    pub fn run_first<T, F>(&self, work: F) -> Reply<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut State) -> T + Send + 'static,
+    {
+        let (task, reply) = task(work);
+        if !self.may_send() {
+            return reply;
+        }
+        self.first.push(Box::new(move |state| task.run(state)));
+        let told = self
+            .jobs
+            .as_ref()
+            .is_some_and(|jobs| jobs.send(Message::First).is_ok());
+        if !told {
+            // Nothing will look at the queue again. Dropping the jobs
+            // settles their replies without a value.
+            while self.first.pop().is_some() {}
+        }
+        reply
     }
 
     /// Runs `work` on the connection's thread and waits for it without
@@ -147,20 +204,31 @@ impl Drop for Owner {
     }
 }
 
-fn serve(mut state: State, queue: Receiver<Job>) {
+fn serve(mut state: State, queue: Receiver<Message>, first: &SegQueue<Job>) {
     let mut poisoned = false;
-    for job in queue {
+    for message in queue {
         // A job that is dropped without running settles its reply without
-        // a value, which its caller reports as poisoned.
+        // a value, which its caller reports as poisoned. That includes the
+        // job in `message` when one from `first` panics ahead of it.
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            if poisoned {
-                drop(job);
-            } else {
-                job(&mut state);
+            let mut run = |job: Job| {
+                if poisoned {
+                    drop(job);
+                } else {
+                    job(&mut state);
+                }
+            };
+            while let Some(job) = first.pop() {
+                run(job);
+            }
+            if let Message::Job(job) = message {
+                run(job);
             }
         }));
         poisoned |= outcome.is_err();
     }
+    // Every push to `first` was followed by a message, so it is empty.
+    while first.pop().is_some() {}
     // Close the connection, then let go of what its callbacks point at.
     let State {
         connection,
@@ -181,19 +249,28 @@ struct Task<F, T> {
 }
 
 fn task<T, F: FnOnce(&mut State) -> T>(work: F) -> (Task<F, T>, Reply<T>) {
+    let (settle, reply) = reply();
+    (
+        Task {
+            work: Some(work),
+            reply: settle,
+        },
+        reply,
+    )
+}
+
+/// A reply and the means to answer it, for an answer that is not one
+/// job's result: several callers answered by the same job. A `Settle`
+/// dropped without `send` settles its reply as a job that did not run
+/// does, with the poisoned error.
+pub(crate) fn reply<T>() -> (Settle<T>, Reply<T>) {
     let slot = Arc::new(Slot {
         value: AtomicPtr::new(ptr::null_mut()),
         waker: AtomicPtr::new(ptr::null_mut()),
         settled: AtomicBool::new(false),
         owns: PhantomData,
     });
-    (
-        Task {
-            work: Some(work),
-            reply: Settle(Arc::clone(&slot)),
-        },
-        Reply(slot),
-    )
+    (Settle(Arc::clone(&slot)), Reply(slot))
 }
 
 impl<F: FnOnce(&mut State) -> T, T> Task<F, T> {
@@ -202,10 +279,7 @@ impl<F: FnOnce(&mut State) -> T, T> Task<F, T> {
         // If this unwinds, `work` is gone with the frame that was running
         // it, and dropping `self` then settles the reply without a value.
         let value = work(state);
-        self.reply
-            .0
-            .value
-            .store(Box::into_raw(Box::new(value)), Ordering::Release);
+        self.reply.send(value);
     }
 }
 
@@ -250,7 +324,17 @@ impl<T> Drop for Slot<T> {
 
 /// The job's side of a slot. Dropping it settles the slot, with the value
 /// if the job stored one.
-struct Settle<T>(Arc<Slot<T>>);
+pub(crate) struct Settle<T>(Arc<Slot<T>>);
+
+impl<T> Settle<T> {
+    /// Answers the reply with `value` and wakes whoever waits for it.
+    pub fn send(self, value: T) {
+        self.0
+            .value
+            .store(Box::into_raw(Box::new(value)), Ordering::Release);
+        // Dropping `self` settles the slot.
+    }
+}
 
 impl<T> Drop for Settle<T> {
     fn drop(&mut self) {
@@ -394,6 +478,133 @@ mod tests {
             assert_eq!(sequence, next[sender as usize]);
             next[sender as usize] += 1;
         }
+    }
+
+    #[test]
+    fn a_job_sent_first_runs_ahead_of_queued_jobs_and_after_the_running_one() {
+        let owner = owner();
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = |name: &'static str| {
+            let order = Arc::clone(&order);
+            move |_: &mut State| order.lock().unwrap().push(name)
+        };
+        let (started, wait_started) = channel();
+        let (release, held) = channel::<()>();
+        let running = {
+            let order = Arc::clone(&order);
+            owner.run(move |_| {
+                started.send(()).unwrap();
+                held.recv().unwrap();
+                order.lock().unwrap().push("running");
+            })
+        };
+        wait_started.recv().unwrap();
+        let queued = [owner.run(record("queued 1")), owner.run(record("queued 2"))];
+        let first = [
+            owner.run_first(record("first 1")),
+            owner.run_first(record("first 2")),
+        ];
+        release.send(()).unwrap();
+        wait(running).unwrap();
+        for reply in first.into_iter().chain(queued) {
+            wait(reply).unwrap();
+        }
+        assert_eq!(
+            *order.lock().unwrap(),
+            ["running", "first 1", "first 2", "queued 1", "queued 2"]
+        );
+        // With nothing queued it simply runs.
+        assert_eq!(wait(owner.run_first(|_| 5)).unwrap(), 5);
+    }
+
+    #[test]
+    fn jobs_sent_first_from_many_threads_all_run_once_among_ordinary_jobs() {
+        let owner = owner();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let running = Arc::new(AtomicUsize::new(0));
+        let senders: Vec<_> = (0..8_usize)
+            .map(|sender| {
+                let (owner, ran, running) =
+                    (Arc::clone(&owner), Arc::clone(&ran), Arc::clone(&running));
+                thread::spawn(move || {
+                    for sequence in 0..200_usize {
+                        let (ran, running) = (Arc::clone(&ran), Arc::clone(&running));
+                        let work = move |_: &mut State| {
+                            assert_eq!(running.fetch_add(1, Ordering::SeqCst), 0);
+                            ran.fetch_add(1, Ordering::SeqCst);
+                            running.fetch_sub(1, Ordering::SeqCst);
+                            sequence
+                        };
+                        let reply = if (sender + sequence) % 2 == 0 {
+                            owner.run_first(work)
+                        } else {
+                            owner.run(work)
+                        };
+                        assert_eq!(wait(reply).unwrap(), sequence);
+                    }
+                })
+            })
+            .collect();
+        for sender in senders {
+            sender.join().unwrap();
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 1600);
+    }
+
+    #[test]
+    fn a_poisoned_owner_drops_first_and_submitted_jobs_without_running_them() {
+        struct Dropped(Arc<AtomicUsize>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let owner = owner();
+        let (started, wait_started) = channel();
+        let (release, held) = channel::<()>();
+        drop(owner.run(move |_| {
+            started.send(()).unwrap();
+            held.recv().unwrap();
+        }));
+        wait_started.recv().unwrap();
+        // A job sent first panics; the ordinary job it ran ahead of, and
+        // everything after, is dropped without running.
+        let panicking = owner.run_first(|_| -> u8 { panic!("job failed") });
+        let behind = owner.run(|_| 1_u8);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::new(AtomicBool::new(false));
+        let (owned, flag) = (Dropped(Arc::clone(&dropped)), Arc::clone(&ran));
+        owner.submit(move |_| {
+            let _owned = &owned;
+            flag.store(true, Ordering::SeqCst);
+        });
+        let (answer, answered) = reply::<u8>();
+        owner.submit(move |_| answer.send(9));
+        release.send(()).unwrap();
+        for reply in [panicking, behind, owner.run_first(|_| 2_u8), answered] {
+            assert_eq!(wait(reply).unwrap_err().to_string(), poisoned().to_string());
+        }
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_reply_is_answered_by_whichever_job_holds_its_other_end() {
+        let owner = owner();
+        let (answers, replies): (Vec<_>, Vec<_>) = (0..4_u8).map(|_| reply::<u8>()).unzip();
+        // One job answers them all.
+        owner.submit(move |_| {
+            for (value, answer) in answers.into_iter().enumerate() {
+                answer.send(value as u8);
+            }
+        });
+        for (value, reply) in replies.into_iter().enumerate() {
+            assert_eq!(wait(reply).unwrap(), value as u8);
+        }
+        // An end dropped unanswered is reported as a job that did not run.
+        let (answer, unanswered) = reply::<u8>();
+        drop(answer);
+        assert!(wait(unanswered).is_err());
     }
 
     #[test]

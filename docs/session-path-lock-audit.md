@@ -564,3 +564,12 @@ is not a lock, and locks that are off the path:
    the same block share that line. Different blocks share nothing.
 11. **Strict-atime reads were not benchmarked**; the benchmark has no switch
    for the policy. A test covers that they skip the gate and the mutex.
+
+## Later changes
+
+This audit records each step as it was made. Several locks it names were
+removed or changed afterwards: the block cache I/O gate, the pending access
+time gate, the WebDAV lock table, the tunnel transport tables and others, and
+long sections moved from `TurnCell` to `ParkCell`. The current list of every
+lock, with the reason each one stays, is in the Locks section of
+[production-readiness.md](production-readiness.md).

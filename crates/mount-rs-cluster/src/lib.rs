@@ -49,6 +49,7 @@ pub use registration_supervisor::RegistrationSupervisor;
 mod sessions;
 pub use sessions::{SessionBudget, SessionToken, VolumeSessions};
 
+#[cfg(any(feature = "http3", test))]
 mod coalesce;
 mod handles;
 mod join_slot;

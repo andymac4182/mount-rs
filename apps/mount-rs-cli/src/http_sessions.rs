@@ -350,32 +350,18 @@ struct OwnerService {
     registrations: mount_rs_cluster::RegistrationSupervisor,
     router: mount_rs_cluster::OwnerHttpRouter,
     stop: tokio_util::sync::CancellationToken,
-    task: mount_rs_core::turn_gate::TurnLock<
-        Option<
-            tokio::task::JoinHandle<Result<(), mount_rs_cluster::transport::PeerTransportError>>,
-        >,
-    >,
+    /// The peer listener. Its error text is reported by the first `close`.
+    task: crate::joined::JoinedTask<String>,
 }
 impl OwnerService {
     fn failed(&self) -> bool {
-        self.registrations.failed()
-            || self
-                .task
-                .try_lock()
-                .is_some_and(|task| task.as_ref().is_some_and(|task| task.is_finished()))
+        // The listener ending is a failure unless `close` asked it to end.
+        self.registrations.failed() || (self.task.is_finished() && !self.stop.is_cancelled())
     }
     async fn close(&self) -> Result<(), CliError> {
         let registration = self.registrations.shutdown().await;
         self.stop.cancel();
-        let mut task = self.task.lock().await;
-        if let Some(worker) = task.as_mut() {
-            let result = worker.await;
-            task.take();
-            result
-                .map_err(|e| CliError::runtime(e.to_string()))?
-                .map_err(|e| CliError::runtime(e.to_string()))?;
-        }
-        drop(task);
+        self.task.join().await.map_err(CliError::runtime)?;
         self.router
             .close()
             .await
@@ -472,7 +458,11 @@ pub(crate) async fn start_owner(
         Some(SessionSupervisor::start(sessions)?)
     };
     let stop = tokio_util::sync::CancellationToken::new();
-    let task = tokio::spawn(server.serve(stop.clone()));
+    let serving = server.serve(stop.clone());
+    let task = crate::joined::JoinedTask::spawn(
+        async move { serving.await.map_err(|e| e.to_string()) },
+        || "peer listener task ended without a result".to_owned(),
+    );
     let startup = RegistrationSupervisor::start_ready(
         registrations,
         RegistrationRecovery {
@@ -487,7 +477,7 @@ pub(crate) async fn start_owner(
         Ok(registrations) => registrations,
         Err(error) => {
             stop.cancel();
-            let _ = task.await;
+            let _ = task.join().await;
             router.close().await.map_err(|e| fail(&e))?;
             return Err(error.into());
         }
@@ -496,7 +486,7 @@ pub(crate) async fn start_owner(
         registrations,
         router,
         stop,
-        task: mount_rs_core::turn_gate::TurnLock::new(Some(task)),
+        task,
     };
     let drain_timeout = options.drain_timeout;
     match HttpServer::start_with_handler(public, options).await {

@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::turn_cell::TurnCell;
+use arc_swap::{ArcSwap, ArcSwapOption};
+use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::{
     ErrorCode, FileHandle, FsDriver, FsError, GuardedDirectoryEntry, GuardedMutation,
     GuardedMutationResult, GuardedRead, GuardedReadResult, GuardedSetattr, Loopback, MkdirOptions,
@@ -638,6 +639,23 @@ struct MountRecord {
     directory: String,
 }
 
+/// Drop the mount records `keep` rejects. Leaves the list alone, without
+/// copying it, when there is none.
+fn retain_mounts(mounts: &ArcSwap<Vec<MountRecord>>, keep: impl Fn(&MountRecord) -> bool) {
+    mounts.rcu(|current| {
+        if current.iter().all(&keep) {
+            return Arc::clone(current);
+        }
+        Arc::new(
+            current
+                .iter()
+                .filter(|record| keep(record))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    });
+}
+
 #[derive(Debug)]
 struct ExclusiveCreate {
     verifier: Vec<u8>,
@@ -651,24 +669,28 @@ struct ExclusiveCreate {
 /// not durable filesystem metadata. Keeping it process-local matches the
 /// upstream transport; the limit and expiry prevent a client creating files
 /// in a loop from turning it into an unbounded cache.
-#[derive(Debug, Default)]
+///
+/// A value is never changed in place: `ExclusiveCreateTable` replaces the
+/// whole thing, so paths and records are shared pointers and a copy costs
+/// two allocations however many entries there are.
+#[derive(Debug, Default, Clone)]
 struct ExclusiveCreates {
-    entries: HashMap<String, ExclusiveCreate>,
-    order: VecDeque<String>,
+    entries: HashMap<Arc<str>, Arc<ExclusiveCreate>>,
+    order: VecDeque<Arc<str>>,
+}
+
+/// `candidate` is `path` or lies below it. Does not allocate.
+fn is_path_or_below(candidate: &str, path: &str) -> bool {
+    candidate
+        .strip_prefix(path)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 impl ExclusiveCreates {
-    fn set(&mut self, path: String, verifier: Vec<u8>, identity: Option<PathIdentity>) {
-        self.forget(&path);
-        self.entries.insert(
-            path.clone(),
-            ExclusiveCreate {
-                verifier,
-                identity,
-                recorded: Instant::now(),
-            },
-        );
-        self.order.push_back(path);
+    fn set(&mut self, path: &Arc<str>, record: &Arc<ExclusiveCreate>) {
+        self.forget(path);
+        self.entries.insert(Arc::clone(path), Arc::clone(record));
+        self.order.push_back(Arc::clone(path));
         while self.order.len() > DEFAULT_EXCLUSIVE_CREATES {
             if let Some(oldest) = self.order.pop_front() {
                 self.entries.remove(&oldest);
@@ -676,31 +698,83 @@ impl ExclusiveCreates {
         }
     }
 
-    fn matches(&mut self, path: &str, verifier: &[u8], identity: Option<PathIdentity>) -> bool {
-        let expired = self
-            .entries
-            .get(path)
-            .is_some_and(|entry| entry.recorded.elapsed() >= EXCLUSIVE_CREATE_WINDOW);
-        if expired {
-            self.forget(path);
-            return false;
-        }
+    fn remembers(&self, path: &str) -> bool {
         self.entries
-            .get(path)
-            .is_some_and(|entry| entry.verifier == verifier && entry.identity == identity)
+            .keys()
+            .any(|candidate| is_path_or_below(candidate, path))
     }
 
     fn forget(&mut self, path: &str) {
-        let prefix = format!("{path}/");
         self.entries
-            .retain(|candidate, _| candidate != path && !candidate.starts_with(&prefix));
+            .retain(|candidate, _| !is_path_or_below(candidate, path));
         self.order
             .retain(|candidate| self.entries.contains_key(candidate));
     }
+}
 
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.order.clear();
+/// The exclusive-create records of one session, replaced whole on each
+/// change so that reading them never waits.
+#[derive(Debug, Default)]
+struct ExclusiveCreateTable(ArcSwap<ExclusiveCreates>);
+
+impl ExclusiveCreateTable {
+    fn set(&self, path: &str, verifier: Vec<u8>, identity: Option<PathIdentity>) {
+        // Built once, outside the retry loop: a retry must not restamp it.
+        let path: Arc<str> = Arc::from(path);
+        let record = Arc::new(ExclusiveCreate {
+            verifier,
+            identity,
+            recorded: Instant::now(),
+        });
+        self.0.rcu(|current| {
+            let mut next = ExclusiveCreates::clone(current);
+            next.set(&path, &record);
+            next
+        });
+    }
+
+    fn matches(&self, path: &str, verifier: &[u8], identity: Option<PathIdentity>) -> bool {
+        let Some(entry) = self.0.load().entries.get(path).cloned() else {
+            return false;
+        };
+        if entry.recorded.elapsed() >= EXCLUSIVE_CREATE_WINDOW {
+            // Drop the expired record, unless a newer create replaced it
+            // in the meantime.
+            self.0.rcu(|current| {
+                let still_there = current
+                    .entries
+                    .get(path)
+                    .is_some_and(|candidate| Arc::ptr_eq(candidate, &entry));
+                if !still_there {
+                    return Arc::clone(current);
+                }
+                let mut next = ExclusiveCreates::clone(current);
+                next.forget(path);
+                Arc::new(next)
+            });
+            return false;
+        }
+        entry.verifier == verifier && entry.identity == identity
+    }
+
+    /// Almost every call finds nothing to forget (each SETATTR, REMOVE and
+    /// RENAME makes one), so look first and copy only when a record goes.
+    fn forget(&self, path: &str) {
+        if !self.0.load().remembers(path) {
+            return;
+        }
+        self.0.rcu(|current| {
+            if !current.remembers(path) {
+                return Arc::clone(current);
+            }
+            let mut next = ExclusiveCreates::clone(current);
+            next.forget(path);
+            Arc::new(next)
+        });
+    }
+
+    fn clear(&self) {
+        self.0.store(Arc::default());
     }
 }
 
@@ -726,8 +800,9 @@ pub struct Nfs3Session {
     pub handles: FileHandleTable,
     pub write_verifier: [u8; 8],
     snapshots: DirectorySnapshots,
-    mounts: Arc<TurnCell<Vec<MountRecord>>>,
-    exclusive_creates: Arc<TurnCell<ExclusiveCreates>>,
+    /// Replaced whole on each MNT or UMNT; DUMP and `mounts()` load it.
+    mounts: Arc<ArcSwap<Vec<MountRecord>>>,
+    exclusive_creates: Arc<ExclusiveCreateTable>,
     /// NFSv3 has no OPEN on the wire. Keep one backend read handle for every
     /// regular filehandle we expose so an unlink can detach the namespace name
     /// without destroying the object a client is still holding.
@@ -745,6 +820,19 @@ enum CloseOutcome {
     Failed,
 }
 
+/// What a close-attempt waiter says about whether another attempt is due.
+fn close_needs_attempt(closing: Option<&tokio::sync::watch::Receiver<CloseOutcome>>) -> bool {
+    match closing {
+        None => true,
+        Some(wait) => match *wait.borrow() {
+            // A task that ended without reporting was on a stopped runtime.
+            CloseOutcome::Pending => wait.has_changed().is_err(),
+            CloseOutcome::Succeeded => false,
+            CloseOutcome::Failed => true,
+        },
+    }
+}
+
 struct CloseEntry {
     handle: Arc<dyn FileHandle>,
     closing: Option<tokio::sync::watch::Receiver<CloseOutcome>>,
@@ -752,26 +840,51 @@ struct CloseEntry {
 
 impl CloseEntry {
     fn needs_attempt(&self) -> bool {
-        match self.closing.as_ref() {
-            None => true,
-            Some(wait) => match *wait.borrow() {
-                CloseOutcome::Pending => wait.has_changed().is_err(),
-                CloseOutcome::Succeeded => false,
-                CloseOutcome::Failed => true,
-            },
-        }
+        close_needs_attempt(self.closing.as_ref())
     }
 }
 
+/// One descriptor waiting to be closed outside the retained table.
+struct ProvisionalEntry {
+    handle: Arc<dyn FileHandle>,
+    /// The waiter of the latest close attempt. Whoever replaces it by
+    /// compare-and-swap owns that attempt and spawns its one close task.
+    closing: ArcSwapOption<tokio::sync::watch::Receiver<CloseOutcome>>,
+}
+
 struct ProvisionalCloses {
-    next_id: u64,
-    by_id: HashMap<u64, CloseEntry>,
+    next_id: AtomicU64,
+    /// Holds only descriptors whose close has not succeeded yet, so it is
+    /// small; replaced whole on each change.
+    by_id: ArcSwap<HashMap<u64, Arc<ProvisionalEntry>>>,
+}
+
+impl ProvisionalCloses {
+    fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+            by_id: ArcSwap::from_pointee(HashMap::new()),
+        }
+    }
+
+    fn remove(&self, id: u64) {
+        self.by_id.rcu(|current| {
+            if !current.contains_key(&id) {
+                return Arc::clone(current);
+            }
+            let mut next = HashMap::clone(current);
+            next.remove(&id);
+            Arc::new(next)
+        });
+    }
 }
 
 struct RetainedHandles {
     table: FileHandleTable,
-    by_id: TurnCell<HashMap<u64, CloseEntry>>,
-    provisional: TurnCell<ProvisionalCloses>,
+    /// A park cell: `schedule_retained` walks every entry and spawns a task
+    /// for each while holding it.
+    by_id: ParkCell<HashMap<u64, CloseEntry>>,
+    provisional: ProvisionalCloses,
     active: tokio::sync::watch::Sender<usize>,
 }
 
@@ -794,19 +907,20 @@ impl RetainedHandles {
     }
 
     fn register_provisional(&self, handle: Arc<dyn FileHandle>) -> u64 {
-        let mut state = self.provisional.lock().expect("NFS provisional close lock");
-        let id = state.next_id;
-        state.next_id = state
+        let id = self
+            .provisional
             .next_id
-            .checked_add(1)
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .expect("provisional close id overflow");
-        state.by_id.insert(
-            id,
-            CloseEntry {
-                handle,
-                closing: None,
-            },
-        );
+        let entry = Arc::new(ProvisionalEntry {
+            handle,
+            closing: ArcSwapOption::empty(),
+        });
+        self.provisional.by_id.rcu(|current| {
+            let mut next = HashMap::clone(current);
+            next.insert(id, Arc::clone(&entry));
+            next
+        });
         id
     }
 
@@ -850,34 +964,48 @@ impl RetainedHandles {
         waits
     }
 
+    /// Return the waiter of this descriptor's current close attempt,
+    /// starting one if none is running. The drop path and `destroy` can both
+    /// ask at once; only the caller whose compare-and-swap installs the new
+    /// waiter spawns the close task, so a handle is never closed twice by
+    /// one attempt.
     fn schedule_provisional(
         self: &Arc<Self>,
         id: u64,
         runtime: &tokio::runtime::Handle,
     ) -> Option<tokio::sync::watch::Receiver<CloseOutcome>> {
-        let mut state = self.provisional.lock().expect("NFS provisional close lock");
-        let entry = state.by_id.get_mut(&id)?;
-        if entry.needs_attempt() {
+        let entry = self.provisional.by_id.load().get(&id).cloned()?;
+        loop {
+            let current = entry.closing.load_full();
+            if !close_needs_attempt(current.as_deref()) {
+                return current.as_deref().cloned();
+            }
+            let (completed, wait) = tokio::sync::watch::channel(CloseOutcome::Pending);
+            let installed = entry
+                .closing
+                .compare_and_swap(&current, Some(Arc::new(wait.clone())));
+            let won = match (&*installed, &current) {
+                (None, None) => true,
+                (Some(before), Some(expected)) => Arc::ptr_eq(before, expected),
+                _ => false,
+            };
+            if !won {
+                // Another caller owns this attempt: use its waiter.
+                continue;
+            }
             let handle = Arc::clone(&entry.handle);
             let owner = Arc::clone(self);
-            let (completed, wait) = tokio::sync::watch::channel(CloseOutcome::Pending);
             runtime.spawn(async move {
                 let outcome = if handle.close().await.is_ok() {
-                    owner
-                        .provisional
-                        .lock()
-                        .expect("NFS provisional close lock")
-                        .by_id
-                        .remove(&id);
+                    owner.provisional.remove(id);
                     CloseOutcome::Succeeded
                 } else {
                     CloseOutcome::Failed
                 };
                 let _ = completed.send(outcome);
             });
-            entry.closing = Some(wait);
+            return Some(wait);
         }
-        entry.closing.clone()
     }
 
     fn schedule_all_provisional(
@@ -886,9 +1014,8 @@ impl RetainedHandles {
     ) -> Vec<tokio::sync::watch::Receiver<CloseOutcome>> {
         let ids = self
             .provisional
-            .lock()
-            .expect("NFS provisional close lock")
             .by_id
+            .load()
             .keys()
             .copied()
             .collect::<Vec<_>>();
@@ -912,12 +1039,7 @@ impl RetainedHandles {
             .lock()
             .expect("NFS retained handle lock")
             .is_empty()
-            && self
-                .provisional
-                .lock()
-                .expect("NFS provisional close lock")
-                .by_id
-                .is_empty()
+            && self.provisional.by_id.load().is_empty()
     }
 }
 
@@ -1113,11 +1235,8 @@ impl Nfs3Session {
         let (active, _) = tokio::sync::watch::channel(0usize);
         let retained_handles = Arc::new(RetainedHandles {
             table: handles.clone(),
-            by_id: TurnCell::new(HashMap::new()),
-            provisional: TurnCell::new(ProvisionalCloses {
-                next_id: 1,
-                by_id: HashMap::new(),
-            }),
+            by_id: ParkCell::new(HashMap::new()),
+            provisional: ProvisionalCloses::new(),
             active,
         });
         Self {
@@ -1126,8 +1245,8 @@ impl Nfs3Session {
             handles,
             write_verifier,
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
-            mounts: Arc::new(TurnCell::new(Vec::new())),
-            exclusive_creates: Arc::new(TurnCell::new(ExclusiveCreates::default())),
+            mounts: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            exclusive_creates: Arc::new(ExclusiveCreateTable::default()),
             retained_handles,
             stats: shared.stats.clone(),
             destroyed: Arc::new(AtomicBool::new(false)),
@@ -1155,8 +1274,7 @@ impl Nfs3Session {
 
     pub fn mounts(&self) -> Vec<(String, String)> {
         self.mounts
-            .lock()
-            .expect("NFS mount lock")
+            .load()
             .iter()
             .map(|record| (record.hostname.clone(), record.directory.clone()))
             .collect()
@@ -1217,11 +1335,8 @@ impl Nfs3Session {
         }
         self.handles.clear();
         self.snapshots.clear();
-        self.mounts.lock().expect("NFS mount lock").clear();
-        self.exclusive_creates
-            .lock()
-            .expect("NFS exclusive-create lock")
-            .clear();
+        self.mounts.store(Arc::default());
+        self.exclusive_creates.clear();
         true
     }
 
@@ -1978,10 +2093,7 @@ impl Nfs3Session {
         match result {
             Ok(()) => {
                 if let Some(path) = path.as_deref() {
-                    self.exclusive_creates
-                        .lock()
-                        .expect("NFS exclusive-create lock")
-                        .forget(path);
+                    self.exclusive_creates.forget(path);
                     write_wcc_res(
                         writer,
                         &WccRes {
@@ -2746,9 +2858,7 @@ impl Nfs3Session {
                             .clone()
                             .unwrap_or_else(|| vec![0; NFS3_CREATEVERFSIZE]);
                         self.exclusive_creates
-                            .lock()
-                            .expect("NFS exclusive-create lock")
-                            .set(path.clone(), verifier, created_identity);
+                            .set(&path, verifier, created_identity);
                     }
                     trace.stage("create_handle_close_start", format_args!("path={path}"));
                     handle.close().await?;
@@ -2798,11 +2908,9 @@ impl Nfs3Session {
                     } else {
                         None
                     };
-                    let matches = self
-                        .exclusive_creates
-                        .lock()
-                        .expect("NFS exclusive-create lock")
-                        .matches(&path, verifier, existing_identity);
+                    let matches =
+                        self.exclusive_creates
+                            .matches(&path, verifier, existing_identity);
                     if matches {
                         created_identity = existing_identity;
                         Ok(path)
@@ -3243,10 +3351,7 @@ impl Nfs3Session {
                     self.handles.orphan(&path);
                 }
             }
-            self.exclusive_creates
-                .lock()
-                .expect("NFS exclusive-create lock")
-                .forget(&path);
+            self.exclusive_creates.forget(&path);
             self.invalidate(&parent);
             Ok::<String, FsError>(parent)
         }
@@ -3350,14 +3455,8 @@ impl Nfs3Session {
             }
             if !same_inode && !self.options.shared_concurrent_view {
                 self.handles.remap(&from, &to);
-                self.exclusive_creates
-                    .lock()
-                    .expect("NFS exclusive-create lock")
-                    .forget(&from);
-                self.exclusive_creates
-                    .lock()
-                    .expect("NFS exclusive-create lock")
-                    .forget(&to);
+                self.exclusive_creates.forget(&from);
+                self.exclusive_creates.forget(&to);
             }
             self.invalidate(&from_parent);
             self.invalidate(&to_parent);
@@ -4074,16 +4173,19 @@ impl Nfs3Session {
                 let path = mount_rs_core::path::normalize_path(&requested);
                 match self.attr_of(&path).await {
                     Ok((entry, attr, _)) if attr.r#type == NF3DIR => {
-                        self.mounts
-                            .lock()
-                            .expect("NFS mount lock")
-                            .push(MountRecord {
-                                hostname: context
-                                    .peer
-                                    .clone()
-                                    .unwrap_or_else(|| "localhost".to_owned()),
-                                directory: path,
-                            });
+                        let record = MountRecord {
+                            hostname: context
+                                .peer
+                                .clone()
+                                .unwrap_or_else(|| "localhost".to_owned()),
+                            directory: path,
+                        };
+                        self.mounts.rcu(|current| {
+                            let mut next = Vec::with_capacity(current.len() + 1);
+                            next.extend(current.iter().cloned());
+                            next.push(record.clone());
+                            next
+                        });
                         write_mount_res(
                             writer,
                             &Mountres3 {
@@ -4130,8 +4232,7 @@ impl Nfs3Session {
                 args.end("DUMP arguments")?;
                 let entries: Vec<MountEntry3> = self
                     .mounts
-                    .lock()
-                    .expect("NFS mount lock")
+                    .load()
                     .iter()
                     .map(|record| MountEntry3 {
                         hostname: record.hostname.clone(),
@@ -4145,18 +4246,14 @@ impl Nfs3Session {
                     mount_rs_core::path::normalize_path(&args.string(MNT3_PATHLEN, "dirpath")?);
                 args.end("UMNT arguments")?;
                 let host = context.peer.as_deref().unwrap_or("localhost");
-                self.mounts
-                    .lock()
-                    .expect("NFS mount lock")
-                    .retain(|record| !(record.hostname == host && record.directory == requested));
+                retain_mounts(&self.mounts, |record| {
+                    !(record.hostname == host && record.directory == requested)
+                });
             }
             MOUNTPROC3_UMNTALL => {
                 args.end("UMNTALL arguments")?;
                 let host = context.peer.as_deref().unwrap_or("localhost");
-                self.mounts
-                    .lock()
-                    .expect("NFS mount lock")
-                    .retain(|record| record.hostname != host);
+                retain_mounts(&self.mounts, |record| record.hostname != host);
             }
             MOUNTPROC3_EXPORT => {
                 args.end("EXPORT arguments")?;
@@ -4757,5 +4854,277 @@ mod tests {
         assert_eq!(observed[0].1, None);
         assert_eq!(observed[0].0, "NFS request returned an error");
         assert!(!reply.is_empty());
+    }
+
+    fn mount_call(xid: u32, procedure: u32, path: Option<&str>) -> Vec<u8> {
+        let arguments = match path {
+            Some(path) => crate::xdr::encode_xdr(|writer| writer.string(path)),
+            None => Vec::new(),
+        };
+        crate::rpc::encode_call(
+            xid,
+            MOUNT_PROGRAM,
+            MOUNT_V3,
+            procedure,
+            None,
+            None,
+            &arguments,
+        )
+    }
+
+    /// MNT, UMNT and UMNTALL from many peers at once: no record is lost and
+    /// none is removed on behalf of another peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_mount_records_are_neither_lost_nor_removed_for_another_peer() {
+        const PEERS: usize = 24;
+        const ROUNDS: usize = 20;
+        let session = session().await;
+        let tasks = (0..PEERS)
+            .map(|peer| {
+                let session = session.clone();
+                tokio::spawn(async move {
+                    let context = NfsRequestContext {
+                        peer: Some(format!("peer-{peer}")),
+                    };
+                    for round in 0..ROUNDS {
+                        let xid = (peer * ROUNDS + round) as u32;
+                        session
+                            .handle_call(
+                                &mount_call(xid, MOUNTPROC3_MNT, Some("/")),
+                                context.clone(),
+                            )
+                            .await
+                            .unwrap();
+                        let mine = session
+                            .mounts()
+                            .iter()
+                            .filter(|(host, _)| *host == format!("peer-{peer}"))
+                            .count();
+                        assert_eq!(mine, 1, "own mount record is visible exactly once");
+                        // Even peers keep their last record; odd peers end
+                        // with none.
+                        if round + 1 < ROUNDS || peer % 2 == 1 {
+                            let (procedure, path) = if round % 2 == 0 {
+                                (MOUNTPROC3_UMNT, Some("/"))
+                            } else {
+                                (MOUNTPROC3_UMNTALL, None)
+                            };
+                            session
+                                .handle_call(&mount_call(xid, procedure, path), context.clone())
+                                .await
+                                .unwrap();
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let mut hosts = session
+            .mounts()
+            .into_iter()
+            .map(|(host, directory)| {
+                assert_eq!(directory, "/");
+                host
+            })
+            .collect::<Vec<_>>();
+        hosts.sort();
+        let mut expected = (0..PEERS)
+            .filter(|peer| peer % 2 == 0)
+            .map(|peer| format!("peer-{peer}"))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(hosts, expected);
+    }
+
+    /// Concurrent exclusive creates and forgets keep the record map and its
+    /// eviction order describing the same paths, lose no record, and a
+    /// forget with nothing to forget leaves the very same value in place.
+    #[test]
+    fn concurrent_exclusive_create_records_stay_consistent() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 24;
+        let table = ExclusiveCreateTable::default();
+        let barrier = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let table = &table;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for index in 0..PER_THREAD {
+                        let kept = format!("/kept/{thread}/{index}");
+                        let verifier = vec![thread as u8, index as u8];
+                        table.set(&kept, verifier.clone(), None);
+                        assert!(table.matches(&kept, &verifier, None));
+                        assert!(!table.matches(&kept, &[0xff], None));
+                        // A record under a directory goes with it, and a
+                        // sibling whose name merely starts the same stays.
+                        let gone = format!("/gone-{thread}/{index}");
+                        table.set(&gone, verifier.clone(), None);
+                        table.forget(&format!("/gone-{thread}"));
+                        assert!(!table.matches(&gone, &verifier, None));
+                        table.forget("/kep");
+                        table.forget("/absent");
+                    }
+                });
+            }
+        });
+        let state = table.0.load_full();
+        assert_eq!(state.entries.len(), THREADS * PER_THREAD);
+        assert_eq!(state.order.len(), state.entries.len());
+        assert!(
+            state
+                .order
+                .iter()
+                .all(|path| state.entries.contains_key(path))
+        );
+        for thread in 0..THREADS {
+            for index in 0..PER_THREAD {
+                assert!(table.matches(
+                    &format!("/kept/{thread}/{index}"),
+                    &[thread as u8, index as u8],
+                    None
+                ));
+            }
+        }
+        table.forget("/absent");
+        table.forget("/kept/0/1/below");
+        assert!(
+            Arc::ptr_eq(&state, &table.0.load_full()),
+            "a forget that matches nothing must not replace the value"
+        );
+        // The cap still evicts the oldest records.
+        for index in 0..DEFAULT_EXCLUSIVE_CREATES {
+            table.set(&format!("/fill/{index}"), Vec::new(), None);
+        }
+        let state = table.0.load_full();
+        assert_eq!(state.entries.len(), DEFAULT_EXCLUSIVE_CREATES);
+        assert!(!table.matches("/kept/0/0", &[0, 0], None));
+        table.clear();
+        assert!(table.0.load().entries.is_empty());
+    }
+
+    struct CountingCloseHandle {
+        started: AtomicU64,
+        fail_next: AtomicBool,
+        release: tokio::sync::Semaphore,
+    }
+
+    #[async_trait::async_trait]
+    impl FileHandle for CountingCloseHandle {
+        async fn read(&self, _buffer: &mut [u8], _position: Option<u64>) -> FsResult<usize> {
+            Ok(0)
+        }
+
+        async fn write(&self, buffer: &[u8], _position: Option<u64>) -> FsResult<usize> {
+            Ok(buffer.len())
+        }
+
+        async fn stat(&self) -> FsResult<mount_rs_core::Stats> {
+            Err(FsError::new(ErrorCode::Enotsup))
+        }
+
+        async fn truncate(&self, _length: u64) -> FsResult<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> FsResult<()> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.release.acquire().await.expect("release").forget();
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                return Err(FsError::new(ErrorCode::Eio));
+            }
+            Ok(())
+        }
+    }
+
+    /// The drop path and `destroy` may both ask for a provisional descriptor
+    /// to be closed. However many ask at once, each attempt runs one close
+    /// task; a failed attempt allows exactly one more.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_provisional_close_requests_spawn_one_task_per_attempt() {
+        const CALLERS: usize = 16;
+        let session = session().await;
+        let retained = Arc::clone(&session.retained_handles);
+        let runtime = tokio::runtime::Handle::current();
+        for round in 0..50_u64 {
+            let handle = Arc::new(CountingCloseHandle {
+                started: AtomicU64::new(0),
+                fail_next: AtomicBool::new(true),
+                release: tokio::sync::Semaphore::new(0),
+            });
+            let id = retained.register_provisional(handle.clone());
+            assert_eq!(id, round + 1, "ids are handed out once each, in order");
+            // Attempt 1 fails, attempt 2 succeeds.
+            for attempt in 1..=2_u64 {
+                let barrier = Arc::new(std::sync::Barrier::new(CALLERS));
+                let callers = (0..CALLERS)
+                    .map(|caller| {
+                        let retained = Arc::clone(&retained);
+                        let runtime = runtime.clone();
+                        let barrier = Arc::clone(&barrier);
+                        std::thread::spawn(move || {
+                            barrier.wait();
+                            if caller % 2 == 0 {
+                                retained
+                                    .schedule_provisional(id, &runtime)
+                                    .into_iter()
+                                    .collect()
+                            } else {
+                                retained.schedule_all_provisional(&runtime)
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let mut waits = Vec::new();
+                for caller in callers {
+                    let caller_waits: Vec<_> = caller.join().unwrap();
+                    assert_eq!(
+                        caller_waits.len(),
+                        1,
+                        "every caller gets the attempt's waiter"
+                    );
+                    waits.extend(caller_waits);
+                }
+                // Every caller holds a waiter for the one running attempt.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while handle.started.load(Ordering::SeqCst) < attempt {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the attempt's close task starts");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                assert_eq!(
+                    handle.started.load(Ordering::SeqCst),
+                    attempt,
+                    "one close task per attempt"
+                );
+                assert!(
+                    waits
+                        .iter()
+                        .all(|wait| *wait.borrow() == CloseOutcome::Pending)
+                );
+                // Asking again while it runs starts nothing.
+                assert!(retained.schedule_provisional(id, &runtime).is_some());
+                handle.release.add_permits(1);
+                RetainedHandles::await_attempts(waits.clone()).await;
+                let expected = if attempt == 1 {
+                    CloseOutcome::Failed
+                } else {
+                    CloseOutcome::Succeeded
+                };
+                assert!(waits.iter().all(|wait| *wait.borrow() == expected));
+                assert_eq!(handle.started.load(Ordering::SeqCst), attempt);
+                assert_eq!(retained.all_closed(), attempt == 2);
+            }
+            // A closed descriptor is forgotten: nothing is left to schedule.
+            assert!(retained.schedule_provisional(id, &runtime).is_none());
+            assert!(retained.schedule_all_provisional(&runtime).is_empty());
+            assert_eq!(handle.started.load(Ordering::SeqCst), 2);
+        }
+        assert!(session.destroy().await);
     }
 }

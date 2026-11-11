@@ -219,10 +219,15 @@ impl Default for DavLockTableOptions {
     }
 }
 
+/// The lock table is a value: a session publishes one behind an
+/// `ArcSwap` and replaces it on every change, so a reader works from one
+/// loaded snapshot and takes no lock. Lock records are shared between
+/// snapshots, so cloning a table copies pointers, not locks.
+#[derive(Clone)]
 pub struct DavLockTable {
-    locks: HashMap<String, DavLock>,
-    issued: HashSet<String>,
-    order: Vec<String>,
+    locks: HashMap<Arc<str>, Arc<DavLock>>,
+    issued: Arc<HashSet<String>>,
+    order: Vec<Arc<DavLock>>,
     options: DavLockTableOptions,
 }
 
@@ -235,11 +240,21 @@ impl std::fmt::Debug for DavLockTable {
     }
 }
 
+/// A token memoised across the attempts of one grant, so a configured
+/// generator runs at most once however often publishing the table is retried.
+pub(crate) type TokenMemo = Option<String>;
+
+/// Why a grant was refused, sharing the conflicting lock with the table.
+pub(crate) enum LockRefusal {
+    Conflict(Arc<DavLock>),
+    Full,
+}
+
 impl DavLockTable {
     pub fn new(options: DavLockTableOptions) -> Self {
         Self {
             locks: HashMap::new(),
-            issued: HashSet::new(),
+            issued: Arc::new(HashSet::new()),
             order: Vec::new(),
             options,
         }
@@ -252,35 +267,22 @@ impl DavLockTable {
 
     pub fn all(&mut self, now: i64) -> Vec<DavLock> {
         self.sweep(now);
-        self.order
-            .iter()
-            .filter_map(|token| self.locks.get(token).cloned())
-            .collect()
+        owned(self.all_at(now))
     }
 
     pub fn covering(&mut self, path: &str, now: i64) -> Vec<DavLock> {
         self.sweep(now);
-        self.order
-            .iter()
-            .filter_map(|token| self.locks.get(token))
-            .filter(|lock| lock_covers_path(&lock.path, lock.depth, path))
-            .cloned()
-            .collect()
+        owned(self.covering_at(path, now))
     }
 
     pub fn within(&mut self, path: &str, now: i64) -> Vec<DavLock> {
         self.sweep(now);
-        self.order
-            .iter()
-            .filter_map(|token| self.locks.get(token))
-            .filter(|lock| normalized_path_inside(&lock.path, path))
-            .cloned()
-            .collect()
+        owned(self.within_at(path, now))
     }
 
     pub fn find(&mut self, token: &str, now: i64) -> Option<DavLock> {
         self.sweep(now);
-        self.locks.get(token).cloned()
+        self.find_at(token, now).map(|lock| DavLock::clone(&lock))
     }
 
     pub fn in_scope(lock: &DavLock, path: &str) -> bool {
@@ -295,10 +297,56 @@ impl DavLockTable {
         now: i64,
     ) -> Option<DavLock> {
         self.sweep(now);
+        self.conflict_at(path, depth, exclusive, now)
+            .map(|lock| DavLock::clone(&lock))
+    }
+
+    /// Locks live at `now`, in grant order. The `_at` readers borrow the
+    /// table and skip expired locks instead of removing them, so they answer
+    /// from a shared snapshot.
+    fn live(&self, now: i64) -> impl Iterator<Item = &Arc<DavLock>> {
+        self.order.iter().filter(move |lock| lock.expires_at > now)
+    }
+
+    pub fn size_at(&self, now: i64) -> usize {
+        self.live(now).count()
+    }
+
+    pub fn all_at(&self, now: i64) -> Vec<Arc<DavLock>> {
+        self.live(now).cloned().collect()
+    }
+
+    pub fn covering_at(&self, path: &str, now: i64) -> Vec<Arc<DavLock>> {
+        self.live(now)
+            .filter(|lock| lock_covers_path(&lock.path, lock.depth, path))
+            .cloned()
+            .collect()
+    }
+
+    pub fn within_at(&self, path: &str, now: i64) -> Vec<Arc<DavLock>> {
+        self.live(now)
+            .filter(|lock| normalized_path_inside(&lock.path, path))
+            .cloned()
+            .collect()
+    }
+
+    pub fn find_at(&self, token: &str, now: i64) -> Option<Arc<DavLock>> {
+        self.locks
+            .get(token)
+            .filter(|lock| lock.expires_at > now)
+            .cloned()
+    }
+
+    pub fn conflict_at(
+        &self,
+        path: &str,
+        depth: LockDepth,
+        exclusive: bool,
+        now: i64,
+    ) -> Option<Arc<DavLock>> {
         let covering = self
             .order
             .iter()
-            .filter_map(|token| self.locks.get(token))
             .find(|lock| {
                 conflict_candidate(lock, path, depth, exclusive, now, ConflictPhase::Covering)
             })
@@ -307,7 +355,6 @@ impl DavLockTable {
             (depth == LockDepth::Infinity).then(|| {
                 self.order
                     .iter()
-                    .filter_map(|token| self.locks.get(token))
                     .find(|lock| {
                         conflict_candidate(lock, path, depth, exclusive, now, ConflictPhase::Within)
                     })
@@ -317,49 +364,74 @@ impl DavLockTable {
     }
 
     pub fn create(&mut self, request: DavLockRequest, now: i64) -> DavLockGrant {
-        if let Some(lock) = self.conflict(&request.path, request.depth, request.exclusive, now) {
-            return DavLockGrant::Conflict(lock);
+        self.sweep(now);
+        let mut memo = None;
+        match self.with_created(&request, now, &mut memo) {
+            Ok((next, lock)) => {
+                *self = next;
+                DavLockGrant::Granted(DavLock::clone(&lock))
+            }
+            Err(LockRefusal::Conflict(lock)) => DavLockGrant::Conflict(DavLock::clone(&lock)),
+            Err(LockRefusal::Full) => DavLockGrant::Full,
         }
-        if self.size(now) >= self.options.max_locks {
-            return DavLockGrant::Full;
+    }
+
+    /// The table with `request` granted, or why it is refused. This borrows
+    /// the table so a session can retry it against a newer snapshot; `memo`
+    /// carries the configured generator's token across those attempts so the
+    /// generator, which is the embedder's callback, is called once per grant.
+    pub(crate) fn with_created(
+        &self,
+        request: &DavLockRequest,
+        now: i64,
+        memo: &mut TokenMemo,
+    ) -> Result<(Self, Arc<DavLock>), LockRefusal> {
+        if let Some(lock) = self.conflict_at(&request.path, request.depth, request.exclusive, now) {
+            return Err(LockRefusal::Conflict(lock));
+        }
+        if self.size_at(now) >= self.options.max_locks {
+            return Err(LockRefusal::Full);
         }
         let injected_generator = self.options.new_token.is_some();
         if injected_generator && self.issued.len() >= MAX_LOCKS {
-            return DavLockGrant::Full;
+            return Err(LockRefusal::Full);
         }
         let timeout_seconds = self.granted_timeout(request.timeout);
-        let mut token = self.options.new_token.as_ref().map_or_else(
-            || format!("{LOCK_TOKEN_PREFIX}{}", Uuid::new_v4()),
-            |new_token| new_token(),
-        );
+        let mut token = match &self.options.new_token {
+            None => format!("{LOCK_TOKEN_PREFIX}{}", Uuid::new_v4()),
+            Some(new_token) => memo.get_or_insert_with(|| new_token()).clone(),
+        };
         if injected_generator
             && (token.len() > MAX_INJECTED_TOKEN_BYTES || !usable_lock_token_uri(&token))
         {
-            return DavLockGrant::Full;
+            return Err(LockRefusal::Full);
         }
         // A configured generator may repeat a token from an expired lock.
         // Retain its issued values; default UUIDs use random uniqueness.
-        while self.locks.contains_key(&token)
+        while self.locks.contains_key(token.as_str())
             || (injected_generator && self.issued.contains(&token))
         {
             token = format!("{LOCK_TOKEN_PREFIX}{}", Uuid::new_v4());
         }
-        let lock = DavLock {
+        let lock = Arc::new(DavLock {
             token: token.clone(),
-            path: request.path,
+            path: request.path.clone(),
             collection: request.collection,
             depth: request.depth,
             exclusive: request.exclusive,
-            owner: request.owner,
+            owner: request.owner.clone(),
             timeout_seconds,
             expires_at: lock_expiration(now, timeout_seconds),
-        };
+        });
+        let mut next = self.clone();
+        next.sweep(now);
+        next.locks
+            .insert(Arc::from(token.as_str()), Arc::clone(&lock));
+        next.order.push(Arc::clone(&lock));
         if injected_generator {
-            self.issued.insert(token.clone());
+            Arc::make_mut(&mut next.issued).insert(token);
         }
-        self.locks.insert(token.clone(), lock.clone());
-        self.order.push(token);
-        DavLockGrant::Granted(lock)
+        Ok((next, lock))
     }
 
     pub fn refresh(
@@ -368,23 +440,54 @@ impl DavLockTable {
         requested: Option<LockTimeout>,
         now: i64,
     ) -> Option<DavLock> {
-        let existing = self.find(token, now)?;
+        self.sweep(now);
+        let (next, lock) = self.with_refreshed(token, requested, now)?;
+        *self = next;
+        Some(DavLock::clone(&lock))
+    }
+
+    /// The table with the live lock `token` refreshed, or `None` when there
+    /// is no such lock.
+    pub(crate) fn with_refreshed(
+        &self,
+        token: &str,
+        requested: Option<LockTimeout>,
+        now: i64,
+    ) -> Option<(Self, Arc<DavLock>)> {
+        let existing = self.find_at(token, now)?;
         let timeout_seconds = self.granted_timeout(requested);
-        let refreshed = DavLock {
+        let refreshed = Arc::new(DavLock {
             timeout_seconds,
             expires_at: lock_expiration(now, timeout_seconds),
-            ..existing
-        };
-        self.locks.insert(token.to_owned(), refreshed.clone());
-        Some(refreshed)
+            ..DavLock::clone(&existing)
+        });
+        let mut next = self.clone();
+        next.sweep(now);
+        if let Some(slot) = next.locks.get_mut(token) {
+            *slot = Arc::clone(&refreshed);
+        }
+        if let Some(slot) = next
+            .order
+            .iter_mut()
+            .find(|lock| Arc::ptr_eq(lock, &existing))
+        {
+            *slot = Arc::clone(&refreshed);
+        }
+        Some((next, refreshed))
     }
 
     pub fn remove(&mut self, token: &str) -> bool {
         let removed = self.locks.remove(token).is_some();
         if removed {
-            self.order.retain(|entry| entry != token);
+            self.order.retain(|entry| entry.token != token);
         }
         removed
+    }
+
+    /// Whether `token` names a lock, live or expired, that `remove` would
+    /// take out.
+    pub(crate) fn holds(&self, token: &str) -> bool {
+        self.locks.contains_key(token)
     }
 
     pub fn remaining(lock: &DavLock, now: i64) -> u64 {
@@ -411,8 +514,12 @@ impl DavLockTable {
 
     fn sweep(&mut self, now: i64) {
         self.locks.retain(|_, lock| lock.expires_at > now);
-        self.order.retain(|token| self.locks.contains_key(token));
+        self.order.retain(|lock| lock.expires_at > now);
     }
+}
+
+fn owned(locks: Vec<Arc<DavLock>>) -> Vec<DavLock> {
+    locks.iter().map(|lock| DavLock::clone(lock)).collect()
 }
 
 fn lock_expiration(now: i64, timeout_seconds: u64) -> i64 {

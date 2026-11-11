@@ -8,6 +8,7 @@ license = "Apache-2.0"
 repository = "https://github.com/andymac4182/mount-rs"
 
 [dependencies]
+arc-swap = "1.9"
 async-trait = "0.1"
 base64 = "0.22"
 bytes = "1"
