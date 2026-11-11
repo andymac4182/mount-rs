@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, GuardedDirectoryEntry, Stats};
 
 use crate::constants::{NFS3_COOKIEVERFSIZE, NFS3_FHSIZE};
@@ -54,7 +54,7 @@ struct HandleState {
 }
 
 /// Formats a cell the way a mutex formats itself: the value when it is free.
-pub(crate) struct CellDebug<'a, T>(pub(crate) &'a TurnCell<T>);
+pub(crate) struct CellDebug<'a, T>(pub(crate) &'a ParkCell<T>);
 
 impl<T: std::fmt::Debug> std::fmt::Debug for CellDebug<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -68,7 +68,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for CellDebug<'_, T> {
 
 #[derive(Clone)]
 pub struct FileHandleTable {
-    state: Arc<TurnCell<HandleState>>,
+    state: Arc<ParkCell<HandleState>>,
     use_driver_ino: bool,
     max_handles: usize,
 }
@@ -115,7 +115,7 @@ impl FileHandleTable {
         let mut by_id = HashMap::new();
         by_id.insert(ROOT_HANDLE_ID, root);
         Self {
-            state: Arc::new(TurnCell::new(HandleState {
+            state: Arc::new(ParkCell::new(HandleState {
                 verifier,
                 stable_inode_ids: false,
                 next_id: ROOT_HANDLE_ID + 1,
@@ -681,7 +681,7 @@ pub struct DirectorySnapshot {
 
 #[derive(Clone)]
 pub struct DirectorySnapshots {
-    state: Arc<TurnCell<SnapshotState>>,
+    state: Arc<ParkCell<SnapshotState>>,
     max: usize,
 }
 
@@ -706,7 +706,7 @@ impl std::fmt::Debug for DirectorySnapshots {
 impl DirectorySnapshots {
     pub fn new(max: usize) -> Self {
         Self {
-            state: Arc::new(TurnCell::new(SnapshotState::default())),
+            state: Arc::new(ParkCell::new(SnapshotState::default())),
             max: max.max(1),
         }
     }
