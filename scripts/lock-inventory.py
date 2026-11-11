@@ -124,6 +124,36 @@ def fields():
                         yield crate_of(path), path, number, holder, found.group(1), kind
 
 
+STD = re.compile(r"\b(Mutex|RwLock|Condvar|parking_lot)\b")
+
+
+def std_mentions():
+    """Every production line that names a standard or third-party lock at all.
+
+    This does not depend on the line being a field, a static, an alias or a
+    variant, so it also catches a local variable, an argument or a renamed
+    import. Production code is meant to hold none.
+    """
+    test_only = test_only_files()
+    for root in ROOTS:
+        for directory, names, files in os.walk(root):
+            names[:] = [n for n in names if n not in ("tests", "benches", "examples", "target", "node_modules")]
+            for name in files:
+                path = os.path.join(directory, name)
+                if not name.endswith(".rs") or name.endswith("_tests.rs") or name == "tests.rs" or path in test_only:
+                    continue
+                gated = False
+                for number, line in enumerate(production_lines(path), 1):
+                    code = line.split("//")[0]
+                    if TEST_MOD.match(line):
+                        gated = True
+                    elif gated:
+                        # A test-only item runs to the end of its statement.
+                        gated = not code.rstrip().endswith((";", "{", "}"))
+                    elif STD.search(code):
+                        yield path, number, line.strip()
+
+
 def main():
     doc = open("docs/production-readiness.md", encoding="utf-8").read()
     section = doc[doc.index("## Locks"):]
@@ -151,7 +181,11 @@ def main():
         f"\n{len(rows)} lock fields: {len(rows) - missing - handles} named in a row for their crate in "
         f"docs/production-readiness.md, {handles} second handles to a named lock, {missing} missing"
     )
-    return 1 if missing else 0
+    mentions = list(std_mentions())
+    for path, number, line in mentions:
+        print(f"STD     {path}:{number}  {line}")
+    print(f"{len(mentions)} production lines name a standard or third-party lock")
+    return 1 if missing or mentions else 0
 
 
 if __name__ == "__main__":
