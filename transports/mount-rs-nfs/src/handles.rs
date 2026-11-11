@@ -1,6 +1,6 @@
 //! NFSv3 file handles and directory-cookie snapshots.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,6 +34,8 @@ struct Entry {
     key: Option<String>,
     paths: BTreeSet<String>,
     pins: usize,
+    /// This entry's key in `HandleState::lru`; zero while it has none.
+    used: u64,
 }
 
 #[derive(Debug)]
@@ -44,7 +46,11 @@ struct HandleState {
     by_id: HashMap<u64, Entry>,
     by_path: HashMap<String, u64>,
     by_key: HashMap<String, u64>,
-    lru: VecDeque<u64>,
+    /// Handle ids by when each was last used, oldest first. Keyed by a
+    /// counter rather than kept as a list so that using a handle does not
+    /// scan every other handle: each NFS operation decodes at least one.
+    lru: BTreeMap<u64, u64>,
+    next_use: u64,
 }
 
 /// Formats a cell the way a mutex formats itself: the value when it is free.
@@ -104,6 +110,7 @@ impl FileHandleTable {
             key: None,
             paths: BTreeSet::from([String::from("/")]),
             pins: 0,
+            used: 0,
         };
         let mut by_id = HashMap::new();
         by_id.insert(ROOT_HANDLE_ID, root);
@@ -115,7 +122,8 @@ impl FileHandleTable {
                 by_id,
                 by_path: HashMap::from([(String::from("/"), ROOT_HANDLE_ID)]),
                 by_key: HashMap::new(),
-                lru: VecDeque::new(),
+                lru: BTreeMap::new(),
+                next_use: 1,
             })),
             use_driver_ino: options.use_driver_ino,
             max_handles: options.max_handles.filter(|value| *value > 0).unwrap_or(0),
@@ -363,6 +371,7 @@ impl FileHandleTable {
                         key: key.clone(),
                         paths: BTreeSet::new(),
                         pins: 0,
+                        used: 0,
                     },
                 );
                 id
@@ -528,6 +537,7 @@ impl FileHandleTable {
             key: None,
             paths: BTreeSet::from([String::from("/")]),
             pins: 0,
+            used: 0,
         };
         let mut state = self.state.lock().expect("handle table lock");
         state.next_id = ROOT_HANDLE_ID + 1;
@@ -561,14 +571,21 @@ fn touch_locked(state: &mut HandleState, id: u64) {
     if id == ROOT_HANDLE_ID || !state.by_id.contains_key(&id) {
         return;
     }
-    state.lru.retain(|candidate| *candidate != id);
-    state.lru.push_back(id);
+    let used = state.next_use;
+    state.next_use += 1;
+    let Some(entry) = state.by_id.get_mut(&id) else {
+        return;
+    };
+    let previous = std::mem::replace(&mut entry.used, used);
+    state.lru.remove(&previous);
+    state.lru.insert(used, id);
 }
 
 fn drop_entry_locked(state: &mut HandleState, id: u64) {
     let Some(entry) = state.by_id.remove(&id) else {
         return;
     };
+    let used = entry.used;
     for path in entry.paths {
         if state.by_path.get(&path) == Some(&id) {
             state.by_path.remove(&path);
@@ -579,7 +596,7 @@ fn drop_entry_locked(state: &mut HandleState, id: u64) {
     {
         state.by_key.remove(&key);
     }
-    state.lru.retain(|candidate| *candidate != id);
+    state.lru.remove(&used);
 }
 
 fn enforce_limit_locked(state: &mut HandleState, max_handles: usize, protected: u64) {
@@ -587,7 +604,7 @@ fn enforce_limit_locked(state: &mut HandleState, max_handles: usize, protected: 
         return;
     }
     while state.by_id.len() > max_handles {
-        let victim = state.lru.iter().copied().find(|candidate| {
+        let victim = state.lru.values().copied().find(|candidate| {
             *candidate != protected
                 && state
                     .by_id
@@ -921,6 +938,27 @@ mod tests {
         let fifth = table.bind("/fifth", &stats(6));
         assert_eq!(table.at("/fifth").unwrap().id, fifth.id);
         assert!(table.at("/first").is_none());
+    }
+
+    #[test]
+    fn using_a_handle_does_not_scan_the_whole_table() {
+        // Every NFS operation decodes a handle. A crawl leaves one entry per
+        // file, so a cost per use that grows with the table makes the whole
+        // mount slow down as it is used. Linear cost here is tens of seconds.
+        const HANDLES: u64 = 100_000;
+        let table = FileHandleTable::default();
+        let handles: Vec<Vec<u8>> = (0..HANDLES)
+            .map(|index| table.encode(&table.bind(&format!("/f{index}"), &stats(100 + index))))
+            .collect();
+        let start = std::time::Instant::now();
+        for handle in &handles {
+            table.decode(handle).unwrap();
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "decoding {HANDLES} handles took {elapsed:?}"
+        );
     }
 
     #[test]
