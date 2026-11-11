@@ -17,6 +17,33 @@ mod storage;
 
 pub use storage::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 
+/// How long a connection attempt may take before it fails, unless the
+/// connection string sets `connect_timeout`.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a TCP connection may sit idle before the kernel probes it, unless
+/// the connection string sets `keepalives_idle`.
+const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// tokio-postgres's own idle default: two hours.
+const DRIVER_KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+/// Parse a connection string and bound how long a dead server can go
+/// unnoticed.
+///
+/// Every filesystem operation waits its turn on one connection, so a connect
+/// that never completes, or a peer that vanished without closing, would hang
+/// the whole mount. Values set in the connection string are kept. This does
+/// not bound a server that is alive but slow.
+fn connection_config(connection_string: &str) -> mount_rs_core::Result<tokio_postgres::Config> {
+    let mut config: tokio_postgres::Config = connection_string.parse().map_err(postgres_error)?;
+    if config.get_connect_timeout().is_none() {
+        config.connect_timeout(CONNECT_TIMEOUT);
+    }
+    if config.get_keepalives_idle() == DRIVER_KEEPALIVE_IDLE {
+        config.keepalives_idle(KEEPALIVE_IDLE);
+    }
+    Ok(config)
+}
+
 fn postgres_error(error: tokio_postgres::Error) -> mount_rs_core::FsError {
     if let Some(database) = error.as_db_error() {
         backend_error(format!(
@@ -106,7 +133,8 @@ impl PgliteStore {
         connection_string: &str,
         state_key: impl Into<String>,
     ) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(connection_string, NoTls)
+        let (client, connection) = connection_config(connection_string)?
+            .connect(NoTls)
             .await
             .map_err(postgres_error)?;
         let connection = tokio::spawn(async move {
@@ -316,6 +344,25 @@ mod tests {
     use super::*;
     use crate::storage::test_support::PgliteServer;
     use mount_rs_core::{ErrorCode, FsDriver};
+
+    #[test]
+    fn a_connection_string_without_timeouts_gets_bounded_ones() {
+        let config = connection_config("host=/tmp/pglite user=postgres dbname=template1").unwrap();
+        assert_eq!(config.get_connect_timeout(), Some(&CONNECT_TIMEOUT));
+        assert_eq!(config.get_keepalives_idle(), KEEPALIVE_IDLE);
+
+        let chosen =
+            connection_config("host=/tmp/pglite user=postgres connect_timeout=5 keepalives_idle=7")
+                .unwrap();
+        assert_eq!(
+            chosen.get_connect_timeout(),
+            Some(&std::time::Duration::from_secs(5))
+        );
+        assert_eq!(
+            chosen.get_keepalives_idle(),
+            std::time::Duration::from_secs(7)
+        );
+    }
 
     /// This is opt-in because it talks to the caller-provided PGlite socket.
     /// It never runs against an ambient database merely because a URL exists.
