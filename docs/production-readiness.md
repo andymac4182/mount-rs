@@ -121,6 +121,8 @@ Production code holds no `std::sync::Mutex` or `RwLock`. Exclusion is done
 by in-house types:
 
 - `TurnCell`: a waiter spins, then yields; only for short sections.
+- `ParkCell`: `TurnCell` for sections that can be long. A waiter queues
+  and parks its thread instead of spinning.
 - `TurnLock`: a waiter queues; may be held across an await.
 - `TurnGate`: the queue of a `TurnLock` with no value inside it.
 - `DrainGate`: many shared holders or one exclusive holder, which waits
@@ -158,6 +160,7 @@ nothing a cheaper primitive could not guard was removed.
 | PGlite state-store client | An atomic pointer; closing swaps it out and waits for the connection to end |
 | S3 connection shutdown list, Node open-handle callback list | `AppendLog`; shutdown reads a snapshot, and one added after it is missed exactly as it was when a lock ordered the two |
 | Live-mount registries (automatic transport, native NFS), SQLite trace registry, CLI drive metrics map | An atomic pointer to a list or map replaced whole |
+| Authenticator policy cache, one lock held across every key fetch | One atomic snapshot per policy, read without waiting; a turn is taken only by a caller that must fetch |
 | Chunked block cache per-block fill turn (`DrainGate` that never had a shared holder) | `TurnGate`; the exclusion stays, the unused shared half goes |
 
 Fixed keys mean a client can no longer grow a counter map: undefined NFS and
@@ -196,7 +199,6 @@ is listed here with the reason it must stay:
 | crates/mount-rs-blob-cache | `flights` and each flight gate | C, A | Get-or-insert; one fetch per key |
 | crates/mount-rs-blob-cache | `pending` | C | Pushed by puts, taken by flush, filtered by delete |
 | crates/mount-rs-fault-injection | `FaultInjector.state` | S | Plan, counters and event list advance per decision |
-| crates/mount-rs-service | `CatalogAuthenticator.cache` | A | Held across the key fetch to allow one refresh per policy |
 | crates/mount-rs-service | catalog `connections`, `SessionHandles.state` | R, S | SQLite connection; id, closed flag, revision and handle map |
 | filesystems/mount-rs-chunked | `StateCell.mutex` | S | Namespace, revisions, open references; reads already use an atomic mirror |
 | filesystems/mount-rs-chunked | block cache `Index` turn | S | Entries, order and byte total; arrivals already queue lock-free |
@@ -253,6 +255,7 @@ overlap each other; an "exclusive" caller waits for them.
 | filesystems/mount-rs-host | disk cache `io`, `writes` | `DrainGate` | Delete and clear wait for gets and puts running on blocking threads; flush waits for in-flight puts |
 | transports/mount-rs-nfs | `path_lock` | `DrainGate` | Ordinary calls share; remove, rename, client expiry and destroy wait so an unlinked path cannot be rebound |
 | transports/mount-rs-9p | `path_lock` | `DrainGate` | Path requests share; rename waits so fid paths are rewritten with no walk in flight |
+| crates/mount-rs-service | `PolicySlot.refresh` | `TurnGate` | One key fetch per policy; callers that queued re-read the snapshot. Verifying with cached keys never takes it |
 | providers/mount-rs-sqlite | `PutGroup.turn` | `TurnGate` | Group commit: one commit at a time, with queued puts and reads answered by the turn holder |
 
 One gap from the replacements: the S3 connection shutdown list and the Node
@@ -260,16 +263,20 @@ open-handle callback list are now push-only. They hold a weak pointer per
 connection or handle and are freed only when the server or driver is
 dropped, so a very long-lived server grows them slowly.
 
-**Spinning locks held for too long** (found by the audit, not fixed):
+**Spinning locks held for too long** were found by the audit and are
+fixed. Each of these was a `TurnCell`, so a second caller burned a core
+until the holder finished. They are now `ParkCell`: the same exclusion, with
+waiters parked in arrival order.
 
-| Where | What is held under a `TurnCell` |
-|-------|---------------------------------|
-| `providers/mount-rs-sqlite/src/storage.rs` connection | fsync and SQLite's busy wait. Flush, verify and metadata calls can contend, so a waiter spins for the length of a disk sync |
+| Where | What is held |
+|-------|--------------|
+| `providers/mount-rs-sqlite/src/storage.rs` connection | fsync and SQLite's busy wait |
 | Blob cache local store | An eviction scan over every entry |
-| Memory filesystem snapshot | Serialising the whole filesystem |
-| Key-value open file | Whole-file copies |
-| NFS handle table | `forget` and `remap` full scans, and a deep copy for READDIR |
-| `crates/mount-rs-service/src/auth.rs` policy cache (`TurnLock`) | An OIDC fetch, so every request queues behind one slow fetch |
+| Memory filesystem state | Serialising the whole filesystem for a snapshot |
+| Key-value state and open files | Whole-file copies |
+| NFS handle table and directory snapshots | `forget` and `remap` full scans, and a deep copy for READDIR |
 
-The first is the one that matters: it should become a `TurnLock` or run on
-a blocking thread.
+The authenticator's policy cache was a `TurnLock` held across an OIDC key
+fetch, so every request queued behind one slow issuer. Keys are now an
+atomic snapshot per policy. A request whose keys are cached never waits; a
+request that needs a fetch waits only for its own policy's.

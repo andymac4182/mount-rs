@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use mount_rs_core::driver::{FileHandle, FsDriver};
 use mount_rs_core::error::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_core::handle::{OpenFlags, checked_position};
+use mount_rs_core::park_cell::{ParkCell, ParkCellGuard};
 use mount_rs_core::path::{basename, dirname, is_path_inside, normalize_path, split_path};
-use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, now_ms,
 };
@@ -134,14 +134,14 @@ struct State {
     next_fd: u64,
     attributes: HashMap<String, Attributes>,
     empty_directories: HashSet<String>,
-    open_files: HashMap<String, Arc<TurnCell<OpenFile>>>,
+    open_files: HashMap<String, Arc<ParkCell<OpenFile>>>,
 }
 
 struct Inner<S> {
     store: S,
     options: UnstorageOptions,
     created_ms: i64,
-    state: TurnCell<State>,
+    state: ParkCell<State>,
 }
 
 /// A cloneable generic key-value filesystem driver.
@@ -184,7 +184,7 @@ where
             store,
             options,
             created_ms: now_ms(),
-            state: TurnCell::new(State {
+            state: ParkCell::new(State {
                 next_ino: 1,
                 next_fd: 3,
                 attributes: HashMap::new(),
@@ -218,7 +218,7 @@ enum Kind {
 
 struct KvFileHandle<S> {
     inner: Arc<Inner<S>>,
-    entry: Arc<TurnCell<OpenFile>>,
+    entry: Arc<ParkCell<OpenFile>>,
     flags: OpenFlags,
     fd: u64,
     closed: AtomicBool,
@@ -281,7 +281,7 @@ impl<S> Inner<S>
 where
     S: KeyValueStore,
 {
-    fn lock_state(&self) -> Result<TurnCellGuard<'_, State>> {
+    fn lock_state(&self) -> Result<ParkCellGuard<'_, State>> {
         self.state
             .lock()
             .map_err(|_| FsError::new(ErrorCode::Eio).with_message("key-value state lock poisoned"))
@@ -367,7 +367,7 @@ where
         Ok(self.lock_state()?.open_files.contains_key(path))
     }
 
-    fn open_file(&self, path: &str) -> Result<Option<Arc<TurnCell<OpenFile>>>> {
+    fn open_file(&self, path: &str) -> Result<Option<Arc<ParkCell<OpenFile>>>> {
         Ok(self.lock_state()?.open_files.get(path).cloned())
     }
 
@@ -380,7 +380,7 @@ where
         Ok(fd)
     }
 
-    fn remove_open_file_if(&self, path: &str, entry: &Arc<TurnCell<OpenFile>>) -> Result<()> {
+    fn remove_open_file_if(&self, path: &str, entry: &Arc<ParkCell<OpenFile>>) -> Result<()> {
         let mut state = self.lock_state()?;
         if state
             .open_files
@@ -403,7 +403,7 @@ where
         Ok(())
     }
 
-    fn remove_closed(&self, entry: &Arc<TurnCell<OpenFile>>) -> Result<()> {
+    fn remove_closed(&self, entry: &Arc<ParkCell<OpenFile>>) -> Result<()> {
         let (path, refs, dirty, orphan) = {
             let file = entry.lock().map_err(|_| FsError::new(ErrorCode::Eio))?;
             (file.path.clone(), file.refs, file.dirty, file.orphan)
@@ -1549,7 +1549,7 @@ where
         &self,
         path: &str,
         syscall: &str,
-        entry: Option<Arc<TurnCell<OpenFile>>>,
+        entry: Option<Arc<ParkCell<OpenFile>>>,
     ) -> Result<Stats> {
         let attributes = self.attributes_of(path)?;
         let mode = S_IFREG | (attributes.mode.unwrap_or(self.options.file_mode) & 0o7777);
@@ -1608,7 +1608,7 @@ where
         path: &str,
         known: Option<Vec<u8>>,
         syscall: &str,
-    ) -> Result<Arc<TurnCell<OpenFile>>> {
+    ) -> Result<Arc<ParkCell<OpenFile>>> {
         if let Some(entry) = self.open_file(path)? {
             entry
                 .lock()
@@ -1620,7 +1620,7 @@ where
             Some(data) => data,
             None => self.read_value(path, syscall).await?,
         };
-        let candidate = Arc::new(TurnCell::new(OpenFile {
+        let candidate = Arc::new(ParkCell::new(OpenFile {
             path: path.to_owned(),
             data,
             refs: 1,
@@ -1642,7 +1642,7 @@ where
         Ok(candidate)
     }
 
-    async fn flush(&self, entry: &Arc<TurnCell<OpenFile>>) -> Result<()> {
+    async fn flush(&self, entry: &Arc<ParkCell<OpenFile>>) -> Result<()> {
         let snapshot = {
             let mut file = entry
                 .lock()
@@ -1662,7 +1662,7 @@ where
         Ok(())
     }
 
-    async fn release(&self, entry: &Arc<TurnCell<OpenFile>>) -> Result<()> {
+    async fn release(&self, entry: &Arc<ParkCell<OpenFile>>) -> Result<()> {
         {
             let mut file = entry
                 .lock()

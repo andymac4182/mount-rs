@@ -550,3 +550,144 @@ fn grant_conditions_are_conjunctive_typed_and_write_requires_a_matching_grant() 
     }
     assert_eq!(authorize_drive(&catalog, "issuer", &claims, "p", "d"), None);
 }
+
+/// Serves one key per issuer, and holds a fetch for `stalled` until told.
+struct StallingKeys {
+    keys: std::sync::Mutex<BTreeMap<String, Jwk>>,
+    stalled: std::sync::Mutex<Option<String>>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    fetches: std::sync::atomic::AtomicUsize,
+}
+#[async_trait::async_trait]
+impl mount_rs_service::auth::OidcKeySource for StallingKeys {
+    async fn fetch(
+        &self,
+        issuer: &str,
+        audiences: &[String],
+    ) -> Result<OidcVerifier, mount_rs_service::auth::AuthError> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.stalled.lock().unwrap().as_deref() == Some(issuer) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        let key = self.keys.lock().unwrap()[issuer].clone();
+        OidcVerifier::new(issuer, audiences, vec![key])
+    }
+}
+
+/// A key fetch that hangs used to hold the one cache lock, so every other
+/// request queued behind it: requests for other issuers, and requests whose
+/// keys were already cached.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_key_fetch_delays_only_the_requests_that_need_it() {
+    use mount_rs_service::{
+        auth::CatalogAuthenticator, catalog::SqliteCatalog, server::Authenticator,
+    };
+    use std::sync::{Arc, atomic::Ordering};
+    use std::time::Duration;
+    const SLOW: &str = "https://slow.example.com";
+    const FAST: &str = "https://fast.example.com";
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = Arc::new(
+        SqliteCatalog::open(directory.path().join("catalog.sqlite"))
+            .await
+            .unwrap(),
+    );
+    let mut snapshot = CatalogSnapshot::empty();
+    snapshot.partitions.insert(
+        "red".into(),
+        PartitionDefinition {
+            drives: BTreeMap::from([(
+                "data".into(),
+                DriveDefinition {
+                    driver: json!({"kind":"memory"}),
+                },
+            )]),
+        },
+    );
+    for (policy, issuer) in [("slow", SLOW), ("fast", FAST)] {
+        snapshot.issuer_policies.insert(
+            policy.into(),
+            json!({"issuer":issuer,"audiences":["mount-rs"]}),
+        );
+        snapshot.grants.insert(
+            policy.into(),
+            GrantDefinition {
+                partition_id: "red".into(),
+                policy_id: policy.into(),
+                drives: BTreeMap::from([("data".into(), Permission::Read)]),
+                claim_conditions: BTreeMap::from([("/sub".into(), "workload".into())]),
+            },
+        );
+    }
+    catalog.compare_and_swap(0, snapshot).await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = |issuer: &str| json!({"iss":issuer,"aud":"mount-rs","sub":"workload","iat":now,"exp":now+300});
+    let (slow_token, slow_key) = signed_token(claims(SLOW));
+    let (fast_token, fast_key) = signed_token(claims(FAST));
+    let (rotated_token, _) = signed_token(claims(SLOW));
+    let source = Arc::new(StallingKeys {
+        keys: std::sync::Mutex::new(BTreeMap::from([
+            (SLOW.to_owned(), slow_key),
+            (FAST.to_owned(), fast_key),
+        ])),
+        stalled: std::sync::Mutex::new(Some(SLOW.to_owned())),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fetches: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let auth = Arc::new(CatalogAuthenticator::with_key_source(
+        catalog,
+        source.clone(),
+    ));
+    // Paused time jumps to the deadline as soon as nothing can run, so this
+    // fails at once if the request is stuck behind the stalled fetch.
+    let prompt = |token: String| {
+        let auth = Arc::clone(&auth);
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), auth.authenticate(&token, "red"))
+                .await
+                .expect("queued behind another request's key fetch")
+        }
+    };
+
+    // The slow issuer's first fetch hangs. The other issuer is unaffected.
+    let first = tokio::spawn({
+        let auth = Arc::clone(&auth);
+        let token = slow_token.clone();
+        async move { auth.authenticate(&token, "red").await }
+    });
+    source.entered.notified().await;
+    assert_eq!(prompt(fast_token.clone()).await.unwrap().policy_id, "fast");
+    // A second request for the slow issuer waits for the same fetch
+    // instead of starting another.
+    let second = tokio::spawn({
+        let auth = Arc::clone(&auth);
+        let token = slow_token.clone();
+        async move { auth.authenticate(&token, "red").await }
+    });
+    tokio::task::yield_now().await;
+    source.release.notify_one();
+    assert_eq!(first.await.unwrap().unwrap().policy_id, "slow");
+    assert_eq!(second.await.unwrap().unwrap().policy_id, "slow");
+    assert_eq!(source.fetches.load(Ordering::SeqCst), 2);
+
+    // A token signed by an unknown key starts a refresh, which hangs. A
+    // token the cached keys accept does not wait for it.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    let unknown = tokio::spawn({
+        let auth = Arc::clone(&auth);
+        async move { auth.authenticate(&rotated_token, "red").await }
+    });
+    source.entered.notified().await;
+    assert_eq!(prompt(slow_token).await.unwrap().policy_id, "slow");
+    assert_eq!(prompt(fast_token).await.unwrap().policy_id, "fast");
+    source.release.notify_one();
+    assert!(unknown.await.unwrap().is_err());
+    assert_eq!(source.fetches.load(Ordering::SeqCst), 3);
+}

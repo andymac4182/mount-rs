@@ -13,6 +13,7 @@ pub mod driver;
 pub mod error;
 pub mod handle;
 pub mod node_map;
+pub mod park_cell;
 pub mod path;
 pub mod snapshot;
 pub mod storage;

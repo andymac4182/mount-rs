@@ -550,15 +550,39 @@ mod proofs {
 /// Production authenticator. Only catalog-pinned policies are contacted.
 pub struct CatalogAuthenticator {
     catalog: std::sync::Arc<dyn crate::catalog::CatalogStore>,
-    cache: mount_rs_core::turn_gate::TurnLock<std::collections::BTreeMap<String, CachedPolicy>>,
+    /// One slot per catalog policy. Replaced whole when the set of policy
+    /// ids changes; a slot that survives keeps its keys.
+    policies: arc_swap::ArcSwap<std::collections::BTreeMap<String, std::sync::Arc<PolicySlot>>>,
     source: std::sync::Arc<dyn OidcKeySource>,
+}
+
+/// A policy's signing keys. Verifying reads `current` without waiting for
+/// anything; only a caller that has to fetch takes `refresh`, so a slow
+/// issuer delays the requests that need its new keys and no others.
+#[derive(Default)]
+struct PolicySlot {
+    current: arc_swap::ArcSwapOption<CachedPolicy>,
+    /// One discovery or JWKS fetch per policy at a time; the callers that
+    /// queued for it re-read `current` and usually find the work done.
+    refresh: mount_rs_core::turn_gate::TurnGate,
 }
 
 struct CachedPolicy {
     configuration: Value,
-    verifier: Option<OidcVerifier>,
+    verifier: Option<std::sync::Arc<OidcVerifier>>,
     fetched: tokio::time::Instant,
     attempted: tokio::time::Instant,
+}
+
+impl CachedPolicy {
+    fn is_fresh(&self, configuration: &Value) -> bool {
+        self.configuration == *configuration
+            && (if self.verifier.is_some() {
+                self.fetched.elapsed().as_secs() < 600
+            } else {
+                self.attempted.elapsed().as_secs() < 60
+            })
+    }
 }
 
 #[async_trait::async_trait]
@@ -583,8 +607,123 @@ impl CatalogAuthenticator {
         Self {
             catalog,
             source,
-            cache: mount_rs_core::turn_gate::TurnLock::new(std::collections::BTreeMap::new()),
+            policies: arc_swap::ArcSwap::from_pointee(std::collections::BTreeMap::new()),
         }
+    }
+
+    /// The slots for exactly the catalog's policies.
+    fn policy_slots(
+        &self,
+        catalog: &crate::catalog::CatalogSnapshot,
+    ) -> std::sync::Arc<std::collections::BTreeMap<String, std::sync::Arc<PolicySlot>>> {
+        let wanted = &catalog.issuer_policies;
+        let current = self.policies.load_full();
+        if current.len() == wanted.len() && current.keys().all(|id| wanted.contains_key(id)) {
+            return current;
+        }
+        // Built from whatever is current at each attempt, so two callers
+        // that add the same policy end up sharing one slot.
+        self.policies.rcu(|current| {
+            wanted
+                .keys()
+                .map(|id| (id.clone(), current.get(id).cloned().unwrap_or_default()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        });
+        let current = self.policies.load_full();
+        if current.keys().all(|id| wanted.contains_key(id)) && current.len() == wanted.len() {
+            return current;
+        }
+        // A caller with a different catalog revision replaced the map in
+        // between. Use slots of this caller's own for the ids it lost.
+        std::sync::Arc::new(
+            wanted
+                .keys()
+                .map(|id| (id.clone(), current.get(id).cloned().unwrap_or_default()))
+                .collect(),
+        )
+    }
+
+    /// The policy's keys, fetched first if the cached ones are stale or
+    /// were fetched for another configuration.
+    async fn fresh_policy(
+        &self,
+        slot: &PolicySlot,
+        configuration: &Value,
+        policy: &crate::catalog::IssuerPolicyDefinition,
+    ) -> std::sync::Arc<CachedPolicy> {
+        if let Some(entry) = slot.current.load_full()
+            && entry.is_fresh(configuration)
+        {
+            return entry;
+        }
+        let _turn = slot.refresh.lock().await;
+        if let Some(entry) = slot.current.load_full()
+            && entry.is_fresh(configuration)
+        {
+            return entry;
+        }
+        let verifier = self
+            .source
+            .fetch(&policy.issuer, &policy.audiences)
+            .await
+            .ok()
+            .map(std::sync::Arc::new);
+        let entry = std::sync::Arc::new(CachedPolicy {
+            configuration: configuration.clone(),
+            verifier,
+            fetched: tokio::time::Instant::now(),
+            attempted: tokio::time::Instant::now(),
+        });
+        slot.current.store(Some(std::sync::Arc::clone(&entry)));
+        entry
+    }
+
+    /// After `entry`'s keys rejected a token: fetch the keys again, at most
+    /// once a minute per policy, and return whichever keys are then current
+    /// if they are not the ones that already failed.
+    async fn refreshed_verifier(
+        &self,
+        slot: &PolicySlot,
+        entry: &std::sync::Arc<CachedPolicy>,
+        policy: &crate::catalog::IssuerPolicyDefinition,
+    ) -> Option<std::sync::Arc<OidcVerifier>> {
+        if entry.attempted.elapsed().as_secs() < 60 {
+            return None;
+        }
+        let _turn = slot.refresh.lock().await;
+        let current = slot.current.load_full()?;
+        if current.configuration != entry.configuration {
+            return None;
+        }
+        if current.attempted.elapsed().as_secs() < 60 {
+            // Someone else fetched while this caller queued.
+            let changed = match (&current.verifier, &entry.verifier) {
+                (Some(now), Some(before)) => !std::sync::Arc::ptr_eq(now, before),
+                (now, _) => now.is_some(),
+            };
+            return changed.then(|| current.verifier.clone()).flatten();
+        }
+        // Recorded before the fetch, so a fetch that fails or is cancelled
+        // still counts against the minute.
+        slot.current.store(Some(std::sync::Arc::new(CachedPolicy {
+            configuration: current.configuration.clone(),
+            verifier: current.verifier.clone(),
+            fetched: current.fetched,
+            attempted: tokio::time::Instant::now(),
+        })));
+        let verifier = std::sync::Arc::new(
+            self.source
+                .fetch(&policy.issuer, &policy.audiences)
+                .await
+                .ok()?,
+        );
+        slot.current.store(Some(std::sync::Arc::new(CachedPolicy {
+            configuration: current.configuration.clone(),
+            verifier: Some(std::sync::Arc::clone(&verifier)),
+            fetched: tokio::time::Instant::now(),
+            attempted: tokio::time::Instant::now(),
+        })));
+        Some(verifier)
     }
 }
 
@@ -612,8 +751,7 @@ impl crate::server::Authenticator for CatalogAuthenticator {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| ())?
             .as_secs() as i64;
-        let mut cache = self.cache.lock().await;
-        cache.retain(|id, _| catalog.issuer_policies.contains_key(id));
+        let slots = self.policy_slots(&catalog);
         let mut matched = None;
         for (id, configuration) in &catalog.issuer_policies {
             if !catalog
@@ -628,43 +766,17 @@ impl crate::server::Authenticator for CatalogAuthenticator {
             if policy.issuer != claimed_issuer || !policy.algorithms.contains(&header.alg) {
                 continue;
             }
-            let fresh = cache.get(id).is_some_and(|entry| {
-                entry.configuration == *configuration
-                    && (if entry.verifier.is_some() {
-                        entry.fetched.elapsed().as_secs() < 600
-                    } else {
-                        entry.attempted.elapsed().as_secs() < 60
-                    })
-            });
-            if !fresh {
-                let verifier = self
-                    .source
-                    .fetch(&policy.issuer, &policy.audiences)
-                    .await
-                    .ok();
-                cache.insert(
-                    id.clone(),
-                    CachedPolicy {
-                        configuration: configuration.clone(),
-                        verifier,
-                        fetched: tokio::time::Instant::now(),
-                        attempted: tokio::time::Instant::now(),
-                    },
-                );
-            }
-            let entry = cache.get_mut(id).ok_or(())?;
+            let slot = slots.get(id).ok_or(())?;
+            let entry = self.fresh_policy(slot, configuration, &policy).await;
             let Some(verifier) = &entry.verifier else {
                 continue;
             };
             let mut principal = verifier.verify(token, now);
             // At most one discovery/JWKS refresh per minute, including unknown keys.
-            if principal.is_err() && entry.attempted.elapsed().as_secs() >= 60 {
-                entry.attempted = tokio::time::Instant::now();
-                if let Ok(verifier) = self.source.fetch(&policy.issuer, &policy.audiences).await {
-                    principal = verifier.verify(token, now);
-                    entry.verifier = Some(verifier);
-                    entry.fetched = tokio::time::Instant::now();
-                }
+            if principal.is_err()
+                && let Some(verifier) = self.refreshed_verifier(slot, &entry, &policy).await
+            {
+                principal = verifier.verify(token, now);
             }
             let Ok(principal) = principal else {
                 continue;

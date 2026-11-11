@@ -8,6 +8,7 @@ mod direct_io_benchmark;
 
 use async_trait::async_trait;
 use mount_rs_core::diagnostics::profile::{self, Event};
+use mount_rs_core::park_cell::{ParkCell, ParkCellGuard};
 use mount_rs_core::storage::{
     BlockId, BlockStore, CheckoutRequest, ConcurrentBackingId, ConcurrentModeState,
     DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState, DirectoryGrant,
@@ -17,7 +18,6 @@ use mount_rs_core::storage::{
 };
 #[cfg(unix)]
 use mount_rs_core::storage::{encode_inode_namespace, validate_inode_publication};
-use mount_rs_core::turn_cell::{TurnCell, TurnCellGuard};
 use mount_rs_core::turn_gate::Served;
 use mount_rs_core::versioning::{
     PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
@@ -274,7 +274,7 @@ fn require_local_concurrent_backing(
 
 #[derive(Clone)]
 struct Database {
-    connection: Arc<TurnCell<Connection>>,
+    connection: Arc<ParkCell<Connection>>,
     /// Set for the metadata database: its namespace can have change rows on
     /// top of the stored document (see `changes`).
     namespace_changes: bool,
@@ -509,7 +509,7 @@ impl Database {
         connection.execute_batch(schema).map_err(backend_error)?;
         // Empty paths and :memory: are not durable even when passed to open().
         let durable = connection.path().is_some_and(|path| !path.is_empty());
-        let connection = Arc::new(TurnCell::new(connection));
+        let connection = Arc::new(ParkCell::new(connection));
         let diagnostics = super::io_diagnostics::register(&connection)?;
         Ok(Self {
             connection,
@@ -611,7 +611,7 @@ impl Database {
     /// form: change rows are folded into the document first. Everything
     /// that reads or replaces the namespace column relies on that, and may
     /// change the namespace, so the copy kept for comparison is dropped.
-    fn lock(&self) -> Result<TurnCellGuard<'_, Connection>> {
+    fn lock(&self) -> Result<ParkCellGuard<'_, Connection>> {
         let connection = self.lock_unfolded()?;
         if self.namespace_changes {
             self.published.take();
@@ -625,10 +625,12 @@ impl Database {
     /// look at the namespace or its revision (renewing and releasing the
     /// writer lease, `flush`). Acquiring the lease folds: a new writer then
     /// starts from a store without rows, and only the lease holder adds any.
-    fn lock_unfolded(&self) -> Result<TurnCellGuard<'_, Connection>> {
-        // Never waited for on the session path: the block store's users
+    fn lock_unfolded(&self) -> Result<ParkCellGuard<'_, Connection>> {
+        // Rarely waited for on the session path: the block store's users
         // take turns before they get here (`BlockTurns`), and the metadata
-        // store is used by one publication at a time.
+        // store is used by one publication at a time. A flush, a verify or
+        // a diagnostics sample can still arrive during a disk sync, so a
+        // waiter parks instead of spinning.
         self.connection
             .lock()
             .map_err(|()| backend_error("SQLite storage lock poisoned"))

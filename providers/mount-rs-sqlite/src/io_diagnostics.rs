@@ -1,6 +1,6 @@
 //! Optional SQLite engine counters. These are pager operations, not device IOPS.
 use arc_swap::ArcSwap;
-use mount_rs_core::turn_cell::TurnCell;
+use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::{Result, backend_error};
 use rusqlite::{Connection, ffi};
 use std::{
@@ -31,7 +31,7 @@ pub(crate) struct Counts {
 #[derive(Clone)]
 struct Entry {
     id: u64,
-    connection: Weak<TurnCell<Connection>>,
+    connection: Weak<ParkCell<Connection>>,
     counts: Weak<Counts>,
 }
 // Connections register rarely and only when profiling is on, so each change
@@ -76,7 +76,7 @@ fn live_entries(entries: &[Entry]) -> Vec<Entry> {
         .cloned()
         .collect()
 }
-pub(crate) fn register(connection: &Arc<TurnCell<Connection>>) -> Result<Option<Arc<Counts>>> {
+pub(crate) fn register(connection: &Arc<ParkCell<Connection>>) -> Result<Option<Arc<Counts>>> {
     if std::env::var("MOUNT_RS_PROFILE_IO").as_deref() != Ok("1") {
         return Ok(None);
     }
