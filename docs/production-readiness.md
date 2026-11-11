@@ -174,6 +174,12 @@ merged result was swept a third time, including every `TurnGate` and
 including four that were first kept as a matter of judgment. Each lock left
 is listed here with the reason it must stay:
 
+`python3 scripts/lock-inventory.py` lists every lock field in production
+code and fails if one is not named in a row for its crate below, so a new
+lock cannot be added without a reason written here. Production code has no
+standard-library, `parking_lot` or `tokio` lock; every mention of one is in
+test code.
+
 - **S**: several values change together and must agree.
 - **C**: a collection where a check and the change must be one step.
 - **A**: held across an await or a blocking call on purpose, so a second
