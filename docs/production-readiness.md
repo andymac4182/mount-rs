@@ -15,7 +15,7 @@ by its checks. PR #50 addresses them.
 |-----|-------|------------|
 | `rust (windows-latest)` | Dead code in the cluster HTTP/3 test off Unix | Unix-only items gated |
 | `Observability qualification (windows-latest)` | A delegated SQLite hand-off test needs concurrent local backing, which is Unix-only; then the disk cache report test, because the disk cache refuses to open off Unix | Quarantined on non-Unix, with the reason at each test |
-| `node (macos-latest)`, `node (macos-15-intel)` | The provider matrix compiled the CLI inside a 120 s test case | The CLI is built once before the timed cases |
+| `node (macos-latest)`, `node (macos-15-intel)` | The provider matrix compiled the CLI inside a 120 s test case; on Intel macOS the enclosing step's 10-minute limit then expired during that build | The CLI is built once before the timed cases, and the step limit is 25 minutes |
 | `w26-ozone-evidence` | The TiDB job wrote its log into the checkout, and the evidence step refuses a dirty checkout | Log and artifact moved to the runner's temp directory |
 
 The quarantines hide no behaviour that is supported on those platforms: the
@@ -34,6 +34,9 @@ by design.
 | Host disk cache fault (#51) | A fault in the cache's own index or data file failed `put` after the backing store had the block, and failed `get` instead of reading the backing store | A cache fault is a miss; `delete` still fails while the index is broken | New test that fails without the change |
 | SQLite VFS lock level (#52) | After a failed upgrade from SHARED to EXCLUSIVE the file kept the reserved lock and reader gate while the handle recorded SHARED, so SQLite's unlock was dropped and other connections saw `SQLITE_BUSY` | The unlock after a failed upgrade reaches the file | New test that fails without the change |
 | PGlite writer lease refusal (#53) | A concurrent-mode volume refused the legacy writer lease with `EAGAIN`, the answer for "wait for the holder", for a lease that can never be granted | Returns `EBUSY`, as SQLite does | Existing ignored test tightened to assert the code; run against the PGlite test server |
+| NFS handle table (#54) | Every operation scanned a list of every handle to mark one as used, so operations slowed in proportion to the files ever seen | Recency kept in an ordered map | New test: 100,000 handles decoded once each took 362 s before and under 1 s after (debug build) |
+| NFS and WebDAV accept loops (#55) | One failed `accept()` ended the listener; the mount stayed attached but the client's next reconnect hung | The failure is reported and the loop keeps accepting, pausing 10 ms to 1 s between failures | New tests drive the retry with injected `EMFILE`; real descriptor exhaustion was not exercised |
+| PGlite and TiDB liveness (#56) | A connect that never completed, or a peer that vanished without closing, hung a statement and everything queued behind it | PGlite: 30 s connect timeout, 60 s keepalive idle. TiDB: 60 s TCP keepalive. Values in the connection string win | New unit tests for the defaults; a PGlite test connects through the new path |
 | NFSv4 per-request session copy | Every `SEQUENCE` cloned the whole session state under the lock | Only the three fields the request needs are copied | Workspace tests; not benchmarked, the change only removes a clone |
 
 Every Rust change was preceded by
@@ -87,14 +90,14 @@ with `-D warnings` on macOS.
 
 ## Gaps found outside the audit
 
-Found by a read-only survey after the audit items. None has been verified
-further or started.
+Found by a read-only survey after the audit items. The three rated high
+were verified and fixed in part (#54, #55, #56); what is left of them is
+listed first. The rest have not been verified further or started.
 
 | Gap | Failure mode | Severity |
 |-----|--------------|----------|
-| NFS file-handle table has no default cap and scans its LRU on every operation (`transports/mount-rs-nfs/src/handles.rs`) | A crawl over a large tree grows memory without bound and slows every later operation | High |
-| NFS and WebDAV accept loops exit on any `accept()` error, and the CLI wires no error hooks | One transient `EMFILE` stops the listener; the mountpoint hangs while the process looks healthy | High |
-| PGlite and TiDB calls have no connect or query timeout; PGlite does not reconnect | A stalled server hangs one query holding the connection, and every operation queues behind it | High |
+| NFS file-handle table has no default cap (`transports/mount-rs-nfs/src/handles.rs`) | A crawl over a large tree grows memory without bound. A default cap would return stale-handle errors for files a client may still have open, so it needs a decision | High |
+| PGlite and TiDB statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision | High |
 | Exclusive (writeback) mode publishes namespace changes only on fsync, shutdown or reconcile | Creates and renames made without fsync are lost on SIGKILL, OOM or power loss | Medium |
 | A remote mount rejects every operation after one transport error, and the CLI never checks its keepalive worker | A network blip leaves the mount attached and returning `EIO`, with no log or exit | Medium |
 | `/readyz` ignores drive health | A load balancer keeps routing to a drive that has failed closed | Medium |
