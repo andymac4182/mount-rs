@@ -12,8 +12,9 @@ use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
-use std::task::{Context, Poll, Waker};
+use std::task::Poll;
 
+use mount_rs_core::take_cell::TakeCell;
 use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::TurnLock;
 use mount_rs_core::{
@@ -273,67 +274,31 @@ fn capture_napi_error(error: Error, env: Env, operation: &str) -> JsDriverError 
     capture_js_error(value, operation)
 }
 
-struct CompletionState<T> {
-    result: Option<Result<T, JsDriverError>>,
-    waker: Option<Waker>,
+/// The sending side of one JavaScript call's result. The first `finish`
+/// delivers; later ones are ignored.
+struct Completion<T> {
+    sender: TakeCell<CompletionSender<T>>,
 }
 
-struct Completion<T> {
-    state: TurnCell<CompletionState<T>>,
-}
+type CompletionSender<T> = tokio::sync::oneshot::Sender<Result<T, JsDriverError>>;
+type CompletionReceiver<T> = tokio::sync::oneshot::Receiver<Result<T, JsDriverError>>;
 
 impl<T> Completion<T> {
-    fn new() -> Self {
-        Self {
-            state: TurnCell::new(CompletionState {
-                result: None,
-                waker: None,
-            }),
-        }
+    fn new() -> (Self, CompletionReceiver<T>) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                sender: TakeCell::new(sender),
+            },
+            receiver,
+        )
     }
 
     fn finish(&self, result: Result<T, JsDriverError>) {
-        // Nothing inside this section can panic: it moves a value into an
-        // empty slot and a waker out of one.
-        let waker = {
-            let Ok(mut state) = self.state.lock() else {
-                return;
-            };
-            if state.result.is_some() {
-                return;
-            }
-            state.result = Some(result);
-            state.waker.take()
-        };
-        if let Some(waker) = waker {
-            waker.wake();
+        if let Some(sender) = self.sender.take() {
+            // The waiter may have been cancelled and gone.
+            let _ = sender.send(result);
         }
-    }
-}
-
-struct CompletionFuture<T>(Arc<Completion<T>>);
-
-impl<T> Future for CompletionFuture<T>
-where
-    T: Send + 'static,
-{
-    type Output = Result<T, JsDriverError>;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        // Clone the new waker before, and drop the old one after, the
-        // section, so that it only moves values and cannot panic.
-        let waker = context.waker().clone();
-        let replaced = {
-            let Ok(mut state) = self.0.state.lock() else {
-                return Poll::Ready(Err(JsDriverError::closed()));
-            };
-            if let Some(result) = state.result.take() {
-                return Poll::Ready(result);
-            }
-            state.waker.replace(waker)
-        };
-        drop(replaced);
-        Poll::Pending
     }
 }
 
@@ -494,7 +459,8 @@ where
     if lifecycle.is_closed() {
         return Err(JsDriverError::closed());
     }
-    let completion = Arc::new(Completion::new());
+    let (completion, completed) = Completion::new();
+    let completion = Arc::new(completion);
     let mut cancelled = owner.subscribe();
     // A shutdown that fired between the check above and subscribing was
     // missed by this subscription.
@@ -547,11 +513,14 @@ where
     if status != Status::Ok {
         completion.finish(Err(JsDriverError::new(operation).with_code("EBADF")));
     }
-    let mut completed = std::pin::pin!(CompletionFuture(completion));
+    let mut completed = std::pin::pin!(completed);
     let mut cancel = std::pin::pin!(cancelled.changed());
     std::future::poll_fn(move |context| {
+        // Held so the sending side outlives the wait: only a result or a
+        // cancellation ends it.
+        let _sender = &completion;
         if let Poll::Ready(result) = completed.as_mut().poll(context) {
-            return Poll::Ready(result);
+            return Poll::Ready(result.unwrap_or_else(|_| Err(JsDriverError::closed())));
         }
         if cancel.as_mut().poll(context).is_ready() {
             return Poll::Ready(Err(JsDriverError::closed()));

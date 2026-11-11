@@ -1758,6 +1758,7 @@ dependencies = [
 name = "mount-rs-9p"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "mount-rs-core",
  "mount-rs-memfs",
  "tokio",

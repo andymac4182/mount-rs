@@ -121,8 +121,7 @@ Production code holds no `std::sync::Mutex` or `RwLock`. Exclusion is done
 by two in-house types: `TurnCell` (a waiter spins, then yields; only for
 short sections) and `TurnLock` (a waiter queues; may be held across an
 await). Every field of either type was audited, and each one that guarded
-nothing a cheaper primitive could not guard was removed: 48 of 135. None
-that is left is known to be removable.
+nothing a cheaper primitive could not guard was removed.
 
 | Removed | Replaced by |
 |---------|-------------|
@@ -140,14 +139,38 @@ that is left is known to be removable.
 | Node shutdown attempt result and its waiter list | A watched value |
 | NFS per-connection task list, which grew for the server's lifetime | A task set owned by the accept loop, which forgets each connection as it ends |
 | S3 debug in-flight table | A flag carried by the request |
+| 9P listener slot | An atomic take |
+| 9P connection write half, locked only by its one writer task | Owned by that task, which hands it back when stopped |
+| Peer identity install gate | A compare-and-swap on the slot it guarded |
+| Peer listener counter registry, blob-cache active scope | An atomic pointer to a replaced-whole value |
+| Node JavaScript call result and waker | A one-shot channel whose sender is taken once |
+| Node shutdown state machine | A compare-and-swap between phases, with the callback in its own slot |
 
 Fixed keys mean a client can no longer grow a counter map: undefined NFS and
 MOUNT procedure numbers are counted as `unknown`, and WebDAV counts at most
 64 distinct method names before using `OTHER`.
 
-**Kept, because the data needs exclusion**: session and connection tables,
-lifecycle and unmount gates, database connections, the SQLite VFS registry
-and WAL state, WebDAV lock table, shutdown and completion state.
+**Every lock that remains** was then re-read, access site by access site,
+by two independent reviews told to look for a replacement first. They found
+seven more, which are in the table above. Each of the rest is kept for one
+of four reasons:
+
+| Reason it must stay | Fields |
+|---------------------|--------|
+| Several values change together and must agree | 9P: lock table, session state, in-flight tags. NFS: handle table, directory snapshots, exclusive creates, retained and provisional handles, NFSv4 state. WebDAV lock table. Chunked runtime state, memory filesystem, key-value state and open files, memory metadata, object-store block cache, blob-cache local index, fault injector, session handles, SQLite VFS WAL state, Node path lock, Node 9P server state and fid table, peer turnover counts, refusal log windows, QUIC token caches |
+| A collection that concurrent callers insert into and remove from, where a check and the change must be one step | Connection tables (9P, NFS, WebDAV, S3 shutdowns, peer server), live-mount registries, mount records, blob-cache flights and pending writes, CLI drive metrics, Node callback list, S3 conditional-put locks, peer dial locks and draining list, SQLite VFS registry and WAL regions, SQLite trace registry, 9P and S3 assertion logs, WebDAV method counts |
+| Held across an await on purpose, so a second caller waits for the first to finish or one exchange owns a connection | Unmount, release, adoption, listen and lifecycle gates (9P, NFS, WebDAV, HTTP, Node); FUSE and NFS reply writers; close gates; save gate; versioned view state; SlateDB state; SQLite VFS volume state; Redis and peer connections; policy cache; single-flight and per-key gates; CLI worker and task handles; Node FUSE session, response body streams and delegated mounts; FoundationDB network start and stop; peer pool writer |
+| A resource that is not safe to share | SQLite connections (provider, storage, catalog); the PGlite storage client, whose transactions need exclusive use; host file handle |
+
+Three were judged removable in form but are kept, because removing them
+changes behaviour:
+
+- **Blob-cache `flush_gate`**: without it two flushes could fill the cache
+  out of order, so an older write of a block could land after a newer one.
+- **PGlite state-store client**: without it statements would be pipelined
+  on one socket to a server that runs one statement at a time.
+- **9P and S3 assertion logs**: the only lock-free form copies the whole
+  list on every append.
 
 **Spinning locks held for too long** (found by the audit, not fixed):
 

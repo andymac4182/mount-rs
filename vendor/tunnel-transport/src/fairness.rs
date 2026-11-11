@@ -49,6 +49,7 @@
 //! Every value here is a count, a flag or a duration: no address, identifier
 //! or payload is retained.
 
+use arc_swap::ArcSwap;
 use mount_rs_core::turn_cell::TurnCell;
 use std::{
     collections::BTreeMap,
@@ -167,11 +168,28 @@ struct NamedCounters {
 
 static PROCESS_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-static NAMED: LazyLock<TurnCell<BTreeMap<&'static str, Arc<NamedCounters>>>> =
-    LazyLock::new(|| TurnCell::new(BTreeMap::new()));
+// Read on every snapshot and replaced only when a listener name is first
+// seen, so readers load a pointer and a new name copies the map.
+static NAMED: LazyLock<ArcSwap<BTreeMap<&'static str, Arc<NamedCounters>>>> =
+    LazyLock::new(ArcSwap::default);
 
 fn named(listener: &'static str) -> Arc<NamedCounters> {
-    NAMED.lock_recovered().entry(listener).or_default().clone()
+    if let Some(counters) = NAMED.load().get(listener) {
+        return Arc::clone(counters);
+    }
+    // A racing caller may add the name first; whoever stores, both then
+    // read the same counters back.
+    let added = NAMED.rcu(|names| {
+        if names.contains_key(listener) {
+            Arc::clone(names)
+        } else {
+            let mut names = BTreeMap::clone(names);
+            names.insert(listener, Arc::default());
+            Arc::new(names)
+        }
+    });
+    drop(added);
+    NAMED.load().get(listener).cloned().unwrap_or_default()
 }
 
 /// Milliseconds since the process epoch, plus one, so zero can mean "never".
@@ -190,7 +208,7 @@ fn window_ms() -> u64 {
 pub fn listener_fairness() -> Vec<ListenerFairnessSnapshot> {
     let now = now_mark();
     NAMED
-        .lock_recovered()
+        .load()
         .iter()
         .map(|(listener, counters)| {
             let last = counters.last_full_ms.load(Ordering::Acquire);

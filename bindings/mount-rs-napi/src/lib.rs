@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountHooks, AutoMountOptions, AutoTransport, Transport,
     TransportProbe,
@@ -29,7 +29,6 @@ use mount_rs_core::storage::{
     ConcurrentModeState, DelegatedCheckin, DelegatedPublish, DelegatedRecovery, DelegationState,
     DirectoryGrant, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{
@@ -3234,10 +3233,7 @@ impl ShutdownRunGuard {
     }
 
     fn finish_error(&mut self, error: FsError) {
-        let callback = self.callback.take();
-        let mut state = self.lifecycle.lifecycle.lock_recovered();
-        *state = ShutdownLifecycle::Open(callback);
-        drop(state);
+        self.lifecycle.reopen(self.callback.take());
         self.completed = true;
         self.attempt.finish(Err(error));
     }
@@ -3250,8 +3246,7 @@ impl ShutdownRunGuard {
         drop(self.callback.take());
         self.completed = true;
         self.attempt.finish(Ok(()));
-        let mut state = self.lifecycle.lifecycle.lock_recovered();
-        *state = ShutdownLifecycle::Closed;
+        self.lifecycle.close();
     }
 }
 
@@ -3265,10 +3260,7 @@ impl Drop for ShutdownRunGuard {
         // provider callback panics after the task has entered Running, this
         // guard still publishes a bounded error and restores the callback so
         // a later shutdown call can retry rather than hanging forever.
-        let callback = self.callback.take();
-        let mut state = self.lifecycle.lifecycle.lock_recovered();
-        *state = ShutdownLifecycle::Open(callback);
-        drop(state);
+        self.lifecycle.reopen(self.callback.take());
         self.attempt.finish(Err(shutdown_panic_error()));
     }
 }
@@ -3307,21 +3299,69 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
-enum ShutdownLifecycle {
-    Open(Option<Arc<ShutdownCallback>>),
+enum ShutdownPhase {
+    Open,
     Running(Arc<ShutdownAttempt>),
     Closed,
 }
 
+/// What a caller of shutdown has to do.
+enum ShutdownBegin {
+    Closed,
+    /// Another caller's attempt is running: wait for it.
+    Join(Arc<ShutdownAttempt>),
+    /// This caller moved the phase to running and must run the callback.
+    Start(Arc<ShutdownAttempt>, Option<Arc<ShutdownCallback>>),
+}
+
 struct ShutdownState {
-    lifecycle: TurnCell<ShutdownLifecycle>,
+    phase: ArcSwap<ShutdownPhase>,
+    /// Held here while the phase is open. Only the caller that moved the
+    /// phase to running takes it, and only that caller puts it back, so no
+    /// other pointer to the callback can outlive a successful shutdown.
+    callback: ArcSwapOption<Arc<ShutdownCallback>>,
 }
 
 impl ShutdownState {
     fn new(callback: Option<Arc<ShutdownCallback>>) -> Self {
         Self {
-            lifecycle: TurnCell::new(ShutdownLifecycle::Open(callback)),
+            phase: ArcSwap::from_pointee(ShutdownPhase::Open),
+            callback: ArcSwapOption::new(callback.map(Arc::new)),
         }
+    }
+
+    fn begin(&self) -> ShutdownBegin {
+        loop {
+            let current = self.phase.load_full();
+            match &*current {
+                ShutdownPhase::Closed => return ShutdownBegin::Closed,
+                ShutdownPhase::Running(attempt) => {
+                    return ShutdownBegin::Join(Arc::clone(attempt));
+                }
+                ShutdownPhase::Open => {
+                    let attempt = Arc::new(ShutdownAttempt::new());
+                    let running = Arc::new(ShutdownPhase::Running(Arc::clone(&attempt)));
+                    let previous = self.phase.compare_and_swap(&current, running);
+                    if Arc::ptr_eq(&previous, &current) {
+                        let callback = self.callback.swap(None).map(Arc::unwrap_or_clone);
+                        return ShutdownBegin::Start(attempt, callback);
+                    }
+                    // Another caller moved the phase first: look again.
+                }
+            }
+        }
+    }
+
+    /// Lets a later shutdown call try again after this one failed.
+    fn reopen(&self, callback: Option<Arc<ShutdownCallback>>) {
+        // The callback goes back before the phase opens, so the caller that
+        // next moves the phase to running finds it.
+        self.callback.store(callback.map(Arc::new));
+        self.phase.store(Arc::new(ShutdownPhase::Open));
+    }
+
+    fn close(&self) {
+        self.phase.store(Arc::new(ShutdownPhase::Closed));
     }
 }
 
@@ -3346,34 +3386,19 @@ impl ShutdownController {
     }
 
     async fn shutdown(&self) -> CoreResult<()> {
-        let (attempt, start) = {
-            let mut lifecycle =
-                self.lifecycle.lifecycle.lock().map_err(|_| {
-                    FsError::new(ErrorCode::Eio).with_message("shutdown lock poisoned")
-                })?;
-            match &mut *lifecycle {
-                ShutdownLifecycle::Closed => (None, None),
-                ShutdownLifecycle::Running(attempt) => (Some(Arc::clone(attempt)), None),
-                ShutdownLifecycle::Open(callback) => {
-                    let attempt = Arc::new(ShutdownAttempt::new());
-                    let callback = callback.take();
-                    *lifecycle = ShutdownLifecycle::Running(Arc::clone(&attempt));
-                    (Some(Arc::clone(&attempt)), Some((attempt, callback)))
-                }
+        let attempt = match self.lifecycle.begin() {
+            ShutdownBegin::Closed => return Ok(()),
+            ShutdownBegin::Join(attempt) => attempt,
+            ShutdownBegin::Start(attempt, callback) => {
+                napi::bindgen_prelude::spawn(run_shutdown(
+                    Arc::clone(&self.lifecycle),
+                    Arc::clone(&self.driver),
+                    Arc::clone(&attempt),
+                    callback,
+                ));
+                attempt
             }
         };
-
-        let Some(attempt) = attempt else {
-            return Ok(());
-        };
-        if let Some((attempt, callback)) = start {
-            napi::bindgen_prelude::spawn(run_shutdown(
-                Arc::clone(&self.lifecycle),
-                Arc::clone(&self.driver),
-                attempt,
-                callback,
-            ));
-        }
         shutdown_wait(attempt).await
     }
 }
@@ -4421,14 +4446,7 @@ mod tests {
 
     impl CompletionWaker {
         fn observe(&self) {
-            if matches!(
-                &*self
-                    .lifecycle
-                    .lifecycle
-                    .lock()
-                    .expect("shutdown lifecycle lock"),
-                ShutdownLifecycle::Running(_)
-            ) {
+            if matches!(&**self.lifecycle.phase.load(), ShutdownPhase::Running(_)) {
                 self.observed_running.store(true, AtomicOrdering::SeqCst);
             }
         }
@@ -4781,8 +4799,9 @@ mod tests {
         callback: Option<Arc<ShutdownCallback>>,
     ) -> Arc<ShutdownState> {
         let lifecycle = Arc::new(ShutdownState::new(callback));
-        *lifecycle.lifecycle.lock().expect("shutdown lifecycle lock") =
-            ShutdownLifecycle::Running(Arc::clone(attempt));
+        lifecycle
+            .phase
+            .store(Arc::new(ShutdownPhase::Running(Arc::clone(attempt))));
         lifecycle
     }
 
@@ -5205,10 +5224,7 @@ mod tests {
         });
 
         gate.wait_started();
-        let running_before_release = {
-            let state = lifecycle.lifecycle.lock().expect("shutdown lifecycle lock");
-            matches!(&*state, ShutdownLifecycle::Running(_))
-        };
+        let running_before_release = matches!(&**lifecycle.phase.load(), ShutdownPhase::Running(_));
 
         // Two callers can join the same attempt; while the provider-owned
         // callback reference is blocked in Drop, neither may observe Closed
@@ -5230,10 +5246,7 @@ mod tests {
 
         assert!(running_before_release);
         assert!(observed_running.load(AtomicOrdering::SeqCst));
-        assert!(matches!(
-            &*lifecycle.lifecycle.lock().expect("shutdown lifecycle lock"),
-            ShutdownLifecycle::Closed
-        ));
+        assert!(matches!(&**lifecycle.phase.load(), ShutdownPhase::Closed));
         assert!(matches!(attempt.result(), Some(Ok(()))));
         assert_eq!(block_on(first).expect("first shutdown waiter"), ());
         assert_eq!(block_on(second).expect("second shutdown waiter"), ());
@@ -5255,17 +5268,10 @@ mod tests {
             }
         });
         let driver = Arc::new(DriverSlot::new(Arc::new(MemoryFs::empty())));
-        let attempt = Arc::new(ShutdownAttempt::new());
         let lifecycle = Arc::new(ShutdownState::new(Some(callback)));
-        let callback = {
-            let mut state = lifecycle.lifecycle.lock().expect("shutdown lifecycle lock");
-            match &mut *state {
-                ShutdownLifecycle::Open(callback) => callback.take(),
-                _ => panic!("expected open shutdown state"),
-            }
+        let ShutdownBegin::Start(attempt, callback) = lifecycle.begin() else {
+            panic!("expected open shutdown state");
         };
-        *lifecycle.lifecycle.lock().expect("shutdown lifecycle lock") =
-            ShutdownLifecycle::Running(Arc::clone(&attempt));
 
         block_on(run_shutdown(
             Arc::clone(&lifecycle),
@@ -5277,20 +5283,11 @@ mod tests {
             attempt.result(),
             Some(Err(ref error)) if error.code == ErrorCode::Eio
         ));
-        assert!(matches!(
-            &*lifecycle.lifecycle.lock().expect("shutdown lifecycle lock"),
-            ShutdownLifecycle::Open(Some(_))
-        ));
+        assert!(matches!(&**lifecycle.phase.load(), ShutdownPhase::Open));
+        assert!(lifecycle.callback.load().is_some());
 
-        let retry_attempt = Arc::new(ShutdownAttempt::new());
-        let retry_callback = {
-            let mut state = lifecycle.lifecycle.lock().expect("shutdown lifecycle lock");
-            let callback = match &mut *state {
-                ShutdownLifecycle::Open(callback) => callback.take(),
-                _ => panic!("expected retryable shutdown state"),
-            };
-            *state = ShutdownLifecycle::Running(Arc::clone(&retry_attempt));
-            callback
+        let ShutdownBegin::Start(retry_attempt, retry_callback) = lifecycle.begin() else {
+            panic!("expected retryable shutdown state");
         };
         block_on(run_shutdown(
             lifecycle,

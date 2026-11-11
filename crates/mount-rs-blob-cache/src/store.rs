@@ -260,7 +260,8 @@ pub struct CachedBlockStore {
     cache: Arc<LocalCache>,
     identity: ScopeIdentity,
     policy: IntegrityPolicy,
-    scope: TurnCell<Option<(Arc<CacheScope>, CacheKey)>>,
+    /// Read on every get and put; replaced whole on activate and deactivate.
+    scope: ArcSwapOption<(Arc<CacheScope>, CacheKey)>,
     distributed: Option<Arc<DistributedRuntime>>,
     metrics: Arc<CacheMetrics>,
     pending: TurnCell<Vec<PendingBlob>>,
@@ -280,7 +281,7 @@ impl CachedBlockStore {
             cache,
             identity,
             policy,
-            scope: TurnCell::new(None),
+            scope: ArcSwapOption::empty(),
             distributed: None,
             metrics: Arc::new(CacheMetrics::default()),
             pending: TurnCell::new(Vec::new()),
@@ -311,7 +312,7 @@ impl CachedBlockStore {
         self.current_hashed().map(|(scope, _)| scope)
     }
     fn current_hashed(&self) -> Option<(Arc<CacheScope>, CacheKey)> {
-        self.scope.lock().ok()?.clone()
+        self.scope.load().as_deref().cloned()
     }
     fn activate(&self, backing: ConcurrentBackingId) -> Result<()> {
         if [
@@ -324,27 +325,30 @@ impl CachedBlockStore {
         {
             return Err(error());
         }
-        let mut active = self.scope.lock().map_err(|_| error())?;
-        if active.as_ref().is_some_and(|(s, _)| s.backing == backing) {
+        if self
+            .scope
+            .load()
+            .as_ref()
+            .is_some_and(|active| active.0.backing == backing)
+        {
             return Ok(());
         }
         let scope = Arc::new(CacheScope {
             identity: self.identity.clone(),
             backing,
         });
+        // Registrations are counted, and every scope stored here carries one
+        // that is released when it is swapped out, whoever swaps it.
         self.cache.register_scope((*scope).clone(), self.policy)?;
-        if let Some((previous, _)) = active.take() {
-            self.cache.unregister_scope(&previous);
-        }
         let fingerprint = LocalCache::scope_hash(&scope);
-        *active = Some((scope, fingerprint));
+        if let Some(previous) = self.scope.swap(Some(Arc::new((scope, fingerprint)))) {
+            self.cache.unregister_scope(&previous.0);
+        }
         Ok(())
     }
     fn deactivate(&self) {
-        if let Ok(mut s) = self.scope.lock()
-            && let Some((scope, _)) = s.take()
-        {
-            self.cache.unregister_scope(&scope);
+        if let Some(previous) = self.scope.swap(None) {
+            self.cache.unregister_scope(&previous.0);
         }
         if let Ok(mut p) = self.pending.lock() {
             p.clear();
