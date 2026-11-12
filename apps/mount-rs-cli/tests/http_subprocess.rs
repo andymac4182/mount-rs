@@ -205,7 +205,8 @@ fn request_streaming(
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
         .expect("connect HTTP subprocess");
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        // Generous: this bounds a hung server, not a slow disk.
+        .set_read_timeout(Some(Duration::from_secs(15)))
         .expect("set HTTP response timeout");
     stream
         .set_write_timeout(Some(Duration::from_secs(2)))
@@ -759,12 +760,14 @@ fn request_when_not_busy(
 fn an_acknowledged_upload_survives_the_process_being_killed() {
     let root = temporary_root();
     // A short lease: the killed process cannot release it, and the next
-    // one has to wait it out.
+    // one has to wait it out. Not shorter than this: at two seconds a slow
+    // machine misses renewals, and requests then stall or are answered 503
+    // while the process waits out its own lease.
     let config_path = write_sqlite_split_config(
         &root,
         "http.json",
         "http-kill-test",
-        2_000,
+        8_000,
         serde_json::json!({"max_request_bytes": 4096}),
     );
     let mut child = HttpChild::start(&config_path, root.clone());
