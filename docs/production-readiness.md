@@ -267,7 +267,7 @@ caller wait or excludes one. Outside it, and not in the table below:
 | bindings/mount-rs-napi | `native_delegation_mounts` | A | A mount passes the "no active mounts" check and awaits the mount; a scope check-in sees an empty list and checks the directory in; the mount is then recorded: a live delegated mount over a directory that is not checked out |
 | bindings/mount-rs-sqlite-vfs | `StorageVolume.state` | A | Held across provider round trips. A delete and a commit both publish from revision R; one is rejected and marks the volume failed: a healthy volume fails for good on a benign race |
 | crates/mount-rs-blob-cache | flight `Entry.turn`, `PeerLink.dial` | D | Two misses on one block both go to peers and the backing store; two requests to one peer both dial |
-| crates/mount-rs-blob-cache | `LocalCache.files` | A | Inserts hold it shared and an invalidation exclusively, so only invalidation waits. Without it an insert renames its file into place; an invalidation of that block finds nothing to remove and returns; the process dies before the insert indexes or removes the file: the next start adopts a cached copy of an invalidated block. A first version of this change had no gate and a review found exactly that |
+| crates/mount-rs-blob-cache | `LocalCache.files` | A | Inserts hold it shared and an invalidation exclusively, so only invalidation waits. Without it an insert renames its file into place; an invalidation of that block finds nothing to remove and returns; the process dies before the insert indexes or removes the file: the next start adopts a cached copy of an invalidated block. A first version of this change had no gate and a review found exactly that; with the gate taken out of both invalidations, `an_invalidation_waits_for_an_insert_whose_file_is_not_yet_indexed` fails. Having the insert re-check an invalidation count after indexing closes the race in a running process but not the crash between rename and re-check, and a durable invalidation record would cost a synced write per invalidation |
 | crates/mount-rs-cluster | coalesce `Entry.turn` | D | N requests on a cold route make N registry lookups |
 | crates/mount-rs-cluster | `Slot.gate` | A | Two closes both pass the open check and both call `close()`. With a flag, close runs while a read is still inside the handle, and two cursor reads interleave on one cursor |
 | crates/mount-rs-cluster | `path_operations` | A | A path call passes the closing check and is inside the driver; close finds no handles and returns; the server releases the volume lease while that call is still writing |
@@ -309,6 +309,15 @@ caller wait or excludes one. Outside it, and not in the table below:
 **Kept because the replacement measured slower.** For each of these the
 removal was built, tested and benchmarked against the lock, then reverted.
 The benchmark is in the tree as an ignored test.
+
+The rule: a replacement goes in if one caller is no slower than run-to-run
+noise, or if one caller loses under 100 ns an operation and eight callers
+gain. Both locks below fail it on both counts: one caller loses more than
+100 ns and eight callers are slower too. The rule was set aside once, for
+the NFS directory listing cache in the table of removed locks: one caller
+loses 0.4 to 0.5 microseconds on a store, over the allowance, but eight
+callers read 13 to 19 times faster, so the lock was removed and the cost is
+recorded there. No lock is kept whose replacement won for eight callers.
 
 | Lock | Replacement built | Measured | Benchmark |
 |------|-------------------|----------|-----------|
