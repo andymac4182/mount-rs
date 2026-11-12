@@ -1,7 +1,6 @@
 //! Bounded process-local cache for immutable blocks.
 use async_trait::async_trait;
 use mount_rs_core::Result;
-use mount_rs_core::drain_gate::DrainGate;
 use mount_rs_core::storage::{BlockId, BlockStore};
 use mount_rs_core::turn_gate::TurnGate;
 use std::collections::BTreeMap;
@@ -18,10 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Concurrent misses for one block share a fill when the result fits the cache.
 /// Cancellation releases fill ownership; failures are retried by waiting callers.
 /// Oversized blocks are not retained and therefore cannot share completed data.
-/// Cache misses can overlap immutable puts and flushes. Puts run
-/// concurrently with each other, as they do against an uncached store; a
-/// flush waits for the puts in flight and holds back new ones, so it covers
-/// every put acknowledged before it. Deletion and clearing wait for no backing
+/// Cache misses can overlap immutable puts and flushes. Puts and flushes go
+/// straight to the backing store, as they do uncached: a flush covers every
+/// put acknowledged before it was called, which is the `BlockStore`
+/// contract and the backing store's to keep. Deletion and clearing wait for no backing
 /// I/O and stall none: a miss or a put that overlaps a deletion of a block in
 /// the same stripe is simply not cached (see `Front::deletes`), which is what
 /// prevents stale repopulation. Hits do not wait for backing I/O, and they
@@ -37,7 +36,6 @@ pub struct CachedBlockStore<B: ?Sized> {
     index: Arc<Index>,
     fills: Arc<Fills>,
     front: Arc<Front>,
-    write_gate: Arc<DrainGate>,
 }
 
 impl<B: ?Sized> Clone for CachedBlockStore<B> {
@@ -49,7 +47,6 @@ impl<B: ?Sized> Clone for CachedBlockStore<B> {
             index: self.index.clone(),
             fills: self.fills.clone(),
             front: self.front.clone(),
-            write_gate: self.write_gate.clone(),
         }
     }
 }
@@ -698,7 +695,6 @@ impl<B: BlockStore + ?Sized> CachedBlockStore<B> {
             }),
             front,
             fills: Arc::new(Fills::new()),
-            write_gate: Arc::new(DrainGate::new()),
         }
     }
     fn prepare_entry(&self, bytes: &[u8]) -> Option<Arc<Vec<u8>>> {
@@ -776,14 +772,10 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
         self.backing.durable()
     }
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let _write = self.write_gate.read().await;
         // Before the backing call: see `Front::deletes`. The id, and so the
         // stripe, is not known until the backing store answers.
         let generations = self.front.generations();
         let id = self.backing.put(bytes).await?;
-        // The durability-ordering gate protects backing put/flush, not cache
-        // allocation or publication.
-        drop(_write);
         // Allocate/copy before taking the shared cache-state lock.
         if let Some(cached) = self.prepare_entry(bytes) {
             // Never waits: if another thread is in the index, it files this
@@ -812,7 +804,6 @@ impl<B: BlockStore + ?Sized> BlockStore for CachedBlockStore<B> {
         mount_rs_core::storage::copy_block_range(&bytes, offset, buffer)
     }
     async fn flush(&self) -> Result<()> {
-        let _write = self.write_gate.write().await;
         self.backing.flush().await
     }
     async fn delete(&self, id: &BlockId) -> Result<()> {
@@ -1238,7 +1229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn puts_overlap_each_other_and_flush_waits_for_them() {
+    async fn puts_and_a_flush_reach_the_backing_store_without_waiting_for_each_other() {
         use std::time::Duration;
         let stall = Arc::new(AtomicBool::new(true));
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -1262,24 +1253,39 @@ mod tests {
                 .await
                 .expect("puts must not serialize behind each other");
         }
+        // The cache adds no ordering of its own: the flush reaches the
+        // backing store, whose barrier it is, while the puts are in flight.
         let worker = cache.clone();
         let flush = tokio::spawn(async move { worker.flush().await });
-        // A flush must cover the puts already in flight, so it waits for them.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), entered.notified())
-                .await
-                .is_err()
-        );
-        resume.notify_one();
-        resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("a flush must not wait behind puts in the cache");
+        stall.store(false, Ordering::SeqCst);
+        for _ in 0..3 {
+            resume.notify_one();
+        }
         for put in puts {
             put.await.unwrap().unwrap();
         }
-        tokio::time::timeout(Duration::from_secs(1), entered.notified())
-            .await
-            .expect("flush runs once the puts finish");
-        resume.notify_one();
         flush.await.unwrap().unwrap();
+    }
+
+    /// The contract the cache passes through: a put acknowledged before a
+    /// flush is called has reached the backing store by the time it runs.
+    #[tokio::test]
+    async fn a_flush_follows_every_put_acknowledged_before_it() {
+        let stall = Arc::new(AtomicBool::new(false));
+        let backing = StalledIo {
+            inner: MemoryBlockStore::new(),
+            stall,
+            entered: Arc::new(tokio::sync::Notify::new()),
+            resume: Arc::new(tokio::sync::Notify::new()),
+        };
+        // Too small to cache anything, so the read below is the backing store's.
+        let cache = CachedBlockStore::new(backing, 1, 1);
+        let id = cache.put(b"acknowledged").await.unwrap();
+        cache.flush().await.unwrap();
+        assert_eq!(cache.backing.inner.get(&id).await.unwrap(), b"acknowledged");
     }
 
     /// A backing store that can hold a get or a put after the inner store

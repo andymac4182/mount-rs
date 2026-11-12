@@ -26,8 +26,6 @@ TEST_MOD = re.compile(r"^\s*#\[cfg\((?:all\()?test\b")
 # Second references to a lock the doc lists under another name. Each is a
 # clone of the same `Arc`, or a wrapper around it, not a lock of its own.
 HANDLES = {
-    ("bindings/mount-rs-napi", "Acquire.lock"): "NativePathLock state",
-    ("bindings/mount-rs-napi", "LockGuard.lock"): "NativePathLock state",
     ("filesystems/mount-rs-chunked", "AsyncGate.state"): "the TurnGate inside gate and lease_gate",
     ("filesystems/mount-rs-kv", "KvFileHandle.entry"): "each OpenFile",
     ("transports/mount-rs-nfs", "CellDebug.0"): "a borrowed cell, for formatting",

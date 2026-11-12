@@ -4,17 +4,20 @@
 //! state.  It does not turn arbitrary JavaScript objects into an `FsDriver`:
 //! the native `Filesystem` classes remain the filesystem boundary.
 
+use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 
-use mount_rs_core::park_cell::{ParkCell, ParkCellGuard};
+use crossbeam_queue::SegQueue;
 use mount_rs_core::types::FileType;
 use napi::bindgen_prelude::{Function, JsObjectValue, Object, Promise, PromiseRaw};
 use napi::{Env, Error as NapiError, JsError, JsRangeError, Status, Unknown, ValueType};
 use napi_derive::napi;
+use tokio::sync::oneshot;
 
 const STACKLESS_CODES: &[&str] = &["ENOENT", "ENOTSUP", "ENOSYS"];
 
@@ -475,9 +478,25 @@ pub fn is_special_mode(mode: u32) -> bool {
 
 #[derive(Clone, Default)]
 struct NativePathLock {
-    /// A parking cell, not a spinning one: the sections scan the waiter and
-    /// writer lists, so a contender queues instead of burning a core.
-    state: Arc<ParkCell<LockState>>,
+    owner: Arc<Owner>,
+}
+
+/// What a caller tells the owner of the lock state.
+enum Message {
+    /// A writer was called: its ticket joins the back of the queue. Sent
+    /// synchronously from the N-API entry point, so the queue is in call
+    /// order.
+    Reserve(u64),
+    /// A caller polled for the first time. `granted` is answered when it
+    /// may start; a writer names its ticket.
+    Acquire {
+        ticket: Option<u64>,
+        granted: oneshot::Sender<()>,
+    },
+    /// A writer that never started was dropped, from anywhere in the queue.
+    Cancel(u64),
+    /// A caller that had started is done.
+    Release { write: bool },
 }
 
 #[derive(Default)]
@@ -485,24 +504,275 @@ struct LockState {
     readers: usize,
     writer: bool,
     gate: bool,
-    next_writer_ticket: u64,
+    /// Tickets in call order.
     writers: VecDeque<u64>,
-    waiters: Vec<Waker>,
+    /// Callers that polled and could not start, in the order they polled.
+    waiting: Vec<Waiter>,
 }
 
-fn lock_state(lock: &ParkCell<LockState>) -> ParkCellGuard<'_, LockState> {
-    lock.lock_recovered()
+struct Waiter {
+    /// A writer's ticket.
+    ticket: Option<u64>,
+    /// Taken when the caller is told to start.
+    granted: Option<oneshot::Sender<()>>,
 }
 
-fn take_waiters(state: &mut LockState) -> Vec<Waker> {
-    std::mem::take(&mut state.waiters)
+impl LockState {
+    /// The first poll of a caller that can start at once, with no channel.
+    fn start_now(&mut self, ticket: Option<u64>) -> bool {
+        match ticket {
+            None => {
+                let free = !self.writer && !self.gate;
+                if free {
+                    self.readers += 1;
+                }
+                free
+            }
+            Some(ticket) => {
+                let at_front = self.writers.front() == Some(&ticket);
+                if !at_front || self.writer {
+                    return false;
+                }
+                // This is the upstream `#gate = new Promise(...)` point:
+                // readers arriving after the writer has actually started
+                // must wait, even while existing readers drain.
+                self.gate = true;
+                if self.readers != 0 {
+                    return false;
+                }
+                self.writers.pop_front();
+                self.writer = true;
+                true
+            }
+        }
+    }
+
+    fn handle(&mut self, message: Message) {
+        match message {
+            Message::Reserve(ticket) => {
+                // A ticket that has not polled changes nothing for anyone.
+                self.writers.push_back(ticket);
+                return;
+            }
+            Message::Acquire { ticket, granted } => self.waiting.push(Waiter {
+                ticket,
+                granted: Some(granted),
+            }),
+            Message::Cancel(ticket) => {
+                self.waiting.retain(|waiter| waiter.ticket != Some(ticket));
+                if let Some(index) = self.writers.iter().position(|queued| *queued == ticket) {
+                    self.writers.remove(index);
+                    if self.writers.is_empty() && !self.writer {
+                        self.gate = false;
+                    }
+                }
+            }
+            Message::Release { write: true } => {
+                self.writer = false;
+                self.gate = false;
+            }
+            Message::Release { write: false } => self.readers -= 1,
+        }
+        while self.settle() {}
+    }
+
+    /// Start every waiting caller that may now start, looking at them in
+    /// the order they polled, as if each had polled again. A caller whose
+    /// receiver is gone was dropped: it is passed over, which is the same
+    /// as its having started and released at once. Returns true if that
+    /// happened to a writer, so that the callers already passed must be
+    /// looked at again.
+    fn settle(&mut self) -> bool {
+        let Self {
+            readers,
+            writer,
+            gate,
+            writers,
+            waiting,
+        } = self;
+        let mut again = false;
+        waiting.retain_mut(|waiter| {
+            let open = waiter
+                .granted
+                .as_ref()
+                .is_some_and(|granted| !granted.is_closed());
+            if !open {
+                // Dropped. A writer's ticket leaves with its `Cancel`.
+                return false;
+            }
+            if *writer {
+                return true;
+            }
+            let start = match waiter.ticket {
+                None => !*gate,
+                Some(ticket) => {
+                    let at_front = writers.front() == Some(&ticket);
+                    if at_front {
+                        // The upstream `#gate = new Promise(...)` point.
+                        *gate = true;
+                    }
+                    at_front && *readers == 0
+                }
+            };
+            if !start {
+                return true;
+            }
+            let told = waiter
+                .granted
+                .take()
+                .is_some_and(|granted| granted.send(()).is_ok());
+            match (waiter.ticket, told) {
+                (None, true) => *readers += 1,
+                (None, false) => {}
+                (Some(_), told) => {
+                    writers.pop_front();
+                    *writer = told;
+                    if !told {
+                        // Dropped as it was told: what `Cancel` does.
+                        if writers.is_empty() {
+                            *gate = false;
+                        }
+                        again = true;
+                    }
+                }
+            }
+            false
+        });
+        again
+    }
+}
+
+/// The lock state and the messages for it. There is no lock around the
+/// state: whoever finds no message unhandled becomes its owner for as long
+/// as messages keep arriving, and everyone else leaves a message and goes.
+/// Nobody waits for the state.
+#[derive(Default)]
+struct Owner {
+    next_ticket: AtomicU64,
+    /// Messages sent and not yet handled, the one being handled included.
+    /// The caller that moves it from zero owns `state` until it is zero
+    /// again.
+    unhandled: AtomicUsize,
+    inbox: SegQueue<Message>,
+    state: UnsafeCell<LockState>,
+}
+
+// SAFETY: `state` is only reached by the caller that moved `unhandled` from
+// zero, one at a time, and may be reached from any thread.
+unsafe impl Sync for Owner {}
+
+/// Possession of the state: the caller that moved `unhandled` from zero.
+struct Owned<'a>(&'a Owner);
+
+impl Owned<'_> {
+    fn state(&mut self) -> &mut LockState {
+        // SAFETY: this caller moved `unhandled` from zero, and gives the
+        // state up only by consuming `self`.
+        unsafe { &mut *self.0.state.get() }
+    }
+
+    /// One message has been handled: stop being the owner, unless others
+    /// were left meanwhile.
+    fn handled(self) {
+        if self.0.unhandled.fetch_sub(1, Ordering::SeqCst) != 1 {
+            self.drain();
+        }
+    }
+
+    /// Handle queued messages until none is unhandled.
+    fn drain(mut self) {
+        loop {
+            // A message is counted after it is queued, so one is there.
+            let message = self.0.inbox.pop();
+            debug_assert!(message.is_some());
+            if let Some(message) = message {
+                self.state().handle(message);
+            }
+            if self.0.unhandled.fetch_sub(1, Ordering::SeqCst) == 1 {
+                return;
+            }
+        }
+    }
+}
+
+impl Owner {
+    /// Become the owner if no message is unhandled.
+    fn take(&self) -> Option<Owned<'_>> {
+        self.unhandled
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()?;
+        let owned = Owned(self);
+        if self.inbox.is_empty() {
+            return Some(owned);
+        }
+        // Messages are queued whose senders have not counted them yet.
+        // The caller's own goes behind them, so give the state up again.
+        owned.handled();
+        None
+    }
+
+    fn send(&self, message: Message) {
+        if let Some(mut owned) = self.take() {
+            owned.state().handle(message);
+            owned.handled();
+            return;
+        }
+        self.inbox.push(message);
+        if self.unhandled.fetch_add(1, Ordering::SeqCst) == 0 {
+            // The owner left between the two steps.
+            Owned(self).drain();
+        }
+    }
+
+    /// A caller's first poll. `None`: it has started. Otherwise the channel
+    /// on which it is told when it may.
+    fn acquire(&self, ticket: Option<u64>) -> Option<oneshot::Receiver<()>> {
+        if let Some(mut owned) = self.take() {
+            let waiting = if owned.state().start_now(ticket) {
+                None
+            } else {
+                let (granted, receiver) = oneshot::channel();
+                owned.state().handle(Message::Acquire { ticket, granted });
+                Some(receiver)
+            };
+            owned.handled();
+            return waiting;
+        }
+        let (granted, receiver) = oneshot::channel();
+        self.send(Message::Acquire { ticket, granted });
+        Some(receiver)
+    }
 }
 
 struct Acquire {
-    lock: Arc<ParkCell<LockState>>,
+    owner: Arc<Owner>,
     write: bool,
     writer_ticket: Option<u64>,
-    granted: bool,
+    stage: Stage,
+}
+
+enum Stage {
+    /// Not polled yet: a writer has only its ticket.
+    Unpolled,
+    Waiting(oneshot::Receiver<()>),
+    /// Holds the lock, with no guard yet to give it back. A reader is here
+    /// from its call until its first poll, so a future dropped in between
+    /// must release.
+    Holding,
+    /// The guard has been handed out and owns the release.
+    Issued,
+}
+
+impl Acquire {
+    /// What the first poll does: start, or join the callers waiting.
+    fn begin(&mut self) {
+        if matches!(self.stage, Stage::Unpolled) {
+            self.stage = match self.owner.acquire(self.writer_ticket) {
+                Some(receiver) => Stage::Waiting(receiver),
+                None => Stage::Holding,
+            };
+        }
+    }
 }
 
 impl Future for Acquire {
@@ -510,110 +780,72 @@ impl Future for Acquire {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let mut state = lock_state(&this.lock);
-        let available = if this.write {
-            let at_front = this
-                .writer_ticket
-                .is_some_and(|ticket| state.writers.front() == Some(&ticket));
-            if at_front && !state.writer {
-                // This is the upstream `#gate = new Promise(...)` point:
-                // readers arriving after the writer has actually started
-                // must wait, even while existing readers drain.
-                state.gate = true;
+        this.begin();
+        if let Stage::Waiting(receiver) = &mut this.stage {
+            // The owner answers every sender whose receiver is open, so the
+            // channel does not close under a caller that is still waiting.
+            match Pin::new(receiver).poll(context) {
+                Poll::Ready(Ok(())) => this.stage = Stage::Holding,
+                Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
             }
-            at_front && !state.writer && state.readers == 0
-        } else {
-            !state.writer && !state.gate
-        };
-
-        if available {
-            if this.write {
-                state.writers.pop_front();
-                state.writer = true;
-            } else {
-                state.readers += 1;
-            }
-            this.granted = true;
-            return Poll::Ready(LockGuard {
-                lock: Arc::clone(&this.lock),
-                write: this.write,
-            });
         }
-
-        if !state
-            .waiters
-            .iter()
-            .any(|waiter| waiter.will_wake(context.waker()))
-        {
-            state.waiters.push(context.waker().clone());
-        }
-        Poll::Pending
+        this.stage = Stage::Issued;
+        Poll::Ready(LockGuard {
+            owner: Arc::clone(&this.owner),
+            write: this.write,
+        })
     }
 }
 
 impl Drop for Acquire {
     fn drop(&mut self) {
-        if self.granted {
-            return;
-        }
-        if let Some(ticket) = self.writer_ticket {
-            let waiters = {
-                let mut state = lock_state(&self.lock);
-                if let Some(index) = state.writers.iter().position(|queued| *queued == ticket) {
-                    state.writers.remove(index);
-                    if state.writers.front().is_none() && !state.writer {
-                        state.gate = false;
-                    }
-                    take_waiters(&mut state)
-                } else {
-                    Vec::new()
+        match std::mem::replace(&mut self.stage, Stage::Issued) {
+            Stage::Issued => {}
+            Stage::Holding => self.owner.send(Message::Release { write: self.write }),
+            Stage::Unpolled => {
+                if let Some(ticket) = self.writer_ticket {
+                    self.owner.send(Message::Cancel(ticket));
                 }
-            };
-            for waiter in waiters {
-                waiter.wake();
+            }
+            Stage::Waiting(mut receiver) => {
+                // After `close` the owner can no longer start this caller;
+                // if it already did, this caller holds the lock and gives
+                // it back.
+                receiver.close();
+                if receiver.try_recv().is_ok() {
+                    self.owner.send(Message::Release { write: self.write });
+                } else if let Some(ticket) = self.writer_ticket {
+                    self.owner.send(Message::Cancel(ticket));
+                }
             }
         }
     }
 }
 
 struct LockGuard {
-    lock: Arc<ParkCell<LockState>>,
+    owner: Arc<Owner>,
     write: bool,
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let waiters = {
-            let mut state = lock_state(&self.lock);
-            if self.write {
-                state.writer = false;
-                state.gate = false;
-            } else {
-                state.readers -= 1;
-            }
-            take_waiters(&mut state)
-        };
-        for waiter in waiters {
-            waiter.wake();
-        }
+        self.owner.send(Message::Release { write: self.write });
     }
 }
 
 impl NativePathLock {
     fn reserve_writer(&self) -> u64 {
-        let mut state = lock_state(&self.state);
-        let ticket = state.next_writer_ticket;
-        state.next_writer_ticket = state.next_writer_ticket.wrapping_add(1);
-        state.writers.push_back(ticket);
+        let ticket = self.owner.next_ticket.fetch_add(1, Ordering::Relaxed);
+        self.owner.send(Message::Reserve(ticket));
         ticket
     }
 
     fn acquire(&self, write: bool, writer_ticket: Option<u64>) -> Acquire {
         Acquire {
-            lock: Arc::clone(&self.state),
+            owner: Arc::clone(&self.owner),
             write,
             writer_ticket,
-            granted: false,
+            stage: Stage::Unpolled,
         }
     }
 }
@@ -662,28 +894,320 @@ impl PathLock {
             .build_threadsafe_function::<()>()
             .callee_handled::<false>()
             .build()?;
-        let lock = self.inner.clone();
-        let writer_ticket = write.then(|| lock.reserve_writer());
-        let promise: PromiseRaw<'_, ()> = match env.spawn_future(async move {
-            let _guard = lock.acquire(write, writer_ticket).await;
+        let writer_ticket = write.then(|| self.inner.reserve_writer());
+        let mut acquire = self.inner.acquire(write, writer_ticket);
+        if !write {
+            // A reader takes its place now, in the call. Left to its first
+            // poll on the runtime, a reader called before a writer could be
+            // polled after it and wait behind its gate, where upstream's
+            // reader has already entered. A writer still sets the gate at
+            // its first poll.
+            acquire.begin();
+        }
+        // A future that cannot be spawned is dropped, and `acquire` with
+        // it: that withdraws the ticket or gives the read back.
+        let promise: PromiseRaw<'_, ()> = env.spawn_future(async move {
+            let _guard = acquire.await;
             let result = callback.call_async_catch(()).await?;
             result.await?;
             Ok(())
-        }) {
-            Ok(promise) => promise,
-            Err(error) => {
-                if let Some(ticket) = writer_ticket {
-                    let mut state = lock_state(&self.inner.state);
-                    if let Some(index) = state.writers.iter().position(|queued| *queued == ticket) {
-                        state.writers.remove(index);
-                    }
-                }
-                return Err(error);
-            }
-        };
+        })?;
         // `PromiseRaw` only carries the Env lifetime at the type level.  The
         // N-API promise and its callback queue are owned by Node; all values
         // captured by the future are owned or thread-safe before this point.
         Ok(unsafe { std::mem::transmute::<PromiseRaw<'_, ()>, PromiseRaw<'static, ()>>(promise) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use napi::tokio::{self as rt_tokio, runtime::Runtime};
+    use std::sync::atomic::AtomicI64;
+    use std::task::Waker;
+    use std::time::Instant;
+
+    fn runtime(workers: usize) -> Runtime {
+        rt_tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Poll once with a waker that does nothing: the tests below decide
+    /// themselves when to look again.
+    fn poll_once(acquire: &mut Acquire) -> Option<LockGuard> {
+        let mut context = Context::from_waker(Waker::noop());
+        match Pin::new(acquire).poll(&mut context) {
+            Poll::Ready(guard) => Some(guard),
+            Poll::Pending => None,
+        }
+    }
+
+    fn writer(lock: &NativePathLock) -> Acquire {
+        let ticket = lock.reserve_writer();
+        lock.acquire(true, Some(ticket))
+    }
+
+    fn reader(lock: &NativePathLock) -> Acquire {
+        lock.acquire(false, None)
+    }
+
+    #[test]
+    fn reader_issued_after_an_unpolled_writer_starts() {
+        let lock = NativePathLock::default();
+        let first = poll_once(&mut reader(&lock)).unwrap();
+        let mut queued = writer(&lock);
+        // The writer holds a ticket but has not polled: no gate yet.
+        let second = poll_once(&mut reader(&lock)).unwrap();
+        assert!(poll_once(&mut queued).is_none());
+        // Now it has, and a later reader waits behind it.
+        let mut late = reader(&lock);
+        assert!(poll_once(&mut late).is_none());
+        drop(first);
+        assert!(poll_once(&mut queued).is_none());
+        drop(second);
+        let writing = poll_once(&mut queued).unwrap();
+        assert!(poll_once(&mut late).is_none());
+        drop(writing);
+        assert!(poll_once(&mut late).is_some());
+    }
+
+    #[test]
+    fn reader_begun_in_its_call_is_ahead_of_a_writer_that_polls_first() {
+        let lock = NativePathLock::default();
+        let first = poll_once(&mut reader(&lock)).unwrap();
+        let mut queued = writer(&lock);
+        // What `PathLock::read` does before it spawns the reader's future.
+        let mut second = reader(&lock);
+        second.begin();
+        // The writer's future is polled first; the reader is in all the same.
+        assert!(poll_once(&mut queued).is_none());
+        let second = poll_once(&mut second).unwrap();
+        drop(first);
+        assert!(poll_once(&mut queued).is_none());
+        drop(second);
+        assert!(poll_once(&mut queued).is_some());
+    }
+
+    #[test]
+    fn a_reader_dropped_between_its_call_and_its_first_poll_gives_the_read_back() {
+        let lock = NativePathLock::default();
+        // What `PathLock::read` does before it spawns the reader's future,
+        // which is then dropped unpolled, as it is when the spawn fails.
+        let mut abandoned = reader(&lock);
+        abandoned.begin();
+        drop(abandoned);
+        // A writer would wait for ever on a read that nobody holds.
+        let guard = poll_once(&mut writer(&lock)).expect("the lock is free");
+        drop(guard);
+        assert!(poll_once(&mut reader(&lock)).is_some());
+    }
+
+    #[test]
+    fn writers_run_in_call_order_whatever_order_they_poll_in() {
+        let lock = NativePathLock::default();
+        let mut first = writer(&lock);
+        let mut second = writer(&lock);
+        let mut third = writer(&lock);
+        assert!(poll_once(&mut third).is_none());
+        assert!(poll_once(&mut second).is_none());
+        let guard = poll_once(&mut first).unwrap();
+        assert!(poll_once(&mut second).is_none());
+        drop(guard);
+        assert!(poll_once(&mut third).is_none());
+        let guard = poll_once(&mut second).unwrap();
+        drop(guard);
+        assert!(poll_once(&mut third).is_some());
+    }
+
+    #[test]
+    fn cancel_in_mid_queue_leaves_the_writers_around_it_in_order() {
+        let lock = NativePathLock::default();
+        let holder = poll_once(&mut reader(&lock)).unwrap();
+        let mut first = writer(&lock);
+        let mut second = writer(&lock);
+        let mut third = writer(&lock);
+        let unpolled = writer(&lock);
+        let mut last = writer(&lock);
+        for acquire in [&mut first, &mut second, &mut third, &mut last] {
+            assert!(poll_once(acquire).is_none());
+        }
+        // One from the middle that has polled, one that never did.
+        drop(second);
+        drop(unpolled);
+        // The front writer has polled, so its gate holds new readers out.
+        let mut gated = reader(&lock);
+        assert!(poll_once(&mut gated).is_none());
+        drop(holder);
+        assert!(poll_once(&mut third).is_none());
+        assert!(poll_once(&mut last).is_none());
+        let guard = poll_once(&mut first).unwrap();
+        assert!(poll_once(&mut third).is_none());
+        drop(guard);
+        assert!(poll_once(&mut last).is_none());
+        let guard = poll_once(&mut third).unwrap();
+        drop(guard);
+        let guard = poll_once(&mut last).unwrap();
+        assert!(poll_once(&mut gated).is_none());
+        drop(guard);
+        assert!(poll_once(&mut gated).is_some());
+    }
+
+    #[test]
+    fn cancelling_the_only_writer_lets_gated_readers_in() {
+        let lock = NativePathLock::default();
+        let holder = poll_once(&mut reader(&lock)).unwrap();
+        let mut only = writer(&lock);
+        assert!(poll_once(&mut only).is_none());
+        let mut gated = reader(&lock);
+        assert!(poll_once(&mut gated).is_none());
+        drop(only);
+        let guard = poll_once(&mut gated).unwrap();
+        drop((holder, guard));
+        assert!(poll_once(&mut writer(&lock)).is_some());
+    }
+
+    #[test]
+    fn a_writer_dropped_once_the_lock_is_free_for_it_holds_nothing() {
+        let lock = NativePathLock::default();
+        let holder = poll_once(&mut reader(&lock)).unwrap();
+        let mut front = writer(&lock);
+        let mut behind = writer(&lock);
+        assert!(poll_once(&mut front).is_none());
+        assert!(poll_once(&mut behind).is_none());
+        // The lock becomes free for `front`, which is dropped without
+        // looking again: that must count as a release, not strand `behind`.
+        drop(holder);
+        drop(front);
+        let guard = poll_once(&mut behind).unwrap();
+        drop(guard);
+        assert!(poll_once(&mut reader(&lock)).is_some());
+    }
+
+    /// Writers exclude everyone, start in ticket order, and nothing is left
+    /// held, while tasks on eight workers acquire and give up at random.
+    #[test]
+    fn stress_exclusion_and_order_with_random_cancels() {
+        const WRITER: i64 = 1 << 32;
+        let runtime = runtime(8);
+        let lock = NativePathLock::default();
+        let inside = Arc::new(AtomicI64::new(0));
+        let last_writer = Arc::new(AtomicU64::new(0));
+        let cancelled = Arc::new(AtomicU64::new(0));
+        runtime.block_on(async {
+            let mut tasks = Vec::new();
+            let mut sequence = 0u64;
+            for round in 0..4_000u64 {
+                let write = round % 3 == 0;
+                let give_up = round % 7 == 3 || round % 11 == 5;
+                // Tickets are reserved here, in one place, as the N-API
+                // entry point does: `sequence` is the call order.
+                let ticket = write.then(|| lock.reserve_writer());
+                if write {
+                    sequence += 1;
+                }
+                let order = sequence;
+                let lock = lock.clone();
+                let inside = Arc::clone(&inside);
+                let last_writer = Arc::clone(&last_writer);
+                let cancelled = Arc::clone(&cancelled);
+                tasks.push(rt_tokio::spawn(async move {
+                    let mut acquire = lock.acquire(write, ticket);
+                    let guard = if give_up {
+                        // Look once, and walk away if it is not ready.
+                        let first = std::future::poll_fn(|context| {
+                            Poll::Ready(match Pin::new(&mut acquire).poll(context) {
+                                Poll::Ready(guard) => Some(guard),
+                                Poll::Pending => None,
+                            })
+                        })
+                        .await;
+                        match first {
+                            Some(guard) => guard,
+                            None => {
+                                rt_tokio::task::yield_now().await;
+                                drop(acquire);
+                                cancelled.fetch_add(1, Ordering::Relaxed);
+                                return;
+                            }
+                        }
+                    } else {
+                        acquire.await
+                    };
+                    if write {
+                        assert_eq!(inside.fetch_add(WRITER, Ordering::SeqCst), 0);
+                        let before = last_writer.swap(order, Ordering::SeqCst);
+                        assert!(before < order, "writer {order} ran after {before}");
+                    } else {
+                        assert!(inside.fetch_add(1, Ordering::SeqCst) < WRITER);
+                    }
+                    rt_tokio::task::yield_now().await;
+                    inside.fetch_sub(if write { WRITER } else { 1 }, Ordering::SeqCst);
+                    drop(guard);
+                }));
+                if round % 64 == 0 {
+                    rt_tokio::task::yield_now().await;
+                }
+            }
+            for task in tasks {
+                task.await.unwrap();
+            }
+            // Nothing is left held or queued.
+            let guard = lock.acquire(true, Some(lock.reserve_writer())).await;
+            drop(guard);
+            let _reader = lock.acquire(false, None).await;
+        });
+        assert_eq!(inside.load(Ordering::SeqCst), 0);
+        assert!(cancelled.load(Ordering::Relaxed) > 0);
+    }
+
+    async fn cycle(lock: &NativePathLock, write: bool) {
+        let ticket = write.then(|| lock.reserve_writer());
+        drop(lock.acquire(write, ticket).await);
+    }
+
+    /// `callers` tasks each acquire and release `each` times; every
+    /// `write_every`-th acquisition of a caller is a write (0: none).
+    fn bench(runtime: &Runtime, label: &str, callers: usize, each: usize, write_every: usize) {
+        let mut rounds = Vec::new();
+        for _ in 0..5 {
+            let lock = NativePathLock::default();
+            let started = Instant::now();
+            runtime.block_on(async {
+                let tasks: Vec<_> = (0..callers)
+                    .map(|_| {
+                        let lock = lock.clone();
+                        rt_tokio::spawn(async move {
+                            for index in 0..each {
+                                let write = write_every != 0 && index % write_every == 0;
+                                cycle(&lock, write).await;
+                            }
+                        })
+                    })
+                    .collect();
+                for task in tasks {
+                    task.await.unwrap();
+                }
+            });
+            rounds.push(started.elapsed().as_nanos() as f64 / (callers * each) as f64);
+        }
+        rounds.sort_by(f64::total_cmp);
+        println!(
+            "path lock {label:<22} callers={callers} ns/op min={:>8.1} median={:>8.1} max={:>8.1}",
+            rounds[0], rounds[2], rounds[4]
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark; run with --release --ignored --nocapture"]
+    fn bench_path_lock() {
+        let runtime = runtime(8);
+        bench(&runtime, "read", 1, 2_000_000, 0);
+        bench(&runtime, "write", 1, 2_000_000, 1);
+        bench(&runtime, "read", 8, 250_000, 0);
+        bench(&runtime, "write", 8, 100_000, 1);
+        bench(&runtime, "1 write in 8", 8, 100_000, 8);
     }
 }

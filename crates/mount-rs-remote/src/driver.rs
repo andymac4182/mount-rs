@@ -1,11 +1,13 @@
-//! Native-driver adapter. Per-handle locks serialize cursor operations and close.
+//! Native-driver adapter. A handle keeps no lock of its own: the owner's
+//! per-handle gate orders cursor moves, mutations and close, and makes close
+//! wait for every call it admitted. The client only remembers whether the
+//! handle is open, so a closed handle is refused without a round trip.
 //! No operation is retried; dropped handles rely on explicit session shutdown
 //! or owner-side idle expiry rather than spawning untracked cleanup tasks.
 #[cfg(test)]
 use super::MAX_IO;
 use super::RemoteSession;
 use async_trait::async_trait;
-use mount_rs_core::drain_gate::{DrainExclusive, DrainGate, DrainShared};
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, OpenFlags,
     Result, Stats, StatsFs,
@@ -125,18 +127,33 @@ const CLOSED: u8 = 2;
 struct RemoteHandle {
     session: Arc<RemoteSession>,
     id: u64,
-    /// Positional reads and stats share the gate; cursor moves, mutations
-    /// and close hold it exclusively. Shared entry is an atomic counter.
-    gate: DrainGate,
-    /// Written only while holding `gate` exclusively.
+    /// `OPEN` until a close is sent, `CLOSING` while one is in flight and
+    /// `CLOSED` once the owner has answered it. Only `OPEN` admits a call.
+    ///
+    /// This is a hint, not the exclusion: a call that read `OPEN` can reach
+    /// the owner after a close. The owner's handle gate decides that race.
+    /// Either the call runs first and close waits for it, or close runs
+    /// first and the call is answered `EBADF`. The cursor lives on the
+    /// owner too, so nothing here is read and written back across a request.
     state: std::sync::atomic::AtomicU8,
+}
+/// Puts a handle whose close did not succeed back to `OPEN`, also when the
+/// close future is dropped, so calls and a retried close are sent again.
+struct Reopen<'a>(&'a std::sync::atomic::AtomicU8);
+impl Drop for Reopen<'_> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        // Fails, as it must, once any close has stored `CLOSED`.
+        let _ = self
+            .0
+            .compare_exchange(CLOSING, OPEN, Ordering::AcqRel, Ordering::Acquire);
+    }
 }
 impl RemoteHandle {
     fn new(session: Arc<RemoteSession>, id: u64) -> Self {
         Self {
             session,
             id,
-            gate: DrainGate::new(),
             state: std::sync::atomic::AtomicU8::new(OPEN),
         }
     }
@@ -146,18 +163,8 @@ impl RemoteHandle {
         }
         Ok(())
     }
-    async fn admitted(&self) -> Result<DrainExclusive<'_>> {
-        let guard = self.gate.write().await;
-        self.check_open()?;
-        Ok(guard)
-    }
-    async fn admitted_read(&self) -> Result<DrainShared<'_>> {
-        let guard = self.gate.read().await;
-        self.check_open()?;
-        Ok(guard)
-    }
     async fn mutation(&self, operation: Value) -> Result<()> {
-        let _guard = self.admitted().await?;
+        self.check_open()?;
         empty(&self.session, self.session.control(&operation).await?)
     }
 }
@@ -167,16 +174,7 @@ impl FileHandle for RemoteHandle {
         Some(self.id)
     }
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> Result<usize> {
-        let _exclusive = if position.is_none() {
-            Some(self.admitted().await?)
-        } else {
-            None
-        };
-        let _shared = if position.is_some() {
-            Some(self.admitted_read().await?)
-        } else {
-            None
-        };
+        self.check_open()?;
         let length = buffer.len().min(self.session.max_io_bytes());
         let bytes = if let Some(position) = position.filter(|_| {
             self.session
@@ -196,7 +194,7 @@ impl FileHandle for RemoteHandle {
         Ok(bytes.len())
     }
     async fn write(&self, buffer: &[u8], position: Option<u64>) -> Result<usize> {
-        let _guard = self.admitted().await?;
+        self.check_open()?;
         self.session
             .write(
                 self.id,
@@ -206,7 +204,7 @@ impl FileHandle for RemoteHandle {
             .await
     }
     async fn stat(&self) -> Result<Stats> {
-        let _guard = self.admitted_read().await?;
+        self.check_open()?;
         decode(
             &self.session,
             &self
@@ -229,11 +227,19 @@ impl FileHandle for RemoteHandle {
     }
     async fn close(&self) -> Result<()> {
         use std::sync::atomic::Ordering;
-        let _exclusive = self.gate.write().await;
         if self.state.load(Ordering::Acquire) == CLOSED {
             return Ok(());
         }
-        self.state.store(CLOSING, Ordering::Release);
+        // A close that finds another in flight does not wait here and is
+        // not answered from its state: it is sent as well. The owner takes
+        // the handle exclusively for each close, so this one is answered
+        // only after the first has finished: `EBADF` or success once the
+        // handle is gone, or the result of closing it again if the first
+        // failed. No caller is told the handle is closed before it is.
+        let _ = self
+            .state
+            .compare_exchange(OPEN, CLOSING, Ordering::AcqRel, Ordering::Acquire);
+        let _reopen = Reopen(&self.state);
         match self
             .session
             .control(&json!({"operation":"close","handle":self.id}))
@@ -370,20 +376,25 @@ impl FsDriver for RemoteFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn positional_admission_shares_rpc_reads_and_drains_before_close() {
+    /// The handle has no lock: what orders a call against a close is the
+    /// owner's per-handle gate. So this runs against the real owner session
+    /// and checks what a caller of close relies on. When any close returns
+    /// Ok the owner no longer has the handle, nothing admitted before it is
+    /// still running there, and every write that was acknowledged is in the
+    /// file. Two closes race each other and eight callers on every round.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_returns_only_after_the_owner_has_closed_the_handle() {
         use mount_rs_cluster::{SessionCredentials, SessionHttpHandler, VolumeSessions};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const WORKERS: usize = 8;
         let owner = Arc::new(
-            mount_rs_sdk::Filesystem::split(mount_rs_sdk::SplitOptions::memory(
-                "parallel-remote",
-                4096,
-            ))
-            .await
-            .unwrap(),
+            mount_rs_sdk::Filesystem::split(mount_rs_sdk::SplitOptions::memory("close-race", 4096))
+                .await
+                .unwrap(),
         );
         let registry =
             Arc::new(VolumeSessions::new(owner.clone(), 2, 4, Duration::from_secs(60)).unwrap());
-        let secret = "s".repeat(32);
+        let secret = "c".repeat(32);
         let handler = SessionHttpHandler::new(
             "volume",
             SessionCredentials::new(vec![("client".into(), secret.clone())]).unwrap(),
@@ -394,62 +405,295 @@ mod tests {
             mount_rs_http::HttpServer::start_with_handler(Arc::new(handler), Default::default())
                 .await
                 .unwrap();
-        let remote = RemoteFs::connect(&server.url(), "volume", &secret, Duration::from_secs(5))
+        let remote = RemoteFs::connect(&server.url(), "volume", &secret, Duration::from_secs(10))
             .await
             .unwrap();
-        let opened = remote.open("/data", "w+", 0o600).await.unwrap();
-        let handle = RemoteHandle::new(remote.session.clone(), opened.fd().unwrap());
-        handle.write(b"data", Some(0)).await.unwrap();
-        let admitted = handle.admitted_read().await.unwrap();
-        let mut bytes = [0; 4];
-        for headers in [false, true] {
-            if headers {
-                remote.enable_header_reads().await.unwrap();
+        let contents = |remote: RemoteFs| async move {
+            let file = remote.open("/race", "r", 0).await.unwrap();
+            let mut bytes = [0u8; WORKERS];
+            let count = file.read(&mut bytes, Some(0)).await.unwrap();
+            file.close().await.unwrap();
+            (count, bytes)
+        };
+        for round in 1u8..=24 {
+            let opened = remote.open("/race", "w+", 0o600).await.unwrap();
+            let id = opened.fd().unwrap();
+            let handle = Arc::new(RemoteHandle::new(remote.session.clone(), id));
+            let started = Arc::new(tokio::sync::Barrier::new(WORKERS + 1));
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut workers = Vec::new();
+            for worker in 0..WORKERS {
+                let handle = handle.clone();
+                let started = started.clone();
+                let stop = stop.clone();
+                workers.push(tokio::spawn(async move {
+                    // The last byte this worker was told is in the file.
+                    let mut acknowledged = None;
+                    let mut first = true;
+                    for value in (1u8..=250).cycle() {
+                        let written = handle.write(&[value], Some(worker as u64)).await;
+                        if first {
+                            first = false;
+                            started.wait().await;
+                        }
+                        let mut byte = [0u8; 1];
+                        // Positional and cursor reads, a stat, a sync and a
+                        // truncate that changes nothing: every kind of call.
+                        let results = [
+                            written.map(|count| {
+                                assert_eq!(count, 1);
+                                acknowledged = Some(value);
+                            }),
+                            handle
+                                .read(&mut byte, Some(worker as u64))
+                                .await
+                                .map(|_| ()),
+                            handle.read(&mut byte, None).await.map(|_| ()),
+                            handle.stat().await.map(|_| ()),
+                            handle.datasync().await,
+                            handle.truncate(WORKERS as u64).await,
+                        ];
+                        let mut refused = false;
+                        for result in results {
+                            match result {
+                                Ok(()) => {}
+                                Err(error) if error.code == ErrorCode::Ebadf => refused = true,
+                                Err(error) => panic!("round {round}: {error:?}"),
+                            }
+                        }
+                        if refused || stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                    acknowledged
+                }));
+            }
+            started.wait().await;
+            let mut closers = Vec::new();
+            for _ in 0..2 {
+                let handle = handle.clone();
+                let remote = remote.clone();
+                closers.push(tokio::spawn(async move {
+                    handle.close().await.unwrap();
+                    // Asked of the owner directly, past the handle's own
+                    // state: at the moment close returned Ok, to whichever
+                    // caller, the owner had already let go of the handle.
+                    let stat = remote
+                        .session
+                        .control(&json!({"operation":"stat","handle":id}))
+                        .await;
+                    assert_eq!(stat.unwrap_err().code, ErrorCode::Ebadf, "round {round}");
+                }));
+            }
+            for closer in closers {
+                within(closer).await.unwrap();
+            }
+            // Workers are still running here: anything they send now must be
+            // refused, so the file cannot change after close returned.
+            let at_close = contents(remote.clone()).await;
+            stop.store(true, Ordering::Release);
+            let mut acknowledged = Vec::new();
+            for worker in workers {
+                acknowledged.push(within(worker).await.unwrap());
+            }
+            let settled = contents(remote.clone()).await;
+            assert_eq!(at_close, settled, "round {round}: a call ran after close");
+            assert_eq!(settled.0, WORKERS, "round {round}");
+            for (worker, value) in acknowledged.into_iter().enumerate() {
+                // The barrier let no close start before each first write
+                // was answered, so every worker has one acknowledged.
+                assert_eq!(
+                    Some(settled.1[worker]),
+                    value,
+                    "round {round}: worker {worker} lost an acknowledged write"
+                );
             }
             assert_eq!(
-                tokio::time::timeout(Duration::from_secs(1), handle.read(&mut bytes, Some(0)))
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                4
+                handle.stat().await.unwrap_err().code,
+                ErrorCode::Ebadf,
+                "round {round}"
             );
-            assert_eq!(&bytes, b"data");
+            handle.close().await.unwrap();
+            drop(opened);
         }
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), handle.stat())
-                .await
-                .unwrap()
-                .unwrap()
-                .size,
-            4
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), handle.read(&mut bytes, None))
-                .await
-                .is_err()
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), handle.write(b"x", Some(0)))
-                .await
-                .is_err()
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), handle.close())
-                .await
-                .is_err()
-        );
-        drop(admitted);
-        assert_eq!(handle.read(&mut bytes, None).await.unwrap(), 4);
-        assert_eq!(&bytes, b"data");
-        handle.close().await.unwrap();
-        assert_eq!(
-            handle.read(&mut bytes, Some(0)).await.unwrap_err().code,
-            ErrorCode::Ebadf
-        );
         remote.shutdown().await.unwrap();
         server.close().await.unwrap();
         registry.close().await.unwrap();
         owner.shutdown().await.unwrap();
+    }
+
+    /// A wait that fails the test instead of hanging it.
+    async fn within<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(60), future)
+            .await
+            .expect("timed out")
+    }
+
+    /// Reads one request and returns its body.
+    async fn owner_request(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0);
+            bytes.extend_from_slice(&chunk[..count]);
+            if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                let length = std::str::from_utf8(&bytes[..end])
+                    .unwrap()
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                if bytes.len() >= end + 4 + length {
+                    return String::from_utf8(bytes[end + 4..].to_vec()).unwrap();
+                }
+            }
+        }
+    }
+    async fn owner_reply(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
+        use tokio::io::AsyncWriteExt;
+        let reply = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(reply.as_bytes()).await.unwrap();
+    }
+    async fn owner_session(listener: &tokio::net::TcpListener) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        owner_request(&mut stream).await;
+        let body = json!({"protocol_version":1,"session":"a".repeat(64),"idle_timeout_ms":60000});
+        owner_reply(&mut stream, "201 Created", &body.to_string()).await;
+    }
+    /// The next request, which must be a close of handle 7.
+    async fn owner_close(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request: Value = serde_json::from_str(&owner_request(&mut stream).await).unwrap();
+        assert_eq!(request, json!({"operation":"close","handle":7}));
+        stream
+    }
+
+    /// A scripted owner, so each answer to close is chosen. A refused close
+    /// leaves the handle open and can be sent again; while one close is in
+    /// flight a second is sent too, and neither returns before its own
+    /// answer; a closed handle sends nothing more.
+    #[tokio::test]
+    async fn refused_close_is_retried_and_overlapping_closes_each_wait_for_the_owner() {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (both_sent, both_arrived) = tokio::sync::oneshot::channel();
+        let (answer_first, first) = tokio::sync::oneshot::channel::<()>();
+        let (answer_second, second) = tokio::sync::oneshot::channel::<()>();
+        let owner = tokio::spawn(async move {
+            owner_session(&listener).await;
+            let mut refused = owner_close(&listener).await;
+            owner_reply(
+                &mut refused,
+                "409 Conflict",
+                r#"{"error":{"code":"EBUSY"}}"#,
+            )
+            .await;
+            let mut one = owner_close(&listener).await;
+            let mut two = owner_close(&listener).await;
+            both_sent.send(()).unwrap();
+            first.await.unwrap();
+            owner_reply(&mut one, "204 No Content", "").await;
+            second.await.unwrap();
+            // What the owner says to a close that waited out another.
+            owner_reply(&mut two, "404 Not Found", r#"{"error":{"code":"EBADF"}}"#).await;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "a closed handle sent another request"
+            );
+        });
+        let session = Arc::new(
+            RemoteSession::connect(&endpoint, "volume", &"s".repeat(32), Duration::from_secs(5))
+                .await
+                .unwrap(),
+        );
+        let handle = Arc::new(RemoteHandle::new(session, 7));
+        assert_eq!(handle.close().await.unwrap_err().code, ErrorCode::Ebusy);
+        assert_eq!(handle.state.load(Ordering::Acquire), OPEN);
+        let closes: Vec<_> = (0..2)
+            .map(|_| {
+                let handle = handle.clone();
+                tokio::spawn(async move { handle.close().await })
+            })
+            .collect();
+        within(both_arrived).await.unwrap();
+        // Calls are refused here while a close is in flight.
+        assert_eq!(handle.state.load(Ordering::Acquire), CLOSING);
+        assert_eq!(handle.stat().await.unwrap_err().code, ErrorCode::Ebadf);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(closes.iter().all(|close| !close.is_finished()));
+        answer_first.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while handle.state.load(Ordering::Acquire) != CLOSED {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            closes.iter().filter(|close| close.is_finished()).count(),
+            1,
+            "the second close returned before the owner answered it"
+        );
+        answer_second.send(()).unwrap();
+        for close in closes {
+            within(close).await.unwrap().unwrap();
+        }
+        assert_eq!(handle.state.load(Ordering::Acquire), CLOSED);
+        handle.close().await.unwrap();
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            handle.read(&mut byte, Some(0)).await.unwrap_err().code,
+            ErrorCode::Ebadf
+        );
+        assert_eq!(
+            handle.write(b"x", None).await.unwrap_err().code,
+            ErrorCode::Ebadf
+        );
+        within(owner).await.unwrap();
+    }
+
+    /// A close whose caller stops waiting has an unknown outcome, so the
+    /// handle must not be left refusing a retry as if it were closing.
+    #[tokio::test]
+    async fn cancelled_close_leaves_the_handle_open() {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (sent, arrived) = tokio::sync::oneshot::channel();
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let owner = tokio::spawn(async move {
+            owner_session(&listener).await;
+            let stream = owner_close(&listener).await;
+            sent.send(()).unwrap();
+            finished.await.unwrap();
+            drop(stream);
+        });
+        let session = Arc::new(
+            RemoteSession::connect(&endpoint, "volume", &"s".repeat(32), Duration::from_secs(5))
+                .await
+                .unwrap(),
+        );
+        let handle = Arc::new(RemoteHandle::new(session, 7));
+        let closing = handle.clone();
+        let close = tokio::spawn(async move { closing.close().await });
+        within(arrived).await.unwrap();
+        assert_eq!(handle.state.load(Ordering::Acquire), CLOSING);
+        close.abort();
+        assert!(close.await.unwrap_err().is_cancelled());
+        assert_eq!(handle.state.load(Ordering::Acquire), OPEN);
+        handle.check_open().unwrap();
+        finish.send(()).unwrap();
+        within(owner).await.unwrap();
     }
 
     #[tokio::test]

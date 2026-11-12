@@ -1064,6 +1064,20 @@ where
         Ok(path)
     }
 
+    /// Checked again once the entry's lock is held. A close marks the
+    /// handle closed before it takes that lock to give up its reference,
+    /// so a call that holds the lock and still finds the handle open is
+    /// ahead of the close, which then saves what it wrote. Without this a
+    /// call could pass `begin`, lose the processor while the close ran to
+    /// the end and dropped the buffer from the table, and then write into
+    /// a buffer nothing will ever save.
+    fn still_open(&self, syscall: &str) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(FsError::new(ErrorCode::Ebadf).with_syscall(syscall));
+        }
+        Ok(())
+    }
+
     fn ensure_open(&self, syscall: &str) -> Result<String> {
         let path = self.path()?;
         if self.closed.load(Ordering::Acquire) {
@@ -1090,6 +1104,7 @@ where
             .entry
             .lock()
             .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("read"))?;
+        self.still_open("read")?;
         let current = self.position.load(Ordering::Relaxed);
         let from = position.unwrap_or(current);
         let from = usize::try_from(from).unwrap_or(usize::MAX);
@@ -1115,6 +1130,7 @@ where
             .entry
             .lock()
             .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("write"))?;
+        self.still_open("write")?;
         let from = if self.flags.append {
             file.data.len() as u64
         } else {
@@ -1156,6 +1172,7 @@ where
                 .entry
                 .lock()
                 .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("ftruncate"))?;
+            self.still_open("ftruncate")?;
             resize_bytes(&mut file.data, length, "ftruncate")?;
             file.dirty = true;
             self.inner.touch_open(&mut file, "ftruncate")?

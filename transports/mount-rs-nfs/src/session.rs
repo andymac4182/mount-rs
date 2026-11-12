@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::{
     ErrorCode, FileHandle, FsDriver, FsError, GuardedDirectoryEntry, GuardedMutation,
     GuardedMutationResult, GuardedRead, GuardedReadResult, GuardedSetattr, Loopback, MkdirOptions,
@@ -833,19 +832,9 @@ fn close_needs_attempt(closing: Option<&tokio::sync::watch::Receiver<CloseOutcom
     }
 }
 
+/// One open descriptor the session must close: a retained handle, or a
+/// provisional one waiting to be closed outside the retained table.
 struct CloseEntry {
-    handle: Arc<dyn FileHandle>,
-    closing: Option<tokio::sync::watch::Receiver<CloseOutcome>>,
-}
-
-impl CloseEntry {
-    fn needs_attempt(&self) -> bool {
-        close_needs_attempt(self.closing.as_ref())
-    }
-}
-
-/// One descriptor waiting to be closed outside the retained table.
-struct ProvisionalEntry {
     handle: Arc<dyn FileHandle>,
     /// The waiter of the latest close attempt. Whoever replaces it by
     /// compare-and-swap owns that attempt and spawns its one close task.
@@ -856,7 +845,7 @@ struct ProvisionalCloses {
     next_id: AtomicU64,
     /// Holds only descriptors whose close has not succeeded yet, so it is
     /// small; replaced whole on each change.
-    by_id: ArcSwap<HashMap<u64, Arc<ProvisionalEntry>>>,
+    by_id: ArcSwap<HashMap<u64, Arc<CloseEntry>>>,
 }
 
 impl ProvisionalCloses {
@@ -881,9 +870,10 @@ impl ProvisionalCloses {
 
 struct RetainedHandles {
     table: FileHandleTable,
-    /// A park cell: `schedule_retained` walks every entry and spawns a task
-    /// for each while holding it.
-    by_id: ParkCell<HashMap<u64, CloseEntry>>,
+    /// One entry per regular filehandle the session has exposed, so the map
+    /// is persistent: an insert or removal shares all but one branch with
+    /// the map it replaces. Readers load it; writers compare-and-swap.
+    by_id: ArcSwap<im::HashMap<u64, Arc<CloseEntry>>>,
     provisional: ProvisionalCloses,
     active: tokio::sync::watch::Sender<usize>,
 }
@@ -912,7 +902,7 @@ impl RetainedHandles {
             .next_id
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .expect("provisional close id overflow");
-        let entry = Arc::new(ProvisionalEntry {
+        let entry = Arc::new(CloseEntry {
             handle,
             closing: ArcSwapOption::empty(),
         });
@@ -924,61 +914,83 @@ impl RetainedHandles {
         id
     }
 
-    fn schedule_retained(
-        self: &Arc<Self>,
-        runtime: &tokio::runtime::Handle,
-    ) -> Vec<tokio::sync::watch::Receiver<CloseOutcome>> {
-        let mut retained = self.by_id.lock().expect("NFS retained handle lock");
-        let mut waits = Vec::with_capacity(retained.len());
-        for (&id, entry) in retained.iter_mut() {
-            if entry.needs_attempt() {
-                let handle = Arc::clone(&entry.handle);
-                let owner = Arc::clone(self);
-                let (completed, wait) = tokio::sync::watch::channel(CloseOutcome::Pending);
-                runtime.spawn(async move {
-                    let outcome = if handle.close().await.is_ok() {
-                        let removed = owner
-                            .by_id
-                            .lock()
-                            .expect("NFS retained handle lock")
-                            .remove(&id);
-                        if removed.is_some() {
-                            owner.table.unpin(id);
-                        }
-                        CloseOutcome::Succeeded
-                    } else {
-                        CloseOutcome::Failed
-                    };
-                    let _ = completed.send(outcome);
-                });
-                entry.closing = Some(wait);
+    fn retained(&self, id: u64) -> Option<Arc<dyn FileHandle>> {
+        self.by_id
+            .load()
+            .get(&id)
+            .map(|entry| Arc::clone(&entry.handle))
+    }
+
+    /// Retain `handle` for `id` unless the id already has a descriptor or
+    /// the session is destroyed. Callers racing for one id each bring their
+    /// own descriptor; exactly one compare-and-swap installs an entry, and
+    /// every other caller is handed that winner's descriptor.
+    fn retain(
+        &self,
+        id: u64,
+        handle: &Arc<dyn FileHandle>,
+        destroyed: &AtomicBool,
+    ) -> RetainOutcome {
+        let entry = Arc::new(CloseEntry {
+            handle: Arc::clone(handle),
+            closing: ArcSwapOption::empty(),
+        });
+        loop {
+            let current = self.by_id.load_full();
+            if let Some(existing) = current.get(&id) {
+                return RetainOutcome::Existing(Arc::clone(&existing.handle));
             }
-            waits.push(
-                entry
-                    .closing
-                    .as_ref()
-                    .expect("retained close waiter")
-                    .clone(),
-            );
+            // The caller is counted active, and `destroy` sets this flag
+            // before it waits for the count to drain and walks the map, so
+            // an entry installed after reading the flag unset is seen there.
+            if destroyed.load(Ordering::SeqCst) {
+                return RetainOutcome::Destroyed;
+            }
+            let next = Arc::new(current.update(id, Arc::clone(&entry)));
+            let previous = self.by_id.compare_and_swap(&current, next);
+            if Arc::ptr_eq(&previous, &current) {
+                return RetainOutcome::Inserted;
+            }
         }
-        waits
+    }
+
+    /// Remove `entry` once its close succeeded. Returns whether this call
+    /// removed it, which makes the caller the one that owes the unpin.
+    fn remove_retained(&self, id: u64, entry: &Arc<CloseEntry>) -> bool {
+        let mut removed = false;
+        self.by_id.rcu(|current| {
+            removed = current
+                .get(&id)
+                .is_some_and(|current| Arc::ptr_eq(current, entry));
+            if removed {
+                Arc::new(current.without(&id))
+            } else {
+                Arc::clone(current)
+            }
+        });
+        removed
     }
 
     /// Return the waiter of this descriptor's current close attempt,
     /// starting one if none is running. The drop path and `destroy` can both
     /// ask at once; only the caller whose compare-and-swap installs the new
     /// waiter spawns the close task, so a handle is never closed twice by
-    /// one attempt.
-    fn schedule_provisional(
+    /// one attempt. `closed` runs in that task after a successful close.
+    fn schedule_close<F>(
         self: &Arc<Self>,
-        id: u64,
+        entry: &Arc<CloseEntry>,
         runtime: &tokio::runtime::Handle,
-    ) -> Option<tokio::sync::watch::Receiver<CloseOutcome>> {
-        let entry = self.provisional.by_id.load().get(&id).cloned()?;
+        closed: F,
+    ) -> tokio::sync::watch::Receiver<CloseOutcome>
+    where
+        F: FnOnce(&RetainedHandles, &Arc<CloseEntry>) + Send + 'static,
+    {
         loop {
             let current = entry.closing.load_full();
-            if !close_needs_attempt(current.as_deref()) {
-                return current.as_deref().cloned();
+            if let Some(wait) = current.as_deref()
+                && !close_needs_attempt(Some(wait))
+            {
+                return wait.clone();
             }
             let (completed, wait) = tokio::sync::watch::channel(CloseOutcome::Pending);
             let installed = entry
@@ -993,19 +1005,47 @@ impl RetainedHandles {
                 // Another caller owns this attempt: use its waiter.
                 continue;
             }
-            let handle = Arc::clone(&entry.handle);
+            let entry = Arc::clone(entry);
             let owner = Arc::clone(self);
             runtime.spawn(async move {
-                let outcome = if handle.close().await.is_ok() {
-                    owner.provisional.remove(id);
+                let outcome = if entry.handle.close().await.is_ok() {
+                    closed(&owner, &entry);
                     CloseOutcome::Succeeded
                 } else {
                     CloseOutcome::Failed
                 };
                 let _ = completed.send(outcome);
             });
-            return Some(wait);
+            return wait;
         }
+    }
+
+    fn schedule_retained(
+        self: &Arc<Self>,
+        runtime: &tokio::runtime::Handle,
+    ) -> Vec<tokio::sync::watch::Receiver<CloseOutcome>> {
+        let retained = self.by_id.load_full();
+        retained
+            .iter()
+            .map(|(&id, entry)| {
+                self.schedule_close(entry, runtime, move |owner, entry| {
+                    if owner.remove_retained(id, entry) {
+                        owner.table.unpin(id);
+                    }
+                })
+            })
+            .collect()
+    }
+
+    fn schedule_provisional(
+        self: &Arc<Self>,
+        id: u64,
+        runtime: &tokio::runtime::Handle,
+    ) -> Option<tokio::sync::watch::Receiver<CloseOutcome>> {
+        let entry = self.provisional.by_id.load().get(&id).cloned()?;
+        Some(self.schedule_close(&entry, runtime, move |owner, _| {
+            owner.provisional.remove(id);
+        }))
     }
 
     fn schedule_all_provisional(
@@ -1035,12 +1075,14 @@ impl RetainedHandles {
     }
 
     fn all_closed(&self) -> bool {
-        self.by_id
-            .lock()
-            .expect("NFS retained handle lock")
-            .is_empty()
-            && self.provisional.by_id.load().is_empty()
+        self.by_id.load().is_empty() && self.provisional.by_id.load().is_empty()
     }
+}
+
+enum RetainOutcome {
+    Inserted,
+    Existing(Arc<dyn FileHandle>),
+    Destroyed,
 }
 
 struct ActiveRetention {
@@ -1060,12 +1102,8 @@ impl Drop for RetainedHandles {
         // Balance table pins even if a caller drops the last session clone
         // without async destroy. Backend handles still require async close;
         // dropping their Arc alone does not release every backend open ref.
-        let retained = std::mem::take(
-            // Reached even after a holder panicked.
-            self.by_id.get_mut(),
-        );
-        for (id, entry) in retained {
-            drop(entry);
+        let retained = self.by_id.swap(Arc::default());
+        for &id in retained.keys() {
             self.table.unpin(id);
         }
     }
@@ -1124,11 +1162,8 @@ impl ProvisionalOpenedHandle {
             .as_ref()
     }
 
-    fn clone_handle(&self) -> Arc<dyn FileHandle> {
-        self.handle
-            .as_ref()
-            .expect("provisional open handle")
-            .clone()
+    fn handle(&self) -> &Arc<dyn FileHandle> {
+        self.handle.as_ref().expect("provisional open handle")
     }
 
     fn transfer(mut self) -> Arc<dyn FileHandle> {
@@ -1235,7 +1270,7 @@ impl Nfs3Session {
         let (active, _) = tokio::sync::watch::channel(0usize);
         let retained_handles = Arc::new(RetainedHandles {
             table: handles.clone(),
-            by_id: ParkCell::new(HashMap::new()),
+            by_id: ArcSwap::from_pointee(im::HashMap::new()),
             provisional: ProvisionalCloses::new(),
             active,
         });
@@ -1536,12 +1571,7 @@ impl Nfs3Session {
     }
 
     fn retained_handle(&self, id: u64) -> Option<Arc<dyn FileHandle>> {
-        self.retained_handles
-            .by_id
-            .lock()
-            .expect("NFS retained handle lock")
-            .get(&id)
-            .map(|entry| Arc::clone(&entry.handle))
+        self.retained_handles.retained(id)
     }
 
     fn begin_retention(&self) -> FsResult<ActiveRetention> {
@@ -1600,41 +1630,22 @@ impl Nfs3Session {
             opened.close().await;
             return Err(error);
         }
-        let existing = {
-            let mut retained = self
-                .retained_handles
-                .by_id
-                .lock()
-                .expect("NFS retained handle lock");
-            if let Some(existing) = retained
-                .get(&entry.id)
-                .map(|entry| Arc::clone(&entry.handle))
-            {
-                Ok(Some(existing))
-            } else if self.destroyed() {
-                Err(FsError::new(ErrorCode::Estale)
-                    .with_message("NFS session was destroyed while retaining a file handle"))
-            } else {
-                retained.insert(
-                    entry.id,
-                    CloseEntry {
-                        handle: opened.clone_handle(),
-                        closing: None,
-                    },
-                );
+        match self
+            .retained_handles
+            .retain(entry.id, opened.handle(), &self.destroyed)
+        {
+            RetainOutcome::Inserted => {
                 pin.transfer();
-                Ok(None)
+                Ok(opened.transfer())
             }
-        };
-        match existing {
-            Ok(Some(existing)) => {
+            RetainOutcome::Existing(existing) => {
                 opened.close().await;
                 Ok(existing)
             }
-            Ok(None) => Ok(opened.transfer()),
-            Err(error) => {
+            RetainOutcome::Destroyed => {
                 opened.close().await;
-                Err(error)
+                Err(FsError::new(ErrorCode::Estale)
+                    .with_message("NFS session was destroyed while retaining a file handle"))
             }
         }
     }
@@ -5126,5 +5137,218 @@ mod tests {
             assert_eq!(handle.started.load(Ordering::SeqCst), 2);
         }
         assert!(session.destroy().await);
+    }
+
+    /// Counts every descriptor the session opens through `open_flags` and
+    /// every successful close of one.
+    #[derive(Clone)]
+    struct CountingOpenDriver {
+        backing: MemoryFs,
+        opens: Arc<AtomicU64>,
+        closes: Arc<AtomicU64>,
+        /// When set, every opener waits here until this many are opening,
+        /// so all of them reach the retained table with their own descriptor.
+        gate: Option<Arc<tokio::sync::Barrier>>,
+    }
+
+    impl CountingOpenDriver {
+        fn new(gate: Option<usize>) -> Self {
+            Self {
+                backing: MemoryFs::new(MemoryOptions::default()),
+                opens: Arc::default(),
+                closes: Arc::default(),
+                gate: gate.map(|callers| Arc::new(tokio::sync::Barrier::new(callers))),
+            }
+        }
+
+        fn open_now(&self) -> u64 {
+            self.opens.load(Ordering::SeqCst) - self.closes.load(Ordering::SeqCst)
+        }
+    }
+
+    struct CountingOpenHandle {
+        inner: Arc<dyn FileHandle>,
+        closes: Arc<AtomicU64>,
+    }
+
+    #[async_trait::async_trait]
+    impl FileHandle for CountingOpenHandle {
+        async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> FsResult<usize> {
+            self.inner.read(buffer, position).await
+        }
+
+        async fn write(&self, buffer: &[u8], position: Option<u64>) -> FsResult<usize> {
+            self.inner.write(buffer, position).await
+        }
+
+        async fn stat(&self) -> FsResult<mount_rs_core::Stats> {
+            self.inner.stat().await
+        }
+
+        async fn truncate(&self, length: u64) -> FsResult<()> {
+            self.inner.truncate(length).await
+        }
+
+        async fn close(&self) -> FsResult<()> {
+            self.inner.close().await?;
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FsDriver for CountingOpenDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.backing.capabilities()
+        }
+
+        async fn stat(&self, path: &str) -> FsResult<mount_rs_core::Stats> {
+            self.backing.stat(path).await
+        }
+
+        async fn readdir(&self, path: &str) -> FsResult<Vec<mount_rs_core::DirEntry>> {
+            self.backing.readdir(path).await
+        }
+
+        async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+            self.backing.open(path, flags, mode).await
+        }
+
+        async fn open_flags(
+            &self,
+            path: &str,
+            flags: OpenFlags,
+            mode: u32,
+        ) -> FsResult<Arc<dyn FileHandle>> {
+            let inner = self.backing.open_flags(path, flags, mode).await?;
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let handle = Arc::new(CountingOpenHandle {
+                inner,
+                closes: Arc::clone(&self.closes),
+            });
+            match &self.gate {
+                Some(gate) => {
+                    gate.wait().await;
+                }
+                None => tokio::task::yield_now().await,
+            }
+            Ok(handle)
+        }
+    }
+
+    async fn counting_session(
+        gate: Option<usize>,
+        files: usize,
+    ) -> (Nfs3Session, CountingOpenDriver, Vec<(HandleEntry, String)>) {
+        let driver = CountingOpenDriver::new(gate);
+        let mut entries = Vec::with_capacity(files);
+        for index in 0..files {
+            let path = format!("/file-{index}");
+            driver.backing.write_file(&path, b"data").await.unwrap();
+            entries.push(path);
+        }
+        let session = Nfs3Session::new(driver.clone(), NfsSessionOptions::default());
+        let mut bound = Vec::with_capacity(files);
+        for path in entries {
+            let stats = driver.backing.stat(&path).await.unwrap();
+            bound.push((session.handles.bind(&path, &stats), path));
+        }
+        (session, driver, bound)
+    }
+
+    /// However many callers race to retain a descriptor for one new
+    /// filehandle, each having opened its own, the table ends with exactly
+    /// one descriptor open and one pin: every loser closes what it opened
+    /// and is handed the winner's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_retains_of_one_handle_keep_one_descriptor_and_one_pin() {
+        const CALLERS: usize = 16;
+        for _round in 0..100 {
+            let (session, driver, entries) = counting_session(Some(CALLERS), 1).await;
+            let (entry, path) = entries.into_iter().next().unwrap();
+            let callers = (0..CALLERS)
+                .map(|_| {
+                    let session = session.clone();
+                    let entry = entry.clone();
+                    let path = path.clone();
+                    tokio::spawn(async move { session.ensure_retained_handle(&entry, &path).await })
+                })
+                .collect::<Vec<_>>();
+            let mut handles = Vec::with_capacity(CALLERS);
+            for caller in callers {
+                handles.push(caller.await.unwrap().expect("retain succeeds"));
+            }
+            // The gate made every caller open before any could insert.
+            assert_eq!(driver.opens.load(Ordering::SeqCst), CALLERS as u64);
+            assert_eq!(driver.open_now(), 1, "losers closed their descriptors");
+            let retained = session.retained_handle(entry.id).expect("retained");
+            assert!(
+                handles.iter().all(|handle| Arc::ptr_eq(handle, &retained)),
+                "every caller is handed the one retained descriptor"
+            );
+            assert_eq!(session.retained_handles.by_id.load().len(), 1);
+
+            // Exactly one pin: a nameless entry is retired by the unpin that
+            // takes its count from one to zero, and by no other.
+            session.handles.orphan(&path).expect("orphaned entry");
+            assert!(session.handles.entry(entry.id).is_some());
+            session.handles.unpin(entry.id);
+            assert!(session.handles.entry(entry.id).is_none(), "exactly one pin");
+
+            assert!(session.destroy().await);
+            assert_eq!(driver.open_now(), 0);
+            assert_eq!(driver.opens.load(Ordering::SeqCst), CALLERS as u64);
+        }
+    }
+
+    /// A retain racing `destroy` either lands before destroy's walk and is
+    /// closed by it, or is refused and closes its own descriptor. Once
+    /// destroy reports success nothing is open and nothing can be retained.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn retain_racing_destroy_leaves_no_descriptor_open() {
+        const FILES: usize = 8;
+        const CALLERS_PER_FILE: usize = 3;
+        for round in 0..200_usize {
+            let (session, driver, entries) = counting_session(None, FILES).await;
+            let callers = entries
+                .iter()
+                .flat_map(|pair| std::iter::repeat_n(pair.clone(), CALLERS_PER_FILE))
+                .map(|(entry, path)| {
+                    let session = session.clone();
+                    tokio::spawn(async move { session.ensure_retained_handle(&entry, &path).await })
+                })
+                .collect::<Vec<_>>();
+            let destroyer = {
+                let session = session.clone();
+                tokio::spawn(async move {
+                    for _ in 0..round % 7 {
+                        tokio::task::yield_now().await;
+                    }
+                    session.destroy().await
+                })
+            };
+            let mut retained = 0_usize;
+            for caller in callers {
+                match caller.await.unwrap() {
+                    Ok(_) => retained += 1,
+                    Err(error) => assert_eq!(error.code, ErrorCode::Estale),
+                }
+            }
+            assert!(destroyer.await.unwrap(), "every close succeeds");
+            assert!(session.retained_handles.all_closed());
+            assert_eq!(
+                driver.open_now(),
+                0,
+                "round {round}: {retained} retains succeeded, opens {}",
+                driver.opens.load(Ordering::SeqCst)
+            );
+            // A destroyed session refuses a late retain without opening.
+            let opens = driver.opens.load(Ordering::SeqCst);
+            let (entry, path) = &entries[0];
+            assert!(session.ensure_retained_handle(entry, path).await.is_err());
+            assert_eq!(driver.opens.load(Ordering::SeqCst), opens);
+            assert!(session.retained_handles.all_closed());
+            assert!(session.destroy().await);
+        }
     }
 }

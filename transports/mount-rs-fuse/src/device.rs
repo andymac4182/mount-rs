@@ -4,8 +4,8 @@
 //! accepts one complete reply per `write(2)`.  `AsyncFd` lets the session use
 //! that character device without parking a Tokio worker thread.  Because the
 //! kernel takes a reply whole or not at all, concurrent replies on the device
-//! need no lock; only a byte-stream descriptor handed to
-//! [`FuseDevice::from_owned_fd`] serializes its writers (see [`Framing`]).  The type is
+//! need no lock.  A byte-stream descriptor, which could take a reply in
+//! pieces, is refused by [`FuseDevice::from_owned_fd`].  The type is
 //! still available on non-Linux targets, but its native operations return
 //! `Unsupported`: macOS uses a different filesystem protocol (NFS in this
 //! workspace), not Linux FUSE.
@@ -32,76 +32,62 @@ pub struct FuseDevice {
     _registered: RegisteredDevice,
     #[cfg(target_os = "linux")]
     io: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
-    #[cfg(target_os = "linux")]
-    framing: Framing,
     max_frame: usize,
 }
 
-/// How the descriptor delimits one reply from the next.
+/// Check that one `write(2)` on the descriptor is one whole message,
+/// accepted atomically or refused: the kernel FUSE device, or a
+/// `SOCK_SEQPACKET`/`SOCK_DGRAM` socket.
 ///
 /// The session loop writes replies from several tasks at once (the loop
-/// itself and up to sixteen positional-read workers).  Whether that needs
-/// mutual exclusion is a property of the descriptor, so the device decides
-/// it once, when it is built.
+/// itself and up to sixteen positional-read workers) with no lock between
+/// them.  That is only sound on such a descriptor, so anything else (a
+/// `SOCK_STREAM` socket, a pipe, another character device) is refused here,
+/// once, when the device is built.
 #[cfg(target_os = "linux")]
-enum Framing {
-    /// One `write(2)` is one whole message, accepted atomically or refused:
-    /// the kernel FUSE device, or a `SOCK_SEQPACKET`/`SOCK_DGRAM` socket.
-    /// Concurrent writers cannot interleave, so replies take no lock.
-    Message,
-    /// A byte stream (a `SOCK_STREAM` socket, a pipe, anything unrecognized).
-    /// A reply may be accepted in pieces, so whole replies are serialized by
-    /// this lock.  Nothing in this crate opens such a descriptor outside
-    /// tests; it exists because `from_owned_fd` is public.  Boxed so that a
-    /// message-framed device does not even allocate a lock.
-    Stream(Box<mount_rs_core::turn_gate::TurnLock<()>>),
-}
+fn require_message_framing(fd: std::os::fd::RawFd) -> io::Result<()> {
+    // The FUSE device is misc character device 10:229 (`FUSE_MINOR` in
+    // the kernel's miscdevice.h; fixed by Documentation/admin-guide/
+    // devices.txt), whatever path it was opened through.
+    const FUSE_MAJOR: libc::c_uint = 10;
+    const FUSE_MINOR: libc::c_uint = 229;
 
-#[cfg(target_os = "linux")]
-impl Framing {
-    /// Classify a descriptor.  Anything not positively known to be message
-    /// framed is treated as a byte stream, which is always safe.
-    fn detect(fd: std::os::fd::RawFd) -> io::Result<Self> {
-        // The FUSE device is misc character device 10:229 (`FUSE_MINOR` in
-        // the kernel's miscdevice.h; fixed by Documentation/admin-guide/
-        // devices.txt), whatever path it was opened through.
-        const FUSE_MAJOR: libc::c_uint = 10;
-        const FUSE_MINOR: libc::c_uint = 229;
-
-        // SAFETY: `stat` is plain data and fstat initializes it on success.
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd, &mut stat) } < 0 {
-            return Err(io::Error::last_os_error());
+    // SAFETY: `stat` is plain data and fstat initializes it on success.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let message = match stat.st_mode & libc::S_IFMT {
+        libc::S_IFCHR => {
+            libc::major(stat.st_rdev) == FUSE_MAJOR && libc::minor(stat.st_rdev) == FUSE_MINOR
         }
-        let message = match stat.st_mode & libc::S_IFMT {
-            libc::S_IFCHR => {
-                libc::major(stat.st_rdev) == FUSE_MAJOR && libc::minor(stat.st_rdev) == FUSE_MINOR
+        libc::S_IFSOCK => {
+            let mut kind: libc::c_int = 0;
+            let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: `kind` and `length` describe one writable c_int.
+            let result = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    (&raw mut kind).cast::<libc::c_void>(),
+                    &raw mut length,
+                )
+            };
+            if result < 0 {
+                return Err(io::Error::last_os_error());
             }
-            libc::S_IFSOCK => {
-                let mut kind: libc::c_int = 0;
-                let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-                // SAFETY: `kind` and `length` describe one writable c_int.
-                let result = unsafe {
-                    libc::getsockopt(
-                        fd,
-                        libc::SOL_SOCKET,
-                        libc::SO_TYPE,
-                        (&raw mut kind).cast::<libc::c_void>(),
-                        &raw mut length,
-                    )
-                };
-                if result < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                kind == libc::SOCK_SEQPACKET || kind == libc::SOCK_DGRAM
-            }
-            _ => false,
-        };
-        Ok(if message {
-            Self::Message
-        } else {
-            Self::Stream(Box::new(mount_rs_core::turn_gate::TurnLock::new(())))
-        })
+            kind == libc::SOCK_SEQPACKET || kind == libc::SOCK_DGRAM
+        }
+        _ => false,
+    };
+    if message {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a FUSE device must take each reply as one message; this descriptor is a byte stream",
+        ))
     }
 }
 
@@ -221,29 +207,31 @@ impl FuseDevice {
     ///
     /// The kernel FUSE device and message sockets (`SOCK_SEQPACKET`,
     /// `SOCK_DGRAM`) take each reply as one atomic write, with no lock.  Any
-    /// other descriptor is treated as a byte stream: replies may be written
-    /// in pieces and are serialized so they do not interleave.
+    /// other descriptor is refused with `InvalidInput`: it could take a
+    /// reply in pieces, and concurrent replies would then interleave.
     #[cfg(target_os = "linux")]
     pub fn from_owned_fd(fd: std::os::fd::OwnedFd, max_frame: usize) -> io::Result<Self> {
         use std::os::fd::AsRawFd;
 
+        require_message_framing(fd.as_raw_fd())?;
+        Self::adopt(fd, max_frame)
+    }
+
+    /// Wrap a descriptor without asking what it is. Tests use this to hand
+    /// the session a descriptor that fails in a chosen way.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adopt(fd: std::os::fd::OwnedFd, max_frame: usize) -> io::Result<Self> {
+        use std::os::fd::AsRawFd;
+
         validate_max_frame(max_frame)?;
         set_nonblocking(fd.as_raw_fd())?;
-        let framing = Framing::detect(fd.as_raw_fd())?;
         let registered = RegisteredDevice::new(fd.as_raw_fd());
         let io = tokio::io::unix::AsyncFd::new(fd)?;
         Ok(Self {
             _registered: registered,
             io,
-            framing,
             max_frame,
         })
-    }
-
-    /// Whether replies are written as single atomic messages, without a lock.
-    #[cfg(all(target_os = "linux", test))]
-    pub(crate) fn is_message_framed(&self) -> bool {
-        matches!(self.framing, Framing::Message)
     }
 
     /// Maximum number of bytes accepted from one device read.
@@ -304,19 +292,12 @@ impl FuseDevice {
     /// Write one complete FUSE reply or notification.
     ///
     /// Safe to call from several tasks at once: replies never interleave.
-    /// On a message-framed descriptor this is one `write(2)` and no lock; a
-    /// short write there is an error, because the rest could only be sent as
-    /// a second, malformed message.
+    /// It is one `write(2)` and no lock; a short write is an error, because
+    /// the rest could only be sent as a second, malformed message.
     pub async fn write_frame(&self, frame: &[u8]) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            match &self.framing {
-                Framing::Message => self.write_message(frame).await,
-                Framing::Stream(turn) => {
-                    let _turn = turn.lock().await;
-                    self.write_stream(frame).await
-                }
-            }
+            self.write_message(frame).await
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -370,26 +351,6 @@ impl FuseDevice {
                 }
             }
         }
-    }
-
-    /// Byte-stream framing: loop over partial writes.  The caller holds the
-    /// stream's turn so another reply cannot land between the pieces.
-    #[cfg(target_os = "linux")]
-    async fn write_stream(&self, frame: &[u8]) -> io::Result<()> {
-        let mut written = 0;
-        while written < frame.len() {
-            match self.write_once(&frame[written..]).await? {
-                None => continue,
-                Some(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "FUSE device accepted no reply bytes",
-                    ));
-                }
-                Some(bytes) => written += bytes,
-            }
-        }
-        Ok(())
     }
 }
 
@@ -471,7 +432,7 @@ mod tests {
         let result = unsafe {
             libc::socketpair(
                 libc::AF_UNIX,
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
                 0,
                 descriptors.as_mut_ptr(),
             )
@@ -543,7 +504,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn framing_is_detected_from_the_descriptor() {
+    async fn only_message_framed_descriptors_are_accepted() {
         use std::os::fd::FromRawFd;
 
         for (kind, message) in [
@@ -552,8 +513,11 @@ mod tests {
             (libc::SOCK_DGRAM, true),
         ] {
             let (device, _peer) = test_socket_pair(kind);
-            let device = FuseDevice::from_owned_fd(device, 4096).unwrap();
-            assert_eq!(device.is_message_framed(), message, "socket type {kind}");
+            let built = FuseDevice::from_owned_fd(device, 4096);
+            assert_eq!(built.is_ok(), message, "socket type {kind}");
+            if let Err(error) = built {
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            }
         }
 
         let mut pipe = [-1; 2];
@@ -568,8 +532,8 @@ mod tests {
                 std::os::fd::OwnedFd::from_raw_fd(pipe[1]),
             )
         };
-        let device = FuseDevice::from_owned_fd(write, 4096).unwrap();
-        assert!(!device.is_message_framed(), "a pipe is a byte stream");
+        let error = FuseDevice::from_owned_fd(write, 4096).expect_err("a pipe is a byte stream");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 
         // A character device that is not the FUSE device (a tty would accept
         // a reply in pieces) must not be taken for message framed.
@@ -578,8 +542,8 @@ mod tests {
             .write(true)
             .open("/dev/null")
             .unwrap();
-        let framing = Framing::detect(std::os::fd::AsRawFd::as_raw_fd(&null)).unwrap();
-        assert!(matches!(framing, Framing::Stream(_)));
+        let error = require_message_framing(std::os::fd::AsRawFd::as_raw_fd(&null)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     /// The production path: the kernel device is message framed, so replies
@@ -589,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn kernel_fuse_device_is_message_framed() {
         match FuseDevice::open("/dev/fuse", DEFAULT_MAX_FRAME) {
-            Ok(device) => assert!(device.is_message_framed()),
+            Ok(device) => drop(device),
             Err(error) => {
                 assert!(
                     std::env::var_os("MOUNT_RS_RUN_NATIVE_FUSE").is_none(),
@@ -651,8 +615,6 @@ mod tests {
         let (device_fd, peer_fd) = test_socket_pair(kind);
         shrink_send_buffer(&device_fd);
         let device = std::sync::Arc::new(FuseDevice::from_owned_fd(device_fd, 4096).unwrap());
-        let stream = kind == libc::SOCK_STREAM;
-        assert_eq!(device.is_message_framed(), !stream);
 
         let total = RACE_WRITERS * RACE_FRAMES_PER_WRITER;
         let peer = std::thread::spawn(move || {
@@ -671,20 +633,9 @@ mod tests {
             let mut buffer = vec![0_u8; max_length + 1];
             let mut seen = [0_usize; RACE_WRITERS];
             for _ in 0..total {
-                let length = if stream {
-                    assert_eq!(receive(&mut buffer[..4], libc::MSG_WAITALL), 4);
-                    let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-                    assert!((8..=max_length).contains(&length), "torn length {length}");
-                    assert_eq!(
-                        receive(&mut buffer[4..length], libc::MSG_WAITALL),
-                        length - 4
-                    );
-                    length
-                } else {
-                    // One receive is one message: a reply split in two, or
-                    // two replies merged, fails the length check.
-                    receive(&mut buffer, 0)
-                };
+                // One receive is one message: a reply split in two, or
+                // two replies merged, fails the length check.
+                let length = receive(&mut buffer, 0);
                 assert_tagged(&buffer[..length]);
                 seen[buffer[4] as usize] += 1;
             }
@@ -716,14 +667,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_replies_stay_whole_on_a_message_socket_without_a_lock() {
         hammer_concurrent_writers(libc::SOCK_SEQPACKET, 2048).await;
-    }
-
-    /// Frames far larger than the send buffer, so each is accepted in
-    /// pieces: the stream variant's own lock must keep the pieces together.
-    #[cfg(target_os = "linux")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_replies_stay_whole_on_a_byte_stream() {
-        hammer_concurrent_writers(libc::SOCK_STREAM, 48 * 1024).await;
     }
 
     /// A message descriptor that takes only part of a reply cannot be

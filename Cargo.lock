@@ -1798,6 +1798,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "bytes",
+ "im",
  "libc",
  "md-5 0.10.6",
  "mount-rs-core",
@@ -2091,6 +2092,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "im",
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-host",

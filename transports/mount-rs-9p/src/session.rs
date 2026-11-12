@@ -835,6 +835,10 @@ impl P9Session {
             }
             P9_TREMOVE => {
                 let fid = decode_body(&mut body, "Tremove", read_fid_request)?.fid;
+                // Shared with every other path operation and excluded by a
+                // rename, so the path taken from the fid inside `remove` is
+                // still the entry's name when it is unlinked.
+                let _guard = self.inner.path_lock.read().await;
                 self.remove(header, fid).await
             }
             P9_TXATTRWALK | P9_TXATTRCREATE => Err(FsError::new(ErrorCode::Enotsup)
@@ -1437,6 +1441,14 @@ impl P9Session {
             {
                 let mut state = self.inner.state.lock().expect("9P session mutex poisoned");
                 match state.fids.get_mut(request.fid) {
+                    // The check before the awaits above is only a fast path:
+                    // another Tlcreate or Tlopen on this fid may have stored
+                    // its handle since. Storing over it would leak that handle.
+                    Some(entry) if entry.open.is_some() => Err(FsError::new(ErrorCode::Ebusy)
+                        .with_message(format!(
+                            "EBUSY: fid {} was opened concurrently",
+                            request.fid
+                        ))),
                     Some(entry) => {
                         entry.set_path(&path);
                         entry.open = Some(FidOpenState {
@@ -2490,5 +2502,404 @@ mod tests {
         .unwrap();
         let reply = session.handle_call(&clunk).await.unwrap();
         assert_eq!(decode_message(&reply).unwrap().0.type_, P9_RCLUNK);
+    }
+
+    type DriverFuture<'t, T> = Pin<Box<dyn Future<Output = FsResult<T>> + Send + 't>>;
+
+    /// A memory filesystem with the hooks the race tests need: it counts
+    /// the handles it opens and the ones that are closed, can hold every
+    /// `lchown` until two callers are inside it, and can hold a `rename`
+    /// after the entry has moved.
+    struct RaceDriver {
+        inner: MemoryFs,
+        opens: AtomicU64,
+        closes: Arc<AtomicU64>,
+        lchown_barrier: Option<tokio::sync::Barrier>,
+        hold_rename: bool,
+        rename_done: Notify,
+        rename_release: Notify,
+        removed: Mutex<Vec<String>>,
+    }
+
+    impl RaceDriver {
+        fn new(inner: MemoryFs) -> Self {
+            Self {
+                inner,
+                opens: AtomicU64::new(0),
+                closes: Arc::new(AtomicU64::new(0)),
+                lchown_barrier: None,
+                hold_rename: false,
+                rename_done: Notify::new(),
+                rename_release: Notify::new(),
+                removed: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn counted(&self, handle: Arc<dyn mount_rs_core::FileHandle>) -> CountedHandle {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            CountedHandle {
+                inner: handle,
+                closes: Arc::clone(&self.closes),
+            }
+        }
+    }
+
+    struct CountedHandle {
+        inner: Arc<dyn mount_rs_core::FileHandle>,
+        closes: Arc<AtomicU64>,
+    }
+
+    impl mount_rs_core::FileHandle for CountedHandle {
+        fn read<'a, 'b, 'async_trait>(
+            &'a self,
+            buffer: &'b mut [u8],
+            position: Option<u64>,
+        ) -> DriverFuture<'async_trait, usize>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.read(buffer, position).await })
+        }
+
+        fn write<'a, 'b, 'async_trait>(
+            &'a self,
+            buffer: &'b [u8],
+            position: Option<u64>,
+        ) -> DriverFuture<'async_trait, usize>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.write(buffer, position).await })
+        }
+
+        fn stat<'a, 'async_trait>(&'a self) -> DriverFuture<'async_trait, Stats>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.stat().await })
+        }
+
+        fn truncate<'a, 'async_trait>(&'a self, length: u64) -> DriverFuture<'async_trait, ()>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.truncate(length).await })
+        }
+
+        fn close<'a, 'async_trait>(&'a self) -> DriverFuture<'async_trait, ()>
+        where
+            'a: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.closes.fetch_add(1, Ordering::SeqCst);
+                self.inner.close().await
+            })
+        }
+    }
+
+    impl FsDriver for RaceDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.inner.capabilities()
+        }
+
+        fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> DriverFuture<'async_trait, Stats>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.stat(path).await })
+        }
+
+        fn lstat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> DriverFuture<'async_trait, Stats>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.lstat(path).await })
+        }
+
+        fn readdir<'a, 'b, 'async_trait>(
+            &'a self,
+            path: &'b str,
+        ) -> DriverFuture<'async_trait, Vec<mount_rs_core::DirEntry>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { self.inner.readdir(path).await })
+        }
+
+        fn open<'a, 'b, 'c, 'async_trait>(
+            &'a self,
+            path: &'b str,
+            flags: &'c str,
+            mode: u32,
+        ) -> DriverFuture<'async_trait, Arc<dyn mount_rs_core::FileHandle>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            'c: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let handle = self.inner.open(path, flags, mode).await?;
+                Ok(Arc::new(self.counted(handle)) as Arc<dyn mount_rs_core::FileHandle>)
+            })
+        }
+
+        fn open_flags<'a, 'b, 'async_trait>(
+            &'a self,
+            path: &'b str,
+            flags: OpenFlags,
+            mode: u32,
+        ) -> DriverFuture<'async_trait, Arc<dyn mount_rs_core::FileHandle>>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                let handle = self.inner.open_flags(path, flags, mode).await?;
+                Ok(Arc::new(self.counted(handle)) as Arc<dyn mount_rs_core::FileHandle>)
+            })
+        }
+
+        fn lchown<'a, 'b, 'async_trait>(
+            &'a self,
+            _path: &'b str,
+            _uid: u32,
+            _gid: u32,
+        ) -> DriverFuture<'async_trait, ()>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                if let Some(barrier) = &self.lchown_barrier {
+                    barrier.wait().await;
+                }
+                Ok(())
+            })
+        }
+
+        fn rename<'a, 'b, 'c, 'async_trait>(
+            &'a self,
+            old_path: &'b str,
+            new_path: &'c str,
+        ) -> DriverFuture<'async_trait, ()>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            'c: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.inner.rename(old_path, new_path).await?;
+                if self.hold_rename {
+                    // `notify_one` keeps a permit, so neither side can miss
+                    // the other's signal.
+                    self.rename_done.notify_one();
+                    self.rename_release.notified().await;
+                }
+                Ok(())
+            })
+        }
+
+        fn unlink<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> DriverFuture<'async_trait, ()>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.removed.lock().expect("removed").push(path.to_owned());
+                self.inner.unlink(path).await
+            })
+        }
+
+        fn rmdir<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> DriverFuture<'async_trait, ()>
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.removed.lock().expect("removed").push(path.to_owned());
+                self.inner.rmdir(path).await
+            })
+        }
+    }
+
+    fn fid_message(type_: u8, tag: u16, fid: u32) -> Vec<u8> {
+        encode_message(type_, tag, 32, |writer| {
+            write_fid_request(writer, FidRequest { fid });
+            Ok(())
+        })
+        .expect("fid request encodes")
+    }
+
+    /// Two Tlcreate on one fid both pass the "not open yet" check and then
+    /// both wait in the driver. Only one may store its handle in the fid;
+    /// the other must be refused and must close the handle it opened, or
+    /// the backend keeps that handle for as long as the process runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_lcreate_on_one_fid_stores_one_handle_and_closes_the_other() {
+        let mut driver = RaceDriver::new(MemoryFs::empty());
+        driver.lchown_barrier = Some(tokio::sync::Barrier::new(2));
+        let driver = Arc::new(driver);
+        let session = P9Session::from_arc(Arc::clone(&driver) as Arc<dyn FsDriver>);
+        session.inner.msize.store(8192, Ordering::SeqCst);
+        session.fid_create(1, "/").unwrap();
+        // An attached user whose ids are not this process's, so that claiming
+        // the new file calls the driver's `lchown`: the await between the
+        // check and the store.
+        let (process_uid, _) = current_process_ids();
+        session.inner.state.lock().unwrap().users.insert(
+            1,
+            P9User {
+                uname: "other".to_owned(),
+                uid: Some(process_uid.wrapping_add(1) & 0x7fff_ffff),
+                aname: String::new(),
+            },
+        );
+
+        let tasks = [11u16, 12].map(|tag| {
+            let request = encode_message(P9_TLCREATE, tag, 64, |writer| {
+                write_tlcreate(
+                    writer,
+                    &Tlcreate {
+                        fid: 1,
+                        name: "created".to_owned(),
+                        flags: P9_O_RDWR,
+                        mode: 0o644,
+                        gid: NO_NGID,
+                    },
+                )
+            })
+            .unwrap();
+            let session = session.clone();
+            tokio::spawn(async move { session.handle_call(&request).await.unwrap() })
+        });
+        let mut created = 0;
+        let mut errors = Vec::new();
+        for task in tasks {
+            let reply = timeout(Duration::from_secs(5), task)
+                .await
+                .expect("both creates reach the driver together and return")
+                .unwrap();
+            let (header, mut body) = decode_message(&reply).unwrap();
+            match header.type_ {
+                P9_RLCREATE => created += 1,
+                P9_RLERROR => errors.push(read_rlerror(&mut body).unwrap().ecode),
+                other => panic!("unexpected reply {}", message_name(other)),
+            }
+        }
+        assert_eq!(created, 1, "exactly one create owns the fid");
+        assert_eq!(errors, vec![16], "the other is refused with EBUSY");
+
+        assert_eq!(driver.opens.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            driver.closes.load(Ordering::SeqCst),
+            1,
+            "the handle that was not stored in the fid is closed"
+        );
+        let stored = session.fid_snapshot(1).unwrap();
+        assert_eq!(stored.path, "/created");
+        assert!(stored.open.is_some_and(|open| open.handle.is_some()));
+
+        let reply = session
+            .handle_call(&fid_message(P9_TCLUNK, 13, 1))
+            .await
+            .unwrap();
+        assert_eq!(decode_message(&reply).unwrap().0.type_, P9_RCLUNK);
+        assert_eq!(
+            driver.closes.load(Ordering::SeqCst),
+            2,
+            "clunking the fid closes the stored handle: nothing is left open"
+        );
+    }
+
+    /// A Tremove that arrives while a rename of the file's parent directory
+    /// is in the driver waits for the rename, and then removes the file
+    /// under its new name. Without the path gate it would read the fid's
+    /// old path and stat a name that no longer exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn remove_waits_for_a_rename_of_its_parent_and_removes_the_new_path() {
+        let memory = MemoryFs::empty();
+        memory.mkdir("/dir", MkdirOptions::default()).await.unwrap();
+        memory.write_file("/dir/file", b"content").await.unwrap();
+        let mut driver = RaceDriver::new(memory);
+        driver.hold_rename = true;
+        let driver = Arc::new(driver);
+        let session = P9Session::from_arc(Arc::clone(&driver) as Arc<dyn FsDriver>);
+        session.inner.msize.store(8192, Ordering::SeqCst);
+        session.fid_create(1, "/").unwrap();
+        session.fid_create(2, "/dir").unwrap();
+        session.fid_create(3, "/dir/file").unwrap();
+
+        let rename = encode_message(P9_TRENAME, 21, 64, |writer| {
+            write_trename(
+                writer,
+                &Trename {
+                    fid: 2,
+                    dfid: 1,
+                    name: "moved".to_owned(),
+                },
+            )
+        })
+        .unwrap();
+        let rename_session = session.clone();
+        let rename =
+            tokio::spawn(async move { rename_session.handle_call(&rename).await.unwrap() });
+        timeout(Duration::from_secs(5), driver.rename_done.notified())
+            .await
+            .expect("the rename moves the directory and stops in the driver");
+
+        let remove_session = session.clone();
+        let mut remove = tokio::spawn(async move {
+            remove_session
+                .handle_call(&fid_message(P9_TREMOVE, 22, 3))
+                .await
+                .unwrap()
+        });
+        assert!(
+            timeout(Duration::from_millis(300), &mut remove)
+                .await
+                .is_err(),
+            "the remove must not run while the rename holds the path gate"
+        );
+        assert!(
+            driver.removed.lock().unwrap().is_empty(),
+            "nothing is removed before the rename finishes"
+        );
+        assert!(session.has_fid(3), "the fid is not clunked early either");
+
+        driver.rename_release.notify_one();
+        let reply = timeout(Duration::from_secs(5), rename)
+            .await
+            .expect("the rename finishes")
+            .unwrap();
+        assert_eq!(decode_message(&reply).unwrap().0.type_, P9_RRENAME);
+        let reply = timeout(Duration::from_secs(5), remove)
+            .await
+            .expect("the remove runs after the rename")
+            .unwrap();
+        assert_eq!(decode_message(&reply).unwrap().0.type_, P9_RREMOVE);
+
+        assert_eq!(*driver.removed.lock().unwrap(), vec!["/moved/file"]);
+        assert!(driver.inner.stat("/moved/file").await.is_err());
+        assert!(driver.inner.stat("/moved").await.is_ok());
+        assert!(!session.has_fid(3));
     }
 }

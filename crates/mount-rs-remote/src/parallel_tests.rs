@@ -18,6 +18,9 @@ async fn run_overlap(http2: bool, headers: bool) {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let entered = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(tokio::sync::Semaphore::new(0));
+    // Reads the backing service has been released to answer.
+    let answered = Arc::new(AtomicUsize::new(0));
+    let finished = answered.clone();
     let arrivals = entered.clone();
     let permits = release.clone();
     let storage = tokio::spawn(async move {
@@ -26,6 +29,7 @@ async fn run_overlap(http2: bool, headers: bool) {
             let (mut socket, _) = listener.accept().await.unwrap();
             let arrivals = arrivals.clone();
             let permits = permits.clone();
+            let served = finished.clone();
             connections.spawn(async move {
                 let mut header = Vec::new();
                 while !header.ends_with(b"\r\n\r\n") {
@@ -46,6 +50,7 @@ async fn run_overlap(http2: bool, headers: bool) {
                     assert!(header.starts_with("GET "));
                     arrivals.fetch_add(1, Ordering::SeqCst);
                     permits.acquire().await.unwrap().forget();
+                    served.fetch_add(1, Ordering::SeqCst);
                     "data"
                 };
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"test\"\r\nLast-Modified: Wed, 01 Jan 2025 00:00:00 GMT\r\nConnection: close\r\n\r\n{payload}", payload.len());
@@ -133,15 +138,31 @@ async fn run_overlap(http2: bool, headers: bool) {
             entered.load(Ordering::SeqCst)
         )
     });
+    // Close is sent while both reads are inside the owner's handle. The
+    // owner, not the client, makes it wait for them: it must not return
+    // before the backing service has answered both.
+    let closing = handle.clone();
+    let answered_at_close = answered.clone();
+    let close = tokio::spawn(async move {
+        closing.close().await.unwrap();
+        answered_at_close.load(Ordering::SeqCst)
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), handle.close())
-            .await
-            .is_err()
+        !close.is_finished(),
+        "close returned with reads still running on the owner: http2={http2} headers={headers}"
     );
     release.add_permits(2);
+    assert_eq!(close.await.unwrap(), 2);
+    // Both reads were admitted before the close, so both complete.
     while let Some(result) = reads.join_next().await {
         assert_eq!(result.unwrap(), (4, *b"data"));
     }
+    let mut bytes = [0; 4];
+    assert_eq!(
+        handle.read(&mut bytes, Some(0)).await.unwrap_err().code,
+        ErrorCode::Ebadf
+    );
     handle.close().await.unwrap();
     remote.shutdown().await.unwrap();
     server.close().await.unwrap();

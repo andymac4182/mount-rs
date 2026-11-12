@@ -6,7 +6,7 @@ use std::{
     collections::BTreeSet,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -254,8 +254,21 @@ pub struct CachedBlockStore {
     distributed: Option<Arc<DistributedRuntime>>,
     metrics: Arc<CacheMetrics>,
     pending: crate::pending::PendingList<PendingBlob>,
-    write_gate: mount_rs_core::drain_gate::DrainGate,
-    dirty: AtomicBool,
+    /// Puts between entry and return, cancelled ones excluded.
+    inflight: AtomicUsize,
+    /// Counts puts as they enter, after `inflight` has counted them.
+    put_gen: AtomicU64,
+    /// The highest `put_gen` a successful backing flush is known to cover:
+    /// one read by a flush that then saw no put in flight, so every put
+    /// counted in it had returned before the barrier was asked for.
+    flushed_gen: AtomicU64,
+}
+/// Counts one put in `inflight` until it returns or is cancelled.
+struct InflightPut<'a>(&'a AtomicUsize);
+impl Drop for InflightPut<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 impl CachedBlockStore {
     pub fn new(
@@ -273,8 +286,9 @@ impl CachedBlockStore {
             distributed: None,
             metrics: Arc::new(CacheMetrics::default()),
             pending: crate::pending::PendingList::new(),
-            write_gate: mount_rs_core::drain_gate::DrainGate::new(),
-            dirty: AtomicBool::new(false),
+            inflight: AtomicUsize::new(0),
+            put_gen: AtomicU64::new(0),
+            flushed_gen: AtomicU64::new(0),
         }
     }
     pub fn with_runtime(mut self, runtime: Arc<DistributedRuntime>) -> Self {
@@ -294,6 +308,18 @@ impl CachedBlockStore {
     }
     pub fn metrics(&self) -> Arc<CacheMetrics> {
         self.metrics.clone()
+    }
+    /// Whether some put may not be covered by a completed flush. While it
+    /// is, a read must not fill the local or peer cache: the bytes it read
+    /// may belong to a block no barrier has covered.
+    ///
+    /// `flushed_gen` is read first. It never exceeds `put_gen`, and both
+    /// only grow, so finding them equal in this order means they were equal
+    /// at the moment `put_gen` was read; the other order could pair a newer
+    /// `flushed_gen` with a `put_gen` that has since moved on.
+    fn dirty(&self) -> bool {
+        let flushed = self.flushed_gen.load(Ordering::SeqCst);
+        self.put_gen.load(Ordering::SeqCst) != flushed
     }
     fn current(&self) -> Option<Arc<CacheScope>> {
         self.current_hashed().map(|(scope, _)| scope)
@@ -435,7 +461,7 @@ impl CachedBlockStore {
             }
             return Ok(bytes);
         }
-        if self.dirty.load(Ordering::Acquire) {
+        if self.dirty() {
             self.metrics.backing_fetches.fetch_add(1, Ordering::Relaxed);
             return self.backing.get(id).await;
         }
@@ -489,7 +515,7 @@ impl CachedBlockStore {
         self.metrics.backing_fetches.fetch_add(1, Ordering::Relaxed);
         let bytes = self.backing.get(id).await?;
         self.policy.verify(id, &bytes)?;
-        if !self.dirty.load(Ordering::Acquire) && bytes.len() <= self.cache.max_blob_bytes() {
+        if !self.dirty() && bytes.len() <= self.cache.max_blob_bytes() {
             let shared = Arc::from(bytes.as_slice());
             self.fill(scope, id, Arc::clone(&shared), None).await;
             if let Some(d) = &self.distributed {
@@ -549,8 +575,13 @@ impl BlockStore for CachedBlockStore {
         self.backing.get_for_migration(id).await
     }
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        let _gate = self.write_gate.read().await;
-        self.dirty.store(true, Ordering::Release);
+        // In flight first, then counted: a flush that reads a `put_gen`
+        // including this put and then sees nothing in flight knows this put
+        // has returned. The guard also leaves on cancellation, after which
+        // the count it added keeps the store dirty until a later flush.
+        self.inflight.fetch_add(1, Ordering::SeqCst);
+        let _inflight = InflightPut(&self.inflight);
+        self.put_gen.fetch_add(1, Ordering::SeqCst);
         let id = self.backing.put(bytes).await?;
         if let Some(scope) = self.current()
             && let Some(reservation) = self.cache.reserve_pending(bytes.len())
@@ -608,16 +639,25 @@ impl BlockStore for CachedBlockStore {
         })
     }
     async fn flush(&self) -> Result<()> {
-        // The write gate makes each flush take its batch and reach the
-        // backing store in turn. The cache fills after it may overlap
-        // another flush's: a block's id is checked against its bytes before
-        // it is queued, so the same id always carries the same bytes.
-        let writes = self.write_gate.write().await;
-        // Take the batch before the barrier: puts completed afterwards wait for a later flush.
+        // A flush does not wait for puts and puts do not wait for it. The
+        // count is read before the in-flight number: every put counted in
+        // `covered` entered `inflight` first, so if none is in flight now,
+        // each of them has returned and the barrier below covers it. If one
+        // is, this flush proves nothing about the count and leaves the store
+        // dirty for a later flush to clear.
+        let covered = self.put_gen.load(Ordering::SeqCst);
+        let quiet = self.inflight.load(Ordering::SeqCst) == 0;
+        // Take the batch before the barrier: a block is queued only after
+        // its backing put returned, so everything taken here is covered, and
+        // puts that finish later wait for a later flush. Flushes may overlap
+        // each other, here and in the cache fills below: a block's id is
+        // checked against its bytes before it is queued, so the same id
+        // always carries the same bytes.
         let pending = self.pending.take();
         self.backing.flush().await?;
-        self.dirty.store(false, Ordering::Release);
-        drop(writes);
+        if quiet {
+            self.flushed_gen.fetch_max(covered, Ordering::SeqCst);
+        }
         for blob in pending {
             if self
                 .current()
@@ -685,7 +725,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
     struct Backing {
         bytes: Mutex<BTreeMap<BlockId, Vec<u8>>>,
         gets: AtomicU64,
@@ -812,6 +851,251 @@ mod tests {
         assert_eq!(cache.usage().2, 0);
         store.flush().await.unwrap();
         assert_eq!(cache.usage().2, 1);
+    }
+    /// A backing store whose puts can be held before their bytes land, and
+    /// which records what each barrier covered.
+    struct ParkingBacking {
+        inner: Arc<Backing>,
+        park: AtomicBool,
+        parked: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        /// Yield inside put and flush, to spread the stress test's races.
+        yields: bool,
+        covered: Mutex<BTreeSet<BlockId>>,
+    }
+    impl ParkingBacking {
+        fn new(yields: bool) -> Arc<Self> {
+            Arc::new(Self {
+                inner: Backing::new(),
+                park: AtomicBool::new(false),
+                parked: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                yields,
+                covered: Mutex::new(BTreeSet::new()),
+            })
+        }
+    }
+    #[async_trait]
+    impl BlockStore for ParkingBacking {
+        fn durable(&self) -> bool {
+            true
+        }
+        async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
+            self.inner.prepare_concurrent_backing().await
+        }
+        async fn verify_concurrent_backing(&self, id: ConcurrentBackingId) -> Result<()> {
+            self.inner.verify_concurrent_backing(id).await
+        }
+        async fn put(&self, b: &[u8]) -> Result<BlockId> {
+            if self.park.load(Ordering::SeqCst) {
+                self.parked.notify_one();
+                self.release.notified().await;
+            }
+            if self.yields {
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            let id = self.inner.put(b).await?;
+            if self.yields {
+                // Landed but not yet acknowledged: the window in which a
+                // barrier can pass this block by.
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            Ok(id)
+        }
+        async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
+            self.inner
+                .bytes
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .ok_or_else(error)
+        }
+        async fn get_for_migration(&self, id: &BlockId) -> Result<Vec<u8>> {
+            self.get(id).await
+        }
+        async fn flush(&self) -> Result<()> {
+            // The barrier covers what the store held when it was asked for.
+            let held: Vec<BlockId> = self.inner.bytes.lock().unwrap().keys().cloned().collect();
+            if self.yields {
+                tokio::task::yield_now().await;
+            }
+            self.covered.lock().unwrap().extend(held);
+            Ok(())
+        }
+        async fn delete(&self, id: &BlockId) -> Result<()> {
+            self.inner.delete(id).await
+        }
+    }
+    fn parking_fixture(
+        backing: Arc<ParkingBacking>,
+    ) -> (tempfile::TempDir, Arc<LocalCache>, Arc<CachedBlockStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LocalCache::new(LocalCacheConfig {
+            directory: dir.path().join("cache"),
+            memory_bytes: 1 << 20,
+            disk_bytes: 1 << 20,
+            max_entries: 4096,
+            max_blob_bytes: 4096,
+        })
+        .unwrap();
+        let store = Arc::new(CachedBlockStore::new(
+            backing,
+            cache.clone(),
+            ScopeIdentity {
+                cluster: "test".into(),
+                partition: "p".into(),
+                drive: "d".into(),
+            },
+            IntegrityPolicy::Sha256Prefixed,
+        ));
+        (dir, cache, store)
+    }
+    #[tokio::test]
+    async fn put_parked_in_the_backing_store_across_a_flush_keeps_reads_out_of_the_cache() {
+        let backing = ParkingBacking::new(false);
+        let (_dir, cache, store) = parking_fixture(backing.clone());
+        store.prepare_concurrent_backing().await.unwrap();
+        backing.park.store(true, Ordering::SeqCst);
+        let put = {
+            let store = store.clone();
+            tokio::spawn(async move { store.put(b"parked").await.unwrap() })
+        };
+        backing.parked.notified().await;
+        // The flush neither waits for the put nor covers it.
+        timeout(Duration::from_secs(5), store.flush())
+            .await
+            .expect("a flush waited for a put")
+            .unwrap();
+        backing.park.store(false, Ordering::SeqCst);
+        backing.release.notify_one();
+        let id = put.await.unwrap();
+        assert!(!backing.covered.lock().unwrap().contains(&id));
+        // The block landed after the barrier: a read finds it in the backing
+        // store, and must not put it in the cache.
+        assert_eq!(store.get(&id).await.unwrap(), b"parked");
+        assert_eq!(cache.usage().2, 0, "a read cached a block no flush covers");
+        // Nor may it cache anything else while that put is uncovered.
+        let other = backing.inner.put(b"other").await.unwrap();
+        assert_eq!(store.get(&other).await.unwrap(), b"other");
+        assert_eq!(cache.usage().2, 0);
+        // The next flush covers the put, caches it, and lets reads fill again.
+        store.flush().await.unwrap();
+        assert!(backing.covered.lock().unwrap().contains(&id));
+        assert_eq!(cache.usage().2, 1);
+        assert_eq!(store.get(&other).await.unwrap(), b"other");
+        assert_eq!(cache.usage().2, 2, "a clean store stopped caching reads");
+    }
+    #[tokio::test]
+    async fn cancelled_put_leaves_the_store_dirty_until_the_next_flush_and_no_longer() {
+        let backing = ParkingBacking::new(false);
+        let (_dir, cache, store) = parking_fixture(backing.clone());
+        store.prepare_concurrent_backing().await.unwrap();
+        let other = backing.inner.put(b"other").await.unwrap();
+        backing.park.store(true, Ordering::SeqCst);
+        let put = {
+            let store = store.clone();
+            tokio::spawn(async move { store.put(b"cancelled").await })
+        };
+        backing.parked.notified().await;
+        put.abort();
+        assert!(put.await.unwrap_err().is_cancelled());
+        backing.park.store(false, Ordering::SeqCst);
+        assert_eq!(store.inflight.load(Ordering::SeqCst), 0);
+        assert_eq!(store.get(&other).await.unwrap(), b"other");
+        assert_eq!(cache.usage().2, 0, "a cancelled put may still have written");
+        store.flush().await.unwrap();
+        assert_eq!(store.get(&other).await.unwrap(), b"other");
+        assert_eq!(cache.usage().2, 1, "a cancelled put left the store dirty");
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn racing_puts_flushes_and_reads_never_cache_a_block_no_barrier_covered() {
+        let backing = ParkingBacking::new(true);
+        let (_dir, cache, store) = parking_fixture(backing.clone());
+        store.prepare_concurrent_backing().await.unwrap();
+        let scope = store.current().unwrap();
+        let block = |writer: u8, n: u16| [writer, n as u8, (n >> 8) as u8, 7];
+        let id_of = |bytes: &[u8]| BlockId(format!("b{:x}", Sha256::digest(bytes)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let cached = Arc::new(AtomicU64::new(0));
+        // The block each writer is putting now, for the readers to chase.
+        let putting = Arc::new(Mutex::new(vec![id_of(&block(9, 0)); 2]));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..2 {
+            let (store, stop) = (store.clone(), stop.clone());
+            tasks.spawn(async move {
+                while !stop.load(Ordering::Relaxed) {
+                    store.flush().await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+        for reader in 0..3_u16 {
+            let (store, cache, backing, scope, stop, cached, putting) = (
+                store.clone(),
+                cache.clone(),
+                backing.clone(),
+                scope.clone(),
+                stop.clone(),
+                cached.clone(),
+                putting.clone(),
+            );
+            tasks.spawn(async move {
+                let mut n = reader;
+                while !stop.load(Ordering::Relaxed) {
+                    // The block a writer is putting: the read races the put
+                    // and the flushes around it. A block not yet in the
+                    // backing store is an error, and not cached.
+                    n += 1;
+                    let id = putting.lock().unwrap()[usize::from(n % 2)].clone();
+                    let _ = store.get(&id).await;
+                    if cache
+                        .get_memory(&scope, &id, IntegrityPolicy::Sha256Prefixed)
+                        .is_some()
+                    {
+                        cached.fetch_add(1, Ordering::Relaxed);
+                        assert!(
+                            backing.covered.lock().unwrap().contains(&id),
+                            "the cache holds a block no barrier covered"
+                        );
+                    }
+                    tokio::task::yield_now().await;
+                }
+            });
+        }
+        let mut writers = tokio::task::JoinSet::new();
+        for writer in 0..2_u8 {
+            let (store, putting) = (store.clone(), putting.clone());
+            writers.spawn(async move {
+                for n in 0..150_u16 {
+                    let bytes = block(writer, n);
+                    putting.lock().unwrap()[usize::from(writer)] = id_of(&bytes);
+                    store.put(&bytes).await.unwrap();
+                    // Gaps between puts, so that a flush can find the store
+                    // quiet and a read can find it clean.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            });
+        }
+        while let Some(result) = writers.join_next().await {
+            result.unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+        assert!(
+            cached.load(Ordering::Relaxed) > 0,
+            "nothing was ever cached"
+        );
+        // Quiet now: one flush covers everything and reads fill again.
+        store.flush().await.unwrap();
+        assert!(!store.dirty());
+        assert_eq!(store.inflight.load(Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn migration_bypasses_a_warm_cache_and_authority_failure_deactivates() {

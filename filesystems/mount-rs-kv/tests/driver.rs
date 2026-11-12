@@ -1180,3 +1180,57 @@ async fn an_open_does_not_keep_contents_read_before_another_buffer_was_saved() {
         "a saved write was undone"
     );
 }
+
+/// A write that is told Ok must be in the store once the handle's close
+/// has returned, however the two race: the close either waits for the
+/// write and saves it, or the write finds the handle closed. The losing
+/// order needs a write to be descheduled between two adjacent statements
+/// while a whole close runs, so this run guards the property without being
+/// able to promise it would catch the fault.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_acknowledged_while_the_handle_closes_is_saved() {
+    let (store, fs) = setup();
+    let fs = Arc::new(fs);
+    for round in 0..3000_u32 {
+        fs.write_file("/f", &[0]).await.expect("seed");
+        let handle = fs.open("/f", "r+", 0).await.expect("open");
+        let start = Arc::new(tokio::sync::Barrier::new(2));
+        let writer = {
+            let (handle, start) = (Arc::clone(&handle), Arc::clone(&start));
+            tokio::spawn(async move {
+                start.wait().await;
+                let mut acknowledged = 0_u8;
+                for value in 1..=40_u8 {
+                    match handle.write(&[value], Some(0)).await {
+                        Ok(_) => acknowledged = value,
+                        Err(error) => {
+                            assert_eq!(error.code, ErrorCode::Ebadf);
+                            break;
+                        }
+                    }
+                    if value % 8 == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                acknowledged
+            })
+        };
+        let closer = {
+            let (handle, start) = (Arc::clone(&handle), Arc::clone(&start));
+            tokio::spawn(async move {
+                start.wait().await;
+                for _ in 0..round % 7 {
+                    std::hint::spin_loop();
+                }
+                handle.close().await.expect("close");
+            })
+        };
+        let acknowledged = writer.await.expect("writer");
+        closer.await.expect("closer");
+        assert_eq!(
+            store.bytes("f"),
+            Some(vec![acknowledged]),
+            "round {round}: an acknowledged write is not in the store"
+        );
+    }
+}
