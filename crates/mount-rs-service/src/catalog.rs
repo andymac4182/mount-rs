@@ -650,6 +650,8 @@ impl CatalogStore for SqliteCatalog {
             .run(move |shared, connection| {
                 #[cfg(unix)]
                 shared.verify_backing()?;
+                #[cfg(not(unix))]
+                let _ = shared;
                 let transaction =
                     connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let previous: i64 = transaction.query_row(
