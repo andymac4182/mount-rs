@@ -814,6 +814,10 @@ if [ "$run_napi" -eq 1 ]; then
     node_command="$node_command && node benchmarks/storage/runner.mjs --providers mount-rs-split-foundationdb-r2 --sizes $iops_size_mib --payload-bytes $iops_payload_bytes --iterations $iops_iterations --concurrency $iops_concurrency --min-iops $iops_minimum --require-configured --network-context ozone-ci --output /fdb/foundationdb-ozone-iops.json"
   fi
   napi_status=0
+  # The checkout is mounted from the host and owned by another user, so git
+  # in the container refuses to read it unless told the directory is safe.
+  # Without that the benchmark artifact records no source revision and the
+  # W26 evidence packet rejects it.
   if [ -n "$rustfs_endpoint" ]; then
     if docker run --rm \
       --platform "$docker_platform" \
@@ -827,6 +831,9 @@ if [ "$run_napi" -eq 1 ]; then
       --env NAPI_RS_NATIVE_LIBRARY_PATH=/fdb/mount-rs.linux-x64-gnu.node \
       --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
+      --env GIT_CONFIG_COUNT=1 \
+      --env GIT_CONFIG_KEY_0=safe.directory \
+      --env GIT_CONFIG_VALUE_0=/workspace \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
       --env "MOUNT_RS_FOUNDATIONDB_NODE_PREFIX=$test_prefix/napi" \
       --env "R2_ENDPOINT=$rustfs_endpoint" \
@@ -856,6 +863,9 @@ if [ "$run_napi" -eq 1 ]; then
       --env NAPI_RS_NATIVE_LIBRARY_PATH=/fdb/mount-rs.linux-x64-gnu.node \
       --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
+      --env GIT_CONFIG_COUNT=1 \
+      --env GIT_CONFIG_KEY_0=safe.directory \
+      --env GIT_CONFIG_VALUE_0=/workspace \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
       --env "MOUNT_RS_FOUNDATIONDB_NODE_PREFIX=$test_prefix/napi" \
       --env "R2_ENDPOINT=$node_r2_endpoint" \
