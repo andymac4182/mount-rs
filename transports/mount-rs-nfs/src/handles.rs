@@ -1,10 +1,11 @@
 //! NFSv3 file handles and directory-cookie snapshots.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwapOption;
 use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::{ErrorCode, FsDriver, FsError, GuardedDirectoryEntry, Stats};
 
@@ -688,81 +689,355 @@ pub struct DirectorySnapshot {
     pub verifier: Vec<u8>,
 }
 
+/// The cache of directory listings that READDIR continues from.
+///
+/// A fixed table of slots, one listing each, with no lock: a reader loads a
+/// slot and a writer publishes into one with a compare-and-swap. Every slot
+/// has a use stamp, and a new directory takes an empty slot or else the slot
+/// with the lowest stamp, so for one caller at a time the least recently
+/// used listing is the one replaced.
 #[derive(Clone)]
 pub struct DirectorySnapshots {
-    state: Arc<ParkCell<SnapshotState>>,
-    max: usize,
+    state: Arc<SnapshotSlots>,
 }
 
-/// The listings and their least-recently-used order, under one cell so that
-/// every operation changes both together: an id is in `order` exactly when
-/// it is in `map`.
-#[derive(Debug, Default)]
-struct SnapshotState {
-    map: HashMap<u64, Arc<DirectorySnapshot>>,
-    order: VecDeque<u64>,
+struct CachedSnapshot {
+    id: u64,
+    /// When this listing was stored, from `SnapshotSlots::clock`. Of two
+    /// listings of one directory, the one with the higher value is newer.
+    stored: u64,
+    snapshot: DirectorySnapshot,
+}
+
+type Listing = Option<Arc<CachedSnapshot>>;
+
+struct SnapshotSlots {
+    /// The listings. This is the only authority on what is cached.
+    listings: Box<[ArcSwapOption<CachedSnapshot>]>,
+    /// For each slot, the directory id it holds plus one, or zero when it is
+    /// empty. Comparing these is much cheaper than loading every listing,
+    /// but a tag is written after its listing, so the tags are only trusted
+    /// when `writers` shows that nothing was written while they were read.
+    tags: Box<[AtomicU64]>,
+    /// For each slot, when its listing was last stored or read.
+    used: Box<[AtomicU64]>,
+    /// Source of `used` and `CachedSnapshot::stored` values.
+    clock: AtomicU64,
+    /// The low bits count the writes in progress and the high bits count
+    /// the writes that have finished, so the value is unchanged across a
+    /// scan of `tags` only if no write overlapped the scan.
+    writers: AtomicU64,
+}
+
+const WRITE_STARTED: u64 = 1;
+const WRITES_IN_PROGRESS: u64 = (1 << 20) - 1;
+const WRITE_FINISHED: u64 = (1 << 20) - WRITE_STARTED;
+
+fn tag_of(id: u64) -> Option<u64> {
+    id.checked_add(1)
+}
+
+fn same_listing(a: &Listing, b: &Listing) -> bool {
+    a.as_ref().map(Arc::as_ptr) == b.as_ref().map(Arc::as_ptr)
+}
+
+impl SnapshotSlots {
+    fn tick(&self) -> u64 {
+        self.clock.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The `writers` value if no write is in progress.
+    fn quiet(&self) -> Option<u64> {
+        let writers = self.writers.load(Ordering::SeqCst);
+        (writers & WRITES_IN_PROGRESS == 0).then_some(writers)
+    }
+
+    /// Make a slot's tag agree with its listing. Every writer calls this
+    /// after it changes a slot. A writer leaves only after it has seen the
+    /// listing its tag describes, so once the writers of a slot have all
+    /// left, the tag is right.
+    fn retag(&self, index: usize) {
+        let tag_now = || {
+            self.listings[index]
+                .load()
+                .as_ref()
+                .map_or(0, |cached| cached.id + 1)
+        };
+        loop {
+            let tag = tag_now();
+            self.tags[index].store(tag, Ordering::SeqCst);
+            if tag_now() == tag {
+                return;
+            }
+        }
+    }
+
+    /// Replace what a slot holds, if it still holds `current`.
+    fn publish(&self, index: usize, current: &Listing, new: Listing) -> bool {
+        self.writers.fetch_add(WRITE_STARTED, Ordering::SeqCst);
+        let previous = self.listings[index].compare_and_swap(current, new);
+        let published = same_listing(&previous, current);
+        if published {
+            self.retag(index);
+        }
+        self.writers.fetch_add(WRITE_FINISHED, Ordering::SeqCst);
+        published
+    }
+
+    /// The slot holding a directory's listing, and that listing. Callers
+    /// that store one directory at the same moment can leave it in two slots
+    /// until one of them tidies up; the newest of them is the one returned,
+    /// so a caller never reads a listing older than one it has already seen.
+    fn find(&self, id: u64, tag: u64) -> Option<(usize, Arc<CachedSnapshot>)> {
+        if let Some(writers) = self.quiet() {
+            let mut tagged = self
+                .tags
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| candidate.load(Ordering::SeqCst) == tag)
+                .map(|(index, _)| index);
+            let (first, second) = (tagged.next(), tagged.next());
+            if second.is_none() && self.writers.load(Ordering::SeqCst) == writers {
+                let index = first?;
+                if let Some(cached) = self.listings[index].load_full()
+                    && cached.id == id
+                {
+                    return Some((index, cached));
+                }
+            }
+        }
+        // A write overlapped the look at the tags, or the directory is in
+        // two slots: ask the listings.
+        self.listings
+            .iter()
+            .enumerate()
+            .filter_map(|(index, listing)| {
+                listing
+                    .load_full()
+                    .filter(|cached| cached.id == id)
+                    .map(|cached| (index, cached))
+            })
+            .max_by_key(|(_, cached)| cached.stored)
+    }
+
+    /// The slot a new listing of `id` should go in, with what it holds now:
+    /// the slot that already holds the directory, else an empty slot, else
+    /// the least recently used one. Also reports whether more than one slot
+    /// holds the directory, which the caller must then put right.
+    fn choose(&self, id: u64, tag: u64) -> (usize, Listing, bool) {
+        if let Some(writers) = self.quiet() {
+            let mut same = None;
+            let mut crowded = false;
+            let mut empty = None;
+            for (index, candidate) in self.tags.iter().enumerate() {
+                let candidate = candidate.load(Ordering::SeqCst);
+                if candidate == tag {
+                    crowded = same.is_some();
+                    same = same.or(Some(index));
+                } else if candidate == 0 && empty.is_none() {
+                    empty = Some(index);
+                }
+            }
+            let index = same.or(empty).or_else(|| {
+                (0..self.used.len()).min_by_key(|index| self.used[*index].load(Ordering::SeqCst))
+            });
+            // Loaded before the check that nothing was written, so the
+            // listing is the one the stamps were read against: a listing
+            // published into this slot after that fails the caller's
+            // compare-and-swap instead of being evicted the moment it lands.
+            let current = index.map(|index| self.listings[index].load_full());
+            if self.writers.load(Ordering::SeqCst) == writers
+                && let (Some(index), Some(current)) = (index, current)
+            {
+                let holds = current.as_ref().map(|cached| cached.id);
+                let as_seen = if same.is_some() {
+                    holds == Some(id)
+                } else if empty.is_some() {
+                    holds.is_none()
+                } else {
+                    true
+                };
+                if as_seen {
+                    return (index, current, crowded);
+                }
+            }
+        }
+        // A write overlapped the look at the tags: ask the listings.
+        let mut same: Option<(usize, Listing)> = None;
+        let mut crowded = false;
+        let mut empty = None;
+        let mut oldest: Option<(u64, usize, Listing)> = None;
+        for (index, listing) in self.listings.iter().enumerate() {
+            let current = listing.load_full();
+            match &current {
+                Some(cached) if cached.id == id => {
+                    if same.is_some() {
+                        crowded = true;
+                    } else {
+                        same = Some((index, current));
+                    }
+                }
+                Some(_) => {
+                    let used = self.used[index].load(Ordering::SeqCst);
+                    if oldest.as_ref().is_none_or(|(least, ..)| used < *least) {
+                        oldest = Some((used, index, current));
+                    }
+                }
+                None => {
+                    if empty.is_none() {
+                        empty = Some(index);
+                    }
+                }
+            }
+        }
+        match (same, empty, oldest) {
+            (Some((index, current)), ..) => (index, current, crowded),
+            (None, Some(index), _) => (index, None, false),
+            (None, None, Some((_, index, current))) => (index, current, false),
+            (None, None, None) => unreachable!("the snapshot table has at least one slot"),
+        }
+    }
+
+    /// Callers that stored one directory at the same moment can each have
+    /// picked a different slot. Keep the newest listing and empty every
+    /// other slot that holds the directory, so it never has two listings to
+    /// choose between. The newest listing is never the one removed: a
+    /// listing is removed here only by a caller that has seen a newer one.
+    fn drop_older_duplicate(&self, index: usize, cached: &Arc<CachedSnapshot>) {
+        // The newest listing seen so far and its slot. It starts as the
+        // caller's own, and every other slot is compared against it.
+        let mut newest = (index, Arc::clone(cached));
+        for (other, listing) in self.listings.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            loop {
+                let found = listing.load_full();
+                let Some(duplicate) = &found else {
+                    break;
+                };
+                if duplicate.id != cached.id {
+                    break;
+                }
+                if duplicate.stored > newest.1.stored {
+                    // This one is newer: remove the one held until now and
+                    // carry on, so that an older listing in a later slot is
+                    // not left for a caller that may never come.
+                    self.publish(newest.0, &Some(Arc::clone(&newest.1)), None);
+                    newest = (other, Arc::clone(duplicate));
+                    break;
+                }
+                if self.publish(other, &found, None) {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for DirectorySnapshots {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cached = self
+            .state
+            .listings
+            .iter()
+            .filter_map(|listing| listing.load_full().map(|cached| cached.id))
+            .collect::<Vec<_>>();
         f.debug_struct("DirectorySnapshots")
-            .field("state", &CellDebug(&self.state))
-            .field("max", &self.max)
+            .field("cached", &cached)
+            .field("max", &self.state.listings.len())
             .finish()
     }
 }
 
 impl DirectorySnapshots {
     pub fn new(max: usize) -> Self {
+        let max = max.max(1);
         Self {
-            state: Arc::new(ParkCell::new(SnapshotState::default())),
-            max: max.max(1),
+            state: Arc::new(SnapshotSlots {
+                listings: (0..max).map(|_| ArcSwapOption::const_empty()).collect(),
+                tags: (0..max).map(|_| AtomicU64::new(0)).collect(),
+                used: (0..max).map(|_| AtomicU64::new(0)).collect(),
+                clock: AtomicU64::new(0),
+                writers: AtomicU64::new(0),
+            }),
         }
     }
 
     pub fn set(&self, id: u64, names: Vec<String>) -> DirectorySnapshot {
         let verifier = cookie_verifier(&names);
-        let snapshot = Arc::new(DirectorySnapshot { names, verifier });
-        {
-            let mut state = self.state.lock().expect("directory snapshot lock");
-            let state = &mut *state;
-            if state.map.contains_key(&id) {
-                state.order.retain(|candidate| *candidate != id);
-            } else if state.map.len() >= self.max
-                && let Some(oldest) = state.order.pop_front()
+        let snapshot = DirectorySnapshot { names, verifier };
+        // The one id that has no tag is never a handle id; do not cache it.
+        let Some(tag) = tag_of(id) else {
+            return snapshot;
+        };
+        let slots = &*self.state;
+        let stored = slots.tick();
+        let cached = Arc::new(CachedSnapshot {
+            id,
+            stored,
+            snapshot,
+        });
+        let published = loop {
+            let (index, current, crowded) = slots.choose(id, tag);
+            // A caller that started later has already stored this directory.
+            // Its listing is the newer one, so this one is not cached.
+            if current
+                .as_ref()
+                .is_some_and(|held| held.id == id && held.stored > stored)
             {
-                state.map.remove(&oldest);
+                break None;
             }
-            state.map.insert(id, Arc::clone(&snapshot));
-            state.order.push_back(id);
+            // Stamped before it is published, so that no other caller sees
+            // the new listing in a slot that still looks unused.
+            slots.used[index].fetch_max(stored, Ordering::SeqCst);
+            if slots.publish(index, &current, Some(Arc::clone(&cached))) {
+                break Some((index, crowded));
+            }
+        };
+        if let Some((index, crowded)) = published {
+            // The clock has moved only if another caller was at work between
+            // the tick above and this one. A caller that stored this
+            // directory in that time may have picked a different slot;
+            // whichever of the two ticks last here is certain to see both
+            // listings. A duplicate left by callers before that was seen
+            // when the slot was chosen.
+            let disturbed = slots.clock.fetch_add(1, Ordering::SeqCst) != stored;
+            if crowded || disturbed {
+                slots.drop_older_duplicate(index, &cached);
+            }
         }
-        // The listing is copied for the caller after the cell is released.
-        Arc::unwrap_or_clone(snapshot)
+        // The listing is copied for the caller; the table keeps the original.
+        cached.snapshot.clone()
     }
 
     pub fn get(&self, id: u64) -> Option<DirectorySnapshot> {
-        let snapshot = {
-            let mut state = self.state.lock().expect("directory snapshot lock");
-            let snapshot = state.map.get(&id).cloned()?;
-            state.order.retain(|candidate| *candidate != id);
-            state.order.push_back(id);
-            snapshot
-        };
-        // As in `set`: only the pointer is cloned while the cell is held.
-        Some(Arc::unwrap_or_clone(snapshot))
+        let slots = &*self.state;
+        let (index, cached) = slots.find(id, tag_of(id)?)?;
+        slots.used[index].fetch_max(slots.tick(), Ordering::SeqCst);
+        Some(cached.snapshot.clone())
     }
 
     pub fn invalidate(&self, id: u64) {
-        let mut state = self.state.lock().expect("directory snapshot lock");
-        if state.map.remove(&id).is_some() {
-            state.order.retain(|candidate| *candidate != id);
+        let Some(tag) = tag_of(id) else {
+            return;
+        };
+        let slots = &*self.state;
+        while let Some((index, cached)) = slots.find(id, tag) {
+            slots.publish(index, &Some(cached), None);
         }
     }
 
     pub fn clear(&self) {
-        let mut state = self.state.lock().expect("directory snapshot lock");
-        state.map.clear();
-        state.order.clear();
+        let slots = &*self.state;
+        slots.writers.fetch_add(WRITE_STARTED, Ordering::SeqCst);
+        for listing in slots.listings.iter() {
+            listing.store(None);
+        }
+        for index in 0..slots.listings.len() {
+            slots.retag(index);
+        }
+        slots.writers.fetch_add(WRITE_FINISHED, Ordering::SeqCst);
     }
 }
 
@@ -1182,13 +1457,66 @@ mod tests {
         for id in 1..=6 {
             assert!(snapshots.get(id).is_none(), "{id}");
         }
+        assert!(snapshots.get(u64::MAX).is_none());
+        snapshots.set(u64::MAX, vec!["uncached".to_owned()]);
+        assert!(snapshots.get(u64::MAX).is_none());
     }
 
-    /// What callers rely on from the snapshot cache, checked while eight
-    /// threads use a cache too small for them: a listing is only ever
-    /// returned for the directory it was stored under; a caller that stores
-    /// a directory nobody else stores reads back that listing or nothing,
-    /// never an older one; and a directory that was invalidated is gone.
+    /// Put a listing of `id` straight into a slot, as a caller that picked
+    /// that slot before another caller stored the same directory would.
+    fn place(snapshots: &DirectorySnapshots, index: usize, id: u64, stored: u64, name: &str) {
+        let slots = &*snapshots.state;
+        let current = slots.listings[index].load_full();
+        let names = vec![name.to_owned()];
+        let cached = Arc::new(CachedSnapshot {
+            id,
+            stored,
+            snapshot: DirectorySnapshot {
+                verifier: cookie_verifier(&names),
+                names,
+            },
+        });
+        assert!(slots.publish(index, &current, Some(cached)));
+    }
+
+    #[test]
+    fn a_directory_in_two_slots_reads_as_its_newest_listing() {
+        // The older listing sits in the lower slot, where a search that
+        // stopped at the first match would find it.
+        let snapshots = DirectorySnapshots::new(3);
+        place(&snapshots, 0, 7, 1, "older");
+        place(&snapshots, 2, 7, 2, "newer");
+        assert_eq!(snapshots.get(7).expect("cached").names, ["newer"]);
+        snapshots.invalidate(7);
+        assert!(snapshots.get(7).is_none());
+    }
+
+    #[test]
+    fn tidying_duplicates_goes_on_past_a_newer_listing() {
+        // The caller's own listing is the middle one. It meets the newest
+        // first and must still remove the oldest behind it; otherwise
+        // removing the newest would bring the oldest back.
+        let snapshots = DirectorySnapshots::new(3);
+        place(&snapshots, 0, 7, 3, "newest");
+        place(&snapshots, 1, 7, 2, "own");
+        place(&snapshots, 2, 7, 1, "oldest");
+        let slots = &*snapshots.state;
+        let own = slots.listings[1].load_full().expect("placed");
+        slots.drop_older_duplicate(1, &own);
+        let left = slots
+            .listings
+            .iter()
+            .map(|listing| listing.load_full().map(|cached| cached.stored))
+            .collect::<Vec<_>>();
+        assert_eq!(left, [Some(3), None, None]);
+    }
+
+    /// What the lock gave the snapshot cache, checked while eight threads
+    /// use a cache too small for them: a listing is only ever returned for
+    /// the directory it was stored under; a caller that stores a directory
+    /// nobody else stores reads back that listing or nothing, never an older
+    /// one; a directory that was invalidated is gone; and once the threads
+    /// stop, no directory is cached twice.
     #[test]
     fn snapshots_stay_exact_under_concurrent_use() {
         const SLOTS: usize = 4;
@@ -1229,11 +1557,79 @@ mod tests {
                 });
             }
         });
+        let slots = &*snapshots.state;
+        let mut cached = Vec::new();
+        for (index, listing) in slots.listings.iter().enumerate() {
+            let id = listing.load_full().map(|cached| cached.id);
+            assert_eq!(
+                slots.tags[index].load(Ordering::SeqCst),
+                id.map_or(0, |id| id + 1),
+                "slot {index}"
+            );
+            cached.extend(id);
+        }
+        let distinct = cached.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(distinct.len(), cached.len(), "{cached:?}");
+        assert_eq!(slots.writers.load(Ordering::SeqCst) & WRITES_IN_PROGRESS, 0);
         // With the threads gone the cache behaves as it does for one caller.
         snapshots.set(1, vec!["fresh".to_owned()]);
         assert_eq!(snapshots.get(1).unwrap().names, vec!["fresh".to_owned()]);
         snapshots.invalidate(1);
         assert!(snapshots.get(1).is_none());
+    }
+
+    /// Callers that store one directory at the same moment, while slots
+    /// ahead of them are being emptied, can each pick a different slot. The
+    /// directory must still end up cached once, or a later read could be
+    /// given the older of two listings.
+    #[test]
+    fn snapshots_stored_at_the_same_moment_are_cached_once() {
+        const SETTERS: u64 = 4;
+        const FILLERS: u64 = 4;
+        let snapshots = DirectorySnapshots::new(16);
+        for round in 0..2_000_u64 {
+            snapshots.clear();
+            for filler in 0..FILLERS {
+                snapshots.set(filler, vec!["filler".to_owned()]);
+            }
+            let directory = 1_000 + round;
+            let start = std::sync::Barrier::new((SETTERS + FILLERS) as usize);
+            std::thread::scope(|scope| {
+                for setter in 0..SETTERS {
+                    let (snapshots, start) = (&snapshots, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        snapshots.set(directory, vec![setter.to_string()]);
+                    });
+                }
+                for filler in 0..FILLERS {
+                    let (snapshots, start) = (&snapshots, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        snapshots.invalidate(filler);
+                    });
+                }
+            });
+            let slots = &*snapshots.state;
+            let holders = slots
+                .listings
+                .iter()
+                .filter(|listing| {
+                    listing
+                        .load_full()
+                        .is_some_and(|cached| cached.id == directory)
+                })
+                .count();
+            assert_eq!(holders, 1, "round {round}");
+            for (index, listing) in slots.listings.iter().enumerate() {
+                assert_eq!(
+                    slots.tags[index].load(Ordering::SeqCst),
+                    listing.load_full().map_or(0, |cached| cached.id + 1),
+                    "round {round} slot {index}"
+                );
+            }
+            assert!(snapshots.get(directory).is_some());
+        }
     }
 
     /// Benchmark for the directory-snapshot cache: READDIR continuation on a
@@ -1249,19 +1645,6 @@ mod tests {
     /// out of both: for one caller a `set_new` took 1.7 to 2.4 microseconds
     /// against 1.2 to 1.3, although eight callers at once ran 2 to 7 times
     /// faster. A READDIR that starts a listing always does one `set`.
-    ///
-    /// A second replacement was measured with this benchmark unchanged: a
-    /// fixed table of slots, each an atomically swapped listing with a use
-    /// stamp, and nothing allocated beyond the listing. Median latency for
-    /// one caller, slots against the cell, at 64 cached directories: `get`
-    /// 0.87 against 0.92 microseconds, `set_same` 2.2 against 1.8 and
-    /// `set_new` 2.6 against 2.1; at 1,000 directories `set_new` was 5.1
-    /// against 2.2. Eight callers at 64 directories ran `get` in 1.4
-    /// against 62 microseconds and `set_new` in 26 against 65. The reads
-    /// were as fast and the writes were not: publishing one pointer through
-    /// `arc-swap` visits a record for every thread that has used it, which
-    /// measured 0.09 microseconds alone and 0.5 with eight other threads
-    /// alive, more than the cell's whole critical section.
     ///
     /// `cargo test --release -p mount-rs-nfs --lib -- --ignored --nocapture bench_directory_snapshots`
     #[test]
@@ -1359,16 +1742,6 @@ mod tests {
     /// bind also retires the least recently used entry. One operation is the
     /// whole bind, decode and unpin; latencies are averages over batches of
     /// 100.
-    ///
-    /// These numbers are why the cell stays. A lock-free replacement was
-    /// built and measured: the whole table as one atomically published
-    /// version made of persistent maps, with a use stamp on each entry in
-    /// place of the recency index. Median latency for one caller: `hot` 2.5
-    /// to 3.3 microseconds against 0.73 to 0.93 for the cell, because the
-    /// pin and its release each copy a path of the map and publish a
-    /// version; `evict` 70 to 76 against 0.9 to 1.4, because picking the
-    /// entry to retire reads every stamp. Eight callers ran `hot` in 16 to
-    /// 63 microseconds against 98 to 176.
     ///
     /// `cargo test --release -p mount-rs-nfs --lib -- --ignored --nocapture bench_handle_table`
     #[test]
