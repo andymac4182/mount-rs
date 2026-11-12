@@ -4110,7 +4110,12 @@ impl Nfs4Session {
         }
         let entry = self.handles.bind(&path, &stats);
 
-        let (owner, open_other, target_key) = if locker.new_lock_owner {
+        // Everything that needs no state section is checked first. The
+        // lookup of the lock state this request lands on, the conflict scan
+        // and the change itself then share the one section below, so two
+        // requests cannot both decide on the table as it stood before either
+        // of them changed it.
+        let new_owner_open = if locker.new_lock_owner {
             let Some(open_stateid) = locker.open_stateid.as_ref() else {
                 return V4OpResult::new(OP_LOCK, NFS4ERR_BAD_STATEID);
             };
@@ -4124,18 +4129,29 @@ impl Nfs4Session {
             if open.file_id != entry.fileid {
                 return V4OpResult::new(OP_LOCK, NFS4ERR_BAD_STATEID);
             }
-            let state = self.state.lock().expect("NFSv4 state lock");
+            Some(open.stateid.other)
+        } else {
+            None
+        };
+
+        let mut state = self.state.lock().expect("NFSv4 state lock");
+        let (owner, open_other, target_key) = if let Some(open_other) = new_owner_open {
+            // The open was validated in its own section; a CLOSE may have
+            // removed it since, and a lock state must not outlive its open.
+            if !state.opens.contains_key(&open_other) {
+                return V4OpResult::new(OP_LOCK, NFS4ERR_BAD_STATEID);
+            }
             let target_key = state
                 .locks
                 .values()
                 .find(|lock| {
                     lock.clientid == clientid
                         && lock.file_id == entry.fileid
-                        && lock.open_other == open.stateid.other
+                        && lock.open_other == open_other
                         && lock.owner == locker.owner
                 })
                 .map(|lock| lock.stateid.other);
-            (locker.owner.clone(), open.stateid.other, target_key)
+            (locker.owner.clone(), open_other, target_key)
         } else {
             let Some(lock_stateid) = locker.lock_stateid.as_ref() else {
                 return V4OpResult::new(OP_LOCK, NFS4ERR_BAD_STATEID);
@@ -4143,7 +4159,6 @@ impl Nfs4Session {
             if is_zero_stateid(lock_stateid) || is_invalid_stateid(lock_stateid) {
                 return V4OpResult::new(OP_LOCK, NFS4ERR_BAD_STATEID);
             }
-            let state = self.state.lock().expect("NFSv4 state lock");
             let Some(lock) = state.locks.get(&lock_stateid.other) else {
                 return V4OpResult::new(OP_LOCK, NFS4ERR_BAD_STATEID);
             };
@@ -4167,7 +4182,6 @@ impl Nfs4Session {
             )
         };
 
-        let mut state = self.state.lock().expect("NFSv4 state lock");
         let denied = state.locks.values().find_map(|held| {
             if held.file_id != entry.fileid || (held.clientid == clientid && held.owner == owner) {
                 return None;
@@ -4203,6 +4217,9 @@ impl Nfs4Session {
             Some(stateid)
         };
 
+        // Nothing below can fail: the target was found in this same section,
+        // so a refused request leaves every range as it was.
+        //
         // A granted range replaces the requesting lock owner's overlapping
         // ranges, including ranges formerly assigned through another OPEN.
         // This is the POSIX-style ownership rule used by the upstream oracle.
@@ -4222,9 +4239,10 @@ impl Nfs4Session {
             lock_type: access,
         };
         let result = if let Some(target_key) = target_key {
-            let Some(target) = state.locks.get_mut(&target_key) else {
-                return V4OpResult::new(OP_LOCK, NFS4ERR_BAD_STATEID);
-            };
+            let target = state
+                .locks
+                .get_mut(&target_key)
+                .expect("lock state found earlier in this state section");
             target.stateid.seqid = bump_stateid_seq(target.stateid.seqid);
             target.ranges.push(range);
             coalesce_lock_ranges(&mut target.ranges);
@@ -4501,30 +4519,21 @@ impl Nfs4Session {
                 return V4OpResult::new(OP_OPEN, error_status(&error));
             }
         };
-        let entry = self.handles.bind(&path, &stats);
-        // Pin before taking the state lock: a concurrent v3 lookup may bind
-        // more names while this OPEN is checking share conflicts.
-        self.handles.pin(entry.id);
-        let share_conflict = self
-            .state
-            .lock()
-            .expect("NFSv4 state lock")
-            .opens
-            .values()
-            .any(|open| {
+        // Bind and pin in one step, before the state section: a concurrent
+        // lookup may bind more names while this OPEN is checking share
+        // conflicts, and a table at its handle limit would otherwise be free
+        // to evict the entry between a bind and a separate pin.
+        let entry = self.handles.bind_pinned(&path, &stats);
+        // The share reservation check and the insert of the open it allows
+        // are one section. Were they two, a second owner could pass the
+        // check before the first had recorded the access it was granted.
+        let (stateid, refused, joined_existing) = {
+            let mut state = self.state.lock().expect("NFSv4 state lock");
+            let share_conflict = state.opens.values().any(|open| {
                 open.file_id == entry.fileid
                     && !(open.clientid == clientid && open.owner == args.owner)
                     && (open.deny & access != 0 || args.share_deny & open.access != 0)
             });
-        if share_conflict {
-            self.handles.unpin(entry.id);
-            if let Some(handle) = handle.take() {
-                let _ = handle.close().await;
-            }
-            return V4OpResult::new(OP_OPEN, NFS4ERR_SHARE_DENIED);
-        }
-        let (stateid, resource_exhausted, joined_existing) = {
-            let mut state = self.state.lock().expect("NFSv4 state lock");
             let existing_key = state
                 .opens
                 .iter()
@@ -4534,7 +4543,9 @@ impl Nfs4Session {
                         && open.owner == args.owner
                 })
                 .map(|(key, _)| *key);
-            if let Some(key) = existing_key {
+            if share_conflict {
+                (None, Some(NFS4ERR_SHARE_DENIED), false)
+            } else if let Some(key) = existing_key {
                 let open = state
                     .opens
                     .get_mut(&key)
@@ -4553,7 +4564,7 @@ impl Nfs4Session {
                 open.access |= access;
                 open.deny |= args.share_deny;
                 open.stateid.seqid = bump_stateid_seq(open.stateid.seqid);
-                (Some(open.stateid.clone()), false, true)
+                (Some(open.stateid.clone()), None, true)
             } else {
                 let open_count = state
                     .opens
@@ -4561,7 +4572,7 @@ impl Nfs4Session {
                     .filter(|open| open.file_id == entry.fileid)
                     .count();
                 if open_count >= self.options.nfs4.max_opens_per_file.max(1) {
-                    (None, true, false)
+                    (None, Some(NFS4ERR_RESOURCE), false)
                 } else if let Some(stateid) = state.allocate_stateid() {
                     if should_create
                         && exclusive
@@ -4590,9 +4601,9 @@ impl Nfs4Session {
                             owner: args.owner.clone(),
                         }
                     });
-                    (Some(stateid), false, false)
+                    (Some(stateid), None, false)
                 } else {
-                    (None, true, false)
+                    (None, Some(NFS4ERR_RESOURCE), false)
                 }
             }
         };
@@ -4602,14 +4613,14 @@ impl Nfs4Session {
             // only pinned once more than needed, which nothing observes.
             self.handles.unpin(entry.id);
         }
-        if resource_exhausted {
+        if let Some(status) = refused {
             self.handles.unpin(entry.id);
             if let Some(handle) = handle.take() {
                 let _ = handle.close().await;
             }
-            return V4OpResult::new(OP_OPEN, NFS4ERR_RESOURCE);
+            return V4OpResult::new(OP_OPEN, status);
         }
-        let stateid = stateid.expect("open state unless the per-file limit was reached");
+        let stateid = stateid.expect("open state unless the OPEN was refused");
         if let Some(handle) = handle {
             let _ = handle.close().await;
         }
@@ -5691,5 +5702,484 @@ mod tests {
                 ("NFS4:unknown".to_owned(), 64),
             ])
         );
+    }
+
+    // ---- check-then-act regressions -------------------------------------
+    //
+    // None of the three windows below contains an await, so no test can park
+    // one request inside a window and release a second into it. Each test
+    // instead starts real threads at the same instant, many rounds over, and
+    // checks an outcome that only holds when the check and the act are one
+    // state section.
+
+    const RACE_CLIENT: u64 = 7;
+
+    async fn race_session(options: NfsSessionOptions) -> Nfs4Session {
+        let backing = MemoryFs::empty();
+        let file = backing.open("/file", "w+", 0o666).await.unwrap();
+        file.close().await.unwrap();
+        let session = Nfs4Session::new(backing, options);
+        session.state.lock().unwrap().clients.insert(
+            RACE_CLIENT,
+            super::ClientState {
+                owner: b"client".to_vec(),
+                verifier: vec![0; 8],
+                id: RACE_CLIENT,
+                confirmed: true,
+                sequence: 1,
+                renewed: session.now(),
+                reclaim_complete: true,
+                create_session_replay: None,
+            },
+        );
+        session
+    }
+
+    fn root_cursor(session: &Nfs4Session) -> super::Cursor {
+        super::Cursor {
+            current: Some(session.handles.encode(&session.handles.root())),
+            clientid: Some(RACE_CLIENT),
+            ..super::Cursor::default()
+        }
+    }
+
+    fn open_file_args(owner: &[u8], access: u32, deny: u32) -> super::OpenArgs {
+        super::OpenArgs {
+            _seqid: 0,
+            share_access: access,
+            share_deny: deny,
+            owner: owner.to_vec(),
+            open_type: super::OPEN4_NOCREATE,
+            create_mode: None,
+            create_attrs: None,
+            create_verf: None,
+            claim: super::CLAIM_NULL,
+            name: Some("file".to_owned()),
+        }
+    }
+
+    /// OPEN `/file`; the returned cursor names the file and its open stateid.
+    async fn open_file(
+        session: &Nfs4Session,
+        owner: &[u8],
+        access: u32,
+        deny: u32,
+    ) -> (u32, super::Cursor) {
+        let mut cursor = root_cursor(session);
+        let result = session
+            .open(&open_file_args(owner, access, deny), &mut cursor)
+            .await;
+        (result.status, cursor)
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    /// Run `threads` copies of `request` on real threads, released together
+    /// by a spin gate so they reach the session as close to at once as the
+    /// machine allows. Each thread has its runtime built before the gate
+    /// opens, so nothing but the request itself runs after it.
+    fn race<T, F>(threads: usize, request: impl Fn(usize) -> F + Sync) -> Vec<T>
+    where
+        T: Send,
+        F: std::future::Future<Output = T>,
+    {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let ready = AtomicUsize::new(0);
+        let go = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let workers = (0..threads)
+                .map(|index| {
+                    let (ready, go, request) = (&ready, &go, &request);
+                    scope.spawn(move || {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .expect("test runtime");
+                        let request = request(index);
+                        ready.fetch_add(1, Ordering::SeqCst);
+                        while !go.load(Ordering::Acquire) {
+                            std::hint::spin_loop();
+                        }
+                        runtime.block_on(request)
+                    })
+                })
+                .collect::<Vec<_>>();
+            while ready.load(Ordering::SeqCst) < threads {
+                std::hint::spin_loop();
+            }
+            go.store(true, Ordering::Release);
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("racing request"))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn concurrent_conflicting_opens_grant_exactly_one_share_reservation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const OWNERS: usize = 4;
+        const GRANTS: usize = 4_000;
+        let session = block_on(race_session(NfsSessionOptions::default()));
+        let granted = AtomicUsize::new(0);
+        let holders = AtomicUsize::new(0);
+        let violations = AtomicUsize::new(0);
+        // Every owner asks for read+write and denies both to the others, so
+        // any two of these opens conflict. Each owner keeps asking; whoever
+        // is granted the file checks that it holds it alone, then closes it,
+        // which sets the others racing for it again.
+        let unexpected = race(OWNERS, |index| {
+            let (session, granted, holders, violations) =
+                (&session, &granted, &holders, &violations);
+            async move {
+                let owner = format!("owner-{index}");
+                let mut unexpected = Vec::new();
+                while granted.load(Ordering::Acquire) < GRANTS
+                    && violations.load(Ordering::Acquire) == 0
+                {
+                    let (status, mut cursor) = open_file(
+                        session,
+                        owner.as_bytes(),
+                        super::OPEN4_SHARE_ACCESS_BOTH,
+                        super::OPEN4_SHARE_DENY_BOTH,
+                    )
+                    .await;
+                    if status == super::NFS4ERR_SHARE_DENIED {
+                        std::hint::spin_loop();
+                        continue;
+                    }
+                    if status != super::NFS4_OK {
+                        unexpected.push(status);
+                        break;
+                    }
+                    let mut alone = holders.fetch_add(1, Ordering::SeqCst) == 0;
+                    for _ in 0..4 {
+                        std::thread::yield_now();
+                        alone &= session.state.lock().unwrap().opens.len() == 1;
+                    }
+                    if !alone {
+                        violations.fetch_add(1, Ordering::SeqCst);
+                    }
+                    holders.fetch_sub(1, Ordering::SeqCst);
+                    let stateid = cursor.stateid.clone();
+                    let closed = session.close(0, &stateid, &mut cursor).await;
+                    if closed.status != super::NFS4_OK {
+                        unexpected.push(closed.status);
+                        break;
+                    }
+                    granted.fetch_add(1, Ordering::Release);
+                }
+                unexpected
+            }
+        });
+        assert_eq!(
+            violations.load(Ordering::SeqCst),
+            0,
+            "two owners held conflicting share reservations on one file at once"
+        );
+        assert!(unexpected.iter().all(Vec::is_empty), "{unexpected:?}");
+        assert!(session.state.lock().unwrap().opens.is_empty());
+    }
+
+    #[test]
+    fn concurrent_new_owner_locks_share_one_lock_state() {
+        const ROUNDS: usize = 3_000;
+        const REQUESTS: usize = 4;
+        for round in 0..ROUNDS {
+            let session = block_on(race_session(NfsSessionOptions::default()));
+            let (status, opened) = block_on(open_file(
+                &session,
+                b"open-owner",
+                super::OPEN4_SHARE_ACCESS_BOTH,
+                super::OPEN4_SHARE_DENY_NONE,
+            ));
+            assert_eq!(status, super::NFS4_OK);
+            // One lock-owner, one open, disjoint ranges: every request is
+            // granted, and all of them must land on a single lock state.
+            let results = race(REQUESTS, |index| {
+                let session = &session;
+                let mut cursor = opened.clone();
+                let locker = super::Locker4 {
+                    new_lock_owner: true,
+                    open_stateid: Some(opened.stateid.clone()),
+                    lock_stateid: None,
+                    owner: b"lock-owner".to_vec(),
+                };
+                async move {
+                    let result = session
+                        .lock(
+                            super::WRITE_LT,
+                            false,
+                            index as u64 * 100,
+                            10,
+                            &locker,
+                            &mut cursor,
+                        )
+                        .await;
+                    (result.status, cursor.stateid.other)
+                }
+            });
+            assert!(
+                results.iter().all(|(status, _)| *status == super::NFS4_OK),
+                "round {round}: {results:?}"
+            );
+            let state = session.state.lock().unwrap();
+            assert_eq!(
+                state.locks.len(),
+                1,
+                "round {round}: one lock-owner on one open has one lock state"
+            );
+            let lock = state.locks.values().next().unwrap();
+            assert_eq!(lock.ranges.len(), REQUESTS, "every granted range is held");
+            assert!(
+                results
+                    .iter()
+                    .all(|(_, other)| *other == lock.stateid.other),
+                "round {round}: every reply names the surviving lock state"
+            );
+        }
+    }
+
+    #[test]
+    fn refused_lock_leaves_the_owners_other_ranges_untouched() {
+        const ROUNDS: usize = 6_000;
+        let mut refused = 0_usize;
+        for round in 0..ROUNDS {
+            let session = block_on(race_session(NfsSessionOptions::default()));
+            // One lock-owner holds state through two opens of the file: a
+            // write range through the first, and an emptied lock state
+            // through the second that FREE_STATEID is allowed to remove.
+            let mut cursors = Vec::new();
+            for owner in [b"open-a".as_slice(), b"open-b".as_slice()] {
+                let (status, cursor) = block_on(open_file(
+                    &session,
+                    owner,
+                    super::OPEN4_SHARE_ACCESS_BOTH,
+                    super::OPEN4_SHARE_DENY_NONE,
+                ));
+                assert_eq!(status, super::NFS4_OK);
+                cursors.push(cursor);
+            }
+            let new_owner = |cursor: &super::Cursor| super::Locker4 {
+                new_lock_owner: true,
+                open_stateid: Some(cursor.stateid.clone()),
+                lock_stateid: None,
+                owner: b"lock-owner".to_vec(),
+            };
+            let mut first = cursors[0].clone();
+            let locker = new_owner(&first);
+            let result =
+                block_on(session.lock(super::WRITE_LT, false, 0, 100, &locker, &mut first));
+            assert_eq!(result.status, super::NFS4_OK);
+            let kept = first.stateid.other;
+            let mut second = cursors[1].clone();
+            let locker = new_owner(&second);
+            let result =
+                block_on(session.lock(super::WRITE_LT, false, 200, 10, &locker, &mut second));
+            assert_eq!(result.status, super::NFS4_OK);
+            assert_ne!(second.stateid.other, kept);
+            let held = second.stateid.clone();
+            let result = block_on(session.locku(super::WRITE_LT, 0, &held, 200, 10, &mut second));
+            assert_eq!(result.status, super::NFS4_OK);
+            let emptied = second.stateid.clone();
+
+            // LOCK through the emptied state races FREE_STATEID of it. The
+            // new range overlaps the kept one, so a granted LOCK trims it; a
+            // LOCK that loses to the free must change nothing at all.
+            let statuses = race(2, |index| {
+                let (session, second, emptied) = (&session, &second, &emptied);
+                async move {
+                    if index == 0 {
+                        let mut cursor = second.clone();
+                        let locker = super::Locker4 {
+                            new_lock_owner: false,
+                            open_stateid: None,
+                            lock_stateid: Some(emptied.clone()),
+                            owner: Vec::new(),
+                        };
+                        return session
+                            .lock(super::READ_LT, false, 0, 50, &locker, &mut cursor)
+                            .await
+                            .status;
+                    }
+                    // FREE_STATEID does far less work before its section
+                    // than LOCK does; a delay that sweeps with the round
+                    // walks it across the point where LOCK takes its own.
+                    for _ in 0..(round % 64) * 16 {
+                        std::hint::spin_loop();
+                    }
+                    session.free_stateid(emptied, second).status
+                }
+            });
+            let state = session.state.lock().unwrap();
+            let kept_ranges = state.locks[&kept]
+                .ranges
+                .iter()
+                .map(|range| (range.offset, range.length, range.lock_type))
+                .collect::<Vec<_>>();
+            if statuses[0] == super::NFS4_OK {
+                // The grant advanced the seqid the free presented.
+                assert_eq!(statuses[1], super::NFS4ERR_BAD_STATEID, "round {round}");
+                assert_eq!(kept_ranges, [(50, 50, super::WRITE_LT)], "round {round}");
+            } else {
+                refused += 1;
+                assert_eq!(
+                    statuses,
+                    [super::NFS4ERR_BAD_STATEID, super::NFS4_OK],
+                    "round {round}"
+                );
+                assert_eq!(
+                    kept_ranges,
+                    [(0, 100, super::WRITE_LT)],
+                    "round {round}: a LOCK refused with BAD_STATEID changed held ranges"
+                );
+            }
+        }
+        assert!(
+            refused > 0 && refused < ROUNDS,
+            "both orders must occur for the race to have been exercised: {refused}/{ROUNDS}"
+        );
+    }
+
+    #[test]
+    fn concurrent_locks_through_one_lock_stateid_grant_one_per_seqid() {
+        const ROUNDS: usize = 3_000;
+        const REQUESTS: usize = 4;
+        for round in 0..ROUNDS {
+            let session = block_on(race_session(NfsSessionOptions::default()));
+            let (status, opened) = block_on(open_file(
+                &session,
+                b"open-owner",
+                super::OPEN4_SHARE_ACCESS_BOTH,
+                super::OPEN4_SHARE_DENY_NONE,
+            ));
+            assert_eq!(status, super::NFS4_OK);
+            let mut cursor = opened.clone();
+            let locker = super::Locker4 {
+                new_lock_owner: true,
+                open_stateid: Some(opened.stateid.clone()),
+                lock_stateid: None,
+                owner: b"lock-owner".to_vec(),
+            };
+            let result =
+                block_on(session.lock(super::WRITE_LT, false, 1_000, 10, &locker, &mut cursor));
+            assert_eq!(result.status, super::NFS4_OK);
+            let held = cursor.stateid.clone();
+            // Every request presents the same lock stateid. The first one
+            // granted advances its seqid, so the rest are stale.
+            let statuses = race(REQUESTS, |index| {
+                let session = &session;
+                let mut cursor = cursor.clone();
+                let locker = super::Locker4 {
+                    new_lock_owner: false,
+                    open_stateid: None,
+                    lock_stateid: Some(held.clone()),
+                    owner: Vec::new(),
+                };
+                async move {
+                    session
+                        .lock(
+                            super::WRITE_LT,
+                            false,
+                            index as u64 * 100,
+                            10,
+                            &locker,
+                            &mut cursor,
+                        )
+                        .await
+                        .status
+                }
+            });
+            let granted = statuses
+                .iter()
+                .filter(|status| **status == super::NFS4_OK)
+                .count();
+            let stale = statuses
+                .iter()
+                .filter(|status| **status == super::NFS4ERR_OLD_STATEID)
+                .count();
+            assert_eq!(
+                (granted, stale),
+                (1, REQUESTS - 1),
+                "round {round}: {statuses:?}"
+            );
+            let state = session.state.lock().unwrap();
+            assert_eq!(state.locks[&held.other].ranges.len(), 2, "round {round}");
+        }
+    }
+
+    #[test]
+    fn open_pins_its_handle_in_the_step_that_binds_it() {
+        const OPENS: usize = 8_000;
+        const CHURN: usize = 8;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Room for the root and one more entry: every bind of another name
+        // evicts the file's entry unless it is pinned.
+        let session = block_on(race_session(NfsSessionOptions {
+            max_handles: Some(2),
+            ..NfsSessionOptions::default()
+        }));
+        let churn = block_on(async {
+            let mut churn = Vec::new();
+            for index in 0..CHURN {
+                let path = format!("/churn-{index}");
+                let file = session.driver.open(&path, "w+", 0o666).await.unwrap();
+                file.close().await.unwrap();
+                let stats = session.stat_of(&path).await.unwrap();
+                churn.push((path, stats));
+            }
+            churn
+        });
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Acquire) {
+                    for (path, stats) in &churn {
+                        session.handles.bind(path, stats);
+                    }
+                }
+            });
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                block_on(async {
+                    for round in 0..OPENS {
+                        let (status, mut cursor) = open_file(
+                            &session,
+                            b"open-owner",
+                            super::OPEN4_SHARE_ACCESS_READ,
+                            super::OPEN4_SHARE_DENY_NONE,
+                        )
+                        .await;
+                        assert_eq!(status, super::NFS4_OK, "round {round}");
+                        let stateid = cursor.stateid.clone();
+                        let handle_id =
+                            session.state.lock().unwrap().opens[&stateid.other].handle_id;
+                        // Give the other thread time to bind past the limit.
+                        for _ in 0..4 {
+                            std::thread::yield_now();
+                            assert!(
+                                session.handles.entry(handle_id).is_some(),
+                                "round {round}: an open file's handle was evicted"
+                            );
+                        }
+                        assert_eq!(
+                            session.current_path(&cursor).ok().as_deref(),
+                            Some("/file"),
+                            "round {round}: the handle OPEN returned must stay usable"
+                        );
+                        let result = session.close(0, &stateid, &mut cursor).await;
+                        assert_eq!(result.status, super::NFS4_OK, "round {round}");
+                    }
+                });
+            }));
+            stop.store(true, Ordering::Release);
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
+        });
     }
 }

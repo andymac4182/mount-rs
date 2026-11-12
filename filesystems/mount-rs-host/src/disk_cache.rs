@@ -689,10 +689,6 @@ pub struct DiskCachedBlockStore<B: ?Sized> {
     index: Arc<ReadIndex>,
     root: Arc<PathBuf>,
     io: Arc<DrainGate>,
-    /// Puts share this gate and flush takes it exclusively, so puts to the
-    /// backing store overlap while a flush still covers every put
-    /// acknowledged before it.
-    writes: Arc<DrainGate>,
     workers: Arc<tokio::sync::Semaphore>,
     fills: Arc<tokio::sync::Semaphore>,
     background_read_fills: bool,
@@ -706,7 +702,6 @@ impl<B: ?Sized> Clone for DiskCachedBlockStore<B> {
             root: self.root.clone(),
             index: self.index.clone(),
             io: self.io.clone(),
-            writes: self.writes.clone(),
             workers: self.workers.clone(),
             fills: self.fills.clone(),
             background_read_fills: self.background_read_fills,
@@ -762,7 +757,6 @@ impl<B: BlockStore + ?Sized + 'static> DiskCachedBlockStore<B> {
             index: disk.index.clone(),
             disk: Arc::new(Shared::new(disk)),
             io: Arc::new(DrainGate::new()),
-            writes: Arc::new(DrainGate::new()),
             workers: budget.workers,
             fills: budget.fills,
             background_read_fills: budget.background_read_fills,
@@ -975,12 +969,10 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
     }
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let guard = self.io.clone().read_owned().await;
-        let _write = self.writes.read().await;
+        // Puts and flushes go straight to the backing store, which keeps
+        // the `BlockStore` barrier: a flush covers every put acknowledged
+        // before it was called.
         let id = self.backing.put(bytes).await?;
-        // Only authoritative put/flush ordering needs this gate. Keep the I/O
-        // exclusion guard through cache work, but do not delay backing flush
-        // behind non-authoritative fill admission or disk-cache I/O.
-        drop(_write);
         let key = digest(id.0.as_bytes());
         // The block is stored. A cache that cannot take a copy only costs a
         // later miss; reporting it would tell the caller a completed write
@@ -1006,7 +998,6 @@ impl<B: BlockStore + ?Sized + 'static> BlockStore for DiskCachedBlockStore<B> {
         Ok(bytes)
     }
     async fn flush(&self) -> Result<()> {
-        let _write = self.writes.write().await;
         self.backing.flush().await
     }
     async fn delete(&self, id: &BlockId) -> Result<()> {

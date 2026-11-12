@@ -8,6 +8,7 @@ license = "Apache-2.0"
 
 [dependencies]
 arc-swap = "1.9"
+im = "15.1"
 mount-rs-core = { path = "../.." }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 

@@ -994,10 +994,10 @@ async fn write_reply_until_stop(
     if state.stop.is_set() {
         return Ok(());
     }
-    // The device keeps concurrent replies whole by itself (see
-    // `device::Framing`): no lock on the kernel device. `biased` checks the
-    // stop signal before every poll of the write, so a reply that waited
-    // its turn on a byte-stream descriptor is still dropped after a stop.
+    // The device takes each reply as one whole message, so concurrent
+    // replies need no lock. `biased` checks the stop signal before every
+    // poll of the write, so a reply that waited for the descriptor to become
+    // writable is still dropped after a stop.
     tokio::select! {
         biased;
         _ = state.stop.wait() => Ok(()),
@@ -2185,9 +2185,8 @@ mod tests {
     async fn session_protocol_failure_reports_one_owned_transport_error() {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -2241,9 +2240,8 @@ mod tests {
     async fn closed_reply_peer_reports_one_owned_write_error() {
         use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -2329,7 +2327,7 @@ mod tests {
         };
         assert_eq!(registered, 0, "register ready eventfd with epoll");
         let device_fd = epoll_fd;
-        let device = FuseDevice::from_owned_fd(device_fd, DEFAULT_MAX_FRAME)
+        let device = FuseDevice::adopt(device_fd, DEFAULT_MAX_FRAME)
             .expect("epoll should satisfy the descriptor boundary");
 
         let observed = Arc::new(Mutex::new(Vec::new()));
@@ -2708,9 +2706,8 @@ mod tests {
     async fn session_panic_closes_state_and_reports_one_owned_task_error() {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -2748,9 +2745,7 @@ mod tests {
         peer.write_all(&test_frame(26, 1, 0, &init))
             .await
             .expect("send init");
-        // The test peer is a byte stream while the native FUSE device is
-        // message-framed. Consume the INIT reply before sending the next
-        // request so two test frames cannot be coalesced into one read.
+        // Consume the INIT reply before sending the next request.
         let _ = read_test_reply(&mut peer).await;
         peer.write_all(&test_frame(1, 2, 1, b"panic\0"))
             .await
@@ -2888,14 +2883,13 @@ mod tests {
     async fn destroy_bounds_backend_handle_cleanup_and_reports_task_error() {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
         let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
         file.close().await.expect("close seed file");
         let driver = Arc::new(BlockingCloseDriver { inner });
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -3075,9 +3069,8 @@ mod tests {
     async fn stop_cancels_an_inflight_request_and_closes_without_transport_error() {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -3117,8 +3110,6 @@ mod tests {
         peer.write_all(&test_frame(26, 1, 0, &init))
             .await
             .expect("send init");
-        // Keep the stream-backed test peer aligned with the message framing
-        // provided by the native FUSE character device.
         let _ = read_test_reply(&mut peer).await;
         peer.write_all(&test_frame(1, 2, 1, b"blocked\0"))
             .await
@@ -3253,41 +3244,62 @@ mod tests {
         }
     }
 
+    /// A `SOCK_SEQPACKET` pair, message framed like the kernel FUSE device:
+    /// one write is one request or reply. Both ends are wrapped as Tokio
+    /// Unix streams only for their async read and write calls.
+    #[cfg(target_os = "linux")]
+    fn message_socket_pair() -> (tokio::net::UnixStream, tokio::net::UnixStream) {
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        let mut descriptors = [-1; 2];
+        let result = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+                descriptors.as_mut_ptr(),
+            )
+        };
+        assert_eq!(result, 0, "socketpair: {}", io::Error::last_os_error());
+        let wrap = |descriptor| {
+            // SAFETY: socketpair returned this descriptor and nothing else owns it.
+            let owned = unsafe { OwnedFd::from_raw_fd(descriptor) };
+            tokio::net::UnixStream::from_std(std::os::unix::net::UnixStream::from(owned))
+                .expect("register socket")
+        };
+        (wrap(descriptors[0]), wrap(descriptors[1]))
+    }
+
     #[cfg(target_os = "linux")]
     async fn read_test_reply(peer: &mut tokio::net::UnixStream) -> Vec<u8> {
-        use tokio::io::AsyncReadExt;
-
-        let mut reply = vec![0; crate::OUT_HEADER_SIZE];
-        peer.read_exact(&mut reply)
-            .await
-            .expect("read FUSE reply header");
-        let length = u32::from_le_bytes(reply[..4].try_into().unwrap()) as usize;
-        assert!(length >= crate::OUT_HEADER_SIZE);
-        reply.resize(length, 0);
-        peer.read_exact(&mut reply[crate::OUT_HEADER_SIZE..])
-            .await
-            .expect("read FUSE reply body");
-        reply
+        read_test_reply_or_eof(peer).await.expect("read FUSE reply")
     }
 
     #[cfg(target_os = "linux")]
     async fn read_test_reply_or_eof(peer: &mut tokio::net::UnixStream) -> Option<Vec<u8>> {
-        use tokio::io::AsyncReadExt;
-
-        let mut reply = vec![0; crate::OUT_HEADER_SIZE];
-        if peer.read(&mut reply[..1]).await.expect("read reply or EOF") == 0 {
+        // One read is one whole reply. `AsyncReadExt::read` takes a short
+        // read to mean the socket is empty, which is true of a byte stream
+        // but not here, where a second reply may already be queued; it would
+        // then wait for an event that never comes. `try_read` forgets
+        // readiness only when the socket says it would block.
+        let mut reply = vec![0; DEFAULT_MAX_FRAME];
+        let length = loop {
+            peer.readable().await.expect("wait for a reply");
+            match peer.try_read(&mut reply) {
+                Ok(length) => break length,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("read reply or EOF: {error}"),
+            }
+        };
+        if length == 0 {
             return None;
         }
-        peer.read_exact(&mut reply[1..])
-            .await
-            .expect("read complete FUSE reply header");
-        let length = u32::from_le_bytes(reply[..4].try_into().unwrap()) as usize;
+        reply.truncate(length);
         assert!(length >= crate::OUT_HEADER_SIZE);
-        assert!(length <= DEFAULT_MAX_FRAME);
-        reply.resize(length, 0);
-        peer.read_exact(&mut reply[crate::OUT_HEADER_SIZE..])
-            .await
-            .expect("read complete FUSE reply body");
+        assert_eq!(
+            u32::from_le_bytes(reply[..4].try_into().unwrap()) as usize,
+            length
+        );
         Some(reply)
     }
 
@@ -3314,7 +3326,6 @@ mod tests {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
         use std::sync::atomic::AtomicUsize;
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
         let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
@@ -3331,7 +3342,7 @@ mod tests {
             entered: Arc::clone(&entered),
         });
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -3383,10 +3394,8 @@ mod tests {
         let handle = u64::from_le_bytes(open[16..24].try_into().unwrap());
 
         let body = read_body(handle);
-        // A Unix stream may coalesce adjacent writes, but a native FUSE
-        // descriptor returns one complete request per read. Wait until the
-        // first worker has entered before sending the second request so this
-        // test preserves that framing while still proving concurrency.
+        // Wait until the first worker has entered before sending the second
+        // request, so the two reads are known to overlap.
         let first_entered = entered.notified();
         peer.write_all(&test_frame(15, 4, nodeid, &body))
             .await
@@ -3431,7 +3440,6 @@ mod tests {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
         use std::sync::atomic::AtomicUsize;
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
         let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
@@ -3445,7 +3453,7 @@ mod tests {
             entered: Arc::new(tokio::sync::Notify::new()),
         });
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -3543,7 +3551,6 @@ mod tests {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
         use std::sync::atomic::AtomicUsize;
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
         let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
@@ -3557,7 +3564,7 @@ mod tests {
             entered: Arc::new(tokio::sync::Notify::new()),
         });
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -3652,7 +3659,6 @@ mod tests {
     async fn stop_cancels_blocked_positional_read_before_next_device_frame() {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
         let inner = Arc::new(mount_rs_memfs::MemoryFs::empty());
         let file = inner.open("/file", "w", 0o644).await.expect("create file");
@@ -3667,7 +3673,7 @@ mod tests {
             entered: Arc::clone(&entered),
         });
 
-        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let (device_stream, mut peer) = message_socket_pair();
         let standard = device_stream.into_std().expect("standard Unix stream");
         // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
@@ -4320,43 +4326,26 @@ mod tests {
         );
     }
 
-    /// Read one reply on the blocking peer end. A stream socket needs the
-    /// length prefix to find the end of the reply; a message socket returns
+    /// Read one reply on the blocking peer end: a message socket returns
     /// exactly one reply per call.
     #[cfg(target_os = "linux")]
-    fn blocking_recv_reply(fd: &std::os::fd::OwnedFd, stream: bool, buffer: &mut [u8]) -> usize {
+    fn blocking_recv_reply(fd: &std::os::fd::OwnedFd, buffer: &mut [u8]) -> usize {
         use std::os::fd::AsRawFd;
-        let receive = |target: &mut [u8], flags: libc::c_int| -> usize {
-            let bytes = unsafe {
-                libc::recv(
-                    fd.as_raw_fd(),
-                    target.as_mut_ptr().cast::<libc::c_void>(),
-                    target.len(),
-                    flags,
-                )
-            };
-            assert!(bytes > 0, "receive reply: {}", io::Error::last_os_error());
-            bytes as usize
+        let bytes = unsafe {
+            libc::recv(
+                fd.as_raw_fd(),
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                buffer.len(),
+                0,
+            )
         };
-        if !stream {
-            let length = receive(buffer, 0);
-            assert_eq!(
-                u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize,
-                length,
-                "a message socket must deliver exactly one whole reply"
-            );
-            return length;
-        }
-        let header = receive(&mut buffer[..crate::OUT_HEADER_SIZE], libc::MSG_WAITALL);
-        assert_eq!(header, crate::OUT_HEADER_SIZE);
-        let length = u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize;
-        if length > crate::OUT_HEADER_SIZE {
-            let body = receive(
-                &mut buffer[crate::OUT_HEADER_SIZE..length],
-                libc::MSG_WAITALL,
-            );
-            assert_eq!(body, length - crate::OUT_HEADER_SIZE);
-        }
+        assert!(bytes > 0, "receive reply: {}", io::Error::last_os_error());
+        let length = bytes as usize;
+        assert_eq!(
+            u32::from_le_bytes(buffer[..4].try_into().unwrap()) as usize,
+            length,
+            "a message socket must deliver exactly one whole reply"
+        );
         length
     }
 
@@ -4378,8 +4367,6 @@ mod tests {
         window: usize,
         ops: usize,
     ) -> (f64, Duration, Duration) {
-        let stream = kind == libc::SOCK_STREAM;
-        assert!(!stream || window == 1, "a stream socket coalesces requests");
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
@@ -4416,13 +4403,13 @@ mod tests {
             .flat_map(u32::to_le_bytes)
             .collect();
         blocking_send(&peer, &test_frame(26, 1, 0, &init));
-        assert_eq!(blocking_recv_reply(&peer, stream, &mut buffer), 80);
+        assert_eq!(blocking_recv_reply(&peer, &mut buffer), 80);
         blocking_send(&peer, &test_frame(1, 2, 1, b"file\0"));
-        blocking_recv_reply(&peer, stream, &mut buffer);
+        blocking_recv_reply(&peer, &mut buffer);
         assert_eq!(i32::from_le_bytes(buffer[4..8].try_into().unwrap()), 0);
         let nodeid = u64::from_le_bytes(buffer[16..24].try_into().unwrap());
         blocking_send(&peer, &test_frame(14, 3, nodeid, &[0; 8]));
-        blocking_recv_reply(&peer, stream, &mut buffer);
+        blocking_recv_reply(&peer, &mut buffer);
         assert_eq!(i32::from_le_bytes(buffer[4..8].try_into().unwrap()), 0);
         let handle = u64::from_le_bytes(buffer[16..24].try_into().unwrap());
 
@@ -4445,7 +4432,7 @@ mod tests {
             next += 1;
         }
         for _ in 0..ops {
-            let length = blocking_recv_reply(&peer, stream, &mut buffer);
+            let length = blocking_recv_reply(&peer, &mut buffer);
             let now = Instant::now();
             assert_eq!(
                 i32::from_le_bytes(buffer[4..8].try_into().unwrap()),
@@ -4489,12 +4476,10 @@ mod tests {
         reply_round_trips(libc::SOCK_SEQPACKET, BenchRequest::Read, 16, 20_000);
         reply_round_trips(libc::SOCK_DGRAM, BenchRequest::Read, 16, 5_000);
         reply_round_trips(libc::SOCK_SEQPACKET, BenchRequest::Getattr, 1, 2_000);
-        reply_round_trips(libc::SOCK_STREAM, BenchRequest::Read, 1, 2_000);
     }
 
     /// Reply-path benchmark: request/reply round trips through the session
-    /// loop over a socket pair. `seqpacket` is message framed like
-    /// `/dev/fuse`; `stream` is the byte-stream path.
+    /// loop over a socket pair, message framed like `/dev/fuse`.
     ///
     /// ```sh
     /// cargo test --release -p mount-rs-fuse --lib bench_reply_writer_round_trips -- --ignored --nocapture
@@ -4531,18 +4516,6 @@ mod tests {
                 libc::SOCK_SEQPACKET,
                 BenchRequest::Read,
                 16,
-            ),
-            (
-                "stream    getattr inline  window=1 ",
-                libc::SOCK_STREAM,
-                BenchRequest::Getattr,
-                1,
-            ),
-            (
-                "stream    read    worker  window=1 ",
-                libc::SOCK_STREAM,
-                BenchRequest::Read,
-                1,
             ),
         ];
         for (label, kind, request, window) in cases {

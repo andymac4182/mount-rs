@@ -1080,6 +1080,62 @@ mod tests {
         assert_eq!(table.resolve(&table.encode(&old)).unwrap(), "/new-dir");
     }
 
+    /// `bind_pinned` returns a handle that is already pinned. If binding and
+    /// pinning were two steps, a bind on another thread could push the table
+    /// over its limit between them and evict the new handle, and the decode
+    /// below would fail.
+    #[test]
+    fn pinned_handles_survive_concurrent_binds_at_a_small_limit() {
+        const MAX: usize = 4;
+        const THREADS: u64 = 4;
+        const ROUNDS: u64 = 3_000;
+        let table = FileHandleTable::new(FileHandleTableOptions {
+            max_handles: Some(MAX),
+            ..FileHandleTableOptions::default()
+        });
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let table = &table;
+                scope.spawn(move || {
+                    let path = format!("/pinned-{thread}");
+                    for round in 0..ROUNDS {
+                        // Every other round the name refers to a new file.
+                        let ino = (thread + 1) * 1_000_000 + round / 2;
+                        let entry = table.bind_pinned(&path, &stats(ino));
+                        let handle = table.encode(&entry);
+                        for _ in 0..4 {
+                            let decoded =
+                                table.decode(&handle).expect("a pinned handle was evicted");
+                            assert_eq!(decoded.id, entry.id);
+                            assert_eq!(decoded.fileid, ino);
+                            std::thread::yield_now();
+                        }
+                        table.unpin(entry.id);
+                    }
+                });
+                scope.spawn(move || {
+                    for round in 0..ROUNDS {
+                        let ino = (thread + 1) * 1_000_000_000 + round;
+                        table.bind(&format!("/churn-{thread}-{round}"), &stats(ino));
+                        if round % 8 == 0 {
+                            // Give a pinned name to a different file.
+                            table.bind(
+                                &format!("/pinned-{}", round % THREADS),
+                                &stats(ino + 500_000_000),
+                            );
+                        }
+                    }
+                });
+            }
+        });
+        // Nothing is pinned now, so the next bind brings the table back
+        // within its limit.
+        table.bind("/last", &stats(7));
+        assert!(table.size() <= MAX, "{} handles", table.size());
+        assert!(table.at("/").is_some());
+        assert!(table.at("/last").is_some());
+    }
+
     #[test]
     fn cookie_changes_with_directory_contents() {
         let one = cookie_verifier(&["a".to_owned(), "b".to_owned()]);
@@ -1100,6 +1156,86 @@ mod tests {
         assert!(snapshots.get(2).is_none());
     }
 
+    #[test]
+    fn snapshots_evict_in_least_recently_used_order() {
+        let snapshots = DirectorySnapshots::new(3);
+        for id in 1..=3 {
+            snapshots.set(id, vec![id.to_string()]);
+        }
+        // Reading 1 and storing 2 again leave 3 the least recently used.
+        assert!(snapshots.get(1).is_some());
+        snapshots.set(2, vec!["again".to_owned()]);
+        snapshots.set(4, vec!["4".to_owned()]);
+        assert!(snapshots.get(3).is_none());
+        assert_eq!(snapshots.get(2).unwrap().names, vec!["again".to_owned()]);
+        // Now 1 is the oldest, and an invalidated slot is reused first.
+        snapshots.invalidate(4);
+        assert!(snapshots.get(4).is_none());
+        snapshots.set(5, vec!["5".to_owned()]);
+        assert!(snapshots.get(1).is_some());
+        snapshots.set(6, vec!["6".to_owned()]);
+        assert!(snapshots.get(2).is_none());
+        for id in [1, 5, 6] {
+            assert!(snapshots.get(id).is_some(), "{id}");
+        }
+        snapshots.clear();
+        for id in 1..=6 {
+            assert!(snapshots.get(id).is_none(), "{id}");
+        }
+    }
+
+    /// What callers rely on from the snapshot cache, checked while eight
+    /// threads use a cache too small for them: a listing is only ever
+    /// returned for the directory it was stored under; a caller that stores
+    /// a directory nobody else stores reads back that listing or nothing,
+    /// never an older one; and a directory that was invalidated is gone.
+    #[test]
+    fn snapshots_stay_exact_under_concurrent_use() {
+        const SLOTS: usize = 4;
+        const THREADS: u64 = 8;
+        const ROUNDS: u64 = 4_000;
+        const SHARED: u64 = 6;
+        let snapshots = DirectorySnapshots::new(SLOTS);
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let snapshots = &snapshots;
+                scope.spawn(move || {
+                    let own = 1_000 + thread;
+                    for round in 0..ROUNDS {
+                        let shared = (round * 7 + thread) % SHARED;
+                        let stored = snapshots.set(
+                            shared,
+                            vec![shared.to_string(), format!("{thread}-{round}")],
+                        );
+                        assert_eq!(stored.names[0], shared.to_string());
+                        let other = (shared + 1) % SHARED;
+                        if let Some(found) = snapshots.get(other) {
+                            assert_eq!(found.names[0], other.to_string());
+                            assert_eq!(found.verifier, cookie_verifier(&found.names));
+                        }
+                        let latest = vec![own.to_string(), round.to_string()];
+                        snapshots.set(own, latest.clone());
+                        if let Some(found) = snapshots.get(own) {
+                            assert_eq!(found.names, latest);
+                        }
+                        if round % 3 == 0 {
+                            snapshots.invalidate(own);
+                            assert!(snapshots.get(own).is_none());
+                        }
+                        if round % 5 == 0 {
+                            snapshots.invalidate(shared);
+                        }
+                    }
+                });
+            }
+        });
+        // With the threads gone the cache behaves as it does for one caller.
+        snapshots.set(1, vec!["fresh".to_owned()]);
+        assert_eq!(snapshots.get(1).unwrap().names, vec!["fresh".to_owned()]);
+        snapshots.invalidate(1);
+        assert!(snapshots.get(1).is_none());
+    }
+
     /// Benchmark for the directory-snapshot cache: READDIR continuation on a
     /// cached listing (`get`), a re-list of a cached directory (`set_same`)
     /// and a listing of a new directory into a full cache (`set_new`).
@@ -1113,6 +1249,19 @@ mod tests {
     /// out of both: for one caller a `set_new` took 1.7 to 2.4 microseconds
     /// against 1.2 to 1.3, although eight callers at once ran 2 to 7 times
     /// faster. A READDIR that starts a listing always does one `set`.
+    ///
+    /// A second replacement was measured with this benchmark unchanged: a
+    /// fixed table of slots, each an atomically swapped listing with a use
+    /// stamp, and nothing allocated beyond the listing. Median latency for
+    /// one caller, slots against the cell, at 64 cached directories: `get`
+    /// 0.87 against 0.92 microseconds, `set_same` 2.2 against 1.8 and
+    /// `set_new` 2.6 against 2.1; at 1,000 directories `set_new` was 5.1
+    /// against 2.2. Eight callers at 64 directories ran `get` in 1.4
+    /// against 62 microseconds and `set_new` in 26 against 65. The reads
+    /// were as fast and the writes were not: publishing one pointer through
+    /// `arc-swap` visits a record for every thread that has used it, which
+    /// measured 0.09 microseconds alone and 0.5 with eight other threads
+    /// alive, more than the cell's whole critical section.
     ///
     /// `cargo test --release -p mount-rs-nfs --lib -- --ignored --nocapture bench_directory_snapshots`
     #[test]
@@ -1198,6 +1347,107 @@ mod tests {
                     for threads in [1_usize, 8] {
                         run(op, cached, threads, if op == "get" { 2_000 } else { 1_000 });
                     }
+                }
+            }
+        }
+    }
+
+    /// Benchmark for the handle table. `hot` is the NFSv3 path for a file the
+    /// table already knows: bind and pin its name, decode the handle the
+    /// client sends back, release the pin. `evict` binds a name the table
+    /// has not seen into a table that is at its `max_handles` limit, so each
+    /// bind also retires the least recently used entry. One operation is the
+    /// whole bind, decode and unpin; latencies are averages over batches of
+    /// 100.
+    ///
+    /// These numbers are why the cell stays. A lock-free replacement was
+    /// built and measured: the whole table as one atomically published
+    /// version made of persistent maps, with a use stamp on each entry in
+    /// place of the recency index. Median latency for one caller: `hot` 2.5
+    /// to 3.3 microseconds against 0.73 to 0.93 for the cell, because the
+    /// pin and its release each copy a path of the map and publish a
+    /// version; `evict` 70 to 76 against 0.9 to 1.4, because picking the
+    /// entry to retire reads every stamp. Eight callers ran `hot` in 16 to
+    /// 63 microseconds against 98 to 176.
+    ///
+    /// `cargo test --release -p mount-rs-nfs --lib -- --ignored --nocapture bench_handle_table`
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_handle_table() {
+        use std::sync::Barrier;
+        use std::time::Instant;
+
+        const BATCH: usize = 100;
+        const ENTRIES: u64 = 4_096;
+        fn run(op: &'static str, threads: usize, batches: usize) {
+            let table = FileHandleTable::new(FileHandleTableOptions {
+                max_handles: (op == "evict").then_some(ENTRIES as usize + 1),
+                ..FileHandleTableOptions::default()
+            });
+            for index in 0..ENTRIES {
+                table.bind(&format!("/dir/file-{index:05}"), &stats(100 + index));
+            }
+            let barrier = Arc::new(Barrier::new(threads + 1));
+            let workers = (0..threads)
+                .map(|thread| {
+                    let table = table.clone();
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let mut samples = Vec::with_capacity(batches);
+                        let mut random = 0x9e37_79b9_7f4a_7c15_u64 ^ (thread as u64) << 32;
+                        let mut fresh = (thread as u64 + 1) * 1_000_000_000;
+                        barrier.wait();
+                        for _ in 0..batches {
+                            let mut inputs = Vec::with_capacity(BATCH);
+                            for _ in 0..BATCH {
+                                random = random
+                                    .wrapping_mul(6_364_136_223_846_793_005)
+                                    .wrapping_add(1_442_695_040_888_963_407);
+                                let index = if op == "evict" {
+                                    fresh += 1;
+                                    fresh
+                                } else {
+                                    (random >> 33) % ENTRIES
+                                };
+                                inputs.push((format!("/dir/file-{index:05}"), stats(100 + index)));
+                            }
+                            let started = Instant::now();
+                            for (path, stats) in &inputs {
+                                let entry = table.bind_pinned(path, stats);
+                                let handle = table.encode(&entry);
+                                std::hint::black_box(table.decode(&handle).unwrap());
+                                table.unpin(entry.id);
+                            }
+                            samples.push(started.elapsed().as_nanos() as u64 / BATCH as u64);
+                        }
+                        samples
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            let started = Instant::now();
+            let mut samples = Vec::new();
+            for worker in workers {
+                samples.extend(worker.join().unwrap());
+            }
+            let wall = started.elapsed();
+            samples.sort_unstable();
+            let busy: u64 = samples.iter().sum::<u64>() * BATCH as u64;
+            let ops = (samples.len() * BATCH) as f64;
+            println!(
+                "handlebench op={op} entries={ENTRIES} threads={threads} ops/s={:.0} mean={:.0}ns p50={}ns p99={}ns wall={:?}",
+                ops * threads as f64 / (busy as f64 / 1e9),
+                busy as f64 / ops,
+                samples[samples.len() / 2],
+                samples[samples.len() * 99 / 100],
+                wall,
+            );
+        }
+        for round in 0..3 {
+            println!("handlebench round={round}");
+            for op in ["hot", "evict"] {
+                for threads in [1_usize, 8] {
+                    run(op, threads, 1_000);
                 }
             }
         }

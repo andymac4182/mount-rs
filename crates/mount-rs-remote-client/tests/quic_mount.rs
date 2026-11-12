@@ -189,6 +189,51 @@ async fn signed_oidc_multiple_drives_persistence_and_revocation() {
     );
     assert_eq!(received, payload);
     writer.close().await.unwrap();
+
+    // Calls racing a close of their own handle. The client holds nothing
+    // back: each call is either ahead of the close on the server, and then
+    // its write is kept, or behind it, and then it is refused. Nothing
+    // acknowledged is lost and nothing runs on the handle after the close.
+    for round in 0..20_u8 {
+        let racer = data.open("/raced", "w+", 0o644).await.unwrap();
+        let mut calls = tokio::task::JoinSet::new();
+        for slot in 0..8_u64 {
+            let racer = racer.clone();
+            calls.spawn(async move {
+                let mut kept = Vec::new();
+                for step in 0..4_u64 {
+                    let position = slot * 4 + step;
+                    match racer.write(&[round + 1], Some(position)).await {
+                        Ok(1) => kept.push(position),
+                        Ok(other) => panic!("short write of {other}"),
+                        Err(error) => {
+                            assert_eq!(error.code, mount_rs_core::ErrorCode::Ebadf);
+                            break;
+                        }
+                    }
+                }
+                kept
+            });
+        }
+        tokio::task::yield_now().await;
+        racer.close().await.unwrap();
+        assert_eq!(
+            racer.write(b"late", Some(0)).await.unwrap_err().code,
+            mount_rs_core::ErrorCode::Ebadf
+        );
+        let mut kept = Vec::new();
+        while let Some(positions) = calls.join_next().await {
+            kept.extend(positions.unwrap());
+        }
+        let check = data.open("/raced", "r", 0).await.unwrap();
+        let mut stored = [0_u8; 32];
+        let length = check.read(&mut stored, Some(0)).await.unwrap();
+        check.close().await.unwrap();
+        for position in kept {
+            assert!((position as usize) < length, "round {round}: lost write");
+            assert_eq!(stored[position as usize], round + 1, "round {round}");
+        }
+    }
     let readonly = logs.open("/marker", "r", 0).await.unwrap();
     assert_eq!(
         readonly.write(b"denied", Some(0)).await.unwrap_err().code,

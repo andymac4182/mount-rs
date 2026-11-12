@@ -7,17 +7,16 @@
 //! R2 blocks plus a fenced metadata store, or PGlite metadata/blocks.  The
 //! provider pair is still responsible for its own durability declaration.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::os::raw::{c_int, c_void};
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use mount_rs_core::chunking::ChunkerConfig;
-use mount_rs_core::park_cell::ParkCell;
 use mount_rs_core::storage::{
     BlockExtent, BlockStore, DirectoryEntry, FileLayout, InodeId, LoadedMetadata, MetadataStore,
     NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata, WriterLease,
@@ -297,7 +296,7 @@ where
         let is_wal_file = name.ends_with(b"-wal");
         let wal_connection = (options.wal_scope == WalScope::ProcessLocal
             && options.kind == FileKind::MainDatabase)
-            .then(|| self.volume.wal_connection(name, handle_id))
+            .then(|| self.volume.wal_connection(name))
             .transpose()?;
         Ok(Box::new(StorageFile {
             volume: Arc::clone(&self.volume),
@@ -389,22 +388,59 @@ enum ProcessShmLockMode {
     Exclusive,
 }
 
-#[derive(Default)]
-struct ProcessShmSlot {
-    shared: BTreeSet<u64>,
-    exclusive: Option<u64>,
+/// Number of SQLite WAL-index lock slots; each has one byte in
+/// `ProcessWalRegion::slots`.
+const SHM_SLOTS: usize = ffi::SQLITE_SHM_NLOCK as usize;
+const _: () = assert!(SHM_SLOTS * 8 <= u64::BITS as usize);
+
+/// Slot byte meaning "one connection holds this slot exclusively". Any other
+/// value is the number of connections holding the slot shared.
+const SHM_SLOT_EXCLUSIVE: u64 = 0xFF;
+
+/// Most shared holders one slot can count. The byte after it is the
+/// exclusive marker, so a shared request beyond this many holders is
+/// answered busy, which SQLite retries, rather than corrupting the count.
+const SHM_SLOT_MAX_SHARED: u64 = 0xFE;
+
+fn shm_slot(word: u64, index: usize) -> u64 {
+    (word >> (index * 8)) & 0xFF
 }
 
-struct ProcessWalState {
-    region_size: Option<usize>,
-    regions: Vec<Box<[u8]>>,
-    slots: [ProcessShmSlot; ffi::SQLITE_SHM_NLOCK as usize],
+/// One zeroed page of WAL-index memory. SQLite reads and writes it through
+/// the raw pointer `shm_map` hands out; the bytes are atomics only so that
+/// the pointer may be written through while the page is shared.
+struct WalPage {
+    bytes: Box<[AtomicU8]>,
+    #[cfg(test)]
+    live: Arc<AtomicUsize>,
+}
+
+impl WalPage {
+    fn pointer(&self) -> *mut c_void {
+        self.bytes.as_ptr().cast_mut().cast::<c_void>()
+    }
+}
+
+#[cfg(test)]
+impl Drop for WalPage {
+    fn drop(&mut self) {
+        self.live.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct ProcessWalRegion {
-    // A waiter parks instead of spinning: mapping a page allocates and
-    // zeroes it, and taking a lock inserts into a set, with the cell held.
-    state: ParkCell<ProcessWalState>,
+    /// Page size of the WAL index, zero until the first `map` sets it.
+    region_size: AtomicUsize,
+    /// The mapped pages. The list only grows, and a page stays at its
+    /// address until the region is dropped, so a pointer handed to SQLite
+    /// stays valid for as long as any connection holds the region.
+    pages: ArcSwap<Vec<Arc<WalPage>>>,
+    /// One byte per lock slot, slot `i` in bits `8 * i ..`. A lock or unlock
+    /// call changes every slot of its range in one step, so no other
+    /// connection sees a range half taken.
+    slots: AtomicU64,
+    #[cfg(test)]
+    live_pages: Arc<AtomicUsize>,
 }
 
 /// The region of `database_name`, created on first use. Callers racing on a
@@ -434,28 +470,39 @@ fn wal_region(
 
 struct ProcessWalConnection {
     region: Arc<ProcessWalRegion>,
-    id: u64,
-    held: [ProcessShmLockMode; ffi::SQLITE_SHM_NLOCK as usize],
+    /// What this connection holds in each slot. Only this connection adds
+    /// to or removes its own holds, so this array alone answers "do I
+    /// already hold this slot".
+    held: [ProcessShmLockMode; SHM_SLOTS],
 }
 
 impl ProcessWalRegion {
     fn new() -> Self {
         Self {
-            state: ParkCell::new(ProcessWalState {
-                region_size: None,
-                regions: Vec::new(),
-                slots: std::array::from_fn(|_| ProcessShmSlot::default()),
-            }),
+            region_size: AtomicUsize::new(0),
+            pages: ArcSwap::default(),
+            slots: AtomicU64::new(0),
+            #[cfg(test)]
+            live_pages: Arc::default(),
         }
+    }
+
+    fn new_page(&self, page_size: usize) -> Arc<WalPage> {
+        #[cfg(test)]
+        self.live_pages.fetch_add(1, Ordering::SeqCst);
+        Arc::new(WalPage {
+            bytes: (0..page_size).map(|_| AtomicU8::new(0)).collect(),
+            #[cfg(test)]
+            live: Arc::clone(&self.live_pages),
+        })
     }
 }
 
 impl ProcessWalConnection {
-    fn new(region: Arc<ProcessWalRegion>, id: u64) -> Self {
+    fn new(region: Arc<ProcessWalRegion>) -> Self {
         Self {
             region,
-            id,
-            held: [ProcessShmLockMode::None; ffi::SQLITE_SHM_NLOCK as usize],
+            held: [ProcessShmLockMode::None; SHM_SLOTS],
         }
     }
 
@@ -465,31 +512,49 @@ impl ProcessWalConnection {
         page_size: usize,
         extend: bool,
     ) -> Result<*mut c_void, VfsError> {
-        let mut state = self
-            .region
-            .state
-            .lock()
-            .map_err(|_| VfsError::Other("process-local WAL state lock poisoned".to_owned()))?;
         if page_size == 0 {
             return Err(VfsError::InvalidInput("WAL shared-memory region is empty"));
         }
-        if let Some(existing) = state.region_size
-            && existing != page_size
+        // The first caller sets the size; everyone else must agree with it.
+        if let Err(existing) = self.region.region_size.compare_exchange(
+            0,
+            page_size,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) && existing != page_size
         {
             return Err(VfsError::InvalidInput(
                 "WAL shared-memory region size changed",
             ));
         }
-        state.region_size = Some(page_size);
-        if page >= state.regions.len() {
-            if !extend {
-                return Ok(ptr::null_mut());
-            }
-            state
-                .regions
-                .resize_with(page + 1, || vec![0_u8; page_size].into_boxed_slice());
+        if let Some(existing) = self.region.pages.load().get(page) {
+            return Ok(existing.pointer());
         }
-        Ok(state.regions[page].as_mut_ptr().cast::<c_void>())
+        if !extend {
+            return Ok(ptr::null_mut());
+        }
+        // Offer a longer list. If another connection publishes first, the
+        // pages it added are the ones everybody uses and the unused pages
+        // allocated here are freed when `fresh` is dropped.
+        let mut fresh: Vec<Arc<WalPage>> = Vec::new();
+        loop {
+            let current = self.region.pages.load_full();
+            if let Some(existing) = current.get(page) {
+                return Ok(existing.pointer());
+            }
+            let missing = page + 1 - current.len();
+            while fresh.len() < missing {
+                fresh.push(self.region.new_page(page_size));
+            }
+            let mut next = Vec::with_capacity(page + 1);
+            next.extend(current.iter().cloned());
+            next.extend(fresh[..missing].iter().cloned());
+            let pointer = next[page].pointer();
+            let previous = self.region.pages.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&previous, &current) {
+                return Ok(pointer);
+            }
+        }
     }
 
     fn lock(&mut self, offset: usize, number: usize, flags: c_int) -> Result<(), VfsError> {
@@ -505,11 +570,6 @@ impl ProcessWalConnection {
         if end > self.held.len() {
             return Err(VfsError::InvalidInput("WAL lock range is outside SQLite"));
         }
-        let mut state = self
-            .region
-            .state
-            .lock()
-            .map_err(|_| VfsError::Other("process-local WAL state lock poisoned".to_owned()))?;
         if !locking {
             for index in offset..end {
                 if self.held[index] != mode {
@@ -521,68 +581,89 @@ impl ProcessWalConnection {
                     ));
                 }
             }
-            for index in offset..end {
-                match mode {
-                    ProcessShmLockMode::Shared => {
-                        state.slots[index].shared.remove(&self.id);
-                    }
-                    ProcessShmLockMode::Exclusive => {
-                        if state.slots[index].exclusive == Some(self.id) {
-                            state.slots[index].exclusive = None;
-                        }
-                    }
-                    ProcessShmLockMode::None => {}
-                }
-                self.held[index] = ProcessShmLockMode::None;
-            }
+            self.release(offset..end);
             return Ok(());
         }
 
-        for index in offset..end {
-            let slot = &state.slots[index];
-            match mode {
-                ProcessShmLockMode::Shared => {
-                    if slot.exclusive.is_some() && slot.exclusive != Some(self.id) {
-                        return Err(VfsError::Busy);
+        let mut current = self.region.slots.load(Ordering::SeqCst);
+        loop {
+            // Judge the whole range against one value of the word, then
+            // install the whole range with one compare-and-swap. A failed
+            // swap means some slot changed, so the range is judged again
+            // against the new value; nothing was taken that needs undoing.
+            let mut next = current;
+            for index in offset..end {
+                let slot = shm_slot(current, index);
+                let held = self.held[index];
+                match mode {
+                    ProcessShmLockMode::Shared => {
+                        if held == ProcessShmLockMode::Exclusive {
+                            return Err(VfsError::InvalidInput(
+                                "WAL shared lock cannot replace an exclusive lock",
+                            ));
+                        }
+                        if held == ProcessShmLockMode::Shared {
+                            continue;
+                        }
+                        if slot == SHM_SLOT_EXCLUSIVE || slot == SHM_SLOT_MAX_SHARED {
+                            return Err(VfsError::Busy);
+                        }
+                        next += 1 << (index * 8);
                     }
-                    if slot.exclusive == Some(self.id) {
-                        return Err(VfsError::InvalidInput(
-                            "WAL shared lock cannot replace an exclusive lock",
-                        ));
+                    ProcessShmLockMode::Exclusive => {
+                        if held == ProcessShmLockMode::Exclusive {
+                            continue;
+                        }
+                        if held == ProcessShmLockMode::Shared {
+                            // This connection is one of the holders counted.
+                            if slot > 1 {
+                                return Err(VfsError::Busy);
+                            }
+                            return Err(VfsError::InvalidInput(
+                                "WAL exclusive lock cannot replace a shared lock",
+                            ));
+                        }
+                        if slot != 0 {
+                            return Err(VfsError::Busy);
+                        }
+                        next |= SHM_SLOT_EXCLUSIVE << (index * 8);
                     }
+                    ProcessShmLockMode::None => unreachable!(),
                 }
-                ProcessShmLockMode::Exclusive => {
-                    if slot.exclusive.is_some() && slot.exclusive != Some(self.id) {
-                        return Err(VfsError::Busy);
-                    }
-                    if slot.exclusive == Some(self.id) {
-                        continue;
-                    }
-                    if slot.shared.iter().any(|owner| *owner != self.id) {
-                        return Err(VfsError::Busy);
-                    }
-                    if slot.shared.contains(&self.id) {
-                        return Err(VfsError::InvalidInput(
-                            "WAL exclusive lock cannot replace a shared lock",
-                        ));
-                    }
-                }
-                ProcessShmLockMode::None => unreachable!(),
+            }
+            match self.region.slots.compare_exchange_weak(
+                current,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(changed) => current = changed,
             }
         }
         for index in offset..end {
-            match mode {
-                ProcessShmLockMode::Shared => {
-                    state.slots[index].shared.insert(self.id);
-                }
-                ProcessShmLockMode::Exclusive => {
-                    state.slots[index].exclusive = Some(self.id);
-                }
-                ProcessShmLockMode::None => unreachable!(),
-            }
             self.held[index] = mode;
         }
         Ok(())
+    }
+
+    /// Give up whatever this connection holds in `range`. Each held slot's
+    /// byte is at least what is subtracted for it, a shared holder's count
+    /// of one or the whole exclusive marker, so one subtraction releases
+    /// the range in one step and never borrows from a neighbouring slot.
+    fn release(&mut self, range: std::ops::Range<usize>) {
+        let mut holds = 0_u64;
+        for index in range {
+            holds |= match self.held[index] {
+                ProcessShmLockMode::Shared => 1,
+                ProcessShmLockMode::Exclusive => SHM_SLOT_EXCLUSIVE,
+                ProcessShmLockMode::None => 0,
+            } << (index * 8);
+            self.held[index] = ProcessShmLockMode::None;
+        }
+        if holds != 0 {
+            self.region.slots.fetch_sub(holds, Ordering::SeqCst);
+        }
     }
 
     fn barrier(&mut self) {
@@ -590,25 +671,7 @@ impl ProcessWalConnection {
     }
 
     fn unmap(&mut self) -> Result<(), VfsError> {
-        let mut state = self
-            .region
-            .state
-            .lock()
-            .map_err(|_| VfsError::Other("process-local WAL state lock poisoned".to_owned()))?;
-        for index in 0..self.held.len() {
-            match self.held[index] {
-                ProcessShmLockMode::Shared => {
-                    state.slots[index].shared.remove(&self.id);
-                }
-                ProcessShmLockMode::Exclusive => {
-                    if state.slots[index].exclusive == Some(self.id) {
-                        state.slots[index].exclusive = None;
-                    }
-                }
-                ProcessShmLockMode::None => {}
-            }
-            self.held[index] = ProcessShmLockMode::None;
-        }
+        self.release(0..SHM_SLOTS);
         Ok(())
     }
 }
@@ -726,19 +789,15 @@ where
             .map_err(|_| VfsError::InvalidInput("storage file handle id overflow"))
     }
 
-    fn wal_connection(
-        &self,
-        database_name: &[u8],
-        handle_id: u64,
-    ) -> Result<ProcessWalConnection, VfsError> {
+    fn wal_connection(&self, database_name: &[u8]) -> Result<ProcessWalConnection, VfsError> {
         let database_name = database_name
             .strip_suffix(b"-wal")
             .unwrap_or(database_name)
             .to_vec();
-        Ok(ProcessWalConnection::new(
-            wal_region(&self.wal_regions, database_name),
-            handle_id,
-        ))
+        Ok(ProcessWalConnection::new(wal_region(
+            &self.wal_regions,
+            database_name,
+        )))
     }
 
     fn ensure_healthy_state(state: &VolumeState) -> Result<(), VfsError> {
@@ -1611,8 +1670,7 @@ mod tests {
                             barrier.wait();
                             let name = format!("db-{}", thread % 2).into_bytes();
                             let region = wal_region(regions, name);
-                            let mut connection =
-                                ProcessWalConnection::new(Arc::clone(&region), thread as u64);
+                            let mut connection = ProcessWalConnection::new(Arc::clone(&region));
                             let page = connection.map(0, 32 * 1024, true).unwrap();
                             (thread % 2, page as usize)
                         })
@@ -1625,13 +1683,439 @@ mod tests {
             });
             assert_eq!(regions.load().len(), 2, "round {round}");
             for database in 0..2 {
-                let pages: BTreeSet<usize> = mapped
+                let pages: std::collections::BTreeSet<usize> = mapped
                     .iter()
                     .filter(|(name, _)| *name == database)
                     .map(|(_, page)| *page)
                     .collect();
                 assert_eq!(pages.len(), 1, "one WAL-index page per database");
             }
+        }
+    }
+
+    const SHARED: c_int = ffi::SQLITE_SHM_SHARED;
+    const EXCLUSIVE: c_int = ffi::SQLITE_SHM_EXCLUSIVE;
+    const LOCK: c_int = ffi::SQLITE_SHM_LOCK;
+    const UNLOCK: c_int = ffi::SQLITE_SHM_UNLOCK;
+
+    /// The lock table written the obvious way: who holds each slot.
+    #[derive(Default)]
+    struct ModelSlots {
+        shared: [std::collections::BTreeSet<usize>; SHM_SLOTS],
+        exclusive: [Option<usize>; SHM_SLOTS],
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum Outcome {
+        Granted,
+        Busy,
+        Invalid,
+    }
+
+    fn outcome(result: Result<(), VfsError>) -> Outcome {
+        match result {
+            Ok(()) => Outcome::Granted,
+            Err(VfsError::Busy) => Outcome::Busy,
+            Err(VfsError::InvalidInput(_)) => Outcome::Invalid,
+            Err(other) => panic!("unexpected WAL lock error: {other:?}"),
+        }
+    }
+
+    impl ModelSlots {
+        /// What a lock table guarded by one lock answers, slot by slot in
+        /// index order, changing nothing unless the whole range is granted.
+        fn apply(&mut self, owner: usize, offset: usize, number: usize, flags: c_int) -> Outcome {
+            let range = offset..offset + number;
+            let shared = flags & SHARED != 0;
+            if flags & LOCK == 0 {
+                for index in range.clone() {
+                    let holds_shared = self.shared[index].contains(&owner);
+                    let holds_exclusive = self.exclusive[index] == Some(owner);
+                    if (shared && holds_exclusive) || (!shared && holds_shared) {
+                        return Outcome::Invalid;
+                    }
+                }
+                for index in range {
+                    if shared {
+                        self.shared[index].remove(&owner);
+                    } else if self.exclusive[index] == Some(owner) {
+                        self.exclusive[index] = None;
+                    }
+                }
+                return Outcome::Granted;
+            }
+            for index in range.clone() {
+                match self.exclusive[index] {
+                    Some(holder) if holder != owner => return Outcome::Busy,
+                    Some(_) if shared => return Outcome::Invalid,
+                    Some(_) => continue,
+                    None => {}
+                }
+                if !shared {
+                    if self.shared[index].iter().any(|holder| *holder != owner) {
+                        return Outcome::Busy;
+                    }
+                    if self.shared[index].contains(&owner) {
+                        return Outcome::Invalid;
+                    }
+                }
+            }
+            for index in range {
+                if shared {
+                    self.shared[index].insert(owner);
+                } else {
+                    self.exclusive[index] = Some(owner);
+                }
+            }
+            Outcome::Granted
+        }
+
+        fn drop_owner(&mut self, owner: usize) {
+            for index in 0..SHM_SLOTS {
+                self.shared[index].remove(&owner);
+                if self.exclusive[index] == Some(owner) {
+                    self.exclusive[index] = None;
+                }
+            }
+        }
+
+        fn word(&self) -> u64 {
+            (0..SHM_SLOTS).fold(0, |word, index| {
+                let slot = match self.exclusive[index] {
+                    Some(_) => SHM_SLOT_EXCLUSIVE,
+                    None => self.shared[index].len() as u64,
+                };
+                word | slot << (index * 8)
+            })
+        }
+    }
+
+    struct Random(u64);
+
+    impl Random {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound as u64) as usize
+        }
+
+        fn lock_call(&mut self) -> (usize, usize, c_int) {
+            let offset = self.below(SHM_SLOTS);
+            let number = 1 + self.below((SHM_SLOTS - offset).min(3));
+            let action = if self.below(2) == 0 { LOCK } else { UNLOCK };
+            let mode = if self.below(2) == 0 {
+                SHARED
+            } else {
+                EXCLUSIVE
+            };
+            (offset, number, action | mode)
+        }
+    }
+
+    /// With no races, every answer and the whole slot word match the lock
+    /// table written with sets of holders, including the refusals.
+    #[test]
+    fn wal_slot_word_answers_like_a_table_of_holders() {
+        const CONNECTIONS: usize = 5;
+        let region = Arc::new(ProcessWalRegion::new());
+        let mut connections: Vec<_> = (0..CONNECTIONS)
+            .map(|_| ProcessWalConnection::new(Arc::clone(&region)))
+            .collect();
+        let mut model = ModelSlots::default();
+        let mut random = Random(0x9e37_79b9_7f4a_7c15);
+        let mut seen = [0_usize; 3];
+        for step in 0..200_000 {
+            let owner = random.below(CONNECTIONS);
+            if random.below(40) == 0 {
+                connections[owner].unmap().unwrap();
+                model.drop_owner(owner);
+            } else {
+                let (offset, number, flags) = random.lock_call();
+                let expected = model.apply(owner, offset, number, flags);
+                let actual = outcome(connections[owner].lock(offset, number, flags));
+                assert_eq!(
+                    actual, expected,
+                    "step {step}: {offset}+{number} {flags:#x}"
+                );
+                seen[expected as usize] += 1;
+            }
+            assert_eq!(
+                region.slots.load(Ordering::SeqCst),
+                model.word(),
+                "step {step}"
+            );
+        }
+        assert!(seen.iter().all(|count| *count > 1_000), "{seen:?}");
+        drop(connections);
+        assert_eq!(region.slots.load(Ordering::SeqCst), 0);
+    }
+
+    /// Connections on different threads lock and unlock random ranges. A
+    /// table of who holds what, kept under a test mutex, is told of a hold
+    /// only after it is granted and of a release before it happens, so two
+    /// holds that conflict in the table were both held for real.
+    #[test]
+    fn racing_wal_locks_keep_exclusive_holders_alone() {
+        use std::sync::Mutex;
+
+        const THREADS: usize = 8;
+        const STEPS: usize = 40_000;
+
+        struct Table {
+            held: ModelSlots,
+            /// Lock attempts ever announced per slot, by any connection.
+            attempts: [u64; SHM_SLOTS],
+            /// Attempts announced and not yet finished or released.
+            pending: [std::collections::BTreeSet<usize>; SHM_SLOTS],
+        }
+
+        let region = Arc::new(ProcessWalRegion::new());
+        let table = Mutex::new(Table {
+            held: ModelSlots::default(),
+            attempts: [0; SHM_SLOTS],
+            pending: Default::default(),
+        });
+        let barrier = std::sync::Barrier::new(THREADS);
+        let totals: Vec<[usize; 3]> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|thread| {
+                    let (region, table, barrier) = (&region, &table, &barrier);
+                    scope.spawn(move || {
+                        let mut connection = ProcessWalConnection::new(Arc::clone(region));
+                        let mut random =
+                            Random(0x2545_f491_4f6c_dd1d_u64.wrapping_mul(thread as u64 + 1));
+                        let mut seen = [0_usize; 3];
+                        barrier.wait();
+                        for _ in 0..STEPS {
+                            if random.below(60) == 0 {
+                                table.lock().unwrap().held.drop_owner(thread);
+                                connection.unmap().unwrap();
+                                for pending in &mut table.lock().unwrap().pending {
+                                    pending.remove(&thread);
+                                }
+                                continue;
+                            }
+                            let (offset, number, flags) = random.lock_call();
+                            let range = offset..offset + number;
+                            let shared = flags & SHARED != 0;
+                            let before = connection.held;
+                            let own_other_mode = range.clone().any(|index| {
+                                before[index]
+                                    == if shared {
+                                        ProcessShmLockMode::Exclusive
+                                    } else {
+                                        ProcessShmLockMode::Shared
+                                    }
+                            });
+                            if flags & LOCK == 0 {
+                                // An unlock depends only on this connection.
+                                if !own_other_mode {
+                                    let mut table = table.lock().unwrap();
+                                    assert_eq!(
+                                        table.held.apply(thread, offset, number, flags),
+                                        Outcome::Granted
+                                    );
+                                }
+                                let actual = outcome(connection.lock(offset, number, flags));
+                                if own_other_mode {
+                                    assert_eq!(actual, Outcome::Invalid);
+                                    assert_eq!(connection.held, before);
+                                } else {
+                                    assert_eq!(actual, Outcome::Granted);
+                                    let mut table = table.lock().unwrap();
+                                    for index in range {
+                                        table.pending[index].remove(&thread);
+                                    }
+                                }
+                                seen[actual as usize] += 1;
+                                continue;
+                            }
+                            // Announce the attempt, noting who else might
+                            // be in the way now and how many have ever tried.
+                            let (rivals_before, attempts_before) = {
+                                let mut table = table.lock().unwrap();
+                                let rivals = range
+                                    .clone()
+                                    .any(|index| table.pending[index].iter().any(|o| *o != thread));
+                                let attempts = table.attempts;
+                                for index in range.clone() {
+                                    table.attempts[index] += 1;
+                                    table.pending[index].insert(thread);
+                                }
+                                (rivals, attempts)
+                            };
+                            let actual = outcome(connection.lock(offset, number, flags));
+                            let mut table = table.lock().unwrap();
+                            match actual {
+                                Outcome::Granted => {
+                                    assert!(!own_other_mode);
+                                    // The table grants it too: nobody it
+                                    // knows of holds a conflicting slot.
+                                    assert_eq!(
+                                        table.held.apply(thread, offset, number, flags),
+                                        Outcome::Granted,
+                                        "a granted lock overlaps a conflicting holder"
+                                    );
+                                    for index in range.clone() {
+                                        if !shared {
+                                            assert_eq!(table.held.exclusive[index], Some(thread));
+                                            assert!(table.held.shared[index].is_empty());
+                                        }
+                                    }
+                                }
+                                Outcome::Busy => {
+                                    // Busy needs another connection that
+                                    // was on these slots during the call.
+                                    let rivals_since = range.clone().any(|index| {
+                                        table.attempts[index] != attempts_before[index] + 1
+                                    });
+                                    assert!(
+                                        rivals_before || rivals_since,
+                                        "busy with no other connection on the range"
+                                    );
+                                }
+                                Outcome::Invalid => assert!(own_other_mode),
+                            }
+                            if actual != Outcome::Granted {
+                                // All or nothing: a refusal took no slot.
+                                assert_eq!(connection.held, before);
+                                for index in range {
+                                    if before[index] == ProcessShmLockMode::None {
+                                        table.pending[index].remove(&thread);
+                                    }
+                                }
+                            }
+                            seen[actual as usize] += 1;
+                        }
+                        table.lock().unwrap().held.drop_owner(thread);
+                        drop(connection);
+                        seen
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        // Every hold was given back exactly once: no count is left over.
+        assert_eq!(region.slots.load(Ordering::SeqCst), 0);
+        assert_eq!(table.lock().unwrap().held.word(), 0);
+        for kind in 0..3 {
+            let total: usize = totals.iter().map(|seen| seen[kind]).sum();
+            assert!(total > 1_000, "outcome {kind} seen {total} times");
+        }
+    }
+
+    /// A slot counts at most 254 shared holders; the next is told busy and
+    /// the count stays exact.
+    #[test]
+    fn wal_slot_refuses_shared_holders_beyond_its_count() {
+        let region = Arc::new(ProcessWalRegion::new());
+        let mut holders: Vec<_> = (0..SHM_SLOT_MAX_SHARED)
+            .map(|_| {
+                let mut connection = ProcessWalConnection::new(Arc::clone(&region));
+                connection.lock(3, 2, LOCK | SHARED).unwrap();
+                connection
+            })
+            .collect();
+        let mut extra = ProcessWalConnection::new(Arc::clone(&region));
+        assert!(matches!(
+            extra.lock(4, 1, LOCK | SHARED),
+            Err(VfsError::Busy)
+        ));
+        assert!(matches!(
+            extra.lock(4, 1, LOCK | EXCLUSIVE),
+            Err(VfsError::Busy)
+        ));
+        assert_eq!(shm_slot(region.slots.load(Ordering::SeqCst), 4), 254);
+        assert_eq!(shm_slot(region.slots.load(Ordering::SeqCst), 5), 0);
+        holders.pop();
+        extra.lock(4, 1, LOCK | SHARED).unwrap();
+        drop(holders);
+        assert_eq!(region.slots.load(Ordering::SeqCst), 1 << (4 * 8));
+        drop(extra);
+        assert_eq!(region.slots.load(Ordering::SeqCst), 0);
+    }
+
+    /// Threads racing to map the same page index of one region all get the
+    /// same address, earlier pages keep theirs, and the pages the losers
+    /// allocated are freed, as are all pages once the region is dropped.
+    #[test]
+    fn racing_wal_maps_share_each_page_and_free_the_spares() {
+        const THREADS: usize = 8;
+        const PAGE: usize = 4096;
+        for round in 0..300_usize {
+            let region = Arc::new(ProcessWalRegion::new());
+            let live = Arc::clone(&region.live_pages);
+            let target = round % 4;
+            let barrier = std::sync::Barrier::new(THREADS);
+            let mapped: Vec<[usize; 2]> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|thread| {
+                        let (region, barrier) = (&region, &barrier);
+                        scope.spawn(move || {
+                            let mut connection = ProcessWalConnection::new(Arc::clone(region));
+                            barrier.wait();
+                            // Half the threads ask for the page after.
+                            let page = target + thread % 2;
+                            let first = connection.map(page, PAGE, true).unwrap();
+                            assert!(!first.is_null());
+                            let again = connection.map(page, PAGE, false).unwrap();
+                            assert_eq!(first, again);
+                            let lower = connection.map(target, PAGE, false).unwrap();
+                            assert!(!lower.is_null());
+                            assert!(connection.map(page, PAGE * 2, true).is_err());
+                            [
+                                lower as usize,
+                                if page == target { 0 } else { first as usize },
+                            ]
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect()
+            });
+            for column in 0..2 {
+                let addresses: std::collections::BTreeSet<usize> = mapped
+                    .iter()
+                    .map(|pair| pair[column])
+                    .filter(|address| *address != 0)
+                    .collect();
+                assert_eq!(addresses.len(), 1, "round {round}: one address per page");
+            }
+            let pages = region.pages.load_full();
+            assert_eq!(pages.len(), target + 2, "round {round}");
+            let distinct: std::collections::BTreeSet<usize> =
+                pages.iter().map(|page| page.pointer() as usize).collect();
+            assert_eq!(distinct.len(), pages.len());
+            let mut reader = ProcessWalConnection::new(Arc::clone(&region));
+            assert!(reader.map(target + 2, PAGE, false).unwrap().is_null());
+            // Only the published pages are still allocated.
+            assert_eq!(live.load(Ordering::SeqCst), pages.len(), "round {round}");
+            drop((pages, reader, region));
+            assert_eq!(live.load(Ordering::SeqCst), 0, "round {round}");
+        }
+    }
+
+    /// A mapped page starts zeroed and one connection's writes through its
+    /// pointer are what another connection reads through its own.
+    #[test]
+    fn wal_page_is_zeroed_and_shared_between_connections() {
+        let region = Arc::new(ProcessWalRegion::new());
+        let mut writer = ProcessWalConnection::new(Arc::clone(&region));
+        let mut reader = ProcessWalConnection::new(Arc::clone(&region));
+        let written = writer.map(1, 512, true).unwrap().cast::<u8>();
+        let read = reader.map(1, 512, false).unwrap().cast::<u8>();
+        // SAFETY: both pointers address the 512-byte page the region keeps
+        // alive, and only this thread touches it.
+        unsafe {
+            assert!((0..512).all(|at| read.add(at).read() == 0));
+            written.add(511).write(9);
+            assert_eq!(read.add(511).read(), 9);
         }
     }
 

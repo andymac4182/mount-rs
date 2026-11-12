@@ -6,6 +6,7 @@ rust-version = "1.95"
 license = "Apache-2.0"
 [dependencies]
 arc-swap = "1.9"
+im = "15.1"
 mount-rs-core = { path = "../.." }
 async-trait = "0.1"
 bytes = "1"

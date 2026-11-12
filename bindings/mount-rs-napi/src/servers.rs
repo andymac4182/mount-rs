@@ -31,7 +31,6 @@ use mount_rs_9p::{
     P9TransportErrorHook as TransportP9ErrorHook,
 };
 use mount_rs_core::take_cell::TakeCell;
-use mount_rs_core::turn_cell::TurnCell;
 use mount_rs_core::{ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, OpenFlags, Stats};
 use mount_rs_fuse::{
     FuseMountHooks as TransportFuseMountHooks, FuseTransportError as TransportFuseError,
@@ -79,6 +78,8 @@ use napi::futures_core::Stream as FuturesStream;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Error, JsValue, Status, ValueType, sys};
 use napi_derive::napi;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use super::nfs_codec::{NfsRpcCall, from_call as from_nfs_call};
 use super::p9_codec::{NativeP9Header, NativeP9Qid};
@@ -2367,7 +2368,11 @@ pub struct P9StatsLike {
 
 #[derive(Clone)]
 enum P9FidTableTarget {
-    Standalone(Arc<TurnCell<TransportP9FidTable>>),
+    /// A table made by JavaScript's `new P9FidTable()`. Every method on it
+    /// is synchronous and runs on the JavaScript thread that owns the
+    /// wrapper, and `Rc` keeps the compiler from letting it leave that
+    /// thread, so it needs no lock.
+    Standalone(Rc<RefCell<TransportP9FidTable>>),
     Session(mount_rs_9p::P9Session),
 }
 
@@ -2557,30 +2562,21 @@ impl P9Fid {
 
 fn p9_target_size(target: &P9FidTableTarget) -> usize {
     match target {
-        P9FidTableTarget::Standalone(table) => {
-            table.lock().expect("9P fid table mutex poisoned").len()
-        }
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().len(),
         P9FidTableTarget::Session(session) => session.fid_size(),
     }
 }
 
 fn p9_target_qid_path_count(target: &P9FidTableTarget) -> usize {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .qid_path_count(),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().qid_path_count(),
         P9FidTableTarget::Session(session) => session.fid_qid_path_count(),
     }
 }
 
 fn p9_target_exists(target: &P9FidTableTarget, fid: u32) -> bool {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .get(fid)
-            .is_some(),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().get(fid).is_some(),
         P9FidTableTarget::Session(session) => session.fid_exists(fid),
     }
 }
@@ -2588,8 +2584,7 @@ fn p9_target_exists(target: &P9FidTableTarget, fid: u32) -> bool {
 fn p9_target_view(target: &P9FidTableTarget, fid: u32) -> napi::Result<TransportP9FidView> {
     match target {
         P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
+            .borrow_mut()
             .view(fid)
             .ok_or_else(|| p9_fid_error(fid)),
         P9FidTableTarget::Session(session) => session.fid_view(fid).map_err(super::to_js_error),
@@ -2598,42 +2593,30 @@ fn p9_target_view(target: &P9FidTableTarget, fid: u32) -> napi::Result<Transport
 
 fn p9_target_ids(target: &P9FidTableTarget) -> Vec<u32> {
     match target {
-        P9FidTableTarget::Standalone(table) => {
-            table.lock().expect("9P fid table mutex poisoned").fids()
-        }
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().fids(),
         P9FidTableTarget::Session(session) => session.fid_ids(),
     }
 }
 
 fn p9_target_create(target: &P9FidTableTarget, fid: u32, path: &str) -> Result<(), FsError> {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .create(fid, path)
-            .map(|_| ()),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().create(fid, path).map(|_| ()),
         P9FidTableTarget::Session(session) => session.fid_create(fid, path),
     }
 }
 
 fn p9_target_clone(target: &P9FidTableTarget, from: u32, to: u32) -> Result<(), FsError> {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .clone_fid(from, to)
-            .map(|_| ()),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().clone_fid(from, to).map(|_| ()),
         P9FidTableTarget::Session(session) => session.fid_clone(from, to),
     }
 }
 
 fn p9_target_clunk(target: &P9FidTableTarget, fid: u32) -> Result<TransportP9FidView, FsError> {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .clunk(fid)
-            .map(|entry| entry.view()),
+        P9FidTableTarget::Standalone(table) => {
+            table.borrow_mut().clunk(fid).map(|entry| entry.view())
+        }
         P9FidTableTarget::Session(session) => session.fid_clunk(fid),
     }
 }
@@ -2641,7 +2624,7 @@ fn p9_target_clunk(target: &P9FidTableTarget, fid: u32) -> Result<TransportP9Fid
 fn p9_target_set_path(target: &P9FidTableTarget, fid: u32, path: &str) -> Result<(), FsError> {
     match target {
         P9FidTableTarget::Standalone(table) => {
-            let mut table = table.lock().expect("9P fid table mutex poisoned");
+            let mut table = table.borrow_mut();
             let entry = table.get_mut(fid).ok_or_else(|| {
                 FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid}"))
             })?;
@@ -2658,20 +2641,14 @@ fn p9_target_set_open(
     open: Option<TransportP9FidOpenState>,
 ) -> Result<(), FsError> {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .set_open(fid, open),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().set_open(fid, open),
         P9FidTableTarget::Session(session) => session.fid_set_open(fid, open),
     }
 }
 
 fn p9_target_set_iounit(target: &P9FidTableTarget, fid: u32, iounit: u32) -> Result<(), FsError> {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .set_iounit(fid, iounit),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().set_iounit(fid, iounit),
         P9FidTableTarget::Session(session) => session.fid_set_iounit(fid, iounit),
     }
 }
@@ -2682,10 +2659,7 @@ fn p9_target_set_cursor(
     cursor: Option<TransportP9DirCursor>,
 ) -> Result<(), FsError> {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .set_cursor(fid, cursor),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().set_cursor(fid, cursor),
         P9FidTableTarget::Session(session) => session.fid_set_cursor(fid, cursor),
     }
 }
@@ -2696,10 +2670,7 @@ fn p9_target_resume(
     offset: u64,
 ) -> Result<Option<(Vec<String>, usize)>, FsError> {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .resume(fid, offset),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().resume(fid, offset),
         P9FidTableTarget::Session(session) => session.fid_resume(fid, offset),
     }
 }
@@ -2710,30 +2681,21 @@ fn p9_target_snapshot(
     entries: Vec<String>,
 ) -> Result<(Vec<String>, usize), FsError> {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .snapshot(fid, entries),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().snapshot(fid, entries),
         P9FidTableTarget::Session(session) => session.fid_snapshot_entries(fid, entries),
     }
 }
 
 fn p9_target_note_offset(target: &P9FidTableTarget, fid: u32, offset: u64, index: usize) {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .note_offset(fid, offset, index),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().note_offset(fid, offset, index),
         P9FidTableTarget::Session(session) => session.fid_note_offset(fid, offset, index),
     }
 }
 
 fn p9_target_qid_for(target: &P9FidTableTarget, stats: &Stats, path: &str) -> mount_rs_9p::P9Qid {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .qid_for(stats, path),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().qid_for(stats, path),
         P9FidTableTarget::Session(session) => session.fid_qid_for(stats, path),
     }
 }
@@ -2744,29 +2706,21 @@ fn p9_target_qid_path_for(target: &P9FidTableTarget, stats: &Stats, path: &str) 
 
 fn p9_target_release(target: &P9FidTableTarget, path: &str) {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .release(path),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().release(path),
         P9FidTableTarget::Session(session) => session.fid_release(path),
     }
 }
 
 fn p9_target_remap(target: &P9FidTableTarget, from: &str, to: &str) {
     match target {
-        P9FidTableTarget::Standalone(table) => table
-            .lock()
-            .expect("9P fid table mutex poisoned")
-            .remap(from, to),
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().remap(from, to),
         P9FidTableTarget::Session(session) => session.fid_remap(from, to),
     }
 }
 
 fn p9_target_clear(target: &P9FidTableTarget) {
     match target {
-        P9FidTableTarget::Standalone(table) => {
-            table.lock().expect("9P fid table mutex poisoned").clear()
-        }
+        P9FidTableTarget::Standalone(table) => table.borrow_mut().clear(),
         P9FidTableTarget::Session(session) => session.fid_clear(),
     }
 }
@@ -2838,7 +2792,7 @@ impl P9FidTable {
     #[napi(constructor)]
     pub fn new(options: Option<P9FidTableOptions>) -> Self {
         Self {
-            inner: P9FidTableTarget::Standalone(Arc::new(TurnCell::new(TransportP9FidTable::new(
+            inner: P9FidTableTarget::Standalone(Rc::new(RefCell::new(TransportP9FidTable::new(
                 options
                     .and_then(|options| options.use_driver_ino)
                     .unwrap_or(true),

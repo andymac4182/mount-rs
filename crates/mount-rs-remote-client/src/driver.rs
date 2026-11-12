@@ -1,6 +1,5 @@
 //! FsDriver adapter over the bounded remote request protocol.
 
-use mount_rs_core::drain_gate::DrainGate;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -142,9 +141,11 @@ struct RemoteHandle {
     connection: Arc<RemoteConnection>,
     drive_id: String,
     id: u64,
-    /// Calls share the gate with one atomic increment; close drains them.
-    gate: DrainGate,
-    /// Written only while holding `gate` exclusively.
+    /// Set by close before it sends. A call that reaches the server after
+    /// the close finds the handle gone and gets `EBADF` there; one that is
+    /// ahead of it is ordered against the close by the provider's own
+    /// handle, which is where that ordering has to hold anyway, because the
+    /// server's sweeps close handles without asking any client.
     closed: AtomicBool,
 }
 
@@ -154,7 +155,6 @@ impl RemoteHandle {
         name: OperationName,
         mut body: Value,
     ) -> mount_rs_core::Result<T> {
-        let _open = self.gate.read().await;
         if self.closed.load(Ordering::Acquire) {
             return Err(FsError::new(ErrorCode::Ebadf));
         }
@@ -170,7 +170,6 @@ impl FileHandle for RemoteHandle {
     }
 
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> mount_rs_core::Result<usize> {
-        let _open = self.gate.read().await;
         if self.closed.load(Ordering::Acquire) {
             return Err(FsError::new(ErrorCode::Ebadf));
         }
@@ -182,7 +181,6 @@ impl FileHandle for RemoteHandle {
     }
 
     async fn write(&self, buffer: &[u8], position: Option<u64>) -> mount_rs_core::Result<usize> {
-        let _open = self.gate.read().await;
         if self.closed.load(Ordering::Acquire) {
             return Err(FsError::new(ErrorCode::Ebadf));
         }
@@ -211,7 +209,6 @@ impl FileHandle for RemoteHandle {
         self.call(OperationName::HandleDatasync, json!({})).await
     }
     async fn close(&self) -> mount_rs_core::Result<()> {
-        let _draining = self.gate.write().await;
         if self.closed.swap(true, Ordering::AcqRel) {
             return Err(FsError::new(ErrorCode::Ebadf));
         }
@@ -285,7 +282,6 @@ impl FsDriver for RemoteFsDriver {
                     connection: Arc::clone(&self.connection),
                     drive_id: self.drive_id.clone(),
                     id,
-                    gate: DrainGate::new(),
                     closed: AtomicBool::new(false),
                 });
                 Ok(GuardedMutationResult::Opened { handle, identity })
@@ -341,7 +337,6 @@ impl FsDriver for RemoteFsDriver {
             connection: Arc::clone(&self.connection),
             drive_id: self.drive_id.clone(),
             id,
-            gate: DrainGate::new(),
             closed: AtomicBool::new(false),
         }))
     }
@@ -361,7 +356,6 @@ impl FsDriver for RemoteFsDriver {
             connection: Arc::clone(&self.connection),
             drive_id: self.drive_id.clone(),
             id,
-            gate: DrainGate::new(),
             closed: AtomicBool::new(false),
         }))
     }
