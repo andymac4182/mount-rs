@@ -1617,4 +1617,52 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("remove host error-shape fixture");
         result.expect("host error-shape regression");
     }
+
+    /// The handle lock (`HostHandle.state`): cursor reads on one handle each
+    /// load the position, read and store it as one step, so no two return
+    /// the same range. The step is one blocking file read with no seam to
+    /// park in, so this is a race loop: four tasks read 4-byte records
+    /// through one cursor and every record must come back exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cursor_reads_on_one_handle_each_get_their_own_range() {
+        const RECORDS: u32 = 400;
+        const TASKS: u32 = 4;
+        let root = tempfile::tempdir().expect("create host cursor fixture");
+        let fs = Loopback::new(HostFs::new(root.path()));
+        let contents: Vec<u8> = (0..RECORDS).flat_map(u32::to_le_bytes).collect();
+        let writer = fs.open("/records", "w", 0o666).await.unwrap();
+        assert_eq!(
+            writer.write(&contents, Some(0)).await.unwrap(),
+            contents.len()
+        );
+        writer.close().await.unwrap();
+
+        let handle = fs.open("/records", "r", 0).await.unwrap();
+        let mut tasks = Vec::new();
+        for _ in 0..TASKS {
+            let handle = Arc::clone(&handle);
+            tasks.push(tokio::spawn(async move {
+                let mut seen = Vec::new();
+                for _ in 0..RECORDS / TASKS {
+                    let mut record = [0_u8; 4];
+                    assert_eq!(handle.read(&mut record, None).await.unwrap(), 4);
+                    seen.push(u32::from_le_bytes(record));
+                }
+                seen
+            }));
+        }
+        let mut seen = Vec::new();
+        for task in tasks {
+            seen.extend(task.await.unwrap());
+        }
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            (0..RECORDS).collect::<Vec<_>>(),
+            "two cursor reads on one handle returned the same range"
+        );
+        let mut record = [0_u8; 4];
+        assert_eq!(handle.read(&mut record, None).await.unwrap(), 0);
+        handle.close().await.unwrap();
+    }
 }

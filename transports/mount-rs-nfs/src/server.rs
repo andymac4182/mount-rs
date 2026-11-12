@@ -1798,4 +1798,238 @@ mod tests {
         assert_eq!(server.session().stats().requests, 1);
         assert!(events.snapshot().is_empty(), "close is not a write error");
     }
+
+    // ---- listen_lock ------------------------------------------------------
+
+    /// `listen` has no await between finding no address and storing the one
+    /// it bound, so two calls only meet inside it on real threads.
+    #[test]
+    fn concurrent_listens_from_real_threads_bind_one_listener() {
+        const ROUNDS: usize = if cfg!(windows) { 20 } else { 200 };
+        const CALLERS: usize = 4;
+        for round in 0..ROUNDS {
+            let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+            let barrier = std::sync::Barrier::new(CALLERS);
+            let addresses = std::thread::scope(|scope| {
+                let callers = (0..CALLERS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("test runtime");
+                            barrier.wait();
+                            runtime.block_on(server.listen()).expect("listen")
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                callers
+                    .into_iter()
+                    .map(|caller| caller.join().expect("listen caller"))
+                    .collect::<Vec<_>>()
+            });
+            let address = server.local_addr().expect("listening address");
+            assert!(
+                addresses.iter().all(|returned| *returned == address),
+                "round {round}: a caller was given a listener the server does not own: \
+                 {addresses:?}, server at {address}"
+            );
+        }
+    }
+
+    /// A file whose READ never answers and, once cancelled, does not let go
+    /// until the test says so, as a backend stuck in a blocking call does
+    /// not. Its connection lasts until a close stops waiting for it.
+    struct HeldReadDriver {
+        backing: MemoryFs,
+        entered: Arc<Notify>,
+        release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    struct HeldReadHandle {
+        inner: Arc<dyn mount_rs_core::FileHandle>,
+        entered: Arc<Notify>,
+        release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    struct HeldUntilReleased(Arc<Mutex<std::sync::mpsc::Receiver<()>>>);
+
+    impl Drop for HeldUntilReleased {
+        fn drop(&mut self) {
+            // Returns when the test sends, or drops its sender.
+            let _ = self.0.lock().unwrap().recv();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl mount_rs_core::FileHandle for HeldReadHandle {
+        async fn read(
+            &self,
+            _buffer: &mut [u8],
+            _position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            let _held = HeldUntilReleased(Arc::clone(&self.release));
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn write(
+            &self,
+            buffer: &[u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.inner.write(buffer, position).await
+        }
+
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat().await
+        }
+
+        async fn truncate(&self, length: u64) -> mount_rs_core::Result<()> {
+            self.inner.truncate(length).await
+        }
+
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            self.inner.close().await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl mount_rs_core::FsDriver for HeldReadDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.backing.capabilities()
+        }
+
+        async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.backing.stat(path).await
+        }
+
+        async fn lstat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.backing.lstat(path).await
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.backing.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            Ok(Arc::new(HeldReadHandle {
+                inner: self.backing.open(path, flags, mode).await?,
+                entered: Arc::clone(&self.entered),
+                release: Arc::clone(&self.release),
+            }))
+        }
+
+        async fn open_flags(
+            &self,
+            path: &str,
+            flags: mount_rs_core::OpenFlags,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            Ok(Arc::new(HeldReadHandle {
+                inner: self.backing.open_flags(path, flags, mode).await?,
+                entered: Arc::clone(&self.entered),
+                release: Arc::clone(&self.release),
+            }))
+        }
+    }
+
+    /// The first close is draining a connection whose READ is still in the
+    /// backend. READ holds no path lock, so nothing but `listen_lock` keeps
+    /// a second close, which finds the accept task already taken and has
+    /// nothing of its own to drain, from destroying the session under it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_second_close_waits_for_the_first_to_drain_its_connections() {
+        let backing = MemoryFs::empty();
+        let file = backing.open("/file", "w+", 0o666).await.unwrap();
+        file.close().await.unwrap();
+        let stats = mount_rs_core::FsDriver::stat(&backing, "/file")
+            .await
+            .unwrap();
+        let entered = Arc::new(Notify::new());
+        let (release, held) = std::sync::mpsc::channel();
+        let server = Arc::new(NfsServer::new(
+            HeldReadDriver {
+                backing,
+                entered: Arc::clone(&entered),
+                release: Arc::new(Mutex::new(held)),
+            },
+            NfsServerOptions::default(),
+        ));
+        let handles = &server.session().handles;
+        let file = handles.encode(&handles.bind("/file", &stats));
+        let address = server.listen().await.unwrap();
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let read = encode_call(
+            7,
+            crate::constants::NFS_PROGRAM,
+            crate::constants::NFS_V3,
+            crate::constants::NFSPROC3_READ,
+            None,
+            None,
+            &crate::xdr::encode_xdr(|writer| {
+                crate::protocol::write_read_args(
+                    writer,
+                    &crate::protocol::Read3args {
+                        file,
+                        offset: 0,
+                        count: 16,
+                    },
+                );
+            }),
+        );
+        stream
+            .write_all(&frame_record(&read).unwrap())
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("READ reaches the backend");
+
+        let first = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move { server.close().await }
+        });
+        // `closed` is set by a close that has its turn. Looking at the
+        // accept task itself would hold a reference to it, and close takes
+        // the task only when it holds the last one.
+        timeout(Duration::from_secs(5), async {
+            while !server.closed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the first close starts");
+        let second = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move { server.close().await }
+        });
+        // The held READ keeps the connection alive until the first close
+        // gives up on draining it. A second close that did not wait
+        // reaches the session at once, well inside that time.
+        let mut live_when_destroyed = None;
+        while !first.is_finished() && live_when_destroyed.is_none() {
+            if server.session().destroyed() {
+                live_when_destroyed = Some(server.connections());
+            }
+            tokio::task::yield_now().await;
+        }
+        release.send(()).unwrap();
+        assert!(
+            live_when_destroyed.is_none_or(|live| live == 0),
+            "a second close destroyed the session while the first was still draining \
+             {live_when_destroyed:?} connection(s)"
+        );
+        first.await.expect("first close task").expect("first close");
+        second
+            .await
+            .expect("second close task")
+            .expect("second close");
+        assert_eq!(server.connections(), 0);
+    }
 }

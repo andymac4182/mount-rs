@@ -1061,6 +1061,8 @@ where
                 .with_syscall(syscall)
                 .with_path(path));
         }
+        #[cfg(test)]
+        tests::after_begin();
         Ok(path)
     }
 
@@ -2159,5 +2161,175 @@ where
             file.refs = file.refs.saturating_sub(1);
         }
         self.flush_and_remove_closed(entry).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::sync::Mutex;
+    use std::task::{Context, Poll, Waker};
+
+    thread_local! {
+        /// Run once, on this thread, by the next handle call that passes
+        /// its first look at `closed`, before it takes the entry's lock:
+        /// the one place a whole close can fit between the two.
+        static AFTER_BEGIN: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn after_begin() {
+        if let Some(hook) = AFTER_BEGIN.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    fn set_after_begin(hook: impl FnOnce() + 'static) {
+        AFTER_BEGIN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    fn hook_ran() -> bool {
+        AFTER_BEGIN.with(|slot| slot.borrow().is_none())
+    }
+
+    #[derive(Clone, Default)]
+    struct Store(Arc<Mutex<HashMap<String, Vec<u8>>>>);
+
+    impl Store {
+        fn bytes(&self, key: &str) -> Option<Vec<u8>> {
+            self.0.lock().expect("store").get(key).cloned()
+        }
+    }
+
+    #[async_trait]
+    impl KeyValueStore for Store {
+        type Error = std::convert::Infallible;
+
+        async fn has_item(&self, key: &str) -> std::result::Result<bool, Self::Error> {
+            Ok(self.0.lock().expect("store").contains_key(key))
+        }
+
+        async fn get_item_raw(
+            &self,
+            key: &str,
+        ) -> std::result::Result<Option<Vec<u8>>, Self::Error> {
+            Ok(self.bytes(key))
+        }
+
+        async fn set_item_raw(
+            &self,
+            key: &str,
+            value: Vec<u8>,
+        ) -> std::result::Result<(), Self::Error> {
+            self.0.lock().expect("store").insert(key.to_owned(), value);
+            Ok(())
+        }
+
+        async fn remove_item(&self, key: &str) -> std::result::Result<(), Self::Error> {
+            self.0.lock().expect("store").remove(key);
+            Ok(())
+        }
+
+        async fn get_keys(&self, prefix: &str) -> std::result::Result<Vec<String>, Self::Error> {
+            let store = self.0.lock().expect("store");
+            Ok(store
+                .keys()
+                .filter(|key| key.starts_with(prefix))
+                .cloned()
+                .collect())
+        }
+
+        async fn get_keys_bounded(
+            &self,
+            prefix: &str,
+            _max_keys: usize,
+        ) -> std::result::Result<Option<Vec<String>>, Self::Error> {
+            self.get_keys(prefix).await.map(Some)
+        }
+    }
+
+    /// The store answers at once, so every call here finishes in one poll
+    /// on the calling thread: the hook runs a whole close in the middle of
+    /// a write with no second thread and no timing.
+    fn now<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("the in-memory store never waits"),
+        }
+    }
+
+    fn open_seeded() -> (Store, KeyValueFs<Store>, Arc<dyn FileHandle>) {
+        let store = Store::default();
+        now(store.set_item_raw("f", vec![0])).expect("seed");
+        let fs = create_unstorage_driver(store.clone(), UnstorageOptions::default());
+        let handle = now(fs.open("/f", "r+", 0)).expect("open");
+        (store, fs, handle)
+    }
+
+    /// The whole close runs after the write's first look at `closed` and
+    /// before the write takes the entry's lock. The buffer has left the
+    /// open-file table by then and nothing will save it again, so the
+    /// write must not be acknowledged.
+    #[test]
+    fn a_write_overtaken_by_the_whole_close_is_refused_not_lost() {
+        let (store, _fs, handle) = open_seeded();
+        let closing = Arc::clone(&handle);
+        set_after_begin(move || now(closing.close()).expect("close"));
+        let outcome = now(handle.write(&[7], Some(0)));
+        assert!(hook_ran(), "the close did not run inside the write");
+        if outcome.is_ok() {
+            assert_eq!(
+                store.bytes("f"),
+                Some(vec![7]),
+                "a write was acknowledged after its handle's close had returned, \
+                 and is not in the store"
+            );
+        }
+        assert_eq!(outcome.map_err(|error| error.code), Err(ErrorCode::Ebadf));
+    }
+
+    #[test]
+    fn a_truncate_overtaken_by_the_whole_close_is_refused_not_lost() {
+        let (store, _fs, handle) = open_seeded();
+        let closing = Arc::clone(&handle);
+        set_after_begin(move || now(closing.close()).expect("close"));
+        let outcome = now(handle.truncate(0));
+        assert!(hook_ran(), "the close did not run inside the truncate");
+        if outcome.is_ok() {
+            assert_eq!(
+                store.bytes("f"),
+                Some(Vec::new()),
+                "a truncate was acknowledged after its handle's close had returned, \
+                 and is not in the store"
+            );
+        }
+        assert_eq!(outcome.map_err(|error| error.code), Err(ErrorCode::Ebadf));
+    }
+
+    /// The same gap for a read. After the close, the file is rewritten
+    /// through another handle; a read let through would answer from the
+    /// buffer the close dropped, which no longer follows the file.
+    #[test]
+    fn a_read_overtaken_by_the_whole_close_does_not_answer_from_the_dropped_buffer() {
+        let (_store, fs, handle) = open_seeded();
+        let closing = Arc::clone(&handle);
+        set_after_begin(move || {
+            now(closing.close()).expect("close");
+            let other = now(fs.open("/f", "r+", 0)).expect("open other");
+            now(other.write(&[9], Some(0))).expect("write other");
+            now(other.close()).expect("close other");
+        });
+        let mut seen = [0xff];
+        let outcome = now(handle.read(&mut seen, Some(0)));
+        assert!(hook_ran(), "the close did not run inside the read");
+        if outcome.is_ok() {
+            assert_eq!(seen, [9], "a read answered from a buffer its close dropped");
+        }
+        assert_eq!(outcome.map_err(|error| error.code), Err(ErrorCode::Ebadf));
     }
 }

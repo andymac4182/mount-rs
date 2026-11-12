@@ -275,7 +275,7 @@ caller wait or excludes one. Outside it, and not in the table below:
 | crates/mount-rs-service | `PolicySlot.refresh` | A | Two requests both see the last fetch as a minute old and both fetch, breaking "at most one key fetch a minute" before authentication. With a compare-and-swap the loser cannot wait, so a valid token signed by the rotated key is rejected |
 | filesystems/mount-rs-chunked | `StateCell.mutex` | S | The handle-transition counter is read then added to. Two deciders both see it even and both add, leaving it even while both still decide; a lock-free open then takes a reference to an inode that unlink has just dropped (`ESTALE` on an open handle) |
 | filesystems/mount-rs-chunked | block cache `Index` turn | S | With a retried compare-and-swap, a losing insert has already published its block to the lock-free front: a block served from cache after its delete |
-| filesystems/mount-rs-chunked | `gate` | A | A write and a mutation batch both snapshot revision r. The batch publishes r+1; the write publishes expecting r, is rejected, and fails the volume closed: a healthy single owner poisons itself |
+| filesystems/mount-rs-chunked | `gate` | A | A write and a mutation batch both snapshot revision r. The batch publishes r+1; the write publishes expecting r, is rejected, and fails the volume closed: a healthy single owner poisons itself. The test shows the mirror image, where the write publishes first and the mutation is the one rejected |
 | filesystems/mount-rs-chunked | `lease_gate` | A | A publisher takes the cached lease token; the heartbeat renews it; the publish goes out with the old token, is rejected, and fails the volume closed |
 | filesystems/mount-rs-chunked | `lifecycle` | A | A write holds it shared while uploading blocks. Without the drain, shutdown releases the lease and returns; the write then fails after its blocks are stored (orphan blocks), and reads still call the block store after shutdown returned |
 | filesystems/mount-rs-chunked | `ChunkedHandle.gate` | A | Two cursor reads both load position p and both store p+n (the same bytes twice). Two closes both pass the closed check and both release the reference: the inode is reaped under an open handle |
@@ -288,9 +288,9 @@ caller wait or excludes one. Outside it, and not in the table below:
 | filesystems/mount-rs-memfs | `MemoryFs.inner` | S | Two cursor writes both load the position and write at p. Reserving the position first breaks short reads (the cursor ends past end of file and the next write leaves a hole). The node map and the quota counters also change in the same step |
 | filesystems/mount-rs-persist | `SaveGate.lock` | A | Save 1 snapshots; save 2 snapshots a superset and writes; save 1's write lands last: an acknowledged write is gone after restart. A versioned store turns that into a conflict error on a write that already succeeded in memory |
 | filesystems/mount-rs-versioned | `ViewLifetime.state` | A | Two begins both copy the pin and both renew it. The first rotates the pin; the second fails its exact-expiry check and closes a healthy view |
-| filesystems/mount-rs-versioned | `HistoricalFileHandle.admission` | A | Two closes both see "open" and both release: the view pin is released under another open handle. A flag cannot stand in, because a close that fails at the provider leaves the handle open and a second closer must wait to learn which. Reads hold it shared, so close does not release the pin under a read that already passed the closed check |
+| filesystems/mount-rs-versioned | `HistoricalFileHandle.admission` | A | Two closes both see "open" and both release: the view pin is released under another open handle. A flag cannot stand in, because a close that fails at the provider leaves the handle open and a second closer must wait to learn which. Reads hold it shared, so a close does not return while a read is still running. The view's own operation count, not this, is what keeps the pin under a read |
 | providers/mount-rs-object-store-blocks | cache `ObjectStoreBlockCache.state` | S | The section publishes to and retracts from the lock-free front. With compare-and-swap, A inserts X; B removes X and retracts nothing; A then publishes X: X is in the front but not the index and is served for ever |
-| providers/mount-rs-slatedb | `SlateDbMetadataStore.state` | A | Held across the persisted write. A publish starts writing {rev 6, fence 3}; the lease expires and an acquire writes {rev 5, fence 4}; the publish lands second. Disk says fence 3, and after reopen fence 4 is issued twice |
+| providers/mount-rs-slatedb | `SlateDbMetadataStore.state` | A | Held across the persisted write. A publish starts writing {rev 6, fence 3}; the lease expires and an acquire writes {rev 5, fence 4}; the publish lands second. Disk says fence 3, and after reopen fence 4 is issued twice. In the test the same overlap shows as the publish's acknowledged revision being overwritten |
 | transports/mount-rs-9p | `MountState.release` | A | The monitor is inside `server.close`, awaiting client closes with the socket file still present; an unmount sees its own `server.close` return at once (the server is already marked closed) and removes the directory before the socket file is gone: `ENOTEMPTY`, and unmount reports failure for a mount that is gone. A failed release must also be retryable, so a write-once flag does not fit |
 | transports/mount-rs-9p | `P9Server.adoption` | A | Held across the `mount` subprocess. Two mounts on one shared server both snapshot the client set and both run `mount`; each adopts the first connection not in its snapshot, so both adopt the same one. One mount then watches the other's kernel connection (its `active()`, `wait_closed` and monitor answer for the wrong mount) and one kernel connection has no monitor at all. A connection carries nothing that names its mount, so there is no cheaper way to pair them |
 | transports/mount-rs-9p | `SessionInner.state` | S | Two opens of one fid both pass the "not open" check and both open a backend handle; the first is never closed. A copied snapshot copies an unbounded fid table per walk step |
@@ -305,6 +305,60 @@ caller wait or excludes one. Outside it, and not in the table below:
 | vendor/tunnel-transport | per-destination dial gate (`DialLocks`) | A | Two connects to one destination both miss the pool and both dial; the second insert replaces the first, which is then outside the pool and missed by shutdown. Inserting by compare-and-swap and closing the loser would fix that, but every racing caller would still dial and take a connection permit, so a reconnect burst turns into capacity errors |
 | vendor/quinn-proto | `TokenMemoryCache` | S | A map with its order list. Two lock-free versions were built and measured slower: see below |
 | vendor/quinn-proto | `BloomTokenLog`, `QlogStream` | S, R | Not compiled in this workspace (their features are off). A filter turnover racing an insert accepts a replayed token; the qlog writer is used through `&mut` |
+
+**Checked by experiment.** Each row above was first argued from the code.
+Each lock below was then neutralised in a throwaway edit (the acquisition
+made a no-op, or the guard dropped at once), the named test was seen to
+fail, and the code was restored. "New" tests were written for this; the
+others already existed. A stress test races threads because the guarded
+step has nowhere to park a caller.
+
+| Lock | Test | Seen without the lock |
+|------|------|-----------------------|
+| chunked `Fill.turn` | `concurrent_misses_share_fill_and_cancelled_leader_releases_waiters` | Every waiter went to the backing store |
+| chunked block cache index turn | `fills_and_puts_racing_deletes_never_leave_a_deleted_block_cached` (stress) | A block cached after its delete returned |
+| chunked `StateCell.mutex` | `lock_free_opens_and_closes_stay_consistent_with_unlinks` (stress) | `ESTALE` reading an open handle |
+| chunked `gate` | new `a_handle_write_cannot_publish_between_a_mutations_snapshot_and_its_publication` | Metadata revision conflict |
+| chunked `lease_gate` | `heartbeat_renewal_cannot_replace_the_lease_during_publication` | The heartbeat ran during a publication |
+| chunked `lifecycle` | new `shutdown_waits_for_a_write_that_is_uploading_blocks` | Shutdown returned during the upload |
+| chunked `ChunkedHandle.gate` | new `cursor_reads_on_one_handle_take_turns`, new `two_closes_of_one_handle_release_one_reference` (stress) | Two reads returned one range; two closes released another handle's reference |
+| host `DiskCachedBlockStore.io` | new `delete_waits_for_a_read_in_flight_so_its_fill_cannot_outlive_the_delete` | A cached copy of a deleted block left on disk |
+| host disk cache index turn | `concurrent_read_fill_clear_and_delete_preserve_bytes_and_bounds` (stress) | Size bound exceeded; aborts |
+| host `HostHandle.state` | new `concurrent_cursor_reads_on_one_handle_each_get_their_own_range` (stress) | Two reads returned one range. The close half of the row is argued only |
+| blob cache flight `Entry.turn` | `hundred_simultaneous_cold_reads_coalesce_to_one_backing_get` | 64 fetches instead of 1 |
+| blob cache `PeerLink.dial` | `concurrent_requests_dial_a_peer_once_and_replace_a_closed_connection_once` | 64 dials instead of 1 |
+| blob cache `LocalCache.files` | `an_invalidation_waits_for_an_insert_whose_file_is_not_yet_indexed` | Invalidation returned with the file on disk |
+| cluster coalesce `Entry.turn` | new `concurrent_requests_on_a_cold_route_make_one_registry_lookup` (needs `--features http3`, which CI does not build) | 8 registry lookups instead of 1 |
+| cluster `Slot.gate` | new `a_second_close_waits_for_the_first_and_the_handle_is_closed_once`, `close_waits_for_a_read_that_is_inside_the_handle`, `cursor_reads_enter_the_handle_one_at_a_time` | Handle closed twice; closed under a read; two cursor reads inside together |
+| cluster `path_operations` | `close_waits_for_admitted_path_operation` | Close finished under a path operation |
+| remote client `renew_lock` | new `a_renewal_waits_for_the_one_in_flight_and_agrees_with_the_server` | Client scheduled renewal by a token the server had replaced |
+| service `PolicySlot.refresh` | new `two_requests_for_a_policy_with_no_keys_share_one_fetch`, `two_requests_refused_by_stale_keys_share_one_fetch_and_both_get_the_new_keys` | Two fetches; the request that did not fetch kept stale keys |
+| kv `OpenEntry.file` | new `cursor_writes_racing_on_one_handle_each_land_at_their_own_offset` (stress), `an_open_never_lands_on_a_buffer_the_last_close_dropped` (stress) | Lost cursor writes; a second buffer for one file |
+| kv `OpenEntry.saving` | `overlapping_flushes_of_one_file_reach_the_store_in_order` | Older bytes stored last |
+| kv re-check that the handle is still open | new `a_write_overtaken_by_the_whole_close_is_refused_not_lost` and two like it for truncate and read | A write acknowledged after close returned, missing from the store |
+| memfs `MemoryFs.inner` | new `cursor_writes_racing_on_one_handle_each_land_at_their_own_offset` (stress) | Lost cursor writes |
+| persist `SaveGate` | new `a_newer_save_waits_for_the_older_one_in_flight` | The newer save finished first |
+| versioned `ViewLifetime.state` | new `a_second_operation_waits_for_the_first_ones_pin_renewal` | The first operation lost its pin |
+| versioned `HistoricalFileHandle.admission` | new `a_second_close_of_one_handle_does_not_release_another_handles_pin`, `positional_reads_overlap_without_releasing_close_or_cursor_admission` | Pin released under an open handle; close returned during reads |
+| object-store blocks `ObjectStoreBlockCache.state` | new `racing_inserts_and_removes_leave_the_front_agreeing_with_the_index` (stress) | A block served from a payload the index had replaced |
+| slatedb `SlateDbMetadataStore.state` | new `an_acquire_waits_for_a_publish_whose_write_is_in_flight` | The acknowledged revision was overwritten |
+| sqlite-vfs `StorageVolume.state` | new `a_delete_waits_for_a_commit_that_is_publishing` | The commit was refused as busy |
+| NFS `unmount_lock` | new `a_second_unmount_waits_for_one_in_its_force_ladder` | An unmount reported success with the mount still marked mounted |
+| NFS `listen_lock` | new `concurrent_listens_from_real_threads_bind_one_listener` (stress), `a_second_close_waits_for_the_first_to_drain_its_connections` | Four listeners bound; session destroyed during a drain |
+| NFS path locks (v3, v4, shared) | new `v3_remove_waits_for_a_v3_lookup_between_stat_and_bind` and three like it for the other pairings | A handle still bound to the removed name |
+| NFS `Nfs4Session.state` | new `concurrent_retransmissions_of_one_slot_sequence_run_the_request_once` (stress), `concurrent_conflicting_locks_from_two_owners_grant_exactly_one` (stress) | A request run twice; one exclusive range granted to two owners. The second handle in `InFlightSlot`'s drop is argued only |
+| 9P `MountState.release` | new `a_second_release_waits_for_the_one_closing_the_server` | The second release failed on a directory not yet emptied |
+| 9P `P9Server.adoption` | new `native_linux_concurrent_mounts_on_one_server_adopt_distinct_connections` (Linux native job only) | Two mounts adopted one kernel connection |
+| 9P `SessionInner.state` | new `concurrent_set_open_admits_one_caller_per_fid` (stress) | A fid opened by two callers |
+| 9P `path_lock` | new `rename_waits_for_a_walk_under_the_renamed_directory`, `remove_waits_for_a_rename_of_its_parent_and_removes_the_new_path` | A fid naming a path the rename removed |
+| S3 conditional-put gate | `conditional_puts_serialize_compare_and_swap_checks` | A second precondition saw the old ETag |
+| WebDAV `lifecycle` | new `close_waits_for_a_listen_that_has_not_stored_its_task` (skips where `localhost.` does not resolve) | Close returned with the server still accepting |
+| tunnel dial gate | `concurrent_cold_checkouts_share_one_connection_and_close_removes_the_slot` | Every caller dialled and the pool ran out of permits, so inserting by compare-and-swap would not be enough |
+
+Not checked this way: the two napi locks (`close_gate`, whose JavaScript
+test needs the built addon, and `native_delegation_mounts`, reachable only
+through a Linux FUSE mount), and quinn's `BloomTokenLog` and `QlogStream`,
+which are not compiled here.
 
 **Kept because the replacement measured slower.** For each of these the
 removal was built, tested and benchmarked against the lock, then reverted.

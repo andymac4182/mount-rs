@@ -786,6 +786,172 @@ mod tests {
         session.close().await.unwrap();
     }
 
+    /// A handle whose calls park until the test lets them go, and which
+    /// records what the session let into it at once.
+    struct Parked {
+        entered: tokio::sync::Semaphore,
+        release: tokio::sync::Semaphore,
+        inside: AtomicUsize,
+        most_inside: AtomicUsize,
+        closes: AtomicUsize,
+        closed_over_a_call: AtomicBool,
+    }
+    type Call<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>;
+    impl Parked {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: tokio::sync::Semaphore::new(0),
+                release: tokio::sync::Semaphore::new(0),
+                inside: AtomicUsize::new(0),
+                most_inside: AtomicUsize::new(0),
+                closes: AtomicUsize::new(0),
+                closed_over_a_call: AtomicBool::new(false),
+            })
+        }
+        async fn park(&self) {
+            self.entered.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+        }
+        async fn call(&self) -> Result<usize> {
+            let inside = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most_inside.fetch_max(inside, Ordering::SeqCst);
+            self.park().await;
+            self.inside.fetch_sub(1, Ordering::SeqCst);
+            Ok(0)
+        }
+        async fn entered(&self) {
+            self.entered.acquire().await.unwrap().forget();
+        }
+    }
+    impl FileHandle for Parked {
+        fn read<'a, 'b, 'c>(&'a self, _: &'b mut [u8], _: Option<u64>) -> Call<'c, usize>
+        where
+            'a: 'c,
+            'b: 'c,
+            Self: 'c,
+        {
+            Box::pin(self.call())
+        }
+        fn write<'a, 'b, 'c>(&'a self, _: &'b [u8], _: Option<u64>) -> Call<'c, usize>
+        where
+            'a: 'c,
+            'b: 'c,
+            Self: 'c,
+        {
+            Box::pin(self.call())
+        }
+        fn stat<'a, 'c>(&'a self) -> Call<'c, Stats>
+        where
+            'a: 'c,
+            Self: 'c,
+        {
+            Box::pin(async { Err(error(ErrorCode::Ebadf, "fstat")) })
+        }
+        fn truncate<'a, 'c>(&'a self, _: u64) -> Call<'c, ()>
+        where
+            'a: 'c,
+            Self: 'c,
+        {
+            Box::pin(async { self.call().await.map(|_| ()) })
+        }
+        fn close<'a, 'c>(&'a self) -> Call<'c, ()>
+        where
+            'a: 'c,
+            Self: 'c,
+        {
+            Box::pin(async {
+                self.closes.fetch_add(1, Ordering::SeqCst);
+                if self.inside.load(Ordering::SeqCst) != 0 {
+                    self.closed_over_a_call.store(true, Ordering::SeqCst);
+                }
+                self.park().await;
+                Ok(())
+            })
+        }
+    }
+    async fn parked_fixture() -> (Arc<Filesystem>, Arc<OwnedHandleSession>, Arc<Parked>, u64) {
+        let (fs, session) = fixture(1).await;
+        let handle = Parked::new();
+        let opened: Arc<dyn FileHandle> = handle.clone();
+        let id = session.open_with(async { Ok(opened) }).await.unwrap();
+        (fs, session, handle, id)
+    }
+    /// Lets every task that can run without the handle's release run.
+    async fn settle() {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_close_waits_for_the_first_and_the_handle_is_closed_once() {
+        let (fs, session, handle, id) = parked_fixture().await;
+        let closer = |session: Arc<OwnedHandleSession>| {
+            tokio::spawn(async move { session.close_handle(id).await })
+        };
+        let first = closer(session.clone());
+        handle.entered().await;
+        // The first close is inside the handle and has not returned.
+        let second = closer(session.clone());
+        settle().await;
+        handle.release.add_permits(2);
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(
+            handle.closes.load(Ordering::SeqCst),
+            1,
+            "two closes both called the handle's close"
+        );
+        session.close().await.unwrap();
+        fs.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_waits_for_a_read_that_is_inside_the_handle() {
+        let (fs, session, handle, id) = parked_fixture().await;
+        let reading = session.clone();
+        let read = tokio::spawn(async move { reading.read(id, &mut [0; 1], Some(0)).await });
+        handle.entered().await;
+        let closing = session.clone();
+        let close = tokio::spawn(async move { closing.close_handle(id).await });
+        settle().await;
+        assert_eq!(
+            handle.closes.load(Ordering::SeqCst),
+            0,
+            "close ran while a read was inside the handle"
+        );
+        handle.release.add_permits(2);
+        read.await.unwrap().unwrap();
+        close.await.unwrap().unwrap();
+        assert!(!handle.closed_over_a_call.load(Ordering::SeqCst));
+        assert_eq!(handle.closes.load(Ordering::SeqCst), 1);
+        session.close().await.unwrap();
+        fs.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cursor_reads_enter_the_handle_one_at_a_time() {
+        let (fs, session, handle, id) = parked_fixture().await;
+        let reader = |session: Arc<OwnedHandleSession>| {
+            tokio::spawn(async move { session.read(id, &mut [0; 1], None).await })
+        };
+        let first = reader(session.clone());
+        handle.entered().await;
+        let second = reader(session.clone());
+        settle().await;
+        handle.release.add_permits(2);
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        assert_eq!(
+            handle.most_inside.load(Ordering::SeqCst),
+            1,
+            "two cursor reads were inside the handle together"
+        );
+        handle.release.add_permits(1);
+        session.close().await.unwrap();
+        fs.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn concurrent_cursor_reads_consume_each_byte_once() {
         let (fs, session) = fixture(1).await;

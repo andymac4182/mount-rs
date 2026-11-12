@@ -2519,6 +2519,10 @@ mod tests {
         rename_done: Notify,
         rename_release: Notify,
         removed: Mutex<Vec<String>>,
+        /// A path whose `lstat` is held after it has answered.
+        hold_lstat: Option<String>,
+        lstat_done: Notify,
+        lstat_release: Notify,
     }
 
     impl RaceDriver {
@@ -2532,6 +2536,9 @@ mod tests {
                 rename_done: Notify::new(),
                 rename_release: Notify::new(),
                 removed: Mutex::new(Vec::new()),
+                hold_lstat: None,
+                lstat_done: Notify::new(),
+                lstat_release: Notify::new(),
             }
         }
 
@@ -2624,7 +2631,14 @@ mod tests {
             'b: 'async_trait,
             Self: 'async_trait,
         {
-            Box::pin(async move { self.inner.lstat(path).await })
+            Box::pin(async move {
+                let stats = self.inner.lstat(path).await?;
+                if self.hold_lstat.as_deref() == Some(path) {
+                    self.lstat_done.notify_one();
+                    self.lstat_release.notified().await;
+                }
+                Ok(stats)
+            })
         }
 
         fn readdir<'a, 'b, 'async_trait>(
@@ -2901,5 +2915,124 @@ mod tests {
         assert!(driver.inner.stat("/moved/file").await.is_err());
         assert!(driver.inner.stat("/moved").await.is_ok());
         assert!(!session.has_fid(3));
+    }
+
+    /// A Twalk has read its fid's path and found the child when a rename of
+    /// that directory arrives. The rename waits for the walk, so the new fid
+    /// is stored first and then renamed with every other fid. Without the
+    /// path gate the rename would finish first and the walk would then store
+    /// a path that no longer exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rename_waits_for_a_walk_under_the_renamed_directory() {
+        let memory = MemoryFs::empty();
+        memory.mkdir("/a", MkdirOptions::default()).await.unwrap();
+        memory.write_file("/a/x", b"content").await.unwrap();
+        let mut driver = RaceDriver::new(memory);
+        driver.hold_lstat = Some("/a/x".to_owned());
+        let driver = Arc::new(driver);
+        let session = P9Session::from_arc(Arc::clone(&driver) as Arc<dyn FsDriver>);
+        session.inner.msize.store(8192, Ordering::SeqCst);
+        session.fid_create(1, "/").unwrap();
+        session.fid_create(2, "/a").unwrap();
+
+        let walk = encode_message(P9_TWALK, 31, 64, |writer| {
+            write_twalk(
+                writer,
+                &Twalk {
+                    fid: 2,
+                    newfid: 3,
+                    wnames: vec!["x".to_owned()],
+                },
+            )
+        })
+        .unwrap();
+        let walk_session = session.clone();
+        let walk = tokio::spawn(async move { walk_session.handle_call(&walk).await.unwrap() });
+        timeout(Duration::from_secs(5), driver.lstat_done.notified())
+            .await
+            .expect("the walk finds /a/x and stops in the driver");
+
+        let rename = encode_message(P9_TRENAME, 32, 64, |writer| {
+            write_trename(
+                writer,
+                &Trename {
+                    fid: 2,
+                    dfid: 1,
+                    name: "b".to_owned(),
+                },
+            )
+        })
+        .unwrap();
+        let rename_session = session.clone();
+        let mut rename =
+            tokio::spawn(async move { rename_session.handle_call(&rename).await.unwrap() });
+        let early = timeout(Duration::from_millis(300), &mut rename).await;
+
+        driver.lstat_release.notify_one();
+        let reply = timeout(Duration::from_secs(5), walk)
+            .await
+            .expect("the walk finishes")
+            .unwrap();
+        assert_eq!(decode_message(&reply).unwrap().0.type_, P9_RWALK);
+        let reply = match early {
+            Ok(reply) => reply.unwrap(),
+            Err(_) => timeout(Duration::from_secs(5), rename)
+                .await
+                .expect("the rename runs after the walk")
+                .unwrap(),
+        };
+        assert_eq!(decode_message(&reply).unwrap().0.type_, P9_RRENAME);
+
+        assert!(driver.inner.stat("/b/x").await.is_ok());
+        assert_eq!(session.fid_snapshot(2).unwrap().path, "/b");
+        assert_eq!(
+            session.fid_snapshot(3).unwrap().path,
+            "/b/x",
+            "the walked fid names a path the rename removed"
+        );
+    }
+
+    /// Many threads try to open the same fids. `set_open` checks that the
+    /// fid is not open and stores the open state in one section of the
+    /// session state, so each fid is opened by exactly one caller. This is
+    /// a stress loop: the section is synchronous and has no seam to park in.
+    #[test]
+    fn concurrent_set_open_admits_one_caller_per_fid() {
+        const THREADS: usize = 4;
+        const FIDS: u32 = 20_000;
+        const BATCH: u32 = 50;
+
+        let session = P9Session::new(MemoryFs::empty());
+        for fid in 0..FIDS {
+            session.fid_create(fid, "/").unwrap();
+        }
+        let barrier = std::sync::Barrier::new(THREADS);
+        let wins = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    for batch in 0..FIDS / BATCH {
+                        barrier.wait();
+                        for fid in batch * BATCH..(batch + 1) * BATCH {
+                            let open = FidOpenState {
+                                flags: reopen_flags(OpenFlags::from_bits(0)),
+                                wire_flags: 0,
+                                handle: None,
+                                directory: true,
+                                qid: None,
+                            };
+                            if session.set_open(fid, open).is_ok() {
+                                wins.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            wins.load(Ordering::Relaxed),
+            u64::from(FIDS),
+            "a fid was opened by two callers"
+        );
     }
 }

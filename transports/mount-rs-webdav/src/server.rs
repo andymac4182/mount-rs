@@ -1130,4 +1130,55 @@ mod tests {
 
         task.abort();
     }
+
+    /// A `close` that arrives while `listen` has passed its checks but not
+    /// yet stored its accept task waits for it, and then stops the listener
+    /// it started. Without the lifecycle lock the close would find no task,
+    /// return Ok, and leave the server accepting.
+    ///
+    /// `listen` only waits in one place: resolving a host name. `localhost.`
+    /// is not the literal `localhost`, so it goes to the resolver, which
+    /// answers from another thread. Where that name gives no address the
+    /// host can bind, or resolves before the first poll returns, there is no
+    /// interleaving to check and the test says so.
+    #[tokio::test]
+    async fn close_waits_for_a_listen_that_has_not_stored_its_task() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let server = super::WebdavServer::new(
+            Arc::new(mount_rs_memfs::MemoryFs::empty()),
+            super::WebdavServerOptions {
+                host: "localhost.".to_owned(),
+                ..super::WebdavServerOptions::default()
+            },
+            super::WebdavServerHooks::default(),
+            super::WebdavSessionHooks::default(),
+        );
+        let mut listen = std::pin::pin!(server.listen());
+        if std::future::poll_fn(|cx| Poll::Ready(listen.as_mut().poll(cx)))
+            .await
+            .is_ready()
+        {
+            eprintln!("skipped: listen did not wait for the resolver");
+            let _ = server.close().await;
+            return;
+        }
+        let mut close = std::pin::pin!(server.close());
+        let early = std::future::poll_fn(|cx| Poll::Ready(close.as_mut().poll(cx))).await;
+        if listen.await.is_err() {
+            eprintln!("skipped: `localhost.` gave no address this host can bind");
+            return;
+        }
+        let closed = match early {
+            Poll::Ready(closed) => closed,
+            Poll::Pending => close.await,
+        };
+        closed.expect("close");
+        let lifecycle = server.lifecycle.try_lock().expect("nothing holds the lock");
+        assert!(
+            !task_is_running(lifecycle.task.as_ref()),
+            "close returned Ok and the server is still accepting"
+        );
+    }
 }

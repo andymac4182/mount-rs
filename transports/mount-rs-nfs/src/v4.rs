@@ -5719,6 +5719,11 @@ mod tests {
         let file = backing.open("/file", "w+", 0o666).await.unwrap();
         file.close().await.unwrap();
         let session = Nfs4Session::new(backing, options);
+        add_race_client(&session);
+        session
+    }
+
+    fn add_race_client(session: &Nfs4Session) {
         session.state.lock().unwrap().clients.insert(
             RACE_CLIENT,
             super::ClientState {
@@ -5732,7 +5737,6 @@ mod tests {
                 create_session_replay: None,
             },
         );
-        session
     }
 
     fn root_cursor(session: &Nfs4Session) -> super::Cursor {
@@ -6190,5 +6194,354 @@ mod tests {
                 std::panic::resume_unwind(panic);
             }
         });
+    }
+
+    // ---- lock guards ------------------------------------------------------
+    //
+    // Each test below fails when the exclusion it names is taken away.
+
+    const WIRE_SESSION: [u8; super::NFS4_SESSIONID_SIZE] = [9; super::NFS4_SESSIONID_SIZE];
+
+    /// Give `RACE_CLIENT` a session with `slots` unused slots.
+    fn add_wire_session(session: &Nfs4Session, slots: usize) {
+        session.state.lock().unwrap().sessions.insert(
+            WIRE_SESSION,
+            super::SessionState {
+                clientid: RACE_CLIENT,
+                next_sequence: vec![1; slots],
+                in_flight: vec![None; slots],
+                cached: vec![None; slots],
+                max_operations: 3,
+                max_cached: 1024,
+            },
+        );
+    }
+
+    /// The arguments of SEQUENCE, PUTROOTFH and `op` on `name` in the root.
+    fn root_name_compound(slot: u32, sequence: u32, op: u32, name: &str) -> Vec<u8> {
+        let mut writer = crate::XdrWriter::new();
+        writer.string("lock-guard");
+        writer.u32(super::NFS4_MINOR_VERSION_1);
+        writer.u32(3);
+        writer.u32(super::OP_SEQUENCE);
+        writer.fixed_opaque(&WIRE_SESSION, super::NFS4_SESSIONID_SIZE);
+        writer.u32(sequence);
+        writer.u32(slot);
+        writer.u32(slot);
+        writer.bool(true);
+        writer.u32(super::OP_PUTROOTFH);
+        writer.u32(op);
+        writer.string(name);
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn concurrent_retransmissions_of_one_slot_sequence_run_the_request_once() {
+        const ROUNDS: usize = stress_rounds(2_000);
+        const REQUESTS: usize = 4;
+        let credentials = crate::rpc::RpcCredentials {
+            flavor: crate::rpc::AUTH_NONE,
+            uid: None,
+            gid: None,
+            gids: Vec::new(),
+        };
+        for round in 0..ROUNDS {
+            let session = block_on(race_session(NfsSessionOptions::default()));
+            add_wire_session(&session, 1);
+            // Admission has no await between reading the slot and marking
+            // it in flight, so only real threads can meet inside it.
+            let body = root_name_compound(0, 1, super::OP_REMOVE, "file");
+            let replies = race(REQUESTS, |index| {
+                let (session, body, credentials) = (&session, &body, &credentials);
+                async move {
+                    let mut reader = crate::XdrReader::new(body);
+                    session
+                        .dispatch_compound(&mut reader, credentials, None, index as u32)
+                        .await
+                        .expect("dispatch REMOVE COMPOUND")
+                }
+            });
+            let statuses = replies
+                .iter()
+                .map(|reply| crate::XdrReader::new(reply).u32("status").unwrap())
+                .collect::<Vec<_>>();
+            // REMOVE is not idempotent: run twice, the second answers
+            // NOENT. A copy that arrives while the first runs is told to
+            // wait, and one that arrives after it is given its reply.
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| matches!(*status, super::NFS4_OK | super::NFS4ERR_DELAY)),
+                "round {round}: one (session, slot, sequence) ran more than once: {statuses:?}"
+            );
+            let answered = replies
+                .iter()
+                .zip(&statuses)
+                .filter(|(_, status)| **status == super::NFS4_OK)
+                .map(|(reply, _)| reply)
+                .collect::<Vec<_>>();
+            assert!(!answered.is_empty(), "round {round}: {statuses:?}");
+            assert!(
+                answered.windows(2).all(|pair| pair[0] == pair[1]),
+                "round {round}: a replay must repeat the first reply"
+            );
+            let state = session.state.lock().unwrap();
+            assert_eq!(state.sessions[&WIRE_SESSION].in_flight, [None]);
+            assert_eq!(state.sessions[&WIRE_SESSION].next_sequence, [2]);
+        }
+    }
+
+    #[test]
+    fn concurrent_conflicting_locks_from_two_owners_grant_exactly_one() {
+        const ROUNDS: usize = stress_rounds(3_000);
+        for round in 0..ROUNDS {
+            let session = block_on(race_session(NfsSessionOptions::default()));
+            let mut cursors = Vec::new();
+            for owner in [b"open-a".as_slice(), b"open-b".as_slice()] {
+                let (status, cursor) = block_on(open_file(
+                    &session,
+                    owner,
+                    super::OPEN4_SHARE_ACCESS_BOTH,
+                    super::OPEN4_SHARE_DENY_NONE,
+                ));
+                assert_eq!(status, super::NFS4_OK);
+                cursors.push(cursor);
+            }
+            // Two lock-owners ask for the same exclusive range. The conflict
+            // scan and the insert have no await between them.
+            let statuses = race(2, |index| {
+                let session = &session;
+                let mut cursor = cursors[index].clone();
+                let locker = super::Locker4 {
+                    new_lock_owner: true,
+                    open_stateid: Some(cursor.stateid.clone()),
+                    lock_stateid: None,
+                    owner: format!("lock-owner-{index}").into_bytes(),
+                };
+                async move {
+                    session
+                        .lock(super::WRITE_LT, false, 0, 100, &locker, &mut cursor)
+                        .await
+                        .status
+                }
+            });
+            let count = |wanted: u32| statuses.iter().filter(|status| **status == wanted).count();
+            assert_eq!(
+                (count(super::NFS4_OK), count(super::NFS4ERR_DENIED)),
+                (1, 1),
+                "round {round}: two owners were granted one exclusive range: {statuses:?}"
+            );
+            let state = session.state.lock().unwrap();
+            let held = state
+                .locks
+                .values()
+                .map(|lock| lock.ranges.len())
+                .sum::<usize>();
+            assert_eq!(held, 1, "round {round}: one exclusive range is held");
+        }
+    }
+
+    /// A driver that holds one stat of `/victim` after the backing has
+    /// answered it: the caller knows the file is there and has not yet
+    /// acted on knowing it.
+    #[derive(Clone)]
+    struct ParkedStat {
+        backing: MemoryFs,
+        armed: Arc<std::sync::atomic::AtomicBool>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl ParkedStat {
+        async fn park(&self, path: &str) {
+            use std::sync::atomic::Ordering;
+            if path == "/victim" && self.armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FsDriver for ParkedStat {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.backing.capabilities()
+        }
+
+        async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            let stats = self.backing.stat(path).await?;
+            self.park(path).await;
+            Ok(stats)
+        }
+
+        async fn lstat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            let stats = self.backing.lstat(path).await?;
+            self.park(path).await;
+            Ok(stats)
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.backing.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            self.backing.open(path, flags, mode).await
+        }
+
+        async fn open_flags(
+            &self,
+            path: &str,
+            flags: mount_rs_core::OpenFlags,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            self.backing.open_flags(path, flags, mode).await
+        }
+
+        async fn unlink(&self, path: &str) -> mount_rs_core::Result<()> {
+            self.backing.unlink(path).await
+        }
+    }
+
+    /// One NFSv3 call that takes a directory handle and a name; its status.
+    async fn v3_root_name_call(session: &crate::Nfs3Session, procedure: u32, name: &str) -> u32 {
+        let arguments = crate::xdr::encode_xdr(|writer| {
+            crate::protocol::write_dir_op(
+                writer,
+                &crate::protocol::DirOpArgs {
+                    dir: session.handles.encode(&session.handles.root()),
+                    name: name.to_owned(),
+                },
+            );
+        });
+        let call = encode_call(
+            1,
+            crate::NFS_PROGRAM,
+            crate::NFS_V3,
+            procedure,
+            None,
+            None,
+            &arguments,
+        );
+        let reply = session
+            .handle_call(&call, crate::NfsRequestContext::default())
+            .await
+            .expect("NFSv3 reply");
+        let (_, mut body) = decode_reply(&reply).expect("decode NFSv3 reply");
+        body.u32("nfsstat3").expect("NFSv3 status")
+    }
+
+    /// One NFSv4 COMPOUND, through the entry that takes the path lock.
+    async fn v4_root_name_call(session: &Nfs4Session, slot: u32, op: u32, name: &str) -> u32 {
+        let call = encode_call(
+            1,
+            NFS4_PROGRAM,
+            NFS_V4,
+            super::NFSPROC4_COMPOUND,
+            None,
+            None,
+            &root_name_compound(slot, 1, op, name),
+        );
+        let reply = session
+            .handle_call(&call, crate::NfsRequestContext::default())
+            .await
+            .expect("NFSv4 reply");
+        let (_, mut body) = decode_reply(&reply).expect("decode NFSv4 reply");
+        body.u32("COMPOUND status").expect("COMPOUND status")
+    }
+
+    /// A LOOKUP of `/victim` is held between its stat and its bind while a
+    /// REMOVE of the same name arrives, each over either protocol version
+    /// of one server. The REMOVE must wait: were it to run first, the
+    /// LOOKUP would then bind a handle to a name that is gone, and the next
+    /// file created there would be reached through that handle.
+    async fn remove_waits_for_a_lookup_between_stat_and_bind(lookup_v4: bool, remove_v4: bool) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let driver = ParkedStat {
+            backing: MemoryFs::empty(),
+            armed: Arc::new(AtomicBool::new(false)),
+            entered: Arc::default(),
+            release: Arc::default(),
+        };
+        let file = driver.backing.open("/victim", "w+", 0o666).await.unwrap();
+        file.close().await.unwrap();
+        let v3 = crate::Nfs3Session::new(driver.clone(), NfsSessionOptions::default());
+        let v4 = Nfs4Session::from_loopback_shared(
+            v3.driver.clone(),
+            NfsSessionOptions::default(),
+            &v3.shared_state(),
+        );
+        add_race_client(&v4);
+        add_wire_session(&v4, 2);
+
+        driver.armed.store(true, Ordering::SeqCst);
+        let lookup = tokio::spawn({
+            let (v3, v4) = (v3.clone(), v4.clone());
+            async move {
+                if lookup_v4 {
+                    v4_root_name_call(&v4, 0, super::OP_LOOKUP, "victim").await
+                } else {
+                    v3_root_name_call(&v3, crate::NFSPROC3_LOOKUP, "victim").await
+                }
+            }
+        });
+        driver.entered.notified().await;
+        let remove = tokio::spawn({
+            let (v3, v4) = (v3.clone(), v4.clone());
+            async move {
+                if remove_v4 {
+                    v4_root_name_call(&v4, 1, super::OP_REMOVE, "victim").await
+                } else {
+                    v3_root_name_call(&v3, crate::NFSPROC3_REMOVE, "victim").await
+                }
+            }
+        });
+        // The REMOVE either queues at its session's gate, which closes the
+        // gate to new shared entries, or runs to its end.
+        let gate = if remove_v4 {
+            Arc::clone(&v4.path_lock)
+        } else {
+            v3.shared_state().path_lock
+        };
+        while !remove.is_finished() && gate.try_read().is_some() {
+            tokio::task::yield_now().await;
+        }
+        let overtook = remove.is_finished();
+        driver.release.notify_one();
+        let lookup = lookup.await.expect("LOOKUP task");
+        let remove = remove.await.expect("REMOVE task");
+        assert_eq!((lookup, remove), (0, 0), "both requests succeed, in order");
+        assert!(
+            v3.handles.at("/victim").is_none(),
+            "a handle is still bound to the removed name"
+        );
+        assert!(
+            !overtook,
+            "REMOVE finished while a LOOKUP of the name was between its stat and its bind"
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_remove_waits_for_a_v3_lookup_between_stat_and_bind() {
+        remove_waits_for_a_lookup_between_stat_and_bind(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn v4_remove_waits_for_a_v4_lookup_between_stat_and_bind() {
+        remove_waits_for_a_lookup_between_stat_and_bind(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn v4_remove_waits_for_a_v3_lookup_between_stat_and_bind() {
+        remove_waits_for_a_lookup_between_stat_and_bind(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn v3_remove_waits_for_a_v4_lookup_between_stat_and_bind() {
+        remove_waits_for_a_lookup_between_stat_and_bind(true, false).await;
     }
 }

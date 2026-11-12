@@ -11347,6 +11347,265 @@ mod tests {
         block_on(first.shutdown()).expect("shutdown first coordinator");
         block_on(second.shutdown()).expect("shutdown second coordinator");
     }
+
+    /// A block store whose puts, gets or flushes wait for as long as their
+    /// flag is set, so a test can hold an operation inside its block I/O.
+    #[derive(Clone)]
+    struct ParkingBlockStore {
+        inner: MemoryBlockStore,
+        park_puts: Arc<AtomicBool>,
+        park_gets: Arc<AtomicBool>,
+        park_flushes: Arc<AtomicBool>,
+        parked: Arc<AtomicUsize>,
+    }
+
+    impl ParkingBlockStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryBlockStore::new(),
+                park_puts: Arc::new(AtomicBool::new(false)),
+                park_gets: Arc::new(AtomicBool::new(false)),
+                park_flushes: Arc::new(AtomicBool::new(false)),
+                parked: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        async fn park_while(&self, flag: &AtomicBool) {
+            let mut counted = false;
+            std::future::poll_fn(|_| {
+                if !flag.load(Ordering::SeqCst) {
+                    return Poll::Ready(());
+                }
+                if !counted {
+                    counted = true;
+                    self.parked.fetch_add(1, Ordering::SeqCst);
+                }
+                Poll::Pending
+            })
+            .await;
+        }
+    }
+
+    #[async_trait]
+    impl BlockStore for ParkingBlockStore {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+
+        async fn put(&self, bytes: &[u8]) -> Result<mount_rs_core::storage::BlockId> {
+            self.park_while(&self.park_puts).await;
+            self.inner.put(bytes).await
+        }
+
+        async fn get(&self, id: &mount_rs_core::storage::BlockId) -> Result<Vec<u8>> {
+            self.park_while(&self.park_gets).await;
+            self.inner.get(id).await
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.park_while(&self.park_flushes).await;
+            self.inner.flush().await
+        }
+
+        async fn delete(&self, id: &mount_rs_core::storage::BlockId) -> Result<()> {
+            self.inner.delete(id).await
+        }
+    }
+
+    /// The operation gate (`ChunkedInner.gate`): a mutation takes its
+    /// snapshot and publishes it under the gate, so a handle write that
+    /// starts in between cannot publish first against the same revision.
+    /// The mutation is held in the block flush that sits between its
+    /// snapshot and its publication.
+    #[test]
+    fn a_handle_write_cannot_publish_between_a_mutations_snapshot_and_its_publication() {
+        let blocks = ParkingBlockStore::new();
+        let fs = block_on(ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            blocks.clone(),
+            options("gate-write-during-mutation"),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/file", b"abcd")).unwrap();
+        let handle = block_on(fs.open("/file", "r+", 0)).unwrap();
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+
+        blocks.park_flushes.store(true, Ordering::SeqCst);
+        let mut mutation = Box::pin(fs.mkdir("/directory", MkdirOptions::default()));
+        assert!(matches!(
+            Future::poll(mutation.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        // The mutation has its snapshot and has not published it.
+        assert_eq!(blocks.parked.load(Ordering::SeqCst), 1);
+        let mut write = Box::pin(handle.write(b"wxyz", Some(0)));
+        assert!(matches!(
+            Future::poll(write.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        blocks.park_flushes.store(false, Ordering::SeqCst);
+        // Give the write every chance to publish before the mutation does.
+        let started = Future::poll(write.as_mut(), &mut context);
+        block_on(mutation).expect("a mutation that overlapped a write still commits");
+        let written = match started {
+            Poll::Ready(written) => written,
+            Poll::Pending => block_on(write),
+        };
+        assert_eq!(written.expect("the write commits after the mutation"), 4);
+        assert!(
+            fs.lock_state().unwrap().failure.is_none(),
+            "an overlapping write failed a healthy volume closed"
+        );
+        let mut bytes = [0; 4];
+        assert_eq!(block_on(handle.read(&mut bytes, Some(0))).unwrap(), 4);
+        assert_eq!(&bytes, b"wxyz");
+        assert!(block_on(fs.stat("/directory")).unwrap().is_directory());
+        block_on(handle.close()).unwrap();
+        block_on(fs.shutdown()).unwrap();
+    }
+
+    /// The lifecycle gate (`ChunkedInner.lifecycle`): shutdown waits for a
+    /// write that is still uploading its blocks, so the write publishes
+    /// before the lease is released.
+    #[test]
+    fn shutdown_waits_for_a_write_that_is_uploading_blocks() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = ParkingBlockStore::new();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("lifecycle-drain"),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/file", b"abcd")).unwrap();
+        let handle = block_on(fs.open("/file", "r+", 0)).unwrap();
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+
+        blocks.park_puts.store(true, Ordering::SeqCst);
+        let mut write = Box::pin(handle.write(b"wxyz", Some(0)));
+        assert!(matches!(
+            Future::poll(write.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        assert_eq!(blocks.parked.load(Ordering::SeqCst), 1);
+        // The write is inside its block upload, outside the operation gate.
+        let mut shutdown = Box::pin(fs.shutdown());
+        assert!(
+            matches!(Future::poll(shutdown.as_mut(), &mut context), Poll::Pending),
+            "shutdown returned while a write was still uploading its blocks"
+        );
+        blocks.park_puts.store(false, Ordering::SeqCst);
+        assert_eq!(
+            block_on(write).expect("the write publishes before shutdown releases the lease"),
+            4
+        );
+        block_on(shutdown).unwrap();
+        drop(handle);
+
+        let reopened = block_on(ChunkedFs::open(
+            metadata,
+            blocks,
+            options("lifecycle-drain-reopened"),
+        ))
+        .unwrap();
+        let handle = block_on(reopened.open("/file", "r", 0)).unwrap();
+        let mut bytes = [0; 4];
+        assert_eq!(block_on(handle.read(&mut bytes, Some(0))).unwrap(), 4);
+        assert_eq!(&bytes, b"wxyz");
+        block_on(handle.close()).unwrap();
+        block_on(reopened.shutdown()).unwrap();
+    }
+
+    /// The handle gate (`ChunkedHandle.gate`), cursor half: two cursor reads
+    /// on one handle read consecutive ranges, never the same one.
+    #[test]
+    fn cursor_reads_on_one_handle_take_turns() {
+        let blocks = ParkingBlockStore::new();
+        let fs = block_on(ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            blocks.clone(),
+            options("handle-gate-cursor").with_atime_policy(AtimePolicy::NoAtime),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/file", b"abcdefgh")).unwrap();
+        let handle = block_on(fs.open("/file", "r", 0)).unwrap();
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+
+        let (mut one, mut two) = ([0_u8; 4], [0_u8; 4]);
+        blocks.park_gets.store(true, Ordering::SeqCst);
+        let counts = {
+            let mut first = Box::pin(handle.read(&mut one, None));
+            let mut second = Box::pin(handle.read(&mut two, None));
+            // The first read has loaded the cursor and is inside its block
+            // read when the second one starts.
+            assert!(matches!(
+                Future::poll(first.as_mut(), &mut context),
+                Poll::Pending
+            ));
+            assert_eq!(blocks.parked.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                Future::poll(second.as_mut(), &mut context),
+                Poll::Pending
+            ));
+            blocks.park_gets.store(false, Ordering::SeqCst);
+            block_on_all(vec![first, second])
+        };
+        assert!(counts.iter().all(|count| matches!(count, Ok(4))));
+        assert_eq!(
+            (&one, &two),
+            (b"abcd", b"efgh"),
+            "two cursor reads on one handle returned the same range"
+        );
+        assert_eq!(block_on(handle.read(&mut one, None)).unwrap(), 0);
+        block_on(handle.close()).unwrap();
+        block_on(fs.shutdown()).unwrap();
+    }
+
+    /// The handle gate (`ChunkedHandle.gate`), close half: two closes of one
+    /// handle release one open reference, not two. The window is a few
+    /// instructions inside `close` with no seam to park in, so this is a
+    /// race loop: two threads close the same handle from a spinning start.
+    #[test]
+    fn two_closes_of_one_handle_release_one_reference() {
+        let fs = block_on(ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            MemoryBlockStore::new(),
+            options("handle-gate-close").with_atime_policy(AtimePolicy::NoAtime),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/file", b"abcd")).unwrap();
+        let kept = block_on(fs.open("/file", "r", 0)).unwrap();
+        let inode = block_on(kept.stat()).unwrap().ino;
+        for round in 0..100 {
+            let closing = block_on(fs.open("/file", "r", 0)).unwrap();
+            assert_eq!(fs.lock_state().unwrap().open_count(inode), 2);
+            let ready = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..2 {
+                    scope.spawn(|| {
+                        ready.fetch_add(1, Ordering::SeqCst);
+                        while ready.load(Ordering::SeqCst) < 2 {
+                            std::hint::spin_loop();
+                        }
+                        block_on(closing.close()).unwrap();
+                    });
+                }
+            });
+            assert_eq!(
+                fs.lock_state().unwrap().open_count(inode),
+                1,
+                "round {round}: two closes of one handle released the other handle's reference"
+            );
+        }
+        let mut bytes = [0; 4];
+        assert_eq!(block_on(kept.read(&mut bytes, Some(0))).unwrap(), 4);
+        block_on(kept.close()).unwrap();
+        assert!(!fs.lock_state().unwrap().any_open());
+        block_on(fs.shutdown()).unwrap();
+    }
 }
 
 #[cfg(all(test, unix))]

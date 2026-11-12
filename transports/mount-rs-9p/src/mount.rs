@@ -1044,4 +1044,70 @@ mod tests {
             }]
         );
     }
+
+    /// The connection monitor is inside `server.close`, waiting for the
+    /// kernel connection to end with the socket file still in place, when a
+    /// second release arrives (from `wait_closed`, or from `unmount` after
+    /// its kernel unmount). The second waits for the first and then finds
+    /// the work done. Without the release lock it would see its own
+    /// `server.close` return at once, try to remove a directory that still
+    /// holds the socket, and report a failure for a mount that is gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_second_release_waits_for_the_one_closing_the_server() {
+        use std::future::Future;
+        use std::os::unix::fs::PermissionsExt;
+        use std::task::Poll;
+
+        let directory = std::env::temp_dir().join(format!("m9r-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).expect("socket directory");
+        std::fs::set_permissions(&directory, PermissionsExt::from_mode(0o700))
+            .expect("private socket directory");
+        let socket = directory.join("9p.sock");
+        let server = Arc::new(
+            P9Server::bind_unix(
+                mount_rs_memfs::MemoryFs::empty(),
+                &socket,
+                P9ServerOptions::default(),
+            )
+            .await
+            .expect("bind the Unix listener"),
+        );
+        let (_client, stream) = tokio::io::duplex(1024);
+        let connection = server
+            .attach(stream, Default::default())
+            .expect("attach a client");
+        let state = MountState {
+            stopping: AtomicBool::new(false),
+            // No serve task: the server is shared, as when a caller passes
+            // its own already-serving server to the mount.
+            release: TurnLock::new(Release {
+                done: false,
+                serve_task: None,
+            }),
+            server: Arc::clone(&server),
+            socket_dir: Some(directory.clone()),
+            timeout: None,
+        };
+
+        // This runtime has one thread, so the connection task cannot run
+        // until the test yields: one poll takes the first release into
+        // `server.close` and leaves it waiting for the client to close.
+        let mut first = std::pin::pin!(state.finish_resources());
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending(),
+            "the first release waits for the client connection to close"
+        );
+        assert!(!connection.is_closed());
+        assert!(socket.exists(), "the socket file is still in its directory");
+
+        let (first, second) = tokio::join!(first, state.finish_resources());
+        first.expect("the first release");
+        second.expect("the second release finds the resources released");
+        assert!(connection.is_closed());
+        assert!(!directory.exists(), "the socket directory is removed");
+    }
 }

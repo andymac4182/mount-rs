@@ -804,3 +804,150 @@ impl crate::server::Authenticator for CatalogAuthenticator {
         matched.ok_or(())
     }
 }
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ISSUER: &str = "https://issuer.example.com";
+
+    struct NoCatalog;
+    #[async_trait::async_trait]
+    impl crate::catalog::CatalogStore for NoCatalog {
+        async fn load_current(
+            &self,
+        ) -> Result<crate::catalog::CatalogSnapshot, crate::catalog::CatalogError> {
+            unreachable!("these tests call the key cache directly")
+        }
+        async fn compare_and_swap(
+            &self,
+            _: u64,
+            _: crate::catalog::CatalogSnapshot,
+        ) -> Result<u64, crate::catalog::CatalogError> {
+            unreachable!("these tests call the key cache directly")
+        }
+    }
+
+    /// Counts fetches and holds each one until the test lets it go.
+    struct HeldKeys {
+        fetches: AtomicUsize,
+        entered: tokio::sync::Semaphore,
+        release: tokio::sync::Semaphore,
+    }
+    #[async_trait::async_trait]
+    impl OidcKeySource for HeldKeys {
+        async fn fetch(
+            &self,
+            issuer: &str,
+            audiences: &[String],
+        ) -> Result<OidcVerifier, AuthError> {
+            self.fetches.fetch_add(1, Ordering::SeqCst);
+            self.entered.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            verifier(issuer, audiences)
+        }
+    }
+    fn verifier(issuer: &str, audiences: &[String]) -> Result<OidcVerifier, AuthError> {
+        let key = Jwk::EcP256 {
+            kid: "key".into(),
+            x: String::new(),
+            y: String::new(),
+        };
+        OidcVerifier::new(issuer, audiences, vec![key])
+    }
+    struct Fixture {
+        source: Arc<HeldKeys>,
+        auth: Arc<CatalogAuthenticator>,
+        slot: Arc<PolicySlot>,
+        configuration: Value,
+        policy: crate::catalog::IssuerPolicyDefinition,
+    }
+    fn fixture() -> Fixture {
+        let source = Arc::new(HeldKeys {
+            fetches: AtomicUsize::new(0),
+            entered: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let configuration = serde_json::json!({"issuer":ISSUER,"audiences":["mount-rs"]});
+        Fixture {
+            auth: Arc::new(CatalogAuthenticator::with_key_source(
+                Arc::new(NoCatalog),
+                source.clone(),
+            )),
+            source,
+            slot: Arc::default(),
+            policy: serde_json::from_value(configuration.clone()).unwrap(),
+            configuration,
+        }
+    }
+    /// Lets every task that can run without a fetch being released run.
+    async fn settle() {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn two_requests_for_a_policy_with_no_keys_share_one_fetch() {
+        let fixture = fixture();
+        let request = || {
+            let (auth, slot) = (fixture.auth.clone(), fixture.slot.clone());
+            let (configuration, policy) = (fixture.configuration.clone(), fixture.policy.clone());
+            tokio::spawn(async move { auth.fresh_policy(&slot, &configuration, &policy).await })
+        };
+        let first = request();
+        fixture.source.entered.acquire().await.unwrap().forget();
+        let second = request();
+        settle().await;
+        fixture.source.release.add_permits(2);
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+        assert_eq!(
+            fixture.source.fetches.load(Ordering::SeqCst),
+            1,
+            "both requests fetched the policy's keys"
+        );
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// Two requests were each refused by the cached keys more than a minute
+    /// after the last fetch, so each sees a fetch as due. One fetches. The
+    /// other must wait for it and get the keys it brings back: fetching too
+    /// breaks the one-fetch-a-minute bound, and not waiting turns away a
+    /// valid token signed by the rotated key.
+    #[tokio::test(start_paused = true)]
+    async fn two_requests_refused_by_stale_keys_share_one_fetch_and_both_get_the_new_keys() {
+        let fixture = fixture();
+        let stale = Arc::new(CachedPolicy {
+            configuration: fixture.configuration.clone(),
+            verifier: Some(Arc::new(
+                verifier(ISSUER, &fixture.policy.audiences).unwrap(),
+            )),
+            fetched: tokio::time::Instant::now(),
+            attempted: tokio::time::Instant::now(),
+        });
+        fixture.slot.current.store(Some(stale.clone()));
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let request = || {
+            let (auth, slot) = (fixture.auth.clone(), fixture.slot.clone());
+            let (stale, policy) = (stale.clone(), fixture.policy.clone());
+            tokio::spawn(async move { auth.refreshed_verifier(&slot, &stale, &policy).await })
+        };
+        let first = request();
+        fixture.source.entered.acquire().await.unwrap().forget();
+        let second = request();
+        settle().await;
+        fixture.source.release.add_permits(2);
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+        assert_eq!(
+            fixture.source.fetches.load(Ordering::SeqCst),
+            1,
+            "more than one key fetch inside a minute"
+        );
+        let fetched = first.expect("the fetching request got no keys");
+        let waited = second.expect("the request that did not fetch was left with the stale keys");
+        assert!(Arc::ptr_eq(&fetched, &waited));
+        assert!(!Arc::ptr_eq(&fetched, stale.verifier.as_ref().unwrap()));
+    }
+}

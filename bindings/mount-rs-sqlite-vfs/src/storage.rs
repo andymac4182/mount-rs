@@ -2119,6 +2119,153 @@ mod tests {
         }
     }
 
+    /// Metadata whose next publish stops on entry, before it reaches the
+    /// provider, until the test lets it go on.
+    #[derive(Clone)]
+    struct ParkingMetadata {
+        inner: mount_rs_memory::MemoryMetadataStore,
+        gate: Arc<ParkGate>,
+    }
+
+    #[derive(Default)]
+    struct ParkGate {
+        /// (armed, parked, released)
+        steps: std::sync::Mutex<(bool, bool, bool)>,
+        changed: std::sync::Condvar,
+    }
+
+    impl ParkingMetadata {
+        fn park_next_publish(&self) {
+            *self.gate.steps.lock().unwrap() = (true, false, false);
+        }
+
+        fn wait_until_parked(&self) {
+            let mut steps = self.gate.steps.lock().unwrap();
+            while !steps.1 {
+                steps = self.gate.changed.wait(steps).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            self.gate.steps.lock().unwrap().2 = true;
+            self.gate.changed.notify_all();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataStore for ParkingMetadata {
+        fn durable(&self) -> bool {
+            false
+        }
+
+        async fn load(&self) -> mount_rs_core::Result<LoadedMetadata> {
+            self.inner.load().await
+        }
+
+        async fn acquire_writer(
+            &self,
+            owner: &str,
+            ttl: Duration,
+        ) -> mount_rs_core::Result<WriterLease> {
+            self.inner.acquire_writer(owner, ttl).await
+        }
+
+        async fn renew_writer(
+            &self,
+            lease: &WriterLease,
+            ttl: Duration,
+        ) -> mount_rs_core::Result<WriterLease> {
+            self.inner.renew_writer(lease, ttl).await
+        }
+
+        async fn release_writer(&self, lease: &WriterLease) -> mount_rs_core::Result<()> {
+            self.inner.release_writer(lease).await
+        }
+
+        async fn publish(
+            &self,
+            expected_revision: u64,
+            lease: &WriterLease,
+            namespace: Namespace,
+        ) -> mount_rs_core::Result<u64> {
+            {
+                // The bridge calls this from a blocking callback, so the
+                // thread itself waits.
+                let mut steps = self.gate.steps.lock().unwrap();
+                if steps.0 {
+                    steps.0 = false;
+                    steps.1 = true;
+                    self.gate.changed.notify_all();
+                    while !steps.2 {
+                        steps = self.gate.changed.wait(steps).unwrap();
+                    }
+                }
+            }
+            self.inner
+                .publish(expected_revision, lease, namespace)
+                .await
+        }
+
+        async fn flush(&self) -> mount_rs_core::Result<()> {
+            self.inner.flush().await
+        }
+    }
+
+    /// The volume state is held across a publication. A commit has read
+    /// the revision it publishes from and is on its way to the provider
+    /// when another connection deletes a file (SQLite removes a journal
+    /// through whichever connection gets there). The delete must wait and
+    /// publish from the commit's revision; publishing from the same one,
+    /// one of the two is refused and the volume fails closed for good.
+    #[test]
+    fn a_delete_waits_for_a_commit_that_is_publishing() {
+        let metadata = ParkingMetadata {
+            inner: mount_rs_memory::MemoryMetadataStore::new(),
+            gate: Arc::default(),
+        };
+        let backend = StorageBackend::new(
+            metadata.clone(),
+            mount_rs_memory::MemoryBlockStore::new(),
+            StorageOptions::volatile_for_tests("race", 4096).unwrap(),
+        )
+        .unwrap();
+        let volume = &backend.volume;
+        let owner = volume.next_handle_id().unwrap();
+        volume.acquire_owner(owner).unwrap();
+        volume.commit_file(b"/db", b"one", owner).unwrap();
+        volume
+            .commit_file(b"/db-journal", b"journal", owner)
+            .unwrap();
+
+        metadata.park_next_publish();
+        std::thread::scope(|threads| {
+            let commit = threads.spawn(|| volume.commit_file(b"/db", b"two", owner));
+            metadata.wait_until_parked();
+            let delete = threads.spawn(|| volume.delete_file(b"/db-journal"));
+            // Unheld, the delete is done within this wait; held, it is
+            // parked on the state and the wait only runs out.
+            let waited = std::time::Instant::now();
+            while !delete.is_finished() && waited.elapsed() < Duration::from_millis(100) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            metadata.release();
+            commit
+                .join()
+                .unwrap()
+                .expect("the commit was refused: a delete published from its revision");
+            delete
+                .join()
+                .unwrap()
+                .expect("the delete was refused: it published from a stale revision");
+        });
+        volume
+            .ensure_healthy()
+            .expect("a commit and a delete that overlapped failed the volume");
+        assert_eq!(volume.load_file(b"/db").unwrap(), b"two");
+        assert!(!volume.file_exists(b"/db-journal").unwrap());
+        volume.release_owner(owner).unwrap();
+    }
+
     #[test]
     fn inline_executor_parks_until_a_real_wake() {
         assert_eq!(InlineExecutor.block_on(WakeOnce(false)), 7);
