@@ -410,6 +410,11 @@ function install(binding) {
       #inner
       #debug
       #onError
+      // Settles when every earlier `handle` has finished its bookkeeping.
+      // The session answers requests in call order, but each answer reaches
+      // JavaScript from its own native task, so two answers can arrive
+      // swapped; waiting here keeps stats and `onError` in call order.
+      #settled = Promise.resolve()
       #onAssertion
       #inflight = new Set()
       #negotiated
@@ -515,13 +520,15 @@ function install(binding) {
         const frame = copyBytes(bytes)
         this.stats.requests += 1
         const tracked = this.#track(frame)
-        return Promise.resolve()
+        const earlier = this.#settled
+        const handled = Promise.resolve()
           .then(() => {
             if (typeof this.#inner.__handleObserved === "function") {
               return this.#inner.__handleObserved(frame)
             }
             return this.#inner.handle(frame).then((reply) => ({ reply, error: null }))
           })
+          .then((observed) => earlier.then(() => observed))
           .then((observed) => this.#refreshState().then(() => observed))
           .then((observed) => {
             const reply = observed.reply ?? null
@@ -547,6 +554,11 @@ function install(binding) {
           .finally(() => {
             if (tracked !== undefined) this.#inflight.delete(tracked)
           })
+        this.#settled = handled.then(
+          () => {},
+          () => {},
+        )
+        return handled
       }
 
       destroy() {

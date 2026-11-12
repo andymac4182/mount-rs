@@ -759,8 +759,25 @@ fn an_acknowledged_upload_survives_the_process_being_killed() {
         ("/v1/drives/durable/fs/created", &first),
         ("/v1/drives/durable/fs/interrupted", &first),
     ] {
-        let response = request(address, "PUT", path, token, body);
-        assert_eq!(response.status, 200, "{path}");
+        // The two-second lease makes the drive briefly busy on a slow
+        // machine. The contract for that is 503 with `Retry-After`, and a
+        // client resends; any other failure is reported with its body.
+        let mut attempts = 0;
+        let response = loop {
+            let response = request(address, "PUT", path, token, body);
+            attempts += 1;
+            if response.status != 503 || response.header("retry-after").is_none() || attempts == 20
+            {
+                break response;
+            }
+            thread::sleep(Duration::from_millis(250));
+        };
+        assert_eq!(
+            response.status,
+            200,
+            "{path} after {attempts} attempts: {}",
+            String::from_utf8_lossy(&response.body)
+        );
     }
     // One more upload is part-way through when the process dies.
     let interrupted = stalled_put(address, "/v1/drives/durable/fs/interrupted", 4000, 2000);
