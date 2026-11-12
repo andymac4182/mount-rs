@@ -5779,6 +5779,15 @@ mod tests {
             .block_on(future)
     }
 
+    /// How many rounds a race test runs. Each round starts real threads that
+    /// spin until released together. On the four-core Windows CI runner the
+    /// full counts took over ten minutes, against four seconds on macOS, and
+    /// ran the job past its 25 minute limit. Windows runs a twentieth of
+    /// them, which still races every path; the full counts run elsewhere.
+    const fn stress_rounds(full: usize) -> usize {
+        if cfg!(windows) { full / 20 } else { full }
+    }
+
     /// Run `threads` copies of `request` on real threads, released together
     /// by a spin gate so they reach the session as close to at once as the
     /// machine allows. Each thread has its runtime built before the gate
@@ -5823,7 +5832,7 @@ mod tests {
     fn concurrent_conflicting_opens_grant_exactly_one_share_reservation() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         const OWNERS: usize = 4;
-        const GRANTS: usize = 4_000;
+        const GRANTS: usize = stress_rounds(4_000);
         let session = block_on(race_session(NfsSessionOptions::default()));
         let granted = AtomicUsize::new(0);
         let holders = AtomicUsize::new(0);
@@ -5887,7 +5896,7 @@ mod tests {
 
     #[test]
     fn concurrent_new_owner_locks_share_one_lock_state() {
-        const ROUNDS: usize = 3_000;
+        const ROUNDS: usize = stress_rounds(3_000);
         const REQUESTS: usize = 4;
         for round in 0..ROUNDS {
             let session = block_on(race_session(NfsSessionOptions::default()));
@@ -5946,7 +5955,7 @@ mod tests {
 
     #[test]
     fn refused_lock_leaves_the_owners_other_ranges_untouched() {
-        const ROUNDS: usize = 6_000;
+        const ROUNDS: usize = stress_rounds(6_000);
         let mut refused = 0_usize;
         for round in 0..ROUNDS {
             let session = block_on(race_session(NfsSessionOptions::default()));
@@ -6047,7 +6056,7 @@ mod tests {
 
     #[test]
     fn concurrent_locks_through_one_lock_stateid_grant_one_per_seqid() {
-        const ROUNDS: usize = 3_000;
+        const ROUNDS: usize = stress_rounds(3_000);
         const REQUESTS: usize = 4;
         for round in 0..ROUNDS {
             let session = block_on(race_session(NfsSessionOptions::default()));
@@ -6114,7 +6123,7 @@ mod tests {
 
     #[test]
     fn open_pins_its_handle_in_the_step_that_binds_it() {
-        const OPENS: usize = 8_000;
+        const OPENS: usize = stress_rounds(8_000);
         const CHURN: usize = 8;
         use std::sync::atomic::{AtomicBool, Ordering};
 
