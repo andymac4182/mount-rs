@@ -24,7 +24,8 @@ const build = execFileSync(`${root}/scripts/cargo-shared`, [
 ], {
   cwd: root,
   stdio: ['ignore', 'pipe', 'inherit'],
-  timeout: 180000,
+  // A cold build on a slow runner, the same allowance the NFS suite gives.
+  timeout: 20 * 60 * 1000,
   encoding: 'utf8',
 });
 const fixture = build.trim().split('\n').map((line) => JSON.parse(line))
