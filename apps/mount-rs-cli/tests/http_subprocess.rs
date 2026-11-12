@@ -734,6 +734,27 @@ fn stalled_put(address: SocketAddr, path: &str, declared: usize, sent: usize) ->
     stream
 }
 
+/// Send a request the way the API contract tells a client to: a 503 that
+/// carries `Retry-After` means the drive is briefly busy, so send it again.
+/// The two-second lease this test uses makes that likely on a slow machine.
+/// Any other answer, including a 503 without `Retry-After`, is returned.
+fn request_when_not_busy(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: &[u8],
+) -> HttpResponse {
+    for _ in 0..20 {
+        let response = request(address, method, path, token, body);
+        if response.status != 503 || response.header("retry-after").is_none() {
+            return response;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    request(address, method, path, token, body)
+}
+
 #[test]
 fn an_acknowledged_upload_survives_the_process_being_killed() {
     let root = temporary_root();
@@ -759,23 +780,11 @@ fn an_acknowledged_upload_survives_the_process_being_killed() {
         ("/v1/drives/durable/fs/created", &first),
         ("/v1/drives/durable/fs/interrupted", &first),
     ] {
-        // The two-second lease makes the drive briefly busy on a slow
-        // machine. The contract for that is 503 with `Retry-After`, and a
-        // client resends; any other failure is reported with its body.
-        let mut attempts = 0;
-        let response = loop {
-            let response = request(address, "PUT", path, token, body);
-            attempts += 1;
-            if response.status != 503 || response.header("retry-after").is_none() || attempts == 20
-            {
-                break response;
-            }
-            thread::sleep(Duration::from_millis(250));
-        };
+        let response = request_when_not_busy(address, "PUT", path, token, body);
         assert_eq!(
             response.status,
             200,
-            "{path} after {attempts} attempts: {}",
+            "{path}: {}",
             String::from_utf8_lossy(&response.body)
         );
     }
@@ -829,8 +838,13 @@ fn an_acknowledged_upload_survives_the_process_being_killed() {
         // The write that was not answered left the previous content alone.
         ("/v1/drives/durable/fs/interrupted", &first),
     ] {
-        let response = request(address, "GET", path, token, &[]);
-        assert_eq!(response.status, 200, "{path}");
+        let response = request_when_not_busy(address, "GET", path, token, &[]);
+        assert_eq!(
+            response.status,
+            200,
+            "{path}: {}",
+            String::from_utf8_lossy(&response.body)
+        );
         assert!(
             response.body == **body,
             "{path}: {} bytes",
