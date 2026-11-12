@@ -143,7 +143,27 @@ async fn bounded_unmount(mount: &P9Mount) -> io::Result<()> {
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "native 9P teardown timed out"))?
 }
 
+/// Unmount with the system `umount`, as an administrator would.
+///
+/// The kernel reports a mount busy while anything still refers to it, and
+/// that includes a moment after the test's own files were closed, or while
+/// another process on the machine is looking at the new mount. A person
+/// would run the command again, so this does too, for a bounded time; a
+/// mount that stays busy is still a failure.
 async fn external_umount(path: &Path) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match external_umount_once(path).await {
+            Err(error) if error.to_string().contains("target is busy") && attempt < 20 => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn external_umount_once(path: &Path) -> io::Result<()> {
     let mut child = Command::new("umount")
         .arg(path)
         .stdout(Stdio::null())
