@@ -221,7 +221,14 @@ try {
     flushSettled = true
     return reply
   })
-  await new Promise((resolve) => setImmediate(resolve))
+  // The flush is handled off this thread. Wait until it has found the held
+  // request before releasing it: one turn of the event loop is not always
+  // enough on a slow machine, and a flush that arrives after the request
+  // has finished is answered without being counted.
+  await waitUntil(
+    () => structuralSession.stats.flushed === 1,
+    "direct 9P Tflush waiting on the held request",
+  )
   assert.equal(getattrSettled, false)
   assert.equal(flushSettled, false)
   releaseBlockedStat()
