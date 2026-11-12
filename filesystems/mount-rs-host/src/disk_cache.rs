@@ -1026,6 +1026,10 @@ mod tests {
         fail_put: AtomicBool,
         fail_flush: AtomicBool,
         stall_delete: AtomicBool,
+        /// A get reads its answer, then waits here until resumed.
+        stall_get: AtomicBool,
+        get_entered: tokio::sync::Notify,
+        resume_get: tokio::sync::Notify,
         deleted: tokio::sync::Notify,
         put_completed: tokio::sync::Notify,
     }
@@ -1046,12 +1050,12 @@ mod tests {
         }
         async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
             self.gets.fetch_add(1, Ordering::SeqCst);
-            self.data
-                .lock()
-                .unwrap()
-                .get(&id.0)
-                .cloned()
-                .ok_or_else(|| error("missing backing block"))
+            let found = self.data.lock().unwrap().get(&id.0).cloned();
+            if self.stall_get.load(Ordering::SeqCst) {
+                self.get_entered.notify_one();
+                self.resume_get.notified().await;
+            }
+            found.ok_or_else(|| error("missing backing block"))
         }
         async fn flush(&self) -> Result<()> {
             if self.fail_flush.load(Ordering::SeqCst) {
@@ -1125,6 +1129,55 @@ mod tests {
         drop(filled);
         cache.delete(&id).await.unwrap();
         assert!(cache.get(&id).await.is_err());
+    }
+    /// The I/O gate (`DiskCachedBlockStore.io`): a delete waits for a read
+    /// of the block that is still in flight, so the read's fill cannot put a
+    /// cached copy back after the delete has removed it.
+    #[tokio::test]
+    async fn delete_waits_for_a_read_in_flight_so_its_fill_cannot_outlive_the_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let backing = Arc::new(Backing::default());
+        let id = backing.put(b"deleted later").await.unwrap();
+        let cache = DiskCachedBlockStore::open(backing.clone(), root.path(), "scope", 1024, 8)
+            .await
+            .unwrap();
+        // A miss that has its answer from the backing store and has not yet
+        // cached it.
+        backing.stall_get.store(true, Ordering::SeqCst);
+        let (child, child_id) = (cache.clone(), id.clone());
+        let read = tokio::spawn(async move { child.get(&child_id).await });
+        backing.get_entered.notified().await;
+        backing.stall_get.store(false, Ordering::SeqCst);
+
+        let (child, child_id) = (cache.clone(), id.clone());
+        let delete = tokio::spawn(async move { child.delete(&child_id).await });
+        // The delete must not reach the backing store while the read is in
+        // flight. With the gate this wait always runs out.
+        let overtook = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            backing.deleted.notified(),
+        )
+        .await
+        .is_ok();
+        backing.resume_get.notify_one();
+        assert_eq!(read.await.unwrap().unwrap(), b"deleted later");
+        delete.await.unwrap().unwrap();
+        assert!(!overtook, "the delete ran while a read was in flight");
+
+        // Nothing of the block is left once the delete has returned.
+        assert!(
+            !cache_path(root.path(), "scope", &id).exists(),
+            "a cached copy of a deleted block was left on disk"
+        );
+        assert!(cache.get(&id).await.is_err(), "deleted data resurfaced");
+        drop(cache);
+        let reopened = DiskCachedBlockStore::open(backing, root.path(), "scope", 1024, 8)
+            .await
+            .unwrap();
+        assert!(
+            reopened.get(&id).await.is_err(),
+            "a restart re-indexed a cached copy of a deleted block"
+        );
     }
     #[tokio::test]
     async fn backing_flush_does_not_wait_for_cache_fill_admission() {

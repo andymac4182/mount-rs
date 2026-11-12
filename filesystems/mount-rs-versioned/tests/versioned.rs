@@ -1731,3 +1731,116 @@ async fn sqlite_replays_committed_operation_after_head_moves() {
     let namespace = seed_current(metadata.clone(), blocks, "replay-sqlite-writer").await;
     replay_cases(metadata, namespace).await;
 }
+
+/// The view's state is held across a pin renewal. A second operation that
+/// starts while the first one's renewal is with the provider must wait
+/// for the renewed pin: renewing the pin it would otherwise copy rotates
+/// it under the first, whose exact-token renewal then fails and closes a
+/// healthy view.
+#[tokio::test]
+async fn a_second_operation_waits_for_the_first_ones_pin_renewal() {
+    let inner = MemoryMetadataStore::new();
+    let metadata = BlockingRenewMetadata::new(inner.clone());
+    let blocks = MemoryBlockStore::new();
+    seed_current(inner.clone(), blocks.clone(), "two-begins-writer").await;
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options("two-begins", "two-begins-blocks"),
+    )
+    .unwrap();
+    let first = coordinator.snapshot().await.unwrap();
+    let _current = coordinator.snapshot().await.unwrap();
+    let view = Arc::new(coordinator.view(&first.id).await.unwrap());
+
+    metadata.block_next_begin();
+    let before = metadata.renew_calls.load(Ordering::Acquire);
+    let spawn_stat = || {
+        let view = Arc::clone(&view);
+        tokio::spawn(async move { view.stat("/hello").await })
+    };
+    let first_stat = spawn_stat();
+    metadata.entered.notified().await;
+    let second_stat = spawn_stat();
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    let reached = metadata.renew_calls.load(Ordering::Acquire) - before;
+    metadata.release.notify_one();
+
+    first_stat
+        .await
+        .unwrap()
+        .expect("the first operation lost its pin to the second one's renewal");
+    second_stat
+        .await
+        .unwrap()
+        .expect("the second operation renewed a pin the first had rotated");
+    view.stat("/hello")
+        .await
+        .expect("two overlapping operations closed a healthy view");
+    assert_eq!(
+        reached, 1,
+        "the second renewal reached the provider while the first was in flight"
+    );
+    view.close().await.unwrap();
+    coordinator.delete(&first.id).await.unwrap();
+}
+
+/// Two closes of one handle count as one. The first is made to wait
+/// inside its release (a stat on another handle holds the view's state in
+/// a renewal), so a second close that did not wait for it would also see
+/// the handle open and give up a second reference: the one belonging to
+/// the other handle, whose pin is then released while it is still open.
+#[tokio::test]
+async fn a_second_close_of_one_handle_does_not_release_another_handles_pin() {
+    let inner = MemoryMetadataStore::new();
+    let metadata = BlockingRenewMetadata::new(inner.clone());
+    let blocks = MemoryBlockStore::new();
+    seed_current(inner.clone(), blocks.clone(), "double-close-writer").await;
+    let coordinator = VersionedCoordinator::new(
+        metadata.clone(),
+        blocks,
+        options("double-close", "double-close-blocks"),
+    )
+    .unwrap();
+    let first = coordinator.snapshot().await.unwrap();
+    let _current = coordinator.snapshot().await.unwrap();
+    let view = coordinator.view(&first.id).await.unwrap();
+    let closing = view.open("/hello", "r", 0).await.unwrap();
+    let open = view.open("/hello", "r", 0).await.unwrap();
+    view.close().await.unwrap();
+
+    metadata.block_next_begin();
+    let stat = tokio::spawn({
+        let open = open.clone();
+        async move { open.stat().await }
+    });
+    metadata.entered.notified().await;
+    let spawn_close = || {
+        let closing = closing.clone();
+        tokio::spawn(async move { closing.close().await })
+    };
+    let closes = [spawn_close(), spawn_close()];
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    metadata.release.notify_one();
+    stat.await.unwrap().unwrap();
+    for close in closes {
+        close.await.unwrap().unwrap();
+    }
+
+    // The other handle is still open, so the pin is still held.
+    assert_eq!(
+        coordinator
+            .delete(&first.id)
+            .await
+            .expect_err("the pin was released under an open handle")
+            .code,
+        ErrorCode::Ebusy
+    );
+    assert_eq!(open.stat().await.unwrap().size, 9);
+    open.close().await.unwrap();
+    coordinator.delete(&first.id).await.unwrap();
+}

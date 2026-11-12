@@ -4,9 +4,13 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
-use mount_rs_9p::{P9Mount, P9MountOptions, mount_9p, p9_client_probe, parse_mount_table};
+use mount_rs_9p::{
+    P9Mount, P9MountOptions, P9Server, P9ServerOptions, mount_9p, p9_client_probe,
+    parse_mount_table,
+};
 use mount_rs_memfs::MemoryFs;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -411,5 +415,84 @@ async fn native_linux_external_umount_finishes_server_lifecycle() {
                 mount.server.connection_count()
             );
         }
+    }
+}
+
+/// Two mounts started together on one shared server each adopt their own
+/// kernel connection. A connection carries nothing that names its mount, so
+/// each mount takes the one connection that appears while it alone runs
+/// `mount`; without that turn both would pick from the same new connections
+/// and could adopt the same one, leaving the other with no mount watching
+/// it. The mounts run in subprocesses, so this repeats the race instead of
+/// steering it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Linux v9fs/CAP_SYS_ADMIN; set MOUNT_RS_9P_NATIVE_TEST=1 and pass --ignored"]
+async fn native_linux_concurrent_mounts_on_one_server_adopt_distinct_connections() {
+    use std::os::unix::fs::PermissionsExt;
+
+    require_native_host();
+    for round in 0..4 {
+        let socket_dir = std::env::temp_dir().join(format!(
+            "mount-rs-9p-native-shared-{}-{round}",
+            std::process::id()
+        ));
+        fs::create_dir(&socket_dir).expect("create shared socket directory");
+        fs::set_permissions(&socket_dir, PermissionsExt::from_mode(0o700))
+            .expect("private shared socket directory");
+        let server = Arc::new(
+            P9Server::bind_unix(
+                MemoryFs::empty(),
+                socket_dir.join("9p.sock"),
+                P9ServerOptions::default(),
+            )
+            .await
+            .expect("bind shared 9P server"),
+        );
+        let first_point = make_mountpoint(&format!("shared-a-{round}"))
+            .await
+            .expect("create first mountpoint");
+        let second_point = make_mountpoint(&format!("shared-b-{round}"))
+            .await
+            .expect("create second mountpoint");
+        let options = || P9MountOptions {
+            server: Some(Arc::clone(&server)),
+            unmount_timeout: Some(COMMAND_TIMEOUT),
+            ..P9MountOptions::default()
+        };
+        let (first, second) = tokio::join!(
+            mount_9p(MemoryFs::empty(), &first_point, options()),
+            mount_9p(MemoryFs::empty(), &second_point, options()),
+        );
+        let first = first.expect("first shared-server mount");
+        let second = second.expect("second shared-server mount");
+        let adopted = (first.connection.id(), second.connection.id());
+        let connections = server.connection_count().expect("connection count");
+
+        // Detach both while the shared server still answers; the first
+        // release then closes the server for both.
+        let first_umount = external_umount(&first_point).await;
+        let second_umount = external_umount(&second_point).await;
+        let first_release = bounded_unmount(&first).await;
+        let second_release = bounded_unmount(&second).await;
+        match (first_umount, second_umount, first_release, second_release) {
+            (Ok(()), Ok(()), Ok(()), Ok(())) => {
+                remove_mountpoint(first_point)
+                    .await
+                    .expect("remove first mountpoint");
+                remove_mountpoint(second_point)
+                    .await
+                    .expect("remove second mountpoint");
+                fs::remove_dir(&socket_dir).expect("remove shared socket directory");
+            }
+            results => {
+                panic!("shared-server teardown failed; refusing recursive cleanup: {results:?}")
+            }
+        }
+
+        assert_eq!(connections, 2, "each kernel mount has one connection");
+        assert_ne!(
+            adopted.0, adopted.1,
+            "round {round}: two mounts adopted the same kernel connection"
+        );
     }
 }

@@ -1092,4 +1092,87 @@ mod tests {
         let error = block_on(fs.write_file("/later", b"three")).unwrap_err();
         assert_eq!(error.code, ErrorCode::Eagain);
     }
+
+    /// A store whose first save stays in flight, holding its snapshot,
+    /// until the test lets it land. Later saves land at once.
+    #[derive(Clone, Default)]
+    struct ParkingStore {
+        snapshot: Arc<Mutex<Option<Vec<u8>>>>,
+        park_next: Arc<AtomicBool>,
+        parked: Arc<AtomicBool>,
+        saves_started: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StateStore for ParkingStore {
+        async fn load(&self) -> Result<Option<Vec<u8>>> {
+            Ok(self.snapshot.lock().unwrap().clone())
+        }
+
+        async fn save(&self, snapshot: Vec<u8>) -> Result<()> {
+            self.saves_started.fetch_add(1, Ordering::SeqCst);
+            if self.park_next.swap(false, Ordering::SeqCst) {
+                self.parked.store(true, Ordering::SeqCst);
+                std::future::poll_fn(|_| {
+                    if self.parked.load(Ordering::SeqCst) {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+            }
+            *self.snapshot.lock().unwrap() = Some(snapshot);
+            Ok(())
+        }
+    }
+
+    /// The save gate's reason, step by step on one thread: an older save
+    /// is in flight with its snapshot taken, the file changes, and a newer
+    /// save is asked for. The newer save must not reach the store until
+    /// the older one has landed; otherwise the older snapshot lands last
+    /// and the store holds contents older than a save that reported Ok.
+    #[test]
+    fn a_newer_save_waits_for_the_older_one_in_flight() {
+        fn poll_once<T>(future: &mut Pin<Box<dyn Future<Output = T> + '_>>) -> Poll<T> {
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+        }
+
+        let store = ParkingStore::default();
+        let fs = block_on(PersistedFs::open(store.clone())).unwrap();
+        block_on(fs.write_file("/file", b"base")).unwrap();
+        let handle = block_on(fs.open("/file", "r+", 0)).unwrap();
+
+        // The older save takes its snapshot ("old!") and parks in the store.
+        store.park_next.store(true, Ordering::SeqCst);
+        let mut older: Pin<Box<dyn Future<Output = Result<usize>> + '_>> =
+            Box::pin(handle.write(b"old!", Some(0)));
+        assert!(poll_once(&mut older).is_pending());
+        assert!(store.parked.load(Ordering::SeqCst));
+        let started = store.saves_started.load(Ordering::SeqCst);
+
+        // The file changes underneath it and a newer save is asked for.
+        let direct = block_on(fs.core().open("/file", "r+", 0)).unwrap();
+        block_on(direct.write(b"new!", Some(0))).unwrap();
+        let mut newer: Pin<Box<dyn Future<Output = Result<()>> + '_>> = Box::pin(fs.persist());
+        assert!(
+            poll_once(&mut newer).is_pending(),
+            "the newer save finished while the older one was in flight"
+        );
+        assert_eq!(
+            store.saves_started.load(Ordering::SeqCst),
+            started,
+            "the newer save reached the store ahead of the older one"
+        );
+
+        // The older save lands, then the newer one runs.
+        store.parked.store(false, Ordering::SeqCst);
+        assert!(matches!(poll_once(&mut older), Poll::Ready(Ok(4))));
+        assert!(matches!(poll_once(&mut newer), Poll::Ready(Ok(()))));
+        let saved = store.snapshot.lock().unwrap().clone().unwrap();
+        let restored = MemoryFs::from_snapshot(&saved).unwrap();
+        assert_eq!(read_file(&restored, "/file"), b"new!");
+    }
 }

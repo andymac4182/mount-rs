@@ -2692,4 +2692,62 @@ mod tests {
             assert!(object_store.head(path).await.is_ok(), "{path} must survive");
         }
     }
+
+    /// The index and the lock-free table in front of it change together,
+    /// inside the index's section: after inserts and removes of the same
+    /// few ids have raced, the table serves nothing the index does not
+    /// hold, and the index's own tallies agree with its entries. The
+    /// section is synchronous and calls out to nothing, so there is no
+    /// seam to park in and this is a stress run.
+    #[test]
+    fn racing_inserts_and_removes_leave_the_front_agreeing_with_the_index() {
+        const THREADS: usize = 4;
+        const ROUNDS: usize = 3000;
+        const IDS: usize = 8;
+        let cache = ObjectStoreBlockCache::default();
+        let start = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|threads| {
+            for thread in 0..THREADS {
+                let (cache, start) = (&cache, &start);
+                threads.spawn(move || {
+                    start.wait();
+                    for round in 0..ROUNDS {
+                        let id = format!("b{}", (round * 7 + thread * 3) % IDS);
+                        if (round + thread) % 2 == 0 {
+                            cache.insert(&id, &[thread as u8; 16]);
+                        } else {
+                            cache.remove(&id);
+                        }
+                    }
+                });
+            }
+        });
+        // Nothing is left queued behind a thread that has gone.
+        cache.with(|_| ()).unwrap();
+        let state = cache.state.lock().unwrap();
+        let mut published = 0;
+        for slot in cache.front.iter() {
+            let Some(hot) = slot.load_full() else {
+                continue;
+            };
+            published += 1;
+            let indexed = state
+                .entries
+                .get(&hot.id)
+                .unwrap_or_else(|| panic!("{} is served but no longer cached", hot.id));
+            assert!(
+                Arc::ptr_eq(&indexed.hot, &hot),
+                "{} is served from a payload the index replaced",
+                hot.id
+            );
+        }
+        assert!(published <= IDS);
+        assert_eq!(state.recency.len(), state.entries.len());
+        let held: usize = state
+            .entries
+            .values()
+            .map(|entry| entry.hot.bytes.len())
+            .sum();
+        assert_eq!(state.bytes, held);
+    }
 }

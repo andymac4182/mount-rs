@@ -1167,4 +1167,158 @@ mod tests {
         assert!(version_refusal(NfsPlatform::Macos, NfsVersion::V4_1).is_some());
         assert!(version_refusal(NfsPlatform::Linux, NfsVersion::V4_1).is_none());
     }
+
+    // ---- unmount exclusion ------------------------------------------------
+
+    const FAKE_COMMANDS: &str = "MOUNT_RS_NFS_FAKE_COMMANDS";
+    const FAKE_MOUNTPOINT: &str = "/mount-rs-nfs-fake-mountpoint";
+
+    /// `unmount` learns everything it knows from `mount` and `umount`. This
+    /// test stands in for both with scripts found first on `PATH`, and a
+    /// changed `PATH` needs a process of its own: the test runs itself
+    /// again as a child, and the child does the work.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_unmount_waits_for_one_in_its_force_ladder() {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(directory) = std::env::var_os(FAKE_COMMANDS) {
+            return unmount_during_a_forced_unmount(Path::new(&directory));
+        }
+        let directory =
+            std::env::temp_dir().join(format!("mount-rs-nfs-unmount-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("create fake command directory");
+        // The table lists the mount while `mounted` exists. The first table
+        // read after a forced umount answers and then holds its caller,
+        // which by then has read that the mount is still there.
+        let mount = format!(
+            r#"#!/bin/sh
+d="${FAKE_COMMANDS}"
+if [ -e "$d/mounted" ]; then echo "127.0.0.1:/ on {FAKE_MOUNTPOINT} (nfs, nodev, nosuid)"; fi
+if [ -e "$d/forced" ] && mkdir "$d/held" 2>/dev/null; then
+  while [ ! -e "$d/release" ]; do sleep 0.02; done
+fi
+exit 0
+"#
+        );
+        // A plain umount is refused as busy until `allow` exists; a forced
+        // one never detaches anything.
+        let umount = format!(
+            r#"#!/bin/sh
+d="${FAKE_COMMANDS}"
+echo "$*" >> "$d/umount.log"
+if [ "$1" = "-f" ]; then : > "$d/forced"; exit 1; fi
+if [ -e "$d/allow" ]; then rm -f "$d/mounted"; exit 0; fi
+echo "umount: $1: Resource busy" >&2
+exit 1
+"#
+        );
+        for (name, script) in [("mount", mount), ("umount", umount)] {
+            let path = directory.join(name);
+            fs::write(&path, script).expect("write fake command");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("make fake command executable");
+        }
+        let mut path = directory.clone().into_os_string();
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "native::tests::a_second_unmount_waits_for_one_in_its_force_ladder",
+                "--nocapture",
+            ])
+            .env("PATH", path)
+            .env(FAKE_COMMANDS, &directory)
+            .output()
+            .expect("run the test again as a child");
+        let _ = fs::remove_dir_all(&directory);
+        assert!(
+            child.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    fn unmount_during_a_forced_unmount(directory: &Path) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let mount = NativeNfsMount {
+                inner: Arc::new(NativeNfsMountInner {
+                    mountpoint: PathBuf::from(FAKE_MOUNTPOINT),
+                    source: "127.0.0.1:/".into(),
+                    port: 0,
+                    // The platform whose mount table is read from a command.
+                    platform: NfsPlatform::Macos,
+                    options: NfsMountOptions {
+                        unmount_timeout: Some(Duration::from_secs(60)),
+                        ..NfsMountOptions::default()
+                    },
+                    server: crate::server::create_nfs_server(
+                        mount_rs_memfs::MemoryFs::empty(),
+                        crate::server::NfsServerOptions::default(),
+                    ),
+                    stopping: AtomicBool::new(false),
+                    mounted: AtomicBool::new(true),
+                    finished: AtomicBool::new(false),
+                    unmount_lock: TurnLock::new(()),
+                }),
+            };
+            let log = directory.join("umount.log");
+            fs::write(directory.join("mounted"), b"").unwrap();
+
+            // The first unmount is refused as busy, forces, and is held
+            // having just read that the mount is still in the table.
+            let first = tokio::spawn({
+                let mount = mount.clone();
+                async move { mount.unmount().await }
+            });
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while !directory.join("held").exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the first unmount reaches its last table read");
+
+            // A second unmount would now succeed gracefully. Allowed to run
+            // beside the first, it needs three short commands; made to
+            // wait its turn, it is still queued when this wait runs out.
+            fs::write(directory.join("allow"), b"").unwrap();
+            let mut second = tokio::spawn({
+                let mount = mount.clone();
+                async move { mount.unmount().await }
+            });
+            let early = tokio::time::timeout(Duration::from_secs(1), &mut second).await;
+            fs::write(directory.join("release"), b"").unwrap();
+            let first = first.await.expect("first unmount task");
+            let second = match early {
+                Ok(joined) => joined,
+                Err(_) => second.await,
+            }
+            .expect("second unmount task");
+            assert!(first.is_err(), "the forced unmount saw the mount remain");
+            second.expect("the graceful unmount detaches the mount");
+            assert!(
+                !mount.inner.mounted.load(Ordering::Acquire),
+                "an unmount succeeded and the mount is still marked as mounted"
+            );
+            assert!(!mount.active());
+
+            // Whatever is mounted there next is not this mount's to detach.
+            fs::write(directory.join("mounted"), b"").unwrap();
+            let before = fs::read_to_string(&log).unwrap();
+            mount.unmount().await.expect("unmount after unmount");
+            assert_eq!(
+                fs::read_to_string(&log).unwrap(),
+                before,
+                "a later unmount ran umount on a mount point this mount had already left"
+            );
+        });
+    }
 }

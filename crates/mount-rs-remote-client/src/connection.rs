@@ -525,4 +525,105 @@ mod tests {
         assert!(matches!(second, Err(ClientError::Transport)));
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
     }
+
+    /// Stands in for the server: it believes the token of the last renewal
+    /// to reach it, and holds its answer to the first one until told.
+    struct RenewingServer {
+        believes: AtomicI64,
+        renewals: AtomicUsize,
+        first_arrived: tokio::sync::Semaphore,
+        answer_first: tokio::sync::Semaphore,
+    }
+
+    #[async_trait]
+    impl Transport for RenewingServer {
+        async fn exchange(&self, message: Message) -> Result<Message, ClientError> {
+            let Message::Renew { bearer } = message else {
+                return Err(ClientError::Protocol);
+            };
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(bearer.split('.').nth(1).unwrap())
+                .unwrap();
+            let expires = serde_json::from_slice::<Value>(&payload).unwrap()["exp"]
+                .as_i64()
+                .unwrap();
+            self.believes.store(expires, Ordering::SeqCst);
+            if self.renewals.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.first_arrived.add_permits(1);
+                self.answer_first.acquire().await.unwrap().forget();
+            }
+            Ok(Message::ServerHello {
+                version: PROTOCOL_VERSION,
+                session_id: String::new(),
+            })
+        }
+        fn close(&self) {}
+    }
+
+    fn token_expiring(at: i64) -> String {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        format!(
+            "{}.{}.{}",
+            encode(b"{}"),
+            encode(serde_json::json!({ "exp": at }).to_string().as_bytes()),
+            encode(b"signature")
+        )
+    }
+
+    /// Two callers find the token due. The first one's renewal reaches the
+    /// server and its answer is slow; meanwhile the credential source hands
+    /// out a token that expires sooner. A second renewal sent now would
+    /// reach the server after the first and be answered before it, leaving
+    /// the client holding the first token's later expiry while the server
+    /// holds the second's.
+    #[tokio::test]
+    async fn a_renewal_waits_for_the_one_in_flight_and_agrees_with_the_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("token");
+        let later = now_seconds() + 7200;
+        let sooner = now_seconds() + 3600;
+        tokio::fs::write(&path, token_expiring(later))
+            .await
+            .unwrap();
+        let server = Arc::new(RenewingServer {
+            believes: AtomicI64::new(0),
+            renewals: AtomicUsize::new(0),
+            first_arrived: tokio::sync::Semaphore::new(0),
+            answer_first: tokio::sync::Semaphore::new(0),
+        });
+        let connection = Arc::new(RemoteConnection {
+            transport: server.clone(),
+            credentials: Some(CredentialSource::File(path.clone())),
+            expires_at: AtomicI64::new(0),
+            renew_lock: TurnGate::new(),
+            next_id: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        });
+        let renew = |connection: Arc<RemoteConnection>| {
+            tokio::spawn(async move { connection.renew_if_needed().await })
+        };
+        let first = renew(connection.clone());
+        server.first_arrived.acquire().await.unwrap().forget();
+        tokio::fs::write(&path, token_expiring(sooner))
+            .await
+            .unwrap();
+        let mut second = renew(connection.clone());
+        // With the first renewal unanswered, the second caller either waits
+        // for it or sends its own, which this server answers at once.
+        let overtook = tokio::time::timeout(Duration::from_millis(100), &mut second)
+            .await
+            .is_ok();
+        server.answer_first.add_permits(1);
+        first.await.unwrap().unwrap();
+        if !overtook {
+            second.await.unwrap().unwrap();
+        }
+        assert_eq!(
+            connection.expires_at.load(Ordering::SeqCst),
+            server.believes.load(Ordering::SeqCst),
+            "the client schedules renewal by a token the server has replaced"
+        );
+        assert_eq!(server.renewals.load(Ordering::SeqCst), 1);
+        assert!(!overtook);
+    }
 }

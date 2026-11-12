@@ -1234,3 +1234,48 @@ async fn a_write_acknowledged_while_the_handle_closes_is_saved() {
         );
     }
 }
+
+/// Two calls on one handle that both write at the handle's cursor must
+/// land one after the other: each loads the cursor, writes there and
+/// advances it inside the entry's lock. There is no seam inside that
+/// section (it never calls the store), so this is a stress run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cursor_writes_racing_on_one_handle_each_land_at_their_own_offset() {
+    const TASKS: usize = 4;
+    const WRITES: usize = 2000;
+    let (store, fs) = setup();
+    // Already full length, so the writes only fill it in and a missing
+    // one shows as a byte left at zero.
+    fs.write_file("/f", &vec![0; TASKS * WRITES])
+        .await
+        .expect("seed");
+    let handle = fs.open("/f", "r+", 0).await.expect("open");
+    let start = Arc::new(tokio::sync::Barrier::new(TASKS));
+    let mut tasks = Vec::new();
+    for task in 0..TASKS {
+        let (handle, start) = (Arc::clone(&handle), Arc::clone(&start));
+        tasks.push(tokio::spawn(async move {
+            start.wait().await;
+            for _ in 0..WRITES {
+                handle.write(&[task as u8 + 1], None).await.expect("write");
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("join");
+    }
+    handle.close().await.expect("close");
+    let stored = store.bytes("f").expect("stored");
+    assert_eq!(
+        stored.len(),
+        TASKS * WRITES,
+        "cursor writes landed on top of each other"
+    );
+    for task in 0..TASKS {
+        let landed = stored
+            .iter()
+            .filter(|byte| **byte == task as u8 + 1)
+            .count();
+        assert_eq!(landed, WRITES, "task {task} lost cursor writes");
+    }
+}

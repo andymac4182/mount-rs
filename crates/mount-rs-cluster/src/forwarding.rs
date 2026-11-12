@@ -1113,3 +1113,153 @@ mod response_length_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod route_lookup_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// One complete RESP command at the front of `buffer` and its length.
+    fn command(buffer: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
+        fn line(buffer: &[u8], from: usize) -> Option<(&[u8], usize)> {
+            let end = from + buffer[from..].windows(2).position(|w| w == b"\r\n")?;
+            Some((&buffer[from..end], end + 2))
+        }
+        fn number(line: &[u8], prefix: u8) -> usize {
+            assert_eq!(line[0], prefix);
+            std::str::from_utf8(&line[1..]).unwrap().parse().unwrap()
+        }
+        let (head, mut at) = line(buffer, 0)?;
+        let mut parts = Vec::new();
+        for _ in 0..number(head, b'*') {
+            let (length, start) = line(buffer, at)?;
+            let end = start + number(length, b'$');
+            parts.push(buffer.get(start..end)?.to_vec());
+            buffer.get(end..end + 2)?;
+            at = end + 2;
+        }
+        Some((parts, at))
+    }
+
+    /// A registry that counts route lookups and answers none of them until
+    /// told, so every caller that is going to ask has asked.
+    async fn registry(
+        record: String,
+        lookups: Arc<AtomicUsize>,
+        answer: tokio::sync::watch::Receiver<bool>,
+    ) -> RedisRouteRegistry {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (mut read, mut write) = socket.into_split();
+            let (replies, mut queued) = tokio::sync::mpsc::unbounded_channel::<bool>();
+            tokio::spawn(async move {
+                let mut answer = answer;
+                while let Some(lookup) = queued.recv().await {
+                    let reply = if lookup {
+                        answer.wait_for(|go| *go).await.unwrap();
+                        format!("${}\r\n{record}\r\n", record.len())
+                    } else {
+                        "+OK\r\n".to_owned()
+                    };
+                    write.write_all(reply.as_bytes()).await.unwrap();
+                }
+            });
+            let mut buffer = Vec::new();
+            loop {
+                while let Some((parts, used)) = command(&buffer) {
+                    buffer.drain(..used);
+                    let lookup = parts[0].eq_ignore_ascii_case(b"GETRANGE");
+                    if lookup {
+                        lookups.fetch_add(1, Ordering::SeqCst);
+                    }
+                    replies.send(lookup).unwrap();
+                }
+                if read.read_buf(&mut buffer).await.unwrap_or(0) == 0 {
+                    return;
+                }
+            }
+        });
+        let connection = redis::Client::open(format!("redis://{address}/"))
+            .unwrap()
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        RedisRouteRegistry::new(connection, "test".into(), Duration::from_secs(10)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_on_a_cold_route_make_one_registry_lookup() {
+        const CALLERS: usize = 8;
+        let peer = TrustedPeer {
+            node: "owner".into(),
+            boot: "boot".into(),
+            address: "127.0.0.1:4443".parse().unwrap(),
+            tls_server_name: "localhost".into(),
+            pin: SpkiSha256::from_bytes([7; 32]),
+        };
+        let route = VolumeRoute {
+            volume: "volume".into(),
+            node: peer.node.clone(),
+            boot: peer.boot.clone(),
+            registration: "registration".into(),
+            fence: 1,
+            address: peer.address,
+            tls_server_name: peer.tls_server_name.clone(),
+        };
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let (answer, held) = tokio::sync::watch::channel(false);
+        let registry = registry(route.encode().unwrap(), lookups.clone(), held).await;
+        // The client is never dialled: only route discovery runs.
+        let client = PeerClient::new(
+            quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap(),
+            ApprovedPeerPins::new([peer.pin]).unwrap(),
+            PeerTransportLimits::default(),
+        )
+        .unwrap();
+        let forwarder = IngressForwarder::new(
+            registry,
+            Arc::new(PeerDirectory::new(vec![peer]).unwrap()),
+            Arc::new(client),
+            ForwardOptions {
+                route_cache_ttl: Duration::from_secs(5),
+                ..ForwardOptions::default()
+            },
+        )
+        .unwrap();
+        let timings = Arc::new(TimingCounters::default());
+        let mut callers = tokio::task::JoinSet::new();
+        for _ in 0..CALLERS {
+            let forwarder = forwarder.clone();
+            let timings = timings.clone();
+            callers.spawn(async move {
+                forwarder
+                    .route("volume", &timings, None)
+                    .await
+                    .map(|entry| entry.route.clone())
+            });
+        }
+        // The registry holds its answer, so a caller that does not wait for
+        // the first one's lookup sends its own in this window.
+        let window = std::time::Instant::now() + Duration::from_millis(150);
+        while lookups.load(Ordering::SeqCst) < CALLERS && std::time::Instant::now() < window {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        answer.send(true).unwrap();
+        while let Some(found) = callers.join_next().await {
+            assert_eq!(found.unwrap().unwrap(), route);
+        }
+        assert_eq!(
+            lookups.load(Ordering::SeqCst),
+            1,
+            "callers for one cold route each asked the registry"
+        );
+        assert_eq!(timings.route_cache_misses.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            timings.route_cache_coalesced_hits.load(Ordering::Relaxed),
+            CALLERS as u64 - 1
+        );
+    }
+}
