@@ -60,6 +60,8 @@ impl Slab {
     const FIRST: usize = 1024;
     /// Enough doubling chunks to hold every `u32` slot number.
     const CHUNKS: usize = 23;
+    // Only a cache that opens builds one, and it opens only on Unix.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn new() -> Arc<Self> {
         Arc::new(Self {
             chunks: [const { OnceLock::new() }; Self::CHUNKS],
@@ -239,6 +241,8 @@ struct Doomed {
     charge: usize,
 }
 impl State {
+    // Only a cache that opens builds one, and it opens only on Unix.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn new() -> Self {
         use std::hash::BuildHasher;
         let seed = std::collections::hash_map::RandomState::new().hash_one(0_u8);
