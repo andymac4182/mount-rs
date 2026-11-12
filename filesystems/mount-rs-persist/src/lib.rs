@@ -25,17 +25,35 @@ use mount_rs_memfs::MemoryFs;
 /// a particular async runtime.
 #[derive(Clone)]
 struct SaveGate {
-    /// The version of the last saved snapshot, which only a save reads or
-    /// replaces.
-    lock: Arc<TurnLock<String>>,
+    /// What the last save left behind, which only a save reads or replaces.
+    lock: Arc<TurnLock<SaveState>>,
 }
 
-type SaveGateGuard = OwnedTurnLockGuard<String>;
+struct SaveState {
+    /// The version of the last snapshot known to be saved.
+    version: String,
+    /// The digest of a snapshot whose save did not report back: the caller
+    /// stopped waiting, or the store returned an error. The store may or may
+    /// not hold it, so the next save finds out before it writes.
+    unconfirmed: Option<u64>,
+}
+
+type SaveGateGuard = OwnedTurnLockGuard<SaveState>;
+
+fn digest(snapshot: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    snapshot.hash(&mut hasher);
+    hasher.finish()
+}
 
 impl SaveGate {
     fn new(version: String) -> Self {
         Self {
-            lock: Arc::new(TurnLock::new(version)),
+            lock: Arc::new(TurnLock::new(SaveState {
+                version,
+                unconfirmed: None,
+            })),
         }
     }
 
@@ -87,10 +105,29 @@ impl<S: StateStore> PersistedFs<S> {
     }
 
     pub async fn persist(&self) -> Result<()> {
-        let mut version = self.save_gate.lock().await;
+        let mut state = self.save_gate.lock().await;
+        if let Some(attempted) = state.unconfirmed {
+            // A store that runs the write on its own thread or over a network
+            // finishes it even when the caller has stopped waiting. Without
+            // this, the version here would stay one behind and every later
+            // save would be refused as a conflict.
+            let stored = self.store.load_versioned().await?;
+            if stored.version != state.version {
+                match stored.snapshot.as_deref() {
+                    Some(snapshot) if digest(snapshot) == attempted => {
+                        state.version = stored.version;
+                    }
+                    // Someone else's snapshot: a real conflict.
+                    _ => return Err(snapshot_conflict("persisted")),
+                }
+            }
+            state.unconfirmed = None;
+        }
         let snapshot = self.core.snapshot_bytes()?;
-        let next_version = self.store.save_versioned(snapshot, &version).await?;
-        *version = next_version;
+        state.unconfirmed = Some(digest(&snapshot));
+        let next_version = self.store.save_versioned(snapshot, &state.version).await?;
+        state.version = next_version;
+        state.unconfirmed = None;
         Ok(())
     }
 
@@ -907,5 +944,95 @@ mod tests {
         let restored = MemoryFs::from_snapshot(&store.snapshot()).unwrap();
         assert_eq!(read_file(&restored, "/decoded"), b"ok");
         assert_eq!(block_on(handle.stat()).unwrap().mode & 0o777, 0o640);
+    }
+
+    /// A store with real versions, like SQLite or R2. A save always lands;
+    /// when `stall` is set the caller is never told so.
+    #[derive(Default)]
+    struct VersionedStore {
+        saved: Mutex<(u64, Option<Vec<u8>>)>,
+        stall: AtomicBool,
+    }
+
+    #[async_trait]
+    impl StateStore for VersionedStore {
+        async fn load(&self) -> Result<Option<Vec<u8>>> {
+            Ok(self.saved.lock().unwrap().1.clone())
+        }
+
+        async fn load_versioned(&self) -> Result<LoadedSnapshot> {
+            let saved = self.saved.lock().unwrap();
+            Ok(LoadedSnapshot {
+                snapshot: saved.1.clone(),
+                version: saved.0.to_string(),
+            })
+        }
+
+        async fn save(&self, _snapshot: Vec<u8>) -> Result<()> {
+            unreachable!("the versioned path is the only one used")
+        }
+
+        async fn save_versioned(&self, snapshot: Vec<u8>, expected: &str) -> Result<String> {
+            let next = {
+                let mut saved = self.saved.lock().unwrap();
+                if saved.0.to_string() != expected {
+                    return Err(snapshot_conflict("test"));
+                }
+                saved.0 += 1;
+                saved.1 = Some(snapshot);
+                saved.0
+            };
+            if self.stall.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            Ok(next.to_string())
+        }
+    }
+
+    /// Start a write and stop waiting for it once the store has committed.
+    fn abandon_a_write(fs: &PersistedFs<VersionedStore>) {
+        fs.store.stall.store(true, Ordering::SeqCst);
+        {
+            let mut abandoned = Box::pin(fs.write_file("/abandoned", b"two"));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(abandoned.as_mut().poll(&mut context).is_pending());
+        }
+        fs.store.stall.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_save_whose_caller_stopped_waiting_does_not_refuse_every_later_save() {
+        let fs = block_on(PersistedFs::open(VersionedStore::default())).unwrap();
+        block_on(fs.write_file("/kept", b"one")).unwrap();
+        // The store commits this save, but the caller is cancelled before it
+        // hears back, as a FUSE request is when the mount goes away.
+        abandon_a_write(&fs);
+
+        // The next save notices the store already holds what it tried to
+        // write, adopts that version and carries on.
+        block_on(fs.write_file("/later", b"three")).unwrap();
+        block_on(fs.write_file("/later", b"four")).unwrap();
+        let saved = fs.store.saved.lock().unwrap().clone();
+        let reopened = block_on(PersistedFs::open(VersionedStore {
+            saved: Mutex::new(saved),
+            stall: AtomicBool::new(false),
+        }))
+        .unwrap();
+        assert_eq!(read_file(reopened.core(), "/abandoned"), b"two");
+        assert_eq!(read_file(reopened.core(), "/later"), b"four");
+    }
+
+    #[test]
+    fn an_unconfirmed_save_still_reports_another_writers_snapshot_as_a_conflict() {
+        let fs = block_on(PersistedFs::open(VersionedStore::default())).unwrap();
+        abandon_a_write(&fs);
+        // Another instance replaces the snapshot before this one saves again.
+        {
+            let mut saved = fs.store.saved.lock().unwrap();
+            saved.0 += 1;
+            saved.1 = Some(MemoryFs::empty().snapshot_bytes().unwrap());
+        }
+        let error = block_on(fs.write_file("/later", b"three")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eagain);
     }
 }
