@@ -756,6 +756,20 @@ fn request_when_not_busy(
     request(address, method, path, token, body)
 }
 
+/// Every line a reader thread sends before it stops, waiting at most
+/// `limit` in all for the sender to go away.
+fn drain_until_closed(lines: &Receiver<String>, limit: Duration) -> Vec<String> {
+    let deadline = std::time::Instant::now() + limit;
+    let mut collected = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match lines.recv_timeout(left) {
+            Ok(line) => collected.push(line),
+            Err(_) => return collected,
+        }
+    }
+}
+
 #[test]
 fn an_acknowledged_upload_survives_the_process_being_killed() {
     let root = temporary_root();
@@ -819,7 +833,11 @@ fn an_acknowledged_upload_survives_the_process_being_killed() {
             }
             Err(_) => {
                 let _ = candidate.child.wait();
-                let stderr = candidate.stderr.try_iter().collect::<Vec<_>>();
+                // The child has exited, but its stderr lines reach this
+                // channel through a reader thread that may not have sent
+                // them yet. Read until that thread sees the pipe close,
+                // rather than taking whatever happens to have arrived.
+                let stderr = drain_until_closed(&candidate.stderr, Duration::from_secs(10));
                 assert!(
                     stderr.iter().any(|line| line.contains("EAGAIN")),
                     "restart failed for another reason: {stderr:?}"
