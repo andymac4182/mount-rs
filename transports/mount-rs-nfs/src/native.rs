@@ -1170,7 +1170,9 @@ mod tests {
 
     // ---- unmount exclusion ------------------------------------------------
 
+    #[cfg(unix)]
     const FAKE_COMMANDS: &str = "MOUNT_RS_NFS_FAKE_COMMANDS";
+    #[cfg(unix)]
     const FAKE_MOUNTPOINT: &str = "/mount-rs-nfs-fake-mountpoint";
 
     /// `unmount` learns everything it knows from `mount` and `umount`. This
