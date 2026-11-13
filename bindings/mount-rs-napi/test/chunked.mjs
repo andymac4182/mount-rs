@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createChunkedDriver, createNfsServer, createP9Server, createWebdavServer, createS3Server, mount } from "../index.js"
@@ -172,6 +172,36 @@ try {
       await ownerA.shutdown()
     }
     console.log("mount-rs N-API delegated SQLite: PASS (disjoint scopes, denied access, clean handoff)")
+
+    // A FUSE mount checks the directory is checked out and then creates the
+    // mount; a check-in must not land between the two. Each takes the
+    // driver's native mount gate, so one of them must refuse.
+    if (process.platform === "linux" && process.env.MOUNT_RS_NAPI_NATIVE_MOUNT === "1") {
+      const racer = await openDriver({ ...delegated, checkoutPath: "/owned-a", owner: `racer-${suffix}` })
+      const mountpoint = join(directory, "racing-mount")
+      await mkdir(mountpoint)
+      let mounted
+      try {
+        const [mounting, checkin] = await Promise.allSettled([
+          mount(racer, mountpoint, { transport: "fuse" }),
+          racer.checkinScope(),
+        ])
+        if (mounting.status === "fulfilled") mounted = mounting.value
+        assert.ok(
+          mounting.status === "rejected" || checkin.status === "rejected",
+          "a FUSE mount must not stay up over a directory that was checked in",
+        )
+        if (mounted) {
+          assert.equal(checkin.reason?.code, "EBUSY", checkin.reason?.message)
+        } else {
+          assert.equal(mounting.reason?.code, "EACCES", mounting.reason?.message)
+        }
+      } finally {
+        await mounted?.unmount()
+        await racer.shutdown()
+      }
+      console.log("mount-rs N-API delegated FUSE mount: PASS (check-in cannot race mount creation)")
+    }
   }
 
   // The provider lease is held until shutdown, so a second writer fails
