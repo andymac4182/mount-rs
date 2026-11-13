@@ -191,3 +191,85 @@ fn packet_type(space: SpaceId, is_0rtt: bool) -> PacketType {
         SpaceId::Data => PacketType::OneRtt,
     }
 }
+
+#[cfg(all(test, feature = "qlog"))]
+mod tests {
+    use std::{
+        io,
+        sync::{Arc, Barrier, Mutex},
+    };
+
+    use qlog::events::{
+        EventData,
+        quic::{PacketLost, PacketLostTrigger},
+    };
+
+    use crate::{ConnectionId, Instant, QlogConfig};
+
+    /// A sink that keeps every byte, each write whole.
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Connections sharing one stream emit at once. The streamer writes an
+    /// event in many small writes, so every record must still come out
+    /// whole: one separator, one JSON object, one newline.
+    #[test]
+    fn concurrent_events_reach_the_trace_whole() {
+        const THREADS: usize = 4;
+        const EVENTS: usize = 2_000;
+        let sink = Sink::default();
+        let mut config = QlogConfig::default();
+        config.writer(Box::new(sink.clone()));
+        let stream = config.into_stream().expect("qlog stream");
+        let start = Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for thread in 0..THREADS {
+                let (stream, start) = (&stream, &start);
+                scope.spawn(move || {
+                    let cid = ConnectionId::new(&[thread as u8; 8]);
+                    start.wait();
+                    for _ in 0..EVENTS {
+                        let lost = PacketLost {
+                            trigger: Some(PacketLostTrigger::TimeThreshold),
+                            ..PacketLost::default()
+                        };
+                        stream.emit_event(cid, EventData::PacketLost(lost), Instant::now());
+                    }
+                });
+            }
+        });
+        let bytes = sink.0.lock().unwrap().clone();
+        let text = String::from_utf8(bytes).expect("trace is UTF-8");
+        let records = text
+            .split('\u{1e}')
+            .filter(|record| !record.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records.len(),
+            1 + THREADS * EVENTS,
+            "one header and every event"
+        );
+        for record in &records[1..] {
+            assert!(
+                record.starts_with('{')
+                    && record.ends_with("}\n")
+                    && record.matches('\n').count() == 1,
+                "a record came out interleaved: {record:?}"
+            );
+            assert!(
+                record.contains("transport:packet_lost") || record.contains("recovery:packet_lost")
+            );
+        }
+    }
+}

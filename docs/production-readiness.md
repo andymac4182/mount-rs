@@ -324,7 +324,7 @@ step has nowhere to park a caller.
 | chunked `ChunkedHandle.gate` | new `cursor_reads_on_one_handle_take_turns`, new `two_closes_of_one_handle_release_one_reference` (stress) | Two reads returned one range; two closes released another handle's reference |
 | host `DiskCachedBlockStore.io` | new `delete_waits_for_a_read_in_flight_so_its_fill_cannot_outlive_the_delete` | A cached copy of a deleted block left on disk |
 | host disk cache index turn | `concurrent_read_fill_clear_and_delete_preserve_bytes_and_bounds` (stress) | Size bound exceeded; aborts |
-| host `HostHandle.state` | new `concurrent_cursor_reads_on_one_handle_each_get_their_own_range` (stress) | Two reads returned one range. The close half of the row is argued only |
+| host `HostHandle.state` | new `concurrent_cursor_reads_on_one_handle_each_get_their_own_range` (stress), new `close_waits_for_a_read_that_holds_the_descriptor` | Two reads returned one range; with close not waiting for the handle, close returned while a read held the descriptor |
 | blob cache flight `Entry.turn` | `hundred_simultaneous_cold_reads_coalesce_to_one_backing_get` | 64 fetches instead of 1 |
 | blob cache `PeerLink.dial` | `concurrent_requests_dial_a_peer_once_and_replace_a_closed_connection_once` | 64 dials instead of 1 |
 | blob cache `LocalCache.files` | `an_invalidation_waits_for_an_insert_whose_file_is_not_yet_indexed` | Invalidation returned with the file on disk |
@@ -346,19 +346,24 @@ step has nowhere to park a caller.
 | NFS `unmount_lock` | new `a_second_unmount_waits_for_one_in_its_force_ladder` | An unmount reported success with the mount still marked mounted |
 | NFS `listen_lock` | new `concurrent_listens_from_real_threads_bind_one_listener` (stress), `a_second_close_waits_for_the_first_to_drain_its_connections` | Four listeners bound; session destroyed during a drain |
 | NFS path locks (v3, v4, shared) | new `v3_remove_waits_for_a_v3_lookup_between_stat_and_bind` and three like it for the other pairings | A handle still bound to the removed name |
-| NFS `Nfs4Session.state` | new `concurrent_retransmissions_of_one_slot_sequence_run_the_request_once` (stress), `concurrent_conflicting_locks_from_two_owners_grant_exactly_one` (stress) | A request run twice; one exclusive range granted to two owners. The second handle in `InFlightSlot`'s drop is argued only |
+| NFS `Nfs4Session.state` | new `concurrent_retransmissions_of_one_slot_sequence_run_the_request_once` (stress), `concurrent_conflicting_locks_from_two_owners_grant_exactly_one` (stress) | A request run twice; one exclusive range granted to two owners. With `InFlightSlot`'s drop not taking the lock, `session_slot_sequence_wraps_to_zero`, `concurrent_retransmissions_of_one_slot_sequence_run_the_request_once` and `compound_opens_keep_files_with_equal_low_fileid_bits` fail: the slot is never released |
 | 9P `MountState.release` | new `a_second_release_waits_for_the_one_closing_the_server` | The second release failed on a directory not yet emptied |
 | 9P `P9Server.adoption` | new `native_linux_concurrent_mounts_on_one_server_adopt_distinct_connections` (Linux native job only) | Two mounts adopted one kernel connection |
 | 9P `SessionInner.state` | new `concurrent_set_open_admits_one_caller_per_fid` (stress) | A fid opened by two callers |
 | 9P `path_lock` | new `rename_waits_for_a_walk_under_the_renamed_directory`, `remove_waits_for_a_rename_of_its_parent_and_removes_the_new_path` | A fid naming a path the rename removed |
 | S3 conditional-put gate | `conditional_puts_serialize_compare_and_swap_checks` | A second precondition saw the old ETag |
 | WebDAV `lifecycle` | new `close_waits_for_a_listen_that_has_not_stored_its_task` (skips where `localhost.` does not resolve) | Close returned with the server still accepting |
+| napi `HandleState.close_gate` | `js-driver.mjs` ("second close must wait for the first"; needs the built addon and `MOUNTX_SOURCE`) | The second close ran while the first was still in JavaScript |
+| napi `native_delegation_mounts` | new delegated FUSE mount race in `chunked.mjs` (Linux, `MOUNT_RS_NAPI_NATIVE_MOUNT=1`) | With the gate released while the mount is created, a check-in landed in between and the mount stayed up over a checked-in directory (5 of 5 runs) |
+| quinn `BloomTokenLog` | new `concurrent_uses_of_one_token_accept_it_once` (needs the `bloom` feature; run from a standalone copy, see below) | The process aborted (SIGTRAP) in the token set |
+| quinn `QlogStream` | new `concurrent_events_reach_the_trace_whole` (needs the `qlog` feature; standalone copy) | About 130 of 8,001 records lost or interleaved |
 | tunnel dial gate | `concurrent_cold_checkouts_share_one_connection_and_close_removes_the_slot` | Every caller dialled and the pool ran out of permits, so inserting by compare-and-swap would not be enough |
 
-Not checked this way: the two napi locks (`close_gate`, whose JavaScript
-test needs the built addon, and `native_delegation_mounts`, reachable only
-through a Linux FUSE mount), and quinn's `BloomTokenLog` and `QlogStream`,
-which are not compiled here.
+The quinn tests run from a copy of `vendor/quinn-proto` made its own
+workspace (append `[workspace]` to its `Cargo.toml`, copy in the root
+`Cargo.lock`), with `cargo test --release --features qlog --lib`. Nothing
+in this workspace enables `bloom` or `qlog`, so CI does not build either
+lock.
 
 **Kept because the replacement measured slower.** For each of these the
 removal was built, tested and benchmarked against the lock, then reverted.

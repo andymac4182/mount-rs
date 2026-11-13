@@ -272,6 +272,43 @@ mod test {
         }
     }
 
+    /// Threads present the same tokens in the same order, so a use and a
+    /// reuse of one token meet often. Each token must be accepted once.
+    #[test]
+    fn concurrent_uses_of_one_token_accept_it_once() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicU8, Ordering},
+        };
+        const TOKENS: usize = 200_000;
+        const THREADS: usize = 4;
+        let log = BloomTokenLog::new_expected_items(10 << 20, TOKENS as u64);
+        let issued = SystemTime::now();
+        let lifetime = Duration::from_secs(1_000_000);
+        let accepted = (0..TOKENS).map(|_| AtomicU8::new(0)).collect::<Vec<_>>();
+        let start = Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    start.wait();
+                    for (nonce, count) in accepted.iter().enumerate() {
+                        if log
+                            .check_and_insert(nonce as u128, issued, lifetime)
+                            .is_ok()
+                        {
+                            count.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+        let reused = accepted
+            .iter()
+            .filter(|count| count.load(Ordering::Relaxed) != 1)
+            .count();
+        assert_eq!(reused, 0, "tokens accepted other than once");
+    }
+
     #[test]
     fn optimal_k_num_test() {
         assert_eq!(optimal_k_num(10 << 20, 1_000_000), 58);

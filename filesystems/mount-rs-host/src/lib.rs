@@ -1041,6 +1041,8 @@ impl FileHandle for HostHandle {
                 // for closed handles and backend failures below.
                 return Err(FsError::new(ErrorCode::Eisdir).with_syscall("read"));
             }
+            #[cfg(test)]
+            tests::hold_read(&path);
             let start = position.unwrap_or(state.position);
             let mut bytes = vec![0_u8; length];
             let count = read_file_at(file, &mut bytes, start)
@@ -1623,6 +1625,56 @@ mod tests {
     /// the same range. The step is one blocking file read with no seam to
     /// park in, so this is a race loop: four tasks read 4-byte records
     /// through one cursor and every record must come back exactly once.
+    /// While set, a read of `HELD_PATH` waits inside its worker, holding
+    /// the handle's descriptor.
+    static HOLDING_READ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    const HELD_PATH: &str = "/held-read";
+
+    pub(super) fn hold_read(path: &str) {
+        while path == HELD_PATH && HOLDING_READ.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// Close must wait for a read in a worker, not return while the worker
+    /// still reads through the descriptor it is meant to have closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn close_waits_for_a_read_that_holds_the_descriptor() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().expect("create host close fixture");
+        let fs = Loopback::new(HostFs::new(root.path()));
+        let writer = fs.open(HELD_PATH, "w", 0o666).await.unwrap();
+        assert_eq!(writer.write(b"x", Some(0)).await.unwrap(), 1);
+        writer.close().await.unwrap();
+        let handle = fs.open(HELD_PATH, "r", 0).await.unwrap();
+        HOLDING_READ.store(true, Ordering::Release);
+        let reader = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move {
+                let mut byte = [0_u8; 1];
+                handle
+                    .read(&mut byte, None)
+                    .await
+                    .map(|count| (count, byte[0]))
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!reader.is_finished(), "the read must be held in its worker");
+        let closer = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move { handle.close().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let closed_early = closer.is_finished();
+        HOLDING_READ.store(false, Ordering::Release);
+        assert!(
+            !closed_early,
+            "close returned while a read still held the descriptor"
+        );
+        assert_eq!(reader.await.unwrap().unwrap(), (1, b'x'));
+        closer.await.unwrap().unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_cursor_reads_on_one_handle_each_get_their_own_range() {
         const RECORDS: u32 = 400;
