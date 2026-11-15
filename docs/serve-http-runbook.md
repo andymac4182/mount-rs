@@ -341,8 +341,8 @@ Operational consequences:
   until it expires; see [Lease takeover wait](#lease-takeover-wait).
 - Take the instance out of the load balancer before sending SIGTERM so that
   steps 2 and 3 affect no client.
-- With `remote_sessions` or `forwarding` enabled (outside the launch
-  contract) a failed drain does **not** release leases.
+- The same holds with `remote_sessions` or `forwarding` enabled: a failed
+  drain still withdraws the Redis route, closes sessions and releases leases.
 - A signal that arrives during startup is honoured: drives already opened are
   shut down and the process exits with code 1 without printing the readiness
   line.

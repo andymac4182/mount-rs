@@ -820,9 +820,10 @@ select TiDB and local or object-store blocks. Sessions have a shared process
 budget of 4096, a per-volume limit of 128 sessions, 128 handles per session and a
 60-second idle timeout; the remote CLI owns keepalive. The command supervises
 expiry and closes listeners/sessions before shutting down SDK owners. Session
-drain uses `drain_timeout_ms`; a failure returns an error and does not explicitly
-release SDK ownership as though cleanup succeeded. A process exit after failure
-still relies on the provider's lease-expiry/fencing behavior.
+drain uses `drain_timeout_ms`. A drain that fails still withdraws the Redis
+route, closes the sessions and releases each drive's writer lease, so a
+replacement process can take over at once; the exit status is 1. Each drive's
+shutdown waits for the operations it admitted and fences the rest.
 
 Multiple writable clients can use the same volume through any configured ingress. Clients need the public HTTPS endpoint and bearer credential. Servers use Redis for volume discovery and mutually authenticated HTTP/3 to forward requests to the owner.
 

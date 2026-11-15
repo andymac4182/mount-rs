@@ -1084,14 +1084,12 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     };
     // Keep SDK ownership alive through the listener/session drain.
     let closed = server.close().await;
-    if closed.is_err() && !server.releases_drives_after_failed_drain() {
-        // Sessions and peers may still be using the drives: an unsuccessful
-        // drain is not permission to release their writer leases.
-        return closed;
-    }
-    // A plain listener that ran out of drain time has aborted what it was
-    // still serving. Release the drives regardless, so the writer lease is
-    // free for the replacement process, and still exit with the failure.
+    // A drain that ran out of time has aborted what it was still serving.
+    // Release the drives regardless, so the writer lease is free for the
+    // replacement process, and still exit with the failure. A session,
+    // handle or forwarded request still in flight is no reason to keep the
+    // lease: each drive's shutdown waits for the operations it admitted,
+    // then fences the rest, and the process is about to exit anyway.
     let released = shutdown_runtimes(&runtimes, &metadata_pools).await;
     closed?;
     released?;
