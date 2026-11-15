@@ -503,6 +503,19 @@ after a kill is up to one full lifetime.
   download.
 - **Throughput.** One process, one writer per drive. Capacity is added by
   putting drives in separate processes, not by adding replicas of one drive.
+- **Forwarding clusters.** Put drives on different owners to add write
+  capacity, and put any number of servers behind an ordinary load balancer as
+  ingresses. The HTTP listener is loopback only, so each server needs the TLS
+  proxy described above, and the load balancer targets that proxy. Each
+  server's peer UDP port (its membership `address`) must be reachable from
+  every other server. The membership file may list up to 1,024 servers. Every
+  ingress keeps `forwarding.peer_connections` (default 4) QUIC connections to
+  each owner it forwards to, so in a full mesh of N servers each server holds
+  up to 4 x N outbound and 4 x N inbound peer connections. Each connection can
+  buffer up to 8 MiB of request or response body in flight, so size memory for
+  the busiest owner: with 100 ingresses all streaming large files to one owner,
+  that is up to 400 connections. Raise `peer_connections` on hosts with many
+  cores if forwarded throughput to one owner is the limit.
 - **Storage caches.** Split-store block and disk caches are sized per drive in
   the driver config. `cache_capacity` makes startup fail if their sum exceeds a
   stated budget.

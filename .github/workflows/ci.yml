@@ -893,7 +893,13 @@ jobs:
       - name: Test the cluster with http3
         env:
           MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
-        run: cargo test --locked -p mount-rs-cluster --features http3 --all-targets -- --include-ignored
+        # The two skipped tests need scripts/test-redis-restart.sh and
+        # scripts/test-tidb.sh, which this job does not start.
+        run: >-
+          cargo test --locked -p mount-rs-cluster --features http3 --all-targets --
+          --include-ignored
+          --skip registration_recovers_after_server_restart
+          --skip tidb_sessions_preserve_handles_and_reopen_persisted_writes
 
   observability-qualification:
     name: Observability qualification (${{ matrix.os }})

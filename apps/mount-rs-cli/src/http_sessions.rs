@@ -57,7 +57,7 @@ impl Sessions {
                 listener,
                 owner: None,
                 application: None,
-                peer: None,
+                peers: Vec::new(),
                 supervisor: None,
                 drain_timeout,
             });
@@ -93,7 +93,7 @@ impl Sessions {
                 owner: None,
                 application: Some(application),
                 supervisor,
-                peer: remote.map(|(_, peer)| peer),
+                peers: remote.map(|(_, peers)| peers).unwrap_or_default(),
                 drain_timeout,
             }),
             Err(error) => {
@@ -206,7 +206,7 @@ impl HttpRequestHandler for Router {
 pub(crate) struct Service {
     listener: HttpServer,
     owner: Option<OwnerService>,
-    peer: Option<Arc<mount_rs_cluster::transport::PeerClient>>,
+    peers: Vec<Arc<mount_rs_cluster::transport::PeerClient>>,
     application: Option<Arc<HttpServer>>,
     supervisor: Option<SessionSupervisor>,
     drain_timeout: Duration,
@@ -256,7 +256,7 @@ impl Service {
         if let Some(owner) = &self.owner {
             keep(owner.close().await);
         }
-        if let Some(peer) = &self.peer {
+        for peer in &self.peers {
             keep(
                 peer.shutdown()
                     .await
@@ -280,6 +280,34 @@ impl Service {
             );
         }
         first.map_or(Ok(()), Err)
+    }
+}
+
+/// Most connections one server opens to each peer
+/// (`forwarding.peer_connections` is at most this).
+const MAX_PEER_CONNECTIONS: usize = 16;
+
+/// A forwarding client keeps one connection to each server it forwards to,
+/// so it needs a connection and a destination slot per member.
+fn client_limits(
+    directory: &mount_rs_cluster::PeerDirectory,
+) -> mount_rs_cluster::transport::PeerTransportLimits {
+    mount_rs_cluster::transport::PeerTransportLimits {
+        max_connections: directory.len(),
+        max_destinations: directory.len(),
+        ..Default::default()
+    }
+}
+
+/// An owner accepts up to `MAX_PEER_CONNECTIONS` connections from every
+/// member, so that no peer_connections setting on the others can lock one
+/// of them out. The transport default of 16 admitted only 16 in all.
+fn server_limits(
+    directory: &mount_rs_cluster::PeerDirectory,
+) -> mount_rs_cluster::transport::PeerTransportLimits {
+    mount_rs_cluster::transport::PeerTransportLimits {
+        max_connections: directory.len() * MAX_PEER_CONNECTIONS,
+        ..Default::default()
     }
 }
 
@@ -315,7 +343,7 @@ async fn connect_forwarder(
 ) -> Result<
     (
         mount_rs_cluster::IngressForwarder,
-        Arc<mount_rs_cluster::transport::PeerClient>,
+        Vec<Arc<mount_rs_cluster::transport::PeerClient>>,
     ),
     CliError,
 > {
@@ -323,23 +351,33 @@ async fn connect_forwarder(
     let fail =
         |e: &dyn std::fmt::Display| CliError::runtime(format!("HTTP forwarding startup: {e}"));
     let directory = files.directory.clone();
-    let tls = load_peer_client_config_from_pem(&files.certificate, &files.key, &files.ca)
-        .map_err(|e| fail(&e))?;
-    let mut endpoint = quinn::Endpoint::client(config.bind).map_err(|e| fail(&e))?;
-    endpoint.set_default_client_config(tls);
-    let peer = Arc::new(
-        PeerClient::new(
-            endpoint,
-            directory.approved_pins().map_err(|e| fail(&e))?,
-            PeerTransportLimits::default(),
-        )
-        .map_err(|e| fail(&e))?,
-    );
+    // One client per connection, each on its own UDP socket: the first on the
+    // configured address, the rest on the same IP with a free port.
+    let mut peers = Vec::with_capacity(config.peer_connections);
+    for index in 0..config.peer_connections {
+        let tls = load_peer_client_config_from_pem(&files.certificate, &files.key, &files.ca)
+            .map_err(|e| fail(&e))?;
+        let bind = if index == 0 {
+            config.bind
+        } else {
+            std::net::SocketAddr::new(config.bind.ip(), 0)
+        };
+        let mut endpoint = quinn::Endpoint::client(bind).map_err(|e| fail(&e))?;
+        endpoint.set_default_client_config(tls);
+        peers.push(Arc::new(
+            PeerClient::new(
+                endpoint,
+                directory.approved_pins().map_err(|e| fail(&e))?,
+                client_limits(&directory),
+            )
+            .map_err(|e| fail(&e))?,
+        ));
+    }
     let registry = connect_registry(config).await?;
     let forwarder = IngressForwarder::new(
         registry,
         directory,
-        peer.clone(),
+        peers[0].clone(),
         ForwardOptions {
             max_request_bytes,
             refresh_active_routes: config.refresh_active_routes,
@@ -347,8 +385,9 @@ async fn connect_forwarder(
             ..Default::default()
         },
     )
-    .map_err(|e| fail(&e))?;
-    Ok((forwarder, peer))
+    .map_err(|e| fail(&e))?
+    .with_additional_clients(peers[1..].to_vec());
+    Ok((forwarder, peers))
 }
 
 async fn connect_registry(
@@ -465,18 +504,13 @@ pub(crate) async fn start_owner(
         handlers.push(handler);
     }
     let router = OwnerHttpRouter::new(handlers).map_err(|e| fail(&e))?;
-    let (remote, peer) = connect_forwarder(config, options.max_request_bytes, &files).await?;
+    let (remote, peers) = connect_forwarder(config, options.max_request_bytes, &files).await?;
     let public = Arc::new(ClusterIngress::new(router.clone(), remote));
     let pins = directory.approved_pins().map_err(|e| fail(&e))?;
+    let limits = server_limits(&directory);
     let policy = move |identity: &TlsIdentity, _: &http::Request<()>| directory.accepts(identity);
-    let server = PeerServer::new(
-        endpoint,
-        pins,
-        PeerTransportLimits::default(),
-        policy,
-        router.clone(),
-    )
-    .map_err(|e| fail(&e))?;
+    let server =
+        PeerServer::new(endpoint, pins, limits, policy, router.clone()).map_err(|e| fail(&e))?;
     let supervisor = if sessions.is_empty() {
         None
     } else {
@@ -518,7 +552,7 @@ pub(crate) async fn start_owner(
         Ok(listener) => Ok(Service {
             listener,
             owner: Some(owner),
-            peer: Some(peer),
+            peers,
             application: None,
             supervisor,
             drain_timeout,

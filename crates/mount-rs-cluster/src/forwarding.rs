@@ -49,6 +49,9 @@ fn deserialize_peer_pin<'de, D: serde::Deserializer<'de>>(
     Ok(SpkiSha256::from_bytes(pin))
 }
 
+/// Most servers a membership file may list.
+pub const MAX_PEER_DIRECTORY_MEMBERS: usize = 1024;
+
 pub struct PeerDirectory(BTreeMap<String, TrustedPeer>);
 impl PeerDirectory {
     /// Load an operator-provided JSON array of trusted peer records before binding listeners.
@@ -58,7 +61,7 @@ impl PeerDirectory {
     }
 
     pub fn new(peers: Vec<TrustedPeer>) -> Result<Self, RegistryError> {
-        if peers.is_empty() || peers.len() > 64 {
+        if peers.is_empty() || peers.len() > MAX_PEER_DIRECTORY_MEMBERS {
             return Err(RegistryError::InvalidInput);
         }
         let mut map = BTreeMap::new();
@@ -74,6 +77,14 @@ impl PeerDirectory {
             map.insert(peer.node.clone(), peer);
         }
         Ok(Self(map))
+    }
+    /// Number of servers in the membership.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    /// Always false: a directory holds at least one server.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
     /// Use the same operator-provided membership for TLS pins and node identity checks.
     pub fn approved_pins(&self) -> Result<ApprovedPeerPins, RegistryError> {
@@ -307,7 +318,8 @@ impl BodyFailures {
 pub struct IngressForwarder {
     registry: RedisRouteRegistry,
     peers: Arc<PeerDirectory>,
-    client: Arc<PeerClient>,
+    clients: Arc<[Arc<PeerClient>]>,
+    next_client: Arc<std::sync::atomic::AtomicUsize>,
     options: ForwardOptions,
     routes: Arc<crate::route_cache::RouteCache>,
     route_lookups: Arc<crate::coalesce::Coalesce>,
@@ -335,12 +347,29 @@ impl IngressForwarder {
         Ok(Self {
             registry,
             peers,
-            client,
+            clients: Arc::new([client]),
+            next_client: Arc::default(),
             options,
             routes: Arc::default(),
             route_lookups: Arc::default(),
             body_failures: Arc::default(),
         })
+    }
+    /// Forward over these clients as well, taking them in turn per request.
+    ///
+    /// Quinn drives each connection under one lock and sends its packets
+    /// while holding it, so one connection to an owner caps forwarded
+    /// throughput at what a single core can encrypt and send. Each client
+    /// keeps its own connection to every owner, on its own UDP socket.
+    pub fn with_additional_clients(mut self, clients: Vec<Arc<PeerClient>>) -> Self {
+        let mut all = self.clients.to_vec();
+        all.extend(clients);
+        self.clients = all.into();
+        self
+    }
+    fn next_client(&self) -> &Arc<PeerClient> {
+        let turn = self.next_client.fetch_add(1, Ordering::Relaxed);
+        &self.clients[turn % self.clients.len()]
     }
     pub fn diagnostics(&self) -> ForwardDiagnostics {
         ForwardDiagnostics {
@@ -547,9 +576,9 @@ impl IngressForwarder {
         // that has stopped since: dialing it would wait out the whole QUIC
         // handshake timeout. An owner that stopped cleanly has withdrawn its
         // route, so read the route again before dialing.
+        let client = self.next_client();
         if cached
-            && self
-                .client
+            && client
                 .pool_stats_for(&PeerDestination::new(
                     entry.route.address,
                     entry.route.tls_server_name.clone(),
@@ -608,7 +637,7 @@ impl IngressForwarder {
         let open_start = Instant::now();
         let connection = timeout_at(
             deadline,
-            self.client.connect(PeerDestination::new(
+            client.connect(PeerDestination::new(
                 route.address,
                 route.tls_server_name.clone(),
             )),
@@ -1079,6 +1108,50 @@ impl mount_rs_http::HttpRequestHandler for ClusterIngress {
             }
             mount_rs_http::HttpRequestHandler::handle(&self.remote, request).await
         })
+    }
+}
+
+#[cfg(test)]
+mod directory_size_tests {
+    use super::*;
+
+    fn members(count: usize) -> Vec<TrustedPeer> {
+        (0..count)
+            .map(|index| {
+                let mut pin = [0u8; 32];
+                pin[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                TrustedPeer {
+                    node: format!("node-{index}"),
+                    boot: format!("boot-{index}"),
+                    address: std::net::SocketAddr::from((
+                        [10, 0, (index / 250) as u8, (index % 250) as u8 + 1],
+                        4433,
+                    )),
+                    tls_server_name: format!("node-{index}.cluster"),
+                    pin: SpkiSha256::from_bytes(pin),
+                }
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_thousand_server_membership_is_accepted_end_to_end() {
+        assert!(PeerDirectory::new(members(MAX_PEER_DIRECTORY_MEMBERS + 1)).is_err());
+        let directory = PeerDirectory::new(members(MAX_PEER_DIRECTORY_MEMBERS)).unwrap();
+        assert_eq!(directory.len(), MAX_PEER_DIRECTORY_MEMBERS);
+        // The transport's client and server take every member's key.
+        let pins = directory.approved_pins().unwrap();
+        assert_eq!(pins.len(), MAX_PEER_DIRECTORY_MEMBERS);
+        PeerClient::new(
+            quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap(),
+            pins,
+            PeerTransportLimits {
+                max_connections: directory.len(),
+                max_destinations: directory.len(),
+                ..PeerTransportLimits::default()
+            },
+        )
+        .unwrap();
     }
 }
 
