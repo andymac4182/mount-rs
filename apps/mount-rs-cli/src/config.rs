@@ -23,6 +23,7 @@ pub const DEFAULT_CHUNK_SIZE_BYTES: usize = 64 * 1024;
 const DEFAULT_HTTP_HOST: &str = "127.0.0.1";
 const DEFAULT_HTTP_PORT: u16 = 0;
 const DEFAULT_HTTP_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_HTTP_MAX_UPLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const DEFAULT_HTTP_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_HTTP_MAX_DIRECTORY_ENTRIES: usize = 100_000;
 const DEFAULT_HTTP_READ_CHUNK_BYTES: usize = 64 * 1024;
@@ -264,6 +265,7 @@ pub(crate) struct HttpServiceConfig {
     pub max_request_bytes: usize,
     /// Memory that uploads being received may hold in total.
     pub max_buffered_upload_bytes: usize,
+    pub max_upload_bytes: u64,
     pub max_response_bytes: usize,
     pub max_directory_entries: usize,
     pub read_chunk_bytes: usize,
@@ -610,6 +612,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "port",
             "max_request_bytes",
             "max_buffered_upload_bytes",
+            "max_upload_bytes",
             "max_response_bytes",
             "max_directory_entries",
             "read_chunk_bytes",
@@ -663,6 +666,19 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             budget
         }
         None => max_request_bytes.saturating_mul(DEFAULT_HTTP_BUFFERED_UPLOAD_REQUESTS),
+    };
+    let max_upload_bytes = match object.get("max_upload_bytes") {
+        Some(value) => {
+            let limit = positive_u64(value, "config.http.max_upload_bytes")?;
+            if limit < max_request_bytes as u64 {
+                return Err(ConfigError::at(
+                    "config.http.max_upload_bytes",
+                    "must be at least max_request_bytes",
+                ));
+            }
+            limit
+        }
+        None => DEFAULT_HTTP_MAX_UPLOAD_BYTES.max(max_request_bytes as u64),
     };
     let max_response_bytes = object
         .get("max_response_bytes")
@@ -752,6 +768,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         port,
         max_request_bytes,
         max_buffered_upload_bytes,
+        max_upload_bytes,
         max_response_bytes,
         max_directory_entries,
         read_chunk_bytes,
@@ -3588,6 +3605,18 @@ mod tests {
         assert_eq!(defaults.max_request_bytes, 8 * 1024 * 1024);
         assert_eq!(defaults.max_buffered_upload_bytes, 32 * 1024 * 1024);
         assert_eq!(defaults.max_directory_entries, 100_000);
+        assert_eq!(defaults.max_upload_bytes, 5 * 1024 * 1024 * 1024);
+        assert_eq!(
+            config(serde_json::json!({"max_upload_bytes": 1u64 << 40}))
+                .unwrap()
+                .max_upload_bytes,
+            1 << 40
+        );
+        assert!(
+            config(serde_json::json!({"max_request_bytes": 4096, "max_upload_bytes": 4095}))
+                .is_err()
+        );
+        assert!(config(serde_json::json!({"max_upload_bytes": 0})).is_err());
         assert_eq!(defaults.max_response_bytes, 32 * 1024 * 1024);
         // A graceful stop outlasts the slowest request it accepted.
         assert_eq!(defaults.request_timeout_ms, 30_000);

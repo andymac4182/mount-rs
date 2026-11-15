@@ -1147,6 +1147,7 @@ fn http_server_options(
         host: config.host.clone(),
         port: config.port,
         max_request_bytes: config.max_request_bytes,
+        max_upload_bytes: config.max_upload_bytes,
         max_response_bytes: config.max_response_bytes,
         max_directory_entries: config.max_directory_entries,
         read_chunk_bytes: config.read_chunk_bytes,

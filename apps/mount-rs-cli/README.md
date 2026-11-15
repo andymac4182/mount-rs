@@ -298,7 +298,8 @@ Listener and limit keys, all optional:
 | --- | --- | --- |
 | `host` | `127.0.0.1` | Loopback hosts only (`127.0.0.1`, `::1`, `localhost`). Anything else is a config error. |
 | `port` | `0` | `0` selects an ephemeral port, printed in the readiness line. |
-| `max_request_bytes` | 8388608 | Largest `PUT` body and JSON body; the largest uploadable file. |
+| `max_request_bytes` | 8388608 | Largest body held whole in memory: JSON bodies, session writes, and file uploads up to this size. |
+| `max_upload_bytes` | 5368709120 | Largest file a `PUT` may upload. Uploads above `max_request_bytes` stream to a temporary file and are renamed into place. Must be >= `max_request_bytes`. |
 | `max_buffered_upload_bytes` | 4 x `max_request_bytes` | Total upload bytes buffered across requests; uploads beyond it wait. Must be >= `max_request_bytes`. |
 | `max_response_bytes` | 33554432 | Largest directory listing. |
 | `max_directory_entries` | 100000 | Largest listable directory. |
@@ -367,7 +368,10 @@ is received in full and published in one step; a failed or aborted upload
 leaves the previous content unchanged and no partial file. (A `memory` drive
 is volatile, and a split-store drive with `writeback` acknowledges before the
 data is durable.) One `PUT` carries
-one file of at most `max_request_bytes`; larger files are not supported.
+one file of at most `max_upload_bytes` (5 GiB by default). Uploads larger than
+`max_request_bytes` are streamed to a hidden temporary file as they arrive and
+renamed over the target once complete, with the same guarantee; each piece of
+such an upload must arrive within `request_timeout_ms` of the last.
 `DELETE` is not recursive. See the API guide for the status codes, retry rules
 and limits.
 
@@ -855,6 +859,11 @@ cleanly stopped owner's drive answers 503 at once rather than after the QUIC
 handshake timeout.
 
 Set `http.forwarding.refresh_active_routes` to `true` to recheck recently used routes in Redis before their one-second cache lifetime expires. This option defaults to `false`. Each refresh verifies the exact registration and stops after `http.forwarding.route_refresh_idle_ttls` route lifetimes without use (default `5`, allowed `1`–`60`). The route lifetime and its hard expiry are unchanged by this setting. Owners still check the route and their current fencing generation before serving forwarded requests.
+
+Forwarded requests have no overall time limit once connected: an upload or
+download through an ingress may take as long as it keeps moving, provided
+each piece arrives within 30 seconds of the last. File uploads are forwarded
+up to `max_upload_bytes`; other request bodies up to `max_request_bytes`.
 
 `http.forwarding.peer_connections` (default `4`, allowed `1`–`16`) sets how
 many QUIC connections an ingress keeps to each owner. Each connection has its

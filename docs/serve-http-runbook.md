@@ -67,12 +67,13 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | --- | --- | --- | --- | --- |
 | `host` | string | `127.0.0.1` | `127.0.0.1`, `::1`, `[::1]`, `localhost`, or any loopback IP | Non-loopback hosts are rejected at config validation and again at bind. |
 | `port` | integer | `0` | 0-65535 | `0` picks an ephemeral port. Set a fixed port in production. |
-| `max_request_bytes` | integer | `8388608` (8 MiB) | >= 1 | Largest `PUT` body and JSON body. Larger requests get 413. This is also the largest file a client can upload. |
-| `max_buffered_upload_bytes` | integer | 4 x `max_request_bytes` | >= `max_request_bytes` (a smaller value is a config error, exit 2) | Upload bytes the server buffers across all in-flight `PUT`s. A `PUT` reserves its `Content-Length` (or `max_request_bytes` without one) before its body is read; uploads beyond the budget wait in arrival order. |
+| `max_request_bytes` | integer | `8388608` (8 MiB) | >= 1 | Largest body received whole in memory: JSON bodies, session writes, and file uploads up to this size. A file upload above it is streamed to storage instead (see `max_upload_bytes`). Other larger requests get 413. |
+| `max_upload_bytes` | integer | `5368709120` (5 GiB) | >= `max_request_bytes` | Largest file a `PUT` may upload. Larger uploads get 413 and leave the target unchanged. Uploads above `max_request_bytes`, or without a `Content-Length` that grow past it, are written to a hidden temporary file in up to 8 MiB writes and renamed over the target when complete. |
+| `max_buffered_upload_bytes` | integer | 4 x `max_request_bytes` | >= `max_request_bytes` (a smaller value is a config error, exit 2) | Upload bytes the server holds in memory across all in-flight `PUT`s. A `PUT` reserves its `Content-Length` (or `max_request_bytes` without one) before its body is read; a streamed upload reserves one write buffer (the smaller of 8 MiB and `max_request_bytes`). Uploads beyond the budget wait in arrival order, up to `request_timeout_ms`. |
 | `max_response_bytes` | integer | `33554432` (32 MiB) | >= 1 | Largest directory listing (uncompressed JSON). Larger listings get 413. Does not limit file downloads. |
 | `max_directory_entries` | integer | `100000` | >= 1 | Largest directory that can be listed. Larger directories get 413. An entry is about 70 bytes of JSON with short names, so 100,000 entries is about 7 MB (0.3 MB gzipped from `/entries`). |
 | `read_chunk_bytes` | integer | `65536` | >= 1 | Read size per chunk when streaming a download. |
-| `request_timeout_ms` | integer | `30000` | >= 1 | Limit for one request up to its response headers, including receiving the body and waiting for upload budget; exceeding it returns 504. Also the header-read and idle keep-alive timeout (the connection is closed without a response) and the time a download may make no progress before it is cut. |
+| `request_timeout_ms` | integer | `30000` | >= 1 | Limit for one request up to its response headers, including receiving the body and waiting for upload budget; exceeding it returns 504. A streamed upload (above `max_request_bytes`, or without a `Content-Length`) has no overall limit: instead each piece of its body, each write to the drive and the final publication must happen within this time, or it gets 504 and leaves the target unchanged. Also the header-read and idle keep-alive timeout (the connection is closed without a response) and the time a download may make no progress before it is cut. |
 | `drain_timeout_ms` | integer | `35000` | >= 1 | How long shutdown waits for in-flight requests before aborting them. Keep it above `request_timeout_ms`. |
 | `max_connections` | integer | `256` | >= 1 | Concurrent TCP connections. Excess connections are accepted and closed immediately with no HTTP response. |
 | `tcp_nodelay` | boolean | `true` | | Disables Nagle on accepted connections. |
@@ -103,8 +104,9 @@ not enable `writeback` on a drive whose consumers rely on the documented
 
 The checked-in `apps/mount-rs-cli/examples/config-http.json` is a demo: it has
 `port: 0` and a `memory` drive. It sets every limit to its default value
-explicitly (`max_request_bytes` 8388608, `max_buffered_upload_bytes` 33554432,
-`drain_timeout_ms` 35000, `request_timeout_ms` 30000).
+explicitly (`max_request_bytes` 8388608, `max_upload_bytes` 5368709120,
+`max_buffered_upload_bytes` 33554432, `drain_timeout_ms` 35000,
+`request_timeout_ms` 30000).
 
 ### Example
 
@@ -183,8 +185,8 @@ Requirements:
 | Run in the same network namespace as the server (same host, or same pod as a sidecar) | The server binds loopback only. A proxy on another host or in another container network cannot reach it. |
 | Forward the request path unmodified | The server validates percent-encoding itself. Do not let the proxy decode, normalise or merge slashes in the upstream URI. |
 | Forward `Authorization`, `Range`, `Accept-Encoding` unchanged; do not cache | Authentication is per request. Responses depend on the token. |
-| Request body cap >= `max_request_bytes` | A smaller cap rejects uploads the server would accept. Equal is best: then the proxy rejects oversize uploads without opening an upstream connection. |
-| Buffer request bodies before connecting upstream | The server's request timeout covers receiving the body. Buffering keeps slow clients from consuming it and from holding upload memory budget. |
+| Request body cap >= `max_upload_bytes` | A smaller cap rejects uploads the server would accept. Equal is best: then the proxy rejects oversize uploads without opening an upstream connection. |
+| Stream request bodies upstream; do not buffer them | Large uploads are streamed to storage as they arrive. A proxy that buffers a multi-gigabyte upload to its own disk first doubles the disk traffic and delays the upload's start. The server gives up on an upload that stalls for `request_timeout_ms`, so a slow client cannot hold it forever. |
 | Do not buffer or cap response bodies | Downloads have no size limit and are streamed. |
 | Upstream read/send timeout slightly above `request_timeout_ms` | The server answers 504 itself at `request_timeout_ms`; the proxy should not give up first. |
 | Upstream keep-alive idle timeout shorter than `request_timeout_ms` | The server closes a keep-alive connection that has been idle for `request_timeout_ms`. A proxy that reuses such a connection at that moment gets a reset. |
@@ -212,8 +214,8 @@ server {
     ssl_certificate     /etc/ssl/files.example.com.fullchain.pem;
     ssl_certificate_key /etc/ssl/files.example.com.key;
 
-    client_max_body_size 8m;      # equals max_request_bytes (8388608)
-    client_body_timeout 30s;
+    client_max_body_size 5g;      # equals max_upload_bytes (5368709120)
+    client_body_timeout 30s;      # between two reads of the body, as the server's own
 
     location / {
         proxy_pass http://mount_rs_http;   # no URI part: the request URI is forwarded unmodified
@@ -221,7 +223,7 @@ server {
         proxy_set_header Connection "";
         proxy_set_header Host $host;
 
-        proxy_request_buffering on;        # receive the upload before connecting upstream
+        proxy_request_buffering off;       # stream uploads; the server streams them to storage
         proxy_buffering off;               # stream downloads
         proxy_max_temp_file_size 0;
 
@@ -242,7 +244,7 @@ server {
 ```caddyfile
 files.example.com {
     request_body {
-        max_size 8MiB
+        max_size 5GiB
     }
 
     @external_probe {
@@ -267,7 +269,8 @@ files.example.com {
 
 Test either config against a staging instance before production. In particular
 check that `GET /v1/drives/<id>/fs/a%2Fb` reaches the server unchanged and
-returns the server's `400`, and that an 8 MiB upload succeeds.
+returns the server's `400`, and that an upload larger than `max_request_bytes`
+(say 100 MiB) succeeds and reads back whole.
 
 ## Health checks
 
@@ -483,16 +486,22 @@ after a kill is up to one full lifetime.
   descriptor; each open download or upload uses more inside the storage layer.
   Set `LimitNOFILE` well above `max_connections`. Excess connections are closed
   without a response, so keep the proxy's upstream pool below the limit.
-- **Upload memory.** Uploads are buffered whole before publication. The
-  buffered total is bounded by `max_buffered_upload_bytes` (default
-  4 x 8 MiB = 32 MiB), not by `max_connections` x `max_request_bytes`. Peak
-  memory is roughly twice the budget, because the drive copies the data while
+- **Upload memory.** Uploads up to `max_request_bytes` are buffered whole
+  before publication; larger ones hold one write buffer of up to 8 MiB. The
+  total is bounded by `max_buffered_upload_bytes` (default 4 x 8 MiB =
+  32 MiB), not by `max_connections` x `max_request_bytes`. Peak memory is
+  roughly twice the budget, because the drive copies the data while
   publishing it; plan for about 64 MiB with the defaults. Uploads beyond the
   budget wait in arrival order, and fail with 504 if the wait exceeds the
-  request timeout. Concurrent
-  full-size uploads beyond `max_buffered_upload_bytes / max_request_bytes`
-  (four by default) therefore queue. Raise the budget if consumers upload many
-  large files in parallel.
+  request timeout. With the defaults, four uploads at a time are received;
+  raise the budget if consumers upload many files in parallel.
+- **Large uploads.** A streamed upload is written through a file handle, and
+  on a split-store drive each write commits the file's block list, which
+  grows with the file. Choose `chunk_size_bytes` for the files a drive holds:
+  measured on a SQLite split-store drive on one Mac, a 5 GiB upload ran at
+  300 MiB/s with 45 MB peak server memory with 1 MiB chunks, but at 58 MiB/s
+  with 386 MB with 64 KiB chunks. A 1 GiB upload with 1 MiB chunks ran at
+  250 MiB/s.
 - **Listing memory.** A listing is built in memory, up to `max_response_bytes`
   per request, and is not covered by the upload budget. Gzip compression runs
   on at most four listings at a time; waiting requests keep their listing in
@@ -522,8 +531,8 @@ after a kill is up to one full lifetime.
 - **Storage caches.** Split-store block and disk caches are sized per drive in
   the driver config. `cache_capacity` makes startup fail if their sum exceeds a
   stated budget.
-- **Largest object.** `max_request_bytes`. Raising it raises per-upload memory
-  and requires the proxy cap and the upload budget to follow.
+- **Largest object.** `max_upload_bytes` (5 GiB by default). Raising it needs
+  the proxy's body cap to follow; it does not raise memory use.
 
 ## Backup and restore (SQLite-backed drives)
 
@@ -598,8 +607,7 @@ Proxy
 
 - [ ] TLS terminates at the proxy; the proxy shares the server's network
       namespace.
-- [ ] Body cap equals `max_request_bytes`; request buffering on; response
-      buffering off.
+- [ ] Body cap equals `max_upload_bytes`; request and response buffering off.
 - [ ] Upstream timeouts above `request_timeout_ms`; upstream keep-alive idle
       below it; upstream pool below `max_connections`.
 - [ ] No automatic upstream retries.

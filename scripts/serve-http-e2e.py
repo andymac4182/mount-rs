@@ -19,6 +19,7 @@ import time
 BIN, WORK = sys.argv[1], sys.argv[2]
 TOKEN = "e2e-token-" + "x" * 24
 CAP = 1 << 20  # 1 MiB request cap for the test
+UPLOAD = 4 << 20  # largest file; bodies above CAP are streamed to storage
 ENTRIES = 64
 failures = []
 
@@ -37,6 +38,7 @@ def write_config():
             "host": "127.0.0.1",
             "port": 0,
             "max_request_bytes": CAP,
+            "max_upload_bytes": UPLOAD,
             "max_directory_entries": ENTRIES,
             "request_timeout_ms": 5000,
             "drain_timeout_ms": 5000,
@@ -161,8 +163,15 @@ def paths():
 def limits():
     s, _, _ = req("PUT", FS + "/cap-exact", os.urandom(CAP))
     check("upload at the cap", s == 200, s)
-    s, _, d = req("PUT", FS + "/cap-over", os.urandom(CAP + 1))
-    check("upload over the cap is 413", s == 413, (s, d[:80]))
+    streamed = os.urandom(3 * CAP + 7)
+    s, _, d = req("PUT", FS + "/streamed", streamed)
+    s2, _, d2 = req("GET", FS + "/streamed")
+    check("upload above the request cap is streamed and stored whole",
+          s == 200 and json.loads(d)["bytes"] == len(streamed) and d2 == streamed, (s, s2, len(d2)))
+    s, _, _ = req("PUT", FS + "/upload-exact", os.urandom(UPLOAD))
+    check("upload at the upload limit", s == 200, s)
+    s, _, d = req("PUT", FS + "/cap-over", os.urandom(UPLOAD + 1))
+    check("upload over the upload limit is 413", s == 413, (s, d[:80]))
     s2, _, _ = req("GET", FS + "/cap-over")
     check("rejected upload left nothing", s2 == 404, s2)
     req("POST", "/v1/drives/files/ops/mkdir", {"path": "/many"})
