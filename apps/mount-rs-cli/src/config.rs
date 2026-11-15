@@ -290,6 +290,8 @@ pub(crate) struct ForwardingConfig {
     pub owner: bool,
     pub refresh_active_routes: bool,
     pub route_refresh_idle_ttls: u32,
+    /// QUIC connections this server keeps to each peer for forwarding.
+    pub peer_connections: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -791,6 +793,7 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "owner",
             "refresh_active_routes",
             "route_refresh_idle_ttls",
+            "peer_connections",
         ],
         path,
     )?;
@@ -814,8 +817,16 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "must be between 1 and 60",
         ));
     }
+    let peer_connections = optional_u32(fields, "peer_connections", path)?.unwrap_or(4);
+    if !(1..=16).contains(&peer_connections) {
+        return Err(ConfigError::at(
+            "config.http.forwarding.peer_connections",
+            "must be between 1 and 16",
+        ));
+    }
     Ok(ForwardingConfig {
         route_refresh_idle_ttls,
+        peer_connections: peer_connections as usize,
         refresh_active_routes: optional_bool(fields, "refresh_active_routes", path)?
             .unwrap_or(false),
         owner: optional_bool(fields, "owner", path)?.unwrap_or(false),
@@ -3496,6 +3507,31 @@ mod tests {
             serde_json::json!("25"),
         ] {
             source["http"]["forwarding"]["route_refresh_idle_ttls"] = invalid;
+            assert!(parse(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn peer_connections_default_to_four_and_are_bounded() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("."))
+                .map(|config| config.http.unwrap().forwarding.unwrap().peer_connections)
+        };
+        assert_eq!(parse(&source).unwrap(), 4);
+        for valid in [1, 16] {
+            source["http"]["forwarding"]["peer_connections"] = valid.into();
+            assert_eq!(parse(&source).unwrap(), valid);
+        }
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(17),
+            serde_json::json!("4"),
+        ] {
+            source["http"]["forwarding"]["peer_connections"] = invalid;
             assert!(parse(&source).is_err());
         }
     }

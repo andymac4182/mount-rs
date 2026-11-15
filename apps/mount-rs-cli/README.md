@@ -856,6 +856,17 @@ handshake timeout.
 
 Set `http.forwarding.refresh_active_routes` to `true` to recheck recently used routes in Redis before their one-second cache lifetime expires. This option defaults to `false`. Each refresh verifies the exact registration and stops after `http.forwarding.route_refresh_idle_ttls` route lifetimes without use (default `5`, allowed `1`–`60`). The route lifetime and its hard expiry are unchanged by this setting. Owners still check the route and their current fencing generation before serving forwarded requests.
 
+`http.forwarding.peer_connections` (default `4`, allowed `1`–`16`) sets how
+many QUIC connections an ingress keeps to each owner. Each connection has its
+own UDP socket, and requests take them in turn. One QUIC connection holds a
+lock while it sends, so it tops out at a few hundred MB/s; in a 5-core Linux
+container, forwarded 1 MiB reads went from 219 MB/s with one connection to
+524 MB/s with four and 584 MB/s with eight. The membership file may list up to
+1,024 servers. Each server sizes its peer connection limits from the
+membership: an ingress may hold one pooled connection per peer per
+`peer_connections`, and an owner accepts up to 16 connections from each listed
+server.
+
 For many TiDB volumes on an owner, `http.tidb_metadata_pool_limit` sets a shared SQL connection limit for volumes that use the same connection environment variable name. The 100-volume local benchmark used 16.
 
 Session JSON control requests and write bodies also respect `max_request_bytes`,

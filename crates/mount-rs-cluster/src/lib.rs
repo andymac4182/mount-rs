@@ -19,7 +19,7 @@ mod request_class;
 #[cfg(feature = "http3")]
 pub use forwarding::{
     ClusterIngress, ForwardDiagnostics, ForwardError, ForwardOptions, IngressForwarder,
-    PeerDirectory, TrustedPeer,
+    MAX_PEER_DIRECTORY_MEMBERS, PeerDirectory, TrustedPeer,
 };
 #[cfg(feature = "http3")]
 mod owner_http;

@@ -69,19 +69,23 @@ class Node:
         self.name, self.proc, self.port = name, proc, port
 
 
-def start_cluster(binary, work, nodes, sessions=True, extra_http=None):
-    """Return {node: Node}. Node `n` owns drive `n`."""
+def start_cluster(binary, work, nodes, sessions=True, extra_http=None, ingress=(),
+                  peer_connections=None):
+    """Return {node: Node}. Node `n` in `nodes` owns drive `n`; nodes in
+    `ingress` own no drive and only forward. `peer_connections` maps a node
+    to its forwarding.peer_connections."""
     os.makedirs(work, exist_ok=True)
-    pins = make_pki(work, nodes)
-    addresses = {n: f"127.0.0.1:{free_udp()}" for n in nodes}
+    everyone = list(nodes) + list(ingress)
+    pins = make_pki(work, everyone)
+    addresses = {n: f"127.0.0.1:{free_udp()}" for n in everyone}
     peers = [{"node": n, "boot": f"{n}-boot", "address": addresses[n],
-              "tls_server_name": "localhost", "spki_sha256": pins[n]} for n in nodes]
+              "tls_server_name": "localhost", "spki_sha256": pins[n]} for n in everyone]
     with open(os.path.join(work, "peers.json"), "w") as f:
         json.dump(peers, f)
     namespace = "fwd-" + uuid.uuid4().hex[:12]
     started = {}
     try:
-        for n in nodes:
+        for n in everyone:
             os.makedirs(os.path.join(work, n), exist_ok=True)
             http = {
                 "host": "127.0.0.1", "port": 0, "remote_sessions": sessions,
@@ -96,6 +100,12 @@ def start_cluster(binary, work, nodes, sessions=True, extra_http=None):
                     "ca": "ca.pem", "redis_url": {"env": "MOUNT_RS_REDIS_URL"},
                     "namespace": namespace, "bind": "127.0.0.1:0", "owner": True},
             }
+            if n in ingress:
+                http["drives"] = []
+                http["remote_sessions"] = False
+                http["forwarding"]["owner"] = False
+            if peer_connections and n in peer_connections:
+                http["forwarding"]["peer_connections"] = peer_connections[n]
             http.update(extra_http or {})
             path = os.path.join(work, f"{n}.json")
             with open(path, "w") as f:
@@ -306,6 +316,27 @@ def owner_restart():
           s == 200 and d == marker, (s, round(30 - (deadline - time.time()), 1)))
 
 
+def owner_connection_limit():
+    """One owner admits more than the transport's default 16 peer connections."""
+    work = os.path.join(WORK, "limit")
+    cluster = start_cluster(BIN, work, ["a", "b"], ingress=["c"],
+                            peer_connections={"b": 16, "c": 4})
+    try:
+        global nodes
+        saved, nodes = nodes, cluster
+        s, _, _ = req("a", "PUT", fs("a", "/limit"), b"limit")
+        # Node b takes all 16 of its clients in turn, so 16 connections reach a.
+        statuses = {req("b", "GET", fs("a", "/limit"))[0] for _ in range(48)}
+        t = time.time()
+        statuses |= {req("c", "GET", fs("a", "/limit"), timeout=15)[0] for _ in range(8)}
+        took = time.time() - t
+        check("an owner serves more than 16 peer connections", statuses == {200} and took < 5,
+              (sorted(statuses), round(took, 2)))
+    finally:
+        nodes = saved
+        stop_cluster(cluster)
+
+
 def main():
     global nodes
     nodes = start_cluster(BIN, WORK, ["a", "b"], extra_http={"max_request_bytes": CAP})
@@ -316,6 +347,7 @@ def main():
         concurrency()
         sessions()
         owner_restart()
+        owner_connection_limit()
     finally:
         codes = stop_cluster(nodes)
         check("both nodes exit 0 on SIGTERM", all(c == 0 for c in codes.values()), codes)

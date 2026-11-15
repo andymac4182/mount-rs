@@ -1404,6 +1404,54 @@ async fn exercise_forwarder(
     response.into_body().collect().await.unwrap();
     assert_eq!(forwarder.diagnostics().mutations.route_cache_misses, 1);
     assert_eq!(forwarder.diagnostics().mutations.route_cache_hits, 0);
+    // Additional clients take turns, each with its own connection to the owner.
+    {
+        let (ingress, ca, _) = certificates;
+        let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(
+            load_peer_client_config_from_pem(
+                ingress.cert.pem().as_bytes(),
+                ingress.key.serialize_pem().as_bytes(),
+                ca.cert.pem().as_bytes(),
+            )
+            .unwrap(),
+        );
+        let second = Arc::new(
+            PeerClient::new(
+                endpoint,
+                ApprovedPeerPins::new([pin]).unwrap(),
+                PeerTransportLimits::default(),
+            )
+            .unwrap(),
+        );
+        let destination = PeerDestination::new(route.address, route.tls_server_name.clone());
+        assert!(second.pool_stats_for(&destination).await.is_none());
+        let spread = IngressForwarder::new(
+            registry.clone(),
+            peers.clone(),
+            client.clone(),
+            ForwardOptions::default(),
+        )
+        .unwrap()
+        .with_additional_clients(vec![second.clone()]);
+        for _ in 0..4 {
+            let response = spread
+                .forward(public_request("GET", "secret-token", &[]))
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body.as_ref(), data);
+        }
+        for (name, peer_client) in [("first", &client), ("second", &second)] {
+            let stats = peer_client
+                .pool_stats_for(&destination)
+                .await
+                .unwrap_or_else(|| panic!("the {name} client never connected to the owner"));
+            assert!(!stats.closed, "the {name} client's connection closed");
+        }
+        second.shutdown().await.unwrap();
+    }
     // Two real public listeners discover the same owner internally. The HTTP
     // client knows neither Redis nor the private peer destination.
     let mut listeners = Vec::new();

@@ -82,7 +82,10 @@ pub const DEFAULT_PEER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum number of relay peer SPKI keys retained by a dynamic pin
 /// snapshot.  A membership coordinator may keep current and next keys for a
 /// bounded relay roster; larger snapshots are rejected before allocation.
-pub const MAX_DYNAMIC_PEER_PINS: usize = 64;
+/// mount-rs raises this from 64 so that a forwarding cluster can have a
+/// thousand servers, each with a current and a next key; pins are a sorted
+/// slice searched by bisection, so the lookup cost barely changes.
+pub const MAX_DYNAMIC_PEER_PINS: usize = 2048;
 
 /// Bounds applied independently to peer connections, streams, and body
 /// chunks.
