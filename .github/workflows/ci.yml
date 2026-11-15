@@ -816,6 +816,25 @@ jobs:
           kani-version: '0.68.0'
           args: '-p mount-rs-core --harness single_extent_validation'
 
+  serve-http-e2e:
+    # Runs the real binary against a durable split-store drive: auth, paths,
+    # limits, concurrency, SIGTERM, restart and the single-writer lease.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Build the CLI
+        run: cargo build --locked --release -p mount-rs-cli
+      - name: Exercise serve-http end to end
+        run: |
+          work="$RUNNER_TEMP/serve-http-e2e"
+          mkdir -p "$work"
+          timeout 300 python3 -I scripts/serve-http-e2e.py target/release/mount-rs "$work"
+
   http-observability:
     runs-on: ubuntu-latest
     timeout-minutes: 15
