@@ -219,14 +219,6 @@ impl Service {
     pub(crate) fn accept_failures(&self) -> u64 {
         self.listener.accept_failures()
     }
-    /// Whether nothing but the listener's own requests uses the drives, so
-    /// that a close which aborted those requests has left the drives idle.
-    pub(crate) fn releases_drives_after_failed_drain(&self) -> bool {
-        self.owner.is_none()
-            && self.peer.is_none()
-            && self.application.is_none()
-            && self.supervisor.is_none()
-    }
     pub(crate) fn failure(&self) -> Option<&'static str> {
         if self.owner.as_ref().is_some_and(OwnerService::failed) {
             Some("peer listener or volume registration failed")
@@ -242,31 +234,52 @@ impl Service {
             None
         }
     }
-    // Retain this value and the SDKs on failure/cancellation for retry. Never
-    // release an owner merely because its listener has stopped accepting.
+    /// Stop every part of the service in order: the public listener, then
+    /// the owner's route and peer listener, the peer client, the sessions and
+    /// the application. A step that fails does not skip the later ones, so a
+    /// public drain that ran out of time still withdraws the Redis route and
+    /// closes the sessions before the caller shuts the drives down. Returns
+    /// the first failure.
     pub(crate) async fn close(&self) -> Result<(), CliError> {
-        self.listener
-            .close()
-            .await
-            .map_err(|e| CliError::runtime(e.to_string()))?;
-        if let Some(owner) = &self.owner {
-            owner.close().await?;
-        }
-        if let Some(peer) = &self.peer {
-            peer.shutdown()
-                .await
-                .map_err(|e| CliError::runtime(e.to_string()))?;
-        }
-        if let Some(supervisor) = &self.supervisor {
-            supervisor.shutdown_with_timeout(self.drain_timeout).await?;
-        }
-        if let Some(application) = &self.application {
-            application
+        let mut first = None;
+        let mut keep = |result: Result<(), CliError>| {
+            if let Err(error) = result {
+                first.get_or_insert(error);
+            }
+        };
+        keep(
+            self.listener
                 .close()
                 .await
-                .map_err(|e| CliError::runtime(e.to_string()))?;
+                .map_err(|e| CliError::runtime(e.to_string())),
+        );
+        if let Some(owner) = &self.owner {
+            keep(owner.close().await);
         }
-        Ok(())
+        if let Some(peer) = &self.peer {
+            keep(
+                peer.shutdown()
+                    .await
+                    .map_err(|e| CliError::runtime(e.to_string())),
+            );
+        }
+        if let Some(supervisor) = &self.supervisor {
+            keep(
+                supervisor
+                    .shutdown_with_timeout(self.drain_timeout)
+                    .await
+                    .map_err(Into::into),
+            );
+        }
+        if let Some(application) = &self.application {
+            keep(
+                application
+                    .close()
+                    .await
+                    .map_err(|e| CliError::runtime(e.to_string())),
+            );
+        }
+        first.map_or(Ok(()), Err)
     }
 }
 

@@ -47,7 +47,10 @@ impl HttpChild {
             .arg(config)
             .env("MOUNT_RS_HTTP_MEMORY_TOKEN", "memory-test-token")
             .env("MOUNT_RS_HTTP_SQLITE_TOKEN", "sqlite-test-token")
-            .env("MOUNT_RS_HTTP_SPLIT_TOKEN", "splitstore-test-token")
+            .env(
+                "MOUNT_RS_HTTP_SPLIT_TOKEN",
+                "splitstore-test-token-for-sessions",
+            )
             .env(
                 "MOUNT_RS_HTTP_SESSION_TOKEN",
                 "session-token-01234567890123456789",
@@ -559,7 +562,7 @@ fn config_driven_http_subprocess_isolates_drives_and_reopens_sqlite() {
         address,
         "PUT",
         "/v1/drives/splitstore/fs/split-only",
-        "splitstore-test-token",
+        "splitstore-test-token-for-sessions",
         b"splitstore bytes",
     );
     assert!((200..300).contains(&split_write.status));
@@ -567,7 +570,7 @@ fn config_driven_http_subprocess_isolates_drives_and_reopens_sqlite() {
         address,
         "GET",
         "/v1/drives/splitstore/fs/split-only",
-        "splitstore-test-token",
+        "splitstore-test-token-for-sessions",
         &[],
     );
     assert_eq!(split_read.status, 200);
@@ -593,14 +596,14 @@ fn config_driven_http_subprocess_isolates_drives_and_reopens_sqlite() {
     abort_streaming_write(
         address,
         "/v1/drives/splitstore/fs/aborted-write",
-        "splitstore-test-token",
+        "splitstore-test-token-for-sessions",
     );
     let recovered_write = (0..20).find_map(|_| {
         let response = request(
             address,
             "PUT",
             "/v1/drives/splitstore/fs/aborted-write",
-            "splitstore-test-token",
+            "splitstore-test-token-for-sessions",
             b"recovered after aborted write",
         );
         if response.status == 200 {
@@ -642,7 +645,7 @@ fn config_driven_http_subprocess_isolates_drives_and_reopens_sqlite() {
         reopened_address,
         "GET",
         "/v1/drives/splitstore/fs/split-only",
-        "splitstore-test-token",
+        "splitstore-test-token-for-sessions",
         &[],
     );
     assert_eq!(missing_splitstore.status, 404);
@@ -723,7 +726,7 @@ fn stalled_put(address: SocketAddr, path: &str, declared: usize, sent: usize) ->
         .set_write_timeout(Some(Duration::from_secs(2)))
         .expect("set stalled-write timeout");
     let request = format!(
-        "PUT {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer splitstore-test-token\r\nConnection: close\r\nContent-Length: {declared}\r\n\r\n"
+        "PUT {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer splitstore-test-token-for-sessions\r\nConnection: close\r\nContent-Length: {declared}\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
@@ -787,7 +790,7 @@ fn an_acknowledged_upload_survives_the_process_being_killed() {
     let mut child = HttpChild::start(&config_path, root.clone());
     let (address, _ready) = child.ready();
 
-    let token = "splitstore-test-token";
+    let token = "splitstore-test-token-for-sessions";
     // Several chunks each, so a prefix would be recognisable.
     let first: Vec<u8> = (0..1500).map(|index| (index % 251) as u8).collect();
     let second: Vec<u8> = (0..3000).map(|index| (index % 239) as u8).collect();
@@ -896,6 +899,17 @@ fn an_acknowledged_upload_survives_the_process_being_killed() {
 #[cfg(unix)]
 #[test]
 fn a_stop_that_runs_out_of_drain_time_still_releases_the_writer_lease() {
+    stop_out_of_drain_time_releases_the_writer_lease(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stop_with_sessions_that_runs_out_of_drain_time_still_releases_the_writer_lease() {
+    stop_out_of_drain_time_releases_the_writer_lease(true);
+}
+
+#[cfg(unix)]
+fn stop_out_of_drain_time_releases_the_writer_lease(remote_sessions: bool) {
     let root = temporary_root();
     // A lease long enough that a process which exits without releasing it
     // keeps every other owner out for the rest of this test.
@@ -903,7 +917,8 @@ fn a_stop_that_runs_out_of_drain_time_still_releases_the_writer_lease() {
     let http = serde_json::json!({
         "max_request_bytes": 4096,
         "drain_timeout_ms": 300,
-        "request_timeout_ms": 60_000
+        "request_timeout_ms": 60_000,
+        "remote_sessions": remote_sessions
     });
     let first_config = write_sqlite_split_config(
         &root,
@@ -922,7 +937,7 @@ fn a_stop_that_runs_out_of_drain_time_still_releases_the_writer_lease() {
 
     let mut first = HttpChild::start(&first_config, root.clone());
     let (address, _ready) = first.ready();
-    let token = "splitstore-test-token";
+    let token = "splitstore-test-token-for-sessions";
     let kept = request(
         address,
         "PUT",
@@ -1483,7 +1498,7 @@ fn cache_report_exposes_per_drive_read_tiers() {
     let child = HttpChild::start(&path, root);
     let (address, _) = child.ready();
     let target = "/v1/drives/splitstore/fs/report";
-    let token = "splitstore-test-token";
+    let token = "splitstore-test-token-for-sessions";
     let put = request(address, "PUT", target, token, b"cache report");
     assert!((200..300).contains(&put.status));
     assert_eq!(
