@@ -832,6 +832,24 @@ jobs:
       - name: Verify HTTP observability lint
         run: cargo clippy --locked -p mount-rs-http --all-targets --all-features -- -D warnings
 
+  cluster-http3:
+    # The workspace build leaves the cluster's http3 feature off, so its
+    # forwarding and coalescing tests are built and run only here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Lint the cluster with http3
+        run: cargo clippy --locked -p mount-rs-cluster --features http3 --all-targets -- -D warnings
+      - name: Test the cluster with http3
+        run: cargo test --locked -p mount-rs-cluster --features http3 --all-targets
+
   observability-qualification:
     name: Observability qualification (${{ matrix.os }})
     strategy:

@@ -328,7 +328,7 @@ step has nowhere to park a caller.
 | blob cache flight `Entry.turn` | `hundred_simultaneous_cold_reads_coalesce_to_one_backing_get` | 64 fetches instead of 1 |
 | blob cache `PeerLink.dial` | `concurrent_requests_dial_a_peer_once_and_replace_a_closed_connection_once` | 64 dials instead of 1 |
 | blob cache `LocalCache.files` | `an_invalidation_waits_for_an_insert_whose_file_is_not_yet_indexed` | Invalidation returned with the file on disk |
-| cluster coalesce `Entry.turn` | new `concurrent_requests_on_a_cold_route_make_one_registry_lookup` (needs `--features http3`, which CI does not build) | 8 registry lookups instead of 1 |
+| cluster coalesce `Entry.turn` | new `concurrent_requests_on_a_cold_route_make_one_registry_lookup` (needs `--features http3`; CI runs it in the `cluster-http3` job) | 8 registry lookups instead of 1 |
 | cluster `Slot.gate` | new `a_second_close_waits_for_the_first_and_the_handle_is_closed_once`, `close_waits_for_a_read_that_is_inside_the_handle`, `cursor_reads_enter_the_handle_one_at_a_time` | Handle closed twice; closed under a read; two cursor reads inside together |
 | cluster `path_operations` | `close_waits_for_admitted_path_operation` | Close finished under a path operation |
 | remote client `renew_lock` | new `a_renewal_waits_for_the_one_in_flight_and_agrees_with_the_server` | Client scheduled renewal by a token the server had replaced |
