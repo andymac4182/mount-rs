@@ -377,12 +377,14 @@ impl IngressForwarder {
                 .load(Ordering::Relaxed),
         }
     }
+    /// The volume's route, and whether it came from the cache rather than
+    /// from Redis just now.
     async fn route(
         &self,
         volume: &str,
         timings: &TimingCounters,
         trace: Option<&ForwardRequestTrace>,
-    ) -> Result<Arc<crate::route_cache::CachedRoute>, ForwardError> {
+    ) -> Result<(Arc<crate::route_cache::CachedRoute>, bool), ForwardError> {
         let started = Instant::now();
         let cached = if self.options.refresh_active_routes {
             self.routes.get_active(volume, started)
@@ -391,7 +393,7 @@ impl IngressForwarder {
         };
         if let Some(route) = cached {
             timings.route_cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(route);
+            return Ok((route, true));
         }
         // Coalesce concurrent discovery for one volume. Cancellation drops
         // the caller's turn and its share; neither is held by a lock.
@@ -425,7 +427,7 @@ impl IngressForwarder {
             timings
                 .route_cache_coalesced_hits
                 .fetch_add(1, Ordering::Relaxed);
-            return Ok(route);
+            return Ok((route, true));
         }
         timings.route_cache_misses.fetch_add(1, Ordering::Relaxed);
         let lookup_start = trace.map(|_| Instant::now());
@@ -447,7 +449,7 @@ impl IngressForwarder {
         if self.options.refresh_active_routes {
             self.schedule_refresh(&route, &entry);
         }
-        Ok(entry)
+        Ok((entry, false))
     }
     fn schedule_refresh(&self, route: &VolumeRoute, entry: &Arc<crate::route_cache::CachedRoute>) {
         use std::hash::{DefaultHasher, Hash, Hasher};
@@ -538,9 +540,28 @@ impl IngressForwarder {
             .filter(|volume| identifier(volume))
             .ok_or(ForwardError::InvalidRequest)?;
         let route_start = Instant::now();
-        let entry = timeout_at(deadline, self.route(volume, timings, trace.as_ref()))
+        let (mut entry, cached) = timeout_at(deadline, self.route(volume, timings, trace.as_ref()))
             .await
             .map_err(|_| ForwardError::RouteUnavailable)??;
+        // A cached route whose owner has no live connection may name a server
+        // that has stopped since: dialing it would wait out the whole QUIC
+        // handshake timeout. An owner that stopped cleanly has withdrawn its
+        // route, so read the route again before dialing.
+        if cached
+            && self
+                .client
+                .pool_stats_for(&PeerDestination::new(
+                    entry.route.address,
+                    entry.route.tls_server_name.clone(),
+                ))
+                .await
+                .is_none_or(|connection| connection.closed)
+        {
+            self.routes.invalidate(&entry.route);
+            (entry, _) = timeout_at(deadline, self.route(volume, timings, trace.as_ref()))
+                .await
+                .map_err(|_| ForwardError::RouteUnavailable)??;
+        }
         timings.route.record(route_start);
         if let Some(trace) = &trace {
             trace.record(Stage::Route, route_start);
@@ -1238,7 +1259,7 @@ mod route_lookup_tests {
                 forwarder
                     .route("volume", &timings, None)
                     .await
-                    .map(|entry| entry.route.clone())
+                    .map(|(entry, _)| entry.route.clone())
             });
         }
         // The registry holds its answer, so a caller that does not wait for

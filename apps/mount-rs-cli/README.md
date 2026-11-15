@@ -844,6 +844,15 @@ Distribute a trusted membership file to the servers. It contains a JSON array wi
 
 On a volume owner, set `http.forwarding.owner` to `true`, supply the owner's certificate and key, and configure its assigned drives. The owner listens for peer requests at its membership address. The forwarding `bind` setting controls the outbound QUIC endpoint. Enable `http.remote_sessions` on the owner for remote mount clients. Ownership assignment is operator-configured. Serve the public endpoint through HTTPS termination for bearer credentials.
 
+`scripts/serve-http-cluster-e2e.py` starts two owners on loopback against a
+disposable Redis and checks the cluster as a round-robin load balancer would
+use it: every drive through every ingress, read-after-write across ingresses,
+uploads at and over the size limit, sessions carried by either ingress, and an
+owner stopping and restarting. CI runs it. A request whose cached route names
+an owner with no live peer connection re-reads the route before dialing, so a
+cleanly stopped owner's drive answers 503 at once rather than after the QUIC
+handshake timeout.
+
 Set `http.forwarding.refresh_active_routes` to `true` to recheck recently used routes in Redis before their one-second cache lifetime expires. This option defaults to `false`. Each refresh verifies the exact registration and stops after `http.forwarding.route_refresh_idle_ttls` route lifetimes without use (default `5`, allowed `1`–`60`). The route lifetime and its hard expiry are unchanged by this setting. Owners still check the route and their current fencing generation before serving forwarded requests.
 
 For many TiDB volumes on an owner, `http.tidb_metadata_pool_limit` sets a shared SQL connection limit for volumes that use the same connection environment variable name. The 100-volume local benchmark used 16.

@@ -1259,6 +1259,13 @@ async fn handle_request_uninstrumented(
         return error_response(RequestError::server_closing());
     }
     if let Some(handler) = &state.handler {
+        // A handler (session routing, forwarding) gets the same answer to a
+        // declared oversized upload as the built-in routes: 413 after the
+        // body is read, rather than a connection closed mid-upload.
+        if content_length_exceeds(request.headers(), state.config.max_request_bytes) {
+            let body = request.into_body();
+            return refuse(body, RequestError::body_too_large(), &state.config.control).await;
+        }
         return handler.handle(request).await;
     }
     let (parts, body) = request.into_parts();

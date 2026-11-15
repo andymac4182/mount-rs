@@ -747,6 +747,67 @@ async fn a_refused_upload_is_answered_after_its_body_is_sent() {
     }
 }
 
+/// Answers at once without reading the request body, as a router or
+/// forwarder that refuses a request might.
+struct AnswersWithoutReading(AtomicUsize);
+
+impl mount_rs_http::HttpRequestHandler for AnswersWithoutReading {
+    fn handle(
+        &self,
+        _request: hyper::Request<mount_rs_http::HttpBody>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = hyper::Response<mount_rs_http::HttpBody>> + Send + '_>,
+    > {
+        use http_body_util::BodyExt;
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            hyper::Response::new(
+                http_body_util::Full::new(bytes::Bytes::new())
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+            )
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handler_server_answers_an_oversized_upload_after_its_body_is_sent() {
+    let handler = Arc::new(AnswersWithoutReading(AtomicUsize::new(0)));
+    let server = HttpServer::start_with_handler(
+        handler.clone(),
+        HttpServerOptions {
+            max_request_bytes: 1024,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+    const BODY: usize = 32 << 20;
+    let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("upload socket");
+    let head = format!(
+        "PUT /v1/drives/remote/fs/big HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nContent-Length: {BODY}\r\nConnection: close\r\n\r\n",
+        bearer(MEMORY_TOKEN)
+    );
+    socket
+        .write_all(head.as_bytes())
+        .await
+        .expect("request head");
+    socket
+        .write_all(&vec![0_u8; BODY])
+        .await
+        .unwrap_or_else(|error| panic!("the body write failed: {error}"));
+    let mut response = Vec::new();
+    socket
+        .read_to_end(&mut response)
+        .await
+        .expect("refusal response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 413"), "{response:.80}");
+    assert_eq!(handler.0.load(Ordering::SeqCst), 0, "the handler saw it");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_body_limit_is_enforced_without_unbounded_buffering() {
     let memory = Arc::new(MemoryFs::empty());
