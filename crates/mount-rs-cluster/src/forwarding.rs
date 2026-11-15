@@ -127,8 +127,15 @@ pub struct ForwardOptions {
     /// Stop proactive refresh after this many route TTLs without foreground
     /// use. Hard route expiry and the exact Redis record check are unchanged.
     pub refresh_idle_ttls: u32,
+    /// Route lookup and connecting must finish within this of the request
+    /// arriving. After that it bounds each step that must make progress: the
+    /// next upload chunk, the response headers once the upload stops, and
+    /// the next response chunk.
     pub operation_timeout: Duration,
     pub max_request_bytes: usize,
+    /// Largest body forwarded for a file upload (`PUT .../fs/...`). Other
+    /// requests are bounded by `max_request_bytes`.
+    pub max_upload_bytes: u64,
 }
 impl Default for ForwardOptions {
     fn default() -> Self {
@@ -140,6 +147,7 @@ impl Default for ForwardOptions {
             refresh_idle_ttls: 5,
             operation_timeout: Duration::from_secs(30),
             max_request_bytes: 8 * 1024 * 1024,
+            max_upload_bytes: mount_rs_http::DEFAULT_MAX_UPLOAD_BYTES,
         }
     }
 }
@@ -341,6 +349,7 @@ impl IngressForwarder {
             || options.operation_timeout > Duration::from_secs(300)
             || options.max_request_bytes == 0
             || options.max_request_bytes > 64 * 1024 * 1024
+            || options.max_upload_bytes < options.max_request_bytes as u64
         {
             return Err(RegistryError::InvalidInput);
         }
@@ -544,7 +553,13 @@ impl IngressForwarder {
         let is_head = request.method() == http::Method::HEAD;
         let request_class = RequestClass::classify(&request);
         let timings = self.body_failures.timings(request_class);
-        let deadline = forward_start + self.options.operation_timeout;
+        let idle = self.options.operation_timeout;
+        let deadline = forward_start + idle;
+        let maximum = if mount_rs_http::is_file_upload(request.method(), request.uri().path()) {
+            self.options.max_upload_bytes
+        } else {
+            self.options.max_request_bytes as u64
+        };
         if request.headers().contains_key(ROUTE_HEADER)
             || request.headers().contains_key(HOP_HEADER)
         {
@@ -556,7 +571,7 @@ impl IngressForwarder {
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .ok_or(ForwardError::InvalidRequest)?;
-            if length > self.options.max_request_bytes as u64 {
+            if length > maximum {
                 return Err(ForwardError::InvalidRequest);
             }
         }
@@ -666,31 +681,35 @@ impl IngressForwarder {
         }
         timings.open.record(open_start);
         let (send, recv) = stream.split();
-        let maximum = self.options.max_request_bytes;
         let send = CancelSend(Some(send));
         let empty = body.is_end_stream();
+        let progress = Arc::new(UploadProgress::new(forward_start));
+        let uploading = progress.clone();
         let transfer = async move {
             let mut send = send;
-            let mut count = 0usize;
-            while let Some(frame) = timeout_at(deadline, body.frame())
+            let mut count = 0u64;
+            // A large upload may take far longer than one operation timeout:
+            // each chunk must arrive and be sent within it instead.
+            while let Some(frame) = timeout_at(Instant::now() + idle, body.frame())
                 .await
                 .map_err(|_| ForwardError::OutcomeUnknown)?
             {
                 let frame = frame.map_err(|_| ForwardError::OutcomeUnknown)?;
                 if let Ok(bytes) = frame.into_data() {
                     count = count
-                        .checked_add(bytes.len())
+                        .checked_add(bytes.len() as u64)
                         .filter(|n| *n <= maximum)
                         .ok_or(ForwardError::OutcomeUnknown)?;
                     send.0
                         .as_mut()
                         .unwrap()
-                        .send_chunked_until(&bytes, deadline)
+                        .send_chunked_until(&bytes, Instant::now() + idle)
                         .await
                         .map_err(|_| ForwardError::OutcomeUnknown)?;
+                    uploading.advanced();
                 }
             }
-            timeout_at(deadline, send.0.as_mut().unwrap().finish())
+            timeout_at(Instant::now() + idle, send.0.as_mut().unwrap().finish())
                 .await
                 .map_err(|_| ForwardError::OutcomeUnknown)?
                 .map_err(|_| ForwardError::OutcomeUnknown)?;
@@ -721,12 +740,12 @@ impl IngressForwarder {
             finished: false,
             recv: CancelRecv(recv),
             upload,
-            deadline,
+            idle,
             require_upload: true,
             body_failures: self.body_failures.clone(),
         };
         let headers_start = Instant::now();
-        let receive = timeout_at(deadline, state.recv.0.recv_response());
+        let receive = progress.wait(state.recv.0.recv_response(), deadline, idle);
         let response = if let Some(trace) = &state.trace {
             let (result, timing) = mount_rs_core::wait_timing::observe(receive).await;
             trace.interval(Stage::HeaderPending, timing.pending_ns);
@@ -796,7 +815,12 @@ impl IngressForwarder {
                 if state.finished {
                     return Ok(None);
                 }
-                match state.recv.0.recv_chunk_until(state.deadline).await {
+                match state
+                    .recv
+                    .0
+                    .recv_chunk_until(Instant::now() + state.idle)
+                    .await
+                {
                     Ok(Some(chunk)) => {
                         let bytes = chunk.into_bytes();
                         let first_payload = !bytes.is_empty() && !state.first_payload_recorded;
@@ -921,8 +945,51 @@ struct ResponseState {
     body_failures: Arc<BodyFailures>,
     recv: CancelRecv,
     upload: Upload,
-    deadline: Instant,
+    /// Each response chunk must arrive within this of the previous one.
+    idle: Duration,
     require_upload: bool,
+}
+
+/// When a forwarded upload last made progress, so the wait for response
+/// headers lasts as long as the upload keeps moving.
+struct UploadProgress {
+    start: Instant,
+    /// Nanoseconds after `start` of the last chunk sent.
+    last: AtomicU64,
+}
+
+impl UploadProgress {
+    fn new(start: Instant) -> Self {
+        Self {
+            start,
+            last: AtomicU64::new(0),
+        }
+    }
+
+    fn advanced(&self) {
+        let elapsed = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.last.fetch_max(elapsed, Ordering::Relaxed);
+    }
+
+    /// Wait for `future` until `deadline`, or until `idle` after the upload
+    /// last advanced, whichever is later.
+    async fn wait<F: std::future::Future>(
+        &self,
+        future: F,
+        deadline: Instant,
+        idle: Duration,
+    ) -> Result<F::Output, ()> {
+        tokio::pin!(future);
+        loop {
+            let seen = self.last.load(Ordering::Relaxed);
+            let until = deadline.max(self.start + Duration::from_nanos(seen) + idle);
+            match timeout_at(until, future.as_mut()).await {
+                Ok(output) => return Ok(output),
+                Err(_) if self.last.load(Ordering::Relaxed) != seen => continue,
+                Err(_) => return Err(()),
+            }
+        }
+    }
 }
 
 impl ResponseState {
@@ -935,7 +1002,12 @@ impl ResponseState {
     async fn verify_end(&mut self, yielding_first_payload: bool) -> Result<(), BoxError> {
         let start = self.trace.as_ref().map(|_| Instant::now());
         loop {
-            match self.recv.0.recv_chunk_until(self.deadline).await {
+            match self
+                .recv
+                .0
+                .recv_chunk_until(Instant::now() + self.idle)
+                .await
+            {
                 Ok(Some(chunk)) => {
                     self.received_bytes = self
                         .received_bytes
@@ -966,7 +1038,10 @@ impl ResponseState {
             let completed = match &mut self.upload {
                 Upload::Complete(ok) => *ok,
                 Upload::Running(task) => {
-                    matches!(timeout_at(self.deadline, &mut task.0).await, Ok(Ok(Ok(()))))
+                    matches!(
+                        timeout_at(Instant::now() + self.idle, &mut task.0).await,
+                        Ok(Ok(Ok(())))
+                    )
                 }
             };
             if let (Some(trace), Some(start)) = (&self.trace, start) {
@@ -1355,5 +1430,45 @@ mod route_lookup_tests {
             timings.route_cache_coalesced_hits.load(Ordering::Relaxed),
             CALLERS as u64 - 1
         );
+    }
+}
+
+#[cfg(test)]
+mod upload_progress_tests {
+    use super::UploadProgress;
+    use std::{sync::Arc, time::Duration};
+    use tokio::time::{Instant, sleep};
+
+    #[tokio::test]
+    async fn the_header_wait_lasts_while_the_upload_advances() {
+        let idle = Duration::from_millis(150);
+        let start = Instant::now();
+        let progress = Arc::new(UploadProgress::new(start));
+        let uploading = progress.clone();
+        let upload = tokio::spawn(async move {
+            for _ in 0..12 {
+                sleep(Duration::from_millis(50)).await;
+                uploading.advanced();
+            }
+        });
+        // Ready long after both the deadline and one idle period.
+        let waited = progress
+            .wait(sleep(Duration::from_millis(500)), start + idle, idle)
+            .await;
+        assert!(waited.is_ok(), "the wait ended while the upload advanced");
+        assert!(start.elapsed() >= Duration::from_millis(500));
+        upload.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_header_wait_ends_when_the_upload_stalls() {
+        let idle = Duration::from_millis(100);
+        let start = Instant::now();
+        let progress = UploadProgress::new(start);
+        let waited = progress
+            .wait(sleep(Duration::from_secs(5)), start + idle, idle)
+            .await;
+        assert!(waited.is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

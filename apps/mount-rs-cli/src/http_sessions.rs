@@ -65,7 +65,15 @@ impl Sessions {
         let remote = match forwarding {
             Some(config) => {
                 let files = PeerFiles::load(config)?;
-                Some(connect_forwarder(config, self.max_request_bytes, &files).await?)
+                Some(
+                    connect_forwarder(
+                        config,
+                        self.max_request_bytes,
+                        options.max_upload_bytes,
+                        &files,
+                    )
+                    .await?,
+                )
             }
             None => None,
         };
@@ -339,6 +347,7 @@ impl PeerFiles {
 async fn connect_forwarder(
     config: &crate::config::ForwardingConfig,
     max_request_bytes: usize,
+    max_upload_bytes: u64,
     files: &PeerFiles,
 ) -> Result<
     (
@@ -380,6 +389,7 @@ async fn connect_forwarder(
         peers[0].clone(),
         ForwardOptions {
             max_request_bytes,
+            max_upload_bytes,
             refresh_active_routes: config.refresh_active_routes,
             refresh_idle_ttls: config.route_refresh_idle_ttls,
             ..Default::default()
@@ -504,7 +514,13 @@ pub(crate) async fn start_owner(
         handlers.push(handler);
     }
     let router = OwnerHttpRouter::new(handlers).map_err(|e| fail(&e))?;
-    let (remote, peers) = connect_forwarder(config, options.max_request_bytes, &files).await?;
+    let (remote, peers) = connect_forwarder(
+        config,
+        options.max_request_bytes,
+        options.max_upload_bytes,
+        &files,
+    )
+    .await?;
     let public = Arc::new(ClusterIngress::new(router.clone(), remote));
     let pins = directory.approved_pins().map_err(|e| fail(&e))?;
     let limits = server_limits(&directory);

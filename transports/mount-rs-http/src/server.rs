@@ -27,6 +27,13 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+/// The largest file a `PUT` may upload. Bodies above `max_request_bytes` are
+/// streamed to storage rather than held in memory.
+pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+/// How much of a streamed upload is gathered before each write to the drive,
+/// at most. Each write through a handle commits the file's metadata, so
+/// fewer, larger writes are much cheaper for large files.
+const STREAM_UPLOAD_BUFFER: usize = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_READ_CHUNK_BYTES: usize = 64 * 1024;
 /// Longer than [`DEFAULT_REQUEST_TIMEOUT`], so a graceful stop lets every
@@ -200,6 +207,11 @@ pub struct HttpServerOptions {
     pub host: String,
     pub port: u16,
     pub max_request_bytes: usize,
+    /// Largest file body a `PUT` may upload. Bodies up to `max_request_bytes`
+    /// are received whole before the drive is touched; larger ones are
+    /// written to a temporary file as they arrive and renamed into place.
+    /// Values below `max_request_bytes` are raised to it.
+    pub max_upload_bytes: u64,
     pub max_response_bytes: usize,
     pub max_directory_entries: usize,
     pub read_chunk_bytes: usize,
@@ -226,6 +238,7 @@ impl Default for HttpServerOptions {
             host: "127.0.0.1".to_owned(),
             port: 0,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_directory_entries: DEFAULT_MAX_DIRECTORY_ENTRIES,
             read_chunk_bytes: DEFAULT_READ_CHUNK_BYTES,
@@ -297,6 +310,7 @@ struct AppState {
 #[derive(Clone)]
 struct RequestConfig {
     max_request_bytes: usize,
+    max_upload_bytes: u64,
     max_response_bytes: usize,
     max_directory_entries: usize,
     read_chunk_bytes: usize,
@@ -305,6 +319,14 @@ struct RequestConfig {
     control: RuntimeControl,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
+}
+
+impl RequestConfig {
+    /// How much of a streamed upload is gathered before each drive write.
+    /// The upload budget always has room for `max_request_bytes`.
+    fn stream_buffer(&self) -> usize {
+        STREAM_UPLOAD_BUFFER.min(self.max_request_bytes)
+    }
 }
 
 /// Stops one connection: set by a download whose client stopped reading and
@@ -460,6 +482,7 @@ impl HttpServer {
                 registry: Arc::new(registry),
                 config: RequestConfig {
                     max_request_bytes,
+                    max_upload_bytes: options.max_upload_bytes.max(max_request_bytes as u64),
                     max_response_bytes: options.max_response_bytes.max(1),
                     max_directory_entries: options.max_directory_entries.max(1),
                     read_chunk_bytes: options.read_chunk_bytes.max(1),
@@ -1240,6 +1263,12 @@ async fn handle_request_with_timeout(
     request: Request<HttpBody>,
     state: Arc<AppState>,
 ) -> Response<HttpBody> {
+    // A streamed upload may take far longer than one request timeout. Its
+    // body, drive writes and publication each have to make progress within
+    // the timeout instead.
+    if streams_upload(&request, state.config.max_request_bytes) {
+        return handle_request_uninstrumented(request, state).await;
+    }
     match tokio::time::timeout(
         state.config.request_timeout,
         handle_request_uninstrumented(request, state),
@@ -1262,7 +1291,10 @@ async fn handle_request_uninstrumented(
         // A handler (session routing, forwarding) gets the same answer to a
         // declared oversized upload as the built-in routes: 413 after the
         // body is read, rather than a connection closed mid-upload.
-        if content_length_exceeds(request.headers(), state.config.max_request_bytes) {
+        if content_length_exceeds(
+            request.headers(),
+            body_limit(request.method(), request.uri().path(), &state.config),
+        ) {
             let body = request.into_body();
             return refuse(body, RequestError::body_too_large(), &state.config.control).await;
         }
@@ -1304,7 +1336,10 @@ async fn handle_request_uninstrumented(
     else {
         return refuse(body, RequestError::unauthorized(), &state.config.control).await;
     };
-    if content_length_exceeds(&parts.headers, state.config.max_request_bytes) {
+    if content_length_exceeds(
+        &parts.headers,
+        body_limit(&parts.method, parts.uri.path(), &state.config),
+    ) {
         return refuse(body, RequestError::body_too_large(), &state.config.control).await;
     }
 
@@ -1602,12 +1637,15 @@ async fn handle_file_read(
 
 /// Replace a file with the request body, in one step.
 ///
-/// The body is received in full before the drive is touched, so a request
-/// that fails, is abandoned, times out or meets a shutdown while its body is
-/// arriving changes nothing. Publication is then one step of the driver: a
-/// reader, another writer or a restart sees the previous content or the
-/// new, never a prefix. A request abandoned during that step is published
-/// or not, as the driver got to it.
+/// A body of up to `max_request_bytes` is received in full before the drive
+/// is touched, then published in one step of the driver. A larger body, or
+/// one without a declared length that grows past `max_request_bytes`, is
+/// written to a temporary sibling as it arrives and renamed over the target
+/// once complete. Either way a request that fails, is abandoned, times out
+/// or meets a shutdown while its body is arriving leaves the target as it
+/// was, and a reader, another writer or a restart sees the previous content
+/// or the new, never a prefix. A request abandoned during publication is
+/// published or not, as the driver got to it.
 async fn handle_file_write(
     headers: &hyper::HeaderMap,
     body: HttpBody,
@@ -1615,28 +1653,34 @@ async fn handle_file_write(
     path: String,
     config: RequestConfig,
 ) -> Result<Response<HttpBody>, RequestError> {
-    let declared = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|length| length.min(config.max_request_bytes));
-    // An upload with no declared length may grow to the request limit.
-    let permit =
-        reserve_upload_budget(&config, declared.unwrap_or(config.max_request_bytes)).await?;
-    let data = read_limited_body(
-        body,
-        config.max_request_bytes,
-        declared.unwrap_or(0),
-        &config.control,
-    )
-    .await?;
+    let declared = declared_length(headers);
+    let (source, permit) = if declared
+        .is_some_and(|length| length > config.max_request_bytes as u64)
+    {
+        // Streaming holds one write buffer, not the body.
+        let permit = reserve_upload_budget(&config, config.stream_buffer()).await?;
+        (
+            UploadSource::Stream(StreamedUpload::new(Vec::new(), body)),
+            permit,
+        )
+    } else {
+        // An upload with no declared length may grow to the request limit
+        // before it is known to need streaming.
+        let declared = declared.map(|length| length as usize);
+        let permit =
+            reserve_upload_budget(&config, declared.unwrap_or(config.max_request_bytes)).await?;
+        match read_body_or_spill(body, declared.unwrap_or(0), &config).await? {
+            Received::Whole(data) => (UploadSource::Whole(data), permit),
+            Received::Spilled { prefix, body } => (
+                UploadSource::Stream(StreamedUpload::new(prefix, body)),
+                permit,
+            ),
+        }
+    };
     if config.control.closing.load(Ordering::Acquire) != 0 {
         return Err(RequestError::server_closing());
     }
-    let written = data.len();
-    publish_upload(drive.driver(), &path, &data, &config.control)
-        .await
-        .map_err(RequestError::Fs)?;
+    let written = publish_upload(drive.driver(), &path, source, &config).await?;
     drop(permit);
     let payload = serde_json::to_vec(&WritePayload {
         path: &path,
@@ -1644,6 +1688,147 @@ async fn handle_file_write(
     })
     .map_err(|_| RequestError::Fs(FsError::backend("failed to encode write result")))?;
     Ok(json_response(StatusCode::OK, Bytes::from(payload), false))
+}
+
+/// Where an upload's bytes come from.
+enum UploadSource {
+    /// Received in full, at most `max_request_bytes`.
+    Whole(Vec<u8>),
+    /// Still arriving: what was received so far, then the rest of the body.
+    Stream(StreamedUpload),
+}
+
+enum Received {
+    Whole(Vec<u8>),
+    Spilled { prefix: Vec<u8>, body: HttpBody },
+}
+
+/// Receive a body of up to `max_request_bytes`, or return what arrived so
+/// far with the rest of the body once it outgrows that.
+async fn read_body_or_spill(
+    mut body: HttpBody,
+    expected_bytes: usize,
+    config: &RequestConfig,
+) -> Result<Received, RequestError> {
+    let mut bytes = Vec::with_capacity(expected_bytes.min(config.max_request_bytes));
+    while let Some(frame) = next_upload_frame(&mut body, config).await? {
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        bytes.extend_from_slice(&data);
+        if bytes.len() as u64 > config.max_upload_bytes {
+            drop(bytes);
+            discard_body(body, &config.control).await;
+            return Err(RequestError::body_too_large());
+        }
+        if bytes.len() > config.max_request_bytes {
+            return Ok(Received::Spilled {
+                prefix: bytes,
+                body,
+            });
+        }
+    }
+    Ok(Received::Whole(bytes))
+}
+
+/// The next frame of an upload body, which must arrive within the request
+/// timeout of the previous one.
+async fn next_upload_frame(
+    body: &mut HttpBody,
+    config: &RequestConfig,
+) -> Result<Option<Frame<Bytes>>, RequestError> {
+    tokio::time::timeout(
+        config.request_timeout,
+        next_request_frame(body, &config.control.shutdown, &config.control.closing),
+    )
+    .await
+    .map_err(|_| RequestError::request_timeout())?
+}
+
+/// One drive call of an upload, which must finish within the request timeout.
+async fn bounded<T>(
+    config: &RequestConfig,
+    call: impl std::future::Future<Output = mount_rs_core::Result<T>>,
+) -> Result<T, RequestError> {
+    tokio::time::timeout(config.request_timeout, call)
+        .await
+        .map_err(|_| RequestError::request_timeout())?
+        .map_err(RequestError::Fs)
+}
+
+struct StreamedUpload {
+    prefix: Vec<u8>,
+    body: HttpBody,
+}
+
+impl StreamedUpload {
+    fn new(prefix: Vec<u8>, body: HttpBody) -> Self {
+        Self { prefix, body }
+    }
+
+    /// Write the whole upload to `file` from offset zero, a buffer at a time,
+    /// and return its length.
+    async fn write_to(
+        self,
+        file: &dyn FileHandle,
+        path: &str,
+        config: &RequestConfig,
+    ) -> Result<u64, RequestError> {
+        let Self { prefix, mut body } = self;
+        let buffer = config.stream_buffer();
+        let mut pending = prefix;
+        pending.reserve(buffer.saturating_sub(pending.len()));
+        let mut offset = 0_u64;
+        loop {
+            let frame = next_upload_frame(&mut body, config).await?;
+            let finished = frame.is_none();
+            if let Some(data) = frame.and_then(|frame| frame.into_data().ok()) {
+                let total = offset
+                    .saturating_add(pending.len() as u64)
+                    .saturating_add(data.len() as u64);
+                if total > config.max_upload_bytes {
+                    discard_body(body, &config.control).await;
+                    return Err(RequestError::body_too_large());
+                }
+                pending.extend_from_slice(&data);
+            }
+            if pending.len() >= buffer || (finished && !pending.is_empty()) {
+                write_all_at(file, &pending, offset, path, config).await?;
+                offset += pending.len() as u64;
+                pending.clear();
+            }
+            if finished {
+                return Ok(offset);
+            }
+        }
+    }
+}
+
+async fn write_all_at(
+    file: &dyn FileHandle,
+    data: &[u8],
+    start: u64,
+    path: &str,
+    config: &RequestConfig,
+) -> Result<(), RequestError> {
+    let mut written = 0;
+    while written < data.len() {
+        let count = bounded(
+            config,
+            file.write(&data[written..], Some(start + written as u64)),
+        )
+        .await?;
+        if count == 0 || count > data.len() - written {
+            return Err(RequestError::Fs(
+                FsError::new(ErrorCode::Eio)
+                    .with_syscall("write")
+                    .with_path(path)
+                    .with_message("driver returned an invalid write length"),
+            ));
+        }
+        written += count;
+    }
+    Ok(())
 }
 
 fn upload_budget_units(bytes: usize) -> usize {
@@ -1668,6 +1853,8 @@ async fn reserve_upload_budget(
     }
     tokio::select! {
         _ = notified => Err(RequestError::server_closing()),
+        // A streamed upload has no overall request timeout to end the wait.
+        () = tokio::time::sleep(config.request_timeout) => Err(RequestError::request_timeout()),
         permit = Arc::clone(&config.upload_budget).acquire_many_owned(units) => permit
             .map_err(|_| RequestError::Fs(FsError::backend("upload budget unavailable"))),
     }
@@ -1678,96 +1865,141 @@ async fn reserve_upload_budget(
 async fn publish_upload(
     driver: Arc<dyn FsDriver>,
     path: &str,
-    data: &[u8],
-    control: &RuntimeControl,
-) -> mount_rs_core::Result<()> {
-    if driver.write_file_is_atomic() {
-        return driver.write_file(path, data).await;
+    source: UploadSource,
+    config: &RequestConfig,
+) -> Result<usize, RequestError> {
+    if let UploadSource::Whole(data) = &source
+        && driver.write_file_is_atomic()
+    {
+        bounded(config, driver.write_file(path, data)).await?;
+        return Ok(data.len());
     }
-    let existing = match driver.lstat(path).await {
+    let existing = match bounded(config, driver.lstat(path)).await {
         Ok(stats) => Some(stats),
-        Err(error) if error.code == ErrorCode::Enoent => None,
+        Err(RequestError::Fs(error)) if error.code == ErrorCode::Enoent => None,
         Err(error) => return Err(error),
     };
     if let Some(stats) = &existing {
         if stats.is_directory() {
-            return Err(FsError::new(ErrorCode::Eisdir)
-                .with_syscall("open")
-                .with_path(path));
+            return Err(RequestError::Fs(
+                FsError::new(ErrorCode::Eisdir)
+                    .with_syscall("open")
+                    .with_path(path),
+            ));
         }
         if stats.is_symbolic_link() {
             // Renaming over a link would replace the link, not what it
             // names. Write through it in place, as before; this one case is
             // not atomic.
-            return driver.write_file(path, data).await;
+            return write_through(driver.as_ref(), path, source, config).await;
         }
         if !stats.is_file() {
-            return Err(FsError::new(ErrorCode::Enxio)
-                .with_syscall("open")
-                .with_path(path));
+            return Err(RequestError::Fs(
+                FsError::new(ErrorCode::Enxio)
+                    .with_syscall("open")
+                    .with_path(path),
+            ));
         }
     }
     let mut sibling = SiblingGuard {
         sibling: Some(ActiveSibling::new(path)),
         driver: Arc::clone(&driver),
-        control: control.clone(),
+        control: config.control.clone(),
     };
     let name = sibling.path().to_owned();
     let result = async {
-        write_sibling(driver.as_ref(), &name, data, control).await?;
+        let written = write_sibling(driver.as_ref(), &name, source, config).await?;
         if let Some(stats) = &existing {
             // The replacement is a new file: keep the permissions the
             // previous one had where the driver can.
-            let _ = driver.chmod(&name, stats.mode & 0o7777).await;
+            let _ = bounded(config, driver.chmod(&name, stats.mode & 0o7777)).await;
         }
-        driver.rename(&name, path).await
+        bounded(config, driver.rename(&name, path)).await?;
+        Ok(written)
     }
     .await;
     match result {
-        Ok(()) => {
+        Ok(written) => {
             sibling.sibling = None;
             // Make the new name durable where the driver can sync a
             // directory; a driver that cannot has nothing more to offer.
-            if let Ok(directory) = driver.open(parent_path(path), "r", 0).await {
-                let _ = directory.sync().await;
-                let _ = directory.close().await;
+            if let Ok(directory) = bounded(config, driver.open(parent_path(path), "r", 0)).await {
+                let _ = bounded(config, directory.sync()).await;
+                let _ = bounded(config, directory.close()).await;
             }
-            Ok(())
+            Ok(written)
         }
         Err(error) => {
-            let _ = driver.unlink(&name).await;
+            let _ = bounded(config, driver.unlink(&name)).await;
             sibling.sibling = None;
             Err(error)
         }
     }
 }
 
-/// Write and sync `data` to a new file that nothing else names.
+/// Write an upload through a symbolic link, in place.
+async fn write_through(
+    driver: &dyn FsDriver,
+    path: &str,
+    source: UploadSource,
+    config: &RequestConfig,
+) -> Result<usize, RequestError> {
+    match source {
+        UploadSource::Whole(data) => {
+            bounded(config, driver.write_file(path, &data)).await?;
+            Ok(data.len())
+        }
+        UploadSource::Stream(stream) => write_handle(driver, path, "w", stream, config).await,
+    }
+}
+
+/// Write and sync an upload to a new file that nothing else names.
 async fn write_sibling(
     driver: &dyn FsDriver,
     sibling: &str,
-    data: &[u8],
-    control: &RuntimeControl,
-) -> mount_rs_core::Result<()> {
-    let mut handle = FileCloseGuard::new(driver.open(sibling, "wx", 0o666).await?, control);
+    source: UploadSource,
+    config: &RequestConfig,
+) -> Result<usize, RequestError> {
+    let stream = match source {
+        UploadSource::Whole(data) => StreamedUpload::new(
+            data,
+            http_body_util::Empty::new()
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+        ),
+        UploadSource::Stream(stream) => stream,
+    };
+    write_handle(driver, sibling, "wx", stream, config).await
+}
+
+async fn write_handle(
+    driver: &dyn FsDriver,
+    path: &str,
+    flags: &str,
+    stream: StreamedUpload,
+    config: &RequestConfig,
+) -> Result<usize, RequestError> {
+    let mut handle = FileCloseGuard::new(
+        bounded(config, driver.open(path, flags, 0o666)).await?,
+        &config.control,
+    );
     let file = handle.handle();
     let written = async {
-        let mut offset = 0;
-        while offset < data.len() {
-            let count = file.write(&data[offset..], Some(offset as u64)).await?;
-            if count == 0 || count > data.len() - offset {
-                return Err(FsError::new(ErrorCode::Eio)
-                    .with_syscall("write")
-                    .with_path(sibling)
-                    .with_message("driver returned an invalid write length"));
-            }
-            offset += count;
-        }
-        file.sync().await
+        let written = stream.write_to(file.as_ref(), path, config).await?;
+        bounded(config, file.sync()).await?;
+        Ok::<_, RequestError>(written)
     }
     .await;
-    let closed = handle.close().await;
-    written.and(closed)
+    let closed = bounded(config, handle.close()).await;
+    let written = written?;
+    closed?;
+    usize::try_from(written).map_err(|_| {
+        RequestError::Fs(
+            FsError::new(ErrorCode::Efbig)
+                .with_syscall("write")
+                .with_path(path),
+        )
+    })
 }
 
 /// Removes an upload's temporary sibling when the request that was writing
@@ -2432,12 +2664,39 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
-fn content_length_exceeds(headers: &hyper::HeaderMap, limit: usize) -> bool {
+fn content_length_exceeds(headers: &hyper::HeaderMap, limit: u64) -> bool {
+    declared_length(headers).is_some_and(|length| length > limit)
+}
+
+fn declared_length(headers: &hyper::HeaderMap) -> Option<u64> {
     headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|length| length > limit as u64)
+}
+
+/// Whether a request replaces a file with its body: `PUT /v1/drives/{id}/fs/...`.
+pub fn is_file_upload(method: &Method, path: &str) -> bool {
+    method == Method::PUT
+        && path
+            .strip_prefix("/v1/drives/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, rest)| rest == "fs" || rest.starts_with("fs/"))
+}
+
+/// Whether a request is a file upload that may be streamed rather than held
+/// in memory: one that declares more than `max_request_bytes`, or no length.
+pub fn streams_upload<B>(request: &Request<B>, max_request_bytes: usize) -> bool {
+    is_file_upload(request.method(), request.uri().path())
+        && declared_length(request.headers()).is_none_or(|length| length > max_request_bytes as u64)
+}
+
+fn body_limit(method: &Method, path: &str, config: &RequestConfig) -> u64 {
+    if is_file_upload(method, path) {
+        config.max_upload_bytes
+    } else {
+        config.max_request_bytes as u64
+    }
 }
 
 fn positive_duration(duration: Duration) -> Duration {

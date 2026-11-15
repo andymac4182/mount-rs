@@ -151,6 +151,7 @@ def stop_cluster(nodes):
 
 BIN, WORK = sys.argv[1], sys.argv[2]
 CAP = 8 << 20
+UPLOAD = 32 << 20
 failures = []
 nodes = {}
 
@@ -230,8 +231,14 @@ def big_and_limits():
     s, _, _ = req("a", "PUT", fs("b", "/big"), big, timeout=120)
     s2, _, d = req("a", "GET", fs("b", "/big"), timeout=120)
     check("forwarded upload and download at the cap", s == 200 and s2 == 200 and d == big, (s, s2, len(d)))
-    s, _, d = req("a", "PUT", fs("b", "/over"), os.urandom(CAP + 1), timeout=120)
-    check("forwarded upload over the cap is 413", s == 413, (s, d[:80]))
+    streamed = os.urandom(3 * CAP + 7)
+    s, _, _ = req("a", "PUT", fs("b", "/streamed"), streamed, timeout=120)
+    s2, _, d = req("b", "GET", fs("b", "/streamed"), timeout=120)
+    s3, _, d3 = req("a", "GET", fs("b", "/streamed"), timeout=120)
+    check("forwarded upload above the request cap is streamed and stored whole",
+          (s, s2, s3) == (200, 200, 200) and d == streamed and d3 == streamed, (s, s2, s3, len(d)))
+    s, _, d = req("a", "PUT", fs("b", "/over"), os.urandom(UPLOAD + 1), timeout=120)
+    check("forwarded upload over the upload limit is 413", s == 413, (s, d[:80]))
     s, _, _ = req("b", "GET", fs("b", "/over"))
     check("rejected forwarded upload left nothing", s == 404, s)
 
@@ -339,7 +346,8 @@ def owner_connection_limit():
 
 def main():
     global nodes
-    nodes = start_cluster(BIN, WORK, ["a", "b"], extra_http={"max_request_bytes": CAP})
+    nodes = start_cluster(BIN, WORK, ["a", "b"], extra_http={"max_request_bytes": CAP,
+                                                                  "max_upload_bytes": UPLOAD})
     try:
         every_route()
         round_robin()

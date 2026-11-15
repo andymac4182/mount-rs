@@ -712,6 +712,7 @@ async fn a_refused_upload_is_answered_after_its_body_is_sent() {
         registry,
         HttpServerOptions {
             max_request_bytes: 1024,
+            max_upload_bytes: 1024,
             ..HttpServerOptions::default()
         },
     )
@@ -777,6 +778,7 @@ async fn a_handler_server_answers_an_oversized_upload_after_its_body_is_sent() {
         handler.clone(),
         HttpServerOptions {
             max_request_bytes: 1024,
+            max_upload_bytes: 1024,
             ..HttpServerOptions::default()
         },
     )
@@ -819,6 +821,7 @@ async fn request_body_limit_is_enforced_without_unbounded_buffering() {
         registry,
         HttpServerOptions {
             max_request_bytes: 32,
+            max_upload_bytes: 32,
             ..HttpServerOptions::default()
         },
     )
@@ -918,6 +921,287 @@ async fn stalled_request_body_is_terminated_by_the_request_timeout() {
     assert!(response.contains("\"code\":\"ETIMEDOUT\""));
     assert!(response.contains("connection: close"));
 
+    server.close().await.expect("server close");
+}
+
+/// A server whose uploads stream past `max_request_bytes`, over a memory
+/// drive (atomic `write_file`) and a SQLite drive (written through a sibling).
+async fn streaming_server(
+    request_timeout: Duration,
+    max_upload_bytes: u64,
+) -> (HttpServer, Arc<dyn FsDriver>, Arc<dyn FsDriver>) {
+    let memory: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let sqlite: Arc<dyn FsDriver> = Arc::new(open_sqlite_memory().await.expect("sqlite driver"));
+    let mut registry = DriveRegistry::new();
+    for (id, driver) in [("memory", &memory), ("sqlite", &sqlite)] {
+        registry
+            .register(DriveConfig::new(id, driver.clone(), MEMORY_TOKEN).expect("drive config"))
+            .expect("drive registration");
+    }
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            max_request_bytes: 1024,
+            max_upload_bytes,
+            request_timeout,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+    (server, memory, sqlite)
+}
+
+/// The names in a drive's root, the server's own temporary names included.
+async fn root_names(driver: &Arc<dyn FsDriver>) -> Vec<String> {
+    let mut names: Vec<String> = driver
+        .readdir("/")
+        .await
+        .expect("root listing")
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    names.sort();
+    names
+}
+
+async fn read_all(driver: &Arc<dyn FsDriver>, path: &str) -> Vec<u8> {
+    let file = driver.open(path, "r", 0).await.expect("open for read");
+    let mut out = Vec::new();
+    let mut buffer = vec![0_u8; 65536];
+    loop {
+        let count = file
+            .read(&mut buffer, Some(out.len() as u64))
+            .await
+            .expect("read");
+        if count == 0 {
+            break;
+        }
+        out.extend_from_slice(&buffer[..count]);
+    }
+    file.close().await.expect("close");
+    out
+}
+
+/// Send a raw request and read the whole reply.
+async fn raw_exchange(port: u16, head: &str, body: &[u8]) -> String {
+    let mut socket = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("upload socket");
+    socket
+        .write_all(head.as_bytes())
+        .await
+        .expect("request head");
+    socket.write_all(body).await.expect("request body");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), socket.read_to_end(&mut response))
+        .await
+        .expect("response in time")
+        .expect("response read");
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+fn chunked(body: &[u8], piece: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for part in body.chunks(piece) {
+        out.extend_from_slice(format!("{:x}\r\n", part.len()).as_bytes());
+        out.extend_from_slice(part);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"0\r\n\r\n");
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uploads_larger_than_the_request_limit_stream_to_storage() {
+    let (server, memory, sqlite) = streaming_server(Duration::from_secs(10), 1 << 20).await;
+    let client = reqwest::Client::new();
+    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite)] {
+        // Declared length above the request limit, then an overwrite.
+        for size in [200_000_usize, 300_001] {
+            let body: Vec<u8> = (0..size).map(|index| (index * 31 % 251) as u8).collect();
+            let response = client
+                .put(format!("{}/v1/drives/{drive}/fs/big.bin", server.url()))
+                .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+                .body(body.clone())
+                .send()
+                .await
+                .expect("streamed PUT");
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{drive} {size}");
+            let reply: serde_json::Value = response.json().await.expect("PUT reply");
+            assert_eq!(reply["bytes"], size, "{drive}");
+            let read = client
+                .get(format!("{}/v1/drives/{drive}/fs/big.bin", server.url()))
+                .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+                .send()
+                .await
+                .expect("GET")
+                .bytes()
+                .await
+                .expect("GET body");
+            assert!(read.as_ref() == body.as_slice(), "{drive} {size} content");
+        }
+        // No declared length: received in memory up to the request limit,
+        // then spilled to storage.
+        let body: Vec<u8> = (0..70_000).map(|index| (index % 253) as u8).collect();
+        let head = format!(
+            "PUT /v1/drives/{drive}/fs/chunked.bin HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            bearer(MEMORY_TOKEN)
+        );
+        let response = raw_exchange(server.port(), &head, &chunked(&body, 4000)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "{drive}: {response:.120}"
+        );
+        let read = client
+            .get(format!("{}/v1/drives/{drive}/fs/chunked.bin", server.url()))
+            .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+            .send()
+            .await
+            .expect("GET")
+            .bytes()
+            .await
+            .expect("GET body");
+        assert!(read.as_ref() == body.as_slice(), "{drive} chunked content");
+        assert_eq!(
+            root_names(driver).await,
+            ["big.bin", "chunked.bin"],
+            "{drive} left a temporary file"
+        );
+    }
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_over_the_upload_limit_leaves_the_target_unchanged() {
+    let (server, memory, sqlite) = streaming_server(Duration::from_secs(10), 64 * 1024).await;
+    let client = reqwest::Client::new();
+    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite)] {
+        driver.write_file("/keep", b"original").await.expect("seed");
+        // Declared too large: refused before anything is written.
+        let response = client
+            .put(format!("{}/v1/drives/{drive}/fs/keep", server.url()))
+            .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+            .body(vec![7_u8; 64 * 1024 + 1])
+            .send()
+            .await
+            .expect("oversized PUT");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            "{drive}"
+        );
+        // No declared length: refused once it grows past the limit, after
+        // part of it was written to a temporary file.
+        let head = format!(
+            "PUT /v1/drives/{drive}/fs/keep HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            bearer(MEMORY_TOKEN)
+        );
+        let response =
+            raw_exchange(server.port(), &head, &chunked(&vec![9_u8; 100_000], 8192)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 413"),
+            "{drive}: {response:.120}"
+        );
+        let mut names = Vec::new();
+        for _ in 0..100 {
+            names = root_names(driver).await;
+            if names == ["keep"] {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(names, ["keep"], "{drive} left a temporary file");
+        assert_eq!(read_all(driver, "/keep").await, b"original", "{drive}");
+    }
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_streamed_upload_may_outlast_the_request_timeout_while_it_progresses() {
+    let (server, memory, _) = streaming_server(Duration::from_millis(300), 1 << 20).await;
+    const PIECES: usize = 12;
+    const PIECE: usize = 4096;
+    let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("upload socket");
+    socket
+        .write_all(
+            format!(
+                "PUT /v1/drives/memory/fs/slow.bin HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bearer(MEMORY_TOKEN),
+                PIECES * PIECE
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request head");
+    let started = std::time::Instant::now();
+    for index in 0..PIECES {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        socket
+            .write_all(&[index as u8; PIECE])
+            .await
+            .expect("request body piece");
+    }
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).await.expect("response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(started.elapsed() > Duration::from_millis(1000));
+    assert!(response.starts_with("HTTP/1.1 200"), "{response:.120}");
+    let stored = read_all(&memory, "/slow.bin").await;
+    assert_eq!(stored.len(), PIECES * PIECE);
+    assert!(
+        stored
+            .chunks(PIECE)
+            .enumerate()
+            .all(|(index, piece)| piece.iter().all(|byte| *byte == index as u8))
+    );
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_streamed_upload_times_out_and_leaves_nothing() {
+    let (server, memory, sqlite) = streaming_server(Duration::from_millis(200), 1 << 20).await;
+    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite)] {
+        let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .expect("upload socket");
+        socket
+            .write_all(
+                format!(
+                    "PUT /v1/drives/{drive}/fs/stalled HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n",
+                    bearer(MEMORY_TOKEN)
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("request head");
+        socket
+            .write_all(&[1_u8; 20_000])
+            .await
+            .expect("part of the body");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut response))
+            .await
+            .expect("stalled upload answered")
+            .expect("response read");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 504"),
+            "{drive}: {response:.120}"
+        );
+        assert!(response.contains("\"code\":\"ETIMEDOUT\""), "{drive}");
+        let mut names = vec![String::from("unchecked")];
+        for _ in 0..100 {
+            names = root_names(driver).await;
+            if names.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(names.is_empty(), "{drive} left {names:?}");
+    }
     server.close().await.expect("server close");
 }
 
