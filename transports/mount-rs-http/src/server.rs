@@ -27,13 +27,13 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_READ_CHUNK_BYTES: usize = 64 * 1024;
 /// Longer than [`DEFAULT_REQUEST_TIMEOUT`], so a graceful stop lets every
 /// request that was accepted either finish or time out by itself.
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(35);
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
-pub const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 4096;
+pub const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 100_000;
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The default upload memory budget, as a multiple of `max_request_bytes`.
 pub const DEFAULT_BUFFERED_UPLOAD_REQUESTS: usize = 4;
