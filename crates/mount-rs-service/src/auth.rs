@@ -687,7 +687,10 @@ impl CatalogAuthenticator {
         entry: &std::sync::Arc<CachedPolicy>,
         policy: &crate::catalog::IssuerPolicyDefinition,
     ) -> Option<std::sync::Arc<OidcVerifier>> {
-        if entry.attempted.elapsed().as_secs() < 60 {
+        // Inside the minute nothing new is coming, unless a fetch is running
+        // now: the entry a request reads during a fetch is the attempt that
+        // fetch recorded, and its keys may be the ones this token needs.
+        if entry.attempted.elapsed().as_secs() < 60 && slot.refresh.try_lock().is_some() {
             return None;
         }
         let _turn = slot.refresh.lock().await;
@@ -949,5 +952,48 @@ mod refresh_tests {
         let waited = second.expect("the request that did not fetch was left with the stale keys");
         assert!(Arc::ptr_eq(&fetched, &waited));
         assert!(!Arc::ptr_eq(&fetched, stale.verifier.as_ref().unwrap()));
+    }
+
+    /// A token signed by the rotated key that arrives while the fetch for
+    /// that key is under way reads the entry the fetch recorded as its
+    /// attempt. That entry is inside the minute, but a fetch is running:
+    /// the request must wait for it, not be turned away.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_arriving_during_the_fetch_waits_for_its_keys() {
+        let fixture = fixture();
+        let stale = Arc::new(CachedPolicy {
+            configuration: fixture.configuration.clone(),
+            verifier: Some(Arc::new(
+                verifier(ISSUER, &fixture.policy.audiences).unwrap(),
+            )),
+            fetched: tokio::time::Instant::now(),
+            attempted: tokio::time::Instant::now(),
+        });
+        fixture.slot.current.store(Some(stale.clone()));
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        let first = {
+            let (auth, slot) = (fixture.auth.clone(), fixture.slot.clone());
+            let (stale, policy) = (stale.clone(), fixture.policy.clone());
+            tokio::spawn(async move { auth.refreshed_verifier(&slot, &stale, &policy).await })
+        };
+        fixture.source.entered.acquire().await.unwrap().forget();
+        // What a request that loads the policy now is given.
+        let during = fixture.slot.current.load_full().unwrap();
+        assert!(
+            !Arc::ptr_eq(&during, &stale),
+            "the attempt is recorded before the fetch"
+        );
+        let second = {
+            let (auth, slot) = (fixture.auth.clone(), fixture.slot.clone());
+            let policy = fixture.policy.clone();
+            tokio::spawn(async move { auth.refreshed_verifier(&slot, &during, &policy).await })
+        };
+        settle().await;
+        fixture.source.release.add_permits(2);
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+        assert_eq!(fixture.source.fetches.load(Ordering::SeqCst), 1);
+        let fetched = first.expect("the fetching request got no keys");
+        let waited = second.expect("a request that arrived during the fetch was turned away");
+        assert!(Arc::ptr_eq(&fetched, &waited));
     }
 }
