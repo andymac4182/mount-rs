@@ -295,8 +295,11 @@ responses.
   default). There is no ranged, resumable or multipart upload. **Files larger
   than the limit are not supported**; split them into several files in your
   service, or ask the operator to raise the limit.
-- **Send `Content-Length`.** A declared length above the limit is rejected
-  with `413` before the body is read. The server also bounds the total upload
+- **Send `Content-Length`.** A declared length above the limit is refused
+  with `413` without storing anything. The server reads and drops up to
+  64 MiB (or 5 seconds) of the refused body first, so a client that sends
+  its whole body before reading the reply still gets the `413` rather than
+  a connection reset; past that the connection is closed. The server also bounds the total upload
   bytes it buffers and admits uploads in arrival order; an upload without
   `Content-Length` reserves the full limit and waits longer under load.
 - **Time.** The whole upload, including waiting for buffer space, must finish

@@ -1264,7 +1264,7 @@ async fn handle_request_uninstrumented(
     let (parts, body) = request.into_parts();
     let route = match parse_route(parts.uri.path()) {
         Ok(route) => route,
-        Err(error) => return error_response(error),
+        Err(error) => return refuse(body, error, &state.config.control).await,
     };
 
     match &route {
@@ -1295,10 +1295,10 @@ async fn handle_request_uninstrumented(
         .filter(|drive| authorized(&parts.headers, drive))
         .cloned()
     else {
-        return error_response(RequestError::unauthorized());
+        return refuse(body, RequestError::unauthorized(), &state.config.control).await;
     };
     if content_length_exceeds(&parts.headers, state.config.max_request_bytes) {
-        return error_response(RequestError::body_too_large());
+        return refuse(body, RequestError::body_too_large(), &state.config.control).await;
     }
 
     let result = match route {
@@ -2191,11 +2191,53 @@ async fn read_limited_body(
             continue;
         };
         if bytes.len().saturating_add(data.len()) > max_request_bytes {
+            drop(bytes);
+            discard_body(body, control).await;
             return Err(RequestError::body_too_large());
         }
         bytes.extend_from_slice(&data);
     }
     Ok(bytes)
+}
+
+/// The most of a refused request's body read and dropped before replying.
+const DISCARD_BODY_BYTES: usize = 64 << 20;
+/// The longest a refused request's body is read and dropped before replying.
+const DISCARD_BODY_TIME: Duration = Duration::from_secs(5);
+
+/// Answer a request without using its body, after reading the body out.
+async fn refuse(
+    body: HttpBody,
+    error: RequestError,
+    control: &RuntimeControl,
+) -> Response<HttpBody> {
+    discard_body(body, control).await;
+    error_response(error)
+}
+
+/// Read and drop what is left of a request body, within byte and time
+/// limits, so a refusal reaches the client.
+///
+/// A client that sends its whole body before reading the reply (Node's
+/// `fetch`, Python's `http.client`) gets a connection reset under its write
+/// if the server replies and closes with body bytes unread, and never sees
+/// the reply. Past the limits the connection is closed anyway.
+async fn discard_body(mut body: HttpBody, control: &RuntimeControl) {
+    if body.is_end_stream() {
+        return;
+    }
+    let drain = async {
+        let mut read = 0_usize;
+        while read < DISCARD_BODY_BYTES {
+            match next_request_frame(&mut body, &control.shutdown, &control.closing).await {
+                Ok(Some(frame)) => {
+                    read = read.saturating_add(frame.data_ref().map_or(0, Bytes::len));
+                }
+                Ok(None) | Err(_) => return,
+            }
+        }
+    };
+    let _ = tokio::time::timeout(DISCARD_BODY_TIME, drain).await;
 }
 
 fn parse_route(raw_path: &str) -> Result<Route, RequestError> {

@@ -550,6 +550,15 @@ Notes:
 
 ## Pre-launch checklist
 
+Run the end-to-end probe against the build you will deploy. It starts the
+binary on a scratch split-store drive and checks auth, path handling, the
+upload and listing limits, parallel reads and writes, SIGTERM, restart and
+the single-writer lease. CI runs it on every change.
+
+```sh
+python3 scripts/serve-http-e2e.py ./mount-rs "$(mktemp -d)"
+```
+
 Configuration
 
 - [ ] `host` is loopback and `port` is fixed (not `0`).

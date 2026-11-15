@@ -697,6 +697,56 @@ async fn real_http_exposes_isolated_memory_and_sqlite_drives() {
     server.close().await.expect("server close");
 }
 
+/// A client that sends its whole body before reading the reply, as Node's
+/// `fetch` and Python's `http.client` do, must get the refusal. Closing as
+/// soon as the reply is written resets the connection under the client's
+/// write, which then fails with EPIPE and never reads the 413 or 401.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_upload_is_answered_after_its_body_is_sent() {
+    let memory = Arc::new(MemoryFs::empty());
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(DriveConfig::new("memory", memory, MEMORY_TOKEN).expect("drive config"))
+        .expect("drive registration");
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            max_request_bytes: 1024,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+    const BODY: usize = 32 << 20;
+    for (token, expected) in [
+        (MEMORY_TOKEN, "HTTP/1.1 413"),
+        ("not-the-token", "HTTP/1.1 401"),
+    ] {
+        let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .expect("upload socket");
+        let head = format!(
+            "PUT /v1/drives/memory/fs/big HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nContent-Length: {BODY}\r\nConnection: close\r\n\r\n",
+            bearer(token)
+        );
+        socket
+            .write_all(head.as_bytes())
+            .await
+            .expect("request head");
+        socket
+            .write_all(&vec![0_u8; BODY])
+            .await
+            .unwrap_or_else(|error| panic!("{expected}: the body write failed: {error}"));
+        let mut response = Vec::new();
+        socket
+            .read_to_end(&mut response)
+            .await
+            .expect("refusal response");
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with(expected), "{expected}: {response:.80}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_body_limit_is_enforced_without_unbounded_buffering() {
     let memory = Arc::new(MemoryFs::empty());
