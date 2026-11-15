@@ -23,8 +23,8 @@ pub const DEFAULT_CHUNK_SIZE_BYTES: usize = 64 * 1024;
 const DEFAULT_HTTP_HOST: &str = "127.0.0.1";
 const DEFAULT_HTTP_PORT: u16 = 0;
 const DEFAULT_HTTP_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
-const DEFAULT_HTTP_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const DEFAULT_HTTP_MAX_DIRECTORY_ENTRIES: usize = 4096;
+const DEFAULT_HTTP_MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_HTTP_MAX_DIRECTORY_ENTRIES: usize = 100_000;
 const DEFAULT_HTTP_READ_CHUNK_BYTES: usize = 64 * 1024;
 // Longer than the request timeout: a graceful stop lets every accepted
 // request finish or time out by itself before anything is aborted.
@@ -3587,6 +3587,8 @@ mod tests {
         let defaults = config(serde_json::json!({})).unwrap();
         assert_eq!(defaults.max_request_bytes, 8 * 1024 * 1024);
         assert_eq!(defaults.max_buffered_upload_bytes, 32 * 1024 * 1024);
+        assert_eq!(defaults.max_directory_entries, 100_000);
+        assert_eq!(defaults.max_response_bytes, 32 * 1024 * 1024);
         // A graceful stop outlasts the slowest request it accepted.
         assert_eq!(defaults.request_timeout_ms, 30_000);
         assert_eq!(defaults.drain_timeout_ms, 35_000);

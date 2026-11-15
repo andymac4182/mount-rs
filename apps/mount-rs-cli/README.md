@@ -300,8 +300,8 @@ Listener and limit keys, all optional:
 | `port` | `0` | `0` selects an ephemeral port, printed in the readiness line. |
 | `max_request_bytes` | 8388608 | Largest `PUT` body and JSON body; the largest uploadable file. |
 | `max_buffered_upload_bytes` | 4 x `max_request_bytes` | Total upload bytes buffered across requests; uploads beyond it wait. Must be >= `max_request_bytes`. |
-| `max_response_bytes` | 8388608 | Largest directory listing. |
-| `max_directory_entries` | 4096 | Largest listable directory. |
+| `max_response_bytes` | 33554432 | Largest directory listing. |
+| `max_directory_entries` | 100000 | Largest listable directory. |
 | `read_chunk_bytes` | 65536 | Download read size. |
 | `request_timeout_ms` | 30000 | Per-request, header-read, idle keep-alive and stalled-download timeout. |
 | `drain_timeout_ms` | 35000 | Shutdown drain. Keep it above `request_timeout_ms`. |

@@ -69,8 +69,8 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | `port` | integer | `0` | 0-65535 | `0` picks an ephemeral port. Set a fixed port in production. |
 | `max_request_bytes` | integer | `8388608` (8 MiB) | >= 1 | Largest `PUT` body and JSON body. Larger requests get 413. This is also the largest file a client can upload. |
 | `max_buffered_upload_bytes` | integer | 4 x `max_request_bytes` | >= `max_request_bytes` (a smaller value is a config error, exit 2) | Upload bytes the server buffers across all in-flight `PUT`s. A `PUT` reserves its `Content-Length` (or `max_request_bytes` without one) before its body is read; uploads beyond the budget wait in arrival order. |
-| `max_response_bytes` | integer | `8388608` (8 MiB) | >= 1 | Largest directory listing (uncompressed JSON). Larger listings get 413. Does not limit file downloads. |
-| `max_directory_entries` | integer | `4096` | >= 1 | Largest directory that can be listed. Larger directories get 413. |
+| `max_response_bytes` | integer | `33554432` (32 MiB) | >= 1 | Largest directory listing (uncompressed JSON). Larger listings get 413. Does not limit file downloads. |
+| `max_directory_entries` | integer | `100000` | >= 1 | Largest directory that can be listed. Larger directories get 413. An entry is about 70 bytes of JSON with short names, so 100,000 entries is about 7 MB (0.3 MB gzipped from `/entries`). |
 | `read_chunk_bytes` | integer | `65536` | >= 1 | Read size per chunk when streaming a download. |
 | `request_timeout_ms` | integer | `30000` | >= 1 | Limit for one request up to its response headers, including receiving the body and waiting for upload budget; exceeding it returns 504. Also the header-read and idle keep-alive timeout (the connection is closed without a response) and the time a download may make no progress before it is cut. |
 | `drain_timeout_ms` | integer | `35000` | >= 1 | How long shutdown waits for in-flight requests before aborting them. Keep it above `request_timeout_ms`. |
@@ -498,7 +498,10 @@ after a kill is up to one full lifetime.
   on at most four listings at a time; waiting requests keep their listing in
   memory. Worst case is roughly `max_connections` x `max_response_bytes`. Lower
   `max_response_bytes` or `max_directory_entries` if consumers list large
-  directories concurrently.
+  directories concurrently. Measured on a SQLite split-store drive, listing a
+  100,000-entry directory took 16 ms and produced 6.8 MB of JSON; the entries
+  and their JSON are held together while the response is built, so budget
+  about 15-20 MB for each such listing in flight.
 - **Download memory.** About two chunks of `read_chunk_bytes` per active
   download.
 - **Throughput.** One process, one writer per drive. Capacity is added by

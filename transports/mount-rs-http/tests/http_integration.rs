@@ -972,6 +972,44 @@ async fn directory_entry_limit_bounds_both_listing_routes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_limits_list_a_directory_of_a_hundred_thousand_files() {
+    const FILES: usize = 100_000;
+    let fs = Arc::new(MemoryFs::empty());
+    fs.mkdir("/big", mount_rs_core::MkdirOptions::default())
+        .await
+        .expect("directory");
+    for index in 0..FILES {
+        fs.write_file(&format!("/big/file-{index:07}.bin"), b"x")
+            .await
+            .expect("file");
+    }
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(DriveConfig::new("memory", fs, MEMORY_TOKEN).expect("drive config"))
+        .expect("drive registration");
+    let server = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    let client = reqwest::Client::new();
+    for path in ["entries/big", "fs/big"] {
+        let response = client
+            .get(format!("{}/v1/drives/memory/{path}", server.url()))
+            .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+            .send()
+            .await
+            .expect("directory listing response");
+        assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+        let body: serde_json::Value = response.json().await.expect("listing JSON");
+        let entries = body
+            .as_array()
+            .or_else(|| body["entries"].as_array())
+            .expect("entries");
+        assert_eq!(entries.len(), FILES, "{path}");
+    }
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn directory_response_byte_limit_bounds_serialized_metadata() {
     let mut registry = DriveRegistry::new();
     registry
