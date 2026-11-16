@@ -184,7 +184,7 @@ Requirements:
 | Terminate TLS at the proxy | The server has no TLS. |
 | Run in the same network namespace as the server (same host, or same pod as a sidecar) | The server binds loopback only. A proxy on another host or in another container network cannot reach it. |
 | Forward the request path unmodified | The server validates percent-encoding itself. Do not let the proxy decode, normalise or merge slashes in the upstream URI. |
-| Forward `Authorization`, `Range`, `Accept-Encoding` unchanged; do not cache | Authentication is per request. Responses depend on the token. |
+| Forward `Authorization`, `Range`, `If-Range`, `If-Match`, `If-None-Match`, `Accept-Encoding` and the response's `ETag` unchanged; do not cache | Authentication is per request. Responses depend on the token. Conditional writes rely on the tags reaching both ways intact. |
 | Request body cap >= `max_upload_bytes` | A smaller cap rejects uploads the server would accept. Equal is best: then the proxy rejects oversize uploads without opening an upstream connection. |
 | Stream request bodies upstream; do not buffer them | Large uploads are streamed to storage as they arrive. A proxy that buffers a multi-gigabyte upload to its own disk first doubles the disk traffic and delays the upload's start. The server gives up on an upload that stalls for `request_timeout_ms`, so a slow client cannot hold it forever. |
 | Do not buffer or cap response bodies | Downloads have no size limit and are streamed. |

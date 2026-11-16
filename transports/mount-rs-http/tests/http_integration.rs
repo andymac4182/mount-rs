@@ -1252,6 +1252,19 @@ async fn a_split_store_publishes_a_streamed_upload_once() {
 
     const SIZE: usize = 300_000;
     let body: Vec<u8> = (0..SIZE).map(|index| (index * 7 % 249) as u8).collect();
+
+    // Preconditions are checked once the body is stored, before publishing.
+    let response = reqwest::Client::new()
+        .put(format!("{}/v1/drives/split/fs/doc", server.url()))
+        .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+        .header(reqwest::header::IF_MATCH, "\"not-the-current-tag\"")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("conditional PUT");
+    assert_eq!(response.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+    assert_eq!(read_all(&driver, "/doc").await, b"original");
+    assert_eq!(split_revision(&split).await, before);
     let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
         .await
         .expect("upload socket");
@@ -1907,4 +1920,264 @@ async fn negotiated_listing_head_preserves_encoded_length_over_http() {
         .unwrap();
     assert_eq!(rejected.status(), reqwest::StatusCode::NOT_ACCEPTABLE);
     server.close().await.unwrap();
+}
+
+/// A split-store drive, whose files have content tags, and a memory drive,
+/// whose files fall back to metadata tags.
+async fn tagged_server() -> (HttpServer, Arc<dyn FsDriver>) {
+    let split: Arc<dyn FsDriver> = Arc::new(
+        mount_rs_chunked::ChunkedFs::open(
+            mount_rs_sqlite::SqliteMetadataStore::in_memory().expect("metadata store"),
+            mount_rs_sqlite::SqliteBlockStore::in_memory().expect("block store"),
+            mount_rs_chunked::ChunkedOptions::fixed("http-etag", 4096).expect("options"),
+        )
+        .await
+        .expect("split store"),
+    );
+    let memory: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let mut registry = DriveRegistry::new();
+    for (id, driver) in [("split", &split), ("memory", &memory)] {
+        registry
+            .register(DriveConfig::new(id, driver.clone(), MEMORY_TOKEN).expect("drive config"))
+            .expect("drive registration");
+    }
+    let server = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    (server, split)
+}
+
+fn etag_of(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .expect("ETag header")
+        .to_str()
+        .expect("ASCII ETag")
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn etags_change_with_content_and_answer_conditional_requests() {
+    let (server, _split) = tagged_server().await;
+    let client = reqwest::Client::new();
+    for drive in ["split", "memory"] {
+        let url = format!("{}/v1/drives/{drive}/fs/file.txt", server.url());
+        let put = |body: &'static str, condition: Option<(&'static str, String)>| {
+            let mut request = client
+                .put(&url)
+                .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+                .body(body);
+            if let Some((name, value)) = condition {
+                request = request.header(name, value);
+            }
+            request.send()
+        };
+        let get = |condition: Option<(&'static str, String)>| {
+            let mut request = client.get(&url).header(AUTHORIZATION, bearer(MEMORY_TOKEN));
+            if let Some((name, value)) = condition {
+                request = request.header(name, value);
+            }
+            request.send()
+        };
+
+        // Only create: the path is free.
+        let created = put("first", Some(("if-none-match", "*".into())))
+            .await
+            .expect("create");
+        assert_eq!(created.status(), reqwest::StatusCode::OK, "{drive}");
+        let first = etag_of(&created);
+        assert!(
+            first.starts_with('"') && first.ends_with('"'),
+            "{drive} {first}"
+        );
+        let refused = put("again", Some(("if-none-match", "*".into())))
+            .await
+            .expect("create again");
+        assert_eq!(
+            refused.status(),
+            reqwest::StatusCode::PRECONDITION_FAILED,
+            "{drive}"
+        );
+
+        let read = get(None).await.expect("GET");
+        assert_eq!(etag_of(&read), first, "{drive}");
+        assert_eq!(read.text().await.expect("body"), "first");
+        let head = client
+            .head(&url)
+            .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+            .send()
+            .await
+            .expect("HEAD");
+        assert_eq!(etag_of(&head), first, "{drive}");
+        for tag in [
+            first.clone(),
+            format!("W/{first}"),
+            format!("\"x\", {first}"),
+        ] {
+            let cached = get(Some(("if-none-match", tag))).await.expect("revalidate");
+            assert_eq!(
+                cached.status(),
+                reqwest::StatusCode::NOT_MODIFIED,
+                "{drive}"
+            );
+            assert_eq!(etag_of(&cached), first, "{drive}");
+            assert!(cached.bytes().await.expect("304 body").is_empty());
+        }
+
+        if drive == "memory" {
+            // Metadata tags change with the modification time, which has a
+            // resolution of a millisecond.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Same size, new bytes: the split store's tag changes even within
+        // the same millisecond.
+        let second = put("other", None).await.expect("overwrite");
+        let second = etag_of(&second);
+        assert_ne!(second, first, "{drive}");
+        assert_eq!(
+            get(Some(("if-none-match", first.clone())))
+                .await
+                .expect("stale revalidation")
+                .status(),
+            reqwest::StatusCode::OK,
+            "{drive}"
+        );
+
+        // A write based on a stale tag is refused and changes nothing.
+        let stale = put("lost!", Some(("if-match", first.clone())))
+            .await
+            .expect("stale write");
+        assert_eq!(
+            stale.status(),
+            reqwest::StatusCode::PRECONDITION_FAILED,
+            "{drive}"
+        );
+        let weak = put("lost!", Some(("if-match", format!("W/{second}"))))
+            .await
+            .expect("weak write");
+        assert_eq!(
+            weak.status(),
+            reqwest::StatusCode::PRECONDITION_FAILED,
+            "{drive}"
+        );
+        assert_eq!(get(None).await.unwrap().text().await.unwrap(), "other");
+        let current = put("third", Some(("if-match", second.clone())))
+            .await
+            .expect("current write");
+        assert_eq!(current.status(), reqwest::StatusCode::OK, "{drive}");
+        let third = etag_of(&current);
+
+        // A range is honoured only while If-Range names the current tag.
+        let ranged = |tag: String| {
+            client
+                .get(&url)
+                .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+                .header(RANGE, "bytes=0-1")
+                .header("if-range", tag)
+                .send()
+        };
+        let partial = ranged(third.clone()).await.expect("If-Range current");
+        assert_eq!(
+            partial.status(),
+            reqwest::StatusCode::PARTIAL_CONTENT,
+            "{drive}"
+        );
+        assert_eq!(partial.text().await.unwrap(), "th");
+        let whole = ranged(second.clone()).await.expect("If-Range stale");
+        assert_eq!(whole.status(), reqwest::StatusCode::OK, "{drive}");
+        assert_eq!(whole.text().await.unwrap(), "third");
+        assert_eq!(
+            get(Some(("if-match", second.clone())))
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::PRECONDITION_FAILED,
+            "{drive}"
+        );
+
+        // Deletes too.
+        let delete = |tag: String| {
+            client
+                .delete(&url)
+                .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+                .header("if-match", tag)
+                .send()
+        };
+        assert_eq!(
+            delete(second).await.unwrap().status(),
+            reqwest::StatusCode::PRECONDITION_FAILED,
+            "{drive}"
+        );
+        assert_eq!(
+            delete(third.clone()).await.unwrap().status(),
+            reqwest::StatusCode::NO_CONTENT,
+            "{drive}"
+        );
+        assert_eq!(
+            put("gone", Some(("if-match", "*".into())))
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::PRECONDITION_FAILED,
+            "{drive}"
+        );
+    }
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writes_conditioned_on_one_tag_have_one_winner() {
+    let (server, split) = tagged_server().await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/drives/split/fs/race.txt", server.url());
+    let base = client
+        .put(&url)
+        .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+        .body("base")
+        .send()
+        .await
+        .expect("base write");
+    let base = etag_of(&base);
+    let writers = (0..16).map(|writer| {
+        let request = client
+            .put(&url)
+            .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+            .header("if-match", base.clone())
+            .body(format!("writer {writer:02}"));
+        async move { (writer, request.send().await.expect("racing write").status()) }
+    });
+    let results = spawn_all(writers).await;
+    let winners: Vec<_> = results
+        .iter()
+        .filter(|(_, status)| *status == reqwest::StatusCode::OK)
+        .map(|(writer, _)| *writer)
+        .collect();
+    assert_eq!(winners.len(), 1, "{results:?}");
+    assert!(
+        results
+            .iter()
+            .all(|(_, status)| *status == reqwest::StatusCode::OK
+                || *status == reqwest::StatusCode::PRECONDITION_FAILED),
+        "{results:?}"
+    );
+    assert_eq!(
+        read_all(&split, "/race.txt").await,
+        format!("writer {:02}", winners[0]).into_bytes()
+    );
+    server.close().await.expect("server close");
+}
+
+/// Run futures as tasks, all at once, and collect their outputs in order.
+async fn spawn_all<F>(futures: impl Iterator<Item = F>) -> Vec<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let handles: Vec<_> = futures.map(tokio::spawn).collect();
+    let mut out = Vec::with_capacity(handles.len());
+    for handle in handles {
+        out.push(handle.await.expect("task"));
+    }
+    out
 }

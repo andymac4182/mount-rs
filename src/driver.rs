@@ -185,6 +185,13 @@ pub trait FileHandle: Send + Sync {
     async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> Result<usize>;
     async fn write(&self, buffer: &[u8], position: Option<u64>) -> Result<usize>;
     async fn stat(&self) -> Result<Stats>;
+    /// An opaque tag for the bytes this handle would read now: two tags
+    /// for the same file are equal only if the bytes are. `None` when the
+    /// driver keeps nothing that identifies content, and callers fall back
+    /// to metadata. Wrappers must forward this to the handle they wrap.
+    async fn content_tag(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
     async fn truncate(&self, length: u64) -> Result<()>;
     async fn sync(&self) -> Result<()> {
         Ok(())
@@ -294,6 +301,11 @@ pub trait FsDriver: Send + Sync {
     }
 
     async fn stat(&self, path: &str) -> Result<Stats>;
+    /// [`FileHandle::content_tag`] for the file `path` names, following
+    /// symbolic links. Wrappers must forward this to the driver they wrap.
+    async fn content_tag(&self, _path: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
     async fn lstat(&self, _path: &str) -> Result<Stats> {
         Err(crate::error::FsError::enosys("lstat"))
     }

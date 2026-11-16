@@ -218,6 +218,10 @@ impl FileHandle for WatchedHandle {
         self.watched("stat", String::new(), self.inner.stat()).await
     }
 
+    async fn content_tag(&self) -> Result<Option<String>> {
+        self.inner.content_tag().await
+    }
+
     async fn truncate(&self, length: u64) -> Result<()> {
         self.watched(
             "truncate",
@@ -250,6 +254,10 @@ impl FsDriver for WatchedDriver {
 
     fn health(&self) -> Result<()> {
         self.inner.health()
+    }
+
+    fn write_file_is_atomic(&self) -> bool {
+        self.inner.write_file_is_atomic()
     }
 
     fn supports_guarded_mutations(&self) -> bool {
@@ -335,6 +343,10 @@ impl FsDriver for WatchedDriver {
             self.inner.stat(path),
         )
         .await
+    }
+
+    async fn content_tag(&self, path: &str) -> Result<Option<String>> {
+        self.inner.content_tag(path).await
     }
 
     async fn lstat(&self, path: &str) -> Result<Stats> {

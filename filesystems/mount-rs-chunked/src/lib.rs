@@ -3451,6 +3451,35 @@ where
         Ok(stats)
     }
 
+    /// The content tag of the node `inode` names in the lock-free snapshot,
+    /// or of an orphan still held open, as [`ChunkedFs::stat_inode`] finds it.
+    fn inode_content_tag(
+        &self,
+        inode: InodeId,
+        syscall: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
+        if let Some(namespace) = self.inner.state.published()
+            && let Some(node) = namespace.nodes.get(&inode)
+        {
+            return Ok(layout_tag(node));
+        }
+        let state = self.lock_state()?;
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
+        if state.closed {
+            return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
+        }
+        state
+            .namespace
+            .nodes
+            .get(&inode)
+            .or_else(|| state.orphans.get(&inode))
+            .map(layout_tag)
+            .ok_or_else(|| error_with_path(ErrorCode::Estale, syscall, path))
+    }
+
     async fn validate_lease(&self) -> Result<()> {
         if self.inner.options.delegated && self.inner.delegation_draining.load(Ordering::SeqCst) {
             return Err(
@@ -5764,6 +5793,35 @@ fn write_base_unchanged(current: &NodeMetadata, original: &NodeMetadata) -> bool
         }
 }
 
+/// A tag that identifies a file's bytes. Blocks are immutable and a block
+/// identity only ever names one content, so the size and the extents fix
+/// every byte, gaps reading as zeros: equal tags mean equal bytes. Equal
+/// bytes stored differently may still have different tags. `None` for
+/// anything but a file.
+fn layout_tag(node: &NodeMetadata) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let NodeData::File(layout) = &node.data else {
+        return None;
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"mount-rs layout tag 1\0");
+    digest.update(node.stats.size.to_le_bytes());
+    for extent in &layout.extents {
+        digest.update(extent.file_offset.to_le_bytes());
+        digest.update(extent.block_offset.to_le_bytes());
+        digest.update(extent.length.to_le_bytes());
+        digest.update((extent.block.0.len() as u64).to_le_bytes());
+        digest.update(extent.block.0.as_bytes());
+    }
+    let hash = digest.finalize();
+    let mut tag = String::with_capacity(32);
+    for byte in &hash[..16] {
+        use std::fmt::Write as _;
+        let _ = write!(tag, "{byte:02x}");
+    }
+    Some(tag)
+}
+
 struct ChunkedHandle<M, B>
 where
     M: MetadataStore,
@@ -5910,6 +5968,23 @@ where
             Some(gate)
         };
         self.filesystem.stat_inode(self.inode, "fstat", &self.path)
+    }
+
+    async fn content_tag(&self) -> Result<Option<String>> {
+        self.check_generation("fstat")?;
+        if self.state.is_closed() {
+            return Err(error_with_path(ErrorCode::Ebadf, "fstat", &self.path));
+        }
+        let _gate = if self.filesystem.lock_free_reads() {
+            self.filesystem.read_lease(true).await?;
+            None
+        } else {
+            let gate = self.filesystem.inner.gate.lock().await;
+            self.filesystem.validate_lease().await?;
+            Some(gate)
+        };
+        self.filesystem
+            .inode_content_tag(self.inode, "fstat", &self.path)
     }
 
     async fn truncate(&self, length: u64) -> Result<()> {
@@ -6688,6 +6763,24 @@ where
         let namespace = self.read_view()?;
         let inode = resolve(&namespace, path, true, "stat")?;
         self.view_stats(&namespace, inode, "stat", path)
+    }
+
+    async fn content_tag(&self, path: &str) -> Result<Option<String>> {
+        let _gate = if self.lock_free_reads() {
+            self.read_lease(true).await?;
+            None
+        } else {
+            let gate = self.inner.gate.lock().await;
+            self.validate_lease().await?;
+            Some(gate)
+        };
+        let namespace = self.read_view()?;
+        let inode = resolve(&namespace, path, true, "stat")?;
+        namespace
+            .nodes
+            .get(&inode)
+            .map(layout_tag)
+            .ok_or_else(|| error_with_path(ErrorCode::Estale, "stat", path))
     }
 
     async fn lstat(&self, path: &str) -> Result<Stats> {
