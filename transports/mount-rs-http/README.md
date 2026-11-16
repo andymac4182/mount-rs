@@ -487,8 +487,8 @@ Defaults; the operator can change them.
 - Recursive delete; copy; `chmod`, `chown`, `utimes`; creating symbolic or
   hard links.
 - More than one byte range per request.
-- TLS or a non-loopback listener in the server itself. Both are the reverse
-  proxy's job.
+- TLS in the server itself. That is the reverse proxy's or load balancer's
+  job.
 - CORS headers and browser clients.
 - Per-user identity or scopes. A token grants full read and write access to
   its drive.
@@ -506,7 +506,7 @@ The crate exposes `HttpServer`, `HttpServerOptions`, `DriveRegistry` and
 `DriveConfig`. A drive is an id, a token and an `Arc<dyn FsDriver>`; the
 transport does not mount a filesystem and does not implement one.
 `HttpServer::start` refuses any host that is not loopback (`127.0.0.1`, `::1`,
-`localhost`). The `observability` feature records one `http.request` span and
+`localhost`) unless `HttpServerOptions::allow_non_loopback` is set. The `observability` feature records one `http.request` span and
 completion event per request through an application-supplied `Telemetry`
 handle; `observability-otlp` also reads the W3C trace context headers. Both are
 off by default.

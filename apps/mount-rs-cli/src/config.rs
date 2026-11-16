@@ -261,6 +261,8 @@ pub(crate) struct HttpServiceConfig {
     pub remote_sessions: bool,
     pub forwarding: Option<ForwardingConfig>,
     pub host: String,
+    /// Whether `host` may be other than loopback.
+    pub allow_non_loopback: bool,
     pub port: u16,
     pub max_request_bytes: usize,
     /// Memory that uploads being received may hold in total.
@@ -609,6 +611,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         object,
         &[
             "host",
+            "allow_non_loopback",
             "port",
             "max_request_bytes",
             "max_buffered_upload_bytes",
@@ -642,10 +645,12 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "must be non-empty and contain no whitespace",
         ));
     }
-    if !is_loopback_http_host(&host) {
+    let allow_non_loopback =
+        optional_bool(object, "allow_non_loopback", "config.http")?.unwrap_or(false);
+    if !allow_non_loopback && !is_loopback_http_host(&host) {
         return Err(ConfigError::at(
             "config.http.host",
-            "must be a loopback host; use a TLS reverse proxy for remote clients",
+            "must be a loopback host; use a TLS reverse proxy for remote clients, or set allow_non_loopback where the network to this listener is private",
         ));
     }
     let port = optional_u16(object, "port", "config.http")?.unwrap_or(DEFAULT_HTTP_PORT);
@@ -765,6 +770,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         forwarding,
         remote_sessions,
         host,
+        allow_non_loopback,
         port,
         max_request_bytes,
         max_buffered_upload_bytes,
@@ -3771,6 +3777,39 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message().contains("must be a loopback host"));
+        assert!(error.message().contains("allow_non_loopback"));
+    }
+
+    #[test]
+    fn http_config_accepts_a_non_loopback_host_only_when_allowed() {
+        let parse = |allow: &str| {
+            parse_config_str(
+                &format!(
+                    r#"{{
+                        "version": 1,
+                        "http": {{
+                            "host": "0.0.0.0",
+                            {allow}
+                            "drives": [
+                                {{"id": "memory", "token": {{"env": "TOKEN"}}, "driver": {{"kind": "memory"}}}}
+                            ]
+                        }}
+                    }}"#
+                ),
+                Path::new("/tmp"),
+            )
+        };
+        assert!(parse(r#""allow_non_loopback": false,"#).is_err());
+        let config = parse(r#""allow_non_loopback": true,"#).expect("allowed");
+        let http = config.http.expect("http config");
+        assert_eq!(http.host, "0.0.0.0");
+        assert!(http.allow_non_loopback);
+        let error = parse(r#""allow_non_loopback": "yes","#).unwrap_err();
+        assert!(
+            error.message().contains("boolean") || error.message().contains("bool"),
+            "{}",
+            error.message()
+        );
     }
 
     #[test]

@@ -296,7 +296,8 @@ Listener and limit keys, all optional:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `host` | `127.0.0.1` | Loopback hosts only (`127.0.0.1`, `::1`, `localhost`). Anything else is a config error. |
+| `host` | `127.0.0.1` | Loopback hosts only (`127.0.0.1`, `::1`, `localhost`), unless `allow_non_loopback` is set. |
+| `allow_non_loopback` | `false` | Lets `host` be any address, such as `0.0.0.0` in a container or behind a load balancer on a private network. The listener stays cleartext. |
 | `port` | `0` | `0` selects an ephemeral port, printed in the readiness line. |
 | `max_request_bytes` | 8388608 | Largest body held whole in memory: JSON bodies, session writes, and file uploads up to this size. |
 | `max_upload_bytes` | 5368709120 | Largest file a `PUT` may upload. Uploads above `max_request_bytes` stream to a temporary file and are renamed into place. Must be >= `max_request_bytes`. |
@@ -330,7 +331,9 @@ Changing a token requires a restart.
 The listener is cleartext HTTP/1.1 on loopback. It has no TLS. Remote clients
 must go through a TLS reverse proxy that runs in the same network namespace.
 The runbook has the proxy requirements and reference nginx and Caddy
-configurations.
+configurations. Where the network up to the listener is private, such as a
+container network or a VPC behind a load balancer that terminates TLS,
+`"allow_non_loopback": true` lets `host` be a non-loopback address instead.
 
 ### Lifecycle
 

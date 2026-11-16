@@ -1145,6 +1145,7 @@ fn http_server_options(
 ) -> HttpServerOptions {
     HttpServerOptions {
         host: config.host.clone(),
+        allow_non_loopback: config.allow_non_loopback,
         port: config.port,
         max_request_bytes: config.max_request_bytes,
         max_upload_bytes: config.max_upload_bytes,

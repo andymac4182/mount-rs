@@ -141,6 +141,27 @@ jobs:
           test "$(docker inspect mount-rs-smoke --format '{{.State.ExitCode}}')" = 0
           docker logs mount-rs-smoke 2>&1 | grep -qx 'http stopped'
           docker rm mount-rs-smoke >/dev/null
+
+          # With allow_non_loopback the listener is reachable through a
+          # published port, with no sidecar.
+          public="$RUNNER_TEMP/mount-rs-public.json"
+          sed 's/"host": "127.0.0.1",/"host": "0.0.0.0", "allow_non_loopback": true,/' "$config" > "$public"
+          grep -q '"allow_non_loopback": true' "$public"
+          chmod 644 "$public"
+          docker run -d --name mount-rs-public -e MOUNT_RS_TOKEN="$token" -p 127.0.0.1:18080:8080 \
+            -v "$public:/etc/mount-rs/config.json:ro" -v mount-rs-smoke:/var/lib/mount-rs \
+            mount-rs:test serve-http --config /etc/mount-rs/config.json >/dev/null
+          for _ in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/readyz || true)" = 200 ]; then
+              break
+            fi
+            sleep 1
+          done
+          test "$(curl -sS -H "Authorization: Bearer $token" \
+            http://127.0.0.1:18080/v1/drives/files/fs/hello.txt)" = 'hello from a container'
+          docker stop -t 30 mount-rs-public >/dev/null
+          test "$(docker inspect mount-rs-public --format '{{.State.ExitCode}}')" = 0
+          docker rm mount-rs-public >/dev/null
           docker volume rm mount-rs-smoke >/dev/null
           echo "CONTAINER_SMOKE_PASS arch=${{ matrix.arch }}"
 
