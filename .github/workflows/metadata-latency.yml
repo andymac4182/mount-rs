@@ -12,6 +12,7 @@ on:
     paths:
       - .github/workflows/metadata-latency.yml
       - scripts/metadata-latency-bench.py
+      - scripts/metadata-latency-tikv.toml
       - transports/mount-rs-http/examples/metadata_latency.rs
   workflow_dispatch:
     inputs:
@@ -61,7 +62,7 @@ jobs:
             --advertise-client-urls=http://pd:2379 --advertise-peer-urls=http://pd:2380 \
             --initial-cluster=pd=http://pd:2380 --log-level=warn --data-dir=/data
           docker run -d --name tikv --network latency --ulimit nofile=1048576:1048576 \
-            -v "$PWD/tests/tidb/tikv-test.toml:/etc/tikv-test.toml:ro" pingcap/tikv:v8.5.7 \
+            -v "$PWD/scripts/metadata-latency-tikv.toml:/etc/tikv-test.toml:ro" pingcap/tikv:v8.5.7 \
             --config=/etc/tikv-test.toml --pd-endpoints=pd:2379 --addr=0.0.0.0:20160 \
             --advertise-addr=tikv:20160 --status-addr=0.0.0.0:20180 --data-dir=/data
           docker run -d --name tidb --network latency -p 127.0.0.1:4000:4000 \

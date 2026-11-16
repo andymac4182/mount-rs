@@ -1,0 +1,13 @@
+# TiKV for the metadata latency benchmark. The harness config in
+# tests/tidb/tikv-test.toml squeezes three TiKVs into a developer's Docker
+# allocation: one scheduler worker, one apply thread and 64 latch slots, so
+# 100 drives queue behind each other's writes and the benchmark would measure
+# that starvation. This single TiKV keeps the production defaults and only
+# bounds the block cache to share a runner with TiDB, PD, RustFS and the
+# servers under test.
+
+[log]
+level = "warn"
+
+[storage.block-cache]
+capacity = "1GiB"
