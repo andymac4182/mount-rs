@@ -613,6 +613,10 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo check --locked -p mount-rs-cli --features foundationdb --test native_lifecycle
 
+      - name: Build config-driven CLI NFS acceptance on macOS
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p mount-rs-cli --test native_lifecycle --no-run
+
       - name: Verify config-driven CLI NFS persistence and cleanup
         if: runner.os == 'macOS'
         env:
@@ -727,6 +731,8 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
         run: timeout 120s cargo test --locked -p mount-rs-auto --test native_fuse -- --ignored --nocapture
+      - name: Build CLI native lifecycle test
+        run: cargo test --locked -p mount-rs-cli --test native_lifecycle --no-run
       - name: Verify CLI mounts, SQLite service crash recovery and cleanup
         env:
           MOUNT_RS_CLI_NATIVE_FUSE: '1'
