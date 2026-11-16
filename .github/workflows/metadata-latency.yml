@@ -107,7 +107,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          nproc
+          # Runner hardware varies between runs; record it beside the numbers.
+          {
+            echo "runner: $(nproc) CPUs, $(lscpu | sed -n 's/^Model name: *//p')," \
+              "$(free -g | awk '/^Mem:/ {print $2}') GiB"
+          } | tee "$RUNNER_TEMP/summary.txt"
           bench() {
             label=$1
             shift
