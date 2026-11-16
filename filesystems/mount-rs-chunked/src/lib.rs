@@ -1472,15 +1472,13 @@ where
 #[derive(Default)]
 struct StreamedWrites {
     next: std::sync::atomic::AtomicU64,
-    active: std::sync::Mutex<HashMap<u64, Vec<BlockExtent>>>,
+    active: mount_rs_core::park_cell::ParkCell<HashMap<u64, Vec<BlockExtent>>>,
 }
 
 impl StreamedWrites {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Vec<BlockExtent>>> {
+    fn lock(&self) -> mount_rs_core::park_cell::ParkCellGuard<'_, HashMap<u64, Vec<BlockExtent>>> {
         // The map holds plain data; a panic mid-update cannot break it.
-        self.active
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.active.lock_recovered()
     }
 
     fn register(&self) -> u64 {

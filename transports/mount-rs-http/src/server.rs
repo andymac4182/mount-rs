@@ -1,3 +1,4 @@
+use mount_rs_core::turn_gate::{TurnLock, TurnLockGuard};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::Write;
@@ -1789,7 +1790,7 @@ impl<'a> Preconditions<'a> {
         &self,
         driver: &dyn FsDriver,
         config: &RequestConfig,
-    ) -> Result<tokio::sync::MutexGuard<'static, ()>, RequestError> {
+    ) -> Result<TurnLockGuard<'static, ()>, RequestError> {
         let lock = tokio::time::timeout(
             positive_duration(config.request_timeout),
             write_lock(self.drive, self.path).lock(),
@@ -1803,11 +1804,11 @@ impl<'a> Preconditions<'a> {
 
 /// One of a fixed set of locks, chosen by drive and path. Unrelated paths
 /// that share one only wait for each other's publication.
-fn write_lock(drive: &str, path: &str) -> &'static tokio::sync::Mutex<()> {
+fn write_lock(drive: &str, path: &str) -> &'static TurnLock<()> {
     use std::hash::{Hash, Hasher};
     const LOCKS: usize = 1024;
-    static TABLE: OnceLock<Vec<tokio::sync::Mutex<()>>> = OnceLock::new();
-    let table = TABLE.get_or_init(|| (0..LOCKS).map(|_| tokio::sync::Mutex::new(())).collect());
+    static WRITE_LOCKS: OnceLock<Vec<TurnLock<()>>> = OnceLock::new();
+    let table = WRITE_LOCKS.get_or_init(|| (0..LOCKS).map(|_| TurnLock::new(())).collect());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (drive, path).hash(&mut hasher);
     &table[(hasher.finish() % LOCKS as u64) as usize]
@@ -2078,7 +2079,7 @@ async fn publish_upload(
     source: UploadSource,
     preconditions: &Preconditions<'_>,
     config: &RequestConfig,
-) -> Result<(usize, tokio::sync::MutexGuard<'static, ()>), RequestError> {
+) -> Result<(usize, TurnLockGuard<'static, ()>), RequestError> {
     if let UploadSource::Whole(data) = &source
         && driver.write_file_is_atomic()
     {
