@@ -3,9 +3,16 @@ name: Metadata latency
 # Measures metadata call latency over the HTTP API on one runner: three
 # serve-http owners forwarding to each other, 100 drives on TiDB metadata
 # and RustFS blocks, one client per drive. Run by hand; the numbers are a
-# measurement, not a gate.
+# measurement, not a gate. It also runs when the benchmark itself changes
+# on main, so a change to the harness is measured once.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/metadata-latency.yml
+      - scripts/metadata-latency-bench.py
+      - transports/mount-rs-http/examples/metadata_latency.rs
   workflow_dispatch:
     inputs:
       seconds:
@@ -35,8 +42,8 @@ jobs:
       MDB_S3_BUCKET: metadata-latency
       MDB_S3_KEY: benchaccess
       MDB_S3_SECRET: benchsecret0123456789
-      SECONDS_PER_MODE: ${{ inputs.seconds }}
-      RATE: ${{ inputs.rate }}
+      SECONDS_PER_MODE: ${{ inputs.seconds || '20' }}
+      RATE: ${{ inputs.rate || '10' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
