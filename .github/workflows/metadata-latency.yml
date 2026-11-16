@@ -1,0 +1,134 @@
+name: Metadata latency
+
+# Measures metadata call latency over the HTTP API on one runner: three
+# serve-http owners forwarding to each other, 100 drives on TiDB metadata
+# and RustFS blocks, one client per drive. Run by hand; the numbers are a
+# measurement, not a gate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Measured seconds per mode
+        required: false
+        default: '20'
+      rate:
+        description: Requests a second per client
+        required: false
+        default: '10'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metadata-latency
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MDB_TIDB_URL: mysql://root@127.0.0.1:4000/test
+      MDB_REDIS_URL: redis://127.0.0.1:6379/
+      MDB_S3_ENDPOINT: http://127.0.0.1:9000
+      MDB_S3_BUCKET: metadata-latency
+      MDB_S3_KEY: benchaccess
+      MDB_S3_SECRET: benchsecret0123456789
+      SECONDS_PER_MODE: ${{ inputs.seconds }}
+      RATE: ${{ inputs.rate }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+
+      - name: Start TiDB, RustFS and Redis
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker network create latency
+          docker run -d --name pd --network latency pingcap/pd:v8.5.7 \
+            --name=pd --client-urls=http://0.0.0.0:2379 --peer-urls=http://0.0.0.0:2380 \
+            --advertise-client-urls=http://pd:2379 --advertise-peer-urls=http://pd:2380 \
+            --initial-cluster=pd=http://pd:2380 --log-level=warn --data-dir=/data
+          docker run -d --name tikv --network latency --ulimit nofile=1048576:1048576 \
+            -v "$PWD/tests/tidb/tikv-test.toml:/etc/tikv-test.toml:ro" pingcap/tikv:v8.5.7 \
+            --config=/etc/tikv-test.toml --pd-endpoints=pd:2379 --addr=0.0.0.0:20160 \
+            --advertise-addr=tikv:20160 --status-addr=0.0.0.0:20180 --data-dir=/data
+          docker run -d --name tidb --network latency -p 127.0.0.1:4000:4000 \
+            -v "$PWD/tests/tidb/tidb-test.toml:/etc/tidb-test.toml:ro" pingcap/tidb:v8.5.7 \
+            --config=/etc/tidb-test.toml --store=tikv --path=pd:2379 --host=0.0.0.0 -P=4000 \
+            -L=warn --status=10080
+          docker run -d --name redis -p 127.0.0.1:6379:6379 redis:8.4.0-alpine \
+            redis-server --save '' --appendonly no
+          docker run -d --name rustfs -p 127.0.0.1:9000:9000 \
+            -e RUSTFS_ACCESS_KEY="$MDB_S3_KEY" -e RUSTFS_SECRET_KEY="$MDB_S3_SECRET" \
+            -e RUSTFS_REGION=us-east-1 -e RUSTFS_ADDRESS=:9000 -e RUSTFS_CONSOLE_ENABLE=false \
+            rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff
+
+      - name: Build the server and the load client
+        run: |
+          cargo build --locked --release -p mount-rs-cli
+          cargo build --locked --release -p mount-rs-http --example metadata_latency
+
+      - name: Wait for storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 90); do
+            if R2_ENDPOINT="$MDB_S3_ENDPOINT" R2_BUCKET="$MDB_S3_BUCKET" R2_ACCESS_KEY_ID="$MDB_S3_KEY" \
+              R2_SECRET_ACCESS_KEY="$MDB_S3_SECRET" node tests/rustfs/create-bucket.mjs >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          for _ in $(seq 1 90); do
+            if docker run --rm --network latency curlimages/curl:8.11.1 -sf http://tidb:10080/status >/dev/null; then
+              echo "storage ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs --tail 50 tikv >&2
+          docker logs --tail 50 tidb >&2
+          exit 1
+
+      - name: Measure
+        shell: bash
+        run: |
+          set -euo pipefail
+          nproc
+          bench() {
+            label=$1
+            shift
+            python3 -I scripts/metadata-latency-bench.py --binary target/release/mount-rs \
+              --client target/release/examples/metadata_latency --work "$RUNNER_TEMP/$label" \
+              --seconds "$SECONDS_PER_MODE" --label "$label" "$@" | tee -a "$RUNNER_TEMP/summary.txt"
+            cp "$RUNNER_TEMP/$label/results.json" "$RUNNER_TEMP/results-$label.json"
+          }
+          bench durable --ops ping,stat,head,list,mkdir,rename,delete \
+            "local:$RATE" "forwarded:$RATE"
+          bench durable-refresh --refresh-active-routes --ops ping,stat,head,list \
+            "forwarded:$RATE"
+          bench exclusive --ownership exclusive --refresh-active-routes \
+            --ops stat,head,list,mkdir,rename,delete "local:$RATE" "forwarded:$RATE"
+          bench sqlite --store sqlite --refresh-active-routes --ops ping,stat \
+            "local:$RATE" "forwarded:$RATE"
+          {
+            echo '```'
+            cat "$RUNNER_TEMP/summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: metadata-latency
+          path: |
+            ${{ runner.temp }}/results-*.json
+            ${{ runner.temp }}/summary.txt
+            ${{ runner.temp }}/*/n*.stderr
+          if-no-files-found: ignore
