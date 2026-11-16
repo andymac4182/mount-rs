@@ -148,6 +148,9 @@ def main():
     parser.add_argument("--label", default="")
     parser.add_argument("modes", nargs="+")
     args = parser.parse_args()
+    # The servers run with the work directory as their cwd, so relative
+    # paths given on the command line must be resolved first.
+    args.binary, args.client, args.work = (os.path.abspath(p) for p in (args.binary, args.client, args.work))
     os.makedirs(args.work, exist_ok=True)
     run = uuid.uuid4().hex[:8]
     owner = {f"d{i:03}": NODES[i % 3] for i in range(args.drives)}
