@@ -952,6 +952,7 @@ dependencies = [
  "crossbeam-queue",
  "futures-util",
  "mount-rs-core",
+ "sha2",
  "tokio",
 ]
 
