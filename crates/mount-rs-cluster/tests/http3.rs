@@ -1828,7 +1828,8 @@ async fn exercise_forwarder(
         assert!(stage.unwrap() <= total);
     }
     // Opt-in successful responses can keep an exact advisory route warm.
-    // Authentication failures must not renew its expiry.
+    // Authentication failures must not renew its expiry. Background refresh
+    // would also keep the route warm, so it is off to isolate renewal.
     let renewing = IngressForwarder::new(
         registry.clone(),
         peers.clone(),
@@ -1836,6 +1837,7 @@ async fn exercise_forwarder(
         ForwardOptions {
             route_cache_ttl: Duration::from_millis(500),
             renew_route_on_success: true,
+            refresh_active_routes: false,
             ..ForwardOptions::default()
         },
     )
