@@ -836,6 +836,22 @@ impl FsDriver for DriverSlot {
         Box::pin(async move { driver.stat(path).await })
     }
 
+    fn content_tag<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Option<String>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.content_tag(path).await })
+    }
+
     fn lstat<'a, 'b, 'async_trait>(
         &'a self,
         path: &'b str,
@@ -1915,6 +1931,18 @@ impl FsDriver for MountDriver {
         Self: 'async_trait,
     {
         self.0.stat(path)
+    }
+
+    fn content_tag<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Option<String>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.content_tag(path)
     }
 
     fn lstat<'a, 'b, 'async_trait>(

@@ -211,6 +211,39 @@ def every_route():
     check("unknown drive is refused, not forwarded forever", s in (401, 403, 404, 502, 503), s)
 
 
+def conditional():
+    """Entity tags and preconditions, on the owner and through a forwarder."""
+    for ingress in ("b", "a"):
+        via = "local" if ingress == "b" else "forwarded"
+        path = fs("b", f"/cond-{ingress}")
+        s, h, _ = req(ingress, "PUT", path, b"one", headers={"If-None-Match": "*"})
+        first = h.get("etag") or h.get("ETag")
+        check(f"{via}: create-only PUT carries an ETag", s == 200 and bool(first), (s, first))
+        s, _, _ = req(ingress, "PUT", path, b"again", headers={"If-None-Match": "*"})
+        check(f"{via}: create-only PUT of an existing file is 412", s == 412, s)
+        other = "a" if ingress == "b" else "b"
+        s, h, _ = req(other, "GET", path)
+        check(f"{via}: both ingresses report the same tag",
+              s == 200 and (h.get("etag") or h.get("ETag")) == first, (s, h.get("etag"), first))
+        s, h, d = req(ingress, "GET", path, headers={"If-None-Match": first})
+        check(f"{via}: revalidation is 304 with no body", s == 304 and d == b"", (s, len(d)))
+        s, _, _ = req(ingress, "PUT", path, b"lost", headers={"If-Match": '"stale"'})
+        s2, _, d2 = req(other, "GET", path)
+        check(f"{via}: a stale If-Match is 412 and changes nothing",
+              s == 412 and d2 == b"one", (s, d2))
+        s, h, _ = req(ingress, "PUT", path, b"two", headers={"If-Match": first})
+        second = h.get("etag") or h.get("ETag")
+        check(f"{via}: a current If-Match replaces", s == 200 and second and second != first,
+              (s, second))
+        with cf.ThreadPoolExecutor(8) as pool:
+            statuses = list(pool.map(
+                lambda i: req(ingress, "PUT", path, f"writer {i}".encode(),
+                              headers={"If-Match": second})[0],
+                range(8)))
+        check(f"{via}: of 8 writes on one tag exactly one wins",
+              statuses.count(200) == 1 and statuses.count(412) == 7, statuses)
+
+
 def round_robin():
     """Alternate ingresses on every request against one file."""
     ok = True
@@ -350,6 +383,7 @@ def main():
                                                                   "max_upload_bytes": UPLOAD})
     try:
         every_route()
+        conditional()
         round_robin()
         big_and_limits()
         concurrency()

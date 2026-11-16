@@ -31,6 +31,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-sqlite-fs = { path = "../../filesystems/mount-rs-sqlite-fs" }
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 mount-rs-host = { path = "../../filesystems/mount-rs-host" }
