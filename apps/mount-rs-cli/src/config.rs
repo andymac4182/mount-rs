@@ -851,7 +851,7 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
         route_refresh_idle_ttls,
         peer_connections: peer_connections as usize,
         refresh_active_routes: optional_bool(fields, "refresh_active_routes", path)?
-            .unwrap_or(false),
+            .unwrap_or(true),
         owner: optional_bool(fields, "owner", path)?.unwrap_or(false),
         peers: required_path(fields, "peers", path, base)?,
         certificate: required_path(fields, "certificate", path, base)?,
@@ -3532,6 +3532,29 @@ mod tests {
             source["http"]["forwarding"]["route_refresh_idle_ttls"] = invalid;
             assert!(parse(&source).is_err());
         }
+    }
+
+    #[test]
+    fn active_route_refresh_defaults_on_and_can_be_turned_off() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new(".")).map(|config| {
+                config
+                    .http
+                    .unwrap()
+                    .forwarding
+                    .unwrap()
+                    .refresh_active_routes
+            })
+        };
+        assert!(parse(&source).unwrap());
+        source["http"]["forwarding"]["refresh_active_routes"] = false.into();
+        assert!(!parse(&source).unwrap());
+        source["http"]["forwarding"]["refresh_active_routes"] = "false".into();
+        assert!(parse(&source).is_err());
     }
 
     #[test]

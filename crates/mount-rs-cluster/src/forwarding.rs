@@ -143,7 +143,7 @@ impl Default for ForwardOptions {
             max_cached_routes: 1024,
             route_cache_ttl: Duration::from_secs(1),
             renew_route_on_success: false,
-            refresh_active_routes: false,
+            refresh_active_routes: true,
             refresh_idle_ttls: 5,
             operation_timeout: Duration::from_secs(30),
             max_request_bytes: 8 * 1024 * 1024,
