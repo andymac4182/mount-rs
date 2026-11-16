@@ -206,6 +206,7 @@ do not have this body.
 | 405 | `ENOTSUP` | Method not supported on this route; see `Allow` | No |
 | 406 | `ENOTSUP` | `Accept-Encoding` refuses both `gzip` and `identity` (listings only) | No |
 | 409 | `EEXIST`, `ENOTEMPTY`, `EISDIR` | Target exists, directory not empty, or the path is a directory | No |
+| 412 | `EPRECONDITION` | `If-Match` or `If-None-Match` does not hold; nothing was changed | No; read the file again |
 | 413 | `EFBIG` | Request body larger than the limit; connection closed | No |
 | 413 | `EOVERFLOW` | Directory has too many entries, or its listing is too large; connection closed | No |
 | 414 | `ENAMETOOLONG` | Name or path too long for the filesystem | No |
@@ -243,7 +244,7 @@ types. Check `Content-Type`, or `HEAD` first.
 
 | `path` is | `Content-Type` | Body |
 | --- | --- | --- |
-| Regular file (symlinks are followed) | `application/octet-stream` | The bytes. `Accept-Ranges: bytes`. |
+| Regular file (symlinks are followed) | `application/octet-stream` | The bytes. `Accept-Ranges: bytes`, `ETag`. |
 | Directory | `application/json` | `{"path","stats","entries"}`. `Range` is ignored. |
 | Device, FIFO, socket | `application/json` | `{"path","stats"}` |
 
@@ -251,7 +252,35 @@ types. Check `Content-Type`, or `HEAD` first.
 is `206` with `Content-Range: bytes a-b/size`. A malformed range, a unit other
 than `bytes`, more than one range, a start at or past the end of the file, or
 any range on an empty file returns `416`. The server does not fall back to a
-full `200` response.
+full `200` response. With `If-Range`, the range is honoured only while the
+file still has the tag `If-Range` names; otherwise the whole file is sent
+with `200`. A date in `If-Range` always gets the whole file.
+
+### Entity tags and conditional requests
+
+A file's `GET`, `HEAD` and `PUT` responses carry an `ETag`. On a split-store
+drive the tag is derived from the file's content: it changes whenever the
+bytes change, including a rewrite of the same size within the same
+millisecond, it stays the same for metadata changes, links and renames, and
+it is the same after a restart and from every node of a cluster. On other
+drives it is derived from the file's metadata and changes when the file's
+size or modification time does, which has a resolution of a millisecond.
+Treat tags as opaque. Directories have no tag.
+
+| Header | On `GET`, `HEAD` | On `PUT`, `DELETE` |
+| --- | --- | --- |
+| `If-None-Match: <tags>` | `304 Not Modified`, no body, when one matches (weak comparison) | `412` when one matches |
+| `If-None-Match: *` | `304` when the file exists | `412` when the path exists: create-only |
+| `If-Match: <tags>` | `412` unless one matches strongly | `412` unless one matches strongly: a write or delete based on what you read |
+| `If-Match: *` | `412` unless the file exists | `412` unless the path exists |
+
+`If-Match` is evaluated before `If-None-Match`. A `412` changes nothing. A
+`PUT` with a precondition is refused before its body is received when the
+precondition already fails, and checked again just before publishing.
+Checking and publishing are one step with respect to every other `PUT` and
+`DELETE` of the path through the HTTP API, so of several writes made with
+`If-Match` and the same tag exactly one succeeds. Writers that reach the
+drive another way, such as a mount, are not covered.
 
 **Downloads are not snapshot-isolated.** A `GET` that overlaps a `PUT`,
 `truncate` or `DELETE` of the same file can return a mixture of old and new
@@ -283,29 +312,34 @@ responses.
   this: a drive on memory storage is volatile, and a split-store drive with
   `writeback` enabled acknowledges before the data is durable. Ask the
   operator if you are unsure.
-- **Overwrite.** `PUT` always replaces an existing file. There is no
-  create-only mode, no `If-Match`, no `If-None-Match`.
+- **Overwrite.** `PUT` replaces an existing file. Send `If-None-Match: *` to
+  create only, or `If-Match` with the tag you read to replace only that
+  version (see [Entity tags](#entity-tags-and-conditional-requests)).
 - **Concurrent PUTs.** Two overlapping `PUT`s to one path leave exactly one of
-  the two bodies, never a mix. Which one is not defined. If you need
-  coordination between writers, do it in your service.
+  the two bodies, never a mix. Without preconditions, which one is not
+  defined. With `If-Match`, only a write based on the current tag succeeds.
 - **Parents.** The parent directory must exist (`404 ENOENT` otherwise). Use
   `mkdir` with `recursive: true` first.
 - **Target is a directory** (including the drive root). `409 EISDIR`.
-- **Size.** One request body, at most the server's request limit (8 MiB by
-  default). There is no ranged, resumable or multipart upload. **Files larger
-  than the limit are not supported**; split them into several files in your
-  service, or ask the operator to raise the limit.
-- **Send `Content-Length`.** A declared length above the limit is refused
-  with `413` without storing anything. The server reads and drops up to
+- **Size.** One request body, at most the server's upload limit (5 GiB by
+  default). A body up to the request limit (8 MiB by default) is received in
+  full and published in one step; a larger one is written to a hidden
+  temporary file as it arrives and renamed over the target once complete,
+  with the same guarantees. There is no ranged, resumable or multipart upload.
+- **Send `Content-Length`.** A declared length above the upload limit is
+  refused with `413` without storing anything. The server reads and drops up to
   64 MiB (or 5 seconds) of the refused body first, so a client that sends
   its whole body before reading the reply still gets the `413` rather than
   a connection reset; past that the connection is closed. The server also bounds the total upload
   bytes it buffers and admits uploads in arrival order; an upload without
   `Content-Length` reserves the full limit and waits longer under load.
-- **Time.** The whole upload, including waiting for buffer space, must finish
-  within the request timeout (30 s by default), or the server answers `504`.
-- **Response.** `{"path":"/a/b","bytes":N}` where `N` is the body length.
-  Any request `Content-Type` is accepted and ignored. It is not stored.
+- **Time.** An upload up to the request limit, including waiting for buffer
+  space, must finish within the request timeout (30 s by default), or the
+  server answers `504`. A larger upload may take as long as it needs, but
+  each piece of its body must arrive within the request timeout of the last.
+- **Response.** `{"path":"/a/b","bytes":N}` where `N` is the body length,
+  with the new file's `ETag`. Any request `Content-Type` is accepted and
+  ignored. It is not stored.
 
 On drives backed by a host directory, a replace creates a new inode (existing
 hard links keep the old content, and the old file's owner and group are not
@@ -315,7 +349,7 @@ not atomic.
 ### Deleting
 
 `DELETE` removes one file, one symbolic link (not its target), or one **empty**
-directory. It is not recursive: a non-empty directory returns `409 ENOTEMPTY`.
+directory. It accepts `If-Match` and `If-None-Match` as `PUT` does. It is not recursive: a non-empty directory returns `409 ENOTEMPTY`.
 To remove a tree, list it and delete bottom-up. The drive root cannot be
 deleted; the server answers `400 EINVAL`.
 
@@ -377,8 +411,8 @@ for anything that is not a symbolic link.
 The order is not guaranteed. `.` and `..` are not included.
 
 A listing is complete or it fails. A directory with more entries than the
-limit (4096 by default), or whose JSON is larger than the response limit
-(8 MiB by default), returns `413 EOVERFLOW`. There is no pagination. Keep
+limit (100,000 by default), or whose JSON is larger than the response limit
+(32 MiB by default), returns `413 EOVERFLOW`. There is no pagination. Keep
 directories below the limit.
 
 With `Accept-Encoding: gzip`, listings of 1 KiB or more are returned with
@@ -391,7 +425,7 @@ route are never compressed.
 | Request | Idempotent | Retrying after a lost response |
 | --- | --- | --- |
 | `GET`, `HEAD` | Yes | Safe |
-| `PUT` | Yes | Safe. It can overwrite a newer write by another client |
+| `PUT` | Yes | Safe. It can overwrite a newer write by another client, unless sent with `If-Match`; then a `412` on the retry may mean the first attempt succeeded |
 | `DELETE` | Effect yes, status no | A `404` on the retry means the first attempt succeeded |
 | `mkdir`, `recursive: true` | Yes | Safe |
 | `mkdir`, non-recursive | No | `409 EEXIST` on the retry means the first attempt succeeded |
@@ -432,9 +466,10 @@ Defaults; the operator can change them.
 
 | Limit | Default | When exceeded |
 | --- | --- | --- |
-| Request body (`PUT` and JSON) | 8 MiB | `413 EFBIG`, connection closed |
-| Directory entries per listing | 4096 | `413 EOVERFLOW`, connection closed |
-| Listing response (uncompressed JSON) | 8 MiB | `413 EOVERFLOW`, connection closed |
+| Upload (`PUT` body) | 5 GiB | `413 EFBIG`, connection closed |
+| Request body received in full (`PUT` and JSON) | 8 MiB | JSON: `413 EFBIG`, connection closed. `PUT`: streamed to storage instead |
+| Directory entries per listing | 100,000 | `413 EOVERFLOW`, connection closed |
+| Listing response (uncompressed JSON) | 32 MiB | `413 EOVERFLOW`, connection closed |
 | Request time | 30 s | `504 ETIMEDOUT`, connection closed |
 | Idle keep-alive, time to send request headers | 30 s | Connection closed without a response |
 | Download stalled by the client | 30 s without progress | Connection closed |
@@ -445,10 +480,10 @@ Defaults; the operator can change them.
 
 ## Not supported at launch
 
-- Files larger than the request body limit; ranged, resumable or multipart
+- Files larger than the upload limit; ranged, resumable or multipart
   upload; append.
 - Pagination of listings.
-- `ETag`, `If-Match`, `If-None-Match`, `If-Modified-Since`, create-exclusive.
+- `Last-Modified`, `If-Modified-Since`, `If-Unmodified-Since`.
 - Recursive delete; copy; `chmod`, `chown`, `utimes`; creating symbolic or
   hard links.
 - More than one byte range per request.

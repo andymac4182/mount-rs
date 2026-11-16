@@ -29,7 +29,8 @@ info:
     3. Route exists: 404.
     4. `/healthz`, `/readyz` and `/v1/drives` are handled here.
     5. Drive exists and the bearer token is that drive's token: 401.
-    6. Declared `Content-Length` within `max_request_bytes`: 413.
+    6. Declared `Content-Length` within `max_upload_bytes` for a file
+       `PUT`, `max_request_bytes` otherwise: 413.
     7. Method allowed for the route: 405 with `Allow`.
     8. The operation itself.
 
@@ -43,18 +44,18 @@ info:
 
     | Limit | Default | Effect when exceeded |
     | --- | --- | --- |
-    | Request body (`max_request_bytes`) | 8 MiB (8388608 bytes) | 413 `EFBIG`, connection closed. Applies to `PUT` bodies and JSON bodies. |
-    | Directory entries (`max_directory_entries`) | 4096 | 413 `EOVERFLOW`, connection closed. The directory cannot be listed. There is no pagination. |
-    | Listing response size (`max_response_bytes`) | 8 MiB | 413 `EOVERFLOW`, connection closed. Measured on the uncompressed JSON. |
-    | Request time (`request_timeout_ms`) | 30 s | 504 `ETIMEDOUT`, connection closed. Covers receiving the request body, waiting for upload memory, and the operation up to the response headers. |
+    | Upload (`max_upload_bytes`) | 5 GiB (5368709120 bytes) | 413 `EFBIG`, connection closed. A file `PUT` body. |
+    | Request body received in full (`max_request_bytes`) | 8 MiB (8388608 bytes) | JSON bodies: 413 `EFBIG`, connection closed. A larger `PUT` body is streamed to storage instead. |
+    | Directory entries (`max_directory_entries`) | 100000 | 413 `EOVERFLOW`, connection closed. The directory cannot be listed. There is no pagination. |
+    | Listing response size (`max_response_bytes`) | 32 MiB | 413 `EOVERFLOW`, connection closed. Measured on the uncompressed JSON. |
+    | Request time (`request_timeout_ms`) | 30 s | 504 `ETIMEDOUT`, connection closed. Covers receiving the request body, waiting for upload memory, and the operation up to the response headers. A streamed upload instead has this long for each piece of its body and each storage step. |
     | Idle keep-alive / header read | same as request time | The server closes the connection without sending a response. |
     | Buffered upload bytes (`max_buffered_upload_bytes`) | 4 x request body limit | `PUT`s wait for room in arrival order; the wait counts against the request time. |
     | Concurrent connections (`max_connections`) | 256 | Further connections are accepted and closed immediately without a response. |
 
     File downloads are not limited in size. An upload is limited to one
-    request body of at most `max_request_bytes`; there is no ranged,
-    chunked-resume or multipart upload, so a file larger than the limit
-    cannot be written through this API.
+    request body of at most `max_upload_bytes`; there is no ranged,
+    chunked-resume or multipart upload.
 
     ## Not part of this contract
 
@@ -62,8 +63,7 @@ info:
     `remote_sessions` or `forwarding` is configured. Those are experimental
     and are not part of the v1 launch contract.
 
-    There is no ETag, `If-Match`, `If-None-Match` or create-exclusive write,
-    no recursive delete, no copy, no chmod/chown/utimes, and no symlink
+    There is no `Last-Modified` or date precondition, no recursive delete, no copy, no chmod/chown/utimes, and no symlink
     creation.
 
     ## Reserved names
@@ -258,7 +258,12 @@ paths:
         malformed, uses another unit, lists more than one range, starts at or
         past the end of the file, or is sent for an empty file returns 416
         with `Content-Range: bytes */<size>`. The server never ignores a
-        `Range` header it cannot satisfy.
+        `Range` header it cannot satisfy. With `If-Range`, the range is
+        honoured only while the file has the tag `If-Range` names; otherwise
+        the whole file is sent with 200.
+
+        A regular file's response carries an `ETag`; see the `If-None-Match`
+        and `If-Match` parameters for conditional reads.
 
         **A download is not snapshot-isolated.** A `GET` that overlaps a
         `PUT`, `truncate` or `DELETE` of the same file can return a mixture
@@ -275,6 +280,9 @@ paths:
         longer than the request timeout is disconnected.
       parameters:
         - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfRange"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
       responses:
         "200":
           description: The whole file, or JSON metadata for a directory or special file.
@@ -282,6 +290,7 @@ paths:
             Accept-Ranges:
               description: "`bytes`. Present for regular files only."
               schema: {type: string, const: bytes}
+            ETag: {$ref: "#/components/headers/ETag"}
             Content-Length:
               description: Exact number of body bytes.
               schema: {type: integer, minimum: 0}
@@ -302,6 +311,7 @@ paths:
               description: "`bytes <first>-<last>/<size>`."
               schema: {type: string}
               example: bytes 7-23/131072
+            ETag: {$ref: "#/components/headers/ETag"}
             Content-Length:
               description: Length of the range.
               schema: {type: integer, minimum: 1}
@@ -314,6 +324,8 @@ paths:
         "404": {$ref: "#/components/responses/NotFound"}
         "413": {$ref: "#/components/responses/TooLarge"}
         "414": {$ref: "#/components/responses/UriTooLong"}
+        "304": {$ref: "#/components/responses/NotModified"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
         "416": {$ref: "#/components/responses/RangeNotSatisfiable"}
         "500": {$ref: "#/components/responses/InternalError"}
         "501": {$ref: "#/components/responses/NotImplemented"}
@@ -324,13 +336,16 @@ paths:
       tags: [files]
       summary: Headers of the corresponding GET, without a body.
       description: |
-        Returns the status, `Content-Type`, `Content-Length`, `Accept-Ranges`
-        and (with `Range`) `Content-Range` that GET would return. For a
+        Returns the status, `Content-Type`, `Content-Length`, `Accept-Ranges`,
+        `ETag` and (with `Range`) `Content-Range` that GET would return. For a
         directory the server builds the listing to compute `Content-Length`,
         so the directory limits apply. Error responses to HEAD have no body;
         use the status code.
       parameters:
         - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/IfRange"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
       responses:
         "200":
           description: The path exists. `Content-Type` tells a file (`application/octet-stream`) from a directory or special file (`application/json`).
@@ -352,6 +367,8 @@ paths:
             WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
         "403": {description: Permission denied by the filesystem.}
         "404": {description: No such file or directory.}
+        "304": {description: "`If-None-Match` matched; `ETag` is sent."}
+        "412": {description: "`If-Match` did not match."}
         "413": {description: Directory too large to list.}
         "416":
           description: Range not satisfiable.
@@ -371,8 +388,10 @@ paths:
         is accepted and ignored. An empty body creates an empty file. The
         parent directory must exist; `PUT` does not create directories.
 
-        **Atomic.** The server receives the whole body, then publishes it in
-        one step. Readers see either the previous content or the new content,
+        **Atomic.** A body of up to `max_request_bytes` is received in full,
+        then published in one step; a larger body is written to a hidden
+        temporary file as it arrives and renamed over the target once
+        complete. Readers see either the previous content or the new content,
         never a prefix and never a mixture of two uploads. A request that
         ends while the body is still being received (client disconnect, 413,
         timeout, server shutdown) changes nothing: an existing file keeps
@@ -398,16 +417,20 @@ paths:
         content, and ownership is not carried over), and a `PUT` through a
         symbolic link is written in place and is not atomic.
 
-        **Overwrite and concurrency.** `PUT` always replaces. There is no
-        create-only mode and no conditional write. When two `PUT`s to the
-        same path overlap, the file ends up with exactly one of the two
-        bodies; which one is not defined (last writer wins).
+        **Overwrite and concurrency.** `PUT` replaces. `If-None-Match: *`
+        creates only; `If-Match` with a tag replaces only that version, and
+        a 412 means nothing changed. Checking a precondition and publishing
+        are one step with respect to every other `PUT` and `DELETE` of the
+        path through this API, so of several writes made with `If-Match` and
+        one tag, exactly one succeeds. Without preconditions, overlapping
+        `PUT`s leave exactly one of the bodies; which one is not defined.
 
-        **Size.** The body may be at most `max_request_bytes` (default
-        8 MiB). A `Content-Length` above the limit is rejected before the
+        **Size.** The body may be at most `max_upload_bytes` (default
+        5 GiB). A `Content-Length` above the limit is rejected before the
         body is read; a chunked body is rejected when it crosses the limit.
-        In both cases the server answers 413 and closes the connection.
-        Larger files are not supported.
+        In both cases the server answers 413 and closes the connection. A
+        streamed upload may take longer than the request timeout, as long as
+        each piece of its body arrives within it.
 
         **Memory admission.** The server holds a bounded total of upload
         bytes in memory (`max_buffered_upload_bytes`, default four times
@@ -418,14 +441,18 @@ paths:
         upload.
 
         **Retry.** `PUT` is idempotent. Retrying after a 5xx, a timeout or a
-        dropped connection is safe, with one caveat: without conditional
-        writes a retry can overwrite a newer write made by another client in
-        between.
+        dropped connection is safe, with one caveat: without `If-Match` a
+        retry can overwrite a newer write made by another client in between.
+        With `If-Match`, a 412 on the retry may mean the first attempt
+        succeeded.
 
         The drive root cannot be written (409 `EISDIR`).
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
       requestBody:
         required: true
-        description: Raw file content, at most `max_request_bytes`.
+        description: Raw file content, at most `max_upload_bytes`.
         content:
           application/octet-stream:
             schema: {type: string, format: binary}
@@ -434,6 +461,8 @@ paths:
       responses:
         "200":
           description: The file now has exactly the uploaded content.
+          headers:
+            ETag: {$ref: "#/components/headers/ETag"}
           content:
             application/json:
               schema: {$ref: "#/components/schemas/WriteResult"}
@@ -451,6 +480,7 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
         "413": {$ref: "#/components/responses/TooLarge"}
         "414": {$ref: "#/components/responses/UriTooLong"}
         "500": {$ref: "#/components/responses/InternalError"}
@@ -471,6 +501,11 @@ paths:
         The effect is idempotent, the status is not: deleting a path that is
         already gone returns 404. When retrying a `DELETE` whose response was
         lost, treat 404 as success.
+
+        `If-Match` and `If-None-Match` apply as for `PUT`.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
       responses:
         "204":
           description: Removed. No body.
@@ -483,6 +518,7 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
+        "412": {$ref: "#/components/responses/PreconditionFailed"}
         "414": {$ref: "#/components/responses/UriTooLong"}
         "500": {$ref: "#/components/responses/InternalError"}
         "501": {$ref: "#/components/responses/NotImplemented"}
@@ -978,6 +1014,37 @@ components:
         type: string
         pattern: "^bytes=([0-9]+-[0-9]*|-[0-9]+)$"
       example: bytes=0-1023
+    IfRange:
+      name: If-Range
+      in: header
+      required: false
+      description: |
+        An entity tag. `Range` is honoured only while the file has this tag
+        (strong comparison); otherwise the whole file is sent with 200. A
+        date always gets the whole file.
+      schema: {type: string}
+      example: '"5f2b0c7d9e8a41c3b6d0e1f2a3b4c5d6"'
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        `*` or a list of entity tags. The request proceeds only if the file
+        has one of the tags (strong comparison; weak tags never match), or,
+        for `*`, if the path exists. Otherwise 412 and nothing changes.
+      schema: {type: string}
+      example: '"5f2b0c7d9e8a41c3b6d0e1f2a3b4c5d6"'
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: |
+        `*` or a list of entity tags. When the file has one of them (weak
+        comparison), or, for `*`, when the path exists, a GET or HEAD is
+        answered 304 and a PUT or DELETE 412. `If-None-Match: *` on a PUT
+        creates only.
+      schema: {type: string}
+      example: "*"
     AcceptEncoding:
       name: Accept-Encoding
       in: header
@@ -989,6 +1056,14 @@ components:
         type: string
       example: gzip
   headers:
+    ETag:
+      description: |
+        The file's entity tag, quoted. On a split-store drive it is derived
+        from the content: it changes exactly when the bytes change and is
+        the same after a restart and on every node. On other drives it is
+        derived from the size and modification time. Opaque.
+      schema: {type: string}
+      example: '"5f2b0c7d9e8a41c3b6d0e1f2a3b4c5d6"'
     WwwAuthenticate:
       description: Always `Bearer`.
       schema: {type: string, const: Bearer}
@@ -1088,7 +1163,8 @@ components:
           schema: {$ref: "#/components/schemas/Error"}
     TooLarge:
       description: |
-        `EFBIG`: the request body exceeds `max_request_bytes`. `EOVERFLOW`:
+        `EFBIG`: the request body exceeds `max_upload_bytes` for a file
+        `PUT`, or `max_request_bytes` for a JSON body. `EOVERFLOW`:
         the directory has too many entries or its listing is too large to
         return. The server closes the connection in both cases. Neither is
         retryable.
@@ -1103,6 +1179,18 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
+    NotModified:
+      description: "`If-None-Match` matched the file's tag. No body."
+      headers:
+        ETag: {$ref: "#/components/headers/ETag"}
+    PreconditionFailed:
+      description: |
+        `If-Match` or `If-None-Match` does not hold (`EPRECONDITION`).
+        Nothing was changed. Read the file again before retrying.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: EPRECONDITION, message: the file does not match the request's preconditions}}
     RangeNotSatisfiable:
       description: The `Range` header is malformed, has several ranges, or lies outside the file (`EINVAL`).
       headers:
@@ -1197,6 +1285,7 @@ components:
         | `ENOTSUP` | 405 for a method, 406 for `Accept-Encoding`, 501 from the filesystem |
         | `ENOSYS` | 501 |
         | `EEXIST`, `ENOTEMPTY`, `EISDIR` | 409 |
+        | `EPRECONDITION` | 412 |
         | `EFBIG`, `EOVERFLOW` | 413 |
         | `ENAMETOOLONG` | 414 |
         | `ESTALE`, `EBADF` | 503 |
@@ -1243,6 +1332,7 @@ components:
         - ESTALE
         - EDQUOT
         - ETIMEDOUT
+        - EPRECONDITION
     Health:
       type: object
       required: [status]

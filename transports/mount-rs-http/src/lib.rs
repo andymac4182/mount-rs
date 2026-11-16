@@ -4,6 +4,7 @@
 //! the native transports.  A drive is only a name, an authorization secret,
 //! and that driver; HTTP never mounts or reimplements a filesystem.
 
+mod conditional;
 mod server;
 
 pub use server::{

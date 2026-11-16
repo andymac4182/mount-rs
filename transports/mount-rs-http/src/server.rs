@@ -16,6 +16,8 @@ use hyper::header;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
+
+use crate::conditional::{self, Current, Outcome};
 use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
 #[cfg(feature = "observability")]
 use mount_rs_observability::Telemetry;
@@ -1072,6 +1074,18 @@ impl RequestError {
             authenticate: false,
         }
     }
+
+    fn precondition_failed() -> Self {
+        Self::Client {
+            status: StatusCode::PRECONDITION_FAILED,
+            code: "EPRECONDITION",
+            message: "the file does not match the request's preconditions".to_owned(),
+            close: false,
+            content_range: None,
+            allow: None,
+            authenticate: false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1502,7 +1516,7 @@ async fn handle_file(
             .await
         }
         Method::PUT => handle_file_write(&headers, body, drive, path, config).await,
-        Method::DELETE => handle_file_delete(drive, path, config).await,
+        Method::DELETE => handle_file_delete(&headers, drive, path, config).await,
         _ => Err(RequestError::method_not_allowed("GET, HEAD, PUT, DELETE")),
     }
 }
@@ -1574,8 +1588,20 @@ async fn handle_file_read(
     } else {
         stats
     };
+    let content = match &opened {
+        Some(guard) => guard.handle().content_tag().await,
+        None => drive.driver().content_tag(&path).await,
+    }
+    .map_err(RequestError::Fs)?;
+    let etag = conditional::entity_tag(&stats, content);
+    match conditional::evaluate(headers, &Current::Tagged(etag.clone()), true) {
+        Outcome::Proceed => {}
+        Outcome::NotModified => return Ok(not_modified(&etag)),
+        Outcome::Failed => return Err(RequestError::precondition_failed()),
+    }
 
     let range = match headers.get(header::RANGE) {
+        Some(_) if !conditional::range_applies(headers, &etag) => None,
         None => None,
         Some(value) => {
             let value = value
@@ -1606,7 +1632,8 @@ async fn handle_file_read(
         .status(status)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_LENGTH, length.to_string())
-        .header(header::ACCEPT_RANGES, "bytes");
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, &etag);
     if let Some(content_range) = content_range {
         builder = builder.header(header::CONTENT_RANGE, content_range);
     }
@@ -1653,6 +1680,13 @@ async fn handle_file_write(
     path: String,
     config: RequestConfig,
 ) -> Result<Response<HttpBody>, RequestError> {
+    let preconditions = Preconditions::new(headers, &drive, &path);
+    // Refuse before receiving a body that could not be published. The
+    // preconditions are checked again, under the path's write lock, just
+    // before publishing.
+    preconditions
+        .check(drive.driver().as_ref(), &config)
+        .await?;
     let declared = declared_length(headers);
     let (source, permit) = if declared
         .is_some_and(|length| length > config.max_request_bytes as u64)
@@ -1680,14 +1714,124 @@ async fn handle_file_write(
     if config.control.closing.load(Ordering::Acquire) != 0 {
         return Err(RequestError::server_closing());
     }
-    let written = publish_upload(drive.driver(), &path, source, &config).await?;
+    let (written, lock) =
+        publish_upload(drive.driver(), &path, source, &preconditions, &config).await?;
     drop(permit);
+    // Read under the lock, so the tag is of this write and not a later one.
+    let etag = match current_state(drive.driver().as_ref(), &path, &config).await {
+        Ok(Current::Tagged(etag)) => Some(etag),
+        _ => None,
+    };
+    drop(lock);
     let payload = serde_json::to_vec(&WritePayload {
         path: &path,
         bytes: written,
     })
     .map_err(|_| RequestError::Fs(FsError::backend("failed to encode write result")))?;
-    Ok(json_response(StatusCode::OK, Bytes::from(payload), false))
+    let mut response = json_response(StatusCode::OK, Bytes::from(payload), false);
+    if let Some(value) = etag.and_then(|etag| header::HeaderValue::from_str(&etag).ok()) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    Ok(response)
+}
+
+/// A write's `If-Match` and `If-None-Match`, and the lock that makes
+/// checking them and publishing one step for HTTP requests.
+struct Preconditions<'a> {
+    headers: &'a hyper::HeaderMap,
+    drive: &'a str,
+    path: &'a str,
+}
+
+impl<'a> Preconditions<'a> {
+    fn new(headers: &'a hyper::HeaderMap, drive: &'a DriveConfig, path: &'a str) -> Self {
+        Self {
+            headers,
+            drive: &drive.id,
+            path,
+        }
+    }
+
+    /// Fail with 412 unless the preconditions hold now.
+    async fn check(
+        &self,
+        driver: &dyn FsDriver,
+        config: &RequestConfig,
+    ) -> Result<(), RequestError> {
+        if !conditional::is_conditional(self.headers) {
+            return Ok(());
+        }
+        let current = current_state(driver, self.path, config).await?;
+        match conditional::evaluate(self.headers, &current, false) {
+            Outcome::Proceed => Ok(()),
+            Outcome::NotModified | Outcome::Failed => Err(RequestError::precondition_failed()),
+        }
+    }
+
+    /// Take the path's write lock, then check the preconditions. Every
+    /// HTTP write and delete of the path takes it while it publishes, so
+    /// none lands between another's check and its publication.
+    async fn lock(
+        &self,
+        driver: &dyn FsDriver,
+        config: &RequestConfig,
+    ) -> Result<tokio::sync::MutexGuard<'static, ()>, RequestError> {
+        let lock = tokio::time::timeout(
+            positive_duration(config.request_timeout),
+            write_lock(self.drive, self.path).lock(),
+        )
+        .await
+        .map_err(|_| RequestError::request_timeout())?;
+        self.check(driver, config).await?;
+        Ok(lock)
+    }
+}
+
+/// One of a fixed set of locks, chosen by drive and path. Unrelated paths
+/// that share one only wait for each other's publication.
+fn write_lock(drive: &str, path: &str) -> &'static tokio::sync::Mutex<()> {
+    use std::hash::{Hash, Hasher};
+    const LOCKS: usize = 1024;
+    static TABLE: OnceLock<Vec<tokio::sync::Mutex<()>>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| (0..LOCKS).map(|_| tokio::sync::Mutex::new(())).collect());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (drive, path).hash(&mut hasher);
+    &table[(hasher.finish() % LOCKS as u64) as usize]
+}
+
+/// What a write's preconditions are evaluated against: the file the path
+/// names, following symbolic links as a write does.
+async fn current_state(
+    driver: &dyn FsDriver,
+    path: &str,
+    config: &RequestConfig,
+) -> Result<Current, RequestError> {
+    let missing = |error: &RequestError| {
+        matches!(error, RequestError::Fs(error)
+            if matches!(error.code, ErrorCode::Enoent | ErrorCode::Enotdir))
+    };
+    let stats = match bounded(config, driver.stat(path)).await {
+        Ok(stats) => stats,
+        Err(error) if missing(&error) => return Ok(Current::Missing),
+        Err(error) => return Err(error),
+    };
+    if !stats.is_file() {
+        return Ok(Current::Untagged);
+    }
+    match bounded(config, driver.content_tag(path)).await {
+        Ok(content) => Ok(Current::Tagged(conditional::entity_tag(&stats, content))),
+        Err(error) if missing(&error) => Ok(Current::Missing),
+        Err(error) => Err(error),
+    }
+}
+
+fn not_modified(etag: &str) -> Response<HttpBody> {
+    let mut response = Response::new(full_body(Bytes::new()));
+    *response.status_mut() = StatusCode::NOT_MODIFIED;
+    if let Ok(value) = header::HeaderValue::from_str(etag) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    response
 }
 
 /// Where an upload's bytes come from.
@@ -1866,13 +2010,15 @@ async fn publish_upload(
     driver: Arc<dyn FsDriver>,
     path: &str,
     source: UploadSource,
+    preconditions: &Preconditions<'_>,
     config: &RequestConfig,
-) -> Result<usize, RequestError> {
+) -> Result<(usize, tokio::sync::MutexGuard<'static, ()>), RequestError> {
     if let UploadSource::Whole(data) = &source
         && driver.write_file_is_atomic()
     {
+        let lock = preconditions.lock(driver.as_ref(), config).await?;
         bounded(config, driver.write_file(path, data)).await?;
-        return Ok(data.len());
+        return Ok((data.len(), lock));
     }
     let existing = match bounded(config, driver.lstat(path)).await {
         Ok(stats) => Some(stats),
@@ -1891,7 +2037,9 @@ async fn publish_upload(
             // Renaming over a link would replace the link, not what it
             // names. Write through it in place, as before; this one case is
             // not atomic.
-            return write_through(driver.as_ref(), path, source, config).await;
+            let lock = preconditions.lock(driver.as_ref(), config).await?;
+            let written = write_through(driver.as_ref(), path, source, config).await?;
+            return Ok((written, lock));
         }
         if !stats.is_file() {
             return Err(RequestError::Fs(
@@ -1914,12 +2062,13 @@ async fn publish_upload(
             // previous one had where the driver can.
             let _ = bounded(config, driver.chmod(&name, stats.mode & 0o7777)).await;
         }
+        let lock = preconditions.lock(driver.as_ref(), config).await?;
         bounded(config, driver.rename(&name, path)).await?;
-        Ok(written)
+        Ok((written, lock))
     }
     .await;
     match result {
-        Ok(written) => {
+        Ok((written, lock)) => {
             sibling.sibling = None;
             // Make the new name durable where the driver can sync a
             // directory; a driver that cannot has nothing more to offer.
@@ -1927,7 +2076,7 @@ async fn publish_upload(
                 let _ = bounded(config, directory.sync()).await;
                 let _ = bounded(config, directory.close()).await;
             }
-            Ok(written)
+            Ok((written, lock))
         }
         Err(error) => {
             let _ = bounded(config, driver.unlink(&name)).await;
@@ -2107,6 +2256,7 @@ async fn list_directory(
 }
 
 async fn handle_file_delete(
+    headers: &hyper::HeaderMap,
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
@@ -2119,6 +2269,9 @@ async fn handle_file_delete(
         ));
     }
     let driver = drive.driver();
+    let _lock = Preconditions::new(headers, &drive, &path)
+        .lock(driver.as_ref(), &config)
+        .await?;
     let stats = driver.lstat(&path).await.map_err(RequestError::Fs)?;
     if stats.is_directory() {
         match driver.rmdir(&path).await {

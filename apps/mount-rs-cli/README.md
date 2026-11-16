@@ -372,6 +372,10 @@ one file of at most `max_upload_bytes` (5 GiB by default). Uploads larger than
 `max_request_bytes` are streamed to a hidden temporary file as they arrive and
 renamed over the target once complete, with the same guarantee; each piece of
 such an upload must arrive within `request_timeout_ms` of the last.
+Files carry an `ETag`, derived from the content on split-store drives, and
+`GET`, `HEAD`, `PUT` and `DELETE` honour `If-Match` and `If-None-Match`:
+`If-None-Match: *` creates only, and `If-Match` with the tag you read replaces
+only that version.
 `DELETE` is not recursive. See the API guide for the status codes, retry rules
 and limits.
 

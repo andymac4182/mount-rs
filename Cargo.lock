@@ -1825,6 +1825,7 @@ dependencies = [
  "mount-rs-memory",
  "mount-rs-sqlite",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 
@@ -2006,6 +2007,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "im",
+ "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-host",
  "mount-rs-memfs",

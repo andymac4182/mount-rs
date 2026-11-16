@@ -769,6 +769,17 @@ impl FsDriver for InstrumentedDriver {
             .await
     }
 
+    async fn content_tag(&self, path: &str) -> Result<Option<String>> {
+        self.telemetry
+            .observe_fs(
+                "core",
+                "content_tag",
+                Some(path),
+                self.inner.content_tag(path),
+            )
+            .await
+    }
+
     async fn lstat(&self, path: &str) -> Result<Stats> {
         self.telemetry
             .observe_fs("core", "lstat", Some(path), self.inner.lstat(path))
@@ -1040,6 +1051,12 @@ impl FileHandle for InstrumentedFileHandle {
     async fn stat(&self) -> Result<Stats> {
         self.telemetry
             .observe_fs("core.handle", "stat", None, self.inner.stat())
+            .await
+    }
+
+    async fn content_tag(&self) -> Result<Option<String>> {
+        self.telemetry
+            .observe_fs("core.handle", "content_tag", None, self.inner.content_tag())
             .await
     }
 
