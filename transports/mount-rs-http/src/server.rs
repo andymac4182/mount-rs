@@ -18,7 +18,9 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 
 use crate::conditional::{self, Current, Outcome};
-use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
+use mount_rs_core::{
+    ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats, StreamedFileWrite,
+};
 #[cfg(feature = "observability")]
 use mount_rs_observability::Telemetry;
 #[cfg(feature = "observability-otlp")]
@@ -1667,8 +1669,9 @@ async fn handle_file_read(
 /// A body of up to `max_request_bytes` is received in full before the drive
 /// is touched, then published in one step of the driver. A larger body, or
 /// one without a declared length that grows past `max_request_bytes`, is
-/// written to a temporary sibling as it arrives and renamed over the target
-/// once complete. Either way a request that fails, is abandoned, times out
+/// handed to the driver's streamed whole-file write as it arrives where the
+/// driver has one, and otherwise written to a temporary sibling and renamed
+/// over the target once complete. Either way a request that fails, is abandoned, times out
 /// or meets a shutdown while its body is arriving leaves the target as it
 /// was, and a reader, another writer or a restart sees the previous content
 /// or the new, never a prefix. A request abandoned during publication is
@@ -1901,51 +1904,101 @@ async fn bounded<T>(
 }
 
 struct StreamedUpload {
-    prefix: Vec<u8>,
+    /// Received but not yet handed out, or the piece last handed out.
+    pending: Vec<u8>,
     body: HttpBody,
+    /// Bytes handed out before `pending`.
+    offset: u64,
+    /// `pending` is the piece last handed out.
+    handed: bool,
+    finished: bool,
 }
 
 impl StreamedUpload {
     fn new(prefix: Vec<u8>, body: HttpBody) -> Self {
-        Self { prefix, body }
+        Self {
+            pending: prefix,
+            body,
+            offset: 0,
+            handed: false,
+            finished: false,
+        }
+    }
+
+    fn whole(data: Vec<u8>) -> Self {
+        Self::new(data, empty_body())
+    }
+
+    /// The next piece of the upload, of about one write buffer, or `None`
+    /// once it has all been handed out.
+    async fn next_piece(&mut self, config: &RequestConfig) -> Result<Option<&[u8]>, RequestError> {
+        if self.handed {
+            self.offset += self.pending.len() as u64;
+            self.pending.clear();
+            self.handed = false;
+        }
+        let buffer = config.stream_buffer();
+        self.pending
+            .reserve(buffer.saturating_sub(self.pending.len()));
+        while !self.finished && self.pending.len() < buffer {
+            let Some(frame) = next_upload_frame(&mut self.body, config).await? else {
+                self.finished = true;
+                break;
+            };
+            if let Ok(data) = frame.into_data() {
+                let total = self
+                    .offset
+                    .saturating_add(self.pending.len() as u64)
+                    .saturating_add(data.len() as u64);
+                if total > config.max_upload_bytes {
+                    let body = std::mem::replace(&mut self.body, empty_body());
+                    discard_body(body, &config.control).await;
+                    return Err(RequestError::body_too_large());
+                }
+                self.pending.extend_from_slice(&data);
+            }
+        }
+        if self.pending.is_empty() {
+            return Ok(None);
+        }
+        self.handed = true;
+        Ok(Some(&self.pending))
     }
 
     /// Write the whole upload to `file` from offset zero, a buffer at a time,
     /// and return its length.
     async fn write_to(
-        self,
+        mut self,
         file: &dyn FileHandle,
         path: &str,
         config: &RequestConfig,
     ) -> Result<u64, RequestError> {
-        let Self { prefix, mut body } = self;
-        let buffer = config.stream_buffer();
-        let mut pending = prefix;
-        pending.reserve(buffer.saturating_sub(pending.len()));
         let mut offset = 0_u64;
-        loop {
-            let frame = next_upload_frame(&mut body, config).await?;
-            let finished = frame.is_none();
-            if let Some(data) = frame.and_then(|frame| frame.into_data().ok()) {
-                let total = offset
-                    .saturating_add(pending.len() as u64)
-                    .saturating_add(data.len() as u64);
-                if total > config.max_upload_bytes {
-                    discard_body(body, &config.control).await;
-                    return Err(RequestError::body_too_large());
-                }
-                pending.extend_from_slice(&data);
-            }
-            if pending.len() >= buffer || (finished && !pending.is_empty()) {
-                write_all_at(file, &pending, offset, path, config).await?;
-                offset += pending.len() as u64;
-                pending.clear();
-            }
-            if finished {
-                return Ok(offset);
-            }
+        while let Some(piece) = self.next_piece(config).await? {
+            write_all_at(file, piece, offset, path, config).await?;
+            offset += piece.len() as u64;
         }
+        Ok(offset)
     }
+
+    /// Hand the whole upload to a driver's streamed write, a buffer at a
+    /// time, and return the write ready to commit.
+    async fn write_into(
+        mut self,
+        mut write: Box<dyn StreamedFileWrite>,
+        config: &RequestConfig,
+    ) -> Result<Box<dyn StreamedFileWrite>, RequestError> {
+        while let Some(piece) = self.next_piece(config).await? {
+            bounded(config, write.write(piece)).await?;
+        }
+        Ok(write)
+    }
+}
+
+fn empty_body() -> HttpBody {
+    http_body_util::Empty::new()
+        .map_err(|never| match never {})
+        .boxed_unsync()
 }
 
 async fn write_all_at(
@@ -2005,7 +2058,9 @@ async fn reserve_upload_budget(
 }
 
 /// Publish a received upload. A driver whose `write_file` is atomic does it
-/// in one call; for any other the bytes go to a hidden sibling first.
+/// in one call when the body was received whole; a driver with a streamed
+/// whole-file write takes the body as it arrives; for any other the bytes go
+/// to a hidden sibling first.
 async fn publish_upload(
     driver: Arc<dyn FsDriver>,
     path: &str,
@@ -2048,6 +2103,27 @@ async fn publish_upload(
                     .with_path(path),
             ));
         }
+    }
+    if let Some(write) = bounded(config, driver.begin_file_write(path)).await? {
+        // The driver stores the body as it arrives and publishes it in one
+        // step, without a sibling to write and rename.
+        let stream = match source {
+            UploadSource::Whole(data) => StreamedUpload::whole(data),
+            UploadSource::Stream(stream) => stream,
+        };
+        let write = stream.write_into(write, config).await?;
+        // As for a sibling: the body is stored, so check the preconditions
+        // under the path's lock and publish while holding it.
+        let lock = preconditions.lock(driver.as_ref(), config).await?;
+        let written = bounded(config, write.commit()).await?;
+        let written = usize::try_from(written).map_err(|_| {
+            RequestError::Fs(
+                FsError::new(ErrorCode::Efbig)
+                    .with_syscall("write")
+                    .with_path(path),
+            )
+        })?;
+        return Ok((written, lock));
     }
     let mut sibling = SiblingGuard {
         sibling: Some(ActiveSibling::new(path)),
@@ -2110,12 +2186,7 @@ async fn write_sibling(
     config: &RequestConfig,
 ) -> Result<usize, RequestError> {
     let stream = match source {
-        UploadSource::Whole(data) => StreamedUpload::new(
-            data,
-            http_body_util::Empty::new()
-                .map_err(|never| match never {})
-                .boxed_unsync(),
-        ),
+        UploadSource::Whole(data) => StreamedUpload::whole(data),
         UploadSource::Stream(stream) => stream,
     };
     write_handle(driver, sibling, "wx", stream, config).await

@@ -10,7 +10,7 @@
 #![deny(unsafe_code)]
 
 use async_trait::async_trait;
-use mount_rs_core::driver::{FileHandle, FsDriver};
+use mount_rs_core::driver::{FileHandle, FsDriver, StreamedFileWrite};
 use mount_rs_core::error::Result;
 use mount_rs_core::storage::{
     BlockId, BlockReconcileReport, BlockStore, ConcurrentBackingId, ConcurrentModeState,
@@ -679,6 +679,17 @@ impl FsDriver for InstrumentedDriver {
 
     fn write_file_is_atomic(&self) -> bool {
         self.inner.write_file_is_atomic()
+    }
+
+    async fn begin_file_write(&self, path: &str) -> Result<Option<Box<dyn StreamedFileWrite>>> {
+        self.telemetry
+            .observe_fs(
+                "core",
+                "begin_file_write",
+                Some(path),
+                self.inner.begin_file_write(path),
+            )
+            .await
     }
 
     fn supports_guarded_mutations(&self) -> bool {

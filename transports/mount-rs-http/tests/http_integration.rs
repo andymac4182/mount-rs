@@ -4,9 +4,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_core::storage::MetadataStore;
 use mount_rs_core::{Capabilities, DirEntry, FileHandle, FsDriver, FsError, Result, Stats};
 use mount_rs_http::{DriveConfig, DriveRegistry, HttpServer, HttpServerError, HttpServerOptions};
 use mount_rs_memfs::MemoryFs;
+use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 #[cfg(feature = "observability")]
 use mount_rs_observability::{Telemetry, TelemetryConfig};
 use mount_rs_sqlite_fs::open_sqlite_memory;
@@ -924,16 +927,43 @@ async fn stalled_request_body_is_terminated_by_the_request_timeout() {
     server.close().await.expect("server close");
 }
 
+type SplitFs = ChunkedFs<MemoryMetadataStore, MemoryBlockStore>;
+
+/// A split-store drive with chunks that do not line up with the server's
+/// 1,024-byte upload buffer.
+async fn split_drive() -> SplitFs {
+    ChunkedFs::open(
+        MemoryMetadataStore::new(),
+        MemoryBlockStore::new(),
+        ChunkedOptions::fixed("http-test", 1000).expect("chunked options"),
+    )
+    .await
+    .expect("split-store driver")
+}
+
+/// The split store's published metadata revision.
+async fn split_revision(split: &SplitFs) -> u64 {
+    split
+        .metadata_store()
+        .load()
+        .await
+        .expect("metadata load")
+        .revision
+}
+
 /// A server whose uploads stream past `max_request_bytes`, over a memory
-/// drive (atomic `write_file`) and a SQLite drive (written through a sibling).
+/// drive (atomic `write_file`), a SQLite drive (written through a sibling)
+/// and a split-store drive (a streamed whole-file write).
 async fn streaming_server(
     request_timeout: Duration,
     max_upload_bytes: u64,
-) -> (HttpServer, Arc<dyn FsDriver>, Arc<dyn FsDriver>) {
+) -> (HttpServer, Arc<dyn FsDriver>, Arc<dyn FsDriver>, SplitFs) {
     let memory: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
     let sqlite: Arc<dyn FsDriver> = Arc::new(open_sqlite_memory().await.expect("sqlite driver"));
+    let split_fs = split_drive().await;
+    let split: Arc<dyn FsDriver> = Arc::new(split_fs.clone());
     let mut registry = DriveRegistry::new();
-    for (id, driver) in [("memory", &memory), ("sqlite", &sqlite)] {
+    for (id, driver) in [("memory", &memory), ("sqlite", &sqlite), ("split", &split)] {
         registry
             .register(DriveConfig::new(id, driver.clone(), MEMORY_TOKEN).expect("drive config"))
             .expect("drive registration");
@@ -949,7 +979,7 @@ async fn streaming_server(
     )
     .await
     .expect("HTTP server");
-    (server, memory, sqlite)
+    (server, memory, sqlite, split_fs)
 }
 
 /// The names in a drive's root, the server's own temporary names included.
@@ -1014,9 +1044,10 @@ fn chunked(body: &[u8], piece: usize) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn uploads_larger_than_the_request_limit_stream_to_storage() {
-    let (server, memory, sqlite) = streaming_server(Duration::from_secs(10), 1 << 20).await;
+    let (server, memory, sqlite, split) = streaming_server(Duration::from_secs(10), 1 << 20).await;
+    let split: Arc<dyn FsDriver> = Arc::new(split);
     let client = reqwest::Client::new();
-    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite)] {
+    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite), ("split", &split)] {
         // Declared length above the request limit, then an overwrite.
         for size in [200_000_usize, 300_001] {
             let body: Vec<u8> = (0..size).map(|index| (index * 31 % 251) as u8).collect();
@@ -1074,9 +1105,11 @@ async fn uploads_larger_than_the_request_limit_stream_to_storage() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_upload_over_the_upload_limit_leaves_the_target_unchanged() {
-    let (server, memory, sqlite) = streaming_server(Duration::from_secs(10), 64 * 1024).await;
+    let (server, memory, sqlite, split) =
+        streaming_server(Duration::from_secs(10), 64 * 1024).await;
+    let split: Arc<dyn FsDriver> = Arc::new(split);
     let client = reqwest::Client::new();
-    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite)] {
+    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite), ("split", &split)] {
         driver.write_file("/keep", b"original").await.expect("seed");
         // Declared too large: refused before anything is written.
         let response = client
@@ -1119,7 +1152,7 @@ async fn an_upload_over_the_upload_limit_leaves_the_target_unchanged() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_streamed_upload_may_outlast_the_request_timeout_while_it_progresses() {
-    let (server, memory, _) = streaming_server(Duration::from_millis(300), 1 << 20).await;
+    let (server, memory, _, _) = streaming_server(Duration::from_millis(300), 1 << 20).await;
     const PIECES: usize = 12;
     const PIECE: usize = 4096;
     let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
@@ -1162,8 +1195,10 @@ async fn a_streamed_upload_may_outlast_the_request_timeout_while_it_progresses()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_streamed_upload_times_out_and_leaves_nothing() {
-    let (server, memory, sqlite) = streaming_server(Duration::from_millis(200), 1 << 20).await;
-    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite)] {
+    let (server, memory, sqlite, split) =
+        streaming_server(Duration::from_millis(200), 1 << 20).await;
+    let split: Arc<dyn FsDriver> = Arc::new(split);
+    for (drive, driver) in [("memory", &memory), ("sqlite", &sqlite), ("split", &split)] {
         let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
             .await
             .expect("upload socket");
@@ -1202,6 +1237,67 @@ async fn a_stalled_streamed_upload_times_out_and_leaves_nothing() {
         }
         assert!(names.is_empty(), "{drive} left {names:?}");
     }
+    server.close().await.expect("server close");
+}
+
+/// A split-store drive takes a streamed upload as it arrives and publishes
+/// it once: no temporary sibling, one metadata revision, and nothing visible
+/// at the target until the body is complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_split_store_publishes_a_streamed_upload_once() {
+    let (server, _, _, split) = streaming_server(Duration::from_secs(10), 1 << 20).await;
+    let driver: Arc<dyn FsDriver> = Arc::new(split.clone());
+    driver.write_file("/doc", b"original").await.expect("seed");
+    let before = split_revision(&split).await;
+
+    const SIZE: usize = 300_000;
+    let body: Vec<u8> = (0..SIZE).map(|index| (index * 7 % 249) as u8).collect();
+
+    // Preconditions are checked once the body is stored, before publishing.
+    let response = reqwest::Client::new()
+        .put(format!("{}/v1/drives/split/fs/doc", server.url()))
+        .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+        .header(reqwest::header::IF_MATCH, "\"not-the-current-tag\"")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("conditional PUT");
+    assert_eq!(response.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+    assert_eq!(read_all(&driver, "/doc").await, b"original");
+    assert_eq!(split_revision(&split).await, before);
+    let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("upload socket");
+    socket
+        .write_all(
+            format!(
+                "PUT /v1/drives/split/fs/doc HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nContent-Length: {SIZE}\r\nConnection: close\r\n\r\n",
+                bearer(MEMORY_TOKEN)
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request head");
+    socket
+        .write_all(&body[..SIZE / 2])
+        .await
+        .expect("first half of the body");
+    // Half the body has been stored as blocks, but nothing is published.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(read_all(&driver, "/doc").await, b"original");
+    assert_eq!(split_revision(&split).await, before);
+    socket
+        .write_all(&body[SIZE / 2..])
+        .await
+        .expect("rest of the body");
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).await.expect("response");
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response:.120}");
+
+    assert_eq!(split_revision(&split).await, before + 1);
+    assert!(read_all(&driver, "/doc").await == body);
+    assert_eq!(root_names(&driver).await, ["doc"]);
     server.close().await.expect("server close");
 }
 

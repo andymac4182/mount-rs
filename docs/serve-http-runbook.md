@@ -101,7 +101,7 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | `host` | string | `127.0.0.1` | `127.0.0.1`, `::1`, `[::1]`, `localhost`, or any loopback IP | Non-loopback hosts are rejected at config validation and again at bind. |
 | `port` | integer | `0` | 0-65535 | `0` picks an ephemeral port. Set a fixed port in production. |
 | `max_request_bytes` | integer | `8388608` (8 MiB) | >= 1 | Largest body received whole in memory: JSON bodies, session writes, and file uploads up to this size. A file upload above it is streamed to storage instead (see `max_upload_bytes`). Other larger requests get 413. |
-| `max_upload_bytes` | integer | `5368709120` (5 GiB) | >= `max_request_bytes` | Largest file a `PUT` may upload. Larger uploads get 413 and leave the target unchanged. Uploads above `max_request_bytes`, or without a `Content-Length` that grow past it, are written to a hidden temporary file in up to 8 MiB writes and renamed over the target when complete. |
+| `max_upload_bytes` | integer | `5368709120` (5 GiB) | >= `max_request_bytes` | Largest file a `PUT` may upload. Larger uploads get 413 and leave the target unchanged. Uploads above `max_request_bytes`, or without a `Content-Length` that grow past it, are stored as they arrive and published once complete: a split-store drive stores the blocks and publishes the file in one step; other drives write a hidden temporary file in up to 8 MiB writes and rename it over the target. |
 | `max_buffered_upload_bytes` | integer | 4 x `max_request_bytes` | >= `max_request_bytes` (a smaller value is a config error, exit 2) | Upload bytes the server holds in memory across all in-flight `PUT`s. A `PUT` reserves its `Content-Length` (or `max_request_bytes` without one) before its body is read; a streamed upload reserves one write buffer (the smaller of 8 MiB and `max_request_bytes`). Uploads beyond the budget wait in arrival order, up to `request_timeout_ms`. |
 | `max_response_bytes` | integer | `33554432` (32 MiB) | >= 1 | Largest directory listing (uncompressed JSON). Larger listings get 413. Does not limit file downloads. |
 | `max_directory_entries` | integer | `100000` | >= 1 | Largest directory that can be listed. Larger directories get 413. An entry is about 70 bytes of JSON with short names, so 100,000 entries is about 7 MB (0.3 MB gzipped from `/entries`). |
@@ -528,13 +528,17 @@ after a kill is up to one full lifetime.
   budget wait in arrival order, and fail with 504 if the wait exceeds the
   request timeout. With the defaults, four uploads at a time are received;
   raise the budget if consumers upload many files in parallel.
-- **Large uploads.** A streamed upload is written through a file handle, and
-  on a split-store drive each write commits the file's block list, which
-  grows with the file. Choose `chunk_size_bytes` for the files a drive holds:
-  measured on a SQLite split-store drive on one Mac, a 5 GiB upload ran at
-  300 MiB/s with 45 MB peak server memory with 1 MiB chunks, but at 58 MiB/s
-  with 386 MB with 64 KiB chunks. A 1 GiB upload with 1 MiB chunks ran at
-  250 MiB/s.
+- **Large uploads.** A split-store drive stores a streamed upload's blocks as
+  they arrive and publishes the file once, so throughput and memory do not
+  grow with the file. Measured on a SQLite split-store drive on one Mac,
+  1 GiB and 2 GiB uploads ran at 190-210 MiB/s with under 65 MB peak server
+  memory with 64 KiB chunks (previously 45-95 MiB/s and up to 300 MB, falling
+  as the file grew), and at 275 MiB/s with 1 MiB chunks. Larger chunks are
+  still faster for drives that hold mostly large files, because each block
+  costs a put. Other drives write a streamed upload through a file handle to
+  a temporary file. Block reconciliation keeps an in-progress upload's
+  blocks; an abandoned upload's blocks are reclaimed like any other
+  unreferenced block.
 - **Listing memory.** A listing is built in memory, up to `max_response_bytes`
   per request, and is not covered by the upload budget. Gzip compression runs
   on at most four listings at a time; waiting requests keep their listing in

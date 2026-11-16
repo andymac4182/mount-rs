@@ -28,7 +28,7 @@ pub mod wait_timing;
 pub use driver::{
     FileHandle, FsDriver, GuardedDirectoryEntry, GuardedMutation, GuardedMutationResult,
     GuardedRead, GuardedReadResult, GuardedSetattr, Loopback, ObservedEntry, PathGuard,
-    PathIdentity, collect_bounded_dir_entries,
+    PathIdentity, StreamedFileWrite, collect_bounded_dir_entries,
 };
 pub use error::{ErrorCode, FsError, Result, backend_error};
 pub use handle::OpenFlags;
