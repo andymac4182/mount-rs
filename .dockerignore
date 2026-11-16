@@ -1,0 +1,10 @@
+# Only sources reach the build: no build output, dependencies, logs or VCS.
+.git
+**/target
+**/node_modules
+artifacts
+benchmarks/read-audit
+integrations
+bindings/mount-rs-napi/*.node
+**/.DS_Store
+.env

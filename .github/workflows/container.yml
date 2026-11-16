@@ -1,0 +1,205 @@
+name: Container image
+
+# Builds the mount-rs image natively on amd64 and arm64 runners, smoke-tests
+# each, and on a CLI preview release tag publishes the tested images to
+# ghcr.io/andymac4182/mount-rs as one multi-architecture tag with a
+# provenance attestation. Pull requests that touch the image only build and
+# test it.
+
+on:
+  push:
+    tags:
+      - 'v*-cli-preview*'
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/container.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/andymac4182/mount-rs
+  CURL_IMAGE: curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69
+  PUBLISH: ${{ github.event_name == 'push' && github.repository == 'andymac4182/mount-rs' }}
+
+jobs:
+  build:
+    name: Build and test linux/${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-latest
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Check the release tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/mount-rs-cli/Cargo.toml | head -1)"
+          if [ "$PUBLISH" = true ]; then
+            case "$GITHUB_REF_NAME" in
+              "v${package_version}"-cli-*) ;;
+              *)
+                echo "Release tag $GITHUB_REF_NAME does not match mount-rs-cli version $package_version" >&2
+                exit 1
+                ;;
+            esac
+            git fetch --no-tags origin main
+            if ! git merge-base --is-ancestor "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" origin/main; then
+              echo "Refusing to publish: $GITHUB_REF_NAME is not reachable from origin/main" >&2
+              exit 1
+            fi
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${package_version}-dev" >> "$GITHUB_OUTPUT"
+          fi
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the image
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --build-arg MOUNT_RS_REVISION="$GITHUB_SHA" \
+            --tag mount-rs:test .
+          docker image inspect mount-rs:test --format 'size={{.Size}} arch={{.Architecture}}'
+          test "$(docker image inspect mount-rs:test --format '{{.Architecture}}')" = "${{ matrix.arch }}"
+
+      - name: Smoke-test serve-http, persistence and shutdown
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker run --rm mount-rs:test --version)" = "mount-rs $PACKAGE_VERSION"
+          test "$(docker run --rm --entrypoint id mount-rs:test -u)" = 10001
+
+          config="$RUNNER_TEMP/mount-rs-config.json"
+          cat > "$config" <<'JSON'
+          {"version": 1, "http": {"host": "127.0.0.1", "port": 8080, "drives": [
+            {"id": "files", "token": {"env": "MOUNT_RS_TOKEN"}, "driver": {"kind": "splitstore", "storage": {
+              "metadata": {"kind": "sqlite", "path": "/var/lib/mount-rs/metadata.db"},
+              "blocks": {"kind": "sqlite", "path": "/var/lib/mount-rs/blocks.db"},
+              "owner": "container-smoke"}}}]}}
+          JSON
+          chmod 644 "$config"
+          token=smoke-token-0123456789abcdef0123
+          docker volume create mount-rs-smoke >/dev/null
+          docker run -d --name mount-rs-smoke -e MOUNT_RS_TOKEN="$token" \
+            -v "$config:/etc/mount-rs/config.json:ro" -v mount-rs-smoke:/var/lib/mount-rs \
+            mount-rs:test serve-http --config /etc/mount-rs/config.json >/dev/null
+          # A sidecar in the same network namespace, as a TLS proxy would be.
+          sidecar() { docker run --rm --network container:mount-rs-smoke "$CURL_IMAGE" -sS "$@"; }
+          ready() {
+            for _ in $(seq 1 60); do
+              if [ "$(sidecar -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/readyz || true)" = 200 ]; then
+                return 0
+              fi
+              sleep 1
+            done
+            docker logs mount-rs-smoke >&2
+            return 1
+          }
+          ready
+          put="$(sidecar -i -X PUT -H "Authorization: Bearer $token" \
+            --data-binary 'hello from a container' \
+            http://127.0.0.1:8080/v1/drives/files/fs/hello.txt)"
+          echo "$put"
+          etag="$(printf '%s\n' "$put" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: //p')"
+          test -n "$etag"
+
+          docker restart -t 30 mount-rs-smoke >/dev/null
+          ready
+          test "$(sidecar -H "Authorization: Bearer $token" \
+            http://127.0.0.1:8080/v1/drives/files/fs/hello.txt)" = 'hello from a container'
+          test "$(sidecar -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" \
+            -H "If-None-Match: $etag" http://127.0.0.1:8080/v1/drives/files/fs/hello.txt)" = 304
+
+          docker stop -t 30 mount-rs-smoke >/dev/null
+          test "$(docker inspect mount-rs-smoke --format '{{.State.ExitCode}}')" = 0
+          docker logs mount-rs-smoke 2>&1 | grep -qx 'http stopped'
+          docker rm mount-rs-smoke >/dev/null
+          docker volume rm mount-rs-smoke >/dev/null
+          echo "CONTAINER_SMOKE_PASS arch=${{ matrix.arch }}"
+
+      - name: Push the tested image
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag mount-rs:test "$IMAGE:$VERSION-${{ matrix.arch }}"
+          docker push "$IMAGE:$VERSION-${{ matrix.arch }}"
+
+  publish:
+    name: Publish the multi-architecture tag
+    needs: build
+    if: github.event_name == 'push' && github.repository == 'andymac4182/mount-rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Combine the architectures under one tag
+        id: manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" \
+            "$IMAGE:$VERSION-amd64" "$IMAGE:$VERSION-arm64"
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')"
+          platforms="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' \
+            | python3 -c 'import json, sys; print(" ".join(sorted(m["platform"]["architecture"] for m in json.load(sys.stdin)["manifests"])))')"
+          test "$platforms" = "amd64 arm64"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the image's provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Pull and run the published tag
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE:$VERSION"
+          docker run --rm "$IMAGE:$VERSION" --version
+          echo "CONTAINER_PUBLISH_PASS image=$IMAGE:$VERSION digest=${{ steps.manifest.outputs.digest }}"
