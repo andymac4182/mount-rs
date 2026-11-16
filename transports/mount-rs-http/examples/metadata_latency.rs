@@ -22,7 +22,7 @@
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const OPS: [&str; 7] = ["ping", "stat", "head", "list", "mkdir", "rename", "delete"];
 
@@ -148,6 +148,11 @@ async fn run(index: usize, clients: usize, spec: Value, plan: Value) -> Outcome 
         .collect();
     let mut timings = Samples::new();
     let mut errors = 0u64;
+    // Modes run one after another on the same drives, and a run can stop
+    // between a mkdir and its delete, so each run names its own entries.
+    let run = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
     let mut n = 0u64;
     'outer: loop {
         for &op in &chosen {
@@ -166,14 +171,16 @@ async fn run(index: usize, clients: usize, spec: Value, plan: Value) -> Outcome 
                 "mkdir" => (
                     Method::POST,
                     "/ops/mkdir".to_owned(),
-                    Some(json!({ "path": format!("/work/a{n}") })),
+                    Some(json!({ "path": format!("/work/{run}-a{n}") })),
                 ),
                 "rename" => (
                     Method::POST,
                     "/ops/rename".to_owned(),
-                    Some(json!({ "from": format!("/work/a{n}"), "to": format!("/work/b{n}") })),
+                    Some(
+                        json!({ "from": format!("/work/{run}-a{n}"), "to": format!("/work/{run}-b{n}") }),
+                    ),
                 ),
-                _ => (Method::DELETE, format!("/fs/work/b{n}"), None),
+                _ => (Method::DELETE, format!("/fs/work/{run}-b{n}"), None),
             };
             let started = Instant::now();
             let result = client.send(method, &path, body).await;

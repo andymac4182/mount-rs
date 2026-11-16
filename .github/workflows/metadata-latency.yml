@@ -117,6 +117,7 @@ jobs:
           }
           bench durable --ops ping,stat,head,list,mkdir,rename,delete \
             "local:$RATE" "forwarded:$RATE"
+          bench durable-reads --ops ping,stat,head,list "forwarded:$RATE"
           bench durable-refresh --refresh-active-routes --ops ping,stat,head,list \
             "forwarded:$RATE"
           bench exclusive --ownership exclusive --refresh-active-routes \
