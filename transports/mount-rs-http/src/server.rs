@@ -210,6 +210,12 @@ impl DriveRegistry {
 pub struct HttpServerOptions {
     pub host: String,
     pub port: u16,
+    /// Let `host` be an address other than loopback (default: false). The
+    /// listener speaks cleartext HTTP, so bearer tokens and file contents
+    /// cross the network unencrypted: enable this only where the network
+    /// between the clients, or the load balancer that terminates TLS, and
+    /// this listener is private, such as a container network or a VPC.
+    pub allow_non_loopback: bool,
     pub max_request_bytes: usize,
     /// Largest file body a `PUT` may upload. Bodies up to `max_request_bytes`
     /// are received whole before the drive is touched; larger ones are
@@ -241,6 +247,7 @@ impl Default for HttpServerOptions {
         Self {
             host: "127.0.0.1".to_owned(),
             port: 0,
+            allow_non_loopback: false,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
@@ -283,7 +290,7 @@ impl fmt::Display for HttpServerError {
             Self::Bind(error) | Self::Io(error) => error.fmt(f),
             Self::InsecureBind { host } => write!(
                 f,
-                "HTTP listener host '{host}' is not allowed; bind to loopback and use a TLS reverse proxy for remote clients"
+                "HTTP listener host '{host}' is not loopback; bind to loopback behind a TLS reverse proxy, or set allow_non_loopback where the network to this listener is private"
             ),
             Self::Join(error) => error.fmt(f),
             Self::Timeout => f.write_str("HTTP server close timed out"),
@@ -410,6 +417,7 @@ impl ListenerHandle {
 pub struct HttpServer {
     state: Arc<AppState>,
     host: String,
+    allow_non_loopback: bool,
     requested_port: u16,
     tcp_nodelay: bool,
     http2_prior_knowledge: bool,
@@ -498,6 +506,7 @@ impl HttpServer {
                 },
             }),
             host: options.host,
+            allow_non_loopback: options.allow_non_loopback,
             requested_port: options.port,
             tcp_nodelay: options.tcp_nodelay,
             http2_prior_knowledge: options.http2_prior_knowledge,
@@ -580,7 +589,9 @@ impl HttpServer {
             return Ok(());
         }
 
-        validate_bind_host(&self.host)?;
+        if !self.allow_non_loopback {
+            validate_bind_host(&self.host)?;
+        }
         let address = socket_address(&self.host, self.requested_port)
             .await
             .map_err(HttpServerError::Bind)?;
@@ -3651,6 +3662,37 @@ mod tests {
             result,
             Err(HttpServerError::InsecureBind { host }) if host == "0.0.0.0"
         ));
+    }
+
+    #[tokio::test]
+    async fn non_loopback_bind_is_served_once_allowed() {
+        let server = HttpServer::start(
+            DriveRegistry::new(),
+            HttpServerOptions {
+                host: "0.0.0.0".to_owned(),
+                allow_non_loopback: true,
+                ..HttpServerOptions::default()
+            },
+        )
+        .await
+        .expect("an allowed non-loopback bind starts");
+        assert_eq!(server.url(), format!("http://0.0.0.0:{}", server.port()));
+        // Every interface, loopback among them, reaches it.
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .expect("connect");
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        socket
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request");
+        let mut response = String::new();
+        socket
+            .read_to_string(&mut response)
+            .await
+            .expect("response");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        server.close().await.expect("close");
     }
 
     #[test]

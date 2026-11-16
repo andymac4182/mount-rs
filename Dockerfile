@@ -5,8 +5,9 @@
 # (.github/workflows/container.yml) builds it natively for linux/amd64 and
 # linux/arm64 and publishes it to ghcr.io/andymac4182/mount-rs.
 #
-# The HTTP listener binds loopback only: put a TLS proxy in the same network
-# namespace (a sidecar in the same pod, or `--network container:<name>`).
+# The HTTP listener binds loopback unless the config sets "allow_non_loopback":
+# put a TLS proxy in the same network namespace (a sidecar in the same pod, or
+# `--network container:<name>`), or listen on 0.0.0.0 on a private network.
 # The forwarding listener may bind any address. See docs/serve-http-runbook.md.
 
 FROM rust:1.95.0-trixie AS build
