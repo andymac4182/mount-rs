@@ -42,6 +42,39 @@ Startup order:
 5. Bind the listener.
 6. Print the readiness line.
 
+### In a container
+
+Each CLI preview release also publishes an image for `linux/amd64` and
+`linux/arm64` to `ghcr.io/andymac4182/mount-rs:<version>`, for example
+`0.1.0-cli-preview.1` for the tag `v0.1.0-cli-preview.1`, with a provenance
+attestation (`gh attestation verify oci://ghcr.io/andymac4182/mount-rs:<version> --repo andymac4182/mount-rs`).
+`docker build -t mount-rs .` at the repository root builds the same image.
+
+- The entrypoint is `mount-rs`; pass the subcommand, as in
+  `serve-http --config /etc/mount-rs/http.json`.
+- It runs as uid and gid 10001. `/var/lib/mount-rs` is a volume owned by that
+  user: keep SQLite files and other state there, and give absolute paths in
+  the config, since relative paths resolve against the config file's
+  directory.
+- The HTTP listener still binds loopback only, so nothing outside the
+  container's network namespace can reach it directly. Run the TLS proxy in
+  the same namespace: a sidecar container in the same Kubernetes pod, or
+  `docker run --network container:<mount-rs container>`. The forwarding
+  listener (`forwarding.bind`) may bind `0.0.0.0` for peers on other hosts.
+- Stopping the container sends SIGTERM, which drains as described under
+  [Shutdown](#shutdown). Give it a stop timeout above `drain_timeout_ms`
+  (`docker stop -t 40`, or `terminationGracePeriodSeconds: 40` in Kubernetes).
+- Probe `/readyz` and `/healthz` from the sidecar or with an HTTP probe sent
+  through it.
+
+```sh
+docker run -d --name mount-rs \
+  -e MOUNT_RS_FILES_TOKEN=... \
+  -v /etc/mount-rs/http.json:/etc/mount-rs/http.json:ro \
+  -v mount-rs-data:/var/lib/mount-rs \
+  ghcr.io/andymac4182/mount-rs:<version> serve-http --config /etc/mount-rs/http.json
+```
+
 ### Readiness line
 
 On success the process prints two lines to stdout and flushes:

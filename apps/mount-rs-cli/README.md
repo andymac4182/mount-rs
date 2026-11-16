@@ -382,6 +382,11 @@ and limits.
 See `examples/config-http.json` for a memory drive and a durable SQLite drive
 with isolated tokens.
 
+A container image for `linux/amd64` and `linux/arm64` is published with each
+CLI preview release as `ghcr.io/andymac4182/mount-rs:<version>`, and the
+repository's `Dockerfile` builds it locally. See the runbook's
+[container section](../../docs/serve-http-runbook.md#in-a-container).
+
 ### Quick local demo
 
 The checked-in example is runnable on macOS, Linux, and Windows terminals
