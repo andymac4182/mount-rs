@@ -870,7 +870,7 @@ an owner with no live peer connection re-reads the route before dialing, so a
 cleanly stopped owner's drive answers 503 at once rather than after the QUIC
 handshake timeout.
 
-Set `http.forwarding.refresh_active_routes` to `true` to recheck recently used routes in Redis before their one-second cache lifetime expires. This option defaults to `false`. Each refresh verifies the exact registration and stops after `http.forwarding.route_refresh_idle_ttls` route lifetimes without use (default `5`, allowed `1`–`60`). The route lifetime and its hard expiry are unchanged by this setting. Owners still check the route and their current fencing generation before serving forwarded requests.
+`http.forwarding.refresh_active_routes` rechecks recently used routes in Redis before their one-second cache lifetime expires, so requests to an active drive don't wait for a Redis lookup each time the cached route expires. This option defaults to `true`; set it to `false` to look routes up only when a request finds the cached one expired. On a GitHub Actions runner with 100 drives across three nodes, refresh lowered forwarded metadata reads from a p99 of 0.80–0.88 ms to about 0.72 ms, at the cost of about one Redis read per active route per second. Each refresh verifies the exact registration and stops after `http.forwarding.route_refresh_idle_ttls` route lifetimes without use (default `5`, allowed `1`–`60`). The route lifetime and its hard expiry are unchanged by this setting. Owners still check the route and their current fencing generation before serving forwarded requests.
 
 Forwarded requests have no overall time limit once connected: an upload or
 download through an ingress may take as long as it keeps moving, provided
