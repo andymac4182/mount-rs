@@ -18,6 +18,7 @@ use mount_rs_core::diagnostics::profile::{self, Event, Span};
 use mount_rs_core::driver::{
     FileHandle, FsDriver, GuardedDirectoryEntry, GuardedMutation, GuardedMutationResult,
     GuardedRead, GuardedReadResult, GuardedSetattr, ObservedEntry, PathGuard, PathIdentity,
+    StreamedFileWrite,
 };
 use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
@@ -54,6 +55,12 @@ const LIFECYCLE_STRIPES: usize = 16;
 // below caps each delay at 20 ms, so 128 attempts bound retry waiting to at
 // most about 2.6 seconds before reporting a known, uncommitted conflict.
 const MAX_CONCURRENT_CAS_RETRIES: usize = 128;
+/// Most block puts a streamed whole-file write keeps in flight. Blocks are
+/// immutable and independent, so small chunks need not wait on each other,
+/// and a store that batches puts (SQLite) can commit many in one step.
+const STREAMED_WRITE_PUTS: usize = 64;
+/// Most chunk bytes those puts may hold, since a store may copy each one.
+const STREAMED_WRITE_PUT_BYTES: u64 = 8 * 1024 * 1024;
 const CAS_BACKOFF_INITIAL_MICROS: u64 = 250;
 const CAS_BACKOFF_MAX_MICROS: u64 = 20_000;
 // The W26 Ozone qualification uses 64 concurrent lifecycle workers. Start
@@ -1446,8 +1453,57 @@ where
     lease_trust: LeaseTrust,
     preparing_mutations: Arc<AtomicUsize>,
     mutations: MutationQueue,
+    /// Blocks stored by streamed whole-file writes that have not published.
+    streamed: StreamedWrites,
     /// Optional idle-owner heartbeat; aborted under `lease_gate` on shutdown.
     lease_worker: arc_swap::ArcSwapOption<tokio::task::AbortHandle>,
+}
+
+/// The extents each in-progress streamed whole-file write has stored but not
+/// yet published, keyed by write.
+///
+/// Block reconciliation counts these as live, so a minutes-long upload's
+/// blocks are not reclaimed before its single publication, without the
+/// upload holding the lifecycle lock between pieces. A write registers its
+/// blocks under the lifecycle read lock it stored them under, and
+/// reconciliation reads the registry under the write lock, so no block is
+/// stored without being visible to the next reconciliation. An abandoned
+/// write removes its entry, leaving its blocks to the next reconciliation.
+#[derive(Default)]
+struct StreamedWrites {
+    next: std::sync::atomic::AtomicU64,
+    active: std::sync::Mutex<HashMap<u64, Vec<BlockExtent>>>,
+}
+
+impl StreamedWrites {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Vec<BlockExtent>>> {
+        // The map holds plain data; a panic mid-update cannot break it.
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn register(&self) -> u64 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        self.lock().insert(id, Vec::new());
+        id
+    }
+
+    fn extend(&self, id: u64, extents: impl IntoIterator<Item = BlockExtent>) {
+        if let Some(stored) = self.lock().get_mut(&id) {
+            stored.extend(extents);
+        }
+    }
+
+    fn take(&self, id: u64) -> Vec<BlockExtent> {
+        self.lock().remove(&id).unwrap_or_default()
+    }
+
+    fn collect_roots(&self, live: &mut BTreeSet<mount_rs_core::storage::BlockId>) {
+        for extents in self.lock().values() {
+            live.extend(extents.iter().map(|extent| extent.block.clone()));
+        }
+    }
 }
 
 /// Optional proof, checked before a reopened volume is exposed, that the
@@ -1610,6 +1666,7 @@ where
                 lease_renewed: AtomicBool::new(false),
                 lease_trust: LeaseTrust::default(),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
+                streamed: StreamedWrites::default(),
                 mutations: MutationQueue::new(),
                 lease_worker: arc_swap::ArcSwapOption::empty(),
             }),
@@ -2165,6 +2222,7 @@ where
                         lease_renewed: AtomicBool::new(false),
                         lease_trust: LeaseTrust::default(),
                         preparing_mutations: Arc::new(AtomicUsize::new(0)),
+                        streamed: StreamedWrites::default(),
                         mutations: MutationQueue::new(),
                         lease_worker: arc_swap::ArcSwapOption::empty(),
                     }),
@@ -2250,6 +2308,7 @@ where
                 lease_renewed: AtomicBool::new(false),
                 lease_trust: LeaseTrust::default(),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
+                streamed: StreamedWrites::default(),
                 mutations: MutationQueue::new(),
                 lease_worker: arc_swap::ArcSwapOption::empty(),
             }),
@@ -2512,6 +2571,7 @@ where
                 collect_block_roots_from_node(node, &mut live);
             }
         }
+        self.inner.streamed.collect_roots(&mut live);
         self.inner.blocks.reconcile(&live, grace).await
     }
 
@@ -4873,8 +4933,15 @@ where
         // mode: truncating and rewriting through a handle would expose an
         // empty or partial file to readers, and leave one behind if the
         // process stopped between the two publications.
-        self.write_file_atomic_concurrent_replay(&normalized, data, replay_layout)
-            .await
+        let data_length = u64::try_from(data.len())
+            .map_err(|_| error_with_path(ErrorCode::Efbig, "write", &normalized))?;
+        self.write_file_atomic_concurrent_replay(
+            &normalized,
+            Some(data),
+            data_length,
+            replay_layout,
+        )
+        .await
     }
 
     /// A prepared whole-file batch can lose its CAS to an unrelated writer.
@@ -4882,17 +4949,19 @@ where
     /// the already-flushed immutable layout. Reprepare blocks only if the
     /// path's chunker changed. The full replacement remains one publication;
     /// truncate followed by byte writes would expose partial revisions.
+    ///
+    /// Without `data` (a streamed write, whose bytes are gone) a changed
+    /// chunker cannot be reprepared and the write fails with `EAGAIN`.
     async fn write_file_atomic_concurrent_replay(
         &self,
         path: &str,
-        data: &[u8],
+        data: Option<&[u8]>,
+        data_length: u64,
         mut prepared_layout: FileLayout,
     ) -> Result<()> {
         let gate_profile = Span::new(Event::GateWait);
         let _gate = self.inner.gate.lock().await;
         drop(gate_profile);
-        let data_length = u64::try_from(data.len())
-            .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
         for attempt in 0..MAX_CONCURRENT_CAS_RETRIES {
             self.ensure_operation_lease().await?;
             let (mut namespace, revision) = self.snapshot()?;
@@ -4931,6 +5000,12 @@ where
                 )
             };
             if prepared_layout.chunker != chunker {
+                let Some(data) = data else {
+                    return Err(FsError::new(ErrorCode::Eagain)
+                        .with_syscall("write file")
+                        .with_path(path)
+                        .with_message("the file's chunking changed while it was being written"));
+                };
                 let empty_layout = FileLayout {
                     chunker,
                     extents: Vec::new(),
@@ -5951,6 +6026,224 @@ where
     }
 }
 
+/// A whole-file replacement on the split store whose bytes arrive in pieces.
+///
+/// Each piece is cut into the target's chunks and stored as immutable blocks
+/// as it arrives, under a short lifecycle read lock, and the layout is
+/// published once on commit. The cost of a piece therefore does not grow
+/// with the file, unlike a handle write, which republishes the whole layout.
+/// [`StreamedWrites`] keeps the stored blocks live until the publication.
+struct ChunkedStreamedWrite<M, B>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    fs: ChunkedFs<M, B>,
+    path: String,
+    chunker: mount_rs_core::chunking::ChunkerConfig,
+    chunk_size: usize,
+    /// The start of the next chunk, always shorter than a chunk.
+    carry: Vec<u8>,
+    /// Bytes written so far, `carry` included.
+    length: u64,
+    /// This write's entry in [`StreamedWrites`].
+    id: u64,
+    /// A piece failed part-way, so what was stored no longer matches
+    /// `length`; the write can only be abandoned.
+    broken: bool,
+}
+
+impl<M, B> ChunkedStreamedWrite<M, B>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    fn too_big(&self) -> FsError {
+        error_with_path(ErrorCode::Efbig, "write", &self.path)
+    }
+
+    fn check_usable(&self) -> Result<()> {
+        if self.broken {
+            return Err(error_with_path(ErrorCode::Eio, "write", &self.path)
+                .with_message("an earlier write of this upload failed"));
+        }
+        Ok(())
+    }
+
+    /// Store `data` after what was written so far. Must run under a
+    /// lifecycle read lock, which the caller holds until the stored blocks
+    /// are registered.
+    async fn store(&mut self, data: &[u8]) -> Result<Vec<BlockExtent>> {
+        let size = u64::try_from(self.chunk_size).map_err(|_| self.too_big())?;
+        let carried = u64::try_from(self.carry.len()).map_err(|_| self.too_big())?;
+        let mut file_offset = self.length - carried;
+        let mut extents = Vec::new();
+        let mut rest = data;
+        if !self.carry.is_empty() {
+            let take = (self.chunk_size - self.carry.len()).min(rest.len());
+            self.carry.extend_from_slice(&rest[..take]);
+            rest = &rest[take..];
+            if self.carry.len() == self.chunk_size {
+                extents.extend(
+                    store_streamed_chunks(
+                        self.fs.inner.blocks.as_ref(),
+                        &self.path,
+                        file_offset,
+                        size,
+                        std::iter::once(self.carry.as_slice()),
+                    )
+                    .await?,
+                );
+                file_offset += size;
+                self.carry.clear();
+            }
+        }
+        let whole = rest.len() - rest.len() % self.chunk_size;
+        extents.extend(
+            store_streamed_chunks(
+                self.fs.inner.blocks.as_ref(),
+                &self.path,
+                file_offset,
+                size,
+                rest[..whole].chunks(self.chunk_size),
+            )
+            .await?,
+        );
+        self.carry.extend_from_slice(&rest[whole..]);
+        Ok(extents)
+    }
+}
+
+impl<M, B> Drop for ChunkedStreamedWrite<M, B>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    fn drop(&mut self) {
+        // Abandoned, failed or committed: either way nothing more of this
+        // write needs protecting, and unpublished blocks are left to
+        // reconciliation.
+        self.fs.inner.streamed.take(self.id);
+    }
+}
+
+#[async_trait]
+impl<M, B> StreamedFileWrite for ChunkedStreamedWrite<M, B>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    async fn write(&mut self, data: &[u8]) -> Result<()> {
+        self.check_usable()?;
+        if data.is_empty() {
+            return Ok(());
+        }
+        let end = u64::try_from(data.len())
+            .ok()
+            .and_then(|added| self.length.checked_add(added))
+            .ok_or_else(|| self.too_big())?;
+        let fs = self.fs.clone();
+        let _lifecycle = fs.inner.lifecycle.read().await;
+        fs.health()?;
+        self.broken = true;
+        let extents = self.store(data).await?;
+        // Registered under the lifecycle lock the blocks were stored under:
+        // the next reconciliation cannot have missed them.
+        fs.inner.streamed.extend(self.id, extents);
+        self.length = end;
+        self.broken = false;
+        Ok(())
+    }
+
+    async fn commit(mut self: Box<Self>) -> Result<u64> {
+        self.check_usable()?;
+        let fs = self.fs.clone();
+        // Held through the publication, so reconciliation (which takes the
+        // write side) cannot run between taking this write's blocks out of
+        // the registry and publishing the layout that names them.
+        let _lifecycle = fs.inner.lifecycle.read().await;
+        fs.health()?;
+        let size = u64::try_from(self.chunk_size).map_err(|_| self.too_big())?;
+        let tail_offset = self.length - self.carry.len() as u64;
+        let tail = store_streamed_chunks(
+            fs.inner.blocks.as_ref(),
+            &self.path,
+            tail_offset,
+            size,
+            (!self.carry.is_empty())
+                .then_some(self.carry.as_slice())
+                .into_iter(),
+        )
+        .await?;
+        if self.length > 0 {
+            fs.flush_mutation_blocks()
+                .await
+                .map_err(|error| with_context(error, "block-flush", Some(&self.path)))?;
+        }
+        let mut extents = fs.inner.streamed.take(self.id);
+        extents.extend(tail);
+        let layout = FileLayout {
+            chunker: self.chunker.clone(),
+            extents,
+        };
+        fs.write_file_atomic_concurrent_replay(&self.path, None, self.length, layout)
+            .await?;
+        Ok(self.length)
+    }
+}
+
+/// Store consecutive chunks starting at `start`, `size` bytes apart, a
+/// bounded number at a time, and return their extents in file order. All-zero
+/// chunks are left as holes, as a handle write leaves them.
+async fn store_streamed_chunks<'a, B: BlockStore + ?Sized>(
+    blocks: &B,
+    path: &str,
+    start: u64,
+    size: u64,
+    chunks: impl Iterator<Item = &'a [u8]>,
+) -> Result<Vec<BlockExtent>> {
+    let in_flight = usize::try_from(STREAMED_WRITE_PUT_BYTES / size.max(1))
+        .unwrap_or(usize::MAX)
+        .clamp(1, STREAMED_WRITE_PUTS);
+    let mut extents = Vec::new();
+    let mut batch = Vec::with_capacity(in_flight);
+    let mut file_offset = start;
+    let mut chunks = chunks.peekable();
+    while chunks.peek().is_some() {
+        batch.clear();
+        for chunk in chunks.by_ref().take(in_flight) {
+            batch.push(store_streamed_chunk(blocks, path, file_offset, chunk));
+            file_offset = file_offset
+                .checked_add(size)
+                .ok_or_else(|| error_with_path(ErrorCode::Efbig, "write", path))?;
+        }
+        let stored = futures_util::future::try_join_all(batch.drain(..)).await?;
+        extents.extend(stored.into_iter().flatten());
+    }
+    Ok(extents)
+}
+
+async fn store_streamed_chunk<B: BlockStore + ?Sized>(
+    blocks: &B,
+    path: &str,
+    file_offset: u64,
+    chunk: &[u8],
+) -> Result<Option<BlockExtent>> {
+    if chunk.iter().all(|byte| *byte == 0) {
+        return Ok(None);
+    }
+    let block = blocks
+        .put(chunk)
+        .await
+        .map_err(|error| with_context(error, "block-put", Some(path)))?;
+    Ok(Some(BlockExtent {
+        file_offset,
+        block,
+        block_offset: 0,
+        length: chunk.len() as u64,
+    }))
+}
+
 #[async_trait]
 impl<M, B> FsDriver for ChunkedFs<M, B>
 where
@@ -5968,6 +6261,68 @@ where
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
         Ok(())
+    }
+
+    /// Streams fixed-size-chunked files outside the selected-inode mode; see
+    /// [`ChunkedStreamedWrite`].
+    async fn begin_file_write(&self, path: &str) -> Result<Option<Box<dyn StreamedFileWrite>>> {
+        if self.inner.options.inode_updates {
+            return Ok(None);
+        }
+        let normalized = normalize_path(path);
+        let _lifecycle = self.inner.lifecycle.read().await;
+        self.ensure_operation_lease().await?;
+        // Check the target now so a request that can never succeed fails
+        // before its body is stored. The commit checks it again.
+        let chunker = {
+            let (namespace, _) = self.read_view_at_revision()?;
+            let entry = walk(&namespace, &normalized, true, "open", 0)?;
+            self.require_inode_authority(&namespace, entry.node.unwrap_or(entry.parent))?;
+            if let Some(inode) = entry.node {
+                let node = namespace
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                match &node.data {
+                    NodeData::File(layout) => layout.chunker.clone(),
+                    NodeData::Directory { .. } => {
+                        return Err(error_with_path(ErrorCode::Eisdir, "open", &entry.path));
+                    }
+                    NodeData::Special => {
+                        return Err(error_with_path(ErrorCode::Enxio, "open", &entry.path));
+                    }
+                    NodeData::Symlink { .. } => {
+                        return Err(error_with_path(ErrorCode::Eio, "open", &entry.path));
+                    }
+                }
+            } else {
+                let parent = namespace
+                    .nodes
+                    .get(&entry.parent)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                if !matches!(parent.data, NodeData::Directory { .. }) {
+                    return Err(error_with_path(ErrorCode::Enotdir, "open", &entry.path));
+                }
+                namespace.default_chunker.clone()
+            }
+        };
+        let Some(chunk_size) = fixed_chunk_size(&chunker)? else {
+            return Ok(None);
+        };
+        let mut carry = Vec::new();
+        carry
+            .try_reserve_exact(chunk_size)
+            .map_err(|_| error_with_path(ErrorCode::Enomem, "write", &normalized))?;
+        Ok(Some(Box::new(ChunkedStreamedWrite {
+            fs: self.clone(),
+            path: normalized,
+            chunker,
+            chunk_size,
+            carry,
+            length: 0,
+            id: self.inner.streamed.register(),
+            broken: false,
+        })))
     }
 
     fn write_file_is_atomic(&self) -> bool {
@@ -10757,6 +11112,241 @@ mod tests {
         assert_eq!(block_on(file.write(b"data", Some(0))).unwrap(), 4);
         block_on(file.close()).unwrap();
         block_on(filesystem.shutdown()).unwrap();
+    }
+
+    /// A block store whose reconciliation deletes every block outside the
+    /// live set at once, however new: the strictest reclamation a provider
+    /// with a grace period could perform once the period has passed.
+    #[derive(Clone, Default)]
+    struct ReclaimingBlockStore {
+        inner: MemoryBlockStore,
+        stored: Arc<Mutex<BTreeSet<mount_rs_core::storage::BlockId>>>,
+        fail_put: Arc<AtomicBool>,
+    }
+
+    impl ReclaimingBlockStore {
+        fn stored(&self) -> usize {
+            self.stored.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl BlockStore for ReclaimingBlockStore {
+        fn durable(&self) -> bool {
+            false
+        }
+
+        async fn put(&self, bytes: &[u8]) -> Result<mount_rs_core::storage::BlockId> {
+            if self.fail_put.load(Ordering::SeqCst) {
+                return Err(FsError::new(ErrorCode::Eio).with_message("injected block put failure"));
+            }
+            let id = self.inner.put(bytes).await?;
+            self.stored.lock().unwrap().insert(id.clone());
+            Ok(id)
+        }
+
+        async fn get(&self, id: &mount_rs_core::storage::BlockId) -> Result<Vec<u8>> {
+            self.inner.get(id).await
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.inner.flush().await
+        }
+
+        async fn delete(&self, id: &mount_rs_core::storage::BlockId) -> Result<()> {
+            self.stored.lock().unwrap().remove(id);
+            self.inner.delete(id).await
+        }
+
+        async fn reconcile(
+            &self,
+            live: &BTreeSet<mount_rs_core::storage::BlockId>,
+            _grace: Duration,
+        ) -> Result<mount_rs_core::storage::BlockReconcileReport> {
+            let stored = self.stored.lock().unwrap().clone();
+            let mut report = mount_rs_core::storage::BlockReconcileReport::default();
+            for id in stored {
+                report.scanned += 1;
+                if live.contains(&id) {
+                    report.protected += 1;
+                } else {
+                    self.delete(&id).await?;
+                    report.deleted += 1;
+                }
+            }
+            Ok(report)
+        }
+    }
+
+    fn read_whole<M, B>(fs: &ChunkedFs<M, B>, path: &str) -> Vec<u8>
+    where
+        M: MetadataStore + 'static,
+        B: BlockStore + 'static,
+    {
+        block_on(async {
+            let file = fs.open(path, "r", 0).await.unwrap();
+            let mut out = Vec::new();
+            let mut buffer = [0_u8; 64];
+            loop {
+                let count = file
+                    .read(&mut buffer, Some(out.len() as u64))
+                    .await
+                    .unwrap();
+                if count == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buffer[..count]);
+            }
+            file.close().await.unwrap();
+            out
+        })
+    }
+
+    /// The blocks a file of `content` needs with the 4-byte test chunks.
+    fn needed_blocks(content: &[u8]) -> usize {
+        content
+            .chunks(4)
+            .filter(|chunk| chunk.iter().any(|byte| *byte != 0))
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    fn reclaim<M, B>(fs: &ChunkedFs<M, B>)
+    where
+        M: MetadataStore + 'static,
+        B: BlockStore + 'static,
+    {
+        block_on(fs.reconcile_blocks(Duration::from_secs(60))).unwrap();
+    }
+
+    #[test]
+    fn a_streamed_write_publishes_the_whole_file_once() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = ReclaimingBlockStore::default();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("stream-once"),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/doc", b"original")).unwrap();
+        let before = block_on(metadata.load()).unwrap().revision;
+
+        let mut write = block_on(fs.begin_file_write("/doc")).unwrap().unwrap();
+        // Pieces that split chunks, an empty piece and two all-zero chunks.
+        let pieces: [&[u8]; 5] = [b"abc", b"defgh", b"", &[0; 8], b"ijklmnopq"];
+        let mut expected = Vec::new();
+        for piece in pieces {
+            block_on(write.write(piece)).unwrap();
+            expected.extend_from_slice(piece);
+            assert_eq!(read_whole(&fs, "/doc"), b"original");
+            assert_eq!(block_on(metadata.load()).unwrap().revision, before);
+        }
+        assert_eq!(block_on(write.commit()).unwrap(), expected.len() as u64);
+        assert_eq!(block_on(metadata.load()).unwrap().revision, before + 1);
+        assert_eq!(read_whole(&fs, "/doc"), expected);
+        assert_eq!(
+            block_on(fs.stat("/doc")).unwrap().size,
+            expected.len() as u64
+        );
+
+        // The zero chunks are holes and the old content's blocks are gone.
+        reclaim(&fs);
+        assert_eq!(blocks.stored(), needed_blocks(&expected));
+
+        // An empty upload creates an empty file.
+        let write = block_on(fs.begin_file_write("/empty")).unwrap().unwrap();
+        assert_eq!(block_on(write.commit()).unwrap(), 0);
+        assert_eq!(read_whole(&fs, "/empty"), b"");
+        block_on(fs.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn abandoned_or_failed_streamed_writes_leave_the_target_and_no_blocks() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = ReclaimingBlockStore::default();
+        let fs = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("stream-abandon"),
+        ))
+        .unwrap();
+        block_on(fs.write_file("/doc", b"original")).unwrap();
+        let before = block_on(metadata.load()).unwrap().revision;
+
+        // Abandoned part-way.
+        let mut write = block_on(fs.begin_file_write("/doc")).unwrap().unwrap();
+        block_on(write.write(b"0123456789abcdef")).unwrap();
+        drop(write);
+        assert_eq!(read_whole(&fs, "/doc"), b"original");
+        reclaim(&fs);
+        assert_eq!(blocks.stored(), needed_blocks(b"original"));
+
+        // A failed piece leaves the write unusable.
+        let mut write = block_on(fs.begin_file_write("/doc")).unwrap().unwrap();
+        block_on(write.write(b"ABCDEFGH")).unwrap();
+        blocks.fail_put.store(true, Ordering::SeqCst);
+        assert_eq!(
+            block_on(write.write(b"IJKLMNOP")).unwrap_err().code,
+            ErrorCode::Eio
+        );
+        blocks.fail_put.store(false, Ordering::SeqCst);
+        assert_eq!(
+            block_on(write.write(b"QRST")).unwrap_err().code,
+            ErrorCode::Eio
+        );
+        assert_eq!(block_on(write.commit()).unwrap_err().code, ErrorCode::Eio);
+        assert_eq!(read_whole(&fs, "/doc"), b"original");
+        assert_eq!(block_on(metadata.load()).unwrap().revision, before);
+        reclaim(&fs);
+        assert_eq!(blocks.stored(), needed_blocks(b"original"));
+
+        // Targets that can never be written fail before any body is stored.
+        block_on(fs.mkdir("/dir", MkdirOptions::default())).unwrap();
+        assert_eq!(
+            block_on(fs.begin_file_write("/dir")).err().unwrap().code,
+            ErrorCode::Eisdir
+        );
+        assert_eq!(
+            block_on(fs.begin_file_write("/missing/doc"))
+                .err()
+                .unwrap()
+                .code,
+            ErrorCode::Enoent
+        );
+        block_on(fs.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn reconciliation_during_a_streamed_write_keeps_its_blocks() {
+        let blocks = ReclaimingBlockStore::default();
+        let fs = block_on(ChunkedFs::open(
+            MemoryMetadataStore::new(),
+            blocks.clone(),
+            options("stream-reconcile"),
+        ))
+        .unwrap();
+        // An unreferenced block the upload will store again: its put finds
+        // the block already present, and only the pin keeps it.
+        block_on(fs.write_file("/old", b"XXXX")).unwrap();
+        block_on(fs.unlink("/old")).unwrap();
+
+        let mut write = block_on(fs.begin_file_write("/new")).unwrap().unwrap();
+        block_on(write.write(b"XXXXAAAABB")).unwrap();
+        // Reconciliation runs between pieces: the upload holds no lock then.
+        reclaim(&fs);
+        assert_eq!(blocks.stored(), 2);
+        block_on(write.write(b"BBCCCCD")).unwrap();
+        reclaim(&fs);
+        assert_eq!(blocks.stored(), 4);
+        // A syncfs between pieces does not wait for the upload either.
+        block_on(fs.syncfs()).unwrap();
+        // Commit stores the short final chunk.
+        assert_eq!(block_on(write.commit()).unwrap(), 17);
+        reclaim(&fs);
+        assert_eq!(read_whole(&fs, "/new"), b"XXXXAAAABBBBCCCCD");
+        assert_eq!(blocks.stored(), 5);
+        block_on(fs.shutdown()).unwrap();
     }
 
     #[test]

@@ -195,6 +195,27 @@ pub trait FileHandle: Send + Sync {
     async fn close(&self) -> Result<()>;
 }
 
+/// A whole-file replacement whose bytes are supplied as they arrive, begun
+/// with [`FsDriver::begin_file_write`].
+///
+/// Nothing is visible at the target until [`StreamedFileWrite::commit`]
+/// returns: readers, other writers and a restart see the previous content
+/// until then and the complete new content after, never a prefix. Dropping
+/// the write without committing it abandons it and leaves the target as it
+/// was. Space the driver used for an abandoned write is reclaimed as it
+/// reclaims any other unreferenced data.
+#[async_trait]
+pub trait StreamedFileWrite: Send {
+    /// Append the next bytes of the new content.
+    async fn write(&mut self, data: &[u8]) -> Result<()>;
+
+    /// Replace the target with everything written, in one step, and return
+    /// its length. Returns only once the new content is as durable as the
+    /// driver makes anything. A commit that is dropped part-way has
+    /// published or not, as the driver got to it.
+    async fn commit(self: Box<Self>) -> Result<u64>;
+}
+
 /// The async filesystem driver contract shared by every backend.
 #[async_trait]
 pub trait FsDriver: Send + Sync {
@@ -237,6 +258,16 @@ pub trait FsDriver: Send + Sync {
     /// Wrappers must forward this to the driver they wrap.
     fn write_file_is_atomic(&self) -> bool {
         false
+    }
+
+    /// Begin replacing the regular file at `path` (created if absent) with
+    /// content supplied as it arrives, with the guarantees of
+    /// [`StreamedFileWrite`]. `None` means this driver has no such path; the
+    /// caller writes a sibling and renames it instead. The target is checked
+    /// again when the write commits. Wrappers must forward this to the
+    /// driver they wrap.
+    async fn begin_file_write(&self, _path: &str) -> Result<Option<Box<dyn StreamedFileWrite>>> {
+        Ok(None)
     }
 
     async fn guarded_mutation(&self, _request: GuardedMutation) -> Result<GuardedMutationResult> {

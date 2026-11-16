@@ -35,7 +35,7 @@ use mount_rs_core::versioning::VolumeId;
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError,
     GuardedMutation, GuardedMutationResult, GuardedRead, GuardedReadResult, MkdirOptions,
-    OpenFlags, Result as CoreResult, Stats, StatsFs,
+    OpenFlags, Result as CoreResult, Stats, StatsFs, StreamedFileWrite,
 };
 #[cfg(all(
     feature = "foundationdb",
@@ -760,6 +760,28 @@ impl FsDriver for DriverSlot {
 
     fn write_file_is_atomic(&self) -> bool {
         self.get().is_ok_and(|driver| driver.write_file_is_atomic())
+    }
+
+    fn begin_file_write<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<Option<Box<dyn StreamedFileWrite>>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.begin_file_write(path).await })
     }
 
     fn supports_guarded_mutations(&self) -> bool {
@@ -1859,6 +1881,24 @@ impl FsDriver for MountDriver {
 
     fn write_file_is_atomic(&self) -> bool {
         self.0.write_file_is_atomic()
+    }
+
+    fn begin_file_write<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = CoreResult<Option<Box<dyn StreamedFileWrite>>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.begin_file_write(path)
     }
 
     fn supports_guarded_mutations(&self) -> bool {
