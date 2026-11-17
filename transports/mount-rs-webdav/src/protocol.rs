@@ -14,14 +14,14 @@ use base64::Engine;
 use httpdate::{fmt_http_date, parse_http_date};
 use mount_rs_core::{ErrorCode, FileHandle, FsError, Stats};
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
-use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
+use quick_xml::{Reader, XmlVersion};
 use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::constants::{
-    DAV_NS, DEFAULT_MAX_REQUEST_BYTES, MAX_XML_DEPTH, MAX_XML_ELEMENTS, XML_CONTENT_TYPE,
-    status_for_error, status_line, status_text,
+    DAV_NS, DEFAULT_MAX_REQUEST_BYTES, MAX_XML_ATTRIBUTES, MAX_XML_DEPTH, MAX_XML_ELEMENTS,
+    XML_CONTENT_TYPE, status_for_error, status_line, status_text,
 };
 
 /// A normalized HTTP request head.  Header names are lowercase and values are
@@ -887,18 +887,23 @@ fn start_node(
     reader: &Reader<&[u8]>,
 ) -> Result<(String, HashMap<String, String>, XmlNode), DavFault> {
     let mut namespaces = inherited.clone();
-    for attribute in start.attributes().with_checks(true) {
+    // The cap is applied while iterating, so neither the duplicate-name check
+    // nor the namespace map can be driven past it by one start tag.
+    for (seen, attribute) in start.attributes().with_checks(true).enumerate() {
+        if seen >= MAX_XML_ATTRIBUTES {
+            return Err(xml_fault("too many attributes on one XML element"));
+        }
         let attribute = attribute.map_err(|error| xml_fault(error.to_string()))?;
         let key = std::str::from_utf8(attribute.key.as_ref())
             .map_err(|_| xml_fault("invalid attribute name"))?;
         if key == "xmlns" {
             let value = attribute
-                .decode_and_unescape_value(reader.decoder())
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                 .map_err(|error| xml_fault(error.to_string()))?;
             namespaces.insert(String::new(), value.into_owned());
         } else if let Some(prefix) = key.strip_prefix("xmlns:") {
             let value = attribute
-                .decode_and_unescape_value(reader.decoder())
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                 .map_err(|error| xml_fault(error.to_string()))?;
             namespaces.insert(prefix.to_owned(), value.into_owned());
         }

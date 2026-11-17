@@ -7,13 +7,13 @@
 
 use mount_rs_s3::{
     AWS_CHUNKED_ENCODING, CredentialScope, EMPTY_PAYLOAD_SHA256, HeaderEntry, MAX_KEY_BYTES,
-    MAX_KEYS, MAX_PART_SIZE, MAX_PARTS, MAX_PRESIGNED_EXPIRES, MAX_XML_BYTES, MIN_PART_SIZE,
-    QUERY_ALGORITHM, QUERY_CREDENTIAL, QUERY_DATE, QUERY_EXPIRES, QUERY_SIGNATURE,
-    QUERY_SIGNED_HEADERS, QueryEntry, S3_SERVICE, S3_XMLNS, SIGV4_ALGORITHM, SIGV4_TERMINATOR,
-    STREAMING_PAYLOAD, UNSIGNED_PAYLOAD, XML_DECLARATION, XML_MAX_BYTES, XML_MAX_DEPTH,
-    XML_MAX_DEPTH_CEILING, XML_MAX_ELEMENTS, canonical_query, canonical_request, canonical_uri,
-    copy_object_xml, credential_scope, delete_result_xml, is_presigned, list_buckets_xml,
-    parse_authorization_header, parse_complete_document, parse_delete_document,
+    MAX_KEYS, MAX_PART_SIZE, MAX_PARTS, MAX_PRESIGNED_EXPIRES, MAX_XML_ATTRIBUTES, MAX_XML_BYTES,
+    MIN_PART_SIZE, QUERY_ALGORITHM, QUERY_CREDENTIAL, QUERY_DATE, QUERY_EXPIRES, QUERY_SIGNATURE,
+    QUERY_SIGNED_HEADERS, QueryEntry, S3_SERVICE, S3_XMLNS, S3Failure, SIGV4_ALGORITHM,
+    SIGV4_TERMINATOR, STREAMING_PAYLOAD, UNSIGNED_PAYLOAD, XML_DECLARATION, XML_MAX_BYTES,
+    XML_MAX_DEPTH, XML_MAX_DEPTH_CEILING, XML_MAX_ELEMENTS, canonical_query, canonical_request,
+    canonical_uri, copy_object_xml, credential_scope, delete_result_xml, is_presigned,
+    list_buckets_xml, parse_authorization_header, parse_complete_document, parse_delete_document,
     parse_presigned_query, s3_error, signature_of, signatures_match, string_to_sign, xml_escape,
 };
 
@@ -210,4 +210,108 @@ fn upstream_sigv4_parsers_preserve_wire_fields_and_case_rules() {
     assert_eq!(parsed.signature, "fedcba");
     assert!(signatures_match("5FA00FA31553B73E", "5fa00fa31553b73e"));
     assert!(!signatures_match("5fa0", "5fa00fa31553b73e"));
+}
+
+/// A start tag with `count` attributes, each rendered by `attribute`.
+fn start_tag_with_flood(name: &str, count: usize, attribute: impl Fn(usize) -> String) -> String {
+    let mut tag = format!("<{name}");
+    for index in 0..count {
+        tag.push(' ');
+        tag.push_str(&attribute(index));
+    }
+    tag.push('>');
+    tag
+}
+
+fn assert_malformed_xml_quickly(label: &str, parse: impl FnOnce() -> Option<S3Failure>) {
+    let started = std::time::Instant::now();
+    let failure = parse();
+    let elapsed = started.elapsed();
+    match failure {
+        Some(S3Failure::S3(error)) => {
+            assert_eq!(error.code, "MalformedXML", "{label}");
+            assert_eq!(error.status, 400, "{label}");
+        }
+        other => panic!("{label}: expected MalformedXML, got {other:?}"),
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "{label}: the refusal took {elapsed:?}"
+    );
+}
+
+#[test]
+fn request_xml_parsers_refuse_attribute_and_namespace_floods_quickly() {
+    // RUSTSEC-2026-0195 / RUSTSEC-2026-0194: quick-xml before 0.41 allocated
+    // without bound for namespace declarations on one start tag and compared
+    // attribute names quadratically. These documents are otherwise valid, so
+    // the old parser accepted them after doing all of that work.
+    let namespace = |index: usize| format!("xmlns:p{index}=\"u\"");
+    let plain = |index: usize| format!("a{index}=\"\"");
+    for (label, attribute) in [
+        (
+            "namespace declarations",
+            &namespace as &dyn Fn(usize) -> String,
+        ),
+        ("distinct attributes", &plain),
+    ] {
+        let delete_root = format!(
+            "{}<Object><Key>k</Key></Object></Delete>",
+            start_tag_with_flood("Delete", 30_000, attribute)
+        );
+        assert!(delete_root.len() < XML_MAX_BYTES);
+        assert_malformed_xml_quickly(&format!("Delete root, {label}"), || {
+            parse_delete_document(delete_root.as_bytes(), MAX_XML_BYTES).err()
+        });
+
+        let delete_child = format!(
+            "<Delete>{}<Key>k</Key></Object></Delete>",
+            start_tag_with_flood("Object", 30_000, attribute)
+        );
+        assert_malformed_xml_quickly(&format!("Delete child, {label}"), || {
+            parse_delete_document(delete_child.as_bytes(), MAX_XML_BYTES).err()
+        });
+
+        let complete = format!(
+            "{}<Part><PartNumber>1</PartNumber><ETag>e</ETag></Part></CompleteMultipartUpload>",
+            start_tag_with_flood("CompleteMultipartUpload", 30_000, attribute)
+        );
+        assert_malformed_xml_quickly(&format!("CompleteMultipartUpload, {label}"), || {
+            parse_complete_document(complete.as_bytes(), MAX_XML_BYTES).err()
+        });
+    }
+}
+
+#[test]
+fn request_xml_parsers_accept_the_attribute_limit_and_refuse_one_more() {
+    let attribute = |index: usize| format!("a{index}=\"\"");
+    let delete = |count: usize| {
+        format!(
+            "{}<Object><Key>k</Key></Object></Delete>",
+            start_tag_with_flood("Delete", count, attribute)
+        )
+    };
+    assert_eq!(
+        parse_delete_document(delete(MAX_XML_ATTRIBUTES).as_bytes(), MAX_XML_BYTES)
+            .expect("a tag at the attribute limit is accepted"),
+        (vec!["k".to_owned()], false)
+    );
+    assert_malformed_xml_quickly("Delete, one attribute over the limit", || {
+        parse_delete_document(delete(MAX_XML_ATTRIBUTES + 1).as_bytes(), MAX_XML_BYTES).err()
+    });
+
+    let complete = |count: usize| {
+        format!(
+            "<CompleteMultipartUpload>{}<PartNumber>1</PartNumber><ETag>e</ETag></Part></CompleteMultipartUpload>",
+            start_tag_with_flood("Part", count, attribute)
+        )
+    };
+    assert_eq!(
+        parse_complete_document(complete(MAX_XML_ATTRIBUTES).as_bytes(), MAX_XML_BYTES)
+            .expect("a tag at the attribute limit is accepted"),
+        vec![(1, "e".to_owned())]
+    );
+    assert_malformed_xml_quickly("Part, one attribute over the limit", || {
+        parse_complete_document(complete(MAX_XML_ATTRIBUTES + 1).as_bytes(), MAX_XML_BYTES).err()
+    });
 }
