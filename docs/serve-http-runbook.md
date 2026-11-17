@@ -11,7 +11,7 @@ configuration, which is plain `serve-http` with `remote_sessions: false` and no
 ## What the process is
 
 One process serves one or more named drives over cleartext HTTP/1.1, on a
-loopback address unless configured otherwise. Each drive has one static
+loopback address unless configured otherwise. Each drive has its own
 bearer token. The process holds
 the exclusive writer lease of every split-store drive it serves, so **exactly
 one instance may serve a given drive**. There is no active-active mode at
@@ -39,7 +39,8 @@ It does not open storage and does not read the token variables.
 Startup order:
 
 1. Parse and validate the config. Any error exits with code 2.
-2. Read each drive's token from its environment variable.
+2. Read each drive's token from its environment variable or its token
+   file.
 3. Install the SIGINT/SIGTERM handler.
 4. Open each drive in config order. A split-store drive acquires its writer
    lease here. If any drive fails to open, the drives already opened are shut
@@ -122,6 +123,7 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | `drive_shutdown_timeout_ms` | integer | `30000` | >= 1 | How long shutdown gives the drives, all together, to flush and release their writer leases once the listener has stopped. When it passes the process exits with code 1 without waiting further. See [Shutdown](#shutdown). |
 | `max_connections` | integer | `256` | >= 1 | Concurrent TCP connections. Excess connections are accepted and closed immediately with no HTTP response. |
 | `access_log` | boolean | `false` | | Writes one `http_request` JSON line per request to stderr. No path, query, token or header is written. See [Access log](#access-log). |
+| `token_reload_seconds` | integer | `30` | 0-3600 | How often the token files of the drives are looked at for a change. `0` turns the timer off, leaving SIGHUP as the only trigger. Only valid when a drive's token is a file. See [Rotation](#rotation). |
 | `tcp_nodelay` | boolean | `true` | | Disables Nagle on accepted connections. |
 | `http2_prior_knowledge` | boolean | `false` | | `true` makes the listener cleartext HTTP/2 only (no HTTP/1.1). Leave `false` at launch; the reference proxy configs below speak HTTP/1.1 upstream. With HTTP/2 a stalled download releases its file handle but its connection is not dropped. |
 | `drives` | array | required | at least one drive | See below. |
@@ -137,7 +139,7 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | Key | Type | Required | Valid values |
 | --- | --- | --- | --- |
 | `id` | string | yes | 1-64 characters from `A-Z a-z 0-9 - _ .`; not `.` or `..`; unique in the file. It appears in URLs. |
-| `token` | object | yes | Exactly `{"env": "NAME"}`. The token itself cannot be written in the file. |
+| `token` | object | yes | Exactly `{"env": "NAME"}` or exactly `{"file": "PATH"}`. The token itself cannot be written in the config. `env` names a variable read once at startup. `file` names a file that lists the drive's tokens and is read again while the server runs; a relative path is taken from the config file's directory. `file` is refused together with `remote_sessions` or `forwarding`. See [Tokens](#tokens). |
 | `driver` | object | yes | A `memory`, `host`, `sqlite` or `splitstore` driver object, in the same shape as native mount configs. `remote` is rejected. |
 
 `memory` drives lose all data on restart. Do not serve one in production.
@@ -188,14 +190,25 @@ explicitly (`max_request_bytes` 8388608, `max_upload_bytes` 5368709120,
 
 ### Provisioning
 
-- One token per drive, supplied in the environment variable named by
-  `drives[].token.env`. Generate at least 32 random bytes, for example
+- Each drive gets its token from one of two places:
+  - `drives[].token.env`: an environment variable, read once at startup.
+    Changing it needs a restart.
+  - `drives[].token.file`: a file, read at startup and again while the
+    server runs. This is what makes [rotation](#rotation) without a restart
+    possible.
+- Generate at least 32 random bytes, for example
   `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='`.
 - A token must be non-empty and must not contain whitespace. An invalid token
   exits with code 2; a missing variable exits with code 1. Neither message
   contains the token.
-- The token is read once, at startup. It is never printed, never written to
-  the config, and never returned by the API.
+- A token file lists one token per line: the current token, and optionally
+  the one before it. Blank lines and white space around a token are
+  ignored. More than two tokens, no token, a token with white space inside
+  it, a file over 64 KiB or one that is not UTF-8 is not valid. At startup a
+  file that is missing or not valid exits with code 2 and a message that
+  names the drive, the file and the line, never its contents.
+- A token is never printed, never written to the config, and never returned
+  by the API.
 - Two drives may be given the same token. `GET /v1/drives` then lists both for
   that token. Use distinct tokens unless one consumer owns both drives.
 - A token grants full read and write access to its drive. There are no
@@ -203,19 +216,70 @@ explicitly (`max_request_bytes` 8388608, `max_upload_bytes` 5368709120,
 - Deliver the variables through the service manager's secret mechanism (for
   systemd, `EnvironmentFile=` with mode 0600, or `LoadCredential=`). Do not put
   tokens on the command line.
+- A token file must be readable by the service user and by no one else
+  (mode 0600, or a mounted secret). The server does not check its
+  permissions.
 
 ### Rotation
 
-**Rotation requires a restart.** There is no reload signal and a drive accepts
-only one token at a time.
+A drive whose token is a file is rotated **without a restart**, with a
+period in which the old and the new token both work:
+
+1. Write the new token as the first line of the file and keep the old one
+   as the second. Replace the file by writing a new one beside it and
+   renaming it into place, so that the server never reads half a file.
+2. The server picks the file up within `token_reload_seconds` (30 by
+   default), or at once on `SIGHUP`. From then on both tokens are accepted.
+3. Move the consumers to the new token.
+4. Remove the old token's line. Once that file is picked up the old token
+   gets the same `401` as any wrong token.
+
+Every reload writes one line to stderr:
+
+```json
+{"event":"http_token_reload","drive":"files","outcome":"reloaded","tokens":2,"error":null}
+```
+
+`outcome` is `reloaded` (the accepted tokens changed), `unchanged` (the file
+lists the tokens already accepted) or `refused`. `tokens` is how many tokens
+the drive accepts after the reload. `error` says why a file was refused and
+never quotes it. Check for `reloaded` with the count you expect before you
+tell consumers to switch, and again before you rely on the old token being
+gone.
+
+What to know:
+
+- **A file that is not valid changes nothing.** A file that cannot be read,
+  or that does not list one or two valid tokens, is refused whole: the
+  tokens accepted before stay accepted and one `refused` line is written.
+  The timer reports a bad file once, not at every look; `SIGHUP` always
+  reports. Deleting the file does not lock anyone out and does not revoke
+  anything.
+- **To revoke a token at once**, write a file with only the new token and
+  send `SIGHUP`. There is no overlap and consumers holding the old token
+  get `401` from that moment.
+- A request is checked against the tokens in force when it arrives. A
+  request already under way when its token is dropped finishes.
+- With a token file, `SIGHUP` reloads every token file and the process
+  keeps running. **A server with no token file does not handle `SIGHUP`:**
+  the signal ends the process, as it always has.
+- A mounted Kubernetes Secret is updated by the kubelet by renaming, so it
+  is picked up by the timer with no signal.
+- `token.file` cannot be used together with `remote_sessions` or
+  `forwarding`; the config is refused. A remote session and a forwarded
+  request are authorized against the token read at startup, which a reload
+  would not reach. Those experimental modes still rotate by restart.
+
+A drive whose token is an environment variable **rotates by restart**:
 
 1. Give the new token to the consumers, who must be able to switch on a 401.
 2. Update the environment source.
 3. Restart the service (SIGTERM, wait for exit, start).
 4. From the moment the new process is ready, the old token returns 401.
 
-During the restart the API is unavailable (the proxy returns 502), and
-there is no window in which both tokens work. Schedule rotations accordingly.
+During that restart the API is unavailable (the proxy returns 502), and
+there is no window in which both tokens work.
+
 The reverse proxy must not cache or log the `Authorization` header.
 
 ## Reverse proxy
@@ -530,6 +594,7 @@ State of the default build, without qualification:
 | Fatal error on stderr at exit | Yes |
 | `mount_cache_stats` JSON lines on stderr | Only with `cache_report_interval_seconds`, only for drives with a cache |
 | `{"event":"http_accept_failed","total":N}` JSON line on stderr | Yes, each time the count of failed `accept` calls rises |
+| `{"event":"http_token_reload",...}` JSON line on stderr | Yes, each time a token file is reloaded or refused (see [Rotation](#rotation)) |
 | `{"event":"http_drive_storage",...}` JSON line on stderr | Yes, each time the storage of a `host` or `sqlite` drive becomes unreachable or reachable again (see [Health checks](#health-checks)) |
 | Per-request access log (`http_request` JSON lines on stderr) | Only with `"access_log": true`; off by default (see [Access log](#access-log)) |
 | Metrics endpoint (Prometheus or other) | **No** |
@@ -641,6 +706,7 @@ request.
 | `drive shutdown timed out` on stderr at stop | Process stderr | A drive did not flush and release its lease within `drive_shutdown_timeout_ms`; the lease stays held until it expires | Check the storage of the drive named in the message; expect the restart to wait for the lease; raise the bound if the storage was only slow |
 | `HTTP server close timed out` on stderr at stop | Process stderr | The drain deadline passed and requests were aborted | Usually a stalled client; check that `drain_timeout_ms` exceeds `request_timeout_ms` |
 | 401 rate spike | Proxy log | Rotated token not picked up, or probing | Check with the consumer |
+| `http_token_reload` line with `"outcome":"refused"` on stderr | Process stderr | A token file is missing, unreadable or not valid. The drive still accepts the tokens it accepted before, so a rotation that was meant to happen has not | Fix the file named in `error`; send `SIGHUP` or wait for the timer; look for `"outcome":"reloaded"` |
 | 413 rate above baseline | Proxy log | Consumers hitting the upload or listing limit | Talk to the consumer; consider the limits |
 | Free disk on the storage volume below threshold | Host | Leads to 507 | Add space |
 | Open connections above 80% of `max_connections` | Proxy or host | Approaching refusal | Raise the limit or reduce proxy keep-alive |
@@ -658,6 +724,8 @@ request.
 | Start fails with code 1 and a bind error | Port in use | Stop the other listener or change `port`. |
 | Start fails with code 1 and a hash or integrity message | Stored block content does not match its hash | Do not serve. Restore from backup. |
 | Start fails with code 1 and `missing environment variable` | Token variable not set | Fix the environment source. |
+| Start fails with code 2 and `invalid HTTP drive '<id>': ... token file` | The drive's token file is missing, unreadable or does not list one or two valid tokens | Fix the file. The message names the line at fault. |
+| A consumer's new token gets 401 after a rotation | The file was refused, or has not been looked at yet | Read the last `http_token_reload` line for the drive. Fix the file if it was refused; send `SIGHUP`. |
 | `HTTP listener exited unexpectedly`, exit 1 | The accept task ended | Restart. Accept errors, including `EMFILE`/`ENFILE`, are retried with back-off and logged as `http_accept_failed`; they do not cause this. |
 | `http_accept_failed` lines, clients time out connecting | Out of file descriptors | Raise `LimitNOFILE`; the listener recovers by itself when descriptors are free. |
 | Stop ends with code 1 and `drive shutdown timed out after N ms: drive 'X' did not finish` | The drive's storage did not answer in time while flushing or releasing the lease | Fix the storage. The lease of that drive, and of any drive named as not attempted, stays held until it expires, so restarts fail with `EAGAIN ... acquire writer` until then. Acknowledged durable writes are intact. |
@@ -830,8 +898,12 @@ Secrets
 
 - [ ] Each drive has its own random token, delivered through the secret
       mechanism, not the command line or the config file.
-- [ ] Consumers know that rotation needs a restart and that the old token
-      stops working at once.
+- [ ] Drives that must rotate without a restart take their token from a
+      file (`token.file`) that only the service user can read.
+- [ ] Consumers know how a rotation reaches them: with a token file, a
+      period in which both tokens work and then `401` for the old one; with
+      an environment variable, a restart after which the old token stops
+      working at once.
 
 Proxy
 

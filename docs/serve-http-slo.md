@@ -120,9 +120,11 @@ with figures from your own baseline after two to four weeks of data.
 
 The availability objective is bounded by facts in the runbook:
 
-- **Every change is a restart.** Binary upgrades, config changes, token
-  rotations and cold backups each stop the service. There is no reload and no
-  second instance of a drive.
+- **Almost every change is a restart.** Binary upgrades, config changes
+  and cold backups each stop the service, and so does rotating a token that
+  comes from an environment variable. The one change that does not is
+  rotating a token that comes from a file (`token.file`), which is reloaded
+  while the server runs. There is no second instance of a drive.
 - **A clean restart** costs the drain of in-flight requests (up to
   `drain_timeout_ms`, 35 s by default, plus up to 5 s), the storage flush,
   and the start. The project has not published a measured figure for this;

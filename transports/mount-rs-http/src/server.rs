@@ -79,6 +79,8 @@ pub enum RegistryError {
     InvalidDriveId,
     EmptyBearerToken,
     DuplicateDrive,
+    /// A drive was given no token, or more than [`MAX_DRIVE_TOKENS`].
+    TokenCount,
 }
 
 impl fmt::Display for RegistryError {
@@ -91,18 +93,95 @@ impl fmt::Display for RegistryError {
                 f.write_str("drive bearer token must be non-empty and contain no whitespace")
             }
             Self::DuplicateDrive => f.write_str("drive id is already registered"),
+            Self::TokenCount => f.write_str("a drive accepts one or two bearer tokens"),
         }
     }
 }
 
 impl std::error::Error for RegistryError {}
 
-/// A named logical drive.  The bearer token is intentionally private and is
-/// never included in `Debug`, discovery responses, or error responses.
+/// Most bearer tokens a drive accepts at once: the current one and, while
+/// its clients move to it, the one before.
+pub const MAX_DRIVE_TOKENS: usize = 2;
+
+/// The bearer tokens a drive accepts. A request is authorized by any of
+/// them. The set can be replaced while the server runs, which is how a
+/// token is rotated without a restart: accept the new token beside the old
+/// one, move the clients, then drop the old one.
+///
+/// A clone is another handle on the same set: replacing the tokens through
+/// one is seen by the server that holds another. The tokens are never
+/// included in `Debug`.
+#[derive(Clone)]
+pub struct DriveTokens(Arc<ArcSwap<Vec<String>>>);
+
+impl fmt::Debug for DriveTokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DriveTokens")
+            .field("count", &self.len())
+            .field("tokens", &"<redacted>")
+            .finish()
+    }
+}
+
+impl DriveTokens {
+    /// One to [`MAX_DRIVE_TOKENS`] tokens, each valid by
+    /// [`DriveConfig::validate_bearer_token`].
+    pub fn new(tokens: Vec<String>) -> Result<Self, RegistryError> {
+        Self::validate(&tokens)?;
+        Ok(Self(Arc::new(ArcSwap::from_pointee(tokens))))
+    }
+
+    /// Accept `tokens` instead of the current set, from the next request
+    /// on. A set that is not valid is refused and the current one stays.
+    /// Returns whether the set changed.
+    pub fn replace(&self, tokens: Vec<String>) -> Result<bool, RegistryError> {
+        Self::validate(&tokens)?;
+        let changed = **self.0.load() != tokens;
+        if changed {
+            self.0.store(Arc::new(tokens));
+        }
+        Ok(changed)
+    }
+
+    /// How many tokens are accepted.
+    pub fn len(&self) -> usize {
+        self.0.load().len()
+    }
+
+    /// Never true: a drive always accepts at least one token.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn validate(tokens: &[String]) -> Result<(), RegistryError> {
+        if tokens.is_empty() || tokens.len() > MAX_DRIVE_TOKENS {
+            return Err(RegistryError::TokenCount);
+        }
+        tokens
+            .iter()
+            .try_for_each(|token| DriveConfig::validate_bearer_token(token))
+    }
+
+    /// Whether `candidate` is one of the tokens. Every token is compared
+    /// in full, whether or not an earlier one matched, so the time taken
+    /// says nothing about which token it was or how much of one matched.
+    fn matches(&self, candidate: &str) -> bool {
+        let tokens = self.0.load();
+        let mut matched = false;
+        for token in tokens.iter() {
+            matched |= constant_time_eq(token.as_bytes(), candidate.as_bytes());
+        }
+        matched
+    }
+}
+
+/// A named logical drive.  Its bearer tokens are intentionally private and
+/// are never included in `Debug`, discovery responses, or error responses.
 pub struct DriveConfig {
     id: String,
     driver: Arc<dyn FsDriver>,
-    bearer_token: String,
+    tokens: DriveTokens,
     health_check: Option<HealthCheck>,
 }
 
@@ -115,7 +194,7 @@ impl fmt::Debug for DriveConfig {
         f.debug_struct("DriveConfig")
             .field("id", &self.id)
             .field("driver", &"<FsDriver>")
-            .field("bearer_token", &"<redacted>")
+            .field("bearer_tokens", &"<redacted>")
             .finish()
     }
 }
@@ -125,7 +204,8 @@ impl Clone for DriveConfig {
         Self {
             id: self.id.clone(),
             driver: Arc::clone(&self.driver),
-            bearer_token: self.bearer_token.clone(),
+            // The same set, so that a rotation reaches every copy.
+            tokens: self.tokens.clone(),
             health_check: self.health_check.clone(),
         }
     }
@@ -138,14 +218,22 @@ impl DriveConfig {
         driver: Arc<dyn FsDriver>,
         bearer_token: impl Into<String>,
     ) -> Result<Self, RegistryError> {
+        Self::with_tokens(id, driver, DriveTokens::new(vec![bearer_token.into()])?)
+    }
+
+    /// Create a drive that accepts `tokens`. Keep a clone of them to
+    /// [`DriveTokens::replace`] the set while the server runs.
+    pub fn with_tokens(
+        id: impl Into<String>,
+        driver: Arc<dyn FsDriver>,
+        tokens: DriveTokens,
+    ) -> Result<Self, RegistryError> {
         let id = id.into();
-        let bearer_token = bearer_token.into();
         Self::validate_id(&id)?;
-        Self::validate_bearer_token(&bearer_token)?;
         Ok(Self {
             id,
             driver,
-            bearer_token,
+            tokens,
             health_check: None,
         })
     }
@@ -201,7 +289,7 @@ impl DriveConfig {
     }
 
     fn token_matches(&self, candidate: &str) -> bool {
-        constant_time_eq(self.bearer_token.as_bytes(), candidate.as_bytes())
+        self.tokens.matches(candidate)
     }
 }
 

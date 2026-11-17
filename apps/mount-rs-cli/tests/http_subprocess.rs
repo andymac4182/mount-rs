@@ -809,6 +809,225 @@ fn readiness_follows_the_storage_of_host_and_sqlite_drives() {
     );
 }
 
+/// Replace a token file the way an operator should: written beside it and
+/// renamed over it, so the server never reads half a file.
+#[cfg(unix)]
+fn replace_token_file(path: &Path, contents: &str) {
+    let staged = path.with_extension("staged");
+    fs::write(&staged, contents).expect("write staged token file");
+    fs::rename(&staged, path).expect("rename token file into place");
+}
+
+/// Wait for the next `http_token_reload` line on stderr and return it with
+/// every stderr line read on the way.
+#[cfg(unix)]
+fn next_token_reload(child: &HttpChild, seen: &mut Vec<String>) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let line = child
+            .stderr
+            .recv_timeout(wait)
+            .unwrap_or_else(|error| panic!("no token reload line: {error}; stderr={seen:?}"));
+        seen.push(line.clone());
+        if let Ok(record) = serde_json::from_str::<serde_json::Value>(&line)
+            && record["event"] == "http_token_reload"
+        {
+            return record;
+        }
+    }
+}
+
+/// A drive whose token is a file is rotated without a restart: the new
+/// token is accepted beside the old one, then the old one is dropped and
+/// gets what a token that was never valid gets. A file that is not valid
+/// changes nothing, and SIGHUP reloads instead of ending the process.
+#[cfg(unix)]
+#[test]
+fn a_token_file_is_rotated_without_a_restart() {
+    const OLD: &str = "rotation-old-token";
+    const NEW: &str = "rotation-new-token";
+    let root = temporary_root();
+    let token_file = root.join("files.token");
+    fs::write(&token_file, format!("{OLD}\n")).expect("write token file");
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {
+            "host": "127.0.0.1",
+            "port": 0,
+            "token_reload_seconds": 1,
+            "drives": [
+                {
+                    "id": "files",
+                    // Relative to the config file.
+                    "token": {"file": "files.token"},
+                    "driver": {"kind": "memory"}
+                },
+                {
+                    "id": "memory",
+                    "token": {"env": "MOUNT_RS_HTTP_MEMORY_TOKEN"},
+                    "driver": {"kind": "memory"}
+                }
+            ]
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    let mut child = HttpChild::start(&config_path, root.clone());
+    let (address, _ready) = child.ready();
+    let stat = |token: &str| request(address, "GET", "/v1/drives/files/stat", token, &[]);
+    let status = |token: &str| stat(token).status;
+    let mut stderr = Vec::new();
+
+    assert_eq!((status(OLD), status(NEW)), (200, 401));
+    let never_valid = stat("never-a-token");
+    assert_eq!(never_valid.status, 401);
+
+    // The overlap, picked up by the timer with no signal sent.
+    replace_token_file(&token_file, &format!("{NEW}\n{OLD}\n"));
+    let reloaded = next_token_reload(&child, &mut stderr);
+    assert_eq!(
+        reloaded,
+        serde_json::json!({
+            "event": "http_token_reload", "drive": "files",
+            "outcome": "reloaded", "tokens": 2, "error": null
+        })
+    );
+    assert_eq!((status(OLD), status(NEW)), (200, 200));
+    let drives = request(address, "GET", "/v1/drives", NEW, &[]);
+    assert_eq!(drives.body, br#"[{"id":"files"}]"#);
+
+    // SIGHUP with nothing changed: an answer, and the process goes on.
+    child.signal(libc::SIGHUP);
+    let unchanged = next_token_reload(&child, &mut stderr);
+    assert_eq!(
+        (&unchanged["outcome"], &unchanged["tokens"]),
+        (&"unchanged".into(), &2.into())
+    );
+    assert_eq!((status(OLD), status(NEW)), (200, 200));
+
+    // The old token is dropped.
+    replace_token_file(&token_file, &format!("{NEW}\n"));
+    let dropped = next_token_reload(&child, &mut stderr);
+    assert_eq!(
+        (&dropped["outcome"], &dropped["tokens"]),
+        (&"reloaded".into(), &1.into())
+    );
+    assert_eq!(status(NEW), 200);
+    let old = stat(OLD);
+    assert_eq!(old.status, 401);
+    assert_eq!(old.body, never_valid.body);
+    assert_eq!(
+        old.header("www-authenticate"),
+        never_valid.header("www-authenticate")
+    );
+    assert_eq!(request(address, "GET", "/v1/drives", OLD, &[]).status, 401);
+
+    // Files that are not valid: each is refused and the token stays.
+    for (bad, reason) in [
+        (
+            format!("{OLD}\nrotation-third-token\nrotation-fourth-token\n"),
+            "more than 2",
+        ),
+        (format!("{OLD} with a space\n"), "line 1 is not a token"),
+        (String::new(), "lists no token"),
+    ] {
+        replace_token_file(&token_file, &bad);
+        let refused = next_token_reload(&child, &mut stderr);
+        assert_eq!(refused["outcome"], "refused", "{refused}");
+        assert_eq!(refused["tokens"], 1, "{refused}");
+        let error = refused["error"].as_str().expect("error");
+        assert!(error.contains(reason), "{error}");
+        assert_eq!((status(OLD), status(NEW)), (401, 200));
+    }
+    fs::remove_file(&token_file).expect("remove token file");
+    let missing = next_token_reload(&child, &mut stderr);
+    assert_eq!(missing["outcome"], "refused", "{missing}");
+    assert!(missing["error"].as_str().unwrap().contains("cannot read"));
+    assert_eq!((status(OLD), status(NEW)), (401, 200));
+
+    // The other drive's token, from the environment, was never touched.
+    let memory = request(
+        address,
+        "GET",
+        "/v1/drives/memory/stat",
+        "memory-test-token",
+        &[],
+    );
+    assert_eq!(memory.status, 200);
+
+    child.signal(libc::SIGINT);
+    let exit = child.wait_for_exit(Duration::from_secs(10));
+    assert!(exit.success(), "{exit}");
+    let (_stdout, rest) = child.output();
+    stderr.extend(rest);
+    let reloads = stderr
+        .iter()
+        .filter(|line| line.contains("http_token_reload"))
+        .count();
+    assert_eq!(reloads, 7, "a bad file is reported once: {stderr:?}");
+    assert!(
+        !stderr.iter().any(|line| line.contains("rotation-")),
+        "no token is written to stderr: {stderr:?}"
+    );
+}
+
+/// A server with no token file leaves SIGHUP alone: it ends the process,
+/// as it did before tokens could be reloaded.
+#[cfg(unix)]
+#[test]
+fn sighup_still_ends_a_server_that_has_no_token_file() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let root = temporary_root();
+    let config_path = write_http_config(&root);
+    let mut child = HttpChild::start(&config_path, root);
+    let (address, _ready) = child.ready();
+    assert_eq!(request(address, "GET", "/healthz", "", &[]).status, 200);
+    child.signal(libc::SIGHUP);
+    let exit = child.wait_for_exit(Duration::from_secs(10));
+    assert_eq!(exit.signal(), Some(libc::SIGHUP), "{exit}");
+}
+
+/// A token file that is missing or not valid stops the server from
+/// starting, and the message does not quote the file.
+#[test]
+fn a_token_file_that_is_not_valid_fails_startup() {
+    let root = temporary_root();
+    let token_file = root.join("files.token");
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {"host": "127.0.0.1", "port": 0, "drives": [{
+            "id": "files", "token": {"file": token_file}, "driver": {"kind": "memory"}
+        }]}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    for (contents, reason) in [
+        (None, "cannot read"),
+        (
+            Some("startup-secret-a\nstartup-secret-b\nstartup-secret-c\n"),
+            "more than 2",
+        ),
+        (Some("\n"), "lists no token"),
+    ] {
+        if let Some(contents) = contents {
+            fs::write(&token_file, contents).expect("write token file");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+            .args(["serve-http", "--config"])
+            .arg(&config_path)
+            .output()
+            .expect("run mount-rs");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid HTTP drive 'files'"), "{stderr}");
+        assert!(stderr.contains(reason), "{stderr}");
+        assert!(!stderr.contains("startup-secret"), "{stderr}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[cfg(unix)]
 #[test]
 fn the_access_log_writes_one_line_per_request_and_no_path_or_token() {

@@ -992,27 +992,56 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     // Kept until the command returns: dropping one stops its thread.
     let mut storage_checks = Vec::new();
     let mut configured_drives = Vec::with_capacity(http.drives.len());
+    // The drives whose token is a file, which is read again while the
+    // server runs.
+    let mut token_files = Vec::new();
     for drive in &http.drives {
-        let token = std::env::var(&drive.token.name).map_err(|_| {
-            CliError::runtime(format!("missing environment variable {}", drive.token.name))
-        })?;
-        HttpDriveConfig::validate_bearer_token(&token).map_err(|error| {
+        let invalid_drive = |error: &dyn std::fmt::Display| {
             CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id))
-        })?;
-        let credentials = if http.remote_sessions {
-            Some(mount_rs_cluster::SessionCredentials::new(vec![(
+        };
+        let (tokens, token) = match &drive.token {
+            crate::config::TokenSource::Env(variable) => {
+                let token = std::env::var(&variable.name).map_err(|_| {
+                    CliError::runtime(format!("missing environment variable {}", variable.name))
+                })?;
+                let tokens = mount_rs_http::DriveTokens::new(vec![token.clone()])
+                    .map_err(|error| invalid_drive(&error))?;
+                (tokens, Some(token))
+            }
+            crate::config::TokenSource::File(path) => {
+                let loaded = crate::token_reload::LoadedTokens::load(path)
+                    .map_err(|error| invalid_drive(&error))?;
+                let tokens = loaded.tokens();
+                token_files.push((drive.id.clone(), loaded));
+                (tokens, None)
+            }
+        };
+        let credentials = match (&token, http.remote_sessions) {
+            (Some(token), true) => Some(mount_rs_cluster::SessionCredentials::new(vec![(
                 "configured-volume-client".into(),
                 token.clone(),
-            )])?)
-        } else {
-            None
+            )])?),
+            _ => None,
         };
-        configured_drives.push((drive, token, credentials));
+        configured_drives.push((drive, tokens, token, credentials));
     }
     let mut ctrl_c = CtrlCHandler::install().await?;
+    // Only a server with a token file takes SIGHUP for itself: without one
+    // the signal does what it always did. Kept until the command returns:
+    // dropping it stops the reloads.
+    let _token_reloader = if token_files.is_empty() {
+        None
+    } else {
+        let poll =
+            (http.token_reload_seconds > 0).then(|| Duration::from_secs(http.token_reload_seconds));
+        Some(crate::token_reload::TokenReloader::start(
+            token_files,
+            poll,
+        )?)
+    };
     let startup = async {
         let mut owned = Vec::new();
-        for (drive, token, credentials) in configured_drives {
+        for (drive, tokens, token, credentials) in configured_drives {
             let options = drive.driver.to_options();
             let metadata_pool = match (
                 http.tidb_metadata_pool_limit,
@@ -1058,6 +1087,11 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                         "peer owner requires a local splitstore runtime",
                     ));
                 };
+                let Some(token) = token else {
+                    return Err(CliError::usage(
+                        "peer owner requires drive tokens from the environment",
+                    ));
+                };
                 owned.push((drive.id.clone(), token, filesystem.clone(), credentials));
                 continue;
             }
@@ -1067,8 +1101,9 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
             }
             let invalid_drive =
                 |error| CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id));
-            let mut configured = HttpDriveConfig::new(drive.id.clone(), runtime.driver(), token)
-                .map_err(invalid_drive)?;
+            let mut configured =
+                HttpDriveConfig::with_tokens(drive.id.clone(), runtime.driver(), tokens)
+                    .map_err(invalid_drive)?;
             if let Some(storage) = checked_storage(&options)? {
                 let check = crate::storage_check::StorageCheck::start(&drive.id, storage)
                     .map_err(io_error)?;

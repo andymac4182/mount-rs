@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, Result, Stats,
 };
-use mount_rs_http::{DriveConfig, DriveRegistry, HttpServer, HttpServerOptions};
+use mount_rs_http::{DriveConfig, DriveRegistry, DriveTokens, HttpServer, HttpServerOptions};
 use mount_rs_memfs::MemoryFs;
 use mount_rs_sqlite_fs::open_sqlite_memory;
 use reqwest::StatusCode;
@@ -1125,6 +1125,109 @@ async fn an_unknown_operation_is_no_route_with_or_without_a_token() {
             ("ENOENT", "drive or route not found")
         );
     }
+    server.close().await.expect("close");
+}
+
+/// Everything a caller can see of a response, for comparing two of them.
+async fn observable(response: reqwest::Response) -> (u16, Vec<(String, String)>, String) {
+    let status = response.status().as_u16();
+    let mut headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "date" | "x-request-id"))
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+        .collect();
+    headers.sort();
+    (status, headers, response.text().await.unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drive_accepts_each_of_its_tokens_until_the_set_is_replaced() {
+    const OLD: &str = "token-before-rotation";
+    const NEW: &str = "token-after-rotation";
+    let tokens = DriveTokens::new(vec![OLD.to_owned()]).expect("tokens");
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::with_tokens("d", Arc::new(MemoryFs::empty()), tokens.clone())
+                .expect("drive config"),
+        )
+        .expect("register");
+    registry
+        .register(DriveConfig::new("other", Arc::new(MemoryFs::empty()), TOKEN).unwrap())
+        .expect("register");
+    let server = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    let client = reqwest::Client::new();
+    let with = |token: &str, route: &str| {
+        client
+            .get(format!("{}{route}", server.url()))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+    };
+    let status = |token: &'static str| {
+        let request = with(token, "/v1/drives/d/stat");
+        async move { request.await.unwrap().status().as_u16() }
+    };
+    let never_valid = observable(with("never-a-token", "/v1/drives/d/stat").await.unwrap()).await;
+    assert_eq!(never_valid.0, 401);
+
+    assert_eq!((status(OLD).await, status(NEW).await), (200, 401));
+
+    // The overlap: both are accepted, on the drive's routes and in discovery.
+    assert_eq!(
+        tokens.replace(vec![NEW.to_owned(), OLD.to_owned()]),
+        Ok(true)
+    );
+    assert_eq!((status(OLD).await, status(NEW).await), (200, 200));
+    for token in [OLD, NEW] {
+        let drives: Value = with(token, "/v1/drives")
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(drives, json!([{"id": "d"}]), "{token}");
+    }
+    // Still only this drive's tokens, and only on this drive.
+    assert_eq!(status(TOKEN).await, 401);
+    assert_eq!(
+        with(NEW, "/v1/drives/other/stat").await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // A set that is not valid is refused whole and changes nothing.
+    for refused in [
+        vec![],
+        vec![String::new()],
+        vec![NEW.to_owned(), "has a space".to_owned()],
+        vec![NEW.to_owned(), OLD.to_owned(), "third".to_owned()],
+    ] {
+        assert!(tokens.replace(refused).is_err());
+    }
+    assert_eq!((status(OLD).await, status(NEW).await), (200, 200));
+    assert_eq!(
+        tokens.replace(vec![NEW.to_owned(), OLD.to_owned()]),
+        Ok(false)
+    );
+
+    // The old token is dropped: it now gets exactly what a token that was
+    // never valid gets.
+    assert_eq!(tokens.replace(vec![NEW.to_owned()]), Ok(true));
+    assert_eq!(status(NEW).await, 200);
+    assert_eq!(
+        observable(with(OLD, "/v1/drives/d/stat").await.unwrap()).await,
+        never_valid
+    );
+    assert_eq!(
+        with(OLD, "/v1/drives").await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        !format!("{tokens:?}").contains(NEW),
+        "tokens are not printed"
+    );
     server.close().await.expect("close");
 }
 

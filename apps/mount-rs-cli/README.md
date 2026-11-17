@@ -289,7 +289,8 @@ config file's directory.
 
 - `id`: 1-64 characters from `A-Z a-z 0-9 - _ .`, unique, used in URLs;
 - `token`: `{"env": "NAME"}`, the environment variable that holds the drive's
-  bearer token;
+  bearer token, or `{"file": "PATH"}`, a file that lists it (see
+  [Tokens](#tokens));
 - `driver`: a `memory`, `host`, `sqlite` or `splitstore` driver object in the
   same shape as native configs. `remote` drivers are rejected.
 
@@ -323,11 +324,36 @@ within a file read are sequential. Parallel block fetches are not supported.
 
 ### Tokens
 
-The token value is read from the named environment variable once, when the
-service starts. It is never printed and never stored in the config. It must be
+A token is never printed and never stored in the config. It must be
 non-empty and contain no whitespace. Each token is valid only for its own
 drive; a request for an unknown drive gets the same `401` as a wrong token.
-Changing a token requires a restart.
+
+With `{"env": "NAME"}` the token is read from that environment variable once,
+when the service starts. Changing it requires a restart.
+
+With `{"file": "PATH"}` the token is read from a file, at startup and again
+while the service runs, so it can be rotated without a restart. The file
+lists one token per line: the current one and, optionally, the one before
+it. Both are accepted, which gives clients time to move. A relative path is
+taken from the config file's directory. The file is read again:
+
+- when the process receives `SIGHUP` (Unix), and
+- every `http.token_reload_seconds` (default `30`, allowed `0`-`3600`), if
+  its contents have changed. `0` turns the timer off.
+
+A file that cannot be read, or that does not list one or two valid tokens,
+is refused whole and the tokens in force stay as they were. Each reload
+writes one `{"event":"http_token_reload","drive":...,"outcome":"reloaded"|"unchanged"|"refused","tokens":N,"error":...}`
+line to stderr, which never contains a token. At startup such a file is an
+error.
+
+To rotate: put the new token on the first line and keep the old one on the
+second; move the clients; then remove the old line. Replace the file by
+renaming a new one into place.
+
+`token.file` is refused together with `http.remote_sessions` or
+`http.forwarding`: those authorize against the token read at startup. A
+server with no token file does not handle `SIGHUP` for tokens.
 
 ### Network exposure
 
@@ -952,7 +978,8 @@ A running server reads the membership file again, without a restart:
   `0`–`3600`), if the file's contents have changed. `0` turns the timer off,
   leaving `SIGHUP` as the only trigger.
 
-A server with no `forwarding` block does not handle `SIGHUP`.
+A server with no `forwarding` block does not handle `SIGHUP`, unless a
+drive's token is a file (see [Tokens](#tokens)).
 
 The new file is checked in full before anything changes. If it cannot be
 read or parsed, breaks a rule above, lists more servers than

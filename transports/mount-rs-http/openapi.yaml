@@ -1058,7 +1058,10 @@ components:
       type: http
       scheme: bearer
       description: |
-        `Authorization: Bearer <token>`. Each drive has one static token. The
+        `Authorization: Bearer <token>`. Each drive has its own token, and
+        while the operator rotates it accepts two: the new one and the one
+        before. A token that has been dropped gets the same 401 as any wrong
+        token. The
         token is opaque, non-empty and contains no whitespace. The scheme
         name is matched case-insensitively; the token is compared exactly.
         A token for one drive is rejected on every other drive. A request for

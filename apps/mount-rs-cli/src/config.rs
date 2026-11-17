@@ -285,6 +285,9 @@ pub(crate) struct HttpServiceConfig {
     pub request_timeout_ms: u64,
     /// Write one JSON line per request to stderr.
     pub access_log: bool,
+    /// How often token files are looked at for a change, in seconds; zero
+    /// reloads them on SIGHUP only.
+    pub token_reload_seconds: u64,
     pub drives: Vec<HttpDriveConfig>,
     pub disk_cache_budget: Option<DiskCacheBudgetConfig>,
     pub tidb_metadata_pool_limit: Option<usize>,
@@ -346,8 +349,18 @@ pub(crate) struct DiskCacheBudgetConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HttpDriveConfig {
     pub id: String,
-    pub token: EnvReference,
+    pub token: TokenSource,
     pub driver: ConfigSpec,
+}
+
+/// Where a drive's bearer token comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TokenSource {
+    /// An environment variable, read once when the server starts.
+    Env(EnvReference),
+    /// A file listing the current token and optionally the one before,
+    /// read again while the server runs.
+    File(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -665,6 +678,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "max_connections",
             "request_timeout_ms",
             "access_log",
+            "token_reload_seconds",
             "disk_cache_budget",
             "tidb_metadata_pool_limit",
             "cache_report_interval_seconds",
@@ -796,6 +810,44 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         validate_cache_capacity(capacity, &parsed_drives)?;
     }
     let remote_sessions = optional_bool(object, "remote_sessions", "config.http")?.unwrap_or(false);
+    let file_token = parsed_drives
+        .iter()
+        .position(|drive| matches!(drive.token, TokenSource::File(_)));
+    if let Some(index) = file_token {
+        // A remote session and a forwarded request are authorized against
+        // the tokens read at startup, which a reload would not reach.
+        let conflict = if remote_sessions {
+            Some("remote_sessions")
+        } else if forwarding.is_some() {
+            Some("forwarding")
+        } else {
+            None
+        };
+        if let Some(conflict) = conflict {
+            return Err(ConfigError::at(
+                &format!("config.http.drives[{index}].token.file"),
+                format!(
+                    "cannot be used with config.http.{conflict}: tokens are not reloaded there; use token.env"
+                ),
+            ));
+        }
+    }
+    let token_reload_seconds = match optional_u32(object, "token_reload_seconds", "config.http")? {
+        Some(_) if file_token.is_none() => {
+            return Err(ConfigError::at(
+                "config.http.token_reload_seconds",
+                "requires a drive whose token is a file",
+            ));
+        }
+        Some(seconds) if seconds > 3600 => {
+            return Err(ConfigError::at(
+                "config.http.token_reload_seconds",
+                "must be between 0 and 3600; 0 turns polling off",
+            ));
+        }
+        Some(seconds) => u64::from(seconds),
+        None => 30,
+    };
     let sessions = match object.get("sessions") {
         // The limits bound remote sessions; without them they would be
         // accepted and silently do nothing.
@@ -847,6 +899,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         max_connections,
         request_timeout_ms,
         access_log,
+        token_reload_seconds,
         drives: parsed_drives,
         tidb_metadata_pool_limit: object
             .get("tidb_metadata_pool_limit")
@@ -1022,7 +1075,7 @@ fn parse_http_drive(
     )?;
     mount_rs_http::DriveConfig::validate_id(&id)
         .map_err(|error| ConfigError::at(&format!("{path}.id"), error.to_string()))?;
-    let token = required_env_reference(object, "token", &format!("{path}.token"))?;
+    let token = parse_token_source(object, base_dir, &format!("{path}.token"))?;
     let driver_value = object
         .get("driver")
         .ok_or_else(|| ConfigError::at(&format!("{path}.driver"), "is required"))?;
@@ -2258,6 +2311,27 @@ fn optional_u16(
             })
         })
         .transpose()
+}
+
+/// A drive's `token`: `{"env": NAME}` or `{"file": PATH}`, never both and
+/// never the token itself.
+fn parse_token_source(
+    fields: &Map<String, Value>,
+    base_dir: &Path,
+    path: &str,
+) -> Result<TokenSource, ConfigError> {
+    let value = fields
+        .get("token")
+        .ok_or_else(|| ConfigError::at(path, "is required"))?;
+    let source = object(value, path)?;
+    reject_unknown(source, &["env", "file"], path)?;
+    match (source.get("env"), source.get("file")) {
+        (Some(_), Some(_)) => Err(ConfigError::at(path, "takes env or file, not both")),
+        (None, Some(file)) => {
+            parse_path(file, &format!("{path}.file"), base_dir).map(TokenSource::File)
+        }
+        _ => required_env_reference(fields, "token", path).map(TokenSource::Env),
+    }
 }
 
 fn required_env_reference(
@@ -3873,6 +3947,121 @@ mod tests {
     }
 
     #[test]
+    fn a_drive_token_is_an_environment_variable_or_a_file() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[
+            {"id":"a","token":{"file":"secrets/a.token"},"driver":{"kind":"memory"}},
+            {"id":"b","token":{"file":"/run/secrets/b.token"},"driver":{"kind":"memory"}},
+            {"id":"c","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}}
+        ]}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("/config-root"))
+                .map(|config| config.http.unwrap())
+        };
+        let http = parse(&source).unwrap();
+        assert_eq!(
+            http.drives
+                .iter()
+                .map(|drive| drive.token.clone())
+                .collect::<Vec<_>>(),
+            [
+                // Relative to the config file, like every other path in it.
+                TokenSource::File("/config-root/secrets/a.token".into()),
+                TokenSource::File("/run/secrets/b.token".into()),
+                TokenSource::Env(EnvReference {
+                    name: "TEST_TOKEN".into()
+                }),
+            ]
+        );
+        assert_eq!(http.token_reload_seconds, 30);
+        for valid in [0, 1, 3600] {
+            source["http"]["token_reload_seconds"] = valid.into();
+            assert_eq!(parse(&source).unwrap().token_reload_seconds, valid);
+        }
+        for invalid in [
+            serde_json::json!(3601),
+            serde_json::json!(-1),
+            serde_json::json!("30"),
+        ] {
+            source["http"]["token_reload_seconds"] = invalid;
+            assert!(parse(&source).is_err());
+        }
+        source["http"]
+            .as_object_mut()
+            .unwrap()
+            .remove("token_reload_seconds");
+
+        for invalid in [
+            serde_json::json!({"env":"TEST_TOKEN","file":"a.token"}),
+            serde_json::json!({"file":""}),
+            serde_json::json!({"file":7}),
+            serde_json::json!({"file":"a.token","mode":"0600"}),
+            serde_json::json!({}),
+            serde_json::json!("a-token-written-into-the-config"),
+        ] {
+            let mut source = source.clone();
+            source["http"]["drives"][0]["token"] = invalid;
+            let error = parse(&source).unwrap_err().to_string();
+            assert!(error.contains("config.http.drives[0].token"), "{error}");
+            assert!(!error.contains("a-token-written"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_reload_interval_needs_a_token_file() {
+        let source = serde_json::json!({"version":1,"http":{"token_reload_seconds":5,"drives":[
+            {"id":"c","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}}
+        ]}});
+        let error = parse_config_str(&source.to_string(), Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("config.http.token_reload_seconds"),
+            "{error}"
+        );
+        assert!(
+            error.contains("requires a drive whose token is a file"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_token_file_is_refused_where_tokens_are_not_reloaded() {
+        // Remote sessions and forwarding authorize against the tokens read
+        // at startup: a file that is reloaded would promise a rotation they
+        // do not make.
+        let storage = serde_json::json!({
+            "metadata":{"kind":"memory"},"blocks":{"kind":"memory"}
+        });
+        let sessions = serde_json::json!({"version":1,"http":{"remote_sessions":true,"drives":[
+            {"id":"first","token":{"env":"TEST_TOKEN"},"driver":{"kind":"splitstore","storage":storage}},
+            {"id":"second","token":{"file":"second.token"},"driver":{"kind":"splitstore","storage":storage}}
+        ]}});
+        let error = parse_config_str(&sessions.to_string(), Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("config.http.drives[1].token.file"),
+            "{error}"
+        );
+        assert!(error.contains("config.http.remote_sessions"), "{error}");
+
+        let forwarding = serde_json::json!({"version":1,"http":{"drives":[
+            {"id":"first","token":{"file":"first.token"},"driver":{"kind":"memory"}}
+        ],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let error = parse_config_str(&forwarding.to_string(), Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("config.http.drives[0].token.file"),
+            "{error}"
+        );
+        assert!(error.contains("config.http.forwarding"), "{error}");
+    }
+
+    #[test]
     fn shared_disk_budget_is_explicit_and_bounded() {
         let mut source = serde_json::json!({"version":1,"http":{"drives":[{
             "id":"memory","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}
@@ -4014,7 +4203,13 @@ mod tests {
         assert_eq!(http.max_connections, 12);
         assert_eq!(http.request_timeout_ms, 750);
         assert_eq!(http.drives.len(), 2);
-        assert_eq!(http.drives[0].token.name, "MOUNT_RS_MEMORY_TOKEN");
+        assert_eq!(
+            http.drives[0].token,
+            TokenSource::Env(EnvReference {
+                name: "MOUNT_RS_MEMORY_TOKEN".into()
+            })
+        );
+        assert_eq!(http.token_reload_seconds, 30);
         assert_eq!(
             http.drives[1].driver.database,
             Some("/tmp/config/state/sqlite.db".into())

@@ -166,16 +166,21 @@ directory like any other: `PUT` on it is `409 EISDIR`, `DELETE` and
 
 ## Authentication
 
-Send `Authorization: Bearer <token>` on every `/v1` request. Each drive has one
-static token, provisioned by the operator. The scheme name is case-insensitive;
-the token is compared exactly.
+Send `Authorization: Bearer <token>` on every `/v1` request. Each drive has
+its own token, provisioned by the operator. The scheme name is
+case-insensitive; the token is compared exactly.
 
 - A missing header, a malformed header, a wrong token and an unknown drive id
   all return the same `401` with `WWW-Authenticate: Bearer`. You cannot tell
   from the response whether a drive exists.
 - A token for drive A is rejected with `401` on drive B.
-- Tokens change only when the operator restarts the service. After a rotation
-  the old token returns `401`; that is the signal to reload your credential.
+- The operator can rotate a drive's token. While a rotation is under way
+  the drive accepts two tokens, the new one and the one before, and both
+  work in every way. Once the operator drops the old token it returns the
+  same `401` as any wrong token; that is the signal to reload your
+  credential. Where the operator has not set the drive up for rotation
+  without a restart, the change happens at a restart and there is no period
+  in which both work.
 
 ## Request ids
 
@@ -599,7 +604,8 @@ Defaults; the operator can change them.
 - CORS headers and browser clients.
 - Per-user identity or scopes. A token grants full read and write access to
   its drive.
-- Token rotation without a restart.
+- Token expiry and revocation lists. A token is valid until the operator
+  rotates it.
 - Change notifications, locking, and cross-request transactions.
 - Snapshot-isolated downloads.
 - Names beginning with `.mount-rs-upload.`.
