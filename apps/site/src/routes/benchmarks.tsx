@@ -1,4 +1,5 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
+import { BenchExplorer } from '../components/bench-explorer'
 import { LatencyChart } from '../components/latency-chart'
 import type { LatencyBar } from '../components/latency-chart'
 import {
@@ -62,9 +63,12 @@ function BenchmarksPage() {
   const durableDelete = benchRow('durable', 'local', 'delete')
   return (
     <>
-      <section className="page-frame arch-hero">
+      <section className="hero arch-hero-wrap">
+      <div className="page-frame arch-hero">
         <p className="eyebrow">Benchmarks / metadata latency</p>
-        <h1>Sub-millisecond metadata, even one hop away.</h1>
+        <h1>
+          Sub-millisecond metadata, <span className="grad-text">even one hop away.</span>
+        </h1>
         <p className="arch-lede">
           {benchRun.drives} drives on {benchRun.nodes} <code>serve-http</code>{' '}
           servers, with TiDB metadata, RustFS blocks and a Redis route registry.
@@ -86,6 +90,22 @@ function BenchmarksPage() {
         <p className="bench-run">
           Run <a href={benchRun.url}>{benchRun.id}</a> · {benchRun.date} · {benchRun.runner}
         </p>
+      </div>
+      </section>
+
+      <section className="page-frame arch-section" id="explore">
+        <div className="section-heading split-heading">
+          <div>
+            <p className="eyebrow">Explore</p>
+            <h2>Every operation, every percentile.</h2>
+          </div>
+          <p>
+            Pick a scenario and a percentile. Blue bars were served by the
+            drive’s owner, violet bars were forwarded from another server, and
+            amber bars took a millisecond or longer.
+          </p>
+        </div>
+        <BenchExplorer />
       </section>
 
       <section className="page-frame arch-section">

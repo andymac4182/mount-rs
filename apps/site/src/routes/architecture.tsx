@@ -1,10 +1,6 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
-import {
-  CacheDiagram,
-  ForwardingDiagram,
-  ServerDiagram,
-  WritePathDiagram,
-} from '../components/architecture-diagrams'
+import { LayerExplorer, NodeAnatomy, WritePathExplorer } from '../components/architecture-explorers'
+import { ClusterSimulator } from '../components/cluster-simulator'
 
 export const Route = createFileRoute('/architecture')({
   head: () => ({
@@ -58,50 +54,48 @@ const fastReasons = [
 function ArchitecturePage() {
   return (
     <>
-      <section className="page-frame arch-hero">
-        <p className="eyebrow">Architecture</p>
-        <h1>How a mount-rs server stays fast.</h1>
-        <p className="arch-lede">
-          <code>mount-rs serve-http</code> serves drives over HTTP. Each drive
-          is owned by one server at a time, which keeps the drive’s namespace in
-          memory and commits changes to shared metadata and block storage. Any
-          server can accept a request and forward it, in one hop, to the owner.
-        </p>
-        <div className="button-row">
-          <Link className="button button-primary" to="/benchmarks">
-            See the benchmarks
-          </Link>
-          <a className="button button-secondary" href="#forwarding">
-            Jump to forwarding
-          </a>
-        </div>
-      </section>
-
-      <section className="page-frame arch-section" id="server">
-        <div className="section-heading split-heading">
-          <div>
-            <p className="eyebrow">01 / one server</p>
-            <h2>A request, from the socket to storage.</h2>
-          </div>
-          <p>
-            The listener, token check and routing decision are the same on every
-            node. What differs is whether this node owns the drive. If it does,
-            the request never leaves the process unless it changes something.
+      <section className="hero arch-hero-wrap">
+        <div className="page-frame arch-hero">
+          <p className="eyebrow">Architecture</p>
+          <h1>
+            How a mount-rs server <span className="grad-text">stays fast.</span>
+          </h1>
+          <p className="arch-lede">
+            <code>mount-rs serve-http</code> serves drives over HTTP. Each drive
+            is owned by one server at a time, which keeps the drive’s namespace in
+            memory and commits changes to shared metadata and block storage. Any
+            server can accept a request and forward it, in one hop, to the owner.
           </p>
+          <div className="button-row">
+            <a className="button button-primary" href="#cluster">
+              Try the cluster
+            </a>
+            <Link className="button button-secondary" to="/benchmarks">
+              See the benchmarks
+            </Link>
+          </div>
+          <nav className="arch-toc" aria-label="On this page">
+            <a href="#cluster">01 The cluster</a>
+            <a href="#server">02 Inside a node</a>
+            <a href="#caching">03 Caching</a>
+            <a href="#writes">04 Writes</a>
+            <a href="#why-fast">05 Why it is fast</a>
+          </nav>
         </div>
-        <ServerDiagram />
       </section>
 
-      <section className="page-frame arch-section" id="forwarding">
+      <section className="page-frame arch-section" id="cluster">
         <div className="section-heading split-heading">
           <div>
-            <p className="eyebrow">02 / a cluster</p>
+            <p className="eyebrow">01 / a cluster</p>
             <h2>Forwarding: any node, one hop to the owner.</h2>
           </div>
           <p>
-            Load balancers do not need to know which server owns a drive. Owners
-            publish their drives in Redis, ingresses cache those routes, and
-            peers talk over mutually authenticated HTTP/3.
+            Three nodes sit behind one load balancer. The load balancer does not
+            know which server owns a drive: owners publish their drives in Redis,
+            ingresses cache those routes, and every node holds open, mutually
+            authenticated HTTP/3 connections to the others. Send a request and
+            follow it.
           </p>
         </div>
         <p className="callout callout-amber arch-callout">
@@ -110,7 +104,7 @@ function ArchitecturePage() {
           <code>forwarding</code> block; a cluster also needs operator-assigned
           drive ownership and a trusted membership file.
         </p>
-        <ForwardingDiagram />
+        <ClusterSimulator />
         <ol className="arch-steps">
           <li>
             <strong>Any node accepts the request.</strong> The client sends its
@@ -141,6 +135,21 @@ function ArchitecturePage() {
         </p>
       </section>
 
+      <section className="page-frame arch-section" id="server">
+        <div className="section-heading split-heading">
+          <div>
+            <p className="eyebrow">02 / one node</p>
+            <h2>A request, from the socket to storage.</h2>
+          </div>
+          <p>
+            The listener, token check and routing decision are the same on every
+            node. What differs is whether this node owns the drive. Select any
+            stage to see what it does and what it costs.
+          </p>
+        </div>
+        <NodeAnatomy />
+      </section>
+
       <section className="page-frame arch-section" id="caching">
         <div className="section-heading split-heading">
           <div>
@@ -148,12 +157,12 @@ function ArchitecturePage() {
             <h2>Seven layers between a request and the object store.</h2>
           </div>
           <p>
-            Most requests are answered in the top three layers. The lower layers
-            make the rest cheap: small index probes instead of large reads, and
-            immutable blocks that can be cached without invalidation.
+            Most requests are answered in the top three layers. Pick a request
+            to see how far down it has to go, and open a layer to see what a hit
+            there saves.
           </p>
         </div>
-        <CacheDiagram />
+        <LayerExplorer />
       </section>
 
       <section className="page-frame arch-section" id="writes">
@@ -168,10 +177,10 @@ function ArchitecturePage() {
             the acknowledgement earlier; it does not change that order.
           </p>
         </div>
-        <WritePathDiagram />
+        <WritePathExplorer />
       </section>
 
-      <section className="ink-section arch-fast" id="why-fast">
+      <section className="ink-section arch-fast architecture-fast" id="why-fast">
         <div className="page-frame">
           <div className="section-heading solution-heading">
             <p className="eyebrow eyebrow-light">What makes it fast</p>
