@@ -1,0 +1,65 @@
+# cargo-audit configuration for the dependency advisory gate
+# (.github/workflows/dependency-audit.yml). The gate runs
+# `cargo audit --deny warnings`, so vulnerabilities, unsound and unmaintained
+# notices, and yanked crates all fail it. Every entry below is an advisory
+# that has no semver-compatible fix today; each says what is affected and why
+# it is tolerated. Remove an entry as soon as its upgrade lands.
+
+[advisories]
+ignore = [
+    # --- Vulnerabilities whose fix is a breaking upgrade -------------------
+
+    # quick-xml 0.38.4: quadratic duplicate-attribute check. REACHABLE from
+    # the network in the WebDAV transport (`attributes().with_checks(true)`
+    # on request bodies, capped at 64 MiB) and the S3 transport
+    # (`quick_xml::de` on request bodies, capped at 16 MiB); a request can pin
+    # one worker's CPU for a long time. Also in object_store 0.12, which only
+    # parses responses from the operator-configured object store. The fix is
+    # quick-xml 0.41 (breaking) in both transports plus object_store 0.14.
+    "RUSTSEC-2026-0194",
+    # quick-xml 0.38.4: unbounded namespace-declaration allocation in
+    # `NsReader`. REACHABLE in the S3 transport through `quick_xml::de`, which
+    # wraps an `NsReader`; growth is bounded by the 16 MiB XML body cap (about
+    # three times the body per request). The WebDAV transport uses a plain
+    # `Reader` and is not affected. Same breaking upgrade as above.
+    "RUSTSEC-2026-0195",
+    # libsqlite3-sys 0.37.0 (bundled SQLite, CVE-2026-119375): a crafted
+    # database/-wal pair can leak page-cache memory. Affects every binary that
+    # links the SQLite provider or service catalog (CLI, Node addon, SQLite
+    # VFS). Local vector only: the attacker must be able to write the database
+    # files an operator then opens, and mount-rs creates those files itself.
+    # The fix is rusqlite 0.41, a breaking change from the pinned =0.39.0.
+    "RUSTSEC-2026-0459",
+
+    # --- Unsound, no fixed release -----------------------------------------
+
+    # im 15.1.0: stacked-borrows violation on `OrdSet` insertion. mount-rs-kv
+    # keeps two `OrdSet`s, so the code path is used; it is a Miri finding with
+    # no known miscompilation and no patched release (crate archived).
+    # Clearing it means replacing `im` in six workspace crates.
+    "RUSTSEC-2023-0126",
+    # sized-chunks 0.6.5 (via im): double drop only when an element's `Drop`
+    # panics. The element types stored in `im` collections here are plain
+    # data and `Arc`s whose drops do not panic. No patched release.
+    "RUSTSEC-2026-0255",
+
+    # --- Unmaintained, no replacement without a source change --------------
+
+    # im 15.1.0 and its dependencies bitmaps 2.1.0 and sized-chunks 0.6.5:
+    # archived upstream; direct dependency of six workspace crates.
+    "RUSTSEC-2026-0248",
+    "RUSTSEC-2026-0247",
+    "RUSTSEC-2026-0251",
+    # chrono 0.4.45: direct dependency of the S3 transport and transitive
+    # through object_store; no maintained drop-in release exists.
+    "RUSTSEC-2026-0543",
+    # humantime 2.4.0: transitive through object_store 0.12 and 0.14 only.
+    "RUSTSEC-2026-0542",
+    # rustls-pemfile 2.2.0: used by the CLI and the vendored tunnel transport
+    # to read operator-supplied PEM files; it is a thin wrapper over
+    # rustls-pki-types, and moving to that API is a source change.
+    "RUSTSEC-2025-0134",
+    # unsafe-libyaml 0.2.11: transitive through slatedb -> figment ->
+    # serde_yaml, in the SlateDB provider only; mount-rs parses no YAML.
+    "RUSTSEC-2024-0449",
+]
