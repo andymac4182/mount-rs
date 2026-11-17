@@ -1379,6 +1379,14 @@ give up their drives. 20 seconds is what the tests run with.
 drive's sessions. Without it, after a rolling restart the drives stay on
 whichever candidates took them.
 
+Tested with real processes, each behind its own Redis proxy
+(`apps/mount-rs-cli/tests/failover.rs`): an owner cut off from Redis keeps
+its drive and the standby takes nothing; an owner killed during a Redis
+outage is replaced once Redis is back; fail-back; writes across a killed
+owner are complete or absent and never lost once acknowledged; an owner
+paused past its lease gives the drive up when it resumes; and a release
+that storage does not answer is abandoned so the lease expires.
+
 Each state change is a JSON line on stderr with `"event":"drive_failover"`;
 the states are listed in
 [`serve-http-failover.md`](serve-http-failover.md#startup-shutdown-and-logs).
@@ -1490,11 +1498,23 @@ Stated plainly. None of these is hidden behind a feature flag.
     `409`, `400` and so on. Clients branch on `code`.
 14. **Metrics and the access log's `drive` field** are not available as on
     a single server (see above).
-15. **Not exercised by any test:** fail-back end to end with real
-    processes, a network partition between servers, a Redis outage during
-    a failover, storage that does not answer during a release, failover
-    with a restricted Redis ACL user, more than a handful of servers, and
-    `http2_prior_knowledge` together with cluster features.
+15. **Clocks.** Candidates and the metadata store must agree to within a
+    second or two (NTP is enough). Beyond the 5-second renewal margin a
+    deposed owner can answer *reads* from its last committed state after a
+    successor has taken the drive. Writes are refused throughout. See
+    "Clocks" in [`serve-http-failover.md`](serve-http-failover.md#clocks).
+16. **A candidate removed from the membership file while it runs keeps its
+    drives**, which are then unreachable through the other servers. Stop a
+    server before removing it.
+17. **With `fail_back`, a drive can be handed to a node that has just
+    died**, and is then unavailable for about 15 seconds.
+18. **Not exercised by any test:** a network partition of the
+    server-to-server (peer) link, as opposed to a server cut off from
+    Redis, which is tested; failover with a restricted Redis ACL user;
+    failover contention on TiDB metadata (tested on SQLite); more than a
+    handful of servers; and `http2_prior_knowledge` together with cluster
+    features. The rest of what failover leaves out is listed under "Not
+    handled" in [`serve-http-failover.md`](serve-http-failover.md#not-handled).
 
 ## Pre-launch checklist
 

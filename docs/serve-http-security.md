@@ -251,9 +251,10 @@ headers, membership reload including removal and re-keying
 Redis TLS with a private CA, password and ACL logins, refused plaintext, and
 outages (`apps/mount-rs-cli/tests/redis_connection.rs`); the session
 authentication cases and the reserved-header refusal through real servers
-(`apps/mount-rs-cli/tests/cluster_contract.rs`). Not tested: a network
-partition between servers, a Redis replica promotion, and a hostile peer
-that holds a valid key.
+(`apps/mount-rs-cli/tests/cluster_contract.rs`); servers cut off from
+Redis during a failover (`apps/mount-rs-cli/tests/failover.rs`). Not
+tested: a partition of the server-to-server link, a Redis replica
+promotion, and a hostile peer that holds a valid key.
 
 ## Hardening checklist
 

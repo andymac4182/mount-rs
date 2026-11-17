@@ -105,7 +105,7 @@ its contract and the test that holds the server to it.
 | That an unknown drive id is the forwarding `503`, not `401` | `openapi-cluster.yaml` | The client sequence, for every drive operation |
 | The config keys `http.remote_sessions`, `http.sessions.*`, `http.forwarding.*` and `http.forwarding.failover.*`: name, type, default, range | Runbook "Cluster configuration reference" | Parser tests in `apps/mount-rs-cli/src/config.rs`; the example configs are validated by the binary in `the_cluster_example_configs_are_valid` |
 | The membership file format (`node`, `boot`, `address`, `tls_server_name`, `spki_sha256`) and reload on `SIGHUP` and on a timer | Runbook "Membership file" | `crates/mount-rs-cluster` membership tests; reload with real processes in `scripts/serve-http-cluster-e2e.py` |
-| The `drive_failover` stderr event and its `state` values | `serve-http-failover.md` | `scripts/serve-http-cluster-e2e.py` |
+| The `drive_failover` stderr event and its `state` values | `serve-http-failover.md` | `scripts/serve-http-cluster-e2e.py`; `apps/mount-rs-cli/tests/failover.rs` |
 
 The tolerance rules of the next section apply to this surface too, with
 one difference: the session routes reject unknown properties in a request
@@ -295,7 +295,7 @@ Not covered. Each may change in any release without a deprecation window:
 | Redis Sentinel, Redis Cluster, a replicated Redis failing over | Not supported or not tested; see the runbook. |
 | Token rotation without a restart on a server with cluster features | Not provided: `token.file` is refused there. |
 | Metrics with `remote_sessions` or `forwarding` | Not validated. |
-| Fail-back, network partitions between servers, a Redis outage during a failover | The design is in `serve-http-failover.md` and unit-tested; not exercised with real processes. |
+| A network partition of the server-to-server link; failover with a restricted Redis ACL user; failover contention on TiDB metadata | Not exercised by a test. (A server cut off from Redis, a Redis outage during a failover, fail-back, a paused owner and an unanswered release are, in `apps/mount-rs-cli/tests/failover.rs`.) |
 | `mount-rs mount` with a `remote` driver (the client of the session routes) | A separate component with its own status; see the CLI README. |
 
 Differences from a plain server that are specified, and so covered, are in
