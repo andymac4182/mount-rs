@@ -268,7 +268,8 @@ mount.
 The full documentation is in three places:
 
 - API guide for consumers: [`transports/mount-rs-http/README.md`](../../transports/mount-rs-http/README.md)
-- OpenAPI 3.1 contract: [`transports/mount-rs-http/openapi.yaml`](../../transports/mount-rs-http/openapi.yaml)
+- OpenAPI 3.1 contract: [`transports/mount-rs-http/openapi.yaml`](../../transports/mount-rs-http/openapi.yaml),
+  checked against the server by `transports/mount-rs-http/tests/openapi_conformance.rs`
 - Operator runbook (config reference, proxy, health, shutdown, recovery):
   [`docs/serve-http-runbook.md`](../../docs/serve-http-runbook.md)
 
@@ -288,7 +289,8 @@ config file's directory.
 
 - `id`: 1-64 characters from `A-Z a-z 0-9 - _ .`, unique, used in URLs;
 - `token`: `{"env": "NAME"}`, the environment variable that holds the drive's
-  bearer token;
+  bearer token, or `{"file": "PATH"}`, a file that lists it (see
+  [Tokens](#tokens));
 - `driver`: a `memory`, `host`, `sqlite` or `splitstore` driver object in the
   same shape as native configs. `remote` drivers are rejected.
 
@@ -322,11 +324,56 @@ within a file read are sequential. Parallel block fetches are not supported.
 
 ### Tokens
 
-The token value is read from the named environment variable once, when the
-service starts. It is never printed and never stored in the config. It must be
+A token is never printed and never stored in the config. It must be
 non-empty and contain no whitespace. Each token is valid only for its own
 drive; a request for an unknown drive gets the same `401` as a wrong token.
-Changing a token requires a restart.
+
+With `{"env": "NAME"}` the token is read from that environment variable once,
+when the service starts. Changing it requires a restart.
+
+With `{"file": "PATH"}` the token is read from a file, at startup and again
+while the service runs, so it can be rotated without a restart. The file
+lists one token per line: the current one and, optionally, the one before
+it. Both are accepted, which gives clients time to move. A relative path is
+taken from the config file's directory. The file is read again:
+
+- when the process receives `SIGHUP` (Unix), and
+- every `http.token_reload_seconds` (default `30`, allowed `0`-`3600`), if
+  its contents have changed. `0` turns the timer off.
+
+A file that cannot be read, or that does not list one or two valid tokens,
+is refused whole and the tokens in force stay as they were. Each reload
+writes one `{"event":"http_token_reload","drive":...,"outcome":"reloaded"|"unchanged"|"refused","tokens":N,"error":...}`
+line to stderr, which never contains a token. At startup such a file is an
+error.
+
+To rotate: put the new token on the first line and keep the old one on the
+second; move the clients; then remove the old line. Replace the file by
+renaming a new one into place.
+
+`token.file` is refused together with `http.remote_sessions` or
+`http.forwarding`: those authorize against the token read at startup. A
+server with no token file does not handle `SIGHUP` for tokens.
+
+### Metrics
+
+`http.metrics` turns on a second listener that serves Prometheus text at
+`GET /metrics`, without a token:
+
+```json
+"metrics": {"listen": "127.0.0.1:9464"}
+```
+
+`listen` is an IP address and port and must be loopback unless
+`"allow_non_loopback": true` is set beside it. The API listener never serves
+`/metrics`. The series are requests by route template, method and status
+class (`mount_rs_http_requests_total`), a duration histogram by route
+template (`mount_rs_http_request_duration_seconds`), requests in flight,
+request and response body bytes, readiness per drive
+(`mount_rs_http_drive_ready{drive=...}`), dropped access-log lines,
+`process_start_time_seconds` and `mount_rs_build_info{version=...}`. No path
+or token appears in them. The
+[runbook](../../docs/serve-http-runbook.md#metrics) has the full table.
 
 ### Network exposure
 
@@ -346,8 +393,12 @@ After every drive is open and the socket is bound, the process prints:
 
 `GET /healthz` reports that the process is alive. `GET /readyz` returns `200`
 with `{"status":"ready","drives":N}` and `503` with
-`{"status":"not_ready","drives":N,"failed":M}` when a drive has failed closed.
-Only split-store drives report health.
+`{"status":"not_ready","drives":N,"failed":M}` when a drive cannot serve: a
+split-store drive that has failed closed, a `host` drive whose root
+directory cannot be opened, or a `sqlite` drive whose database file cannot
+be opened or whose last save failed. The storage of `host` and `sqlite`
+drives is checked every two seconds in the background. A `memory` drive has
+nothing to check.
 
 Ctrl-C and, on Unix, SIGTERM start a graceful shutdown: the listener stops
 accepting, in-flight requests get up to `drain_timeout_ms`, the drives are
@@ -1061,7 +1112,8 @@ A running server reads the membership file again, without a restart:
   `0`–`3600`), if the file's contents have changed. `0` turns the timer off,
   leaving `SIGHUP` as the only trigger.
 
-A server with no `forwarding` block does not handle `SIGHUP`.
+A server with no `forwarding` block does not handle `SIGHUP`, unless a
+drive's token is a file (see [Tokens](#tokens)).
 
 The new file is checked in full before anything changes. If it cannot be
 read or parsed, breaks a rule above, lists more servers than

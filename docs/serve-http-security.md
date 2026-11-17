@@ -20,8 +20,8 @@ Related documents:
 
 ## Summary
 
-The server authenticates each request with one static bearer token per drive
-and nothing else. It has no TLS, no user identity and no rate limiting, and
+The server authenticates each request with a bearer token per drive (two
+while one is being rotated) and nothing else. It has no TLS, no user identity and no rate limiting, and
 its access log is off by default and records no path, client or token. It
 is built to sit on a loopback address behind a reverse proxy that supplies
 those. A token is the whole of a caller's authority: whoever
@@ -32,7 +32,7 @@ holds a drive's token can read, replace and delete everything on that drive.
 | Asset | Where it lives | What compromise means |
 | --- | --- | --- |
 | Drive contents | The drive's storage: SQLite files, a host directory, or a metadata store plus a block store | Disclosure, modification or loss of files |
-| Drive bearer tokens | The process environment at startup; process memory for its lifetime; the operator's secret store; every consumer that calls the drive | Full read and write access to that drive until the token is rotated, which needs a restart |
+| Drive bearer tokens | The process environment at startup, or a token file on the host; process memory for as long as the token is accepted; the operator's secret store; every consumer that calls the drive | Full read and write access to that drive until the token is rotated: by a reload for a drive whose token is a file, by a restart otherwise |
 | Storage credentials | Environment variables named by the driver config (for example a TiDB URL, object-store keys) | Direct access to stored data, bypassing the API and the writer lease |
 | The writer lease | A row in the drive's metadata store | A party that can write the metadata store can break single-writer exclusion |
 | Drive ids | The config file, URLs, the readiness line on stdout | Low. Ids are not secret, but the API does not reveal which ids exist to a caller without a valid token |
@@ -79,7 +79,7 @@ holds a drive's token can read, replace and delete everything on that drive.
 | Cross-site requests from a browser | No CORS headers are ever sent, and there is no cookie authentication | Do not add CORS headers at the proxy |
 | A second process corrupting a drive | Split-store drives hold an exclusive writer lease and fail closed when it cannot be renewed | For `sqlite`-kind and `host` drives there is no lease: run exactly one process |
 | Tampering with stored data underneath the server | The runbook records that a stored block whose content does not match its hash stops a start with exit code 1. The extent of integrity checking on reads was not examined for this document | Restrict access to the stores; keep backups |
-| Stolen token | None. A token does not expire and cannot be revoked without a restart | Rotate on suspicion; plan for the restart |
+| Stolen token | A token does not expire. A drive whose token is a file drops it at the next reload (`SIGHUP`, or the timer); a drive whose token is an environment variable needs a restart | Rotate on suspicion. Use `token.file` for drives where a restart to revoke is not acceptable |
 | Compromised binary or image | Release images carry a provenance attestation | Verify it before deploying (`gh attestation verify`, see the runbook) |
 
 ## What the server does itself
@@ -97,7 +97,10 @@ Each row is backed by the appendix.
 | A token is never accepted for another drive | The comparison is made against the token of the drive named in the URL only. `GET /v1/drives` lists exactly the drives whose token equals the presented one, and answers `401` if there are none. |
 | Authentication comes after path and route checks | A malformed path is `400` and an unknown route is `404` without a token. Neither response depends on which drives exist. A `405` on a drive route is only sent to an authenticated caller. |
 | Token validity rule | Non-empty, no ASCII whitespace. **There is no minimum length and no entropy check in the v1 configuration**: a one-character token is accepted. (With `remote_sessions` a 32-256 character format is enforced; that is outside v1.) |
-| Tokens come only from the environment | The config accepts `token` only as `{"env": "NAME"}`; an inline value is a config error. The variable is read once at startup, before any drive is opened. |
+| Tokens come only from the environment or a token file | The config accepts `token` only as `{"env": "NAME"}` or `{"file": "PATH"}`; an inline value is a config error. The variable or file is read at startup, before any drive is opened. |
+| A reloaded token file cannot weaken a drive | A file is taken whole or not at all: one or two tokens, each by the same rule as at startup. A file that is missing, unreadable or not valid leaves the accepted tokens as they were. A drive never accepts more than two tokens and never none. |
+| Every accepted token is compared in constant time | Each of a drive's tokens is compared in full whether or not an earlier one matched, so the time taken does not say which token a guess resembles. A dropped token gets the same `401` as one that was never valid. |
+| A reload writes no token | The `http_token_reload` line and every refusal name the drive, the file and a line number, never the file's contents. |
 | Tokens are not disclosed by the process | Not printed on stdout or stderr, not returned by any route, redacted from the `Debug` form of a drive. CLI error messages pass through a filter that redacts URL user-info and values of keys such as `token`, `password`, `secret`, `authorization`. |
 | `/healthz` and `/readyz` need no token | They return a status word, the number of configured drives and, when not ready, the number of failed drives. They never return a drive id. Responses carry `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. |
 
@@ -109,6 +112,8 @@ tokens, and clearing the token from memory after use.
 
 | Behaviour | Detail |
 | --- | --- |
+| Metrics are off, apart and on loopback | Nothing serves metrics unless `http.metrics` is set. They are then served by a second listener, never the API's, so that publishing the API cannot publish them. That listener asks for no token, and for that reason refuses an address that is not loopback, in the config parser (exit 2) and again before it binds, unless `metrics.allow_non_loopback` is set. |
+| Metrics name no path and no credential | A label is a route template, a method from a fixed list, a status class, a configured drive id or the build version. Nothing a client sent is repeated, and a client cannot create series. Drive ids and the build version are disclosed to whoever can scrape. |
 | Loopback only by default | The default host is `127.0.0.1`. A host that is not `localhost` or a loopback IP is rejected twice: by the config parser (exit 2) and again by the listener before it binds. |
 | `allow_non_loopback` removes both checks | The listener then binds whatever address it is given. It is still cleartext HTTP. |
 | No TLS | The listener is a plain TCP socket served as HTTP/1.1 (or cleartext HTTP/2 with `http2_prior_knowledge`). There is no TLS code path in the transport. |
@@ -178,8 +183,9 @@ can modify its tree.
 | Rate limiting and brute-force detection | Not implemented | Limit requests and concurrent connections per client address at the proxy. Alert on the `401` rate. |
 | Per-client connection limits | The server has one global connection limit | At the proxy. Keep the proxy's upstream pool below `max_connections`. |
 | Access and audit log | The server's optional access log has no path, no client address and no caller identity, so it is not an audit log | The proxy's access log: method, path, status, upstream time, bytes. Never the `Authorization` header. There is no record of which token made a request unless the proxy adds one (for example a hash of the header). |
-| Secret storage | Tokens are plain environment variables | Deliver through the service manager's secret mechanism (systemd `LoadCredential=` or an `EnvironmentFile=` with mode 0600; a Kubernetes Secret). Not the command line, not the config file. On Linux a process's environment is readable by the same user and by root through `/proc/<pid>/environ`; run the service as a dedicated user. |
-| Token rotation | **Needs a restart.** A drive accepts one token; there is no reload and no overlap in which old and new both work | Follow the runbook's rotation steps. Budget an outage of one restart per rotation, and rotate on a schedule so that the procedure is practised. |
+| Secret storage | Tokens are plain environment variables, or lines in a file whose permissions the server does not check | Give a token file mode 0600 and the service user as owner, or mount it as a secret. Deliver variables through the service manager's secret mechanism (systemd `LoadCredential=` or an `EnvironmentFile=` with mode 0600; a Kubernetes Secret). Not the command line, not the config file. On Linux a process's environment is readable by the same user and by root through `/proc/<pid>/environ`; run the service as a dedicated user. |
+| Token rotation | Without a restart, and with an overlap in which old and new both work, **only for a drive whose token is a file**. A drive whose token is an environment variable, and every drive of a server with `remote_sessions` or `forwarding` (which refuse `token.file`), still needs a restart and has no overlap | Follow the runbook's rotation steps. Rotate on a schedule so that the procedure is practised. Remove the old token's line when consumers have moved: nothing expires it for you. |
+| Network isolation of the metrics listener | With `metrics.allow_non_loopback` anything that can reach that port reads the drive ids, the version, request rates and which drives are down, without a token | Leave it on loopback and scrape from the same host or pod. Otherwise admit only the scraper, by security group or NetworkPolicy. Never route it through the public proxy. |
 | Network isolation of the listener | With `allow_non_loopback` anything that can reach the port can try tokens and read cleartext traffic | A security group or NetworkPolicy that admits only the load balancer. |
 | Protection of `/healthz` and `/readyz` | Unauthenticated by design | Allow them from the load balancer and monitoring only. |
 | Isolation and credentials for the metadata and block stores | The transport passes the configured connection through | Private network, TLS and least-privilege credentials for TiDB and object stores. The TiDB user needs DDL on the mount-rs tables because schema steps run at open. |
@@ -197,7 +203,10 @@ in the API guide. Do not build on an assumption that they exist.
 - **Read-only tokens.**
 - **CORS and browser clients.** A token in a browser is a token disclosed.
 - **TLS, mutual TLS or client certificates on the public listener.**
-- **Token rotation without a restart, token expiry, revocation lists.**
+- **Token expiry and revocation lists.** A token is accepted until the
+  operator removes it.
+- **Token rotation without a restart together with `remote_sessions` or
+  `forwarding`.** The config refuses `token.file` there.
 - **Encryption at rest.** The transport stores what it is given; encryption
   is a property of the storage provider and its deployment.
 - **Audit logging.**
@@ -301,8 +310,11 @@ Checked at the revision this document was added in. `server.rs` is
 | Order: closing, route parse (path syntax, unknown route), health and discovery, drive and token, declared length, then method inside each handler | `server.rs:1311-1407`; method check example `server.rs:1415-1417` |
 | Contract tests for wrong-token and malformed-header `401` | `transports/mount-rs-http/tests/launch_contract.rs:1005-1013`, `:1058-1066` |
 | Token validity rule (non-empty, no whitespace, no minimum length) | `server.rs:153-158` |
-| Token read from the environment before any drive is opened | `runtime.rs:943-959` |
-| `token` must be `{"env": NAME}` | `config.rs:897`, `config.rs:2135-2150` |
+| Token read from the environment or the token file before any drive is opened | `runtime.rs`, `serve_http_command` |
+| `token` must be `{"env": NAME}` or `{"file": PATH}` | `config.rs`, `parse_token_source` |
+| A token file is validated whole before it replaces the accepted tokens; a bad one changes nothing | `apps/mount-rs-cli/src/token_reload.rs`; `DriveTokens::replace` in `server.rs` |
+| Every accepted token compared without short-circuit | `DriveTokens::matches` in `server.rs` |
+| Tests for the overlap, the drop and the identical `401` | `launch_contract.rs`, `a_drive_accepts_each_of_its_tokens_until_the_set_is_replaced`; `apps/mount-rs-cli/tests/http_subprocess.rs`, `a_token_file_is_rotated_without_a_restart` |
 | `Debug` redaction of the token, with a test | `server.rs:99-107`, `server.rs:3643-3650` |
 | CLI diagnostics are redacted | `config.rs:2184-2200`; applied at `runtime.rs:45`, `runtime.rs:52` |
 | Health responses: fields, no drive ids, no authentication | `server.rs:1475-1509` |

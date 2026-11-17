@@ -873,22 +873,37 @@ xcodebuild -project transports/mount-rs-fskit/MountRsFSKit.xcodeproj \
       <>
         The HTTP service exposes named mount-rs drives without creating a
         kernel mount. It is the cleanest boundary for containers, remote
-        clients, and environments where FUSE/NFS/FSKit are unavailable.
+        clients, and environments where FUSE/NFS/FSKit are unavailable. One
+        process can serve its drives alone, or several can form a cluster in
+        which any server accepts a request for any drive and forwards it to
+        the drive’s owner, with optional automatic failover between owners.
       </>
     ),
     platform: (
       <>
         Any platform that can run the CLI/service and an HTTP client can use
-        the mount-free API. The default listener is loopback with bounded
-        requests and an ephemeral port; deployments binding beyond loopback
-        need an authenticated TLS boundary.
+        the mount-free API. The listener is cleartext HTTP/1.1 (or cleartext
+        HTTP/2 with <code>http2_prior_knowledge</code>) on loopback with
+        bounded requests and an ephemeral port by default;{' '}
+        <code>allow_non_loopback</code> lets it listen on a private network
+        behind a proxy or load balancer. The server does not terminate TLS
+        itself. A cluster additionally needs a Redis route registry, a
+        membership file with each server’s pinned key for mutual-TLS HTTP/3
+        between servers, and metadata and block storage that every candidate
+        owner of a drive can reach.
       </>
     ),
     access: (
       <>
         There is no FUSE, NFS, 9P, or FSKit mount. Each named drive retains its
         own <code>FsDriver</code>, stable ID, and bearer token; the API maps
-        HTTP verbs to filesystem operations and one-byte-range reads.
+        HTTP verbs to filesystem operations and one-byte-range reads. A token
+        comes from an environment variable, read once at startup, or from a
+        token file that lists the current token and optionally the previous
+        one. With <code>remote_sessions</code> on split-store drives the same
+        token also opens the session and handle routes used by the remote
+        mount client; session counts, handles per session and the idle
+        timeout are set under <code>http.sessions</code>.
       </>
     ),
     surface: (
@@ -896,7 +911,19 @@ xcodebuild -project transports/mount-rs-fskit/MountRsFSKit.xcodeproj \
         <code>/v1/drives</code> lists authorized drives; <code>fs</code> routes
         read/write/remove paths; <code>entries</code> lists directories; and
         bounded JSON operations cover mkdir, rename, truncate, and sync.
-        Unknown drives and invalid tokens fail closed.
+        Unknown drives and invalid tokens fail closed. Every response carries{' '}
+        <code>X-Request-Id</code>: a well-formed client value is echoed,
+        anything else is replaced by a generated one, and a forwarded request
+        keeps its ID on both servers. <code>entries?limit=N</code> pages a
+        listing in byte order of name and returns a <code>next_cursor</code>{' '}
+        while more follows; without <code>limit</code> the response is the
+        same complete array as before. <code>/healthz</code> reports liveness
+        and <code>/readyz</code> reports readiness for every drive kind:
+        split-store drives that have failed closed, and <code>host</code> and{' '}
+        <code>sqlite</code> drives whose storage a background check, every two
+        seconds, cannot open. The routes, status codes and bodies are
+        described by an OpenAPI 3.1 document that a conformance test compares
+        with a live server in both directions.
       </>
     ),
     verifyLabel: 'Run the local unmounted service with owned tokens',
@@ -909,18 +936,54 @@ curl -H 'Authorization: Bearer demo-memory' \
   http://127.0.0.1:PORT/v1/drives/memory/entries/`,
     safeUse: (
       <>
-        Keep bearer tokens in environment variables or a secret manager, never
-        JSON or source. Put a TLS/authenticated reverse proxy in front of a
-        non-loopback listener and bound request/chunk sizes to the deployment.
+        Keep bearer tokens in environment variables, token files or a secret
+        manager, never in the JSON config or source. A drive whose token is a
+        file rotates without a restart: the file is re-read on{' '}
+        <code>SIGHUP</code> and every <code>token_reload_seconds</code> (30 by
+        default), and the previous token keeps working until its line is
+        removed. Put a TLS-terminating proxy or load balancer in front of the
+        listener and bound request/chunk sizes to the deployment.{' '}
+        <code>access_log: true</code> writes one JSON line per request to
+        stderr with the request ID, route template, status, duration and byte
+        counts, and never the path, query, token or client address.{' '}
+        <code>http.metrics</code> serves Prometheus text on a separate
+        listener, loopback unless explicitly allowed; both are off by
+        default. Shutdown is bounded: requests get{' '}
+        <code>drain_timeout_ms</code>, then the drives get{' '}
+        <code>drive_shutdown_timeout_ms</code> (30 s by default) to release
+        their writer leases; past that the process exits 1 and names the
+        drives whose leases it did not release. In a cluster, the membership
+        file is re-read on <code>SIGHUP</code> or a timer, the Redis
+        connection takes <code>rediss://</code> with a password and a private
+        CA and refuses plaintext to another host unless allowed, and an owner
+        keeps serving its own drives through a Redis outage.
       </>
     ),
     limitations: (
       <>
         <code>PUT</code> publishes atomically: readers see the old content
         or the complete new content, and an upload cut off while its body is
-        still arriving leaves no partial file. Distributed caching and
-        cross-process version coordination are outside this slice. The local
-        demo does not prove internet-facing deployment security.
+        still arriving leaves no partial file. Pagination bounds each
+        response and lifts the response-size cap, but every page still
+        enumerates the directory, so one with more entries than{' '}
+        <code>max_directory_entries</code> (100,000 by default) cannot be
+        listed even in pages, and a walk through the pages is not a snapshot.
+        A token grants full access to its drive; there is no per-user
+        identity, token expiry, CORS or TLS in the server. Token-file
+        rotation is refused together with <code>remote_sessions</code> or{' '}
+        <code>forwarding</code>: a cluster still rotates tokens by restart.
+        Metrics are not split by drive and have not been validated with{' '}
+        <code>remote_sessions</code> or <code>forwarding</code>. Each drive
+        has one owner at a time. Failover is opt-in, needs split-store drives
+        with exclusive ownership, and cannot move a drive before the failed
+        owner’s storage lease expires (240 s by default); requests in flight
+        and sessions on the failed owner are lost, not replayed; nothing
+        checks that candidates point at the same storage; and Redis Sentinel
+        and Redis Cluster are not supported. The session and forwarding
+        routes and their configuration are outside the v1 compatibility
+        policy, and clusters of mixed releases are untested, so a cluster is
+        upgraded by stopping every server. The local demo does not prove
+        internet-facing deployment security.
       </>
     ),
     evidence: (
@@ -941,7 +1004,13 @@ curl -H 'Authorization: Bearer demo-memory' \
         job <code>106333141914</code>. This is hosted exporter-path and
         contract evidence only: deployed collector reachability, provider-
         aware readiness, dashboards, paging, SLOs, and production hardening
-        remain open.
+        remain open. That run predates the server’s request IDs, access log,
+        listing pagination, per-kind <code>/readyz</code> checks, token-file
+        rotation, Prometheus listener, cluster membership reload and drive
+        failover; it is not evidence for any of them. Those are exercised by
+        the transport and CLI test suites, the OpenAPI conformance test and{' '}
+        <code>scripts/serve-http-cluster-e2e.py</code>, as described in the
+        linked documents.
       </>
     ),
     sources: [
@@ -951,6 +1020,16 @@ curl -H 'Authorization: Bearer demo-memory' \
       { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/src/server.rs' },
       { label: 'Hosted HTTP observability CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35599817215' },
       { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#quick-local-demo' },
+      { label: 'OpenAPI 3.1 contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/openapi.yaml' },
+      { label: 'OpenAPI conformance test', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/tests/openapi_conformance.rs' },
+      { label: 'serve-http operator runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-runbook.md' },
+      { label: 'serve-http compatibility policy', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-compatibility.md' },
+      { label: 'serve-http upgrade and rollback', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-upgrade.md' },
+      { label: 'serve-http threat model and hardening', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-security.md' },
+      { label: 'serve-http service levels and backup', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-slo.md' },
+      { label: 'serve-http drive failover design', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-failover.md' },
+      { label: 'Cluster configuration: Redis, membership, failover', href: 'https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#remote-sessions-on-a-configured-http-server' },
+      { label: 'Maturity levels', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/maturity.md' },
     ],
   },
   webdav: {

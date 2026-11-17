@@ -55,7 +55,7 @@
   },
   "devDependencies": {
     "@mount-rs/core": "file:../mount-rs-napi",
-    "@mastra/core": "1.67.0",
+    "@mastra/core": "1.68.0",
     "@types/node": "24.13.6",
     "just-bash": "3.4.2",
     "typescript": "6.0.3"

@@ -1,3 +1,10 @@
 allowBuilds:
   '@mongodb-js/zstd': false
   node-liblzma: false
+# just-bash 3.4.2 (the peer-range floor this package tests against) asks for
+# minimatch ^10.2.6, and GHSA-g3hv-75wg-m249 has no 10.x fix. The just-bash
+# releases that drop minimatch (3.6.x) instead pin guarded-fetch 0.1.3, whose
+# exact undici 7.29.0 pin carries more advisories, so the transitive
+# dependency is lifted here, for just-bash only.
+overrides:
+  'just-bash>minimatch': '>=11.0.1 <12'

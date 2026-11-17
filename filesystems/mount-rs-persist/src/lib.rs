@@ -5,6 +5,7 @@
 //! and all driver operations identical across those stores.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use mount_rs_core::turn_gate::{OwnedTurnLockGuard, TurnLock};
@@ -73,6 +74,8 @@ pub struct PersistedFs<S: StateStore> {
     core: MemoryFs,
     store: Arc<S>,
     save_gate: SaveGate,
+    /// Whether the most recent save was refused by the store.
+    save_failed: Arc<AtomicBool>,
 }
 
 impl<S: StateStore> Clone for PersistedFs<S> {
@@ -81,6 +84,7 @@ impl<S: StateStore> Clone for PersistedFs<S> {
             core: self.core.clone(),
             store: Arc::clone(&self.store),
             save_gate: self.save_gate.clone(),
+            save_failed: Arc::clone(&self.save_failed),
         }
     }
 }
@@ -98,6 +102,7 @@ impl<S: StateStore> PersistedFs<S> {
             core,
             store,
             save_gate: SaveGate::new(loaded.version),
+            save_failed: Arc::new(AtomicBool::new(false)),
         };
         if !has_snapshot {
             filesystem.persist().await?;
@@ -109,7 +114,16 @@ impl<S: StateStore> PersistedFs<S> {
         &self.core
     }
 
+    /// Save the current state, and remember whether the store took it:
+    /// [`FsDriver::health`] reports a filesystem whose last save failed as
+    /// unhealthy until a save succeeds.
     pub async fn persist(&self) -> Result<()> {
+        let saved = self.save().await;
+        self.save_failed.store(saved.is_err(), Ordering::Release);
+        saved
+    }
+
+    async fn save(&self) -> Result<()> {
         let mut state = self.save_gate.lock().await;
         if !state.unconfirmed.is_empty() {
             // A store that runs the write on its own thread or over a network
@@ -203,6 +217,17 @@ impl<S: StateStore + 'static> FsDriver for PersistedFs<S> {
         // that claim conservative for standalone use.
         capabilities.durable_writes = true;
         capabilities
+    }
+
+    /// Unhealthy while the most recent save was refused: what the
+    /// filesystem holds in memory is then ahead of its storage, and stays
+    /// so until a later save (any mutation, or `syncfs`) succeeds.
+    fn health(&self) -> Result<()> {
+        if self.save_failed.load(Ordering::Acquire) {
+            return Err(mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio)
+                .with_message("the last save to storage failed"));
+        }
+        Ok(())
     }
 
     async fn syncfs(&self) -> Result<()> {
@@ -902,6 +927,27 @@ mod tests {
 
         block_on(fs.syncfs()).unwrap();
         assert_eq!(store.save_calls(), before + 2);
+    }
+
+    #[test]
+    fn health_follows_the_outcome_of_the_last_save() {
+        let store = TestStore::new();
+        let fs = block_on(PersistedFs::open(store.clone())).unwrap();
+        let view = fs.clone();
+        assert!(fs.health().is_ok());
+
+        store.fail_next_save();
+        block_on(fs.mkdir("/a", MkdirOptions::default())).unwrap_err();
+        assert_eq!(fs.health().unwrap_err().code, ErrorCode::Eio);
+        // Every view of the filesystem reports it, and reading does not
+        // clear it.
+        assert!(view.health().is_err());
+        block_on(fs.stat("/")).unwrap();
+        assert!(fs.health().is_err());
+
+        block_on(fs.syncfs()).unwrap();
+        assert!(fs.health().is_ok());
+        assert!(view.health().is_ok());
     }
 
     #[test]

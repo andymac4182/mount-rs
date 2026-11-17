@@ -18,6 +18,8 @@ mod remote;
 pub mod runtime;
 mod server_cache;
 mod stale;
+mod storage_check;
+mod token_reload;
 pub mod watch;
 
 pub use parser::{CliOptions, Command, DriverChoice, ParseError, TransportChoice, parse_args};

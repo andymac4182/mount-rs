@@ -642,15 +642,23 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
     metadata: (
       <>
         <code>mount_rs_tidb_metadata</code> stores the namespace LONGTEXT,
-        revision, writer owner/fence/expiry, keyed by the caller's
-        <code>volume_key</code>.
+        revision, writer owner/fence/expiry, the write mode and its
+        block-authority binding, keyed by the caller's{' '}
+        <code>volume_key</code>. <code>mount_rs_tidb_inodes</code> holds one
+        row per inode (generation, revision and the node record) for a volume
+        that has opted in to independent inode publication
+        (<code>inode_updates</code>); other volumes have no rows there.
       </>
     ),
     blocks: (
       <>
         <code>mount_rs_tidb_blocks</code> stores <code>volume_key</code>, a
-        content-derived block ID, and LONGBLOB bytes. Metadata and blocks may
-        use separate TiDB options or different providers.
+        content-derived block ID, and LONGBLOB bytes.{' '}
+        <code>mount_rs_tidb_block_authority</code> holds one server-generated
+        ID per volume key; a concurrent-mode volume binds its metadata to that
+        ID and verifies it on reopen, so metadata is never paired with a
+        different block scope. Metadata and blocks may use separate TiDB
+        options or different providers.
       </>
     ),
     layout: (
@@ -667,7 +675,13 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
         clock, with a volume-row <code>SELECT ... FOR UPDATE</code>. A flush is
         an acknowledgement round trip, not an fsync command. Set
         <code>durable</code> only when the TiDB/TiKV replication and sync-log
-        policy supports that assertion.
+        policy supports that assertion. Every statement, <code>COMMIT</code>{' '}
+        and connection attempt is bounded: 120 seconds by default, or the{' '}
+        <code>statement_timeout_ms</code> parameter of the connection URL. A
+        timeout is never retried. When it ends a <code>COMMIT</code> or a
+        single-statement publication, TiDB may already have committed, so the
+        error reports an unknown outcome, exactly as for a lost connection,
+        and the operation fails closed.
       </>
     ),
     inspectLabel: 'Query only the owned volume key',
@@ -680,11 +694,27 @@ SELECT volume_key, id, OCTET_LENGTH(bytes) AS block_bytes
 FROM mount_rs_tidb_blocks
 WHERE volume_key = '<owned-volume-key>'
 ORDER BY id
-LIMIT 20;`,
+LIMIT 20;
+
+-- Only populated for volumes using independent inode publication.
+SELECT inode, generation, revision
+FROM mount_rs_tidb_inodes
+WHERE volume_key = '<owned-volume-key>'
+ORDER BY inode
+LIMIT 20;
+
+SELECT volume_key, HEX(backing_id) AS backing_id
+FROM mount_rs_tidb_block_authority
+WHERE volume_key = '<owned-volume-key>';`,
     cleanup: (
       <>
         Use a dedicated database/user and keep the MySQL/TiDB URL in an
-        environment variable. The integration tests use a unique volume key;
+        environment variable. With <code>require_ssl=true</code> the server
+        certificate and host name are verified against the built-in public
+        roots; a TiDB whose certificate comes from a private authority adds
+        it with the <code>tls_ca_file</code> URL parameter, which names a PEM
+        file and is rejected without <code>require_ssl=true</code>. The
+        integration tests use a unique volume key;
         clean only that key's metadata and blocks after all clients close, then
         close the pool. Do not drop provider tables shared by another run.
       </>
@@ -692,7 +722,11 @@ LIMIT 20;`,
     limitations: (
       <>
         A MySQL-compatible server is not TiDB acceptance. The durable 3PD/3TiKV
-        topology and provider restart promotion remain capacity-gated. A bounded
+        restart sequence passes in hosted Linux CI, which is the authoritative
+        result; it has not been run on the local development host, which lacks
+        the memory the three-node topology needs. The TLS lane uses a
+        throwaway authority against a single-node TiDB and does not cover a
+        managed endpoint, certificate rotation or client certificates. A bounded
         Node/CLI consumer slice now covers configuration, partial write,
         truncate, shutdown/reopen, and owned RustFS-prefix cleanup. The
         terminal W08 hosted packet qualifies the defined Linux/macOS consumer

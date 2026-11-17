@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, Result, Stats,
 };
-use mount_rs_http::{DriveConfig, DriveRegistry, HttpServer, HttpServerOptions};
+use mount_rs_http::{
+    AccessLog, DriveConfig, DriveRegistry, DriveTokens, HttpMetrics, HttpServer, HttpServerOptions,
+    METRICS_CONTENT_TYPE, MetricsServer,
+};
 use mount_rs_memfs::MemoryFs;
 use mount_rs_sqlite_fs::open_sqlite_memory;
 use reqwest::StatusCode;
@@ -359,6 +362,84 @@ async fn a_drive_that_failed_closed_answers_503_and_takes_readiness_down() {
             .status(),
         StatusCode::OK
     );
+    server.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_drive_with_its_own_health_check_is_ready_only_while_the_check_passes() {
+    // What the driver cannot know, such as whether the directory under it
+    // is still there, is told to the drive, and unlike a failed-closed
+    // driver it can be well again.
+    let reachable = Arc::new(AtomicBool::new(true));
+    let seen = Arc::clone(&reachable);
+    let mut registry = DriveRegistry::new();
+    let checked = DriveConfig::new("checked", Arc::new(MemoryFs::empty()), TOKEN)
+        .expect("drive config")
+        .with_health_check(Arc::new(move || {
+            if seen.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Eio))
+            }
+        }));
+    registry.register(checked).expect("register");
+    registry
+        .register(DriveConfig::new("plain", Arc::new(MemoryFs::empty()), TOKEN).unwrap())
+        .expect("register");
+    let server = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    let readiness = || async {
+        let ready = get(&server, "/readyz").await;
+        (
+            ready.status().as_u16(),
+            ready.json::<Value>().await.unwrap(),
+        )
+    };
+
+    assert_eq!(
+        readiness().await,
+        (200, json!({"status": "ready", "drives": 2}))
+    );
+    reachable.store(false, Ordering::Release);
+    assert_eq!(
+        readiness().await,
+        (
+            503,
+            json!({"status": "not_ready", "drives": 2, "failed": 1})
+        )
+    );
+    // The check is about readiness only: requests are still given to the
+    // drive, which answers them as it can.
+    assert_eq!(
+        get(&server, "/v1/drives/checked/stat").await.status(),
+        StatusCode::OK
+    );
+    reachable.store(true, Ordering::Release);
+    assert_eq!(
+        readiness().await,
+        (200, json!({"status": "ready", "drives": 2}))
+    );
+
+    // A driver that failed closed is not ready whatever the check says.
+    let failing = TestFs::new(true);
+    failing.failed.store(true, Ordering::Release);
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::new("failing", failing, TOKEN)
+                .unwrap()
+                .with_health_check(Arc::new(|| Ok(()))),
+        )
+        .expect("register");
+    let failed = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    assert_eq!(
+        get(&failed, "/readyz").await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    failed.close().await.expect("close");
     server.close().await.expect("close");
 }
 
@@ -1023,6 +1104,337 @@ async fn an_unknown_drive_is_indistinguishable_from_a_wrong_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_operation_is_no_route_with_or_without_a_token() {
+    let server = start(
+        vec![("d", Arc::new(MemoryFs::empty()) as Arc<dyn FsDriver>)],
+        HttpServerOptions::default(),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/drives/d/ops/chown", server.url());
+    // Whatever the method, and before the token is looked at: the route
+    // check comes before authentication, so this is not a 401 or a 405.
+    for request in [
+        client.post(&url),
+        client.post(&url).header(AUTHORIZATION, bearer()),
+        client.get(&url).header(AUTHORIZATION, bearer()),
+        client.post(format!("{}/v1/drives/absent/ops/chown", server.url())),
+    ] {
+        let response = request.send().await.expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let (code, message) = error_of(response).await;
+        assert_eq!(
+            (code.as_str(), message.as_str()),
+            ("ENOENT", "drive or route not found")
+        );
+    }
+    server.close().await.expect("close");
+}
+
+/// The value of one series in a metrics scrape.
+fn sample(text: &str, series: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+        .map(|value| value.parse().expect("a number"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_metrics_listener_reports_what_the_server_did_and_no_path_or_token() {
+    let metrics = HttpMetrics::new("9.9.9-test");
+    let reachable = Arc::new(AtomicBool::new(true));
+    let seen = Arc::clone(&reachable);
+    let checked = DriveConfig::new("checked", Arc::new(MemoryFs::empty()), TOKEN)
+        .expect("drive config")
+        .with_health_check(Arc::new(move || {
+            if seen.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Eio))
+            }
+        }));
+    let plain = DriveConfig::new("plain", Arc::new(MemoryFs::empty()), TOKEN).unwrap();
+    metrics.observe_drive(&checked);
+    metrics.observe_drive(&plain);
+    let mut registry = DriveRegistry::new();
+    registry.register(checked).expect("register");
+    registry.register(plain).expect("register");
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            access_log: Some(Arc::clone(&metrics) as Arc<dyn AccessLog>),
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+    let scraper = MetricsServer::start("127.0.0.1:0".parse().unwrap(), false, metrics)
+        .await
+        .expect("metrics listener");
+    let metrics_url = format!("http://{}/metrics", scraper.local_addr());
+    let client = reqwest::Client::new();
+    let scrape = || async {
+        let response = client.get(&metrics_url).send().await.expect("scrape");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"].to_str().unwrap(),
+            METRICS_CONTENT_TYPE
+        );
+        response.text().await.expect("text")
+    };
+
+    let api = |method: reqwest::Method, route: &str, token: &str| {
+        client
+            .request(method, format!("{}{route}", server.url()))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+    };
+    let secret_path = "/v1/drives/plain/fs/a-secret-name.txt";
+    let put = api(reqwest::Method::PUT, secret_path, TOKEN)
+        .body(vec![7_u8; 1000])
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success(), "{}", put.status());
+    for _ in 0..3 {
+        let got = api(reqwest::Method::GET, secret_path, TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(got.bytes().await.unwrap().len(), 1000);
+    }
+    let wrong = api(reqwest::Method::GET, secret_path, "a-wrong-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    let missing = api(reqwest::Method::GET, "/v1/drives/plain/fs/absent", TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(get(&server, "/readyz").await.status(), StatusCode::OK);
+    assert_eq!(
+        get(&server, "/no/such/route").await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // A request is counted once its response body is finished with, which
+    // can be a moment after the client has read it.
+    let fs = "/v1/drives/{id}/fs/{path}";
+    let requests = |text: &str, route: &str, method: &str, status: &str| {
+        sample(
+            text,
+            &format!(
+                "mount_rs_http_requests_total{{route=\"{route}\",method=\"{method}\",status=\"{status}\"}}"
+            ),
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = scrape().await;
+        if requests(&text, "unmatched", "GET", "4xx") == Some(1.0)
+            && sample(&text, "mount_rs_http_requests_in_flight") == Some(0.0)
+        {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "{text}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(requests(&text, fs, "PUT", "2xx"), Some(1.0), "{text}");
+    assert_eq!(requests(&text, fs, "GET", "2xx"), Some(3.0), "{text}");
+    assert_eq!(requests(&text, fs, "GET", "4xx"), Some(2.0), "{text}");
+    assert_eq!(
+        requests(&text, "/readyz", "GET", "2xx"),
+        Some(1.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!("mount_rs_http_request_duration_seconds_count{{route=\"{fs}\"}}")
+        ),
+        Some(6.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!("mount_rs_http_request_duration_seconds_bucket{{route=\"{fs}\",le=\"+Inf\"}}")
+        ),
+        Some(6.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_request_body_bytes_total"),
+        Some(1000.0)
+    );
+    let sent = sample(&text, "mount_rs_http_response_body_bytes_total").expect("bytes out");
+    assert!(sent >= 3000.0, "{sent}");
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"checked\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"plain\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_build_info{version=\"9.9.9-test\"}"),
+        Some(1.0)
+    );
+    assert!(sample(&text, "process_start_time_seconds").expect("start") > 1.6e9);
+    // Nothing a client typed, and no credential.
+    for private in [
+        "a-secret-name",
+        "absent",
+        "no/such",
+        TOKEN,
+        "a-wrong-token-value",
+    ] {
+        assert!(!text.contains(private), "{private} in {text}");
+    }
+
+    // Readiness per drive follows the drive, as /readyz does.
+    reachable.store(false, Ordering::Release);
+    let text = scrape().await;
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"checked\"}"),
+        Some(0.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"plain\"}"),
+        Some(1.0)
+    );
+    // Scrapes are not requests to the API.
+    assert_eq!(requests(&text, "unmatched", "GET", "4xx"), Some(1.0));
+
+    // The listener serves the metrics and nothing else.
+    let base = format!("http://{}", scraper.local_addr());
+    for other in ["/", "/healthz", "/v1/drives", "/metrics/"] {
+        let response = client.get(format!("{base}{other}")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{other}");
+    }
+    let posted = client.post(&metrics_url).send().await.unwrap();
+    assert_eq!(posted.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(posted.headers()["allow"], "GET, HEAD");
+    let head = client.head(&metrics_url).send().await.unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    // And the API listener does not serve them.
+    assert_eq!(
+        get(&server, "/metrics").await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    drop(scraper);
+    server.close().await.expect("close");
+    assert!(
+        client.get(&metrics_url).send().await.is_err(),
+        "the listener stopped"
+    );
+}
+
+/// Everything a caller can see of a response, for comparing two of them.
+async fn observable(response: reqwest::Response) -> (u16, Vec<(String, String)>, String) {
+    let status = response.status().as_u16();
+    let mut headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "date" | "x-request-id"))
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+        .collect();
+    headers.sort();
+    (status, headers, response.text().await.unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drive_accepts_each_of_its_tokens_until_the_set_is_replaced() {
+    const OLD: &str = "token-before-rotation";
+    const NEW: &str = "token-after-rotation";
+    let tokens = DriveTokens::new(vec![OLD.to_owned()]).expect("tokens");
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::with_tokens("d", Arc::new(MemoryFs::empty()), tokens.clone())
+                .expect("drive config"),
+        )
+        .expect("register");
+    registry
+        .register(DriveConfig::new("other", Arc::new(MemoryFs::empty()), TOKEN).unwrap())
+        .expect("register");
+    let server = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    let client = reqwest::Client::new();
+    let with = |token: &str, route: &str| {
+        client
+            .get(format!("{}{route}", server.url()))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+    };
+    let status = |token: &'static str| {
+        let request = with(token, "/v1/drives/d/stat");
+        async move { request.await.unwrap().status().as_u16() }
+    };
+    let never_valid = observable(with("never-a-token", "/v1/drives/d/stat").await.unwrap()).await;
+    assert_eq!(never_valid.0, 401);
+
+    assert_eq!((status(OLD).await, status(NEW).await), (200, 401));
+
+    // The overlap: both are accepted, on the drive's routes and in discovery.
+    assert_eq!(
+        tokens.replace(vec![NEW.to_owned(), OLD.to_owned()]),
+        Ok(true)
+    );
+    assert_eq!((status(OLD).await, status(NEW).await), (200, 200));
+    for token in [OLD, NEW] {
+        let drives: Value = with(token, "/v1/drives")
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(drives, json!([{"id": "d"}]), "{token}");
+    }
+    // Still only this drive's tokens, and only on this drive.
+    assert_eq!(status(TOKEN).await, 401);
+    assert_eq!(
+        with(NEW, "/v1/drives/other/stat").await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // A set that is not valid is refused whole and changes nothing.
+    for refused in [
+        vec![],
+        vec![String::new()],
+        vec![NEW.to_owned(), "has a space".to_owned()],
+        vec![NEW.to_owned(), OLD.to_owned(), "third".to_owned()],
+    ] {
+        assert!(tokens.replace(refused).is_err());
+    }
+    assert_eq!((status(OLD).await, status(NEW).await), (200, 200));
+    assert_eq!(
+        tokens.replace(vec![NEW.to_owned(), OLD.to_owned()]),
+        Ok(false)
+    );
+
+    // The old token is dropped: it now gets exactly what a token that was
+    // never valid gets.
+    assert_eq!(tokens.replace(vec![NEW.to_owned()]), Ok(true));
+    assert_eq!(status(NEW).await, 200);
+    assert_eq!(
+        observable(with(OLD, "/v1/drives/d/stat").await.unwrap()).await,
+        never_valid
+    );
+    assert_eq!(
+        with(OLD, "/v1/drives").await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        !format!("{tokens:?}").contains(NEW),
+        "tokens are not printed"
+    );
+    server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_bearer_scheme_is_matched_without_regard_to_case() {
     let server = start(
         vec![("d", Arc::new(MemoryFs::empty()) as Arc<dyn FsDriver>)],
@@ -1610,8 +2022,8 @@ async fn the_access_log_gets_one_record_per_request_without_paths_or_tokens() {
             client
                 .post(format!("{}/v1/drives/d/ops/chown-everything", server.url()))
                 .header(AUTHORIZATION, bearer()),
-            "/v1/drives/{id}/ops/{operation}",
-            Some("d"),
+            "unmatched",
+            None,
             404,
         ),
         (
