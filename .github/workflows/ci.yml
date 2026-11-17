@@ -953,6 +953,14 @@ jobs:
         # lifetimes; this is the outage coverage the skipped restart test
         # above cannot give without stopping the service container.
         run: cargo test --locked -p mount-rs-cli --test redis_connection -- --include-ignored
+      - name: Test drive failover with real servers
+        env:
+          MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+        # Two candidates and an ingress per test, each behind its own Redis
+        # proxy: a partitioned owner, a Redis outage with the owner killed,
+        # fail-back, writes across a kill, a paused owner and a release that
+        # storage does not answer. About two minutes on a four-core runner.
+        run: cargo test --locked -p mount-rs-cli --test failover -- --include-ignored
 
   observability-qualification:
     name: Observability qualification (${{ matrix.os }})
