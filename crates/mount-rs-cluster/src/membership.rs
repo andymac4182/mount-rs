@@ -6,7 +6,7 @@
 //! every request, so nothing keeps a copy of an older membership.
 use crate::forwarding::{MAX_PEER_DIRECTORY_MEMBERS, PeerDirectory, TrustedPeer};
 use crate::{VolumeRoute, transport::*};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Why a membership file, or a reload of one, was refused. The text names
 /// the record and field at fault; a membership file holds no secrets.
@@ -106,8 +106,6 @@ pub struct PeerMembership {
     pins: SharedPeerPins,
     capacity: usize,
     local: Option<LocalMember>,
-    /// Serializes reloads so the directory and the pins change together.
-    reload: Mutex<()>,
 }
 
 impl PeerMembership {
@@ -134,7 +132,6 @@ impl PeerMembership {
             pins,
             capacity,
             local: None,
-            reload: Mutex::new(()),
         })
     }
 
@@ -209,6 +206,15 @@ impl PeerMembership {
 
     /// Check `candidate` against the reload rules without installing it.
     pub fn check(&self, candidate: &PeerDirectory) -> Result<MembershipChange, MembershipError> {
+        self.check_against(&self.directory.load(), candidate)
+    }
+
+    /// [`Self::check`], against `current` as the membership in use.
+    fn check_against(
+        &self,
+        current: &PeerDirectory,
+        candidate: &PeerDirectory,
+    ) -> Result<MembershipChange, MembershipError> {
         if candidate.len() > self.capacity {
             return Err(MembershipError::OverCapacity {
                 members: candidate.len(),
@@ -238,7 +244,6 @@ impl PeerMembership {
                 }
             }
         }
-        let current = self.directory.load();
         let mut change = MembershipChange::default();
         for (node, old) in current.members() {
             match candidate.member(node) {
@@ -267,28 +272,51 @@ impl PeerMembership {
     /// only refuse a peer the new membership would admit, never admit one
     /// either membership refuses.
     ///
+    /// Reloads take no turns. Each replaces the directory only if it is
+    /// still the one its change was worked out against, working it out
+    /// again if not, so every reload reports what it really replaced. Each
+    /// then sets the pins from whichever directory is installed, again if
+    /// the directory moved while it did. Whichever reload sets the pins
+    /// last therefore set them from the directory that stays, and the two
+    /// agree once the reloads have returned. While they overlap a reader
+    /// can see one reload's directory with another's pins, which is the
+    /// case above: it applies both.
+    ///
     /// This closes inbound and outbound connections whose pin left the pin
     /// set (the transports watch it). Connections pooled to a retired
     /// address whose pin is still listed are closed by
     /// [`crate::IngressForwarder::reload_membership`], which is the entry
     /// point a server with a forwarder should use.
     pub fn apply(&self, candidate: PeerDirectory) -> Result<MembershipChange, MembershipError> {
-        let _serial = self
-            .reload
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let change = self.check(&candidate)?;
-        if change.is_empty() {
-            return Ok(change);
+        let candidate = Arc::new(candidate);
+        let change = loop {
+            let current = self.directory.load_full();
+            let change = self.check_against(&current, &candidate)?;
+            if change.is_empty() {
+                return Ok(change);
+            }
+            // Refused here, before anything changes, if the pins are
+            // unusable.
+            approved_pins(&candidate)?;
+            let previous = self
+                .directory
+                .compare_and_swap(&current, Arc::clone(&candidate));
+            if Arc::ptr_eq(&previous, &current) {
+                break change;
+            }
+        };
+        loop {
+            let installed = self.directory.load_full();
+            // Cannot fail: every installed directory passed the check
+            // above, and its pin count is bounded by the membership size,
+            // which is below the transport's pin limit.
+            self.pins
+                .replace_approved(approved_pins(&installed)?)
+                .map_err(|error| MembershipError::Pins(error.to_string()))?;
+            if Arc::ptr_eq(&installed, &self.directory.load()) {
+                return Ok(change);
+            }
         }
-        let pins = approved_pins(&candidate)?;
-        self.directory.store(Arc::new(candidate));
-        // Cannot fail: the pin count is bounded by the membership size,
-        // which is below the transport's pin limit.
-        self.pins
-            .replace_approved(pins)
-            .map_err(|error| MembershipError::Pins(error.to_string()))?;
-        Ok(change)
     }
 
     /// Parse a membership file and [`Self::apply`] it.
@@ -400,6 +428,42 @@ mod tests {
         assert!(after.revision() > before.revision());
         assert!(after.contains(other("d", 4).pin));
         assert!(!after.contains(other("c", 3).pin));
+    }
+
+    /// Reloads from several threads at once, each of a different file:
+    /// when they have returned, the pins are those of the directory that
+    /// stayed, whichever it was, and each reload reported a real change.
+    #[test]
+    fn reloads_at_once_leave_the_pins_of_the_directory_that_stayed() {
+        const THREADS: u16 = 8;
+        const ROUNDS: u16 = 200;
+        let membership = membership(vec![other("a", 1)], 8);
+        for round in 0..ROUNDS {
+            std::thread::scope(|scope| {
+                for thread in 0..THREADS {
+                    let membership = &membership;
+                    scope.spawn(move || {
+                        // A member no other reload lists, and one that
+                        // every reload lists, under one of three pins.
+                        let own = format!("n{thread}-{round}");
+                        let candidate = directory(vec![
+                            other("a", 1),
+                            other(&own, 10 + thread),
+                            other("shared", 100 + ((round + thread) % 3)),
+                        ]);
+                        let change = membership.apply(candidate).unwrap();
+                        assert!(change.added.contains(&own), "{change:?}");
+                    });
+                }
+            });
+            let directory = membership.directory();
+            let pins = membership.pins().snapshot();
+            assert_eq!(directory.len(), 3, "round {round}");
+            assert_eq!(pins.len(), 3, "round {round}");
+            for (node, peer) in directory.members() {
+                assert!(pins.contains(peer.pin), "round {round}: {node}");
+            }
+        }
     }
 
     #[test]
