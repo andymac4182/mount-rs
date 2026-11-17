@@ -7,7 +7,9 @@ introduced.
 Related documents:
 
 - API guide: [`transports/mount-rs-http/README.md`](../transports/mount-rs-http/README.md)
-- Machine-readable contract: [`transports/mount-rs-http/openapi.yaml`](../transports/mount-rs-http/openapi.yaml) (`info.version` `1.0.0`)
+- Machine-readable contract: [`transports/mount-rs-http/openapi.yaml`](../transports/mount-rs-http/openapi.yaml) (`info.version` `1.0.1`),
+  checked against a running server by
+  `transports/mount-rs-http/tests/openapi_conformance.rs` on every change
 - Operator runbook: [`serve-http-runbook.md`](serve-http-runbook.md)
 - Upgrade and rollback: [`serve-http-upgrade.md`](serve-http-upgrade.md)
 - Security: [`serve-http-security.md`](serve-http-security.md)
@@ -32,7 +34,7 @@ They are independent. Do not infer one from another.
 | Number | Where | Current value | Changes when |
 | --- | --- | --- | --- |
 | API version | URL prefix `/v1` | `v1` | A breaking change to the HTTP API |
-| Contract document version | `openapi.yaml` `info.version` | `1.0.0` | Any change to the document. Proposed rule: additions raise the minor part, corrections raise the patch part, and the major part equals the API version. |
+| Contract document version | `openapi.yaml` `info.version` | `1.0.1` | Any change to the document. Proposed rule: additions raise the minor part, corrections raise the patch part, and the major part equals the API version. |
 | Config file version | Top-level `"version"` in the JSON config | `1` | A breaking change to the config format |
 | Binary version | `mount-rs --version` | Cargo package version | Every release |
 
@@ -67,9 +69,9 @@ The v1 contract is plain `serve-http` with `remote_sessions: false` and no
 | The command line: `mount-rs serve-http --config <path>`, `mount-rs validate-config --config <path>` | Runbook "Start" |
 | Config keys under `http` and `http.drives[]`: name, type, meaning and default, except those marked experimental | Runbook "Configuration reference" |
 | Exit codes 0, 1 and 2 and what each class means | Runbook "Exit codes" |
-| Signals: SIGINT and SIGTERM start a graceful shutdown | Runbook "Shutdown" |
+| Signals: SIGINT and SIGTERM start a graceful shutdown. SIGHUP reloads the token files of a server that has one, and is not handled by a server that has none | Runbook "Shutdown", "Rotation" |
 | The two stdout lifecycle lines: `http listening at <url> (drives: ...)` and `http stopped` | Runbook "Readiness line", "Shutdown" |
-| Token provisioning: one environment variable per drive, read once at startup | Runbook "Tokens" |
+| Token provisioning: per drive, an environment variable read once at startup, or a token file of one or two lines read again on SIGHUP and on a timer | Runbook "Tokens" |
 
 ## What may change without a version bump
 
@@ -115,7 +117,7 @@ is a breaking change.
 | New optional config keys with a default that preserves existing behaviour | An existing config file keeps working on a newer binary. The reverse is not true; see [Config file compatibility](#config-file-compatibility). |
 | New accepted values for an existing key | Same. |
 | The text of error messages on stderr, beyond the `mount-rs: ` prefix | Alert on exit codes, not on message text. The runbook quotes several messages (`EAGAIN ... acquire writer`, `HTTP server close timed out`); treat those as aids to diagnosis. |
-| New JSON event lines on stderr, and new fields in `mount_cache_stats` and `http_accept_failed` lines | Parse by `event` name; ignore unknown lines and fields. |
+| New JSON event lines on stderr, and new fields in `mount_cache_stats`, `http_accept_failed`, `http_drive_storage`, `http_token_reload` and `http_metrics_listening` lines | Parse by `event` name; ignore unknown lines and fields. |
 | Signals recorded by the optional `observability` feature | Not part of v1. |
 | On-disk and in-database storage formats | Governed by [`serve-http-upgrade.md`](serve-http-upgrade.md), not by the API version. |
 
@@ -267,8 +269,8 @@ suite against a cluster-enabled server. It is therefore not a promise.
 
 ## Why 12 months
 
-- Consumers are other services that integrate once, with a static token, and
-  are then left alone. Their owners need a window long enough to cover a
+- Consumers are other services that integrate once, with a token that
+  changes rarely, and are then left alone. Their owners need a window long enough to cover a
   planning cycle; a window counted only in releases could be a few weeks.
 - The project has no established release cadence: there are two tagged CLI
   preview releases. A time-based floor does not depend on cadence. The

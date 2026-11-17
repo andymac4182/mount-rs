@@ -116,12 +116,19 @@ listed first. The rest have not been verified further or started.
 | PGlite statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision. TiDB now bounds every round trip (120 s by default, `statement_timeout_ms` in the connection URL); a write that times out is reported with an unknown outcome and is not retried | High |
 | Exclusive (writeback) mode publishes namespace changes only on fsync, shutdown or reconcile | Creates and renames made without fsync are lost on SIGKILL, OOM or power loss | Medium |
 | A remote mount rejects every operation after one transport error, and the CLI never checks its keepalive worker | A network blip leaves the mount attached and returning `EIO`, with no log or exit | Medium |
-| `/readyz` reports health only for split-store drives | A `sqlite`-kind, `host` or `memory` drive that has lost its storage stays in rotation | Low |
 | The mount CLI wires no transport error hooks | A filesystem that failed closed shows up only as `EIO` to applications | Medium |
 | The S3 server buffers up to 512 MiB per non-streamable request with no concurrency limit | A few concurrent oversized bodies exhaust memory | Low |
 
 The survey did not examine 9P fid tables, the FUSE inode table, WebDAV lock
 tables or the Node bindings in depth.
+
+One gap from this list is closed. `/readyz` reported health only for
+split-store drives, so a `sqlite`-kind or `host` drive that had lost its
+storage stayed in rotation. `serve-http` now looks at a `host` drive's root
+directory and a `sqlite` drive's database file every two seconds, off the
+request path, and a `sqlite` drive is also not ready while its last save
+failed. A `memory` drive has no storage to lose and always reports ready.
+The runbook's "Health checks" section has the details and the limits.
 
 ## TiDB provider
 
@@ -220,10 +227,11 @@ therefore says nothing about TiDB with any block store other than Ozone.
   runs.
 - The W08 release policy workflow, which carries the TiDB deployment
   policy checks, failed on every push to `main` from #112 on: it asked for
-  release version 0.1.0 after the CLI moved to 0.2.0. It now reads the
-  version from the crate, and passed by manual dispatch
-  ([44116198478](https://github.com/andymac4182/mount-rs/actions/runs/44116198478)).
-  It has not yet run on `main` with the change.
+  release version 0.1.0 after the CLI moved to 0.2.0. #133 made it read
+  the version from the crate. An equivalent change passed by manual
+  dispatch
+  ([44116198478](https://github.com/andymac4182/mount-rs/actions/runs/44116198478));
+  a push run on `main` with #133 had not completed when this was written.
 - If TiDB's temporary directory is on a filesystem that is more than about
   90% full, TiDB refuses the provider's index DDL with error 8256 and the
   first open of a volume fails with `EIO`. Seen on a local Docker host; the

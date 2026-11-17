@@ -7,6 +7,8 @@ with `mount-rs serve-http --config <path>`.
 This file is the guide for services that call the API.
 
 - Machine-readable contract: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.1).
+  `tests/openapi_conformance.rs` checks it against a running server on
+  every change.
 - Running the server: [`docs/serve-http-runbook.md`](../../docs/serve-http-runbook.md).
 - Configuration file and local demo: [`apps/mount-rs-cli/README.md`](../../apps/mount-rs-cli/README.md#unmounted-http-service).
 
@@ -15,8 +17,9 @@ and no forwarding.
 
 ## Quick start
 
-The server listens on a loopback address. In production you reach it through
-the operator's TLS reverse proxy. The examples use two shell variables:
+The server listens on a loopback address unless the operator binds another
+one on a private network. In production you reach it through the operator's
+TLS reverse proxy or load balancer. The examples use two shell variables:
 
 ```sh
 BASE=http://127.0.0.1:8080        # or https://files.example.com
@@ -156,20 +159,28 @@ curl -i -H "Authorization: Bearer $TOKEN" -X DELETE \
 
 `{path}` may contain several `/`-separated segments. Leave it out
 (`/v1/drives/{id}/fs`, `/v1/drives/{id}/entries`, `/v1/drives/{id}/stat`,
-`/v1/drives/{id}/statfs`) to address the drive root.
+`/v1/drives/{id}/lstat`, `/v1/drives/{id}/statfs`,
+`/v1/drives/{id}/readlink`) to address the drive root. The root is a
+directory like any other: `PUT` on it is `409 EISDIR`, `DELETE` and
+`readlink` are `400 EINVAL`.
 
 ## Authentication
 
-Send `Authorization: Bearer <token>` on every `/v1` request. Each drive has one
-static token, provisioned by the operator. The scheme name is case-insensitive;
-the token is compared exactly.
+Send `Authorization: Bearer <token>` on every `/v1` request. Each drive has
+its own token, provisioned by the operator. The scheme name is
+case-insensitive; the token is compared exactly.
 
 - A missing header, a malformed header, a wrong token and an unknown drive id
   all return the same `401` with `WWW-Authenticate: Bearer`. You cannot tell
   from the response whether a drive exists.
 - A token for drive A is rejected with `401` on drive B.
-- Tokens change only when the operator restarts the service. After a rotation
-  the old token returns `401`; that is the signal to reload your credential.
+- The operator can rotate a drive's token. While a rotation is under way
+  the drive accepts two tokens, the new one and the one before, and both
+  work in every way. Once the operator drops the old token it returns the
+  same `401` as any wrong token; that is the signal to reload your
+  credential. Where the operator has not set the drive up for rotation
+  without a restart, the change happens at a restart and there is no period
+  in which both work.
 
 ## Request ids
 
@@ -270,7 +281,8 @@ Other things a client sees:
 The server checks a request in this order: shutting down (503), path syntax
 (400), route (404), drive and token (401), declared body size (413), method
 (405), then the operation. A `405` on a drive route is only returned to an
-authenticated caller. An unknown route is `404` with or without a token.
+authenticated caller. An unknown route is `404` with or without a token;
+that includes an operation name under `/ops/` other than the four above.
 
 ## Semantics
 
@@ -548,11 +560,22 @@ Rules:
 | Route | 200 | 503 |
 | --- | --- | --- |
 | `/healthz` | `{"status":"ok"}`: the process serves HTTP | Only while shutting down (standard error body) |
-| `/readyz` | `{"status":"ready","drives":N}`: no drive has reported a failure | `{"status":"not_ready","drives":N,"failed":M}`: a drive has failed closed or none is configured. While shutting down: the standard error body |
+| `/readyz` | `{"status":"ready","drives":N}`: no drive has reported a failure | `{"status":"not_ready","drives":N,"failed":M}`: `M` drives have failed closed or lost their storage, or none is configured. While shutting down: the standard error body |
 
 Both are unauthenticated, accept `GET` and `HEAD`, and send
 `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. They never
-reveal drive ids. They do not probe an external dependency on each call.
+reveal drive ids. They do not probe an external dependency on each call:
+`/readyz` reports what each drive last found out about itself, in the
+background. A `503` from `/readyz` says nothing about any one request; a
+drive that is not ready answers its requests with the errors in the table
+above.
+
+## Metrics
+
+The API has no metrics route. An operator can turn on a separate listener,
+on a loopback address, that serves the server's own request counts,
+durations and per-drive readiness in the Prometheus text format; see the
+runbook's "Metrics" section. Nothing in it names a path or a token.
 
 ## Limits
 
@@ -588,7 +611,8 @@ Defaults; the operator can change them.
 - CORS headers and browser clients.
 - Per-user identity or scopes. A token grants full read and write access to
   its drive.
-- Token rotation without a restart.
+- Token expiry and revocation lists. A token is valid until the operator
+  rotates it.
 - Change notifications, locking, and cross-request transactions.
 - Snapshot-isolated downloads.
 - Names beginning with `.mount-rs-upload.`.

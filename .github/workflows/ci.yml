@@ -942,9 +942,10 @@ jobs:
   cluster-http3:
     # The workspace build leaves the cluster's http3 feature off, so its
     # forwarding and coalescing tests are built and run only here, including
-    # the ones that need a disposable Redis.
+    # the ones that need a disposable Redis. The CLI's Redis connection tests
+    # run here too, because they need the same Redis.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     services:
@@ -973,6 +974,15 @@ jobs:
           --include-ignored
           --skip registration_recovers_after_server_restart
           --skip tidb_sessions_preserve_handles_and_reopen_persisted_writes
+      - name: Test the Redis connection with TLS, a password and an outage
+        env:
+          MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+          # Started by the test itself with a throwaway CA, on its own port.
+          MOUNT_RS_REDIS_TLS_TEST_IMAGE: redis:8.4@sha256:319f54e668c14f68cee51d1fdf9dba699deecac048fc0e52962433a3ef5562c0
+        # Real servers behind a proxy that cuts Redis off for three route
+        # lifetimes; this is the outage coverage the skipped restart test
+        # above cannot give without stopping the service container.
+        run: cargo test --locked -p mount-rs-cli --test redis_connection -- --include-ignored
 
   observability-qualification:
     name: Observability qualification (${{ matrix.os }})

@@ -9,7 +9,7 @@ export const Route = createFileRoute('/architecture')({
       {
         name: 'description',
         content:
-          'How a mount-rs server handles requests, forwards them across a cluster, caches metadata and blocks, and commits writes.',
+          'How a mount-rs server handles requests, forwards them across a cluster, fails drives over between servers, caches metadata and blocks, and commits writes.',
       },
     ],
   }),
@@ -31,7 +31,7 @@ const fastReasons = [
   },
   {
     title: 'Leases renew off the request path',
-    body: 'An owner renews its 240-second lease every 30 seconds in the background and serves within a 60-second window, instead of paying a lease round trip per operation.',
+    body: 'An owner renews its 240-second lease every 30 seconds in the background and serves within a 60-second window, instead of paying a lease round trip per operation. The same lease is what lets a standby take the drive over if the owner stops.',
   },
   {
     title: 'One statement per durable write',
@@ -95,15 +95,42 @@ function ArchitecturePage() {
             know which server owns a drive: owners publish their drives in Redis,
             ingresses cache those routes, and every node holds open, mutually
             authenticated HTTP/3 connections to the others. Send a request and
-            follow it.
+            follow it, then stop a node and watch a standby take over its
+            drive.
           </p>
         </div>
-        <p className="callout callout-amber arch-callout">
-          Forwarding and remote sessions are experimental. The v1{' '}
-          <code>serve-http</code> contract is a single server with no{' '}
-          <code>forwarding</code> block; a cluster also needs operator-assigned
-          drive ownership and a trusted membership file.
-        </p>
+        <div className="callout callout-blue arch-callout">
+          <p>
+            <strong>Clustering is built into <code>serve-http</code>.</strong>{' '}
+            A cluster needs three things: a membership file that pins every
+            server’s key for mutual TLS, which servers re-read on{' '}
+            <code>SIGHUP</code> or a timer, so nodes join and leave without a
+            restart; a Redis route registry, reached over TLS with a password
+            (plaintext is refused except to the same host unless you allow it);
+            and metadata and block storage that every candidate owner of a
+            drive can reach.
+          </p>
+          <p>
+            In return, any node accepts any request, and with failover turned
+            on a drive whose owner stops moves to a standby with no operator
+            involved. Measured with real binaries, SQLite metadata and a
+            20-second lease, the new owner was published about 21 seconds after{' '}
+            <code>kill -9</code>, and within a second of a clean stop. With the
+            default 240-second lease a crash takes about four minutes, because
+            a standby cannot take a drive before the old lease expires.
+          </p>
+          <p>
+            Limits: failover is opt-in and needs split-store drives; sessions
+            and requests in flight on a failed owner are lost, not replayed;
+            Redis Sentinel and Redis Cluster are not supported; and the cluster
+            configuration and server-to-server protocol are still outside the
+            v1 compatibility policy, so a cluster is upgraded by stopping every
+            server. See the{' '}
+            <a href="https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-failover.md">failover design</a>{' '}
+            and the{' '}
+            <a href="https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#remote-sessions-on-a-configured-http-server">cluster configuration</a>.
+          </p>
+        </div>
         <ClusterSimulator />
         <ol className="arch-steps">
           <li>
@@ -132,6 +159,13 @@ function ArchitecturePage() {
           broke after the owner may have received it, is reported as an error
           and never replayed. Stopping an owner withdraws its routes, so its
           drives answer 503 at once instead of after a connection timeout.
+          While no owner is published the 503 carries{' '}
+          <code>Retry-After: 1</code> and means nothing was executed. Without
+          failover the drive stays unavailable until its owner is restarted.
+          With it, a standby that reads no route opens the drive, which
+          succeeds only once storage grants the writer lease, and then
+          publishes a route with a higher fence. Redis decides nothing about
+          who may write.
         </p>
       </section>
 
@@ -226,6 +260,12 @@ function ArchitecturePage() {
                 <a href="https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-runbook.md">serve-http runbook</a>
               </strong>
               <span>Configuration, TLS proxies, health checks, shutdown and recovery.</span>
+            </div>
+            <div>
+              <strong>
+                <a href="https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-failover.md">Failover design</a>
+              </strong>
+              <span>Candidates, states, timing bounds, what clients see and what is not handled.</span>
             </div>
           </div>
         </div>

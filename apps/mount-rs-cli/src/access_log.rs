@@ -49,6 +49,11 @@ impl JsonAccessLog {
         Ok(Arc::new(Self { queue, dropped }))
     }
 
+    /// Lines dropped so far because the queue to the writer was full.
+    pub(crate) fn dropped_lines(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
     /// Wait, for at most `limit`, until every line recorded so far has been
     /// written. Called once the listener has stopped, so that the lines of
     /// the last requests are not lost with the process.

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: mount-rs HTTP drive API
-  version: "1.0.0"
+  version: "1.0.1"
   summary: File and directory access to named mount-rs drives over HTTP.
   license:
     name: Apache-2.0
@@ -13,9 +13,11 @@ info:
 
     ## Transport
 
-    The server speaks cleartext HTTP/1.1 with keep-alive on a loopback
-    address. TLS is terminated by a reverse proxy in front of it. Clients
-    reach the API through that proxy; the base URL is the proxy's URL.
+    The server speaks cleartext HTTP/1.1 with keep-alive. By default it
+    listens on a loopback address; the operator can bind another address
+    on a private network (`allow_non_loopback`). Either way TLS is
+    terminated by a reverse proxy or load balancer in front of it. Clients
+    reach the API through that; the base URL is the proxy's URL.
     Responses produced by the proxy itself (for example its own 413, 502 or
     504) do not carry the JSON error envelope defined here.
 
@@ -26,7 +28,8 @@ info:
     1. Server shutting down: 503. (Idle connections are simply closed at
        shutdown; only a request already in progress receives this.)
     2. Request path syntax (see the `path` parameter): 400.
-    3. Route exists: 404.
+    3. Route exists: 404. An operation name other than `mkdir`, `rename`,
+       `truncate` or `sync` is not a route.
     4. `/healthz`, `/readyz` and `/v1/drives` are handled here.
     5. Drive exists and the bearer token is that drive's token: 401.
     6. Declared `Content-Length` within `max_upload_bytes` for a file
@@ -69,7 +72,22 @@ info:
     server's access log; it is not a secret and grants nothing. A response
     without the header was not produced by the server's routes: it came
     from the reverse proxy, or it is the bare 400 sent for a request that is
-    not valid HTTP.
+    not valid HTTP. The header is described once, under
+    `components/headers/XRequestId`, and is not repeated under each response.
+
+    ## HEAD
+
+    Every `GET` route also answers `HEAD`, with the status and headers of
+    the `GET` and no body, for error responses too. A `HEAD` operation
+    below lists the responses of its `GET`; read each as "these headers,
+    no content".
+
+    ## Conformance
+
+    `tests/openapi_conformance.rs` in the server's crate checks this
+    document against a running server on every change: the routes and
+    methods, and for each operation the declared statuses, content types,
+    JSON bodies and headers.
 
     ## Not part of this contract
 
@@ -87,7 +105,7 @@ info:
     entries never appear in listings.
 servers:
   - url: https://{host}
-    description: The TLS reverse proxy in front of the loopback listener.
+    description: The TLS reverse proxy or load balancer in front of the listener.
     variables:
       host:
         default: files.example.com
@@ -118,7 +136,7 @@ paths:
         down can receive 503 with the error envelope; after that the
         connection is refused.
       security: []
-      responses:
+      responses: &healthResponses
         "200":
           description: The process is alive.
           headers:
@@ -134,15 +152,9 @@ paths:
       operationId: headHealth
       tags: [health]
       summary: Liveness probe without a body.
+      description: "`Content-Length` is that of the GET body."
       security: []
-      responses:
-        "200":
-          description: The process is alive. `Content-Length` is that of the GET body.
-          headers:
-            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
-            X-Content-Type-Options: {$ref: "#/components/headers/NoSniff"}
-        "503":
-          description: The server is shutting down.
+      responses: *healthResponses
   /readyz:
     get:
       operationId: getReadiness
@@ -150,12 +162,13 @@ paths:
       summary: Readiness probe.
       description: |
         200 only when at least one drive is configured and every drive is
-        healthy. 503 when any drive has failed closed. The body never
-        contains drive ids. A 503 from this route uses the readiness body
+        healthy. 503 when any drive has failed closed or cannot reach its
+        storage. The probe reads what the drives already know; it does no
+        I/O of its own. The body never contains drive ids. A 503 from this route uses the readiness body
         below, not the error envelope, except while the server is shutting
         down, when it is the standard error envelope.
       security: []
-      responses:
+      responses: &readyResponses
         "200":
           description: Every drive is healthy.
           headers:
@@ -168,11 +181,17 @@ paths:
         "405": {$ref: "#/components/responses/MethodNotAllowed"}
         "503":
           description: |
-            At least one drive has failed closed, or no drive is configured,
-            or the server is shutting down.
+            At least one drive has failed closed or cannot reach its
+            storage, or no drive is configured, or the server is shutting
+            down.
           headers:
-            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
-            X-Content-Type-Options: {$ref: "#/components/headers/NoSniff"}
+            Cache-Control:
+              description: "`no-store`, with the readiness body."
+              schema: {type: string, const: no-store}
+            X-Content-Type-Options:
+              description: "`nosniff`, with the readiness body."
+              schema: {type: string, const: nosniff}
+            Connection: {$ref: "#/components/headers/ConnectionCloseSometimes"}
           content:
             application/json:
               schema:
@@ -185,11 +204,7 @@ paths:
       tags: [health]
       summary: Readiness probe without a body.
       security: []
-      responses:
-        "200":
-          description: Every drive is healthy.
-        "503":
-          description: Not ready, or shutting down.
+      responses: *readyResponses
   /v1/drives:
     get:
       operationId: listDrives
@@ -200,7 +215,7 @@ paths:
         token, sorted by id. A token that matches no drive, a missing header
         and a malformed header all return 401. The full drive list is never
         revealed.
-      responses:
+      responses: &driveListResponses
         "200":
           description: The drives this token can access. Never empty.
           content:
@@ -218,13 +233,8 @@ paths:
       operationId: headDrives
       tags: [drives]
       summary: Same as GET without a body.
-      responses:
-        "200":
-          description: The token is valid for at least one drive.
-        "401":
-          description: Missing, malformed or unknown token.
-          headers:
-            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+      description: 200 means the token is valid for at least one drive.
+      responses: *driveListResponses
   /v1/drives/{id}/fs:
     parameters:
       - $ref: "#/components/parameters/DriveId"
@@ -233,17 +243,62 @@ paths:
       tags: [files]
       summary: Metadata and listing of the drive's root directory.
       description: Equivalent to `GET /v1/drives/{id}/fs/{path}` for the root directory `/`.
-      responses:
+      responses: &rootReadResponses
         "200":
           description: Root directory metadata with its entries.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/DirectoryMetadata"}
         "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
         "413": {$ref: "#/components/responses/TooLarge"}
         "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
         "503": {$ref: "#/components/responses/Unavailable"}
         "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headRoot
+      tags: [files]
+      summary: Headers of the corresponding GET, without a body.
+      responses: *rootReadResponses
+    put:
+      operationId: putRoot
+      tags: [files]
+      summary: Always refused; the drive root is a directory.
+      description: |
+        The route accepts `PUT` so that the answer is the one any directory
+        gives: 409 `EISDIR`. Nothing is written.
+      requestBody:
+        required: true
+        content:
+          "*/*":
+            schema: {type: string, format: binary}
+      responses:
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409":
+          description: The root is a directory (`EISDIR`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    delete:
+      operationId: deleteRoot
+      tags: [files]
+      summary: Always refused; the drive root cannot be removed.
+      responses:
+        "400":
+          description: The drive root cannot be removed (`EINVAL`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "503": {$ref: "#/components/responses/Unavailable"}
   /v1/drives/{id}/fs/{path}:
     parameters:
       - $ref: "#/components/parameters/DriveId"
@@ -297,7 +352,7 @@ paths:
         - $ref: "#/components/parameters/IfRange"
         - $ref: "#/components/parameters/IfMatch"
         - $ref: "#/components/parameters/IfNoneMatch"
-      responses:
+      responses: &pathReadResponses
         "200":
           description: The whole file, or JSON metadata for a directory or special file.
           headers:
@@ -313,17 +368,19 @@ paths:
               schema: {type: string, format: binary}
             application/json:
               schema:
-                oneOf:
+                anyOf:
                   - $ref: "#/components/schemas/DirectoryMetadata"
                   - $ref: "#/components/schemas/PathMetadata"
         "206":
           description: The requested byte range of a regular file.
           headers:
             Accept-Ranges:
+              required: true
               schema: {type: string, const: bytes}
             Content-Range:
               description: "`bytes <first>-<last>/<size>`."
-              schema: {type: string}
+              required: true
+              schema: {type: string, pattern: "^bytes [0-9]+-[0-9]+/[0-9]+$"}
               example: bytes 7-23/131072
             ETag: {$ref: "#/components/headers/ETag"}
             Content-Length:
@@ -336,6 +393,7 @@ paths:
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
         "413": {$ref: "#/components/responses/TooLarge"}
         "414": {$ref: "#/components/responses/UriTooLong"}
         "304": {$ref: "#/components/responses/NotModified"}
@@ -354,45 +412,15 @@ paths:
         `ETag` and (with `Range`) `Content-Range` that GET would return. For a
         directory the server builds the listing to compute `Content-Length`,
         so the directory limits apply. Error responses to HEAD have no body;
-        use the status code.
+        use the status code. `Content-Type` tells a file
+        (`application/octet-stream`) from a directory or special file
+        (`application/json`).
       parameters:
         - $ref: "#/components/parameters/Range"
         - $ref: "#/components/parameters/IfRange"
         - $ref: "#/components/parameters/IfMatch"
         - $ref: "#/components/parameters/IfNoneMatch"
-      responses:
-        "200":
-          description: The path exists. `Content-Type` tells a file (`application/octet-stream`) from a directory or special file (`application/json`).
-          headers:
-            Accept-Ranges:
-              schema: {type: string, const: bytes}
-            Content-Length:
-              description: File size in bytes, or the length of the JSON metadata.
-              schema: {type: integer, minimum: 0}
-        "206":
-          description: The range is satisfiable.
-          headers:
-            Content-Range:
-              schema: {type: string}
-        "400": {description: Invalid path.}
-        "401":
-          description: Missing or wrong token, or unknown drive.
-          headers:
-            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
-        "403": {description: Permission denied by the filesystem.}
-        "404": {description: No such file or directory.}
-        "304": {description: "`If-None-Match` matched; `ETag` is sent."}
-        "412": {description: "`If-Match` did not match."}
-        "413": {description: Directory too large to list.}
-        "416":
-          description: Range not satisfiable.
-          headers:
-            Content-Range:
-              schema: {type: string}
-              example: bytes */9
-        "500": {description: Internal error.}
-        "503": {description: Drive unavailable or server shutting down.}
-        "504": {description: Server-side timeout.}
+      responses: *pathReadResponses
     put:
       operationId: putFile
       tags: [files]
@@ -550,15 +578,31 @@ paths:
         - $ref: "#/components/parameters/AcceptEncoding"
         - $ref: "#/components/parameters/ListingLimit"
         - $ref: "#/components/parameters/ListingCursor"
-      responses:
+      responses: &rootEntriesResponses
         "200": {$ref: "#/components/responses/EntryList"}
-        "400": {$ref: "#/components/responses/BadRequest"}
+        "400":
+          description: Invalid `limit` or `cursor` (`EINVAL`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
         "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
         "406": {$ref: "#/components/responses/NotAcceptable"}
         "413": {$ref: "#/components/responses/TooLarge"}
         "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
         "503": {$ref: "#/components/responses/Unavailable"}
         "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headRootEntries
+      tags: [directories]
+      summary: Headers of the corresponding GET, without a body.
+      parameters:
+        - $ref: "#/components/parameters/AcceptEncoding"
+        - $ref: "#/components/parameters/ListingLimit"
+        - $ref: "#/components/parameters/ListingCursor"
+      responses: *rootEntriesResponses
   /v1/drives/{id}/entries/{path}:
     parameters:
       - $ref: "#/components/parameters/DriveId"
@@ -608,7 +652,7 @@ paths:
         - $ref: "#/components/parameters/AcceptEncoding"
         - $ref: "#/components/parameters/ListingLimit"
         - $ref: "#/components/parameters/ListingCursor"
-      responses:
+      responses: &entriesResponses
         "200": {$ref: "#/components/responses/EntryList"}
         "400": {$ref: "#/components/responses/BadRequest"}
         "401": {$ref: "#/components/responses/Unauthorized"}
@@ -618,6 +662,7 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
         "406": {$ref: "#/components/responses/NotAcceptable"}
         "413": {$ref: "#/components/responses/TooLarge"}
         "414": {$ref: "#/components/responses/UriTooLong"}
@@ -636,23 +681,29 @@ paths:
         - $ref: "#/components/parameters/AcceptEncoding"
         - $ref: "#/components/parameters/ListingLimit"
         - $ref: "#/components/parameters/ListingCursor"
-      responses:
-        "200":
-          description: The directory, or the page, can be listed.
-          headers:
-            Vary: {$ref: "#/components/headers/VaryAcceptEncoding"}
-            Content-Encoding: {$ref: "#/components/headers/ContentEncodingGzip"}
-        "400":
-          description: Invalid path, `limit` or `cursor`.
-        "401":
-          description: Missing or wrong token, or unknown drive.
-          headers:
-            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
-        "404": {description: No such directory, or not a directory.}
-        "406": {description: Neither gzip nor identity is acceptable to the client.}
-        "413": {description: Directory too large to list.}
-        "503": {description: Drive unavailable or server shutting down.}
-        "504": {description: Server-side timeout.}
+      responses: *entriesResponses
+  /v1/drives/{id}/stat:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    get:
+      operationId: statRoot
+      tags: [metadata]
+      summary: Metadata of the drive's root directory.
+      description: Equivalent to `GET /v1/drives/{id}/stat/{path}` for `/`.
+      responses: &statRootResponses
+        "200": {$ref: "#/components/responses/StatsResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headStatRoot
+      tags: [metadata]
+      summary: The status and headers of the GET, without a body.
+      responses: *statRootResponses
   /v1/drives/{id}/stat/{path}:
     parameters:
       - $ref: "#/components/parameters/DriveId"
@@ -666,7 +717,7 @@ paths:
         Works for files, directories and special files, and does not read
         file content or list the directory. Omit `{path}`
         (`/v1/drives/{id}/stat`) for the drive root.
-      responses:
+      responses: &statResponses
         "200": {$ref: "#/components/responses/StatsResult"}
         "400": {$ref: "#/components/responses/BadRequest"}
         "401": {$ref: "#/components/responses/Unauthorized"}
@@ -682,16 +733,21 @@ paths:
       operationId: headStatPath
       tags: [metadata]
       summary: Existence check; the status and headers of the GET, without a body.
-      responses:
-        "200": {description: The path exists.}
-        "400": {description: Invalid path.}
-        "401":
-          description: Missing or wrong token, or unknown drive.
-          headers:
-            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
-        "404": {description: No such file or directory.}
-        "503": {description: Drive unavailable or server shutting down.}
-        "504": {description: Server-side timeout.}
+      responses: *statResponses
+  /v1/drives/{id}/lstat:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    get:
+      operationId: lstatRoot
+      tags: [metadata]
+      summary: Metadata of the drive's root directory.
+      description: Equivalent to `GET /v1/drives/{id}/lstat/{path}` for `/`.
+      responses: *statRootResponses
+    head:
+      operationId: headLstatRoot
+      tags: [metadata]
+      summary: The status and headers of the GET, without a body.
+      responses: *statRootResponses
   /v1/drives/{id}/lstat/{path}:
     parameters:
       - $ref: "#/components/parameters/DriveId"
@@ -703,32 +759,37 @@ paths:
       description: |
         Same as `stat`, except that when the path names a symbolic link the
         link's own metadata is returned. Omit `{path}` for the drive root.
-      responses:
-        "200": {$ref: "#/components/responses/StatsResult"}
-        "400": {$ref: "#/components/responses/BadRequest"}
+      responses: *statResponses
+    head:
+      operationId: headLstatPath
+      tags: [metadata]
+      summary: The status and headers of the GET, without a body.
+      responses: *statResponses
+  /v1/drives/{id}/statfs:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    get:
+      operationId: statfsRoot
+      tags: [metadata]
+      summary: Capacity figures of the drive's filesystem.
+      description: |
+        The usual call. The figures are what the drive's filesystem
+        reports; for split-store and memory drives they are nominal and are
+        not a measurement of free space in the backing storage.
+      responses: &statfsRootResponses
+        "200": {$ref: "#/components/responses/StatsFsResult"}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/Forbidden"}
-        "404": {$ref: "#/components/responses/NotFound"}
         "405": {$ref: "#/components/responses/MethodNotAllowed"}
-        "414": {$ref: "#/components/responses/UriTooLong"}
         "500": {$ref: "#/components/responses/InternalError"}
         "501": {$ref: "#/components/responses/NotImplemented"}
         "503": {$ref: "#/components/responses/Unavailable"}
         "504": {$ref: "#/components/responses/GatewayTimeout"}
     head:
-      operationId: headLstatPath
+      operationId: headStatfsRoot
       tags: [metadata]
       summary: The status and headers of the GET, without a body.
-      responses:
-        "200": {description: The path exists.}
-        "400": {description: Invalid path.}
-        "401":
-          description: Missing or wrong token, or unknown drive.
-          headers:
-            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
-        "404": {description: No such file or directory.}
-        "503": {description: Drive unavailable or server shutting down.}
-        "504": {description: Server-side timeout.}
+      responses: *statfsRootResponses
   /v1/drives/{id}/statfs/{path}:
     parameters:
       - $ref: "#/components/parameters/DriveId"
@@ -736,21 +797,13 @@ paths:
     get:
       operationId: statfsPath
       tags: [metadata]
-      summary: Capacity figures of the drive's filesystem.
+      summary: Capacity figures of the filesystem that holds a path.
       description: |
         Returns block and file counts for the filesystem that holds the
         path. Omit `{path}` (`/v1/drives/{id}/statfs`) for the drive root,
-        which is the usual call. The figures are what the drive's
-        filesystem reports; for split-store and memory drives they are
-        nominal and are not a measurement of free space in the backing
-        storage.
-      responses:
-        "200":
-          description: Filesystem figures.
-          content:
-            application/json:
-              schema: {$ref: "#/components/schemas/StatsFs"}
-              example: {filesystem_type: 16914836, block_size: 4096, blocks: 1048576, blocks_free: 1046521, blocks_available: 1046521, files: 1048576, files_free: 1048567}
+        which is the usual call.
+      responses: &statfsResponses
+        "200": {$ref: "#/components/responses/StatsFsResult"}
         "400": {$ref: "#/components/responses/BadRequest"}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/Forbidden"}
@@ -764,13 +817,35 @@ paths:
       operationId: headStatfsPath
       tags: [metadata]
       summary: The status and headers of the GET, without a body.
-      responses:
-        "200": {description: Figures are available.}
-        "401":
-          description: Missing or wrong token, or unknown drive.
-          headers:
-            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
-        "503": {description: Drive unavailable or server shutting down.}
+      responses: *statfsResponses
+  /v1/drives/{id}/readlink:
+    parameters:
+      - $ref: "#/components/parameters/DriveId"
+    get:
+      operationId: readlinkRoot
+      tags: [metadata]
+      summary: Always refused; the drive root is not a symbolic link.
+      description: |
+        The route exists so that the root answers as any other directory
+        does: 400 `EINVAL`.
+      responses: &readlinkRootResponses
+        "400":
+          description: The drive root is not a symbolic link (`EINVAL`).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "500": {$ref: "#/components/responses/InternalError"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    head:
+      operationId: headReadlinkRoot
+      tags: [metadata]
+      summary: The status and headers of the GET, without a body.
+      responses: *readlinkRootResponses
   /v1/drives/{id}/readlink/{path}:
     parameters:
       - $ref: "#/components/parameters/DriveId"
@@ -784,7 +859,7 @@ paths:
         be relative). A path that is not a symbolic link returns 400
         `EINVAL`. Symbolic links cannot be created through this API; they
         exist only when the drive's content was produced another way.
-      responses:
+      responses: &readlinkResponses
         "200":
           description: The link target.
           content:
@@ -808,15 +883,7 @@ paths:
       operationId: headReadlinkPath
       tags: [metadata]
       summary: The status and headers of the GET, without a body.
-      responses:
-        "200": {description: The path is a symbolic link.}
-        "400": {description: Not a symbolic link, or invalid path.}
-        "401":
-          description: Missing or wrong token, or unknown drive.
-          headers:
-            WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
-        "404": {description: No such file or directory.}
-        "503": {description: Drive unavailable or server shutting down.}
+      responses: *readlinkResponses
   /v1/drives/{id}/ops/mkdir:
     parameters:
       - $ref: "#/components/parameters/DriveId"
@@ -977,6 +1044,7 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/Error"}
         "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "405": {$ref: "#/components/responses/MethodNotAllowed"}
         "413": {$ref: "#/components/responses/TooLarge"}
         "500": {$ref: "#/components/responses/InternalError"}
@@ -990,7 +1058,10 @@ components:
       type: http
       scheme: bearer
       description: |
-        `Authorization: Bearer <token>`. Each drive has one static token. The
+        `Authorization: Bearer <token>`. Each drive has its own token, and
+        while the operator rotates it accepts two: the new one and the one
+        before. A token that has been dropped gets the same 401 as any wrong
+        token. The
         token is opaque, non-empty and contains no whitespace. The scheme
         name is matched case-insensitively; the token is compared exactly.
         A token for one drive is rejected on every other drive. A request for
@@ -1137,7 +1208,9 @@ components:
         The request's id, on every response: the request's own
         `X-Request-Id` when it sent exactly one of 1 to 128 characters from
         `A-Z a-z 0-9 . _ -`, otherwise 32 hexadecimal characters generated
-        by the server.
+        by the server. It applies to every response in this document and
+        is not listed under each of them.
+      required: true
       schema: {type: string, pattern: "^[A-Za-z0-9._-]{1,128}$"}
       example: 3f9c1d2e4b5a69788796a5b4c3d2e1f0
     ETag:
@@ -1150,9 +1223,11 @@ components:
       example: '"5f2b0c7d9e8a41c3b6d0e1f2a3b4c5d6"'
     WwwAuthenticate:
       description: Always `Bearer`.
+      required: true
       schema: {type: string, const: Bearer}
     Allow:
       description: The methods the route supports, for example `GET, HEAD, PUT, DELETE`.
+      required: true
       schema: {type: string}
     RetryAfter:
       description: |
@@ -1161,20 +1236,35 @@ components:
       schema: {type: integer, minimum: 0}
     ConnectionClose:
       description: "`close`: the server closes the connection after this response."
+      required: true
+      schema: {type: string, const: close}
+    ConnectionCloseSometimes:
+      description: |
+        `close` when the server closes the connection after this response;
+        the response's description says when. Absent otherwise.
       schema: {type: string, const: close}
     CacheControlNoStore:
       description: "`no-store`."
+      required: true
       schema: {type: string, const: no-store}
     NoSniff:
       description: "`nosniff`."
+      required: true
       schema: {type: string, const: nosniff}
     VaryAcceptEncoding:
       description: "`Accept-Encoding`."
+      required: true
       schema: {type: string, const: Accept-Encoding}
     ContentEncodingGzip:
       description: "`gzip` when the listing is compressed; absent otherwise."
       schema: {type: string, const: gzip}
   responses:
+    StatsFsResult:
+      description: Filesystem figures.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/StatsFs"}
+          example: {filesystem_type: 16914836, block_size: 4096, blocks: 1048576, blocks_free: 1046521, blocks_available: 1046521, files: 1048576, files_free: 1048567}
     StatsResult:
       description: The path's metadata.
       content:
@@ -1265,9 +1355,11 @@ components:
         `PUT`, or `max_request_bytes` for a JSON body. `EOVERFLOW`:
         the directory has too many entries or its listing is too large to
         return. The server closes the connection in both cases. Neither is
-        retryable.
+        retryable. A drive whose own filesystem reports `EFBIG` or
+        `EOVERFLOW` for an operation gets this status too, and then the
+        connection stays open.
       headers:
-        Connection: {$ref: "#/components/headers/ConnectionClose"}
+        Connection: {$ref: "#/components/headers/ConnectionCloseSometimes"}
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
@@ -1294,7 +1386,8 @@ components:
       headers:
         Content-Range:
           description: "`bytes */<size>`, where `<size>` is the current file size."
-          schema: {type: string}
+          required: true
+          schema: {type: string, pattern: "^bytes \\*/[0-9]+$"}
           example: bytes */9
       content:
         application/json:
@@ -1328,7 +1421,7 @@ components:
           draining; the connection is closed.
       headers:
         Retry-After: {$ref: "#/components/headers/RetryAfter"}
-        Connection: {$ref: "#/components/headers/ConnectionClose"}
+        Connection: {$ref: "#/components/headers/ConnectionCloseSometimes"}
       content:
         application/json:
           schema: {$ref: "#/components/schemas/Error"}
@@ -1457,7 +1550,7 @@ components:
         failed:
           type: integer
           minimum: 0
-          description: Number of drives that have failed closed.
+          description: Number of drives that cannot serve, because they failed closed or their storage is unreachable.
     DriveSummary:
       type: object
       required: [id]
@@ -1483,7 +1576,6 @@ components:
       type: object
       description: One page of a listing requested with `limit`.
       required: [entries]
-      additionalProperties: false
       properties:
         entries:
           type: array

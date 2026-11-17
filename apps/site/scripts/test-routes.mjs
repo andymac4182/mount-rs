@@ -9,7 +9,7 @@ const routes = [
     path: '/',
     status: 200,
     contentType: 'text/html',
-    expected: ['A real filesystem for your app.', 'Any storage underneath.', 'prerelease', 'MemoryFs', 'Fast by design', 'Compose the stack you need today.', 'Why mount-rs'],
+    expected: ['A real filesystem for your app.', 'Any storage underneath.', 'prerelease', 'MemoryFs', 'Fast by design', 'Compose the stack you need today.', 'Why mount-rs', 'a standby takes over the drives of a node that stops'],
   },
   {
     path: '/docs',
@@ -29,7 +29,7 @@ const routes = [
     path: '/architecture',
     status: 200,
     contentType: 'text/html',
-    expected: ['How a mount-rs server', 'stays fast.', 'Load balancer', 'Send request', 'HTTP/3 peer mesh', 'Forwarding: any node, one hop to the owner.', 'Seven layers between a request and the object store.', 'Durable by default, writeback by choice.', 'What makes it fast', 'Forwarding and remote sessions are experimental.'],
+    expected: ['How a mount-rs server', 'stays fast.', 'Load balancer', 'Send request', 'HTTP/3 peer mesh', 'Forwarding: any node, one hop to the owner.', 'Seven layers between a request and the object store.', 'Durable by default, writeback by choice.', 'What makes it fast', 'Clustering is built into', 'about 21 seconds after', 'Failover: stop a node', 'aria-label="Stop Node 2"', 'there is no automatic fail-back by', 'serve-http-failover.md', 'Retry-After: 1'],
   },
   { path: '/architecture/', status: 307, redirectTo: '/architecture' },
   {
@@ -101,7 +101,7 @@ const routes = [
     path: '/docs/providers/tidb',
     status: 200,
     contentType: 'text/html',
-    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', '3PD/3TiKV', 'MOUNT_RS_TIDB_URL', 'Preview'],
+    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', '3PD/3TiKV', 'MOUNT_RS_TIDB_URL', 'Preview', 'mount_rs_tidb_inodes', 'mount_rs_tidb_block_authority', 'statement_timeout_ms', 'tls_ca_file', 'unknown outcome'],
   },
   {
     path: '/docs/providers/foundationdb',
@@ -156,7 +156,7 @@ const routes = [
     path: '/docs/transports/http',
     status: 200,
     contentType: 'text/html',
-    expected: ['HTTP multi-drive API', '/v1/drives', 'Preview'],
+    expected: ['HTTP multi-drive API', '/v1/drives', 'Preview', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'outside the v1 compatibility'],
   },
   {
     path: '/docs/transports/webdav',

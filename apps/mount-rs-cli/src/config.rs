@@ -285,6 +285,11 @@ pub(crate) struct HttpServiceConfig {
     pub request_timeout_ms: u64,
     /// Write one JSON line per request to stderr.
     pub access_log: bool,
+    /// How often token files are looked at for a change, in seconds; zero
+    /// reloads them on SIGHUP only.
+    pub token_reload_seconds: u64,
+    /// The metrics listener; none unless configured.
+    pub metrics: Option<MetricsConfig>,
     pub drives: Vec<HttpDriveConfig>,
     pub disk_cache_budget: Option<DiskCacheBudgetConfig>,
     pub tidb_metadata_pool_limit: Option<usize>,
@@ -323,6 +328,10 @@ pub(crate) struct ForwardingConfig {
     pub private_key: PathBuf,
     pub ca: PathBuf,
     pub redis_url: EnvReference,
+    /// PEM bundle that replaces the system roots for a `rediss://` server.
+    pub redis_ca: Option<PathBuf>,
+    /// Permit an unencrypted `redis://` connection to another host.
+    pub allow_plaintext_redis: bool,
     pub namespace: String,
     pub bind: std::net::SocketAddr,
     pub owner: bool,
@@ -335,6 +344,21 @@ pub(crate) struct ForwardingConfig {
     /// Most members a reload may install. `None` is the larger of 64 and
     /// the number in the file at startup.
     pub max_members: Option<usize>,
+    /// Present on an owner that is a failover candidate for its drives.
+    pub failover: Option<FailoverConfig>,
+}
+
+/// `http.forwarding.failover`. See `docs/serve-http-failover.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FailoverConfig {
+    /// How often a standby reads the route and an owner checks its lease.
+    pub poll_interval_ms: u64,
+    /// Extra wait per rank before a standby tries to take a drive.
+    pub takeover_stagger_ms: u64,
+    /// Hand a drive back to a better-ranked candidate that has returned.
+    pub fail_back: bool,
+    /// How long that candidate must have ranked first without interruption.
+    pub fail_back_after_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,8 +370,27 @@ pub(crate) struct DiskCacheBudgetConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HttpDriveConfig {
     pub id: String,
-    pub token: EnvReference,
+    pub token: TokenSource,
     pub driver: ConfigSpec,
+}
+
+/// The listener that serves `GET /metrics` (`http.metrics`). It is apart
+/// from the API listener and asks for no token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MetricsConfig {
+    pub listen: std::net::SocketAddr,
+    /// Whether `listen` may be other than loopback.
+    pub allow_non_loopback: bool,
+}
+
+/// Where a drive's bearer token comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TokenSource {
+    /// An environment variable, read once when the server starts.
+    Env(EnvReference),
+    /// A file listing the current token and optionally the one before,
+    /// read again while the server runs.
+    File(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -665,6 +708,8 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "max_connections",
             "request_timeout_ms",
             "access_log",
+            "token_reload_seconds",
+            "metrics",
             "disk_cache_budget",
             "tidb_metadata_pool_limit",
             "cache_report_interval_seconds",
@@ -796,6 +841,44 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         validate_cache_capacity(capacity, &parsed_drives)?;
     }
     let remote_sessions = optional_bool(object, "remote_sessions", "config.http")?.unwrap_or(false);
+    let file_token = parsed_drives
+        .iter()
+        .position(|drive| matches!(drive.token, TokenSource::File(_)));
+    if let Some(index) = file_token {
+        // A remote session and a forwarded request are authorized against
+        // the tokens read at startup, which a reload would not reach.
+        let conflict = if remote_sessions {
+            Some("remote_sessions")
+        } else if forwarding.is_some() {
+            Some("forwarding")
+        } else {
+            None
+        };
+        if let Some(conflict) = conflict {
+            return Err(ConfigError::at(
+                &format!("config.http.drives[{index}].token.file"),
+                format!(
+                    "cannot be used with config.http.{conflict}: tokens are not reloaded there; use token.env"
+                ),
+            ));
+        }
+    }
+    let token_reload_seconds = match optional_u32(object, "token_reload_seconds", "config.http")? {
+        Some(_) if file_token.is_none() => {
+            return Err(ConfigError::at(
+                "config.http.token_reload_seconds",
+                "requires a drive whose token is a file",
+            ));
+        }
+        Some(seconds) if seconds > 3600 => {
+            return Err(ConfigError::at(
+                "config.http.token_reload_seconds",
+                "must be between 0 and 3600; 0 turns polling off",
+            ));
+        }
+        Some(seconds) => u64::from(seconds),
+        None => 30,
+    };
     let sessions = match object.get("sessions") {
         // The limits bound remote sessions; without them they would be
         // accepted and silently do nothing.
@@ -826,6 +909,33 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             ));
         }
     }
+    if forwarding
+        .as_ref()
+        .is_some_and(|config| config.failover.is_some())
+    {
+        // A failover candidate takes a drive by acquiring its writer lease,
+        // so every drive needs one, on storage the other candidates share.
+        let path = "config.http.forwarding.failover";
+        if parsed_drives.is_empty() {
+            return Err(ConfigError::at(path, "requires at least one drive"));
+        }
+        for drive in &parsed_drives {
+            let Some(storage) = &drive.driver.storage else {
+                continue;
+            };
+            let reason = if storage.concurrent_writes || storage.delegated {
+                "requires exclusive ownership"
+            } else if storage.metadata == StorageProvider::Memory {
+                "requires metadata storage that the other candidates share, not memory"
+            } else {
+                continue;
+            };
+            return Err(ConfigError::at(
+                path,
+                format!("{reason} for every drive (drive '{}')", drive.id),
+            ));
+        }
+    }
     Ok(HttpServiceConfig {
         forwarding,
         remote_sessions,
@@ -847,6 +957,8 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         max_connections,
         request_timeout_ms,
         access_log,
+        token_reload_seconds,
+        metrics: object.get("metrics").map(parse_metrics).transpose()?,
         drives: parsed_drives,
         tidb_metadata_pool_limit: object
             .get("tidb_metadata_pool_limit")
@@ -860,6 +972,33 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             .get("disk_cache_budget")
             .map(parse_disk_budget)
             .transpose()?,
+    })
+}
+
+/// Parse `http.metrics`. The listener asks for no token, so an address
+/// that is not loopback has to be asked for by name.
+fn parse_metrics(value: &Value) -> Result<MetricsConfig, ConfigError> {
+    let path = "config.http.metrics";
+    let fields = object(value, path)?;
+    reject_unknown(fields, &["listen", "allow_non_loopback"], path)?;
+    let listen = required_string(fields, "listen", path)?
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| {
+            ConfigError::at(
+                "config.http.metrics.listen",
+                "must be an IP address and a port, such as 127.0.0.1:9464",
+            )
+        })?;
+    let allow_non_loopback = optional_bool(fields, "allow_non_loopback", path)?.unwrap_or(false);
+    if !allow_non_loopback && !listen.ip().is_loopback() {
+        return Err(ConfigError::at(
+            "config.http.metrics.listen",
+            "must be a loopback address: the metrics are served without a token; set allow_non_loopback only where the network to this listener is private",
+        ));
+    }
+    Ok(MetricsConfig {
+        listen,
+        allow_non_loopback,
     })
 }
 
@@ -920,6 +1059,8 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "private_key",
             "ca",
             "redis_url",
+            "redis_ca",
+            "allow_plaintext_redis",
             "namespace",
             "bind",
             "owner",
@@ -928,9 +1069,18 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "peer_connections",
             "membership_reload_seconds",
             "max_members",
+            "failover",
         ],
         path,
     )?;
+    let owner = optional_bool(fields, "owner", path)?.unwrap_or(false);
+    let failover = fields.get("failover").map(parse_failover).transpose()?;
+    if failover.is_some() && !owner {
+        return Err(ConfigError::at(
+            "config.http.forwarding.failover",
+            "requires owner to be true",
+        ));
+    }
     let namespace = required_string(fields, "namespace", path)?;
     if namespace.is_empty()
         || namespace.len() > 256
@@ -980,18 +1130,54 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
         peer_connections: peer_connections as usize,
         refresh_active_routes: optional_bool(fields, "refresh_active_routes", path)?
             .unwrap_or(true),
-        owner: optional_bool(fields, "owner", path)?.unwrap_or(false),
+        owner,
+        failover,
         peers: required_path(fields, "peers", path, base)?,
         certificate: required_path(fields, "certificate", path, base)?,
         private_key: required_path(fields, "private_key", path, base)?,
         ca: required_path(fields, "ca", path, base)?,
         redis_url: required_env_reference(fields, "redis_url", path)?,
+        redis_ca: optional_path(fields, "redis_ca", path, base)?,
+        allow_plaintext_redis: optional_bool(fields, "allow_plaintext_redis", path)?
+            .unwrap_or(false),
         namespace: namespace.to_owned(),
         bind: required_string(fields, "bind", path)?
             .parse()
             .map_err(|_| {
                 ConfigError::at("config.http.forwarding.bind", "invalid UDP socket address")
             })?,
+    })
+}
+
+/// Parse `http.forwarding.failover`. An empty object takes every default.
+fn parse_failover(value: &Value) -> Result<FailoverConfig, ConfigError> {
+    let path = "config.http.forwarding.failover";
+    let fields = object(value, path)?;
+    reject_unknown(
+        fields,
+        &[
+            "poll_interval_ms",
+            "takeover_stagger_ms",
+            "fail_back",
+            "fail_back_after_seconds",
+        ],
+        path,
+    )?;
+    let bounded = |key: &str, default: u32, minimum: u32, maximum: u32| {
+        let value = optional_u32(fields, key, path)?.unwrap_or(default);
+        if !(minimum..=maximum).contains(&value) {
+            return Err(ConfigError::at(
+                &format!("{path}.{key}"),
+                format!("must be between {minimum} and {maximum}"),
+            ));
+        }
+        Ok(u64::from(value))
+    };
+    Ok(FailoverConfig {
+        poll_interval_ms: bounded("poll_interval_ms", 1000, 100, 10_000)?,
+        takeover_stagger_ms: bounded("takeover_stagger_ms", 2000, 0, 60_000)?,
+        fail_back: optional_bool(fields, "fail_back", path)?.unwrap_or(false),
+        fail_back_after_seconds: bounded("fail_back_after_seconds", 60, 10, 86_400)?,
     })
 }
 
@@ -1022,7 +1208,7 @@ fn parse_http_drive(
     )?;
     mount_rs_http::DriveConfig::validate_id(&id)
         .map_err(|error| ConfigError::at(&format!("{path}.id"), error.to_string()))?;
-    let token = required_env_reference(object, "token", &format!("{path}.token"))?;
+    let token = parse_token_source(object, base_dir, &format!("{path}.token"))?;
     let driver_value = object
         .get("driver")
         .ok_or_else(|| ConfigError::at(&format!("{path}.driver"), "is required"))?;
@@ -2258,6 +2444,27 @@ fn optional_u16(
             })
         })
         .transpose()
+}
+
+/// A drive's `token`: `{"env": NAME}` or `{"file": PATH}`, never both and
+/// never the token itself.
+fn parse_token_source(
+    fields: &Map<String, Value>,
+    base_dir: &Path,
+    path: &str,
+) -> Result<TokenSource, ConfigError> {
+    let value = fields
+        .get("token")
+        .ok_or_else(|| ConfigError::at(path, "is required"))?;
+    let source = object(value, path)?;
+    reject_unknown(source, &["env", "file"], path)?;
+    match (source.get("env"), source.get("file")) {
+        (Some(_), Some(_)) => Err(ConfigError::at(path, "takes env or file, not both")),
+        (None, Some(file)) => {
+            parse_path(file, &format!("{path}.file"), base_dir).map(TokenSource::File)
+        }
+        _ => required_env_reference(fields, "token", path).map(TokenSource::Env),
+    }
 }
 
 fn required_env_reference(
@@ -3633,6 +3840,48 @@ mod tests {
     }
 
     #[test]
+    fn redis_ca_and_plaintext_opt_in_are_optional_and_strictly_typed() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let base = Path::new("/etc/mount-rs");
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), base)
+                .map(|config| config.http.unwrap().forwarding.unwrap())
+        };
+        let defaults = parse(&source).unwrap();
+        assert_eq!(defaults.redis_ca, None);
+        assert!(!defaults.allow_plaintext_redis);
+
+        source["http"]["forwarding"]["redis_ca"] = "redis-ca.pem".into();
+        source["http"]["forwarding"]["allow_plaintext_redis"] = true.into();
+        let set = parse(&source).unwrap();
+        assert_eq!(set.redis_ca, Some(base.join("redis-ca.pem")));
+        assert!(set.allow_plaintext_redis);
+        source["http"]["forwarding"]["redis_ca"] = "/secrets/redis-ca.pem".into();
+        assert_eq!(
+            parse(&source).unwrap().redis_ca,
+            Some(PathBuf::from("/secrets/redis-ca.pem"))
+        );
+
+        for (key, invalid) in [
+            ("redis_ca", serde_json::json!("")),
+            ("redis_ca", serde_json::json!(true)),
+            ("redis_ca", serde_json::json!({"env":"REDIS_CA"})),
+            ("allow_plaintext_redis", serde_json::json!("true")),
+            ("allow_plaintext_redis", serde_json::json!(1)),
+        ] {
+            let mut source = source.clone();
+            source["http"]["forwarding"][key] = invalid;
+            assert!(parse(&source).is_err(), "{key}");
+        }
+        // A misspelled key is refused rather than silently ignored.
+        source["http"]["forwarding"]["allow_plaintext"] = true.into();
+        assert!(parse(&source).is_err());
+    }
+
+    #[test]
     fn route_refresh_idle_window_defaults_to_five_ttls_and_is_bounded() {
         let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
             "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
@@ -3683,6 +3932,96 @@ mod tests {
         assert!(!parse(&source).unwrap());
         source["http"]["forwarding"]["refresh_active_routes"] = "false".into();
         assert!(parse(&source).is_err());
+    }
+
+    #[test]
+    fn failover_is_off_by_default_and_its_keys_are_bounded() {
+        let drive = |metadata: serde_json::Value| {
+            serde_json::json!({"id":"shared","token":{"env":"TOKEN"},"driver":{
+                "kind":"splitstore","storage":{
+                    "metadata":metadata,
+                    "blocks":{"kind":"local","path":"blocks"},
+                    "chunk_size_bytes":65536}}})
+        };
+        let sqlite = serde_json::json!({"kind":"sqlite","path":"meta.db"});
+        let mut source = serde_json::json!({"version":1,"http":{
+            "drives":[drive(sqlite.clone())],
+            "forwarding":{
+                "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem",
+                "ca":"ca.pem","bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},
+                "namespace":"prod","owner":true
+        }}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("."))
+                .map(|config| config.http.unwrap().forwarding.unwrap().failover)
+        };
+        // An owner without the key is not a candidate: nothing changes.
+        assert_eq!(parse(&source).unwrap(), None);
+        source["http"]["forwarding"]["failover"] = serde_json::json!({});
+        assert_eq!(
+            parse(&source).unwrap(),
+            Some(FailoverConfig {
+                poll_interval_ms: 1000,
+                takeover_stagger_ms: 2000,
+                fail_back: false,
+                fail_back_after_seconds: 60,
+            })
+        );
+        source["http"]["forwarding"]["failover"] = serde_json::json!({
+            "poll_interval_ms":100,"takeover_stagger_ms":0,"fail_back":true,
+            "fail_back_after_seconds":86400});
+        assert_eq!(
+            parse(&source).unwrap(),
+            Some(FailoverConfig {
+                poll_interval_ms: 100,
+                takeover_stagger_ms: 0,
+                fail_back: true,
+                fail_back_after_seconds: 86_400,
+            })
+        );
+        for (key, invalid) in [
+            ("poll_interval_ms", serde_json::json!(99)),
+            ("poll_interval_ms", serde_json::json!(10_001)),
+            ("poll_interval_ms", serde_json::json!("1000")),
+            ("takeover_stagger_ms", serde_json::json!(60_001)),
+            ("takeover_stagger_ms", serde_json::json!(-1)),
+            ("fail_back", serde_json::json!("true")),
+            ("fail_back_after_seconds", serde_json::json!(9)),
+            ("fail_back_after_seconds", serde_json::json!(86_401)),
+            ("route_ttl_ms", serde_json::json!(15_000)),
+        ] {
+            let mut bad = source.clone();
+            bad["http"]["forwarding"]["failover"] = serde_json::json!({});
+            bad["http"]["forwarding"]["failover"][key] = invalid.clone();
+            let error = parse(&bad).unwrap_err();
+            assert!(error.message().contains(key), "{key} {invalid}: {error:?}");
+        }
+        source["http"]["forwarding"]["failover"] = serde_json::json!([]);
+        assert!(parse(&source).is_err());
+        source["http"]["forwarding"]["failover"] = serde_json::json!({});
+
+        // Only an owner can be a candidate, and only for drives with a
+        // writer lease on storage that another server can also reach.
+        let mut ingress = source.clone();
+        ingress["http"]["forwarding"]["owner"] = false.into();
+        let error = parse(&ingress).unwrap_err();
+        assert!(error.message().contains("requires owner"), "{error:?}");
+        let mut empty = source.clone();
+        empty["http"]["drives"] = serde_json::json!([]);
+        assert!(parse(&empty).is_err());
+        let mut memory = source.clone();
+        memory["http"]["drives"] = serde_json::json!([drive(serde_json::json!({"kind":"memory"}))]);
+        let error = parse(&memory).unwrap_err();
+        assert!(error.message().contains("not memory"), "{error:?}");
+        let mut concurrent = source.clone();
+        concurrent["http"]["drives"][0]["driver"]["storage"]["concurrent_writes"] = true.into();
+        assert!(parse(&concurrent).is_err());
+        // Without failover the same storage is accepted as before.
+        memory["http"]["forwarding"]
+            .as_object_mut()
+            .unwrap()
+            .remove("failover");
+        assert_eq!(parse(&memory).unwrap(), None);
     }
 
     #[test]
@@ -3873,6 +4212,176 @@ mod tests {
     }
 
     #[test]
+    fn a_drive_token_is_an_environment_variable_or_a_file() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[
+            {"id":"a","token":{"file":"secrets/a.token"},"driver":{"kind":"memory"}},
+            {"id":"b","token":{"file":"/run/secrets/b.token"},"driver":{"kind":"memory"}},
+            {"id":"c","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}}
+        ]}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("/config-root"))
+                .map(|config| config.http.unwrap())
+        };
+        let http = parse(&source).unwrap();
+        assert_eq!(
+            http.drives
+                .iter()
+                .map(|drive| drive.token.clone())
+                .collect::<Vec<_>>(),
+            [
+                // Relative to the config file, like every other path in it.
+                TokenSource::File("/config-root/secrets/a.token".into()),
+                TokenSource::File("/run/secrets/b.token".into()),
+                TokenSource::Env(EnvReference {
+                    name: "TEST_TOKEN".into()
+                }),
+            ]
+        );
+        assert_eq!(http.token_reload_seconds, 30);
+        for valid in [0, 1, 3600] {
+            source["http"]["token_reload_seconds"] = valid.into();
+            assert_eq!(parse(&source).unwrap().token_reload_seconds, valid);
+        }
+        for invalid in [
+            serde_json::json!(3601),
+            serde_json::json!(-1),
+            serde_json::json!("30"),
+        ] {
+            source["http"]["token_reload_seconds"] = invalid;
+            assert!(parse(&source).is_err());
+        }
+        source["http"]
+            .as_object_mut()
+            .unwrap()
+            .remove("token_reload_seconds");
+
+        for invalid in [
+            serde_json::json!({"env":"TEST_TOKEN","file":"a.token"}),
+            serde_json::json!({"file":""}),
+            serde_json::json!({"file":7}),
+            serde_json::json!({"file":"a.token","mode":"0600"}),
+            serde_json::json!({}),
+            serde_json::json!("a-token-written-into-the-config"),
+        ] {
+            let mut source = source.clone();
+            source["http"]["drives"][0]["token"] = invalid;
+            let error = parse(&source).unwrap_err().to_string();
+            assert!(error.contains("config.http.drives[0].token"), "{error}");
+            assert!(!error.contains("a-token-written"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_metrics_listener_is_off_unless_configured_and_loopback_unless_allowed() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[
+            {"id":"c","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}}
+        ]}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("."))
+                .map(|config| config.http.unwrap().metrics)
+        };
+        assert_eq!(parse(&source).unwrap(), None);
+        for (listen, allow) in [
+            ("127.0.0.1:9464", None),
+            ("[::1]:9464", None),
+            ("127.0.0.1:0", Some(false)),
+            ("0.0.0.0:9464", Some(true)),
+            ("10.1.2.3:9464", Some(true)),
+        ] {
+            source["http"]["metrics"] = serde_json::json!({"listen": listen});
+            if let Some(allow) = allow {
+                source["http"]["metrics"]["allow_non_loopback"] = allow.into();
+            }
+            assert_eq!(
+                parse(&source).unwrap(),
+                Some(MetricsConfig {
+                    listen: listen.parse().unwrap(),
+                    allow_non_loopback: allow.unwrap_or(false),
+                }),
+                "{listen}"
+            );
+        }
+        for refused in [
+            serde_json::json!({"listen": "0.0.0.0:9464"}),
+            serde_json::json!({"listen": "10.1.2.3:9464", "allow_non_loopback": false}),
+            serde_json::json!({"listen": "[::]:9464"}),
+        ] {
+            source["http"]["metrics"] = refused;
+            let error = parse(&source).unwrap_err().to_string();
+            assert!(error.contains("config.http.metrics.listen"), "{error}");
+            assert!(error.contains("loopback"), "{error}");
+        }
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!(true),
+            serde_json::json!("127.0.0.1:9464"),
+            serde_json::json!({"listen": "localhost:9464"}),
+            serde_json::json!({"listen": "127.0.0.1"}),
+            serde_json::json!({"listen": 9464}),
+            serde_json::json!({"listen": "127.0.0.1:9464", "path": "/metrics"}),
+            serde_json::json!({"listen": "127.0.0.1:9464", "allow_non_loopback": "yes"}),
+        ] {
+            source["http"]["metrics"] = invalid.clone();
+            assert!(parse(&source).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn a_reload_interval_needs_a_token_file() {
+        let source = serde_json::json!({"version":1,"http":{"token_reload_seconds":5,"drives":[
+            {"id":"c","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}}
+        ]}});
+        let error = parse_config_str(&source.to_string(), Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("config.http.token_reload_seconds"),
+            "{error}"
+        );
+        assert!(
+            error.contains("requires a drive whose token is a file"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_token_file_is_refused_where_tokens_are_not_reloaded() {
+        // Remote sessions and forwarding authorize against the tokens read
+        // at startup: a file that is reloaded would promise a rotation they
+        // do not make.
+        let storage = serde_json::json!({
+            "metadata":{"kind":"memory"},"blocks":{"kind":"memory"}
+        });
+        let sessions = serde_json::json!({"version":1,"http":{"remote_sessions":true,"drives":[
+            {"id":"first","token":{"env":"TEST_TOKEN"},"driver":{"kind":"splitstore","storage":storage}},
+            {"id":"second","token":{"file":"second.token"},"driver":{"kind":"splitstore","storage":storage}}
+        ]}});
+        let error = parse_config_str(&sessions.to_string(), Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("config.http.drives[1].token.file"),
+            "{error}"
+        );
+        assert!(error.contains("config.http.remote_sessions"), "{error}");
+
+        let forwarding = serde_json::json!({"version":1,"http":{"drives":[
+            {"id":"first","token":{"file":"first.token"},"driver":{"kind":"memory"}}
+        ],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let error = parse_config_str(&forwarding.to_string(), Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("config.http.drives[0].token.file"),
+            "{error}"
+        );
+        assert!(error.contains("config.http.forwarding"), "{error}");
+    }
+
+    #[test]
     fn shared_disk_budget_is_explicit_and_bounded() {
         let mut source = serde_json::json!({"version":1,"http":{"drives":[{
             "id":"memory","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}
@@ -4014,7 +4523,13 @@ mod tests {
         assert_eq!(http.max_connections, 12);
         assert_eq!(http.request_timeout_ms, 750);
         assert_eq!(http.drives.len(), 2);
-        assert_eq!(http.drives[0].token.name, "MOUNT_RS_MEMORY_TOKEN");
+        assert_eq!(
+            http.drives[0].token,
+            TokenSource::Env(EnvReference {
+                name: "MOUNT_RS_MEMORY_TOKEN".into()
+            })
+        );
+        assert_eq!(http.token_reload_seconds, 30);
         assert_eq!(
             http.drives[1].driver.database,
             Some("/tmp/config/state/sqlite.db".into())

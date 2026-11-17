@@ -36,6 +36,9 @@ use crate::watch::{WatchOptions, watch_driver};
 pub struct CliError {
     code: u8,
     message: String,
+    /// The filesystem error this was made from, for a caller that must
+    /// tell a held writer lease (`EAGAIN`) from other open failures.
+    filesystem: Option<ErrorCode>,
     /// Work this error gave up on is still running; see
     /// [`CliError::abandons_running_work`].
     abandoned: bool,
@@ -46,6 +49,7 @@ impl CliError {
         Self {
             code: 2,
             message: redact_diagnostic(&message.into()),
+            filesystem: None,
             abandoned: false,
         }
     }
@@ -54,12 +58,13 @@ impl CliError {
         Self {
             code: 1,
             message: redact_diagnostic(&message.into()),
+            filesystem: None,
             abandoned: false,
         }
     }
 
     /// A runtime failure that leaves work running which may never finish.
-    fn abandoning(message: impl Into<String>) -> Self {
+    pub(crate) fn abandoning(message: impl Into<String>) -> Self {
         Self {
             abandoned: true,
             ..Self::runtime(message)
@@ -182,7 +187,10 @@ impl From<ConfigError> for CliError {
 
 impl From<FsError> for CliError {
     fn from(error: FsError) -> Self {
-        Self::runtime(error.to_string())
+        Self {
+            filesystem: Some(error.code),
+            ..Self::runtime(error.to_string())
+        }
     }
 }
 
@@ -937,6 +945,27 @@ fn supports_sdk_reopen(options: &CliOptions) -> bool {
     }
 }
 
+/// The storage `/readyz` keeps an eye on for a drive, where the drive does
+/// not notice by itself that it has gone: the root of a `host` drive and
+/// the database of a `sqlite` drive. A split-store drive reports its own
+/// health, and a `memory` drive has no storage to lose.
+fn checked_storage(
+    options: &CliOptions,
+) -> Result<Option<crate::storage_check::Storage>, CliError> {
+    use crate::storage_check::Storage;
+    Ok(match options.driver {
+        DriverChoice::Host => Some(Storage::Directory(match options.root.as_deref() {
+            Some(root) => expand_path(root),
+            None => std::env::current_dir().map_err(io_error)?,
+        })),
+        DriverChoice::Sqlite => options
+            .database
+            .as_deref()
+            .map(|database| Storage::File(expand_path(database))),
+        DriverChoice::Memory | DriverChoice::SplitStore | DriverChoice::Remote => None,
+    })
+}
+
 async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     let spec = load_config(config_path)?;
     let http = spec.http.as_ref().ok_or_else(|| {
@@ -955,9 +984,47 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     } else {
         None
     };
-    server_options.access_log = access_log
-        .clone()
-        .map(|log| log as Arc<dyn mount_rs_http::AccessLog>);
+    // The metrics are counted from what the access log is told, whether
+    // or not that log is written. The listener is bound before any drive
+    // is opened, so that an address in use costs nothing to back out of;
+    // it is kept until the command returns.
+    let metrics = http
+        .metrics
+        .map(|_| mount_rs_http::HttpMetrics::new(env!("CARGO_PKG_VERSION")));
+    let _metrics_listener = match (http.metrics, &metrics) {
+        (Some(config), Some(metrics)) => {
+            let listener = mount_rs_http::MetricsServer::start(
+                config.listen,
+                config.allow_non_loopback,
+                Arc::clone(metrics),
+            )
+            .await
+            .map_err(|error| CliError::runtime(format!("metrics listener: {error}")))?;
+            let record = serde_json::json!({
+                "event": "http_metrics_listening",
+                "address": listener.local_addr().to_string(),
+            });
+            let _ = writeln!(std::io::stderr().lock(), "{record}");
+            Some(listener)
+        }
+        _ => None,
+    };
+    let mut logs: Vec<Arc<dyn mount_rs_http::AccessLog>> = Vec::new();
+    if let Some(log) = &access_log {
+        logs.push(Arc::clone(log) as Arc<dyn mount_rs_http::AccessLog>);
+        if let Some(metrics) = &metrics {
+            let log = Arc::clone(log);
+            metrics.observe_access_log_dropped(move || log.dropped_lines());
+        }
+    }
+    if let Some(metrics) = &metrics {
+        logs.push(Arc::clone(metrics) as Arc<dyn mount_rs_http::AccessLog>);
+    }
+    server_options.access_log = if logs.len() > 1 {
+        Some(Arc::new(mount_rs_http::AccessLogs(logs)))
+    } else {
+        logs.pop()
+    };
     let mut runtimes = Vec::with_capacity(http.drives.len());
     let mut registry = DriveRegistry::new();
     let mut sessions = crate::http_sessions::Sessions::new(http.max_request_bytes, http.sessions)?;
@@ -968,28 +1035,64 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
 
     let mut metadata_pools =
         std::collections::BTreeMap::<String, mount_rs_sdk::TidbStorePool>::new();
+    // Kept until the command returns: dropping one stops its thread.
+    let mut storage_checks = Vec::new();
     let mut configured_drives = Vec::with_capacity(http.drives.len());
+    // The drives whose token is a file, which is read again while the
+    // server runs.
+    let mut token_files = Vec::new();
     for drive in &http.drives {
-        let token = std::env::var(&drive.token.name).map_err(|_| {
-            CliError::runtime(format!("missing environment variable {}", drive.token.name))
-        })?;
-        HttpDriveConfig::validate_bearer_token(&token).map_err(|error| {
+        let invalid_drive = |error: &dyn std::fmt::Display| {
             CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id))
-        })?;
-        let credentials = if http.remote_sessions {
-            Some(mount_rs_cluster::SessionCredentials::new(vec![(
+        };
+        let (tokens, token) = match &drive.token {
+            crate::config::TokenSource::Env(variable) => {
+                let token = std::env::var(&variable.name).map_err(|_| {
+                    CliError::runtime(format!("missing environment variable {}", variable.name))
+                })?;
+                let tokens = mount_rs_http::DriveTokens::new(vec![token.clone()])
+                    .map_err(|error| invalid_drive(&error))?;
+                (tokens, Some(token))
+            }
+            crate::config::TokenSource::File(path) => {
+                let loaded = crate::token_reload::LoadedTokens::load(path)
+                    .map_err(|error| invalid_drive(&error))?;
+                let tokens = loaded.tokens();
+                token_files.push((drive.id.clone(), loaded));
+                (tokens, None)
+            }
+        };
+        let credentials = match (&token, http.remote_sessions) {
+            (Some(token), true) => Some(mount_rs_cluster::SessionCredentials::new(vec![(
                 "configured-volume-client".into(),
                 token.clone(),
-            )])?)
-        } else {
-            None
+            )])?),
+            _ => None,
         };
-        configured_drives.push((drive, token, credentials));
+        configured_drives.push((drive, tokens, token, credentials));
     }
     let mut ctrl_c = CtrlCHandler::install().await?;
+    // Only a server with a token file takes SIGHUP for itself: without one
+    // the signal does what it always did. Kept until the command returns:
+    // dropping it stops the reloads.
+    let _token_reloader = if token_files.is_empty() {
+        None
+    } else {
+        let poll =
+            (http.token_reload_seconds > 0).then(|| Duration::from_secs(http.token_reload_seconds));
+        Some(crate::token_reload::TokenReloader::start(
+            token_files,
+            poll,
+        )?)
+    };
+    let failover = http
+        .forwarding
+        .as_ref()
+        .filter(|config| config.owner && config.failover.is_some());
     let startup = async {
         let mut owned = Vec::new();
-        for (drive, token, credentials) in configured_drives {
+        let mut candidates = Vec::new();
+        for (drive, tokens, token, credentials) in configured_drives {
             let options = drive.driver.to_options();
             let metadata_pool = match (
                 http.tidb_metadata_pool_limit,
@@ -1009,6 +1112,43 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                 }
                 _ => None,
             };
+            if failover.is_some() {
+                // A failover candidate opens a drive only when it takes it
+                // over, and may do so many times while the process runs.
+                let disk_budget = disk_budget.clone();
+                let factory = move || {
+                    let (options, disk_budget, metadata_pool) =
+                        (options.clone(), disk_budget.clone(), metadata_pool.clone());
+                    async move {
+                        let shared = SharedResources {
+                            disk_budget,
+                            metadata_pool,
+                        };
+                        let opened =
+                            DriverRuntime::open_inner(&options, uid, gid, None, shared).await;
+                        let runtime = opened.map_err(|error| {
+                            FsError::new(error.filesystem.unwrap_or(ErrorCode::Eio))
+                                .with_syscall("open drive")
+                                .with_message(error.message)
+                        })?;
+                        runtime.local().cloned().ok_or_else(|| {
+                            FsError::new(ErrorCode::Enotsup).with_syscall("open drive")
+                        })
+                    }
+                };
+                let Some(token) = token else {
+                    return Err(CliError::usage(
+                        "peer owner requires drive tokens from the environment",
+                    ));
+                };
+                candidates.push(mount_rs_cluster::FailoverDrive {
+                    volume: drive.id.clone(),
+                    bearer_token: token,
+                    sessions: credentials,
+                    factory: Arc::new(factory),
+                });
+                continue;
+            }
             let runtime = DriverRuntime::open_inner(
                 &options,
                 uid,
@@ -1035,6 +1175,11 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                         "peer owner requires a local splitstore runtime",
                     ));
                 };
+                let Some(token) = token else {
+                    return Err(CliError::usage(
+                        "peer owner requires drive tokens from the environment",
+                    ));
+                };
                 owned.push((drive.id.clone(), token, filesystem.clone(), credentials));
                 continue;
             }
@@ -1044,14 +1189,37 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
             }
             let invalid_drive =
                 |error| CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id));
-            let configured = HttpDriveConfig::new(drive.id.clone(), runtime.driver(), token)
-                .map_err(invalid_drive)?;
+            let mut configured =
+                HttpDriveConfig::with_tokens(drive.id.clone(), runtime.driver(), tokens)
+                    .map_err(invalid_drive)?;
+            if let Some(storage) = checked_storage(&options)? {
+                let check = crate::storage_check::StorageCheck::start(&drive.id, storage)
+                    .map_err(io_error)?;
+                configured = configured.with_health_check(check.health_check());
+                storage_checks.push(check);
+            }
+            if let Some(metrics) = &metrics {
+                metrics.observe_drive(&configured);
+            }
             registry.register(configured).map_err(invalid_drive)?;
         }
         if let Some(config) = http.forwarding.as_ref().filter(|config| config.owner) {
+            let drives = if failover.is_some() {
+                // Releasing a drive drains its requests and then shuts it
+                // down, each within its own limit.
+                crate::http_sessions::OwnedDrives::Candidates {
+                    drives: candidates,
+                    release_timeout: Duration::from_millis(
+                        http.drain_timeout_ms
+                            .saturating_add(http.drive_shutdown_timeout_ms),
+                    ),
+                }
+            } else {
+                crate::http_sessions::OwnedDrives::Open(owned)
+            };
             return crate::http_sessions::start_owner(
                 config,
-                owned,
+                drives,
                 server_options.clone(),
                 http.sessions,
             )
@@ -1101,7 +1269,7 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     }
 
     let signal_result = tokio::select! {
-        _ = report_cache_stats(http, &runtimes), if http.cache_report_interval_seconds.is_some() => unreachable!(),
+        _ = report_cache_stats(http, &runtimes, &server), if http.cache_report_interval_seconds.is_some() => unreachable!(),
         result = ctrl_c.wait() => result,
         reason = async {
             let mut accept_failures = 0;
@@ -1141,7 +1309,11 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntime]) {
+async fn report_cache_stats(
+    config: &HttpServiceConfig,
+    runtimes: &[DriverRuntime],
+    server: &crate::http_sessions::Service,
+) {
     let period = Duration::from_secs(
         config
             .cache_report_interval_seconds
@@ -1149,10 +1321,15 @@ async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntim
     );
     loop {
         tokio::time::sleep(period).await;
-        for (drive, runtime) in config.drives.iter().zip(runtimes) {
-            let Some(fs) = runtime.local() else {
-                continue;
-            };
+        // Drives opened at startup, then the drives a failover candidate
+        // owns at this moment (it opens none at startup).
+        let open = config
+            .drives
+            .iter()
+            .zip(runtimes)
+            .filter_map(|(drive, runtime)| Some((drive.id.clone(), runtime.local()?.clone())))
+            .chain(server.failover_filesystems());
+        for (drive, fs) in open {
             let ram = fs.block_cache_stats().await.map(|s| {
                 serde_json::json!({
                     "hits": s.hits, "misses": s.misses, "evictions": s.evictions,
@@ -1172,7 +1349,7 @@ async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntim
                 Err(error) => Some(serde_json::json!({"error": error.code.as_str()})),
             };
             if ram.is_some() || disk.is_some() {
-                let record = serde_json::json!({"event":"mount_cache_stats", "drive":drive.id, "ram":ram, "disk":disk});
+                let record = serde_json::json!({"event":"mount_cache_stats", "drive":drive, "ram":ram, "disk":disk});
                 let _ = tokio::task::spawn_blocking(move || {
                     writeln!(std::io::stderr().lock(), "{record}")
                 })
