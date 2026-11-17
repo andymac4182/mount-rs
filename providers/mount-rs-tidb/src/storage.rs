@@ -2020,14 +2020,31 @@ impl MetadataStore for TidbMetadataStore {
             )
             .await;
         }
-        let next_fence = row
-            .fence
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow));
-        let next_fence = match next_fence {
-            Ok(value) => value,
-            Err(error) => return rollback_and(transaction, error).await,
-        };
+        if row.fence >= CONCURRENT_FENCE_SENTINEL as u64 {
+            // Concurrent write mode exhausts the fence so that no writer
+            // lease can ever be granted again. Report that the way SQLite
+            // and PGlite do, rather than as the arithmetic overflow the
+            // exhausted fence would otherwise produce.
+            let concurrent: Result<Option<bool>> = transaction
+                .exec_first(
+                    "SELECT write_mode IS NOT NULL FROM mount_rs_tidb_metadata
+                     WHERE volume_key=?",
+                    (&self.0.volume_key,),
+                )
+                .await
+                .map_err(|error| db_error("read TiDB write mode", error));
+            let error = match concurrent {
+                Ok(Some(true)) => FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("TiDB acquire writer")
+                    .with_message("TiDB volume is in concurrent write mode"),
+                Ok(_) => FsError::new(ErrorCode::Eoverflow)
+                    .with_syscall("TiDB acquire writer")
+                    .with_message("TiDB writer fence is exhausted"),
+                Err(error) => error,
+            };
+            return rollback_and(transaction, error).await;
+        }
+        let next_fence = row.fence + 1;
         let expires_at_ms = match expiry(row.now_ms, ttl_ms) {
             Ok(value) => value,
             Err(error) => return rollback_and(transaction, error).await,

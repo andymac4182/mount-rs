@@ -69,8 +69,8 @@ repeated on `main` after all of them were merged.
   type and without a test that races `listen` against `close`.
 - NFSv4 keeps its parallel slot vectors.
 - Writer-lease refusal codes still differ between providers for a
-  concurrent-mode volume: SQLite and PGlite `EBUSY`, TiDB `EOVERFLOW`,
-  FoundationDB `ENOTSUP`. All are permanent errors.
+  concurrent-mode volume: SQLite, PGlite and TiDB `EBUSY`, FoundationDB
+  `ENOTSUP`. All are permanent errors.
 
 ## Remaining risk
 

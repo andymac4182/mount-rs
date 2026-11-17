@@ -588,7 +588,8 @@ async fn delegated_directory_authority_fences_old_and_stale_clients() {
         metadata
             .acquire_writer("old-writer", Duration::from_secs(10))
             .await
-            .is_err()
+            .expect_err("a concurrent-mode volume never grants a writer lease")
+            .is(ErrorCode::Ebusy)
     );
     let request_a = CheckoutRequest {
         backing,
