@@ -347,21 +347,38 @@ rollback of that pair of releases works.
 
 The following is **not supported and not tested**:
 
-- Servers of different releases in one forwarding cluster. The peer protocol,
-  the Redis route-record format and the session protocol are experimental
-  and carry no compatibility promise between releases; see
-  [Cluster features](serve-http-compatibility.md#cluster-features).
-- A rolling upgrade that keeps a drive available throughout. Each drive still
-  has one owner process, so upgrading an owner makes its drives unavailable
-  for the length of a restart whatever the other servers do.
+- Servers of different releases in one forwarding cluster. The
+  client-facing session routes and forwarding responses have a contract
+  (`openapi-cluster.yaml`), but the protocol between servers and the Redis
+  record formats are internal, are not versioned and carry no compatibility
+  promise between releases; see
+  [Cluster features](serve-http-compatibility.md#cluster-features). No test
+  runs two releases together.
+- A rolling upgrade across releases, for the same reason.
 
-What the code and runbook do establish for a cluster-enabled server: a clean
-stop withdraws the owner's Redis route, closes sessions and releases the
-leases, including when the drain runs out of time; and a request whose
-cached route names a stopped owner re-reads the route and answers `503`
-rather than waiting for a handshake timeout. An upgrade of a cluster is
-therefore, today, a full stop of every server followed by a start of every
-server on the new release. Remote mount clients lose their sessions.
+An upgrade of a cluster is therefore a full stop of every server followed
+by a start of every server on the new release:
+
+1. Run the new binary's `validate-config` on every server's config.
+2. Stop every server with SIGTERM. Each withdraws its routes, closes its
+   sessions and releases its leases, also when its drain runs out of time,
+   so nothing has to expire before the new release can start.
+3. Start every server on the new release. Start order does not matter.
+4. Check `/readyz` on each and one request per drive through the cluster.
+
+The API is unavailable between steps 2 and 3, and remote mount clients lose
+their sessions. A rollback is the same procedure with the old binary, under
+the storage rules in the rest of this document.
+
+What is supported and tested within **one** release is a rolling restart
+of failover candidates (for a config change or a host reboot): a clean stop
+hands each drive to another candidate in one to two seconds
+(`scripts/serve-http-cluster-e2e.py`; see
+[Placement and failover](serve-http-runbook.md#placement-and-failover)).
+Sessions on the drive that moves are still lost. Without failover, a
+restart of an owner makes its drives unavailable for its duration, and a
+request whose cached route names the stopped owner re-reads the route and
+answers `503` rather than waiting for a handshake timeout.
 
 ## Appendix: code references
 

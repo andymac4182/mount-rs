@@ -5,10 +5,11 @@ must provide, and a checklist. Every statement about server behaviour has a
 code reference in the [appendix](#appendix-code-references) so it can be
 checked.
 
-Scope: the v1 launch configuration (`remote_sessions: false`, no
-`forwarding`). The node-to-node boundary of a forwarding cluster is described
-in [Cluster trust boundaries](#cluster-trust-boundaries) for completeness;
-those features are experimental.
+Scope: one server (`remote_sessions: false`, no `forwarding`), and, in
+[Cluster trust boundaries](#cluster-trust-boundaries), what remote sessions
+and a forwarding cluster add: the session token, the server-to-server
+boundary, Redis, and what a forwarding server reveals before it checks a
+token.
 
 Related documents:
 
@@ -217,21 +218,42 @@ in the API guide. Do not build on an assumption that they exist.
 
 ## Cluster trust boundaries
 
-**Experimental; outside v1.** Summarised from
-[`crates/mount-rs-cluster/README.md`](../crates/mount-rs-cluster/README.md)
-and the forwarding code, so that an operator evaluating a cluster knows what
-to isolate.
+What `remote_sessions` and `forwarding` add to the model above. Operating
+detail is in the [cluster chapter of the runbook](serve-http-runbook.md#clusters).
 
 | Boundary | Mechanism | Notes |
 | --- | --- | --- |
-| Server to server (peer port, UDP) | HTTP/3 over QUIC with mutual TLS. A peer is accepted only if its certificate carries the peer role for a node listed in the membership file **and** its public key matches that node's `spki_sha256` pin. An ingress dialling an owner checks the same pin and node id. | The membership file is the root of trust. Distribute it as carefully as a private key. Changing membership needs a restart; live reload is not implemented. |
-| Client to ingress | The same per-drive bearer token as v1. The ingress forwards it; the owner performs the bearer check. | Client-supplied `x-mount-owner-route` or `x-mount-hop` headers are refused. |
-| Server to Redis | The Redis URL from the environment variable named by `forwarding.redis_url`. | **The CLI does not require TLS or authentication on this connection**: a `redis://` URL is accepted as readily as `rediss://`, and the repository's own cluster tests and benchmark use plaintext loopback Redis. Redis only advertises routes: a route is used only if it matches a pinned member, and the owner checks its own fencing generation before serving. A party that can write Redis can therefore misdirect or deny requests but cannot authorise itself as an owner. Treat Redis as a denial-of-service surface and isolate it. |
-| Peer private keys | Files named by `forwarding.certificate` and `forwarding.private_key` | A stolen peer key plus network reach to the peer port allows impersonating that node to other servers. |
+| Client to any server | The same per-drive bearer token. A server that does not own the drive forwards the request, token included, to the owner; **the owner performs the bearer check.** | Client-supplied `x-mount-owner-route` or `x-mount-hop` headers are refused with `400` before anything is forwarded. |
+| Session token | 256 random bits from the operating system, sent once in the `createSession` response and afterwards only in the `x-mount-session` header. Held in the owner's memory only. | It is not a credential by itself: every session request also needs the drive's bearer token, and a session is usable only with the token that created it. It ends on close, idle timeout, owner restart or failover. Proxies must not log `x-mount-session`. |
+| Drive tokens with `remote_sessions` | The server refuses to start unless each is 32-256 characters from a fixed set. | Length is checked, entropy is not. `token.file` is refused, so rotation is a restart with no overlap period. |
+| Server to server (peer port, UDP) | HTTP/3 over QUIC with mutual TLS. A peer is accepted only if its certificate chains to `forwarding.ca`, carries the peer role for a node listed in the membership file, **and** its public key matches that node's `spki_sha256` pin. A server dialling an owner checks the same. | The membership file is the root of trust: distribute it as carefully as a CA certificate. It is reloaded on `SIGHUP` and on a timer; a removed or re-keyed server has its open connections closed at once. One record holds one pin, so a key rotation has no overlap period. |
+| Server to Redis | The URL in the environment variable named by `forwarding.redis_url`. `rediss://` is verified against the system roots or `redis_ca`, and verification cannot be turned off. `redis://` is refused for any host but loopback unless `allow_plaintext_redis` is set. The URL and its password are never logged. | Redis only advertises routes and candidate liveness: a route is used only if it matches a pinned member, and the owner checks its own fence before serving. A party that can write Redis can misdirect or deny requests and can delay a failover, but cannot make a server serve a drive or accept a peer. Treat Redis as a denial-of-service surface: authenticate it and isolate it. |
+| Peer private keys | Files named by `forwarding.certificate` and `forwarding.private_key`, read once at startup | A stolen peer key plus network reach to a peer port allows impersonating that node to the other servers, which includes receiving forwarded requests with their bearer tokens. Removing or re-pinning the node in the membership file revokes it at the next reload. |
 
-Not established by any test in the repository, per the cluster README:
-production TLS and authorisation on Redis, Redis outage and failover
-behaviour, network partitions between servers.
+Differences from a single server that matter for security:
+
+- **An unknown drive id is `503`, not `401`, on a forwarding server**, and
+  the route is looked up before the token is checked. An unauthenticated
+  caller can therefore learn whether a drive id has an owner at the moment
+  (a `401` from the owner) or not (the `503`). On a single server both
+  cases are the same `401`. Do not treat drive ids as secrets in a cluster,
+  or keep the cluster's public listeners behind an authenticating proxy.
+- **Forwarding sends the bearer token to the owner** inside the mutually
+  authenticated connection. Every server in the membership file can
+  therefore see the tokens of requests it is asked to forward or serve.
+  The membership is one trust domain.
+- `/healthz` and `/readyz` stay unauthenticated on every server and reveal
+  how many drives that server owns, not their ids.
+
+Tested: the pin and node checks on both sides, refusal of spoofed internal
+headers, membership reload including removal and re-keying
+(`crates/mount-rs-cluster` tests and `scripts/serve-http-cluster-e2e.py`);
+Redis TLS with a private CA, password and ACL logins, refused plaintext, and
+outages (`apps/mount-rs-cli/tests/redis_connection.rs`); the session
+authentication cases and the reserved-header refusal through real servers
+(`apps/mount-rs-cli/tests/cluster_contract.rs`). Not tested: a network
+partition between servers, a Redis replica promotion, and a hostile peer
+that holds a valid key.
 
 ## Hardening checklist
 
@@ -241,8 +263,8 @@ Listener
       network control admits only the proxy or load balancer to the port.
 - [ ] `port` is fixed.
 - [ ] `http2_prior_knowledge` is `false`.
-- [ ] `remote_sessions` is `false` or absent and there is no `forwarding`
-      block, unless you have accepted the experimental cluster features.
+- [ ] `remote_sessions` and `forwarding` are absent, or the items under
+      "Cluster" below are done.
 
 Tokens
 
@@ -283,7 +305,25 @@ Storage
 - [ ] Remote metadata and block stores are reached over TLS on a private
       network with credentials scoped to this service.
 - [ ] No `memory` drive; no `writeback` unless consumers accept it.
-- [ ] Exactly one process per drive.
+- [ ] Exactly one process per drive, or every process that lists it is a
+      failover candidate with identical storage for it.
+
+Cluster (only with `remote_sessions` or `forwarding`)
+
+- [ ] Every drive token is at least 32 random characters; a rotation by
+      restart, with no overlap period, has been rehearsed.
+- [ ] The proxy does not log `x-mount-session`.
+- [ ] The peer port (UDP) of each owner is reachable only from the other
+      servers.
+- [ ] The membership file and the peer private keys are readable only by
+      the service user, and the file is replaced by rename.
+- [ ] Redis is reached with `rediss://` and a password or ACL user, or is
+      on loopback; `allow_plaintext_redis` is not set.
+- [ ] Redis is not reachable by anything but the servers.
+- [ ] Drive ids are not treated as secrets (see
+      [Cluster trust boundaries](#cluster-trust-boundaries)).
+- [ ] The [known limits](serve-http-runbook.md#known-limits) have been
+      read.
 
 Operations
 
@@ -308,7 +348,7 @@ Checked at the revision this document was added in. `server.rs` is
 | Unknown drive and wrong token take the same branch; no comparison for an unknown drive | `server.rs:1357-1366` |
 | `GET /v1/drives` lists only drives whose token matches; `401` otherwise | `server.rs:1451-1473` |
 | Order: closing, route parse (path syntax, unknown route), health and discovery, drive and token, declared length, then method inside each handler | `server.rs:1311-1407`; method check example `server.rs:1415-1417` |
-| Contract tests for wrong-token and malformed-header `401` | `transports/mount-rs-http/tests/launch_contract.rs:1005-1013`, `:1058-1066` |
+| Contract tests for wrong-token and malformed-header `401` | `transports/mount-rs-http/tests/suites/launch_contract.rs`, `an_unknown_drive_is_indistinguishable_from_a_wrong_token`; run directly and behind a handler |
 | Token validity rule (non-empty, no whitespace, no minimum length) | `server.rs:153-158` |
 | Token read from the environment or the token file before any drive is opened | `runtime.rs`, `serve_http_command` |
 | `token` must be `{"env": NAME}` or `{"file": PATH}` | `config.rs`, `parse_token_source` |

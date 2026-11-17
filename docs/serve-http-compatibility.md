@@ -7,9 +7,13 @@ introduced.
 Related documents:
 
 - API guide: [`transports/mount-rs-http/README.md`](../transports/mount-rs-http/README.md)
-- Machine-readable contract: [`transports/mount-rs-http/openapi.yaml`](../transports/mount-rs-http/openapi.yaml) (`info.version` `1.0.1`),
+- Machine-readable contract: [`transports/mount-rs-http/openapi.yaml`](../transports/mount-rs-http/openapi.yaml) (`info.version` `1.0.2`),
   checked against a running server by
   `transports/mount-rs-http/tests/openapi_conformance.rs` on every change
+- Machine-readable contract of sessions, handles and forwarding responses:
+  [`transports/mount-rs-http/openapi-cluster.yaml`](../transports/mount-rs-http/openapi-cluster.yaml)
+  (`info.version` `1.0.0`), checked against running servers by
+  `apps/mount-rs-cli/tests/cluster_contract.rs` on every change
 - Operator runbook: [`serve-http-runbook.md`](serve-http-runbook.md)
 - Upgrade and rollback: [`serve-http-upgrade.md`](serve-http-upgrade.md)
 - Security: [`serve-http-security.md`](serve-http-security.md)
@@ -21,7 +25,7 @@ Related documents:
 | --- | --- |
 | The description of what v1 covers and what clients must tolerate | Descriptive. It restates the existing contract documents and the code. |
 | The deprecation window, the `/v2` procedure and the announcement channels | **Proposed policy.** Not yet adopted by the project owner, and not yet exercised: no breaking change has been made to v1 and no `/v2` route exists in the code. |
-| Cluster features (forwarding, remote sessions) | **Not covered.** See [Cluster features](#cluster-features). |
+| Cluster features (forwarding, remote sessions, failover) | Descriptive, like the first row, for the surfaces listed under [Cluster surface](#cluster-surface): each has a written contract, a machine-readable contract or parser, and a test against real servers. The parts that have none are listed by name under [Cluster features](#cluster-features) and are **not covered**. |
 
 Where this document and the contract documents disagree about present
 behaviour, the contract documents and the code win, and this document has a
@@ -34,7 +38,9 @@ They are independent. Do not infer one from another.
 | Number | Where | Current value | Changes when |
 | --- | --- | --- | --- |
 | API version | URL prefix `/v1` | `v1` | A breaking change to the HTTP API |
-| Contract document version | `openapi.yaml` `info.version` | `1.0.1` | Any change to the document. Proposed rule: additions raise the minor part, corrections raise the patch part, and the major part equals the API version. |
+| Contract document version | `openapi.yaml` `info.version` | `1.0.2` | Any change to the document. Proposed rule: additions raise the minor part, corrections raise the patch part, and the major part equals the API version. |
+| Cluster contract document version | `openapi-cluster.yaml` `info.version` | `1.0.0` | The same rule. |
+| Session protocol version | `protocol_version` in the `createSession` response | `1` | A breaking change to the session and handle routes |
 | Config file version | Top-level `"version"` in the JSON config | `1` | A breaking change to the config format |
 | Binary version | `mount-rs --version` | Cargo package version | Every release |
 
@@ -43,8 +49,17 @@ rejected with `unsupported version N; expected 1` and exit code 2.
 
 ## What v1 covers
 
-The v1 contract is plain `serve-http` with `remote_sessions: false` and no
-`forwarding` block. Within that configuration the following are stable.
+The v1 contract was written for plain `serve-http` with
+`remote_sessions: false` and no `forwarding` block. The HTTP API below is
+stable in that configuration, and also on a server with `remote_sessions`
+and on every server of a forwarding cluster, with the differences listed
+under [Cluster surface](#cluster-surface). That it is the same API is
+tested, not assumed: `cluster_contract.rs` sends one sequence of requests
+over every v1 operation to a plain server, a server with `remote_sessions`,
+a forwarding owner and an ingress, and compares the answers one by one; and
+the v1 contract suites of `mount-rs-http` also run behind a request handler
+(`launch_contract_behind_handler`, `openapi_conformance_behind_handler`),
+which is the path requests take once either feature is on.
 
 ### HTTP API
 
@@ -67,11 +82,34 @@ The v1 contract is plain `serve-http` with `remote_sessions: false` and no
 | Covered | Defined in |
 | --- | --- |
 | The command line: `mount-rs serve-http --config <path>`, `mount-rs validate-config --config <path>` | Runbook "Start" |
-| Config keys under `http` and `http.drives[]`: name, type, meaning and default, except those marked experimental | Runbook "Configuration reference" |
+| Config keys under `http` and `http.drives[]`: name, type, meaning and default | Runbook "Configuration reference" |
 | Exit codes 0, 1 and 2 and what each class means | Runbook "Exit codes" |
 | Signals: SIGINT and SIGTERM start a graceful shutdown. SIGHUP reloads the token files of a server that has one, and is not handled by a server that has none | Runbook "Shutdown", "Rotation" |
 | The two stdout lifecycle lines: `http listening at <url> (drives: ...)` and `http stopped` | Runbook "Readiness line", "Shutdown" |
 | Token provisioning: per drive, an environment variable read once at startup, or a token file of one or two lines read again on SIGHUP and on a timer | Runbook "Tokens" |
+
+### Cluster surface
+
+Covered on a server with `remote_sessions` or `forwarding`. Each row names
+its contract and the test that holds the server to it.
+
+| Covered | Defined in | Checked by |
+| --- | --- | --- |
+| The session and handle routes under `/v1/drives/{id}/sessions`: methods, the order of checks, every status and its `code`, the `SessionError` body, the JSON operations and path actions and their fields | `openapi-cluster.yaml` `paths`; README "Sessions and handles" | `the_session_routes_match_the_cluster_document` (one server) and `..._through_an_ingress`: routes and methods in both directions, every declared response produced or listed in the test with the reason it cannot be |
+| The headers `x-mount-session`, `x-mount-handle`, `x-mount-position`, `x-mount-length`, `x-mount-write-file` | Same | Same |
+| The session token format (64 lowercase hexadecimal characters, sent only in `x-mount-session`) and `protocol_version` 1 | `openapi-cluster.yaml` `SessionToken`, `Session` | Same |
+| The drive-token format required with `remote_sessions` (32-256 characters from `A-Z a-z 0-9 - . _ ~ + / =`) | `openapi-cluster.yaml` "Authentication"; runbook | Parser and startup tests in `mount-rs-cli`; the 401 cases of the session suite |
+| The session limits and what exceeding each returns | `openapi-cluster.yaml` "Limits" | The 413, 429 and 408 cases of the session suite |
+| The three forwarding responses: `503` and `400` with `x-mount-dispatch: not-dispatched`, `502` with `x-mount-dispatch: unknown`; their body; `Retry-After: 1` on the 503 | `openapi-cluster.yaml` `x-forwarding-responses` | `a_forwarding_server_answers_for_itself_and_says_when_it_could_not_forward` (503 with no owner, 502 from an owner killed with its route published, then 503 once the route expired); the reserved-header 400 in `the_file_routes_answer_the_same_on_an_owner_and_through_an_ingress` |
+| That a forwarding server answers `/healthz`, `/readyz` and `/v1/drives` itself, for the drives it owns; `drives` may be 0 | `openapi-cluster.yaml` "What a forwarding server answers itself", `ForwardingReady` | The same two tests |
+| That an unknown drive id is the forwarding `503`, not `401` | `openapi-cluster.yaml` | The client sequence, for every drive operation |
+| The config keys `http.remote_sessions`, `http.sessions.*`, `http.forwarding.*` and `http.forwarding.failover.*`: name, type, default, range | Runbook "Cluster configuration reference" | Parser tests in `apps/mount-rs-cli/src/config.rs`; the example configs are validated by the binary in `the_cluster_example_configs_are_valid` |
+| The membership file format (`node`, `boot`, `address`, `tls_server_name`, `spki_sha256`) and reload on `SIGHUP` and on a timer | Runbook "Membership file" | `crates/mount-rs-cluster` membership tests; reload with real processes in `scripts/serve-http-cluster-e2e.py` |
+| The `drive_failover` stderr event and its `state` values | `serve-http-failover.md` | `scripts/serve-http-cluster-e2e.py` |
+
+The tolerance rules of the next section apply to this surface too, with
+one difference: the session routes reject unknown properties in a request
+body, so a client must not send any.
 
 ## What may change without a version bump
 
@@ -240,32 +278,30 @@ The procedure is in [`serve-http-upgrade.md`](serve-http-upgrade.md).
 
 ## Cluster features
 
-**Status: experimental. Not covered by this policy. Not part of v1.**
+**Status: the client-visible and operator-visible surface of sessions,
+forwarding and failover is specified and tested, and is listed under
+[Cluster surface](#cluster-surface). The surfaces below are internal or
+untested and are not covered by this policy.** Maturity labels are kept in
+[`maturity.md`](maturity.md) and are not changed by this document.
 
-This is the one place that status is stated in this document. When the
-cluster features are accepted, change the line above and move the rows below
-into the tables in [What v1 covers](#what-v1-covers).
+Not covered. Each may change in any release without a deprecation window:
 
-Until then, everything in this section may change in any release, including
-in ways that would be breaking under the rules above, without a deprecation
-window.
-
-| Surface | Enabled by |
+| Surface | Why it is not covered |
 | --- | --- |
-| Session and handle routes under `/v1/drives/{id}/sessions`, the `x-mount-session`, `x-mount-handle`, `x-mount-position` and `x-mount-write-file` headers, and the session token format | `http.remote_sessions: true` |
-| The stricter drive-token format required with sessions (32-256 characters from a fixed set) | `http.remote_sessions: true` |
-| Forwarding of `/v1` requests between servers; the status codes and error bodies an ingress produces for routing and peer failures | `http.forwarding` |
-| The config keys `http.remote_sessions` and every key under `http.forwarding` (`peers`, `certificate`, `private_key`, `ca`, `redis_url`, `namespace`, `bind`, `owner`, `refresh_active_routes`, `route_refresh_idle_ttls`, `peer_connections`) | |
-| The membership file format (`node`, `boot`, `address`, `tls_server_name`, `spki_sha256`) | `http.forwarding.peers` |
-| The peer protocol: HTTP/3 between servers, the `x-mount-owner-route` and `x-mount-hop` headers, the peer certificate profile | `http.forwarding` |
-| The Redis route-registry key layout and record format | `http.forwarding.redis_url`, `namespace` |
-| Running servers of different releases in one cluster | Not tested. See [`serve-http-upgrade.md`](serve-http-upgrade.md). |
+| The peer protocol: HTTP/3 between servers, the `x-mount-owner-route` and `x-mount-hop` headers, the timing headers, the peer certificate profile beyond what the runbook asks an operator to issue | Internal. No document specifies it and no test pins its wire form. |
+| The Redis key layout and record formats (routes, candidate sets) | Internal. Readable only by servers of the same release. |
+| **Running servers of different releases in one cluster** | Not tested. It follows from the two rows above that it cannot be promised. An upgrade is a full stop and start; see [`serve-http-upgrade.md`](serve-http-upgrade.md#clusters). |
+| Sessions surviving a restart of their owner or a failover | Not provided. Sessions are lost, by design. |
+| Redis Sentinel, Redis Cluster, a replicated Redis failing over | Not supported or not tested; see the runbook. |
+| Token rotation without a restart on a server with cluster features | Not provided: `token.file` is refused there. |
+| Metrics with `remote_sessions` or `forwarding` | Not validated. |
+| Fail-back, network partitions between servers, a Redis outage during a failover | The design is in `serve-http-failover.md` and unit-tested; not exercised with real processes. |
+| `mount-rs mount` with a `remote` driver (the client of the session routes) | A separate component with its own status; see the CLI README. |
 
-The intent is that enabling a cluster feature does not change the behaviour
-of the v1 file routes. That is not verified: with `remote_sessions` or
-`forwarding` set, requests are dispatched through a different handler than
-the one the v1 contract tests exercise, and no test runs the v1 contract
-suite against a cluster-enabled server. It is therefore not a promise.
+Differences from a plain server that are specified, and so covered, are in
+the table under [Clusters](../transports/mount-rs-http/README.md#clusters)
+in the API guide. The remaining gaps are collected for operators under
+[Known limits](serve-http-runbook.md#known-limits).
 
 ## Why 12 months
 

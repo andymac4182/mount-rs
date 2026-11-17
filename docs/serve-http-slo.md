@@ -172,10 +172,9 @@ guarantee** and are not an objective.
 
 How this differs from a v1 deployment:
 
-- The servers ran with `forwarding` configured, which is the experimental
-  cluster configuration, not the plain v1 one. The "local" rows are the
-  closest to a single-node v1 server. The "forwarded" rows describe a feature
-  outside v1.
+- The servers ran with `forwarding` configured, not as plain single
+  servers. The "local" rows are the closest to a single-node server. The
+  "forwarded" rows are what a request pays for the extra hop in a cluster.
 - Everything shared one 4-vCPU machine, so the servers competed with the
   databases and the load client for CPU.
 - There was no proxy. A production request adds TLS termination and a proxy

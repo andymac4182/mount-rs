@@ -12,8 +12,14 @@ This file is the guide for services that call the API.
 - Running the server: [`docs/serve-http-runbook.md`](../../docs/serve-http-runbook.md).
 - Configuration file and local demo: [`apps/mount-rs-cli/README.md`](../../apps/mount-rs-cli/README.md#unmounted-http-service).
 
-The v1 launch contract covers plain `serve-http` with `remote_sessions: false`
-and no forwarding.
+- Sessions, handles and what a cluster of servers adds:
+  [Sessions and handles](#sessions-and-handles) and [Clusters](#clusters)
+  below, and [`openapi-cluster.yaml`](openapi-cluster.yaml).
+
+Everything up to "Sessions and handles" describes the file routes (v1). They
+behave the same on a single server, on a server with `remote_sessions`, and
+on any server of a forwarding cluster, apart from the differences listed
+under [Clusters](#clusters).
 
 ## Quick start
 
@@ -617,8 +623,134 @@ Defaults; the operator can change them.
 - Snapshot-isolated downloads.
 - Names beginning with `.mount-rs-upload.`.
 
-The session and forwarding routes enabled by `remote_sessions` or `forwarding`
-are experimental and are not part of the v1 launch contract.
+## Sessions and handles
+
+A server started with `remote_sessions: true` also serves a session
+protocol on every drive. A session lets a client hold files open on the
+server between requests: read and write at a position, truncate and sync
+an open file, and use the path operations the file routes do not have
+(`chmod`, `chown`, `utimes`, `link`, `symlink`, `mknod`). It is the protocol
+`mount-rs mount` speaks to a remote drive. A service that only reads and
+writes whole files does not need it.
+
+The exact requests, responses and schemas are in
+[`openapi-cluster.yaml`](openapi-cluster.yaml). This section is the summary.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/drives/{id}/sessions` | Create a session. No body. `201` with `{"protocol_version":1,"session":"<token>","idle_timeout_ms":60000}`. |
+| `DELETE` | `/v1/drives/{id}/sessions` | Close the session named by `x-mount-session` and every handle it holds. `204`. |
+| `POST` | `/v1/drives/{id}/sessions/handles` | One JSON operation: `capabilities`, `path`, `open`, `read`, `stat`, `truncate`, `sync`, `close`. |
+| `GET` | `/v1/drives/{id}/sessions/handles` | Read from a handle: `x-mount-handle`, `x-mount-position`, `x-mount-length`. `200` with the bytes. |
+| `PUT` | `/v1/drives/{id}/sessions/handles` | Write the body to a handle (`x-mount-handle`, optional `x-mount-position`): `200` `{"written":n}`. Or replace a whole file (`x-mount-write-file: <percent-encoded path>`): `204`. |
+
+On a server without `remote_sessions` these paths are `404`.
+
+**Authentication.** Every request carries the drive's bearer token, exactly
+as on the file routes. With `remote_sessions` the server refuses to start
+unless each drive token is 32 to 256 characters from
+`A-Z a-z 0-9 - . _ ~ + / =`. The session routes accept exactly one
+`Authorization: Bearer <token>` header.
+
+**The session token.** `POST .../sessions` returns it once: 64 lowercase
+hexadecimal characters. Send it in the `x-mount-session` header of every
+later request; never put it in a URL. It grants nothing by itself: each
+request needs the bearer token too, and a session is usable only with the
+token that created it.
+
+**Headers.**
+
+| Header | On | Value |
+| --- | --- | --- |
+| `x-mount-session` | Every request except create | The session token. Exactly one. |
+| `x-mount-handle` | `GET`, `PUT` to a handle | The handle number `open` returned. |
+| `x-mount-position` | `GET` (required), `PUT` (optional) | Byte offset. A `PUT` without it writes at the handle's cursor. |
+| `x-mount-length` | `GET` | Most bytes to return. |
+| `x-mount-write-file` | `PUT` of a whole file | The absolute path, percent-encoded. Not together with `x-mount-handle`. |
+
+**Errors.** The session routes use their own error body,
+`{"error":{"code":"ENOENT","syscall":"session"}}`, with no `message`.
+
+| Status | Codes | Meaning |
+| --- | --- | --- |
+| `400` | `EINVAL` | Malformed request: a query string, a missing or malformed header, a body where none is allowed, JSON that is not a known operation (unknown properties are rejected). |
+| `401` | `EACCES` | Missing, malformed, repeated or wrong bearer token. `WWW-Authenticate: Bearer`. |
+| `403` | `EACCES` | No such session for this token: never created, closed, expired, or lost when the drive moved to another server. |
+| `404` | `ENOENT` | The operation's path does not exist. |
+| `405` | `ENOSYS` | Method not allowed on the path. `Allow` lists the methods. Checked before the session. `HEAD` is not served. |
+| `408` | `EINTR` | The request body did not arrive within 5 seconds. |
+| `409` | `EBADF`, `ESTALE` | Unknown or closed handle; or the drive is no longer served here. |
+| `413` | `EFBIG` | A read or write above 65536 bytes, a JSON operation above 8192 bytes. A declared `Content-Length` above `max_request_bytes` gets the file routes' `413` and the connection is closed. |
+| `429` | `ENFILE`, `EMFILE` | Too many sessions (`ENFILE`) or too many open handles in this session (`EMFILE`). |
+| `500` | any other | The filesystem refused the operation: for example `EEXIST`, `ENOTEMPTY`, `EISDIR`, `ENOTSUP`. **Unlike the file routes, the session routes do not give these their own status. Branch on `code`.** |
+| `503` | `EAGAIN` | Shutting down or busy; retry. |
+
+`503` while shutting down and `504` on the server's request timeout carry
+the file routes' error body, because the listener produces them.
+
+**Limits.** Defaults; the operator can change the first four.
+
+| Limit | Default | When exceeded |
+| --- | --- | --- |
+| Sessions in the process (`sessions.max_sessions`) | 4096 | `429 ENFILE` |
+| Sessions per drive (`sessions.max_sessions_per_drive`) | 128 | `429 ENFILE` |
+| Open handles per session (`sessions.max_handles_per_session`) | 128 | `429 EMFILE` |
+| Idle time (`sessions.idle_timeout_seconds`) | 60 s | The session and its handles are closed. |
+| One read or write | 65536 bytes (less if `max_request_bytes` is smaller) | `413 EFBIG` |
+| One JSON operation | 8192 bytes | `413 EFBIG` |
+| Time to send a request body | 5 s | `408 EINTR` |
+
+**Lifetime.** A session lives in the memory of the one server that owns the
+drive. It ends when it is closed, when no request has named it for the idle
+timeout, when that server stops or restarts, and when the drive moves to
+another server. Any request that names the session counts as use; a client
+that holds files open sends `{"operation":"capabilities"}` more often than
+the idle timeout. After a session has ended, requests that name it get
+`403 EACCES` (or `409 ESTALE` if the drive is no longer on that server):
+create a new session and open the files again. Writes that were
+acknowledged are not lost. A write that was not acknowledged has an unknown
+outcome.
+
+**Retries.** Nothing is retried or deduplicated by the server. Positional
+reads, `stat`, `capabilities`, read-only path actions, writes at an explicit
+position and whole-file writes may be repeated. Writes at the cursor, cursor
+reads, `open` with `exclusive` or `truncate`, and mutating path actions must
+be reconciled by the client. A `createSession` whose response was lost
+leaves a session that expires by itself.
+
+## Clusters
+
+Several servers can serve one set of drives behind one address. Each drive
+is served by one server at a time, its *owner*; every server with a
+`forwarding` block accepts a request for any drive and passes it to the
+owner over an authenticated server-to-server connection. A server with no
+drives of its own is an *ingress*. With failover configured, a drive whose
+owner stops is taken over by another server. Operators: see the
+[cluster chapter of the runbook](../../docs/serve-http-runbook.md#clusters).
+
+A client uses the same URLs, tokens, requests and responses as against a
+single server. The differences it can observe are these, all stated in
+[`openapi-cluster.yaml`](openapi-cluster.yaml) and checked by the test
+named there:
+
+| Situation | Single server | Forwarding cluster |
+| --- | --- | --- |
+| No server owns the drive just now (owner stopped, failover in progress, route registry unreachable) | Does not arise | `503`, `x-mount-dispatch: not-dispatched`, `Retry-After: 1`, code `EIO`. Nothing was executed. Retry. |
+| The owner was given the request and its response was lost | Does not arise (the connection breaks) | `502`, `x-mount-dispatch: unknown`, code `EIO`. A read may be repeated. A write may or may not have been applied: read back, or repeat it with `If-Match` / `If-None-Match`. The server does not replay it. |
+| A drive id that no server is configured with | `401` | `503` not-dispatched, as in the first row: the cluster cannot tell an unknown drive from one whose owner is down. |
+| A request carrying `x-mount-hop` or `x-mount-owner-route` | Headers ignored | `400`, `x-mount-dispatch: not-dispatched`, code `EIO`. These headers are reserved for the servers. |
+| `GET /v1/drives` | Drives whose token matches | Only matching drives that the answering server owns itself; `401` on a server that owns none of them. Do not use discovery through a cluster address. |
+| `GET /readyz` | `drives` is the number configured, at least 1 | `drives` is the number the answering server owns itself, and may be 0. |
+| A `413` for a directory too large to list | `Connection: close` | No `Connection: close` when forwarded: the client's connection is kept. |
+| A response body cut short because the owner failed mid-download | The connection closes early | The same: the connection closes before `Content-Length` bytes were sent. |
+
+The `x-mount-dispatch` header is how a client tells "safe to retry" from
+"outcome unknown" without parsing the body. A `503` without that header is
+the drive's own (for example a drive that lost its storage lease, `ESTALE`).
+
+Sessions work through any server of the cluster, but live on the owner:
+when the drive moves, its sessions are gone and the client must create new
+ones, as described above.
 
 ## Embedding the crate
 
