@@ -890,9 +890,11 @@ jobs:
 
   serve-http-e2e:
     # Runs the real binary against a durable split-store drive: auth, paths,
-    # limits, concurrency, SIGTERM, restart and the single-writer lease. Then
+    # limits, concurrency, SIGTERM, SIGINT, restart and the single-writer lease. Then
     # two owners that forward to each other through Redis discovery and
     # mutually authenticated HTTP/3, used as a round-robin balancer would.
+    # The same single-node test runs on the other release platforms in
+    # serve-http-e2e-platforms below.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -922,6 +924,44 @@ jobs:
           work="$RUNNER_TEMP/serve-http-cluster-e2e"
           mkdir -p "$work"
           timeout 300 python3 -I scripts/serve-http-cluster-e2e.py target/release/mount-rs "$work"
+
+  serve-http-e2e-platforms:
+    # The single-node serve-http test on every other platform the CLI
+    # release publishes for (.github/workflows/cli-release.yml), so the
+    # binary is exercised end to end where it ships: auth, paths, limits,
+    # concurrency, restart, the single-writer lease, and a graceful stop
+    # asked for the way that platform's operator asks (SIGTERM and SIGINT on
+    # Unix; Ctrl-C and Ctrl-Break console events on Windows).
+    #
+    # The two-node cluster test stays in serve-http-e2e, on Linux only: it
+    # needs a Redis service, and GitHub runs service containers only on
+    # Linux runners.
+    name: serve-http-e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Build the CLI
+        run: cargo build --locked --release -p mount-rs-cli
+      - name: Exercise serve-http end to end
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          work="$RUNNER_TEMP/serve-http-e2e"
+          mkdir -p "$work"
+          python=python3
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python=python
+          fi
+          "$python" -I scripts/serve-http-e2e.py target/release/mount-rs "$work"
 
   http-observability:
     runs-on: ubuntu-latest

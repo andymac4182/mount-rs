@@ -1,9 +1,34 @@
 name: Publish CLI preview release
 
+# Builds, tests, packages and smoke-tests the `mount-rs` CLI on a native
+# runner for every target below, and on a `v*-cli-preview*` tag publishes the
+# archives as one GitHub prerelease with checksums, release manifests,
+# CycloneDX SBOMs and verified provenance attestations.
+#
+# Every release this workflow can publish is a preview: the tag must match
+# `v<package version>-cli-preview*` and the GitHub release is created as a
+# prerelease. There is no other channel.
+#
+# Dispatching the workflow by hand is build-only unless `publish` is ticked:
+# every target is built, packaged, checksummed and smoke-tested, the assets
+# are kept as workflow artifacts, and nothing is attested or published.
+# `publish` is honoured only when the workflow is dispatched on a preview
+# tag, for a release whose own run failed.
+#
+# docs/support-matrix.md describes what this workflow builds and tests. Keep
+# it in step with the matrix below.
+
 on:
   push:
     tags:
       - 'v*-cli-preview*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the prerelease (only on a v*-cli-preview* tag). Off builds, packages and smoke-tests every target without publishing.
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -13,19 +38,99 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  plan:
+    name: Decide what this run does
     if: github.repository == 'andymac4182/mount-rs'
-    runs-on: macos-15
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
+      contents: read
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      release_commit: ${{ steps.plan.outputs.release_commit }}
+      package_version: ${{ steps.plan.outputs.package_version }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+
+      - name: Check the release identity
+        id: plan
+        env:
+          PUBLISH_REQUESTED: ${{ github.event_name == 'push' || inputs.publish == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "mount-rs-cli"))')"
+          release_commit="$(git rev-parse 'HEAD^{commit}')"
+
+          if [ "$PUBLISH_REQUESTED" = "true" ]; then
+            if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+              echo "Refusing to publish: $GITHUB_REF is not a tag. Dispatch on a v*-cli-preview* tag, or leave publish off." >&2
+              exit 1
+            fi
+            release_tag="$GITHUB_REF_NAME"
+            # Preview is the only channel this workflow publishes.
+            case "$release_tag" in
+              "v${package_version}"-cli-preview*) ;;
+              *)
+                echo "Release tag $release_tag is not a v${package_version}-cli-preview* tag for mount-rs-cli $package_version" >&2
+                exit 1
+                ;;
+            esac
+
+            git fetch --no-tags origin main
+            release_commit="$(git rev-parse "${release_tag}^{commit}")"
+            if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+              echo "Refusing to publish: $release_tag is not reachable from origin/main" >&2
+              exit 1
+            fi
+            publish=true
+          else
+            # Not a release: the manifests still need a tag field, and it
+            # must not read as one that was published.
+            release_tag="build-only-run-${GITHUB_RUN_ID}"
+            publish=false
+          fi
+
+          {
+            echo "publish=$publish"
+            echo "release_tag=$release_tag"
+            echo "release_commit=$release_commit"
+            echo "package_version=$package_version"
+          } >> "$GITHUB_OUTPUT"
+          echo "CLI_RELEASE_PLAN publish=$publish tag=$release_tag commit=$release_commit version=$package_version"
+
+  build:
+    name: Build and smoke-test ${{ matrix.target }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each target is built and tested on a runner of its own
+        # architecture, so the packaged binary is run where it was built and
+        # nothing is cross-compiled. The attest job repeats this list.
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -35,109 +140,270 @@ jobs:
 
       - name: Test and package the CLI
         id: package
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+          PACKAGE_VERSION: ${{ needs.plan.outputs.package_version }}
+          RELEASE_COMMIT: ${{ needs.plan.outputs.release_commit }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
 
-          release_tag="${GITHUB_REF_NAME}"
-          package_version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "mount-rs-cli"))')"
-
-          case "$release_tag" in
-            "v${package_version}"-cli-*) ;;
-            *)
-              echo "Release tag $release_tag does not match mount-rs-cli version $package_version" >&2
-              exit 1
-              ;;
-          esac
-
-          git fetch --no-tags origin main
-          release_commit="$(git rev-parse "${release_tag}^{commit}")"
-          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
-            echo "Refusing to publish: $release_tag is not reachable from origin/main" >&2
-            exit 1
-          fi
-
+          test "$(git rev-parse 'HEAD^{commit}')" = "$RELEASE_COMMIT"
           target="$(rustc -vV | sed -n 's/^host: //p')"
-          if [ "$target" != "aarch64-apple-darwin" ]; then
-            echo "Refusing to publish: expected the verified Apple Silicon target, got $target" >&2
+          if [ "$target" != "$EXPECTED_TARGET" ]; then
+            echo "Refusing to package: expected a native $EXPECTED_TARGET runner, got $target" >&2
             exit 1
           fi
 
-          cargo test --locked -p mount-rs-cli --all-targets
-          cargo build --locked --release -p mount-rs-cli
+          build_dir="$RUNNER_TEMP/mount-rs-cli-build"
+          CARGO_TARGET_DIR="$build_dir" \
+            ./scripts/cargo-shared test --locked -p mount-rs-cli --all-targets
+          CARGO_TARGET_DIR="$build_dir" \
+            ./scripts/cargo-shared build --locked --release -p mount-rs-cli
 
-          version_output="$(target/release/mount-rs --version)"
-          test "$version_output" = "mount-rs $package_version"
+          binary=mount-rs
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            binary=mount-rs.exe
+          fi
+          version_output="$("$build_dir/release/$binary" --version)"
+          test "$version_output" = "mount-rs $PACKAGE_VERSION"
 
           release_dir="$RUNNER_TEMP/mount-rs-cli-release"
           mkdir -p "$release_dir"
-          artifact="mount-rs-${package_version}-${target}.tar.gz"
-          cp target/release/mount-rs "$release_dir/mount-rs"
-          chmod 755 "$release_dir/mount-rs"
-          COPYFILE_DISABLE=1 tar -czf "$release_dir/$artifact" -C "$release_dir" mount-rs
+          artifact="mount-rs-${PACKAGE_VERSION}-${target}.tar.gz"
+          manifest="release-manifest-${target}.json"
+          sbom="release-sbom-${target}.json"
+          cp "$build_dir/release/$binary" "$release_dir/$binary"
+          chmod 755 "$release_dir/$binary"
+          # Relative names: GNU tar on Windows reads a drive letter as a host.
+          (cd "$release_dir" && COPYFILE_DISABLE=1 tar -czf "$artifact" "$binary")
+          rm "$release_dir/$binary"
 
           node scripts/write-w08-release-manifest.mjs \
             --artifact "$release_dir/$artifact" \
-            --output "$release_dir/release-manifest.json" \
+            --output "$release_dir/$manifest" \
             --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$release_commit" \
-            --version "$package_version" \
-            --tag "$release_tag" \
+            --source-commit "$RELEASE_COMMIT" \
+            --version "$PACKAGE_VERSION" \
+            --tag "$RELEASE_TAG" \
             --target "$target" \
             --workflow "$GITHUB_WORKFLOW" \
             --workflow-run-id "$GITHUB_RUN_ID"
           node scripts/verify-w08-release-manifest.mjs \
-            "$release_dir/release-manifest.json" \
+            "$release_dir/$manifest" \
             "$release_dir/$artifact"
-          cargo metadata --locked --format-version 1 > "$release_dir/cargo-metadata.json"
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
           node scripts/write-w08-release-sbom.mjs \
-            --metadata "$release_dir/cargo-metadata.json" \
-            --output "$release_dir/release-sbom.json" \
+            --metadata "$RUNNER_TEMP/cargo-metadata.json" \
+            --output "$release_dir/$sbom" \
             --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$release_commit" \
+            --source-commit "$RELEASE_COMMIT" \
             --package mount-rs-cli \
-            --version "$package_version" \
+            --version "$PACKAGE_VERSION" \
             --artifact "$release_dir/$artifact"
           node scripts/verify-w08-release-sbom.mjs \
-            --sbom "$release_dir/release-sbom.json" \
+            --sbom "$release_dir/$sbom" \
             --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$release_commit" \
+            --source-commit "$RELEASE_COMMIT" \
             --package mount-rs-cli \
-            --version "$package_version" \
+            --version "$PACKAGE_VERSION" \
             --artifact "$release_dir/$artifact"
-          (cd "$release_dir" && shasum -a 256 "$artifact" release-manifest.json release-sbom.json > SHA256SUMS)
-          (cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
 
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
-          echo "manifest=release-manifest.json" >> "$GITHUB_OUTPUT"
-          echo "sbom=release-sbom.json" >> "$GITHUB_OUTPUT"
-          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
-          echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
 
-      - name: Generate artifact provenance attestation
-        id: provenance-attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.artifact }}
-
-      - name: Generate CycloneDX SBOM attestation
-        id: sbom-attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.artifact }}
-          sbom-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.sbom }}
-
-      - name: Verify hosted release attestations
+      # What is tested is the archive that would be published, unpacked the
+      # way a user unpacks it, not the build directory's binary.
+      - name: Smoke-test the packaged binary
+        timeout-minutes: 10
         env:
-          GH_TOKEN: ${{ github.token }}
           ARTIFACT: ${{ steps.package.outputs.artifact }}
-          RELEASE_COMMIT: ${{ steps.package.outputs.release_commit }}
+          BINARY: ${{ steps.package.outputs.binary }}
+          PACKAGE_VERSION: ${{ needs.plan.outputs.package_version }}
         shell: bash
         run: |
           set -euo pipefail
 
           release_dir="$RUNNER_TEMP/mount-rs-cli-release"
+          extracted_dir="$RUNNER_TEMP/mount-rs-cli-extracted"
+          work_dir="$RUNNER_TEMP/mount-rs-cli-smoke"
+          mkdir -p "$extracted_dir" "$work_dir"
+          test "$(cd "$release_dir" && tar -tzf "$ARTIFACT")" = "$BINARY"
+          cp "$release_dir/$ARTIFACT" "$extracted_dir/$ARTIFACT"
+          (cd "$extracted_dir" && tar -xzf "$ARTIFACT" && rm "$ARTIFACT")
+          test "$("$extracted_dir/$BINARY" --version)" = "mount-rs $PACKAGE_VERSION"
+
+          python=python3
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python=python
+          fi
+          # serve-http on loopback with a durable SQLite drive: health and
+          # readiness, auth, put, get, list, a graceful stop that exits 0,
+          # a restart that still has the data, and a second graceful stop.
+          "$python" -I scripts/serve-http-e2e.py --smoke "$extracted_dir/$BINARY" "$work_dir"
+          echo "CLI_RELEASE_SMOKE_PASS target=${{ matrix.target }} artifact=$ARTIFACT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: ${{ runner.temp }}/mount-rs-cli-release/
+          if-no-files-found: error
+          retention-days: 14
+
+  checksums:
+    name: Verify the assets and write SHA256SUMS
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Download every target's assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: cli-release-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/mount-rs-cli-release
+
+      - name: Verify the assets and write SHA256SUMS
+        env:
+          PACKAGE_VERSION: ${{ needs.plan.outputs.package_version }}
+          RELEASE_COMMIT: ${{ needs.plan.outputs.release_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_dir="$RUNNER_TEMP/mount-rs-cli-release"
+          cd "$release_dir"
+          # Fail if a target dropped out of the build matrix without this
+          # list, the attest matrix and docs/support-matrix.md following it.
+          expected_targets="aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu"
+          found_targets="$(for file in mount-rs-"$PACKAGE_VERSION"-*.tar.gz; do
+            name="${file#mount-rs-"$PACKAGE_VERSION"-}"
+            echo "${name%.tar.gz}"
+          done | sort | tr '\n' ' ' | sed 's/ $//')"
+          if [ "$found_targets" != "$expected_targets" ]; then
+            echo "Expected archives for: $expected_targets" >&2
+            echo "Found archives for:    $found_targets" >&2
+            exit 1
+          fi
+
+          files=()
+          for target in $expected_targets; do
+            artifact="mount-rs-${PACKAGE_VERSION}-${target}.tar.gz"
+            manifest="release-manifest-${target}.json"
+            sbom="release-sbom-${target}.json"
+            node "$GITHUB_WORKSPACE/scripts/verify-w08-release-manifest.mjs" "$manifest" "$artifact"
+            test "$(node -e 'console.log(require(process.argv[1]).target)' "$release_dir/$manifest")" = "$target"
+            node "$GITHUB_WORKSPACE/scripts/verify-w08-release-sbom.mjs" \
+              --sbom "$sbom" \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$RELEASE_COMMIT" \
+              --package mount-rs-cli \
+              --version "$PACKAGE_VERSION" \
+              --artifact "$artifact"
+            files+=("$artifact" "$manifest" "$sbom")
+          done
+          shasum -a 256 "${files[@]}" > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+          cat SHA256SUMS
+          echo "CLI_RELEASE_CHECKSUMS_PASS targets=$(echo "$expected_targets" | wc -w | tr -d ' ') publish=${{ needs.plan.outputs.publish }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-release-assets
+          path: ${{ runner.temp }}/mount-rs-cli-release/
+          if-no-files-found: error
+          retention-days: 14
+
+  attest:
+    name: Attest ${{ matrix.target }}
+    if: needs.plan.outputs.publish == 'true'
+    needs: [plan, checksums]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-msvc
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download the checked assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cli-release-assets
+          path: ${{ runner.temp }}/mount-rs-cli-release
+
+      - name: Check the downloaded assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/mount-rs-cli-release"
+          shasum -a 256 -c SHA256SUMS
+
+      - name: Generate artifact provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/mount-rs-cli-release/mount-rs-${{ needs.plan.outputs.package_version }}-${{ matrix.target }}.tar.gz
+
+      - name: Generate CycloneDX SBOM attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/mount-rs-cli-release/mount-rs-${{ needs.plan.outputs.package_version }}-${{ matrix.target }}.tar.gz
+          sbom-path: ${{ runner.temp }}/mount-rs-cli-release/release-sbom-${{ matrix.target }}.json
+
+  publish:
+    name: Publish the GitHub prerelease
+    if: needs.plan.outputs.publish == 'true'
+    needs: [plan, checksums, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Download the checked assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cli-release-assets
+          path: ${{ runner.temp }}/mount-rs-cli-release
+
+      - name: Verify hosted release attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ needs.plan.outputs.package_version }}
+          RELEASE_COMMIT: ${{ needs.plan.outputs.release_commit }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_dir="$RUNNER_TEMP/mount-rs-cli-release"
+          attestation_dir="$RUNNER_TEMP/mount-rs-cli-attestations"
+          mkdir -p "$attestation_dir"
+          (cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
           signer_workflow="$GITHUB_REPOSITORY/.github/workflows/cli-release.yml"
           common_args=(
             --repo "$GITHUB_REPOSITORY"
@@ -148,83 +414,99 @@ jobs:
             --format json
           )
 
-          gh attestation verify "$release_dir/$ARTIFACT" \
-            "${common_args[@]}" \
-            > "$release_dir/provenance-attestation.json"
-          gh attestation verify "$release_dir/$ARTIFACT" \
-            "${common_args[@]}" \
-            --predicate-type https://cyclonedx.org/bom \
-            > "$release_dir/sbom-attestation.json"
-          node -e 'for (const path of process.argv.slice(1)) JSON.parse(require("node:fs").readFileSync(path, "utf8"));' \
-            "$release_dir/provenance-attestation.json" \
-            "$release_dir/sbom-attestation.json"
+          files=()
+          for artifact_path in "$release_dir"/mount-rs-"$PACKAGE_VERSION"-*.tar.gz; do
+            artifact="$(basename "$artifact_path")"
+            target="${artifact#mount-rs-"$PACKAGE_VERSION"-}"
+            target="${target%.tar.gz}"
+            manifest="release-manifest-${target}.json"
+            sbom="release-sbom-${target}.json"
 
-          node scripts/write-w08-release-manifest.mjs \
-            --artifact "$release_dir/$ARTIFACT" \
-            --output "$release_dir/release-manifest.json" \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$RELEASE_COMMIT" \
-            --version "${{ steps.package.outputs.package_version }}" \
-            --tag "$GITHUB_REF_NAME" \
-            --target "${{ steps.package.outputs.target }}" \
-            --workflow "$GITHUB_WORKFLOW" \
-            --workflow-run-id "$GITHUB_RUN_ID" \
-            --signature-status verified \
-            --sbom-status verified
-          node scripts/verify-w08-release-manifest.mjs \
-            "$release_dir/release-manifest.json" \
-            "$release_dir/$ARTIFACT"
-          node scripts/verify-w08-release-sbom.mjs \
-            --sbom "$release_dir/${{ steps.package.outputs.sbom }}" \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$RELEASE_COMMIT" \
-            --package mount-rs-cli \
-            --version "${{ steps.package.outputs.package_version }}" \
-            --artifact "$release_dir/$ARTIFACT"
-          (cd "$release_dir" && shasum -a 256 "$ARTIFACT" release-manifest.json release-sbom.json > SHA256SUMS)
+            gh attestation verify "$release_dir/$artifact" \
+              "${common_args[@]}" \
+              > "$attestation_dir/provenance-attestation-${target}.json"
+            gh attestation verify "$release_dir/$artifact" \
+              "${common_args[@]}" \
+              --predicate-type https://cyclonedx.org/bom \
+              > "$attestation_dir/sbom-attestation-${target}.json"
+            node -e 'for (const path of process.argv.slice(1)) JSON.parse(require("node:fs").readFileSync(path, "utf8"));' \
+              "$attestation_dir/provenance-attestation-${target}.json" \
+              "$attestation_dir/sbom-attestation-${target}.json"
+
+            node scripts/write-w08-release-manifest.mjs \
+              --artifact "$release_dir/$artifact" \
+              --output "$release_dir/$manifest" \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$RELEASE_COMMIT" \
+              --version "$PACKAGE_VERSION" \
+              --tag "$RELEASE_TAG" \
+              --target "$target" \
+              --workflow "$GITHUB_WORKFLOW" \
+              --workflow-run-id "$GITHUB_RUN_ID" \
+              --signature-status verified \
+              --sbom-status verified
+            node scripts/verify-w08-release-manifest.mjs \
+              "$release_dir/$manifest" \
+              "$release_dir/$artifact"
+            node scripts/verify-w08-release-sbom.mjs \
+              --sbom "$release_dir/$sbom" \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$RELEASE_COMMIT" \
+              --package mount-rs-cli \
+              --version "$PACKAGE_VERSION" \
+              --artifact "$release_dir/$artifact"
+            files+=("$artifact" "$manifest" "$sbom")
+            echo "W08_RELEASE_ATTESTATION_PASS artifact=$artifact source=$RELEASE_COMMIT"
+          done
+          # The manifests now record the verified attestations, so the
+          # checksums are written again over the files that will be published.
+          (cd "$release_dir" && shasum -a 256 "${files[@]}" > SHA256SUMS)
           (cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
-          echo "W08_RELEASE_ATTESTATION_PASS artifact=$ARTIFACT source=$RELEASE_COMMIT"
 
       - name: Publish GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ needs.plan.outputs.package_version }}
+          RELEASE_COMMIT: ${{ needs.plan.outputs.release_commit }}
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
 
-          release_tag="${GITHUB_REF_NAME}"
           release_dir="$RUNNER_TEMP/mount-rs-cli-release"
-          artifact="${{ steps.package.outputs.artifact }}"
-          manifest="${{ steps.package.outputs.manifest }}"
-          sbom="${{ steps.package.outputs.sbom }}"
-          package_version="${{ steps.package.outputs.package_version }}"
-          release_commit="${{ steps.package.outputs.release_commit }}"
-          target="${{ steps.package.outputs.target }}"
-          notes="CLI preview built from commit $release_commit.
+          assets=("$release_dir"/SHA256SUMS)
+          targets=()
+          for artifact_path in "$release_dir"/mount-rs-"$PACKAGE_VERSION"-*.tar.gz; do
+            target="$(basename "$artifact_path")"
+            target="${target#mount-rs-"$PACKAGE_VERSION"-}"
+            target="${target%.tar.gz}"
+            targets+=("$target")
+            assets+=(
+              "$artifact_path"
+              "$release_dir/release-manifest-${target}.json"
+              "$release_dir/release-sbom-${target}.json"
+            )
+          done
+          notes="CLI preview built from commit $RELEASE_COMMIT.
 
-          Published target: $target
-          Published artifact: $artifact
+          Published targets: ${targets[*]}
+          Each target has an archive mount-rs-${PACKAGE_VERSION}-<target>.tar.gz, a release-manifest-<target>.json and a release-sbom-<target>.json.
           Checksums: SHA256SUMS
+          Each archive was built on a native runner, and its packaged binary served a file over HTTP and stopped cleanly on that runner before publication.
           GitHub Sigstore provenance and CycloneDX SBOM attestations were generated and verified in this workflow.
 
-          This is a platform-specific CLI preview. It is not a complete platform matrix and does not imply overall project release readiness."
+          This is a CLI preview. It does not imply overall project release readiness. See docs/support-matrix.md for what each platform supports."
 
-          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$release_tag" \
-              "$release_dir/$artifact" \
-              "$release_dir/SHA256SUMS" \
-              "$release_dir/$manifest" \
-              "$release_dir/$sbom" \
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              "${assets[@]}" \
               --clobber \
               --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$release_tag" \
-              "$release_dir/$artifact" \
-              "$release_dir/SHA256SUMS" \
-              "$release_dir/$manifest" \
-              "$release_dir/$sbom" \
+            gh release create "$RELEASE_TAG" \
+              "${assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "mount-rs $package_version CLI preview" \
+              --title "mount-rs $PACKAGE_VERSION CLI preview" \
               --notes "$notes" \
               --prerelease \
               --verify-tag
@@ -232,39 +514,48 @@ jobs:
 
           verification_dir="$RUNNER_TEMP/mount-rs-cli-release-verify"
           mkdir -p "$verification_dir"
-          gh release download "$release_tag" \
+          gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern "$artifact" \
+            --pattern 'mount-rs-*.tar.gz' \
             --pattern SHA256SUMS \
-            --pattern "$manifest" \
-            --pattern "$sbom" \
+            --pattern 'release-manifest-*.json' \
+            --pattern 'release-sbom-*.json' \
             --dir "$verification_dir" \
             --clobber
           (cd "$verification_dir" && shasum -a 256 -c SHA256SUMS)
-          node scripts/verify-w08-release-manifest.mjs \
-            "$verification_dir/$manifest" \
-            "$verification_dir/$artifact"
-          node scripts/verify-w08-release-sbom.mjs \
-            --sbom "$verification_dir/$sbom" \
-            --repository "$GITHUB_REPOSITORY" \
-            --source-commit "$release_commit" \
-            --package mount-rs-cli \
-            --version "$package_version" \
-            --artifact "$verification_dir/$artifact"
           signer_workflow="$GITHUB_REPOSITORY/.github/workflows/cli-release.yml"
           common_args=(
             --repo "$GITHUB_REPOSITORY"
             --signer-workflow "$signer_workflow"
-            --source-digest "$release_commit"
+            --source-digest "$RELEASE_COMMIT"
             --source-ref "$GITHUB_REF"
             --deny-self-hosted-runners
           )
-          gh attestation verify "$verification_dir/$artifact" "${common_args[@]}"
-          gh attestation verify "$verification_dir/$artifact" \
-            "${common_args[@]}" \
-            --predicate-type https://cyclonedx.org/bom
-          test "$(tar -tzf "$verification_dir/$artifact")" = "mount-rs"
+          for target in "${targets[@]}"; do
+            artifact="mount-rs-${PACKAGE_VERSION}-${target}.tar.gz"
+            node scripts/verify-w08-release-manifest.mjs \
+              "$verification_dir/release-manifest-${target}.json" \
+              "$verification_dir/$artifact"
+            node scripts/verify-w08-release-sbom.mjs \
+              --sbom "$verification_dir/release-sbom-${target}.json" \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$RELEASE_COMMIT" \
+              --package mount-rs-cli \
+              --version "$PACKAGE_VERSION" \
+              --artifact "$verification_dir/$artifact"
+            gh attestation verify "$verification_dir/$artifact" "${common_args[@]}"
+            gh attestation verify "$verification_dir/$artifact" \
+              "${common_args[@]}" \
+              --predicate-type https://cyclonedx.org/bom
+            binary=mount-rs
+            if [ "$target" = "x86_64-pc-windows-msvc" ]; then
+              binary=mount-rs.exe
+            fi
+            test "$(tar -tzf "$verification_dir/$artifact")" = "$binary"
+          done
+          # The one archive this runner can execute; every archive was run on
+          # its own platform by the build job.
           extracted_dir="$verification_dir/extracted"
           mkdir -p "$extracted_dir"
-          tar -xzf "$verification_dir/$artifact" -C "$extracted_dir"
-          test "$("$extracted_dir/mount-rs" --version)" = "mount-rs $package_version"
+          tar -xzf "$verification_dir/mount-rs-${PACKAGE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C "$extracted_dir"
+          test "$("$extracted_dir/mount-rs" --version)" = "mount-rs $PACKAGE_VERSION"

@@ -103,8 +103,9 @@ pub(crate) struct CtrlCHandler {
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
 
-/// Resolve on Ctrl-C, or on SIGTERM where supported, so supervised servers
-/// drain sessions and release ownership leases before exiting.
+/// Resolve on Ctrl-C, on SIGTERM on Unix, or on the other console stop
+/// events on Windows, so supervised servers drain sessions and release
+/// ownership leases before exiting.
 fn shutdown_signal() -> Result<ShutdownFuture, CliError> {
     #[cfg(unix)]
     {
@@ -117,7 +118,31 @@ fn shutdown_signal() -> Result<ShutdownFuture, CliError> {
             }
         }))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Windows has no SIGTERM. A console process is stopped with Ctrl-C,
+        // Ctrl-Break, by closing its console, or by system shutdown, which
+        // is also how a Windows container is stopped. Left unhandled, each
+        // of the last three ends the process at once, with no drain and the
+        // writer lease still held. Windows allows about five seconds after
+        // a close or shutdown event before it ends the process regardless.
+        //
+        // Logoff is deliberately not a stop: a process running as a service
+        // receives it whenever any user signs out.
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let mut ctrl_break = ctrl_break().map_err(io_error)?;
+        let mut ctrl_close = ctrl_close().map_err(io_error)?;
+        let mut ctrl_shutdown = ctrl_shutdown().map_err(io_error)?;
+        Ok(Box::pin(async move {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result,
+                _ = ctrl_break.recv() => Ok(()),
+                _ = ctrl_close.recv() => Ok(()),
+                _ = ctrl_shutdown.recv() => Ok(()),
+            }
+        }))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(Box::pin(tokio::signal::ctrl_c()))
     }

@@ -407,7 +407,11 @@ be opened or whose last save failed. The storage of `host` and `sqlite`
 drives is checked every two seconds in the background. A `memory` drive has
 nothing to check.
 
-Ctrl-C and, on Unix, SIGTERM start a graceful shutdown: the listener stops
+Ctrl-C starts a graceful shutdown, as does SIGTERM on Unix. On Windows so do
+Ctrl-Break, closing the console window and system shutdown (which is how a
+Windows container is stopped); Windows ends the process about five seconds
+after the last two whether or not the drain has finished, and forced
+termination (`taskkill /F`, Task Manager) is never graceful. The listener stops
 accepting, in-flight requests get up to `drain_timeout_ms`, the drives are
 shut down (which releases split-store writer leases), and the process prints
 `http stopped` and exits `0`. If the drain deadline passes, in-flight requests
