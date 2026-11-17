@@ -112,8 +112,8 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | `max_request_bytes` | integer | `8388608` (8 MiB) | >= 1 | Largest body received whole in memory: JSON bodies, session writes, and file uploads up to this size. A file upload above it is streamed to storage instead (see `max_upload_bytes`). Other larger requests get 413. |
 | `max_upload_bytes` | integer | `5368709120` (5 GiB) | >= `max_request_bytes` | Largest file a `PUT` may upload. Larger uploads get 413 and leave the target unchanged. Uploads above `max_request_bytes`, or without a `Content-Length` that grow past it, are stored as they arrive and published once complete: a split-store drive stores the blocks and publishes the file in one step; other drives write a hidden temporary file in up to 8 MiB writes and rename it over the target. |
 | `max_buffered_upload_bytes` | integer | 4 x `max_request_bytes` | >= `max_request_bytes` (a smaller value is a config error, exit 2) | Upload bytes the server holds in memory across all in-flight `PUT`s. A `PUT` reserves its `Content-Length` (or `max_request_bytes` without one) before its body is read; a streamed upload reserves one write buffer (the smaller of 8 MiB and `max_request_bytes`). Uploads beyond the budget wait in arrival order, up to `request_timeout_ms`. |
-| `max_response_bytes` | integer | `33554432` (32 MiB) | >= 1 | Largest directory listing (uncompressed JSON). Larger listings get 413. Does not limit file downloads. |
-| `max_directory_entries` | integer | `100000` | >= 1 | Largest directory that can be listed. Larger directories get 413. An entry is about 70 bytes of JSON with short names, so 100,000 entries is about 7 MB (0.3 MB gzipped from `/entries`). |
+| `max_response_bytes` | integer | `33554432` (32 MiB) | >= 1 | Largest directory listing, or page of one (uncompressed JSON). Larger listings get 413; a consumer can then list in pages with `?limit=`. Does not limit file downloads. |
+| `max_directory_entries` | integer | `100000` | >= 1 | Largest directory that can be listed, in one response or in pages, and the largest page `limit`. Larger directories get 413. An entry is about 70 bytes of JSON with short names, so 100,000 entries is about 7 MB (0.3 MB gzipped from `/entries`). |
 | `read_chunk_bytes` | integer | `65536` | >= 1 | Read size per chunk when streaming a download. |
 | `request_timeout_ms` | integer | `30000` | >= 1 | Limit for one request up to its response headers, including receiving the body and waiting for upload budget; exceeding it returns 504. A streamed upload (above `max_request_bytes`, or without a `Content-Length`) has no overall limit: instead each piece of its body, each write to the drive and the final publication must happen within this time, or it gets 504 and leaves the target unchanged. Also the header-read and idle keep-alive timeout (the connection is closed without a response) and the time a download may make no progress before it is cut. |
 | `drain_timeout_ms` | integer | `35000` | >= 1 | How long shutdown waits for in-flight requests before aborting them. Keep it above `request_timeout_ms`. |
@@ -584,7 +584,7 @@ request.
 | 507 on writes | Storage full | Free space or grow the volume. No restart needed. |
 | Clients get connection resets or the proxy logs 502 | `max_connections` reached, or keep-alive idle race | Lower proxy keep-alive count and idle time, or raise `max_connections` and `LimitNOFILE`. |
 | Uploads return 504 under load | Upload memory budget saturated or slow storage | Raise `max_buffered_upload_bytes` if memory allows; reduce upload concurrency at the proxy. |
-| A directory returns `413 EOVERFLOW` | More than `max_directory_entries` entries, or listing above `max_response_bytes` | Raise the limits (needs restart) or have the consumer restructure. |
+| A directory returns `413 EOVERFLOW` | More than `max_directory_entries` entries, or listing above `max_response_bytes` | Above `max_response_bytes` only: have the consumer list in pages (`?limit=N`). Above `max_directory_entries`: pagination does not help, because every page enumerates the whole directory; raise the limit (needs restart, and memory for one full enumeration per listing request in flight) or have the consumer restructure. |
 | A file starting with `.mount-rs-upload.` exists in a `host` drive's directory | The process was killed during a `PUT` on a `host` drive | It stays on disk, hidden from the API, and is removed when its otherwise-empty directory is deleted through the API. Safe to delete by hand while no upload to that directory is in flight. Only `host` drives create such files. |
 
 ### Lease takeover wait
@@ -652,7 +652,11 @@ after a kill is up to one full lifetime.
   directories concurrently. Measured on a SQLite split-store drive, listing a
   100,000-entry directory took 16 ms and produced 6.8 MB of JSON; the entries
   and their JSON are held together while the response is built, so budget
-  about 15-20 MB for each such listing in flight.
+  about 15-20 MB for each such listing in flight. A paginated listing
+  (`?limit=N`) sends less but does not cost less: each page enumerates the
+  whole directory and keeps its entries in memory while it picks the page,
+  so reading a directory of E entries in pages of N costs E/N enumerations.
+  Pagination is for bounding response size, not server work.
 - **Download memory.** About two chunks of `read_chunk_bytes` per active
   download.
 - **Throughput.** One process, one writer per drive. Capacity is added by

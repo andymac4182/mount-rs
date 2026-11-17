@@ -1703,6 +1703,7 @@ async fn handle_request_uninstrumented(
             handle_entries(
                 parts.method,
                 &parts.headers,
+                parts.uri.query(),
                 drive,
                 path,
                 state.config.clone(),
@@ -2713,6 +2714,7 @@ async fn remove_abandoned_siblings(driver: &dyn FsDriver, path: &str, max_entrie
 async fn handle_entries(
     method: Method,
     headers: &hyper::HeaderMap,
+    query: Option<&str>,
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
@@ -2720,13 +2722,142 @@ async fn handle_entries(
     if method != Method::GET && method != Method::HEAD {
         return Err(RequestError::method_not_allowed("GET, HEAD"));
     }
+    let page = ListingPage::from_query(query, config.max_directory_entries)?;
     let entries = list_directory(&drive, &path, config.max_directory_entries).await?;
-    let payload = serde_json::to_vec(&entries)
-        .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
+    let payload = match page {
+        // Without `limit` the response is the whole listing, as an array.
+        None => serde_json::to_vec(&entries),
+        Some(page) => serde_json::to_vec(&page.select(entries)),
+    }
+    .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
     if payload.len() > config.max_response_bytes {
         return Err(RequestError::response_too_large());
     }
     entries_response(payload, headers, method == Method::HEAD).await
+}
+
+/// What a continuation token starts with. The rest is the name of the last
+/// entry of the page before, in lowercase hexadecimal.
+const CURSOR_PREFIX: &str = "v1.";
+/// Longest continuation token accepted: a name of 4096 bytes.
+const MAX_CURSOR_BYTES: usize = CURSOR_PREFIX.len() + 2 * 4096;
+
+/// One page of a listing asked for with `limit`: the entries whose names
+/// follow `after` in byte order, at most `limit` of them.
+#[derive(Debug, PartialEq, Eq)]
+struct ListingPage {
+    limit: usize,
+    after: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EntriesPage {
+    entries: Vec<mount_rs_core::DirEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+impl ListingPage {
+    /// Read `limit` and `cursor` from a query string. A query without
+    /// `limit` asks for no page, whatever else it holds: such requests keep
+    /// the unpaginated response they have always had.
+    fn from_query(query: Option<&str>, max_limit: usize) -> Result<Option<Self>, RequestError> {
+        let mut limit = None;
+        let mut cursor = None;
+        for parameter in query.unwrap_or("").split('&') {
+            let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+            let slot = match name {
+                "limit" => &mut limit,
+                "cursor" => &mut cursor,
+                _ => continue,
+            };
+            if slot.replace(value).is_some() {
+                return Err(RequestError::bad_request(format!(
+                    "{name} is given more than once"
+                )));
+            }
+        }
+        let Some(limit) = limit else {
+            return Ok(None);
+        };
+        // Plain decimal digits only: no sign, no leading zero, no encoding.
+        let limit = Some(limit)
+            .filter(|text| {
+                (1..=20).contains(&text.len())
+                    && text.bytes().all(|byte| byte.is_ascii_digit())
+                    && !text.starts_with('0')
+            })
+            .and_then(|text| text.parse::<usize>().ok())
+            .filter(|limit| *limit <= max_limit)
+            .ok_or_else(|| {
+                RequestError::bad_request(format!(
+                    "limit must be a whole number from 1 to {max_limit}"
+                ))
+            })?;
+        let after = cursor
+            .map(|token| {
+                decode_cursor(token).ok_or_else(|| {
+                    RequestError::bad_request("cursor is not a next_cursor returned by this API")
+                })
+            })
+            .transpose()?;
+        Ok(Some(Self { limit, after }))
+    }
+
+    /// The page out of a complete listing: the `limit` smallest names that
+    /// follow `after`, in order, and a cursor when more follow them.
+    fn select(&self, mut entries: Vec<mount_rs_core::DirEntry>) -> EntriesPage {
+        if let Some(after) = &self.after {
+            entries.retain(|entry| entry.name.as_str() > after.as_str());
+        }
+        let more = entries.len() > self.limit;
+        if more {
+            // Only the page is sorted, not the whole directory.
+            entries.select_nth_unstable_by(self.limit, |left, right| left.name.cmp(&right.name));
+            entries.truncate(self.limit);
+        }
+        entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        let next_cursor = entries
+            .last()
+            .filter(|_| more)
+            .map(|last| encode_cursor(&last.name));
+        EntriesPage {
+            entries,
+            next_cursor,
+        }
+    }
+}
+
+fn encode_cursor(name: &str) -> String {
+    use fmt::Write as _;
+    let mut token = String::with_capacity(CURSOR_PREFIX.len() + 2 * name.len());
+    token.push_str(CURSOR_PREFIX);
+    for byte in name.bytes() {
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
+}
+
+/// The name a continuation token stands for, or `None` for anything that
+/// `encode_cursor` could not have produced.
+fn decode_cursor(token: &str) -> Option<String> {
+    if token.len() > MAX_CURSOR_BYTES {
+        return None;
+    }
+    let digits = token.strip_prefix(CURSOR_PREFIX)?.as_bytes();
+    if digits.is_empty() || digits.len() % 2 != 0 {
+        return None;
+    }
+    let nibble = |digit: u8| match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    };
+    let name = digits
+        .chunks_exact(2)
+        .map(|pair| Some(nibble(pair[0])? << 4 | nibble(pair[1])?))
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(name).ok()
 }
 
 // Bound compression work across all drives without occupying async executor threads.
@@ -3719,6 +3850,174 @@ mod tests {
         .await;
         // 10+20+40+80+160+320+640 ms, then one second each for the rest.
         assert_eq!(started.elapsed(), Duration::from_millis(1270 + 3000));
+    }
+
+    fn entry(name: &str) -> mount_rs_core::DirEntry {
+        mount_rs_core::DirEntry {
+            name: name.to_owned(),
+            parent_path: "/".to_owned(),
+            file_type: mount_rs_core::FileType::File,
+        }
+    }
+
+    fn page_query(query: &str) -> Result<Option<ListingPage>, String> {
+        ListingPage::from_query(Some(query), 1000).map_err(|error| match error {
+            RequestError::Client {
+                status,
+                code,
+                message,
+                ..
+            } => {
+                assert_eq!((status, code), (StatusCode::BAD_REQUEST, "EINVAL"));
+                message
+            }
+            RequestError::Fs(error) => panic!("unexpected {error:?}"),
+        })
+    }
+
+    #[test]
+    fn a_query_without_limit_asks_for_no_page() {
+        assert_eq!(ListingPage::from_query(None, 1000).unwrap(), None);
+        for query in [
+            "",
+            "x=1",
+            "cursor=v1.61",
+            "cursor=garbage",
+            "Limit=5",
+            "limit",
+        ] {
+            // `limit` with no value is a limit, and not a number.
+            if query == "limit" {
+                assert!(page_query(query).is_err());
+                continue;
+            }
+            assert_eq!(page_query(query).unwrap(), None, "{query}");
+        }
+    }
+
+    #[test]
+    fn limit_and_cursor_are_validated_strictly() {
+        assert_eq!(
+            page_query("limit=1").unwrap(),
+            Some(ListingPage {
+                limit: 1,
+                after: None
+            })
+        );
+        assert_eq!(
+            page_query("other=x&limit=1000&cursor=v1.61c3a9").unwrap(),
+            Some(ListingPage {
+                limit: 1000,
+                after: Some("a\u{e9}".to_owned())
+            })
+        );
+        for limit in [
+            "",
+            "0",
+            "1001",
+            "-1",
+            "+1",
+            "01",
+            "1.0",
+            "1e2",
+            "ten",
+            "%31",
+            " 1",
+            "1 ",
+            "99999999999999999999999",
+        ] {
+            let message = page_query(&format!("limit={limit}")).unwrap_err();
+            assert!(message.contains("limit must be"), "{limit:?}: {message}");
+        }
+        let long = format!("v1.{}", "61".repeat(4097));
+        for cursor in [
+            "",
+            "v1.",
+            "61",
+            "v2.61",
+            "v1.6",
+            "v1.6g",
+            "v1.6A",
+            "v1.ff",
+            "V1.61",
+            "v1.61%20",
+            long.as_str(),
+        ] {
+            let message = page_query(&format!("limit=5&cursor={cursor}")).unwrap_err();
+            assert!(message.contains("cursor is not"), "{cursor:?}: {message}");
+        }
+        for repeated in ["limit=1&limit=1", "limit=2&cursor=v1.61&cursor=v1.61"] {
+            let message = page_query(repeated).unwrap_err();
+            assert!(message.contains("more than once"), "{repeated}: {message}");
+        }
+    }
+
+    #[test]
+    fn cursors_round_trip_every_name() {
+        let longest = "n".repeat(4096);
+        for name in [
+            "a",
+            "with space",
+            "caf\u{e9}",
+            "\u{1f600}",
+            "%2F",
+            longest.as_str(),
+        ] {
+            let token = encode_cursor(name);
+            assert!(token.len() <= MAX_CURSOR_BYTES);
+            assert!(
+                token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.'),
+                "a cursor needs no escaping in a URL: {token}"
+            );
+            assert_eq!(decode_cursor(&token).as_deref(), Some(name));
+        }
+    }
+
+    #[test]
+    fn pages_walk_a_listing_in_name_order_without_gaps_or_repeats() {
+        // Enumeration order is the drive's; here it is deliberately not sorted.
+        let names = ["m", "b", "zz", "a", "B", "\u{e9}", "z", "10", "9", "c"];
+        let listing = || names.iter().map(|name| entry(name)).collect::<Vec<_>>();
+        let mut sorted: Vec<&str> = names.to_vec();
+        sorted.sort_unstable();
+        for limit in 1..=names.len() + 1 {
+            let mut walked = Vec::new();
+            let mut after = None;
+            loop {
+                let page = ListingPage { limit, after }.select(listing());
+                assert!(page.entries.len() <= limit);
+                walked.extend(page.entries.iter().map(|entry| entry.name.clone()));
+                match page.next_cursor {
+                    Some(cursor) => {
+                        assert_eq!(page.entries.len(), limit, "a short page is the last");
+                        after = Some(decode_cursor(&cursor).expect("cursor"));
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(walked, sorted, "limit {limit}");
+        }
+        // A cursor naming an entry that has since gone still has a place.
+        let page = ListingPage {
+            limit: 2,
+            after: Some("bb".to_owned()),
+        }
+        .select(listing());
+        let names: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["c", "m"]);
+        // Past the last name there is an empty last page.
+        let page = ListingPage {
+            limit: 2,
+            after: Some("\u{e9}".to_owned()),
+        }
+        .select(listing());
+        assert!(page.entries.is_empty() && page.next_cursor.is_none());
     }
 
     #[test]

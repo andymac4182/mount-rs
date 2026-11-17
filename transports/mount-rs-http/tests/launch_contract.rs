@@ -1726,3 +1726,325 @@ async fn a_request_whose_client_leaves_before_the_response_is_recorded_without_a
     );
     server.close().await.expect("close");
 }
+
+// ------------------------------------------------------ listing pagination
+
+async fn make_files(driver: &dyn FsDriver, directory: &str, names: &[String]) {
+    driver
+        .mkdir(directory, MkdirOptions::default())
+        .await
+        .expect("directory");
+    for name in names {
+        driver
+            .write_file(&format!("{directory}/{name}"), b"x")
+            .await
+            .expect("file");
+    }
+}
+
+/// One page: its entry names and its `next_cursor`, with the shape checked.
+async fn page_of(server: &HttpServer, route: &str) -> (Vec<String>, Option<String>) {
+    let response = get(server, route).await;
+    assert_eq!(response.status(), StatusCode::OK, "{route}");
+    let body: Value = response.json().await.expect("page JSON");
+    let page = body.as_object().expect("a page is an object");
+    let names = page["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| {
+            assert_eq!(entry.as_object().expect("entry").len(), 3, "{entry}");
+            entry["name"].as_str().expect("name").to_owned()
+        })
+        .collect();
+    let cursor = match page.get("next_cursor") {
+        Some(cursor) => {
+            assert_eq!(page.len(), 2, "{body}");
+            Some(cursor.as_str().expect("next_cursor is a string").to_owned())
+        }
+        None => {
+            assert_eq!(page.len(), 1, "{body}");
+            None
+        }
+    };
+    (names, cursor)
+}
+
+/// Follow `next_cursor` from the first page to the last.
+async fn walk(server: &HttpServer, route: &str, limit: usize) -> Vec<Vec<String>> {
+    let mut pages = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let query = match &cursor {
+            Some(cursor) => format!("{route}?limit={limit}&cursor={cursor}"),
+            None => format!("{route}?limit={limit}"),
+        };
+        let (names, next) = page_of(server, &query).await;
+        assert!(names.len() <= limit, "{query}");
+        pages.push(names);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => return pages,
+        }
+        assert!(pages.len() < 10_000, "the walk does not end");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listing_without_limit_is_the_same_array_whatever_else_the_query_holds() {
+    for (kind, driver) in drive_kinds().await {
+        let names: Vec<String> = (0..7).map(|index| format!("f{index}")).collect();
+        make_files(driver.as_ref(), "/dir", &names).await;
+        let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+        let plain = get(&server, "/v1/drives/d/entries/dir").await;
+        assert_eq!(plain.status(), StatusCode::OK);
+        let plain = plain.bytes().await.unwrap();
+        let listed: Value = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(listed.as_array().expect("an array").len(), 7, "{kind}");
+        // Only `limit` asks for a page. Anything else in the query, a
+        // cursor included, is ignored as the query string always was.
+        for query in [
+            "?",
+            "?cursor=v1.6630",
+            "?cursor=garbage",
+            "?x=1&y",
+            "?Limit=2",
+        ] {
+            let same = get(&server, &format!("/v1/drives/d/entries/dir{query}")).await;
+            assert_eq!(same.status(), StatusCode::OK, "{kind} {query}");
+            assert_eq!(same.bytes().await.unwrap(), plain, "{kind} {query}");
+        }
+        server.close().await.expect("close");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paginated_listing_returns_every_entry_once_in_name_order() {
+    for (kind, driver) in drive_kinds().await {
+        // Names whose byte order differs from their creation order.
+        let mut names: Vec<String> = (0..25).rev().map(|index| format!("n{index}")).collect();
+        names.push("caf\u{e9} au lait".to_owned());
+        names.push("Upper".to_owned());
+        make_files(driver.as_ref(), "/dir", &names).await;
+        let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+
+        for limit in [1, 10, 27, 28, 100_000] {
+            let pages = walk(&server, "/v1/drives/d/entries/dir", limit).await;
+            for page in &pages[..pages.len() - 1] {
+                assert_eq!(page.len(), limit, "{kind}: only the last page is short");
+            }
+            assert_eq!(pages.concat(), sorted, "{kind} limit {limit}");
+        }
+        // The root lists the same way, and HEAD announces the page's length.
+        let (root, next) = page_of(&server, "/v1/drives/d/entries?limit=5").await;
+        assert_eq!((root, next), (vec!["dir".to_owned()], None), "{kind}");
+        let route = format!("{}/v1/drives/d/entries/dir?limit=3", server.url());
+        let client = reqwest::Client::new();
+        let head = client
+            .head(&route)
+            .header(AUTHORIZATION, bearer())
+            .send()
+            .await
+            .unwrap();
+        let body = client
+            .get(&route)
+            .header(AUTHORIZATION, bearer())
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(
+            head.headers()["content-length"],
+            body.len().to_string().as_str(),
+            "{kind}"
+        );
+        server.close().await.expect("close");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entries_that_do_not_change_during_a_paginated_walk_appear_exactly_once() {
+    for (kind, driver) in drive_kinds().await {
+        let names: Vec<String> = (10..40).map(|index| format!("e{index}")).collect();
+        make_files(driver.as_ref(), "/dir", &names).await;
+        let server = start(vec![("d", driver.clone())], HttpServerOptions::default()).await;
+        let route = "/v1/drives/d/entries/dir";
+
+        let (first, cursor) = page_of(&server, &format!("{route}?limit=10")).await;
+        assert_eq!(first, names[..10]);
+        let cursor = cursor.expect("more pages");
+        // Between two pages: one listed entry and one unlisted entry go,
+        // and entries arrive before and after the cursor's position.
+        driver.unlink("/dir/e12").await.unwrap();
+        driver.unlink("/dir/e25").await.unwrap();
+        driver.write_file("/dir/a-early", b"x").await.unwrap();
+        driver.write_file("/dir/e205", b"x").await.unwrap();
+        // The cursor's own entry goes too: the cursor is a position, not a
+        // reference to an entry.
+        driver.unlink("/dir/e19").await.unwrap();
+
+        let mut rest = Vec::new();
+        let mut cursor = Some(cursor);
+        while let Some(token) = cursor {
+            let (names, next) = page_of(&server, &format!("{route}?limit=10&cursor={token}")).await;
+            rest.extend(names);
+            cursor = next;
+        }
+        let mut expected: Vec<String> = names[10..]
+            .iter()
+            .filter(|name| *name != "e25")
+            .cloned()
+            .collect();
+        // Created after the cursor's position: seen. Created before it: not.
+        expected.push("e205".to_owned());
+        expected.sort_unstable();
+        assert_eq!(rest, expected, "{kind}");
+        let mut all = first;
+        all.extend(rest);
+        let unique: std::collections::BTreeSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len(), "{kind}: a name was repeated");
+        server.close().await.expect("close");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listing_too_large_for_one_response_can_be_read_in_pages() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let names: Vec<String> = (100..200).map(|index| format!("entry-{index}")).collect();
+    make_files(driver.as_ref(), "/big", &names).await;
+    let server = start(
+        vec![("d", driver.clone())],
+        HttpServerOptions {
+            max_response_bytes: 2048,
+            max_directory_entries: 100,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await;
+    let route = "/v1/drives/d/entries/big";
+
+    // As before: the whole listing does not fit one response.
+    let whole = get(&server, route).await;
+    assert_eq!(whole.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_of(whole).await.0, "EOVERFLOW");
+    // In pages it does.
+    let pages = walk(&server, route, 20).await;
+    assert_eq!(pages.len(), 5);
+    assert_eq!(pages.concat(), names);
+    // A page is held to the same response limit as a listing.
+    let page = get(&server, &format!("{route}?limit=100")).await;
+    assert_eq!(page.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_of(page).await.0, "EOVERFLOW");
+
+    // The entry limit is the size of directory the server will enumerate,
+    // and paging does not lift it.
+    driver.write_file("/big/one-more", b"x").await.unwrap();
+    let over = get(&server, &format!("{route}?limit=20")).await;
+    assert_eq!(over.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_of(over).await.0, "EOVERFLOW");
+    server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bad_limit_or_cursor_is_400_einval() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    make_files(driver.as_ref(), "/dir", &["a".to_owned(), "b".to_owned()]).await;
+    let server = start(
+        vec![("d", driver)],
+        HttpServerOptions {
+            max_directory_entries: 50,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await;
+    let route = "/v1/drives/d/entries/dir";
+    for query in [
+        "limit=",
+        "limit=0",
+        "limit=-1",
+        "limit=01",
+        "limit=1.5",
+        "limit=many",
+        "limit=%35",
+        // Above `max_directory_entries`.
+        "limit=51",
+        "limit=1&limit=2",
+        "limit=1&cursor=",
+        "limit=1&cursor=a",
+        "limit=1&cursor=v1.",
+        "limit=1&cursor=v1.zz",
+        "limit=1&cursor=v1.ff",
+        "limit=1&cursor=v2.61",
+        "limit=1&cursor=v1.61&cursor=v1.62",
+    ] {
+        let response = get(&server, &format!("{route}?{query}")).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        assert!(response.headers().get("connection").is_none(), "{query}");
+        assert_eq!(error_of(response).await.0, "EINVAL", "{query}");
+    }
+    // The largest limit is accepted, and a cursor past the end is an empty
+    // last page rather than an error.
+    let (names, next) = page_of(&server, &format!("{route}?limit=50")).await;
+    assert_eq!((names.len(), next), (2, None));
+    let (names, next) = page_of(&server, &format!("{route}?limit=1&cursor=v1.7a7a")).await;
+    assert_eq!((names.len(), next), (0, None));
+
+    // The checks keep their order: token before method, method before query.
+    let client = reqwest::Client::new();
+    let unauthorized = client
+        .get(format!("{}{route}?limit=0", server.url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let wrong_method = client
+        .post(format!("{}{route}?limit=0", server.url()))
+        .header(AUTHORIZATION, bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    // And a missing directory is still a 404 with a valid page request.
+    let missing = get(&server, "/v1/drives/d/entries/nowhere?limit=5").await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_is_compressed_like_any_listing() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let names: Vec<String> = (0..200)
+        .map(|index| format!("compressible-{index:04}"))
+        .collect();
+    make_files(driver.as_ref(), "/dir", &names).await;
+    let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/drives/d/entries/dir?limit=150",
+            server.url()
+        ))
+        .header(AUTHORIZATION, bearer())
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(response.headers()["vary"], "Accept-Encoding");
+    let compressed = response.bytes().await.unwrap();
+    let mut json = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(compressed.as_ref()),
+        &mut json,
+    )
+    .unwrap();
+    let page: Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(page["entries"].as_array().unwrap().len(), 150);
+    assert!(page["next_cursor"].is_string());
+    server.close().await.expect("close");
+}

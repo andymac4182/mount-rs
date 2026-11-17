@@ -79,6 +79,16 @@ curl --compressed -H "Authorization: Bearer $TOKEN" \
 curl -H "Authorization: Bearer $TOKEN" "$BASE/v1/drives/memory/entries"
 ```
 
+List a large directory a page at a time, in name order:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v1/drives/memory/entries/reports?limit=1"
+# {"entries":[{"name":"2026","parent_path":"/reports","file_type":"Directory"}]}
+# With more entries left: {"entries":[...],"next_cursor":"v1.32303236"}; send it
+# back as &cursor=v1.32303236 for the next page.
+```
+
 `GET` on the `fs` route of a directory returns JSON metadata, not bytes:
 
 ```sh
@@ -134,6 +144,7 @@ curl -i -H "Authorization: Bearer $TOKEN" -X DELETE \
 | `PUT` | `/v1/drives/{id}/fs/{path}` | Create or replace a file | 200 `{"path":"...","bytes":N}` |
 | `DELETE` | `/v1/drives/{id}/fs/{path}` | Remove a file, symlink or empty directory | 204 |
 | `GET`, `HEAD` | `/v1/drives/{id}/entries/{path}` | List a directory | 200 `[{"name","parent_path","file_type"}]` |
+| `GET`, `HEAD` | `/v1/drives/{id}/entries/{path}?limit=N[&cursor=C]` | List a directory a page at a time | 200 `{"entries":[...],"next_cursor"?}` |
 | `GET`, `HEAD` | `/v1/drives/{id}/stat/{path}` | Metadata, following symlinks | 200 `Stats` object |
 | `GET`, `HEAD` | `/v1/drives/{id}/lstat/{path}` | Metadata of the link itself | 200 `Stats` object |
 | `GET`, `HEAD` | `/v1/drives/{id}/statfs/{path}` | Filesystem figures | 200 `StatsFs` object |
@@ -188,7 +199,8 @@ curl -i -H 'X-Request-Id: checkout-7f3a.retry-2' "$BASE/healthz"
 
 In the URL, each path segment is percent-decoded once and must be valid UTF-8.
 Percent-encode spaces, `?`, `#`, `%` and non-ASCII bytes. The query string is
-ignored. In JSON bodies (`mkdir`, `rename`, `truncate`) paths are absolute
+ignored, except `limit` and `cursor` on the `entries` route (see
+[Listings](#listings)). In JSON bodies (`mkdir`, `rename`, `truncate`) paths are absolute
 (`/a/b`) and are not percent-encoded.
 
 The server rejects these with `400 EINVAL`, before it looks at the token:
@@ -222,6 +234,7 @@ do not have this body.
 | --- | --- | --- | --- |
 | 400 | `EINVAL` | Invalid path, invalid JSON, body sent to `sync`, argument rejected by the filesystem | No |
 | 400 | `EINVAL` | `readlink` on something that is not a symbolic link; rename of a directory into itself | No |
+| 400 | `EINVAL` | Listing `limit` that is not a whole number in range, `cursor` that is not a `next_cursor`, or either given twice | No |
 | 400 | `EXDEV`, `EMLINK`, `ELOOP`, `ENXIO` | Operation not possible on this path | No |
 | 400 | `EIO` | The request body could not be read (client aborted the upload) | Yes, resend |
 | 401 | `EACCES` | Missing or wrong token, or unknown drive | No; fix the credential |
@@ -432,12 +445,69 @@ for anything that is not a symbolic link.
 `GET .../entries/{path}` returns an array of
 `{"name","parent_path","file_type"}`. `file_type` is one of `File`,
 `Directory`, `Symlink`, `BlockDevice`, `CharacterDevice`, `Fifo`, `Socket`.
-The order is not guaranteed. `.` and `..` are not included.
+Without `limit` the order is not guaranteed. `.` and `..` are not included.
 
-A listing is complete or it fails. A directory with more entries than the
-limit (100,000 by default), or whose JSON is larger than the response limit
-(32 MiB by default), returns `413 EOVERFLOW`. There is no pagination. Keep
-directories below the limit.
+Without `limit`, a listing is complete or it fails. A directory with more
+entries than the limit (100,000 by default), or whose JSON is larger than
+the response limit (32 MiB by default), returns `413 EOVERFLOW`.
+
+#### Pagination
+
+Add `limit` to read a directory a page at a time:
+
+```text
+GET /v1/drives/{id}/entries/{path}?limit=1000
+GET /v1/drives/{id}/entries/{path}?limit=1000&cursor=<next_cursor of the page before>
+```
+
+The response is then an object, not an array:
+
+```json
+{"entries": [{"name": "a", "parent_path": "/dir", "file_type": "File"}], "next_cursor": "v1.61"}
+```
+
+- `entries` holds at most `limit` entries, ordered by name. The order is the
+  byte order of the UTF-8 names (so `B` sorts before `a`, and `10` before
+  `9`); it is the same on every drive.
+- `next_cursor` is present exactly when more entries follow. Pass it back
+  unchanged as `cursor`, with any `limit`, to get the next page. When it is
+  absent you have the last page. A page shorter than `limit`, or empty, is
+  always the last.
+- `limit` is a whole number from 1 to the server's directory entry limit
+  (100,000 by default), written in plain decimal digits. `cursor` is an
+  opaque string of URL-safe characters: do not build or parse one. A bad
+  `limit` or `cursor`, or either given twice, is `400 EINVAL`.
+- Only `limit` turns pagination on. A request without it gets the complete
+  array described above, and anything else in its query string, including a
+  `cursor`, is ignored as it always was.
+- `HEAD`, `Accept-Encoding` and every error work as for an unpaginated
+  listing. A page whose JSON is larger than the response limit is
+  `413 EOVERFLOW`: ask for a smaller `limit`.
+
+What a walk through the pages guarantees, and what it does not:
+
+- Every page reads the directory afresh. The walk is **not a snapshot**.
+- An entry that exists under the same name from the first page to the last
+  is returned exactly once.
+- No name is returned twice.
+- An entry created, removed or renamed while you walk may or may not appear.
+  One created under a name before your position is not seen; one removed
+  after you passed it stays in what you already read; a renamed entry can
+  appear under its old name, its new name, both, or neither.
+- A cursor is a position in the name order, not a reference to an entry. It
+  stays valid if the entry it was taken from is deleted, it does not expire,
+  and it survives a server restart.
+- A directory that is deleted during the walk answers `404` on the next
+  page.
+
+What pagination does not change: the server still enumerates the whole
+directory for every page, so a directory with more entries than the
+directory entry limit still returns `413 EOVERFLOW`, with or without
+`limit`, and a page of a large directory costs the server about as much as
+the whole listing. Pagination bounds the size of each response, lifts the
+response-size limit for directories within the entry limit, and gives a
+stable order; it does not make very large directories cheap. Prefer a
+`limit` of a few thousand.
 
 With `Accept-Encoding: gzip`, listings of 1 KiB or more are returned with
 `Content-Encoding: gzip`. Without the header the response is plain JSON. All
@@ -492,8 +562,9 @@ Defaults; the operator can change them.
 | --- | --- | --- |
 | Upload (`PUT` body) | 5 GiB | `413 EFBIG`, connection closed |
 | Request body received in full (`PUT` and JSON) | 8 MiB | JSON: `413 EFBIG`, connection closed. `PUT`: streamed to storage instead |
-| Directory entries per listing | 100,000 | `413 EOVERFLOW`, connection closed |
-| Listing response (uncompressed JSON) | 32 MiB | `413 EOVERFLOW`, connection closed |
+| Entries in a directory that can be listed, paginated or not | 100,000 | `413 EOVERFLOW`, connection closed |
+| Listing response or page (uncompressed JSON) | 32 MiB | `413 EOVERFLOW`, connection closed; paginate, or lower `limit` |
+| Listing `limit` | 1 to the directory entry limit | `400 EINVAL` |
 | Request time | 30 s | `504 ETIMEDOUT`, connection closed |
 | Idle keep-alive, time to send request headers | 30 s | Connection closed without a response |
 | Download stalled by the client | 30 s without progress | Connection closed |
@@ -506,7 +577,8 @@ Defaults; the operator can change them.
 
 - Files larger than the upload limit; ranged, resumable or multipart
   upload; append.
-- Pagination of listings.
+- Listing a directory with more entries than the directory entry limit,
+  even in pages; a snapshot-consistent paginated listing.
 - `Last-Modified`, `If-Modified-Since`, `If-Unmodified-Since`.
 - Recursive delete; copy; `chmod`, `chown`, `utimes`; creating symbolic or
   hard links.
