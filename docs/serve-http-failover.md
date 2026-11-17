@@ -274,11 +274,16 @@ therefore tends to leave the drives on the nodes restarted first.
 candidate has ranked first for `fail_back_after_seconds` without
 interruption (any failed read of the candidate set restarts the count), the
 owner releases the drive as on a clean stop and does not try to take it back
-for one route TTL (15 s). If the preferred node does not take the drive in
-that time, the old owner takes it again and doubles its own
-`fail_back_after_seconds` for that drive (up to one hour) until a hand-back
-succeeds. A candidate that cannot open the drive stops announcing itself, so
-it stops being preferred.
+for one route TTL (15 s). A hand-back succeeds when the node it was meant
+for publishes the drive. If that node does not, whether nobody takes the
+drive or a third candidate does, the old owner doubles its own
+`fail_back_after_seconds` for that drive (up to one hour) the next time it
+owns it, until a hand-back succeeds. A preferred node that announces itself
+but cannot open the drive therefore costs each healthy candidate a
+handful of hand-backs at growing intervals, not one every
+`fail_back_after_seconds`. A candidate that cannot open the drive stops
+announcing itself while it backs off, so it stops being preferred for that
+long.
 
 ## Not handled
 

@@ -62,15 +62,15 @@ impl FailoverTimings {
 
 /// What a standby read from the route registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RouteView {
+pub enum RouteView<'a> {
     /// The registry could not be read. This is not evidence of anything.
     Unknown,
     /// The registry was read and no other node's route is published. A
     /// leftover route naming this node, which this process did not publish,
     /// counts as absent.
     Absent,
-    /// Another node's route is published.
-    Published,
+    /// The route of this other node is published.
+    Published(&'a str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,8 +137,9 @@ pub struct FailoverMachine {
     elsewhere_since: Option<Instant>,
     /// The current wait before a hand-back; doubles when one is not taken.
     fail_back_after: Option<Duration>,
-    /// Handed the volume back and has not yet seen another node publish it.
-    handed_back: bool,
+    /// The node the volume was handed back to, until that node publishes
+    /// it or this one takes it again.
+    handed_back_to: Option<String>,
 }
 impl FailoverMachine {
     pub fn new(
@@ -159,7 +160,7 @@ impl FailoverMachine {
             owner_since: None,
             elsewhere_since: None,
             fail_back_after: timings.fail_back_after,
-            handed_back: false,
+            handed_back_to: None,
         })
     }
 
@@ -179,7 +180,7 @@ impl FailoverMachine {
     pub fn standby(
         &mut self,
         now: Instant,
-        route: RouteView,
+        route: RouteView<'_>,
         live: Option<&[String]>,
     ) -> StandbyAction {
         match route {
@@ -187,12 +188,14 @@ impl FailoverMachine {
                 self.absent_since = None;
                 StandbyAction::Wait
             }
-            RouteView::Published => {
+            RouteView::Published(owner) => {
                 self.absent_since = None;
                 self.lease_retry = self.timings.poll;
-                if self.handed_back {
-                    // The hand-back was taken: the next one need not wait longer.
-                    self.handed_back = false;
+                if self.handed_back_to.as_deref() == Some(owner) {
+                    // The hand-back was taken: the next one need not wait
+                    // longer. Any other node publishing the volume means
+                    // the preferred one did not take what it was offered.
+                    self.handed_back_to = None;
                     self.fail_back_after = self.timings.fail_back_after;
                 }
                 StandbyAction::Wait
@@ -235,9 +238,9 @@ impl FailoverMachine {
                 self.not_before = None;
                 self.elsewhere_since = None;
                 self.lease_retry = self.timings.poll;
-                if self.handed_back {
-                    // Nobody took the volume that was handed back.
-                    self.handed_back = false;
+                if self.handed_back_to.take().is_some() {
+                    // The node the volume was handed back to never
+                    // published it.
                     self.fail_back_after = self
                         .fail_back_after
                         .map(|after| after.saturating_mul(2).min(MAX_FAIL_BACK_AFTER));
@@ -273,9 +276,13 @@ impl FailoverMachine {
             // unreadable candidate set is an interruption.
             None => self.elsewhere_since = None,
             Some(live) if self.rank(live) == 0 => self.elsewhere_since = None,
-            Some(_) => {
+            Some(live) => {
                 let since = *self.elsewhere_since.get_or_insert(now);
                 if now.saturating_duration_since(since) >= after {
+                    let nodes = live.iter().map(String::as_str);
+                    self.handed_back_to = placement::ranking(&self.volume, nodes)
+                        .first()
+                        .map(|preferred| (*preferred).to_owned());
                     return OwnerAction::Release(ReleaseReason::FailBack);
                 }
             }
@@ -292,7 +299,6 @@ impl FailoverMachine {
             ReleaseReason::Shutdown => {}
             ReleaseReason::LeaseLost => self.failure_backoff(now),
             ReleaseReason::FailBack => {
-                self.handed_back = true;
                 self.not_before = Some(now + self.timings.fail_back_hold_off);
             }
         }
@@ -357,7 +363,7 @@ mod tests {
         let now = Instant::now();
         let everyone = live(&["node-a", "node-b"]);
         for (route, candidates) in [
-            (RouteView::Published, Some(everyone.as_slice())),
+            (RouteView::Published("node-x"), Some(everyone.as_slice())),
             (RouteView::Unknown, Some(everyone.as_slice())),
             (RouteView::Unknown, None),
             // The route is absent but the candidate set is unreadable.
@@ -431,7 +437,7 @@ mod tests {
         standby.opened(now, OpenOutcome::LeaseHeld);
         now += SECOND * 5;
         assert_eq!(
-            standby.standby(now, RouteView::Published, Some(&everyone)),
+            standby.standby(now, RouteView::Published("node-x"), Some(&everyone)),
             StandbyAction::Wait
         );
         assert_eq!(
@@ -606,7 +612,7 @@ mod tests {
         }
         owner.released(now, ReleaseReason::FailBack);
         assert_eq!(
-            owner.standby(now + SECOND, RouteView::Published, Some(&both)),
+            owner.standby(now + SECOND, RouteView::Published(&best), Some(&both)),
             StandbyAction::Wait
         );
         // Much later that node stops and this one takes the volume again.
@@ -630,6 +636,8 @@ mod tests {
         announced: Vec<Option<Instant>>,
         owner: Vec<bool>,
         alive: Vec<bool>,
+        /// Nodes whose every open fails for a reason other than the lease.
+        broken: Vec<bool>,
         machines: Vec<FailoverMachine>,
         names: Vec<String>,
         registry_up: bool,
@@ -646,6 +654,7 @@ mod tests {
                 announced: vec![None; nodes],
                 owner: vec![false; nodes],
                 alive: vec![true; nodes],
+                broken: vec![false; nodes],
                 machines: names.iter().map(|name| machine(name, timings)).collect(),
                 names,
                 registry_up: true,
@@ -694,11 +703,15 @@ mod tests {
                 }
                 let route = match (self.registry_up, self.route) {
                     (false, _) => RouteView::Unknown,
-                    (true, Some((holder, _))) if holder != node => RouteView::Published,
+                    (true, Some((holder, _))) if holder != node => {
+                        RouteView::Published(&self.names[holder])
+                    }
                     (true, _) => RouteView::Absent,
                 };
                 if self.machines[node].standby(now, route, live.as_deref()) == StandbyAction::Open {
-                    let outcome = if self.lease.is_none() {
+                    let outcome = if self.broken[node] {
+                        OpenOutcome::Failed
+                    } else if self.lease.is_none() {
                         self.lease = Some((node, now + LEASE_TTL));
                         self.route = Some((node, now + ROUTE_TTL));
                         self.owner[node] = true;
@@ -821,5 +834,40 @@ mod tests {
             );
             let _ = now;
         }
+    }
+
+    #[test]
+    fn a_hand_back_that_another_node_took_still_doubles_the_wait() {
+        // Three candidates with fail-back; the preferred one announces
+        // itself but cannot open the volume (a wrong credential, say).
+        let after = SECOND * 30;
+        let mut world = World::new(
+            3,
+            FailoverTimings {
+                fail_back_after: Some(after),
+                ..timings()
+            },
+        );
+        let names: Vec<&str> = world.names.iter().map(String::as_str).collect();
+        let preferred = placement::ranking("volume", names)[0].to_owned();
+        let preferred = world.names.iter().position(|n| *n == preferred).unwrap();
+        world.broken[preferred] = true;
+        let start = Instant::now();
+        let now = world.run(start, 4 * 3600);
+        assert!(world.takeovers.iter().all(|(_, node)| *node != preferred));
+        // Each hand-back to the broken node moves the volume to the third
+        // one, at the cost of a drain and every session. Nobody took what
+        // was offered to the preferred node, so each owner must wait twice
+        // as long before offering again: 30 s, 60 s, ... up to an hour, for
+        // each of the two healthy nodes. Without that the volume would
+        // change hands every 30 to 90 s for ever, a few hundred times here.
+        let moves = world.takeovers.len();
+        assert!(moves <= 24, "{moves} takeovers in four hours");
+        let last_hour = world
+            .takeovers
+            .iter()
+            .filter(|(at, _)| now.duration_since(*at) < SECOND * 3600)
+            .count();
+        assert!(last_hour <= 2, "{last_hour} takeovers in the last hour");
     }
 }
