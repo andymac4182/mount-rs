@@ -117,16 +117,20 @@ def start(config):
 # the server's console and raises the event there, which is what the console
 # does when the key is pressed. It ignores the event itself.
 CONSOLE_EVENT_HELPER = """
-import ctypes, signal, sys
+import ctypes, sys, time
 pid, event = int(sys.argv[1]), int(sys.argv[2])
-signal.signal(signal.SIGINT, signal.SIG_IGN)
-signal.signal(signal.SIGBREAK, signal.SIG_IGN)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+# The event reaches every process on the console, this one included.
+ignore = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(lambda _event: 1)
+if not kernel32.SetConsoleCtrlHandler(ignore, 1):
+    sys.exit("SetConsoleCtrlHandler failed: %d" % ctypes.get_last_error())
 kernel32.FreeConsole()
 if not kernel32.AttachConsole(pid):
     sys.exit("AttachConsole failed: %d" % ctypes.get_last_error())
 if not kernel32.GenerateConsoleCtrlEvent(event, 0):
     sys.exit("GenerateConsoleCtrlEvent failed: %d" % ctypes.get_last_error())
+time.sleep(0.5)
+print("sent")
 """
 
 
@@ -140,7 +144,8 @@ def request_stop(proc, second=False):
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if sent.returncode != 0:
-            raise SystemExit(f"could not send a console event: {sent.stderr.strip()}")
+            raise SystemExit("could not send a console event: exit "
+                             f"{sent.returncode:#x} {sent.stdout.strip()} {sent.stderr.strip()}")
         return "Ctrl-Break" if second else "Ctrl-C"
     proc.send_signal(signal.SIGINT if second else signal.SIGTERM)
     return "SIGINT" if second else "SIGTERM"
