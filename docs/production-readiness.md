@@ -166,13 +166,13 @@ CI on Linux, durable topology, by manual dispatch of the CI workflow
 | `tidb-tls-compile` | `26cb1cdc` | Pass | [44111099561 / 134136607918](https://github.com/andymac4182/mount-rs/actions/runs/44111099561/job/134136607918) |
 | `ozone-tidb` | `26cb1cdc` | Pass: 2,566 IOPS against the 1,000 target | [44111099561 / 134136607791](https://github.com/andymac4182/mount-rs/actions/runs/44111099561/job/134136607791) |
 | `tidb-rustfs` | `16818d44` (adds the SQLite-hosting test) | Pass: four `TIDB_SQLITE_HOSTING_PASS`, two before and two after the component restarts, SQLite 3.45.1, 19.6 s and 18.4 s per pair | [44114932613 / 134150333065](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150333065) |
+| `tidb` | `16818d44` | Pass: `TIDB_ACCEPTANCE evidence=durable-multinode-restart` | [44114932613 / 134150334955](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150334955) |
 | `ozone-tidb` | `16818d44` | **Fail**, before TiDB was started: the Ozone-only `real_ozone_gateway_failure_is_bounded` took 15.03 s against its 15 s limit | [44114932613 / 134150333098](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150333098) |
 
-Not yet observed: the `tidb` and `tidb-tls` jobs on `16818d44` or later
-(queued when this was written), so the new URL-parameter step in `tidb-tls`
-has run locally only; and any of these jobs on a push to `main`, because
-the push run for #130 was cancelled by the next push before its jobs
-started.
+Not yet observed: the `tidb-tls` job on `16818d44` or later (still queued
+when this was written), so the new URL-parameter step in `tidb-tls` has run
+locally only; and any of these jobs on a push to `main`, because the push
+run for #130 was cancelled by the next push before its jobs started.
 
 Elsewhere:
 
@@ -211,8 +211,8 @@ therefore says nothing about TiDB with any block store other than Ozone.
 
 ### Still open for TiDB
 
-- The `tidb` and `tidb-tls` jobs on a revision with the SQLite-hosting
-  test, and a push run on `main`, as above.
+- The `tidb-tls` job on a revision with the new URL-parameter step, and a
+  push run on `main`, as above.
 - The `ozone-tidb` job can fail in its Ozone-only phase. The block store
   client stops retrying after 12 s but lets the last attempt run for up to
   8 s, so `real_ozone_gateway_failure_is_bounded`, which allows 15 s, can
