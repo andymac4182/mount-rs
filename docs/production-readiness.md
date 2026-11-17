@@ -105,7 +105,7 @@ listed first. The rest have not been verified further or started.
 | Gap | Failure mode | Severity |
 |-----|--------------|----------|
 | NFS file-handle table has no default cap (`transports/mount-rs-nfs/src/handles.rs`) | A crawl over a large tree grows memory without bound. A default cap would return stale-handle errors for files a client may still have open, so it needs a decision | High |
-| PGlite and TiDB statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision | High |
+| PGlite statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision. TiDB now bounds every round trip (120 s by default, `statement_timeout_ms` in the connection URL); a write that times out is reported with an unknown outcome and is not retried | High |
 | Exclusive (writeback) mode publishes namespace changes only on fsync, shutdown or reconcile | Creates and renames made without fsync are lost on SIGKILL, OOM or power loss | Medium |
 | A remote mount rejects every operation after one transport error, and the CLI never checks its keepalive worker | A network blip leaves the mount attached and returning `EIO`, with no log or exit | Medium |
 | `/readyz` ignores drive health | A load balancer keeps routing to a drive that has failed closed | Medium |

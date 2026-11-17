@@ -26,6 +26,11 @@
 //! connection, allowing `mysql_async` to roll back a dirty transaction before
 //! the connection is reused.
 //!
+//! Every round trip is bounded by a statement timeout. A timeout is never
+//! retried, and one that ends a `COMMIT` or an autocommit publication is
+//! reported with an unknown outcome, because TiDB may still commit a
+//! statement it has received.
+//!
 //! `durable` is an explicit caller assertion. A successful TiDB commit is an
 //! acknowledged database commit, but host/cluster durability still depends on
 //! the TiDB/TiKV deployment and its replication/sync-log configuration. The
@@ -34,6 +39,7 @@
 mod storage;
 
 pub use storage::{
-    DEFAULT_MAX_BLOCK_BYTES, DEFAULT_MAX_NAMESPACE_BYTES, TidbBlockStore, TidbMetadataStore,
-    TidbStorageOptions, TidbStorePool,
+    DEFAULT_MAX_BLOCK_BYTES, DEFAULT_MAX_NAMESPACE_BYTES, DEFAULT_STATEMENT_TIMEOUT,
+    STATEMENT_TIMEOUT_URL_PARAMETER, TidbBlockStore, TidbMetadataStore, TidbStorageOptions,
+    TidbStorePool,
 };

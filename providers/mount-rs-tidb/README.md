@@ -38,6 +38,44 @@ mount-rs providers.
   bytes; the existing bytes are read back and compared before the ID is
   returned. `delete` is explicit and never runs as a close side effect.
 
+## Statement timeout
+
+Every round trip to TiDB is bounded: each statement, each `COMMIT`, and each
+connection attempt. The default is 120 seconds, chosen to sit well above
+TiDB's own bounded waits so that it fires for a server that has stopped
+answering rather than one that is slow. Set it with
+`TidbStorageOptions::with_statement_timeout`, or with the
+`statement_timeout_ms` parameter of the connection URL, which is how the SDK,
+the CLI and the Node bindings set it:
+
+```text
+mysql://user:password@tidb.example:4000/mount?statement_timeout_ms=30000
+```
+
+The option wins over the URL. A `TidbStorePool` takes the value from its URL;
+a store borrowed from it may shorten its own client deadline with the option.
+
+Two bounds work together:
+
+- The session sets `max_execution_time`, so TiDB interrupts a statement
+  itself and the connection stays usable. TiDB applies it to `SELECT`
+  (including `SELECT ... FOR UPDATE`) only; it does not interrupt `UPDATE`,
+  `INSERT`, `DELETE` or `COMMIT`. Checked against TiDB v8.5.7 by
+  `tests/statement_timeout.rs`.
+- The client stops waiting one second after that limit. This is the only
+  bound for writes, commits, connection attempts and a server that accepts
+  bytes and never answers. The abandoned connection is closed, not reused.
+
+A timeout is never retried. When it ends a `COMMIT` or a single-statement
+publication, TiDB may already have committed, so the error says the commit
+outcome is unknown, exactly as for a lost connection. When the configured
+timeout is at or below the session's `innodb_lock_wait_timeout`, the provider
+lowers the lock wait to one second less, so a contended row is still reported
+by TiDB as a retryable conflict instead of as a timeout.
+
+A timeout fails the operation closed. Choose a value above the slowest
+statement the deployment is expected to serve.
+
 `durable` is caller-declared. TiDB/TiKV replication, sync-log, backup, and
 power-loss guarantees are deployment properties and cannot be inferred from a
 connection URL. The provider's `flush` is an acknowledged TiDB round-trip

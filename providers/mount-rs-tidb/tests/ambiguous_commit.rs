@@ -5,6 +5,10 @@
 //! publication statement, then drops the client connection before its
 //! acknowledgement is delivered. The provider must surface an unknown
 //! outcome and must not replay the publication automatically.
+//!
+//! The same proxy can instead withhold the acknowledgement and keep the
+//! connection open, which is what a hung server looks like. The provider's
+//! statement timeout must end the wait with the same unknown outcome.
 
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
 use mount_rs_core::storage::{
@@ -197,7 +201,20 @@ fn is_publication_execute(packet: &MysqlPacket, publication_statements: &HashSet
         ]))
 }
 
-async fn relay_until_publication_response(client: TcpStream, upstream: TcpStream) -> IoResult<()> {
+/// What the proxy does once TiDB has acknowledged the publication.
+#[derive(Clone, Copy)]
+enum Injection {
+    /// Close both sockets: the acknowledgement is lost with the connection.
+    DropConnection,
+    /// Keep both sockets open and never forward the acknowledgement.
+    Stall,
+}
+
+async fn relay_until_publication_response(
+    client: TcpStream,
+    upstream: TcpStream,
+    injection: Injection,
+) -> IoResult<()> {
     let (mut client_reader, mut client_writer) = client.into_split();
     let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
     let mut publication_prepare_pending = false;
@@ -224,6 +241,11 @@ async fn relay_until_publication_response(client: TcpStream, upstream: TcpStream
                     if publication_response.payload.first() != Some(&0x00) {
                         return Err(Error::new(ErrorKind::InvalidData,
                             "failure injection requires a successful TiDB publication acknowledgement"));
+                    }
+                    if matches!(injection, Injection::Stall) {
+                        // TiDB has committed. Hold both sockets until the
+                        // provider abandons the connection on its own.
+                        while read_packet(&mut client_reader).await.is_ok() {}
                     }
                     return Ok(());
                 }
@@ -335,6 +357,13 @@ async fn rejected_proxy_injection_and_cancelled_task_are_reported() {
 }
 
 async fn start_publication_drop_proxy(database_url: &str) -> (String, PublicationProxy) {
+    start_publication_proxy(database_url, Injection::DropConnection).await
+}
+
+async fn start_publication_proxy(
+    database_url: &str,
+    injection: Injection,
+) -> (String, PublicationProxy) {
     let target = Url::parse(database_url).expect("the TiDB URL must be parseable");
     assert_eq!(
         target.scheme(),
@@ -368,7 +397,9 @@ async fn start_publication_drop_proxy(database_url: &str) -> (String, Publicatio
                 accepted = listener.accept() => {
                     let (client, _) = accepted?;
                     let upstream = TcpStream::connect((target_host.as_str(), target_port)).await?;
-                    relays.spawn(async move { relay_until_publication_response(client, upstream).await });
+                    relays.spawn(async move {
+                        relay_until_publication_response(client, upstream, injection).await
+                    });
                 }
                 relay = relays.join_next(), if !relays.is_empty() => {
                     let result = match relay {
@@ -524,6 +555,156 @@ async fn actual_tidb_bound_commit_outcome_is_ambiguous_and_not_replayed() {
     );
     via_proxy.close().await.expect("close proxy pool");
     direct.close().await.expect("close direct pool");
+    delete_metadata_row(&direct_url, &volume_key).await;
+}
+
+/// Short enough to keep the lane quick, long enough that a healthy TiDB
+/// answers every other statement of the operation well inside it.
+const STALL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn assert_timed_out_with_unknown_outcome(error: &mount_rs_core::FsError, waited: Duration) {
+    assert!(
+        waited >= STALL_STATEMENT_TIMEOUT,
+        "the provider gave up before its statement timeout: {waited:?}"
+    );
+    assert!(error.is(ErrorCode::Eio), "{error}");
+    assert!(
+        !error.is(ErrorCode::Eagain),
+        "a timed-out commit must never be retryable: {error}"
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("commit outcome is unknown"),
+        "a timed-out commit must be reported as an unknown outcome: {rendered}"
+    );
+    assert!(
+        rendered.contains("statement timeout"),
+        "the cause must be recognisable as a timeout: {rendered}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+async fn actual_tidb_stalled_commit_times_out_with_unknown_outcome() {
+    let direct_url = tidb_url();
+    assert_actual_tidb(&direct_url).await;
+    let volume_key = unique_volume_key();
+    let direct = TidbMetadataStore::connect_with_options(&direct_url, options(&volume_key))
+        .await
+        .expect("connect the direct TiDB metadata store");
+
+    let (proxy_url, proxy_task) = start_publication_proxy(&direct_url, Injection::Stall).await;
+    let via_proxy = tokio::time::timeout(
+        Duration::from_secs(30),
+        TidbMetadataStore::connect_with_options(
+            &proxy_url,
+            options(&volume_key).with_statement_timeout(STALL_STATEMENT_TIMEOUT),
+        ),
+    )
+    .await
+    .expect("proxied metadata connection exceeded 30 seconds")
+    .expect("connect the TiDB metadata store through the proxy");
+
+    // Acquiring the writer lease is an explicit transaction. TiDB commits it
+    // and the proxy withholds the COMMIT acknowledgement indefinitely.
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        via_proxy.acquire_writer("tidb-stalled-commit", Duration::from_secs(60)),
+    )
+    .await
+    .expect("the statement timeout must end a stalled COMMIT without outside help")
+    .expect_err("a COMMIT that was never acknowledged must not be reported as success");
+    assert_timed_out_with_unknown_outcome(&error, started.elapsed());
+    // The proxy only finishes once the provider has closed the connection it
+    // gave up on, so the half-finished session is not reused.
+    proxy_task
+        .finish()
+        .await
+        .expect("the provider must abandon the stalled connection");
+
+    // The transaction did commit: the lease is held. Reporting the timeout as
+    // a clean failure, or retrying it, would have been wrong.
+    let contender = direct
+        .acquire_writer("tidb-stalled-commit-contender", Duration::from_secs(60))
+        .await
+        .expect_err("the timed-out acquisition holds the lease in TiDB");
+    assert!(contender.is(ErrorCode::Eagain), "{contender}");
+
+    via_proxy
+        .close()
+        .await
+        .expect("close the proxied TiDB metadata pool");
+    direct
+        .close()
+        .await
+        .expect("close the direct TiDB metadata pool");
+    delete_metadata_row(&direct_url, &volume_key).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+async fn actual_tidb_stalled_autocommit_publication_times_out_with_unknown_outcome() {
+    let direct_url = tidb_url();
+    assert_actual_tidb(&direct_url).await;
+    let volume_key = unique_volume_key();
+    let direct = TidbMetadataStore::connect_with_options(&direct_url, options(&volume_key))
+        .await
+        .expect("connect the direct TiDB metadata store");
+    let lease = direct
+        .acquire_writer("tidb-stalled-publication", Duration::from_secs(60))
+        .await
+        .expect("acquire the TiDB writer before failure injection");
+
+    let (proxy_url, proxy_task) = start_publication_proxy(&direct_url, Injection::Stall).await;
+    let via_proxy = tokio::time::timeout(
+        Duration::from_secs(30),
+        TidbMetadataStore::connect_with_options(
+            &proxy_url,
+            options(&volume_key).with_statement_timeout(STALL_STATEMENT_TIMEOUT),
+        ),
+    )
+    .await
+    .expect("proxied metadata connection exceeded 30 seconds")
+    .expect("connect the TiDB metadata store through the proxy");
+
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        via_proxy.publish(0, &lease, root_namespace().await),
+    )
+    .await
+    .expect("the statement timeout must end a stalled publication without outside help")
+    .expect_err("a publication that was never acknowledged must not be reported as success");
+    assert_timed_out_with_unknown_outcome(&error, started.elapsed());
+    proxy_task
+        .finish()
+        .await
+        .expect("the provider must abandon the stalled connection");
+
+    // TiDB committed the single-statement publication exactly once.
+    let observed = direct
+        .load()
+        .await
+        .expect("reconcile the direct TiDB metadata state");
+    assert_eq!(
+        observed.revision, 1,
+        "the acknowledged server commit happened exactly once"
+    );
+    assert!(observed.namespace.is_some());
+
+    direct
+        .release_writer(&lease)
+        .await
+        .expect("release the scoped TiDB writer after reconciliation");
+    via_proxy
+        .close()
+        .await
+        .expect("close the proxied TiDB metadata pool");
+    direct
+        .close()
+        .await
+        .expect("close the direct TiDB metadata pool");
     delete_metadata_row(&direct_url, &volume_key).await;
 }
 

@@ -746,6 +746,20 @@ run_ambiguous_commit_test() {
     "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
 }
 
+run_statement_timeout_test() {
+  phase_name="statement timeout test"
+  echo "TiDB phase=$phase_name" >&2
+  # What TiDB's own statement limit covers, and that provider sessions carry
+  # the configured limits. The stalled-acknowledgement cases run with the
+  # ambiguous commit lane above.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test statement_timeout -- --ignored --nocapture
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
+      actual_tidb_sessions_carry_the_statement_limits \
+      -- --ignored --nocapture --test-threads=1
+}
+
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2
 docker pull --platform "$docker_platform" "$pd_image" >/dev/null
 docker pull --platform "$docker_platform" "$tikv_image" >/dev/null
@@ -861,6 +875,7 @@ fi
 # startup check; it still exercises the provider's no-replay contract before
 # the owned topology is cleaned up.
 run_ambiguous_commit_test
+run_statement_timeout_test
 
 if [ "$topology" = durable ] && [ "$capacity_issue" -eq 0 ]; then
   evidence_class="durable-multinode-restart"
