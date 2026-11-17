@@ -1,4 +1,5 @@
 //! CLI-owned session routing and expiry. SDK owners must outlive a successful drain.
+use crate::config::SessionLimitsConfig;
 use crate::runtime::CliError;
 use mount_rs_cluster::{SessionCredentials, SessionHttpHandler, SessionSupervisor, VolumeSessions};
 use mount_rs_http::{DriveRegistry, HttpBody, HttpRequestHandler, HttpServer, HttpServerOptions};
@@ -8,13 +9,18 @@ use std::{collections::BTreeMap, pin::Pin, sync::Arc, time::Duration};
 pub(crate) struct Sessions {
     handlers: BTreeMap<String, SessionHttpHandler>,
     budget: mount_rs_cluster::SessionBudget,
+    limits: SessionLimitsConfig,
     max_request_bytes: usize,
 }
 impl Sessions {
-    pub(crate) fn new(max_request_bytes: usize) -> Result<Self, CliError> {
+    pub(crate) fn new(
+        max_request_bytes: usize,
+        limits: SessionLimitsConfig,
+    ) -> Result<Self, CliError> {
         Ok(Self {
             handlers: BTreeMap::new(),
-            budget: mount_rs_cluster::SessionBudget::new(4096)?,
+            budget: mount_rs_cluster::SessionBudget::new(limits.max_sessions)?,
+            limits,
             max_request_bytes,
         })
     }
@@ -32,9 +38,9 @@ impl Sessions {
         };
         let registry = Arc::new(VolumeSessions::new_with_budget(
             filesystem,
-            128,
-            128,
-            Duration::from_secs(60),
+            self.limits.max_sessions_per_drive,
+            self.limits.max_handles_per_session,
+            Duration::from_secs(self.limits.idle_timeout_seconds),
             self.budget.clone(),
         )?);
         let handler = SessionHttpHandler::new(volume, credentials, registry)?
@@ -451,6 +457,7 @@ pub(crate) async fn start_owner(
     config: &crate::config::ForwardingConfig,
     drives: Vec<OwnedDrive>,
     options: HttpServerOptions,
+    session_limits: SessionLimitsConfig,
 ) -> Result<Service, CliError> {
     use mount_rs_cluster::{
         ClusterIngress, OwnedVolumeRegistration, OwnerHttpHandler, OwnerHttpRouter,
@@ -470,7 +477,7 @@ pub(crate) async fn start_owner(
         .map_err(|e| fail(&e))?;
     let endpoint = quinn::Endpoint::server(tls, member.address).map_err(|e| fail(&e))?;
     let registry = connect_registry(config).await?;
-    let budget = mount_rs_cluster::SessionBudget::new(4096)?;
+    let budget = mount_rs_cluster::SessionBudget::new(session_limits.max_sessions)?;
     let mut handlers = Vec::new();
     let mut registrations = Vec::new();
     let mut sessions = Vec::new();
@@ -502,9 +509,9 @@ pub(crate) async fn start_owner(
             handler = handler
                 .with_sessions(
                     credentials,
-                    128,
-                    128,
-                    Duration::from_secs(60),
+                    session_limits.max_sessions_per_drive,
+                    session_limits.max_handles_per_session,
+                    Duration::from_secs(session_limits.idle_timeout_seconds),
                     budget.clone(),
                 )
                 .map_err(|e| fail(&e))?;

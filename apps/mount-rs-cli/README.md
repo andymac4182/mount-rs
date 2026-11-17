@@ -832,9 +832,36 @@ reference. The drive token authorizes both file and session routes for that volu
 ```
 
 The memory example is volatile. Existing split-store provider configuration can
-select TiDB and local or object-store blocks. Sessions have a shared process
-budget of 4096, a per-volume limit of 128 sessions, 128 handles per session and a
-60-second idle timeout; the remote CLI owns keepalive. The command supervises
+select TiDB and local or object-store blocks.
+
+Session limits are set in the optional `http.sessions` object. Every key is
+optional, and a key left out keeps its default. Unknown keys and values
+outside the range are rejected at startup, as is an `http.sessions` object
+when `remote_sessions` is not `true`.
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `max_sessions` | 4096 | 1–65536 | Sessions the whole process admits, across every drive. |
+| `max_sessions_per_drive` | 128 | 1–4096 | Sessions one drive admits. |
+| `max_handles_per_session` | 128 | 1–4096 | Open handles one session may hold. |
+| `idle_timeout_seconds` | 60 | 1–3600 | A session unused for this long is expired and its handles are closed. The server advertises the value and the remote CLI schedules its keepalive from it. |
+
+```json
+"sessions": {
+  "max_sessions": 8192,
+  "max_sessions_per_drive": 512,
+  "max_handles_per_session": 256,
+  "idle_timeout_seconds": 120
+}
+```
+
+A session is admitted only when both the process budget and its drive's
+limit have room, so the smaller of the two is what binds. Each session and
+each open handle holds memory and, for a handle, backend state: raise the
+limits with the process's memory in mind. On a forwarding cluster, each
+owner applies the limits from its own config to the drives it owns.
+
+The remote CLI owns keepalive. The command supervises
 expiry and closes listeners/sessions before shutting down SDK owners. Session
 drain uses `drain_timeout_ms`. A drain that fails still withdraws the Redis
 route, closes the sessions and releases each drive's writer lease, so a

@@ -259,6 +259,7 @@ pub struct ConfigSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HttpServiceConfig {
     pub remote_sessions: bool,
+    pub sessions: SessionLimitsConfig,
     pub forwarding: Option<ForwardingConfig>,
     pub host: String,
     /// Whether `host` may be other than loopback.
@@ -280,6 +281,31 @@ pub(crate) struct HttpServiceConfig {
     pub disk_cache_budget: Option<DiskCacheBudgetConfig>,
     pub tidb_metadata_pool_limit: Option<usize>,
     pub cache_report_interval_seconds: Option<u64>,
+}
+
+/// Remote session limits (`http.sessions`). The defaults are the values that
+/// were fixed before the limits became configurable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionLimitsConfig {
+    /// Sessions the whole process admits, across every drive.
+    pub max_sessions: usize,
+    /// Sessions one drive admits.
+    pub max_sessions_per_drive: usize,
+    /// Open handles one session may hold.
+    pub max_handles_per_session: usize,
+    /// A session unused for this long is expired.
+    pub idle_timeout_seconds: u64,
+}
+
+impl Default for SessionLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions: 4096,
+            max_sessions_per_drive: 128,
+            max_handles_per_session: 128,
+            idle_timeout_seconds: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -628,6 +654,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "tidb_metadata_pool_limit",
             "cache_report_interval_seconds",
             "remote_sessions",
+            "sessions",
             "forwarding",
             "cache_capacity",
             "drives",
@@ -748,6 +775,18 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         validate_cache_capacity(capacity, &parsed_drives)?;
     }
     let remote_sessions = optional_bool(object, "remote_sessions", "config.http")?.unwrap_or(false);
+    let sessions = match object.get("sessions") {
+        // The limits bound remote sessions; without them they would be
+        // accepted and silently do nothing.
+        Some(_) if !remote_sessions => {
+            return Err(ConfigError::at(
+                "config.http.sessions",
+                "requires remote_sessions to be true",
+            ));
+        }
+        Some(value) => parse_session_limits(value)?,
+        None => SessionLimitsConfig::default(),
+    };
     if parsed_drives
         .iter()
         .any(|drive| drive.driver.driver != Some(DriverChoice::SplitStore))
@@ -769,6 +808,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
     Ok(HttpServiceConfig {
         forwarding,
         remote_sessions,
+        sessions,
         host,
         allow_non_loopback,
         port,
@@ -797,6 +837,52 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             .get("disk_cache_budget")
             .map(parse_disk_budget)
             .transpose()?,
+    })
+}
+
+/// Parse `http.sessions`. The ranges are the ones the session registry
+/// itself enforces, checked here so that a bad value names its key.
+fn parse_session_limits(value: &Value) -> Result<SessionLimitsConfig, ConfigError> {
+    let path = "config.http.sessions";
+    let fields = object(value, path)?;
+    reject_unknown(
+        fields,
+        &[
+            "max_sessions",
+            "max_sessions_per_drive",
+            "max_handles_per_session",
+            "idle_timeout_seconds",
+        ],
+        path,
+    )?;
+    let defaults = SessionLimitsConfig::default();
+    let bounded = |key: &str, default: u32, maximum: u32| -> Result<u32, ConfigError> {
+        let value = optional_u32(fields, key, path)?.unwrap_or(default);
+        if !(1..=maximum).contains(&value) {
+            return Err(ConfigError::at(
+                &format!("{path}.{key}"),
+                format!("must be between 1 and {maximum}"),
+            ));
+        }
+        Ok(value)
+    };
+    Ok(SessionLimitsConfig {
+        max_sessions: bounded("max_sessions", defaults.max_sessions as u32, 65536)? as usize,
+        max_sessions_per_drive: bounded(
+            "max_sessions_per_drive",
+            defaults.max_sessions_per_drive as u32,
+            4096,
+        )? as usize,
+        max_handles_per_session: bounded(
+            "max_handles_per_session",
+            defaults.max_handles_per_session as u32,
+            4096,
+        )? as usize,
+        idle_timeout_seconds: u64::from(bounded(
+            "idle_timeout_seconds",
+            defaults.idle_timeout_seconds as u32,
+            3600,
+        )?),
     })
 }
 
@@ -3580,6 +3666,107 @@ mod tests {
             source["http"]["forwarding"]["peer_connections"] = invalid;
             assert!(parse(&source).is_err());
         }
+    }
+
+    #[test]
+    fn session_limits_default_to_the_former_fixed_values_and_are_bounded() {
+        let mut source = serde_json::json!({"version":1,"http":{"remote_sessions":true,"drives":[{
+            "id":"volume","token":{"env":"TEST_TOKEN"},"driver":{"kind":"splitstore","storage":{
+                "metadata":{"kind":"memory"},"blocks":{"kind":"memory"}
+            }}
+        }]}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("."))
+                .map(|config| config.http.unwrap().sessions)
+        };
+        let defaults = SessionLimitsConfig {
+            max_sessions: 4096,
+            max_sessions_per_drive: 128,
+            max_handles_per_session: 128,
+            idle_timeout_seconds: 60,
+        };
+        assert_eq!(parse(&source).unwrap(), defaults);
+        source["http"]["sessions"] = serde_json::json!({});
+        assert_eq!(parse(&source).unwrap(), defaults);
+        // One key set leaves the others at their defaults.
+        source["http"]["sessions"] = serde_json::json!({"idle_timeout_seconds": 300});
+        assert_eq!(
+            parse(&source).unwrap(),
+            SessionLimitsConfig {
+                idle_timeout_seconds: 300,
+                ..defaults
+            }
+        );
+        for (key, maximum) in [
+            ("max_sessions", 65536u64),
+            ("max_sessions_per_drive", 4096),
+            ("max_handles_per_session", 4096),
+            ("idle_timeout_seconds", 3600),
+        ] {
+            for valid in [1, maximum] {
+                source["http"]["sessions"] = serde_json::json!({ key: valid });
+                assert!(parse(&source).is_ok(), "{key}={valid}");
+            }
+            for invalid in [
+                serde_json::json!(0),
+                serde_json::json!(maximum + 1),
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!("1"),
+                serde_json::json!(null),
+            ] {
+                source["http"]["sessions"] = serde_json::json!({ key: invalid });
+                assert!(parse(&source).is_err(), "{key}={invalid}");
+            }
+        }
+        source["http"]["sessions"] = serde_json::json!({
+            "max_sessions": 1000, "max_sessions_per_drive": 10,
+            "max_handles_per_session": 20, "idle_timeout_seconds": 30
+        });
+        assert_eq!(
+            parse(&source).unwrap(),
+            SessionLimitsConfig {
+                max_sessions: 1000,
+                max_sessions_per_drive: 10,
+                max_handles_per_session: 20,
+                idle_timeout_seconds: 30,
+            }
+        );
+    }
+
+    #[test]
+    fn session_limits_reject_unknown_keys_wrong_shapes_and_disabled_sessions() {
+        let mut source = serde_json::json!({"version":1,"http":{"remote_sessions":true,"drives":[{
+            "id":"volume","token":{"env":"TEST_TOKEN"},"driver":{"kind":"splitstore","storage":{
+                "metadata":{"kind":"memory"},"blocks":{"kind":"memory"}
+            }}
+        }]}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("."))
+                .map(|config| config.http.unwrap().sessions)
+        };
+        for invalid in [
+            serde_json::json!({"max_session": 10}),
+            serde_json::json!({"max_sessions": 10, "idle_timeout_ms": 1000}),
+            serde_json::json!([]),
+            serde_json::json!(128),
+            serde_json::json!(null),
+        ] {
+            source["http"]["sessions"] = invalid;
+            assert!(parse(&source).is_err());
+        }
+        // Limits for sessions that are not enabled would silently do nothing.
+        source["http"]["sessions"] = serde_json::json!({"max_sessions": 10});
+        assert!(parse(&source).is_ok());
+        source["http"]["remote_sessions"] = false.into();
+        assert!(parse(&source).is_err());
+        source["http"]
+            .as_object_mut()
+            .unwrap()
+            .remove("remote_sessions");
+        assert!(parse(&source).is_err());
+        source["http"].as_object_mut().unwrap().remove("sessions");
+        assert!(parse(&source).is_ok());
     }
 
     #[test]
