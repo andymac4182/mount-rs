@@ -34,6 +34,12 @@ export MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$phase_run_id"
 
 "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb \
   --test chunked_rustfs -- --ignored --nocapture
+if [ "${MOUNT_RS_TIDB_EXPECT_PERSISTED:-0}" = 0 ]; then
+  # A RustFS block put that succeeds and then loses its reply. The test owns
+  # its own prefix and volume key, so the seed phase alone covers it.
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb \
+    --test lost_block_ack_rustfs -- --ignored --nocapture
+fi
 node "$repo_dir/tests/provider_matrix/node-sdk.mjs"
 node "$repo_dir/tests/provider_matrix/cli.mjs"
 node "$repo_dir/tests/provider_matrix/tidb-rustfs-soak.mjs"

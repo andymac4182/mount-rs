@@ -69,8 +69,8 @@ repeated on `main` after all of them were merged.
   type and without a test that races `listen` against `close`.
 - NFSv4 keeps its parallel slot vectors.
 - Writer-lease refusal codes still differ between providers for a
-  concurrent-mode volume: SQLite and PGlite `EBUSY`, TiDB `EOVERFLOW`,
-  FoundationDB `ENOTSUP`. All are permanent errors.
+  concurrent-mode volume: SQLite, PGlite and TiDB `EBUSY`, FoundationDB
+  `ENOTSUP`. All are permanent errors.
 
 ## Remaining risk
 
@@ -79,9 +79,17 @@ repeated on `main` after all of them were merged.
   Node addon) still inherits the device descriptors and can hang the same
   way.
 - **TiDB autocommit publishes** treat a server error whose message contains
-  "write conflict" or "try again later" as a known non-commit. That rests on
-  TiDB never using those words for an undetermined commit, which was not
-  verified against TiDB itself.
+  "write conflict" or "try again later" as a known non-commit. Verified
+  against TiDB v8.5.7 by a live test
+  (`actual_tidb_autocommit_conflicts_are_known_non_commits`, run by
+  `scripts/test-tidb.sh`): error 9007 ("Write conflict ... [try again
+  later]") and error 1205 (lock wait timeout) were provoked for autocommit
+  statements, and in one contended run 142 of 320 statements reported 9007; in
+  every case the row showed that no statement which reported an error had
+  committed. Not provoked: 1213 (deadlock) and 9006 (GC life time) for an
+  autocommit statement, and other errors that carry "try again later". The
+  classification still rests on TiDB closing the connection, rather than
+  returning one of these errors, when a commit is undetermined.
 - **SlateDB**: if a publish future is cancelled while persisting, the
   provider is not marked failed and its in-memory revision may lag a write
   that committed. Not verified, not fixed.
@@ -105,7 +113,7 @@ listed first. The rest have not been verified further or started.
 | Gap | Failure mode | Severity |
 |-----|--------------|----------|
 | NFS file-handle table has no default cap (`transports/mount-rs-nfs/src/handles.rs`) | A crawl over a large tree grows memory without bound. A default cap would return stale-handle errors for files a client may still have open, so it needs a decision | High |
-| PGlite and TiDB statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision | High |
+| PGlite statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision. TiDB now bounds every round trip (120 s by default, `statement_timeout_ms` in the connection URL); a write that times out is reported with an unknown outcome and is not retried | High |
 | Exclusive (writeback) mode publishes namespace changes only on fsync, shutdown or reconcile | Creates and renames made without fsync are lost on SIGKILL, OOM or power loss | Medium |
 | A remote mount rejects every operation after one transport error, and the CLI never checks its keepalive worker | A network blip leaves the mount attached and returning `EIO`, with no log or exit | Medium |
 | The mount CLI wires no transport error hooks | A filesystem that failed closed shows up only as `EIO` to applications | Medium |

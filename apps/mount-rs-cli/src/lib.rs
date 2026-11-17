@@ -13,6 +13,7 @@ mod http_sessions;
 mod joined;
 mod membership_reload;
 pub mod parser;
+mod redis_connect;
 mod remote;
 pub mod runtime;
 mod server_cache;

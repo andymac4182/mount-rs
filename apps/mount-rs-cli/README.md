@@ -944,6 +944,120 @@ For an ingress with no local drives, set `http.drives` to `[]` and configure `ht
 
 Distribute a trusted membership file to the servers. Each server uses its own certificate and key. Use the same Redis namespace across servers serving the cluster.
 
+#### The Redis connection
+
+`http.forwarding.redis_url` names an environment variable; the variable
+holds the URL, so a password never appears in the config file. Each server
+connects to the one endpoint in that URL.
+
+| URL | Connection |
+| --- | --- |
+| `rediss://[user:password@]host[:port][/db]` | TLS. Use this for any Redis that is not on the same host. |
+| `redis://[user:password@]host[:port][/db]` | Unencrypted. Allowed only to this host unless `allow_plaintext_redis` is set. |
+| `unix:///path/to/redis.sock` | A local Unix socket. Accepted, but not covered by a test. |
+
+The port defaults to 6379 and the database to 0. Anything else is refused at
+startup, as is a URL that cannot be parsed.
+
+| `http.forwarding` key | Default | Meaning |
+| --- | --- | --- |
+| `redis_url` | required | `{"env": "NAME"}`: the variable that holds the URL. |
+| `redis_ca` | system roots | Path to a PEM file of CA certificates, relative to the config file. When set, only these certificates are trusted for the Redis server, and the URL must be `rediss://`. |
+| `allow_plaintext_redis` | `false` | Set to `true` to permit `redis://` to a host other than this one. |
+
+**TLS.** A `rediss://` server must present a certificate that chains to a
+trusted root and that names the host or IP address written in the URL. The
+roots are the operating system's unless `redis_ca` is set. Verification
+cannot be turned off: a URL ending in `#insecure` is refused. `redis_ca` is
+read once at startup, so replacing the CA needs a restart. Client
+certificates are not supported; a Redis that requires them
+(`tls-auth-clients yes`) cannot be used.
+
+**Authentication.** Put the credentials in the URL: `rediss://:password@host`
+for the default user, `rediss://user:password@host` for an ACL user.
+Percent-encode reserved characters in either (`@` is `%40`, `/` is `%2F`,
+`:` is `%3A`). The login is repeated on every reconnect. The registry keeps
+one key per drive, `mount-rs:<namespace>:route:<drive>`, and this ACL rule is
+enough (it is the one the TLS test uses):
+
+```text
+ACL SETUSER registry on >password ~mount-rs:* +eval +getrange +get +set +del +pexpire +strlen +ping +client|setinfo
+```
+
+**Plaintext.** `redis://` sends the password and the routes unencrypted.
+It is accepted without further configuration only when the host is
+`localhost` or a loopback address (`127.0.0.0/8`, `::1`). For any other
+host, including a name that happens to resolve to this machine, the server
+refuses to start (exit status 2) unless `allow_plaintext_redis` is `true`.
+Set that only where the network between the server and Redis is itself
+trusted or encrypted.
+
+**Startup.** Before a server reports that it is listening it connects,
+completes the handshake and the login, and runs one `PING`, all within five
+seconds. A wrong CA, a wrong password, or a missing password on a server
+that requires one is therefore a startup error (exit status 1) that says
+which it was. A server cannot start while Redis is unreachable.
+
+**Secrets.** The URL is never printed. Errors and logs name the endpoint as
+scheme, host and port only (`rediss://redis.internal:6380`), with no user,
+password, database or query, and text returned by the Redis client is
+stripped of the password before it is reported.
+
+#### When Redis is unavailable
+
+Redis holds only the routes: which server owns which drive. It grants no
+ownership and carries no file data. What an outage does, as measured by
+`apps/mount-rs-cli/tests/redis_connection.rs` with real servers and Redis
+cut off for 45 seconds (three route lifetimes), both by refusing connections
+and by silently dropping them:
+
+- **An owner keeps serving its own drives.** A request that arrives at the
+  server that owns the drive does not use Redis. Reads and writes succeeded
+  throughout.
+- **Requests that must be forwarded fail with 503.** A request for a drive
+  owned by another server needs a route. Cached routes last one second;
+  after that each such request is answered with 503 within about two
+  seconds, and nothing is queued. Clients should retry, or be sent to the
+  owner.
+- **Routes expire.** An owner refreshes its routes every five seconds and a
+  route lives for 15 seconds, so an outage longer than that leaves Redis
+  with no routes. A Redis that restarts empty is the same case; Redis
+  persistence is not needed.
+- **Recovery needs no restart.** An owner retries for as long as the outage
+  lasts, at most two seconds apart, and re-registers each drive once Redis
+  answers, after checking that it still holds the drive's writer lease.
+  Routes were back 0.3 to 5 seconds after Redis returned, and forwarding
+  resumed on the next request after that.
+- **A connection that goes silent is replaced.** If three commands in a row
+  time out on a connection, the next one opens a new connection, so a
+  connection whose packets are being dropped does not hold a server back
+  once Redis is reachable again.
+
+An owner still stops, with exit status 1, if it loses the drive's writer
+lease or finds that another server has registered the drive: those are
+ownership changes, not Redis outages.
+
+#### Running Redis highly available
+
+A server connects to the single endpoint in its URL and reconnects to that
+same endpoint, resolving the name again each time. Redis Sentinel and Redis
+Cluster addresses are not supported: there is no Sentinel discovery and no
+cluster redirection in the client as built.
+
+To make Redis highly available, put it behind one stable name or address
+that always reaches the current primary: a managed service's primary
+endpoint, or a virtual address moved by your failover tooling. After a
+failover the servers reconnect, and owners re-register any routes the new
+primary does not have, exactly as after an outage. Forwarded requests fail
+with 503 in between.
+
+What is tested: one Redis 8.4, with TLS and without, stopped or cut off for
+longer than the route lifetime and then restored, and every connection
+killed by the server. What is not tested: a replicated pair failing over,
+Sentinel, Redis Cluster, a proxy such as Envoy or HAProxy in front of Redis,
+and reconnecting to an endpoint that still resolves to a demoted, read-only
+replica.
+
 #### The membership file
 
 `http.forwarding.peers` names the membership file: a JSON array with one
@@ -1091,14 +1205,72 @@ being rotated is restarted; no other server is.
   One record holds one key, so there is no period in which both keys are
   accepted.
 
-On a volume owner, set `http.forwarding.owner` to `true`, supply the owner's certificate and key, and configure its assigned drives. The owner listens for peer requests at its membership address. The forwarding `bind` setting controls the outbound QUIC endpoint. Enable `http.remote_sessions` on the owner for remote mount clients. Ownership assignment is operator-configured. Serve the public endpoint through HTTPS termination for bearer credentials.
+On a volume owner, set `http.forwarding.owner` to `true`, supply the owner's certificate and key, and configure its assigned drives. The owner listens for peer requests at its membership address. The forwarding `bind` setting controls the outbound QUIC endpoint. Enable `http.remote_sessions` on the owner for remote mount clients. Ownership assignment is operator-configured unless failover is enabled (below). Serve the public endpoint through HTTPS termination for bearer credentials.
+
+#### Drive failover
+
+By default each owner opens the drives in its own `http.drives` at startup
+and owns them until it stops; if it dies, they are unavailable until it is
+restarted. Add a `failover` object to `http.forwarding` on two or more
+owners that list the same drive to have the drive move by itself:
+
+```json
+"forwarding": {
+  "owner": true,
+  "failover": {}
+}
+```
+
+Every drive of such a server is then a drive it is a *candidate* for. One
+candidate holds the drive open and publishes its route; the others are
+standbys that forward to it. When the route disappears (the owner crashed,
+was partitioned or stopped), a standby opens the drive, which succeeds only
+once the storage writer lease can be acquired, and then publishes itself.
+The lease stays the only authority: Redis decides nothing about who may
+write. Design, invariants and limits:
+[`docs/serve-http-failover.md`](../../docs/serve-http-failover.md).
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `poll_interval_ms` | `1000` | `100`–`10000` | How often a standby reads the route and an owner checks its lease. |
+| `takeover_stagger_ms` | `2000` | `0`–`60000` | A standby ranked `k` among the live candidates (rendezvous hash of drive id and node id) waits `k` times this before trying to take a drive. |
+| `fail_back` | `false` | boolean | Hand a drive back to a better-ranked candidate that has returned. Off, a drive stays where it is until its owner stops. |
+| `fail_back_after_seconds` | `60` | `10`–`86400` | With `fail_back`: how long that candidate must have ranked first without interruption. |
+
+Unknown keys are rejected. `failover` requires `owner: true`, at least one
+drive, and `splitstore` drives with exclusive ownership whose metadata is
+not `memory`.
+
+Requirements and behaviour:
+
+- All candidates for a drive must configure the **same storage** (metadata
+  store and volume, block store) and the same token and `remote_sessions`
+  setting. Nothing checks this: candidates pointed at different storage
+  would each serve their own copy in turn.
+- Recovery after a crash takes at most
+  `max(15 s + rank x takeover_stagger_ms, lease_ttl_ms) + 5 x poll_interval_ms`
+  plus the time to open the drive: about four minutes with the default
+  240-second lease, about 25 seconds with `lease_ttl_ms: 20000`. A clean
+  stop (SIGTERM) hands over in a second or two.
+- While no owner is published, requests get `503` with
+  `x-mount-dispatch: not-dispatched` and `Retry-After: 1`. Requests in
+  flight on the failed owner get `502` with `x-mount-dispatch: unknown` and
+  are not replayed. Remote sessions and open handles on the failed owner are
+  lost: the new owner answers `403 EACCES` and the client must open a new
+  session.
+- A candidate does not exit when a drive's lease is held elsewhere or the
+  drive cannot be opened; it stays a standby and reports each change as a
+  `drive_failover` JSON line on stderr.
+- A Redis outage moves nothing: standbys wait, owners keep their leases and
+  keep serving requests that reach them directly.
 
 `scripts/serve-http-cluster-e2e.py` starts two owners on loopback against a
 disposable Redis and checks the cluster as a round-robin load balancer would
 use it: every drive through every ingress, read-after-write across ingresses,
 uploads at and over the size limit, sessions carried by either ingress, an
 owner stopping and restarting, and a membership file reloaded on the timer
-and on `SIGHUP` to add and then remove an ingress. CI runs it. A request whose cached route names
+and on `SIGHUP` to add and then remove an ingress, and a drive with two
+failover candidates whose owner is killed and then stopped cleanly. CI runs it. A request whose cached route names
 an owner with no live peer connection re-reads the route before dialing, so a
 cleanly stopped owner's drive answers 503 at once rather than after the QUIC
 handshake timeout.

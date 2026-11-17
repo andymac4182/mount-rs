@@ -301,7 +301,8 @@ async fn actual_tidb_bound_concurrent_contract_persists() {
             metadata_a
                 .acquire_writer("legacy-client", Duration::from_secs(30))
                 .await
-                .is_err()
+                .expect_err("a concurrent-mode volume never grants a writer lease")
+                .is(ErrorCode::Ebusy)
         );
         let obsolete = WriterLease {
             owner: "legacy-client".into(),
@@ -586,7 +587,8 @@ async fn actual_tidb_mrc1_migration_is_revision_guarded_and_read_only_preflight(
         metadata
             .acquire_writer("obsolete-legacy", Duration::from_secs(30))
             .await
-            .is_err()
+            .expect_err("a concurrent-mode volume never grants a writer lease")
+            .is(ErrorCode::Ebusy)
     );
     metadata.close().await.expect("close metadata");
     blocks.close().await.expect("close blocks");
