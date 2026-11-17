@@ -1134,6 +1134,14 @@ code, pre { font-family: var(--mono); }
 .sim-drive { fill: var(--surface); stroke: var(--blue-line); stroke-width: 1.2; transition: fill 200ms ease, stroke 200ms ease; }
 .sim-drive.is-target { fill: var(--green-tint); stroke: var(--green); stroke-width: 2; }
 .sim-packet { fill: var(--amber); stroke: var(--surface); stroke-width: 3; }
+.sim-edge.is-off { stroke-dasharray: 2 7; opacity: 0.22; }
+.sim-box-node { cursor: pointer; }
+.sim-box-node.is-down > rect:first-child { fill: var(--paper-deep); stroke: var(--muted); stroke-dasharray: 7 5; }
+.sim-box-node.is-down text { opacity: 0.62; }
+.sim-drive.is-lost { fill: none; stroke: var(--amber); stroke-dasharray: 4 3; }
+.sim-note { flex-basis: 100%; margin-top: 4px; }
+.sim-nodes button[aria-pressed="true"] { border-color: var(--amber); background: var(--cream); box-shadow: inset 0 0 0 1px var(--amber); }
+.seg button:disabled { cursor: not-allowed; opacity: 0.45; }
 .sim-key { display: inline-block; width: 20px; height: 3px; margin-left: 10px; border-radius: 2px; background: var(--muted); }
 .sim-key:first-child { margin-left: 0; }
 .sim-scroll-hint { display: none; flex-basis: 100%; }

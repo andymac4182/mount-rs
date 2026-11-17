@@ -45,7 +45,7 @@ const entryStages: Stage[] = [
     hint: 'the only branch',
     title: 'The one decision that differs between nodes',
     body: 'Every node runs the same code. The only question is whether this process holds the drive’s fenced writer lease. If it does, the request never leaves the process unless it changes something.',
-    facts: ['Exactly one owner per drive', 'Ownership is assigned by the operator', 'Owners publish their drives as routes'],
+    facts: ['Exactly one owner per drive', 'Assigned by the operator, or taken over by a failover candidate', 'Owners publish their drives as routes'],
   },
 ]
 
