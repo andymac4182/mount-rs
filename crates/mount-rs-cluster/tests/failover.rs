@@ -96,7 +96,7 @@ impl Node {
             router.clone(),
             vec![FailoverDrive {
                 volume: VOLUME.into(),
-                bearer_token: TOKEN.into(),
+                tokens: mount_rs_http::DriveTokens::new(vec![TOKEN.into()]).unwrap(),
                 sessions: None,
                 factory: factory(dir.to_owned(), name.to_owned(), opens.clone()),
             }],

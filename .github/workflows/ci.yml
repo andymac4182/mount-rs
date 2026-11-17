@@ -1064,6 +1064,15 @@ jobs:
         # routes and forwarding responses of openapi-cluster.yaml. The tests
         # of this file that need no Redis also run in the workspace job.
         run: cargo test --locked -p mount-rs-cli --test cluster_contract -- --include-ignored
+      - name: Test token-file rotation and the metrics on a forwarding cluster
+        env:
+          MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+        # Real servers: a token file rotated on an owner, through an
+        # ingress and on a failover standby, with open sessions, and the
+        # Prometheus series of each server compared with the requests sent.
+        # The test of this file that needs no Redis also runs in the
+        # workspace job.
+        run: cargo test --locked -p mount-rs-cli --test cluster_operations -- --include-ignored
 
   cluster-mixed-release:
     # A forwarding cluster with one server on this commit and one on an
