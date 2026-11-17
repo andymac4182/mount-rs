@@ -137,7 +137,6 @@ impl HttpChild {
         }
     }
 
-    #[cfg(unix)]
     fn output(&mut self) -> (Vec<String>, Vec<String>) {
         for reader in self.readers.drain(..) {
             reader.join().expect("join HTTP output reader");
