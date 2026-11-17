@@ -89,7 +89,9 @@ token and status watch channel. It reports failure before cleanup and attempts
 exact withdrawal on failure or graceful stop. It never automatically replays an
 unknown write or re-advertises a missing/replaced registration. Aborting the task
 clears its observed readiness; Redis TTL handles abandoned cleanup. Join this
-supervisor before filesystem shutdown. CLI configuration is not wired yet.
+supervisor before filesystem shutdown. `mount-rs serve-http` starts and joins
+it for each drive of a server configured with `http.forwarding.owner`
+(`apps/mount-rs-cli/src/http_sessions.rs`).
 Cancelled cleanup can leave only a TTL-bounded hint. If ownership changes during
 an advertisement, stale discovery may exist briefly; it never authorizes serving.
 
@@ -190,9 +192,11 @@ full file and a range, checks wrong-bearer refusal, stale fence and second-hop
 refusal without file changes, and ownership-loss refusal after SDK shutdown.
 It also verifies listener-free application shutdown. That test connects directly
 as an authenticated server peer. The cluster load harness exercises Redis route
-resolution and ingress forwarding across three processes. Production
-`serve-http` startup still needs to wire the peer listener, authenticated peer
-directory, and registration supervisor into the configured service lifecycle.
+resolution and ingress forwarding across three processes. `mount-rs
+serve-http` wires the peer listener, the authenticated membership and the
+registration supervisor into its service lifecycle when `http.forwarding` is
+configured; `scripts/serve-http-cluster-e2e.py` exercises that with real
+processes.
 
 ## Ingress forwarding
 
@@ -200,9 +204,79 @@ directory, and registration supervisor into the configured service lifecycle.
 route on the server, verifies it against a bounded operator-authenticated
 `PeerDirectory`, and streams to the owner using a shared `PeerClient`. The peer
 certificate must match the configured public-key pin and node role. Redis cannot
-supply its own trusted endpoint, boot identity or certificate. Replace the
-configured directory/forwarder when membership changes; live membership reload
-is not yet implemented.
+supply its own trusted endpoint, boot identity or certificate.
+
+### Live membership reload
+
+A server takes a changed membership without a restart. `PeerMembership` holds
+the current `PeerDirectory` and the SPKI pin set derived from it. Build the
+forwarder with `IngressForwarder::with_membership`, every `PeerClient` with
+`PeerClient::new_with_pin_provider(.., membership.pins(), ..)`, and the peer
+listener with `PeerServer::new_with_pin_provider(.., membership.pins(), ..)`
+and a request policy that calls `membership.accepts(identity)`. Nothing then
+holds a copy of an older membership:
+
+- the transports check a peer's pin against the current pin set after every
+  handshake, and the listener checks it again on every request;
+- the listener's policy checks the peer's node and pin against the current
+  directory on every request;
+- the forwarder resolves a route against the current directory on every
+  request, including a route it has cached, and requires the owner's
+  certificate to carry that record's node and pin.
+
+TLS chain validation against the CA is unchanged; the CA is read once at
+startup.
+
+`IngressForwarder::reload_membership(candidate)` (or `PeerMembership::apply`
+for a server with no forwarder) replaces the membership:
+
+1. The candidate is validated in full first. A reload is refused, and the
+   membership in force stays exactly as it was, when the file does not parse;
+   lists no servers, more than 1,024, or more than the capacity the
+   `PeerMembership` was created with; has an invalid record or a repeated
+   node; or would cut this server off. A server's own certificate must still
+   match a record (`with_local_identity`), and a server that listens for
+   peers must also keep its record's `boot`, `address` and `tls_server_name`
+   (`with_local_listener`), because its listener is bound to that address
+   and the routes it has published carry those values. `MembershipError`
+   says which rule and which record.
+2. The directory is swapped, then the pin set. Both are single atomic
+   replacements. A reader between the two sees the new directory with the
+   old pins and applies both checks, so it can refuse a peer the new
+   membership admits but cannot admit one that either membership refuses.
+3. Connections that the new membership no longer covers are closed. This is
+   an immediate close, not a drain.
+
+After a reload returns:
+
+- **A removed server** is refused on new inbound connections (its pin is
+  gone, and the policy no longer finds its node) and is no longer dialled:
+  a route naming it is `UntrustedRoute`. Connections already established
+  with it, in both directions, are closed. A request in flight on one of
+  them fails; for a write the outcome is unknown and it is not replayed, as
+  with any lost peer connection. Remove a server only after stopping it or
+  moving its volumes.
+- **A re-keyed server** (same node, new `spki_sha256`) is treated the same
+  way for its old key: connections made under the old pin are closed, and
+  the next handshake must present the new key. A pin that has left the file
+  does not keep working on an existing connection.
+- **A server whose `boot`, `address` or `tls_server_name` changed** keeps
+  its inbound connections if its pin is unchanged, but pooled outbound
+  connections to its old address are closed and routes carrying the old
+  values are no longer trusted.
+- **An added server** is accepted and dialled from the next handshake.
+- **Unchanged servers** keep their connections. A reload that describes the
+  membership already in force changes nothing and closes nothing.
+
+The capacity exists because the transports' connection limits are fixed when
+they are built: size them from `membership.capacity()`, not from the number
+of members at startup.
+
+The ignored `membership_reload_admits_added_peers_and_cuts_off_removed_ones`
+test covers this over real mTLS sockets: a peer added by reload forwards, a
+removed peer has its connection closed and is refused, invalid and
+self-excluding files change nothing, and a re-listed owner is used again
+only under its real key.
 
 The bounded route cache avoids a Redis round trip on each read. Entries are
 short-lived hints, not ownership grants. An owner `not-dispatched` response
@@ -226,9 +300,10 @@ MOUNT_RS_REDIS_TEST_URL=redis://127.0.0.1:6379/ \
   ./scripts/cargo-shared test -p mount-rs-cluster --features http3 --locked -- --include-ignored --nocapture
 ```
 
-The public ingress listener, CLI wiring, local-owner bypass, membership refresh,
-stream cancellation/failure stress tests and combined TiDB/RustFS routed tests
-remain outstanding. The current fixture starts at the ingress library boundary.
+Stream cancellation/failure stress tests and combined TiDB/RustFS routed
+tests remain outstanding. That fixture starts at the ingress library
+boundary; the public listener, CLI wiring, local-owner bypass and membership
+reload are covered by `scripts/serve-http-cluster-e2e.py`.
 
 ## Public ingress listener
 
@@ -243,8 +318,9 @@ Real socket tests now include public HTTP PUT, full/range GET, bearer refusal,
 internal-header spoof refusal, and listener shutdown. Two ingress listeners
 with independent route caches share the same owner and see each other's writes;
 closing either ingress does not close the shared owner. The fixture uses one
-process and a shared peer client. Production public TLS, independent-process
-failure testing, CLI startup configuration and native remote mounts remain open.
+process and a shared peer client. Production public TLS and native remote
+mounts remain open; `mount-rs serve-http` provides the CLI startup
+configuration.
 
 ## Remote handle lifecycle foundation
 

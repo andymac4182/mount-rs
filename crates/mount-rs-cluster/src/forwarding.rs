@@ -1,5 +1,6 @@
 //! Server-side Redis discovery and bounded, single-hop HTTP/3 forwarding.
 use crate::forward_trace::{ForwardRequestTrace, Stage};
+use crate::membership::{MembershipChange, MembershipError, PeerMembership};
 use crate::request_class::RequestClass;
 use crate::{
     HOP_HEADER, ROUTE_HEADER, RedisRouteRegistry, RegistryError, VolumeRoute, identifier,
@@ -20,7 +21,7 @@ use tokio::{
 
 /// Operator-authenticated membership. Never construct this from an unverified
 /// Redis route; the endpoint and certificate pin must have independent trust.
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustedPeer {
     pub node: String,
@@ -56,27 +57,64 @@ pub struct PeerDirectory(BTreeMap<String, TrustedPeer>);
 impl PeerDirectory {
     /// Load an operator-provided JSON array of trusted peer records before binding listeners.
     pub fn from_reader(reader: impl std::io::Read) -> Result<Self, RegistryError> {
-        let peers = serde_json::from_reader(reader).map_err(|_| RegistryError::InvalidInput)?;
-        Self::new(peers)
+        Self::parse(reader).map_err(|_| RegistryError::InvalidInput)
     }
 
     pub fn new(peers: Vec<TrustedPeer>) -> Result<Self, RegistryError> {
-        if peers.is_empty() || peers.len() > MAX_PEER_DIRECTORY_MEMBERS {
-            return Err(RegistryError::InvalidInput);
+        Self::validate(peers).map_err(|_| RegistryError::InvalidInput)
+    }
+
+    /// As [`Self::from_reader`], saying what is wrong with a refused file.
+    pub fn parse(reader: impl std::io::Read) -> Result<Self, MembershipError> {
+        let peers = serde_json::from_reader(reader)
+            .map_err(|error| MembershipError::Parse(error.to_string()))?;
+        Self::validate(peers)
+    }
+
+    /// As [`Self::new`], saying which record and field was refused.
+    pub fn validate(peers: Vec<TrustedPeer>) -> Result<Self, MembershipError> {
+        if peers.is_empty() {
+            return Err(MembershipError::Empty);
+        }
+        if peers.len() > MAX_PEER_DIRECTORY_MEMBERS {
+            return Err(MembershipError::TooManyMembers {
+                members: peers.len(),
+                maximum: MAX_PEER_DIRECTORY_MEMBERS,
+            });
         }
         let mut map = BTreeMap::new();
-        for peer in peers {
-            if !identifier(&peer.node)
-                || !identifier(&peer.boot)
-                || !identifier(&peer.tls_server_name)
-                || peer.address.port() == 0
-                || map.contains_key(&peer.node)
-            {
-                return Err(RegistryError::InvalidInput);
+        for (index, peer) in peers.into_iter().enumerate() {
+            let field = if !identifier(&peer.node) {
+                Some("node")
+            } else if !identifier(&peer.boot) {
+                Some("boot")
+            } else if !identifier(&peer.tls_server_name) {
+                Some("tls_server_name")
+            } else if peer.address.port() == 0 {
+                Some("address")
+            } else {
+                None
+            };
+            if let Some(field) = field {
+                return Err(MembershipError::InvalidRecord { index, field });
+            }
+            if map.contains_key(&peer.node) {
+                return Err(MembershipError::DuplicateNode {
+                    index,
+                    node: peer.node,
+                });
             }
             map.insert(peer.node.clone(), peer);
         }
         Ok(Self(map))
+    }
+    /// Every member, by node name.
+    pub fn members(&self) -> impl Iterator<Item = (&str, &TrustedPeer)> {
+        self.0.iter().map(|(node, peer)| (node.as_str(), peer))
+    }
+    /// The record for `node`, if it is a member.
+    pub fn member(&self, node: &str) -> Option<&TrustedPeer> {
+        self.0.get(node)
     }
     /// Number of servers in the membership.
     pub fn len(&self) -> usize {
@@ -106,7 +144,7 @@ impl PeerDirectory {
             .get(id)
             .filter(|peer| peer.pin == identity.spki_sha256())
     }
-    fn resolve(&self, route: &VolumeRoute) -> Option<&TrustedPeer> {
+    pub(crate) fn resolve(&self, route: &VolumeRoute) -> Option<&TrustedPeer> {
         self.0.get(&route.node).filter(|peer| {
             peer.boot == route.boot
                 && peer.address == route.address
@@ -325,7 +363,7 @@ impl BodyFailures {
 #[derive(Clone)]
 pub struct IngressForwarder {
     registry: RedisRouteRegistry,
-    peers: Arc<PeerDirectory>,
+    peers: Arc<PeerMembership>,
     clients: Arc<[Arc<PeerClient>]>,
     next_client: Arc<std::sync::atomic::AtomicUsize>,
     options: ForwardOptions,
@@ -334,9 +372,27 @@ pub struct IngressForwarder {
     body_failures: Arc<BodyFailures>,
 }
 impl IngressForwarder {
+    /// Forward with a membership that stays as given. To change it while
+    /// the server runs, build the forwarder with [`Self::with_membership`].
     pub fn new(
         registry: RedisRouteRegistry,
         peers: Arc<PeerDirectory>,
+        client: Arc<PeerClient>,
+        options: ForwardOptions,
+    ) -> Result<Self, RegistryError> {
+        let capacity = peers.len();
+        let membership =
+            PeerMembership::new(peers, capacity).map_err(|_| RegistryError::InvalidInput)?;
+        Self::with_membership(registry, Arc::new(membership), client, options)
+    }
+    /// Forward with a membership that [`Self::reload_membership`] can
+    /// replace. Build `client`, and every client added later, with
+    /// `peers.pins()` ([`PeerClient::new_with_pin_provider`]): a client with
+    /// its own fixed pins would refuse a server added or re-keyed by a
+    /// reload.
+    pub fn with_membership(
+        registry: RedisRouteRegistry,
+        peers: Arc<PeerMembership>,
         client: Arc<PeerClient>,
         options: ForwardOptions,
     ) -> Result<Self, RegistryError> {
@@ -375,6 +431,36 @@ impl IngressForwarder {
         all.extend(clients);
         self.clients = all.into();
         self
+    }
+    /// The membership this forwarder routes within.
+    pub fn membership(&self) -> &Arc<PeerMembership> {
+        &self.peers
+    }
+    /// Replace the trusted membership with `candidate`, or leave it as it
+    /// was if `candidate` breaks a reload rule ([`PeerMembership::check`]).
+    ///
+    /// Once this returns `Ok`, a server that was removed or whose record
+    /// changed is no longer dialled under its old record, and every pooled
+    /// connection to its old address has been closed. A request in flight on
+    /// such a connection fails; as with any lost peer connection, whether a
+    /// write reached the owner is then unknown, and it is not replayed.
+    /// Connections to members whose record did not change are untouched.
+    pub async fn reload_membership(
+        &self,
+        candidate: PeerDirectory,
+    ) -> Result<MembershipChange, MembershipError> {
+        let change = self.peers.apply(candidate)?;
+        for client in self.clients.iter() {
+            // A retired address is closed even if its pin is still listed
+            // (a server that moved, or two records sharing a key).
+            for destination in &change.retired {
+                let _ = client.close_peer(destination).await;
+            }
+            // The pin watchers have already closed every connection whose
+            // pin left the set; this joins them and empties their pool slots.
+            let _ = client.refresh_pins().await;
+        }
+        Ok(change)
     }
     fn next_client(&self) -> &Arc<PeerClient> {
         let turn = self.next_client.fetch_add(1, Ordering::Relaxed);
@@ -476,7 +562,7 @@ impl IngressForwarder {
         let route = result
             .map_err(|_| ForwardError::RouteUnavailable)?
             .ok_or(ForwardError::RouteUnavailable)?;
-        if self.peers.resolve(&route).is_none() {
+        if self.peers.route_pin(&route).is_none() {
             return Err(ForwardError::UntrustedRoute);
         }
         let entry = self.routes.insert(
@@ -611,9 +697,11 @@ impl IngressForwarder {
             trace.record(Stage::Route, route_start);
         }
         let route = &entry.route;
-        let peer = self
+        // Read the membership in force now, not when the route was cached:
+        // a reload since then may have removed or re-keyed this server.
+        let expected_pin = self
             .peers
-            .resolve(route)
+            .route_pin(route)
             .ok_or(ForwardError::UntrustedRoute)?;
         let (mut parts, mut body) = request.into_parts();
         strip_connection_headers(&mut parts.headers);
@@ -643,7 +731,6 @@ impl IngressForwarder {
             .build()
             .map_err(|_| ForwardError::InvalidRequest)?;
         parts.version = http::Version::HTTP_3;
-        let expected_pin = peer.pin;
         let expected_route = entry.clone();
         let policy = move |identity: &TlsIdentity, _: &Request<()>| {
             identity.spki_sha256() == expected_pin

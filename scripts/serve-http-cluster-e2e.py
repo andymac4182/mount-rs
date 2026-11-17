@@ -7,8 +7,9 @@ Starts two `serve-http` owners on loopback that share a disposable Redis
 namespace and forward to each other over mutually authenticated HTTP/3:
 node a owns drive a and node b owns drive b. A client that picks either node
 for any request, as a round-robin load balancer would, must see one
-consistent drive. Needs `openssl` for the test PKI. Prints PASS/FAIL per
-check and exits 1 on any FAIL.
+consistent drive. A second cluster then has its membership file changed
+while it runs, to add and remove an ingress. Needs `openssl` for the test
+PKI. Prints PASS/FAIL per check and exits 1 on any FAIL.
 """
 import concurrent.futures as cf
 import hashlib
@@ -69,19 +70,31 @@ class Node:
         self.name, self.proc, self.port = name, proc, port
 
 
+def write_peers(work, peers):
+    """Replace the membership file in one step, as an operator should."""
+    path = os.path.join(work, "peers.json")
+    with open(path + ".new", "w") as f:
+        json.dump(peers, f)
+    os.replace(path + ".new", path)
+
+
 def start_cluster(binary, work, nodes, sessions=True, extra_http=None, ingress=(),
-                  peer_connections=None):
+                  peer_connections=None, later=(), forwarding=None):
     """Return {node: Node}. Node `n` in `nodes` owns drive `n`; nodes in
     `ingress` own no drive and only forward. `peer_connections` maps a node
-    to its forwarding.peer_connections."""
+    to its forwarding.peer_connections. Nodes in `later` (which must also be
+    in `ingress`) get a certificate and a config but are neither listed in
+    the membership file nor started; every node's record is kept in
+    `peers.all.json`. `forwarding` maps a node to extra forwarding keys."""
     os.makedirs(work, exist_ok=True)
     everyone = list(nodes) + list(ingress)
     pins = make_pki(work, everyone)
     addresses = {n: f"127.0.0.1:{free_udp()}" for n in everyone}
     peers = [{"node": n, "boot": f"{n}-boot", "address": addresses[n],
               "tls_server_name": "localhost", "spki_sha256": pins[n]} for n in everyone]
-    with open(os.path.join(work, "peers.json"), "w") as f:
+    with open(os.path.join(work, "peers.all.json"), "w") as f:
         json.dump(peers, f)
+    write_peers(work, [p for p in peers if p["node"] not in later])
     namespace = "fwd-" + uuid.uuid4().hex[:12]
     started = {}
     try:
@@ -106,11 +119,13 @@ def start_cluster(binary, work, nodes, sessions=True, extra_http=None, ingress=(
                 http["forwarding"]["owner"] = False
             if peer_connections and n in peer_connections:
                 http["forwarding"]["peer_connections"] = peer_connections[n]
+            http["forwarding"].update((forwarding or {}).get(n, {}))
             http.update(extra_http or {})
             path = os.path.join(work, f"{n}.json")
             with open(path, "w") as f:
                 json.dump({"version": 1, "http": http}, f)
-            started[n] = launch(binary, work, n)
+            if n not in later:
+                started[n] = launch(binary, work, n)
     except BaseException:
         stop_cluster(started)
         raise
@@ -377,6 +392,69 @@ def owner_connection_limit():
         stop_cluster(cluster)
 
 
+def membership_reload():
+    """A running cluster takes a changed membership file without a restart:
+    node a by polling the file, node b on SIGHUP only."""
+    work = os.path.join(WORK, "reload")
+    cluster = start_cluster(BIN, work, ["a", "b"], ingress=["c"], later=["c"],
+                            forwarding={"a": {"membership_reload_seconds": 1},
+                                        "b": {"membership_reload_seconds": 0}})
+    with open(os.path.join(work, "peers.all.json")) as f:
+        everyone = json.load(f)
+    owners = [p for p in everyone if p["node"] != "c"]
+
+    def reload_b():
+        cluster["b"].proc.send_signal(signal.SIGHUP)
+
+    def through_c(want, seconds=15):
+        """Statuses of both drives read through c, once both meet `want`."""
+        deadline = time.time() + seconds
+        while True:
+            statuses = [req("c", "GET", fs(d, "/reload"), timeout=10)[0] for d in "ab"]
+            if all(want(s) for s in statuses) or time.time() > deadline:
+                return statuses
+            time.sleep(0.2)
+
+    try:
+        global nodes
+        saved, nodes = nodes, cluster
+        for d in "ab":
+            req(d, "PUT", fs(d, "/reload"), b"reload")
+        # c is not a member yet: started now, the owners would refuse it.
+        write_peers(work, everyone)
+        reload_b()
+        cluster["c"] = launch(BIN, work, "c")
+        statuses = through_c(lambda s: s == 200)
+        check("an ingress added to the membership file forwards without a restart",
+              statuses == [200, 200], statuses)
+
+        # A file that cannot be parsed changes nothing.
+        with open(os.path.join(work, "peers.json"), "w") as f:
+            f.write('[{"node": "a",')
+        reload_b()
+        time.sleep(2.5)
+        statuses = [req("c", "GET", fs(d, "/reload"))[0] for d in "ab"]
+        statuses += [req("a", "GET", fs("b", "/reload"))[0], req("b", "GET", fs("a", "/reload"))[0]]
+        alive = all(n.proc.poll() is None for n in cluster.values())
+        check("an invalid membership file leaves the membership in use",
+              statuses == [200] * 4 and alive, (statuses, alive))
+
+        # Taken out of the file, c is cut off by both owners.
+        write_peers(work, owners)
+        reload_b()
+        statuses = through_c(lambda s: s >= 500)
+        check("an ingress removed from the membership file is refused",
+              all(s >= 500 for s in statuses), statuses)
+        statuses = [req("a", "GET", fs("b", "/reload"))[0], req("b", "GET", fs("a", "/reload"))[0]]
+        check("the remaining members still forward to each other", statuses == [200, 200],
+              statuses)
+    finally:
+        nodes = saved
+        codes = stop_cluster(cluster)
+        check("the reloaded cluster exits 0 on SIGTERM", all(c == 0 for c in codes.values()),
+              codes)
+
+
 def main():
     global nodes
     nodes = start_cluster(BIN, WORK, ["a", "b"], extra_http={"max_request_bytes": CAP,
@@ -390,6 +468,7 @@ def main():
         sessions()
         owner_restart()
         owner_connection_limit()
+        membership_reload()
     finally:
         codes = stop_cluster(nodes)
         check("both nodes exit 0 on SIGTERM", all(c == 0 for c in codes.values()), codes)

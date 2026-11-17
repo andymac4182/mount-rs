@@ -1485,7 +1485,9 @@ export function ProviderIndex() {
           with meaningful evidence but important deployment gates remain open.
           <b> Experimental</b> marks a real implementation/checkpoint with
           material acceptance gaps. <b>Planned</b> means preparation exists but
-          the provider integration is not yet accepted.
+          the provider integration is not yet accepted. The{' '}
+          <a href="https://github.com/andymac4182/mount-rs/blob/main/docs/maturity.md">maturity criteria</a>{' '}
+          list what each level requires.
         </p>
       </div>
 

@@ -11,6 +11,7 @@ pub mod color;
 pub mod config;
 mod http_sessions;
 mod joined;
+mod membership_reload;
 pub mod parser;
 mod remote;
 pub mod runtime;

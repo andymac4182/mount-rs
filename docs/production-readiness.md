@@ -108,7 +108,7 @@ listed first. The rest have not been verified further or started.
 | PGlite and TiDB statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision | High |
 | Exclusive (writeback) mode publishes namespace changes only on fsync, shutdown or reconcile | Creates and renames made without fsync are lost on SIGKILL, OOM or power loss | Medium |
 | A remote mount rejects every operation after one transport error, and the CLI never checks its keepalive worker | A network blip leaves the mount attached and returning `EIO`, with no log or exit | Medium |
-| `/readyz` ignores drive health | A load balancer keeps routing to a drive that has failed closed | Medium |
+| `/readyz` reports health only for split-store drives | A `sqlite`-kind, `host` or `memory` drive that has lost its storage stays in rotation | Low |
 | The mount CLI wires no transport error hooks | A filesystem that failed closed shows up only as `EIO` to applications | Medium |
 | The S3 server buffers up to 512 MiB per non-streamable request with no concurrency limit | A few concurrent oversized bodies exhaust memory | Low |
 
