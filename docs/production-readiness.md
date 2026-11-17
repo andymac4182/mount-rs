@@ -123,6 +123,89 @@ listed first. The rest have not been verified further or started.
 The survey did not examine 9P fid tables, the FUSE inode table, WebDAV lock
 tables or the Node bindings in depth.
 
+## TiDB provider
+
+Where the TiDB provider stands against the items
+[`maturity.md`](maturity.md) requires. This section records evidence only;
+it does not change the provider's label. Every test named here needs an
+actual TiDB and fails, instead of skipping, without one. "Durable" means the
+harness's three PD, three TiKV and one TiDB topology on the pinned v8.5.7
+images.
+
+| Item | State | Evidence |
+|------|-------|----------|
+| A stalled server hung one statement, and everything queued behind it (rated High below) | Closed by #130 | Every statement, `COMMIT`, rollback and connect has a client deadline. `actual_tidb_stalled_commit_times_out_with_unknown_outcome` and `actual_tidb_stalled_autocommit_publication_times_out_with_unknown_outcome` stall the acknowledgement through a proxy and require an unknown outcome with no replay; `actual_tidb_max_execution_time_interrupts_reads_but_not_writes` and `actual_tidb_sessions_carry_the_statement_limits` pin what TiDB's own limit covers. Run by `scripts/test-tidb.sh`, so by the `tidb`, `tidb-rustfs` and `ozone-tidb` jobs |
+| Writer lease on a concurrent-mode volume was refused with `EOVERFLOW` | Closed by #130 | Returns `EBUSY`. Pinned by the live tests in `providers/mount-rs-tidb/tests/concurrent.rs` and by `delegated_directory_authority_fences_old_and_stale_clients`; same jobs |
+| Autocommit conflict errors were classified as non-commits without a live check | Partly closed | `actual_tidb_autocommit_conflicts_are_known_non_commits` provokes 9007 and 1205 and checks that no statement which reported one had committed. 1213 and 9006 have not been provoked for an autocommit statement; see "Remaining risk" |
+| Tests that no script ran | Closed by #130 | `shared_pool`, `lost_block_ack_rustfs`, the SDK `tidb` tests and the cluster `tidb_sessions_preserve_handles_and_reopen_persisted_writes` test are run by `scripts/test-tidb.sh` and `scripts/test-tidb-rustfs-consumers.sh` |
+| Restart, fencing, concurrent publication, ambiguous commit | Covered before #130 | `actual_tidb_split_store_contract` and `actual_tidb_provider_clock_fencing_and_concurrent_publication` before and after TiDB, TiKV and PD restarts; `actual_tidb_commit_outcome_is_ambiguous_and_not_replayed`. A run counts only when it ends with `TIDB_ACCEPTANCE evidence=durable-multinode-restart` |
+| Composition with another provider's blocks | Covered | `actual_tidb_chunked_rustfs_contract` and `actual_tidb_rustfs_lost_block_ack_preserves_commit_and_retry` (RustFS, `tidb-rustfs` job); the Ozone composition in the `ozone-tidb` job |
+| Differential traces | Wired by #130 | `scripts/check-trace-parity.mjs` has a `chunked-tidb` backend. The `tidb` job runs it against the pinned mountx oracle (`MOUNT_RS_TIDB_TRACE=1`) and cannot skip it |
+| A real TLS handshake, including rejected ones | Wired by #130 | `tidb-tls` job, `scripts/test-tidb-tls-local.sh`: the provider contract over a verified session, and four refusals (unrelated authority, public roots only, wrong host name, plaintext). A pass prints `TIDB_TLS_HANDSHAKE_ACCEPTANCE` |
+| Mounted SQLite hosting (`REQUIREMENTS.md`) | Added after #130 | `tests/native_tidb_sqlite.rs`: `native_fuse_hosts_sqlite_on_tidb_metadata_and_tidb_blocks` and `native_fuse_hosts_sqlite_on_tidb_metadata_and_rustfs_blocks`, run by `scripts/test-tidb-rustfs-consumers.sh` in the `tidb-rustfs` job before and after the component restarts. Linux FUSE only |
+| Config validators and the new URL parameters | Checked | `scripts/verify-w08-production-config.mjs`, `scripts/verify-w26-ozone-production-config.mjs` and `scripts/test-tidb-tls.sh` in validate-only mode accept `tls_ca_file` and `statement_timeout_ms`, and still refuse `verify_ca=false` or `verify_identity=false` beside them. A step in the `tidb-tls` job keeps this true |
+| 1,000-IOPS lane with Ozone blocks | Passing | See below |
+
+### What has run where
+
+- **macOS, single-node TiDB v8.5.7** (before #130 merged): clippy, the
+  provider tests, the single-node harness, the TLS lane and five trace
+  seeds.
+- **Linux container, single-node TiDB v8.5.7 and RustFS**: both mounted
+  SQLite-hosting cases passed (SQLite 3.40.1, 163 s for the pair), inside
+  the TiDB/RustFS harness.
+- **CI on Linux, durable topology**: not yet observed for a revision that
+  contains #130. The `tidb`, `tidb-rustfs`, `tidb-tls` and `ozone-tidb`
+  jobs last passed on `015039a6` and earlier, which predate it. Until those
+  four jobs pass on a revision with #130 and the SQLite-hosting test, the
+  rows marked "Wired" and "Added" above are wired but not proven on Linux
+  against the durable topology.
+
+### The `ozone-tidb` 1,000-IOPS gate
+
+The gate is the `MOUNT_RS_TIDB_IOPS=1` step of `scripts/test-tidb.sh`, set
+only by the `ozone-tidb` job. It runs `benchmarks/storage/runner.mjs` for
+`mount-rs-split-tidb-r2` through the Node addon: durable TiDB metadata,
+Apache Ozone blocks through its S3 gateway, 400 write, read and delete
+lifecycles of a 4,096-byte payload, 64 at a time. IOPS is the count of
+successful operations divided by the wall time of those lifecycles. The job
+fails below 1,000, and the harness refuses a lower minimum or different
+workload settings.
+
+It failed on the hosted runs the W04, W05 and W26 ledgers record from
+September 2026, at 14 to 463 IOPS, and those ledgers still list it as open.
+It passed on each of the five most recent runs of `main` that reached it:
+3,813 (`87a7d276`), 5,116 (`f891abc3`), 1,850 (`015039a6`), 3,657
+(`f4ad0f0c`) and 5,017 (`90ce382e`). The threshold and workload were not
+changed. The September figures predate the metadata work of 2026-09-24
+(per-inode revisions, skipping unchanged namespaces, fewer reads); which
+change moved the figure was not determined. The passing runs differ by a
+factor of 2.8 on shared runners, so the gate has margin, but the figure is
+not a capacity number.
+
+The same workload has not been measured with RustFS blocks: the
+`tidb-rustfs` job runs a 64-operation soak, not this benchmark. The gate
+therefore says nothing about TiDB with any block store other than Ozone.
+
+### Still open for TiDB
+
+- CI on Linux for the revision containing #130, as above.
+- Error codes 1213 and 9006 for an autocommit statement, unverified.
+- Power loss, host fsync, and a crash of the mounting process while SQLite
+  is hosted are not tested. Component restart is.
+- The mounted SQLite-hosting test runs on Linux FUSE only. macOS NFS with
+  TiDB is covered by the separate opt-in
+  `apps/mount-rs-cli/tests/native_two_process_tidb.rs`, which no CI job
+  runs.
+- The W08 release policy workflow, which carries the TiDB deployment
+  policy checks, failed on every push to `main` from #112 on: it asked for
+  release version 0.1.0 after the CLI moved to 0.2.0. It now reads the
+  version from the crate.
+- If TiDB's temporary directory is on a filesystem that is more than about
+  90% full, TiDB refuses the provider's index DDL with error 8256 and the
+  first open of a volume fails with `EIO`. Seen on a local Docker host; the
+  message names the directory.
+
 ## Locks
 
 Production code holds no `std::sync::Mutex` or `RwLock`. Exclusion is done
