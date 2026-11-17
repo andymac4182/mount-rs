@@ -832,9 +832,36 @@ reference. The drive token authorizes both file and session routes for that volu
 ```
 
 The memory example is volatile. Existing split-store provider configuration can
-select TiDB and local or object-store blocks. Sessions have a shared process
-budget of 4096, a per-volume limit of 128 sessions, 128 handles per session and a
-60-second idle timeout; the remote CLI owns keepalive. The command supervises
+select TiDB and local or object-store blocks.
+
+Session limits are set in the optional `http.sessions` object. Every key is
+optional, and a key left out keeps its default. Unknown keys and values
+outside the range are rejected at startup, as is an `http.sessions` object
+when `remote_sessions` is not `true`.
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `max_sessions` | 4096 | 1–65536 | Sessions the whole process admits, across every drive. |
+| `max_sessions_per_drive` | 128 | 1–4096 | Sessions one drive admits. |
+| `max_handles_per_session` | 128 | 1–4096 | Open handles one session may hold. |
+| `idle_timeout_seconds` | 60 | 1–3600 | A session unused for this long is expired and its handles are closed. The server advertises the value and the remote CLI schedules its keepalive from it. |
+
+```json
+"sessions": {
+  "max_sessions": 8192,
+  "max_sessions_per_drive": 512,
+  "max_handles_per_session": 256,
+  "idle_timeout_seconds": 120
+}
+```
+
+A session is admitted only when both the process budget and its drive's
+limit have room, so the smaller of the two is what binds. Each session and
+each open handle holds memory and, for a handle, backend state: raise the
+limits with the process's memory in mind. On a forwarding cluster, each
+owner applies the limits from its own config to the drives it owns.
+
+The remote CLI owns keepalive. The command supervises
 expiry and closes listeners/sessions before shutting down SDK owners. Session
 drain uses `drain_timeout_ms`. A drain that fails still withdraws the Redis
 route, closes the sessions and releases each drive's writer lease, so a
@@ -857,15 +884,162 @@ For an ingress with no local drives, set `http.drives` to `[]` and configure `ht
 }
 ```
 
-Distribute a trusted membership file to the servers. It contains a JSON array with one record per server. Each record has a unique `node`, a `boot` identifier, a UDP socket `address`, a `tls_server_name`, and the hexadecimal SHA-256 public-key pin `spki_sha256`. Each server uses its own certificate and key. Use the same Redis namespace across servers serving the cluster.
+Distribute a trusted membership file to the servers. Each server uses its own certificate and key. Use the same Redis namespace across servers serving the cluster.
+
+#### The membership file
+
+`http.forwarding.peers` names the membership file: a JSON array with one
+record for every server in the cluster, ingresses included. Every server
+should have the same file.
+
+```json
+[
+  {
+    "node": "owner-a",
+    "boot": "owner-a-2026-11",
+    "address": "10.0.1.11:7443",
+    "tls_server_name": "owner-a.mount.internal",
+    "spki_sha256": "3f0c…64 hexadecimal digits…9b1e"
+  },
+  {
+    "node": "ingress-1",
+    "boot": "ingress-1-2026-11",
+    "address": "10.0.1.21:7443",
+    "tls_server_name": "ingress-1.mount.internal",
+    "spki_sha256": "a47d…64 hexadecimal digits…02c5"
+  }
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `node` | The server's name, unique in the file. It must equal the node in the server certificate's URI SAN, `urn:agent-tunnel:peer:<node>`. |
+| `boot` | An identifier for this deployment of the server. An owner publishes it in its routes, and a route is trusted only if it matches. |
+| `address` | The UDP socket address an owner listens on for peer requests. It must not use port 0. An ingress never listens, but still needs a well-formed address. |
+| `tls_server_name` | The name other servers verify in the server's certificate. |
+| `spki_sha256` | The SHA-256 of the server's public key (DER `SubjectPublicKeyInfo`), as 64 hexadecimal digits. |
+
+`node`, `boot` and `tls_server_name` are 1–256 characters from
+`A-Z a-z 0-9 - _ .`. Unknown fields are rejected, and the file may list at
+most 1,024 servers. Compute a pin from a private key with:
+
+```sh
+openssl pkey -in node.key -pubout -outform DER | openssl dgst -sha256 -hex
+```
+
+A peer is trusted only if its certificate chains to `ca`, names a `node` in
+the file, and has that record's public key. Redis never supplies an address
+or a key.
+
+#### Reloading the membership file
+
+A running server reads the membership file again, without a restart:
+
+- when it receives `SIGHUP` (Unix), and
+- every `http.forwarding.membership_reload_seconds` (default `30`, allowed
+  `0`–`3600`), if the file's contents have changed. `0` turns the timer off,
+  leaving `SIGHUP` as the only trigger.
+
+A server with no `forwarding` block does not handle `SIGHUP`.
+
+The new file is checked in full before anything changes. If it cannot be
+read or parsed, breaks a rule above, lists more servers than
+`max_members`, or would cut this server off, the server keeps the
+membership it had, keeps serving, and writes one line to stderr:
+
+```text
+mount-rs: membership reload refused, keeping the current 3 servers: membership record 2 has an invalid `address`
+```
+
+It does not log the same unchanged bad file again on each timer tick; a
+`SIGHUP` always logs the result. An accepted reload logs
+`mount-rs: membership reload: now 4 servers from /etc/mount-rs/peers.json; added ["owner-c"], removed [], changed []`.
+Replace the file in one step (write a new file beside it and rename it over
+the old one) so that a timer tick never reads a half-written file. A
+half-written file is refused, not applied, and the complete file is picked
+up on the next tick.
+
+A server refuses a file that would stop it authenticating: one with no
+record matching its own certificate's node and key. An owner also refuses a
+file that changes its own `boot`, `address` or `tls_server_name`, since its
+peer listener is bound to that address and its published routes carry those
+values. Restart the server to change its own record.
+
+Once a server has accepted a reload:
+
+- A server **added** to the file is accepted and can be forwarded to from
+  its next connection.
+- A server **removed** from the file is refused on new connections and is
+  no longer forwarded to. Connections already open with it, in either
+  direction, are closed at once. A forwarded request in flight on one
+  fails: the client gets a 502, or a cut-off body if the response had
+  already started. A write caught this way may or may not have been
+  applied, and is not retried. Stop a server, or move its drives, before
+  removing it.
+- A server whose **key changed** has the connections made with its old key
+  closed at once, and must present the new key from then on. An old key
+  does not keep working on a connection that was already open.
+- Servers whose records did not change keep their connections.
+
+`http.forwarding.max_members` (allowed `1`–`1024`) is the most servers a
+reload may install. Each server sizes its peer connection limits from it at
+startup, and they cannot grow while it runs. It defaults to 64, or to the
+number of servers in the file at startup if that is larger. Startup fails
+if the file lists more than `max_members`. To grow a cluster past the
+value, raise it and restart each server, one at a time.
+
+**Adding a server**
+
+1. Issue the new server a certificate from the cluster CA with the URI SAN
+   `urn:agent-tunnel:peer:<node>` and compute its pin.
+2. Add its record to the membership file and distribute the file to every
+   running server.
+3. Send each running server `SIGHUP`, or wait one reload interval. Check
+   stderr on each for the `added` line.
+4. Start the new server with the same file. If it is started before the
+   others have reloaded, requests for a new owner's drives get 503 and
+   requests through a new ingress get 502 until they do; nothing needs
+   restarting either way.
+
+**Removing a server**
+
+1. Stop the server, or move its drives to another owner.
+2. Remove its record from the membership file, distribute it, and send each
+   running server `SIGHUP` or wait one reload interval.
+
+**Rotating a server's certificate**
+
+A server reads its own certificate and key once, at startup, so the server
+being rotated is restarted; no other server is.
+
+- If the new certificate keeps the same key, its pin is unchanged. Install
+  the certificate and restart that server. The membership file does not
+  change.
+- If the key changes:
+  1. Issue the new certificate and key and compute the new pin. Leave the
+     old ones in place for now.
+  2. Stop the server. Its drives are unavailable until step 5.
+  3. Install the new certificate and key on it, and change its
+     `spki_sha256` in the membership file.
+  4. Distribute the file and send every other server `SIGHUP`, or wait one
+     reload interval. They close any connection made under the old key.
+  5. Start the server with the new file.
+
+  If the file reaches the other servers while the rotated server is still
+  running with its old key, they stop accepting it and stop forwarding to
+  it, and it refuses the file itself (its own record no longer matches its
+  key) and logs that. It recovers when it is restarted with the new key.
+  One record holds one key, so there is no period in which both keys are
+  accepted.
 
 On a volume owner, set `http.forwarding.owner` to `true`, supply the owner's certificate and key, and configure its assigned drives. The owner listens for peer requests at its membership address. The forwarding `bind` setting controls the outbound QUIC endpoint. Enable `http.remote_sessions` on the owner for remote mount clients. Ownership assignment is operator-configured. Serve the public endpoint through HTTPS termination for bearer credentials.
 
 `scripts/serve-http-cluster-e2e.py` starts two owners on loopback against a
 disposable Redis and checks the cluster as a round-robin load balancer would
 use it: every drive through every ingress, read-after-write across ingresses,
-uploads at and over the size limit, sessions carried by either ingress, and an
-owner stopping and restarting. CI runs it. A request whose cached route names
+uploads at and over the size limit, sessions carried by either ingress, an
+owner stopping and restarting, and a membership file reloaded on the timer
+and on `SIGHUP` to add and then remove an ingress. CI runs it. A request whose cached route names
 an owner with no live peer connection re-reads the route before dialing, so a
 cleanly stopped owner's drive answers 503 at once rather than after the QUIC
 handshake timeout.
@@ -883,10 +1057,10 @@ own UDP socket, and requests take them in turn. One QUIC connection holds a
 lock while it sends, so it tops out at a few hundred MB/s; in a 5-core Linux
 container, forwarded 1 MiB reads went from 219 MB/s with one connection to
 524 MB/s with four and 584 MB/s with eight. The membership file may list up to
-1,024 servers. Each server sizes its peer connection limits from the
-membership: an ingress may hold one pooled connection per peer per
-`peer_connections`, and an owner accepts up to 16 connections from each listed
-server.
+1,024 servers. Each server sizes its peer connection limits from
+`max_members`: an ingress may hold one pooled connection per member per
+`peer_connections`, and an owner accepts up to 16 connections for each member
+it has room for.
 
 For many TiDB volumes on an owner, `http.tidb_metadata_pool_limit` sets a shared SQL connection limit for volumes that use the same connection environment variable name. The 100-volume local benchmark used 16.
 

@@ -1,4 +1,5 @@
 //! CLI-owned session routing and expiry. SDK owners must outlive a successful drain.
+use crate::config::SessionLimitsConfig;
 use crate::runtime::CliError;
 use mount_rs_cluster::{SessionCredentials, SessionHttpHandler, SessionSupervisor, VolumeSessions};
 use mount_rs_http::{DriveRegistry, HttpBody, HttpRequestHandler, HttpServer, HttpServerOptions};
@@ -8,13 +9,18 @@ use std::{collections::BTreeMap, pin::Pin, sync::Arc, time::Duration};
 pub(crate) struct Sessions {
     handlers: BTreeMap<String, SessionHttpHandler>,
     budget: mount_rs_cluster::SessionBudget,
+    limits: SessionLimitsConfig,
     max_request_bytes: usize,
 }
 impl Sessions {
-    pub(crate) fn new(max_request_bytes: usize) -> Result<Self, CliError> {
+    pub(crate) fn new(
+        max_request_bytes: usize,
+        limits: SessionLimitsConfig,
+    ) -> Result<Self, CliError> {
         Ok(Self {
             handlers: BTreeMap::new(),
-            budget: mount_rs_cluster::SessionBudget::new(4096)?,
+            budget: mount_rs_cluster::SessionBudget::new(limits.max_sessions)?,
+            limits,
             max_request_bytes,
         })
     }
@@ -32,9 +38,9 @@ impl Sessions {
         };
         let registry = Arc::new(VolumeSessions::new_with_budget(
             filesystem,
-            128,
-            128,
-            Duration::from_secs(60),
+            self.limits.max_sessions_per_drive,
+            self.limits.max_handles_per_session,
+            Duration::from_secs(self.limits.idle_timeout_seconds),
             self.budget.clone(),
         )?);
         let handler = SessionHttpHandler::new(volume, credentials, registry)?
@@ -58,22 +64,23 @@ impl Sessions {
                 owner: None,
                 application: None,
                 peers: Vec::new(),
+                reloader: None,
                 supervisor: None,
                 drain_timeout,
             });
         }
         let remote = match forwarding {
             Some(config) => {
-                let files = PeerFiles::load(config)?;
-                Some(
-                    connect_forwarder(
-                        config,
-                        self.max_request_bytes,
-                        options.max_upload_bytes,
-                        &files,
-                    )
-                    .await?,
+                let files = PeerFiles::load(config, None)?;
+                let (forwarder, peers) = connect_forwarder(
+                    config,
+                    self.max_request_bytes,
+                    options.max_upload_bytes,
+                    &files,
                 )
+                .await?;
+                let reloader = files.reloader(config, &forwarder)?;
+                Some((forwarder, peers, reloader))
             }
             None => None,
         };
@@ -92,16 +99,21 @@ impl Sessions {
         let handler = Arc::new(Router {
             handlers: self.handlers,
             local,
-            remote: remote.as_ref().map(|(forwarder, _)| forwarder.clone()),
+            remote: remote.as_ref().map(|(forwarder, ..)| forwarder.clone()),
             application: application.clone(),
         });
+        let (peers, reloader) = match remote {
+            Some((_, peers, reloader)) => (peers, reloader),
+            None => (Vec::new(), None),
+        };
         match HttpServer::start_with_handler(handler, options).await {
             Ok(listener) => Ok(Service {
                 listener,
                 owner: None,
                 application: Some(application),
                 supervisor,
-                peers: remote.map(|(_, peers)| peers).unwrap_or_default(),
+                peers,
+                reloader,
                 drain_timeout,
             }),
             Err(error) => {
@@ -215,6 +227,8 @@ pub(crate) struct Service {
     listener: HttpServer,
     owner: Option<OwnerService>,
     peers: Vec<Arc<mount_rs_cluster::transport::PeerClient>>,
+    /// Reloads the trusted membership file while the service runs.
+    reloader: Option<crate::membership_reload::MembershipReloader>,
     application: Option<Arc<HttpServer>>,
     supervisor: Option<SessionSupervisor>,
     drain_timeout: Duration,
@@ -255,6 +269,10 @@ impl Service {
                 first.get_or_insert(error);
             }
         };
+        // No membership reload may start once the service is closing.
+        if let Some(reloader) = &self.reloader {
+            keep(reloader.stop().await);
+        }
         keep(
             self.listener
                 .close()
@@ -295,14 +313,20 @@ impl Service {
 /// (`forwarding.peer_connections` is at most this).
 const MAX_PEER_CONNECTIONS: usize = 16;
 
+/// Room every forwarding server has for members by default, so that a
+/// reload can add servers to a small cluster without a restart.
+const DEFAULT_MEMBER_CAPACITY: usize = 64;
+
 /// A forwarding client keeps one connection to each server it forwards to,
-/// so it needs a connection and a destination slot per member.
+/// so it needs a connection and a destination slot per member. The limits
+/// cannot grow while the process runs, so they are sized for the largest
+/// membership a reload may install rather than for the one at startup.
 fn client_limits(
-    directory: &mount_rs_cluster::PeerDirectory,
+    membership: &mount_rs_cluster::PeerMembership,
 ) -> mount_rs_cluster::transport::PeerTransportLimits {
     mount_rs_cluster::transport::PeerTransportLimits {
-        max_connections: directory.len(),
-        max_destinations: directory.len(),
+        max_connections: membership.capacity(),
+        max_destinations: membership.capacity(),
         ..Default::default()
     }
 }
@@ -311,36 +335,102 @@ fn client_limits(
 /// member, so that no peer_connections setting on the others can lock one
 /// of them out. The transport default of 16 admitted only 16 in all.
 fn server_limits(
-    directory: &mount_rs_cluster::PeerDirectory,
+    membership: &mount_rs_cluster::PeerMembership,
 ) -> mount_rs_cluster::transport::PeerTransportLimits {
     mount_rs_cluster::transport::PeerTransportLimits {
-        max_connections: directory.len() * MAX_PEER_CONNECTIONS,
+        max_connections: membership.capacity() * MAX_PEER_CONNECTIONS,
         ..Default::default()
     }
 }
 
 struct PeerFiles {
-    directory: Arc<mount_rs_cluster::PeerDirectory>,
+    /// The trusted membership, which a reload replaces while the server runs.
+    membership: Arc<mount_rs_cluster::PeerMembership>,
+    /// The membership file as read at startup.
+    membership_file: Vec<u8>,
     certificate: Vec<u8>,
     key: Vec<u8>,
     ca: Vec<u8>,
 }
 
 impl PeerFiles {
-    fn load(config: &crate::config::ForwardingConfig) -> Result<Self, CliError> {
+    /// Read the peer files. `listener` is the identity of a server that
+    /// also listens for peers (a volume owner); its record must be present,
+    /// and a reload may not change what its listener and routes depend on.
+    fn load(
+        config: &crate::config::ForwardingConfig,
+        listener: Option<&mount_rs_cluster::transport::TlsIdentity>,
+    ) -> Result<Self, CliError> {
+        use mount_rs_cluster::{PeerDirectory, PeerMembership, transport::StagedPeerIdentity};
         let read = |path: &std::path::Path| {
             std::fs::read(path)
                 .map_err(|e| CliError::runtime(format!("cannot read {}: {e}", path.display())))
         };
-        let directory =
-            mount_rs_cluster::PeerDirectory::from_reader(read(&config.peers)?.as_slice())
-                .map_err(|e| CliError::runtime(format!("HTTP forwarding startup: {e}")))?;
+        let fail = |e: &dyn std::fmt::Display| {
+            CliError::runtime(format!(
+                "HTTP forwarding startup: {}: {e}",
+                config.peers.display()
+            ))
+        };
+        let membership_file =
+            crate::membership_reload::read_membership(&config.peers).map_err(CliError::runtime)?;
+        let directory = PeerDirectory::parse(membership_file.as_slice()).map_err(|e| fail(&e))?;
+        let certificate = read(&config.certificate)?;
+        let key = read(&config.private_key)?;
+        let ca = read(&config.ca)?;
+        let capacity = config
+            .max_members
+            .unwrap_or_else(|| directory.len().max(DEFAULT_MEMBER_CAPACITY));
+        let membership =
+            PeerMembership::new(Arc::new(directory), capacity).map_err(|e| fail(&e))?;
+        let membership = match listener {
+            Some(identity) => membership
+                .with_local_listener(identity.clone())
+                .map_err(|_| {
+                    CliError::usage("owner identity is absent from the configured peer directory")
+                })?,
+            None => {
+                // An ingress dials out only, and has never had to be in its
+                // own copy of the file to start. When it is, a reload must
+                // not take it out: the owners read the same file and would
+                // stop accepting it.
+                let directory = membership.directory();
+                match StagedPeerIdentity::from_pem(&certificate, &key, &ca) {
+                    Ok(identity) if directory.accepts(identity.identity()) => membership
+                        .with_local_identity(identity.identity().clone())
+                        .map_err(|e| fail(&e))?,
+                    _ => membership,
+                }
+            }
+        };
         Ok(Self {
-            directory: Arc::new(directory),
-            certificate: read(&config.certificate)?,
-            key: read(&config.private_key)?,
-            ca: read(&config.ca)?,
+            membership: Arc::new(membership),
+            membership_file,
+            certificate,
+            key,
+            ca,
         })
+    }
+
+    /// Start reloading the membership file for `forwarder`.
+    fn reloader(
+        &self,
+        config: &crate::config::ForwardingConfig,
+        forwarder: &mount_rs_cluster::IngressForwarder,
+    ) -> Result<Option<crate::membership_reload::MembershipReloader>, CliError> {
+        let poll = (config.membership_reload_seconds > 0)
+            .then(|| Duration::from_secs(config.membership_reload_seconds));
+        // Without SIGHUP or a poll interval there is nothing to reload on.
+        if cfg!(not(unix)) && poll.is_none() {
+            return Ok(None);
+        }
+        crate::membership_reload::MembershipReloader::start(
+            config.peers.clone(),
+            self.membership_file.clone(),
+            poll,
+            forwarder.clone(),
+        )
+        .map(Some)
     }
 }
 
@@ -359,7 +449,7 @@ async fn connect_forwarder(
     use mount_rs_cluster::{ForwardOptions, IngressForwarder, transport::*};
     let fail =
         |e: &dyn std::fmt::Display| CliError::runtime(format!("HTTP forwarding startup: {e}"));
-    let directory = files.directory.clone();
+    let membership = files.membership.clone();
     // One client per connection, each on its own UDP socket: the first on the
     // configured address, the rest on the same IP with a free port.
     let mut peers = Vec::with_capacity(config.peer_connections);
@@ -374,18 +464,21 @@ async fn connect_forwarder(
         let mut endpoint = quinn::Endpoint::client(bind).map_err(|e| fail(&e))?;
         endpoint.set_default_client_config(tls);
         peers.push(Arc::new(
-            PeerClient::new(
+            // The membership's own pin set, so that a reload reaches every
+            // client: new handshakes are checked against the new pins and
+            // connections whose pin has gone are closed.
+            PeerClient::new_with_pin_provider(
                 endpoint,
-                directory.approved_pins().map_err(|e| fail(&e))?,
-                client_limits(&directory),
+                membership.pins(),
+                client_limits(&membership),
             )
             .map_err(|e| fail(&e))?,
         ));
     }
     let registry = connect_registry(config).await?;
-    let forwarder = IngressForwarder::new(
+    let forwarder = IngressForwarder::with_membership(
         registry,
-        directory,
+        membership,
         peers[0].clone(),
         ForwardOptions {
             max_request_bytes,
@@ -451,18 +544,31 @@ pub(crate) async fn start_owner(
     config: &crate::config::ForwardingConfig,
     drives: Vec<OwnedDrive>,
     options: HttpServerOptions,
+    session_limits: SessionLimitsConfig,
 ) -> Result<Service, CliError> {
     use mount_rs_cluster::{
         ClusterIngress, OwnedVolumeRegistration, OwnerHttpHandler, OwnerHttpRouter,
         RegistrationRecovery, RegistrationSupervisor, VolumeRoute, transport::*,
     };
     let fail = |e: &dyn std::fmt::Display| CliError::runtime(format!("peer owner startup: {e}"));
-    let files = PeerFiles::load(config)?;
-    let directory = files.directory.clone();
-    let identity = StagedPeerIdentity::from_pem(&files.certificate, &files.key, &files.ca)
-        .map_err(|e| fail(&e))?;
-    let member = directory
+    let read = |path: &std::path::Path| {
+        std::fs::read(path)
+            .map_err(|e| CliError::runtime(format!("cannot read {}: {e}", path.display())))
+    };
+    let identity = StagedPeerIdentity::from_pem(
+        &read(&config.certificate)?,
+        &read(&config.private_key)?,
+        &read(&config.ca)?,
+    )
+    .map_err(|e| fail(&e))?;
+    let files = PeerFiles::load(config, Some(identity.identity()))?;
+    let membership = files.membership.clone();
+    // This server's own record. A reload cannot change the fields used
+    // here, so the listener and the published routes stay valid.
+    let member = membership
+        .directory()
         .authenticated_member(identity.identity())
+        .cloned()
         .ok_or_else(|| {
             CliError::usage("owner identity is absent from the configured peer directory")
         })?;
@@ -470,7 +576,7 @@ pub(crate) async fn start_owner(
         .map_err(|e| fail(&e))?;
     let endpoint = quinn::Endpoint::server(tls, member.address).map_err(|e| fail(&e))?;
     let registry = connect_registry(config).await?;
-    let budget = mount_rs_cluster::SessionBudget::new(4096)?;
+    let budget = mount_rs_cluster::SessionBudget::new(session_limits.max_sessions)?;
     let mut handlers = Vec::new();
     let mut registrations = Vec::new();
     let mut sessions = Vec::new();
@@ -502,9 +608,9 @@ pub(crate) async fn start_owner(
             handler = handler
                 .with_sessions(
                     credentials,
-                    128,
-                    128,
-                    Duration::from_secs(60),
+                    session_limits.max_sessions_per_drive,
+                    session_limits.max_handles_per_session,
+                    Duration::from_secs(session_limits.idle_timeout_seconds),
                     budget.clone(),
                 )
                 .map_err(|e| fail(&e))?;
@@ -521,12 +627,16 @@ pub(crate) async fn start_owner(
         &files,
     )
     .await?;
+    let reloader = files.reloader(config, &remote)?;
     let public = Arc::new(ClusterIngress::new(router.clone(), remote));
-    let pins = directory.approved_pins().map_err(|e| fail(&e))?;
-    let limits = server_limits(&directory);
-    let policy = move |identity: &TlsIdentity, _: &http::Request<()>| directory.accepts(identity);
-    let server =
-        PeerServer::new(endpoint, pins, limits, policy, router.clone()).map_err(|e| fail(&e))?;
+    let limits = server_limits(&membership);
+    // Both checks read the membership in force when they run: the pins at
+    // every handshake and request, the policy at every request. A peer
+    // removed or re-keyed by a reload is refused from then on.
+    let pins = membership.pins();
+    let policy = move |identity: &TlsIdentity, _: &http::Request<()>| membership.accepts(identity);
+    let server = PeerServer::new_with_pin_provider(endpoint, pins, limits, policy, router.clone())
+        .map_err(|e| fail(&e))?;
     let supervisor = if sessions.is_empty() {
         None
     } else {
@@ -569,6 +679,7 @@ pub(crate) async fn start_owner(
             listener,
             owner: Some(owner),
             peers,
+            reloader,
             application: None,
             supervisor,
             drain_timeout,

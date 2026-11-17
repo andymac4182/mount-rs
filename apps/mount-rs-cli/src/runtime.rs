@@ -931,7 +931,7 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     let server_options = http_server_options(http);
     let mut runtimes = Vec::with_capacity(http.drives.len());
     let mut registry = DriveRegistry::new();
-    let mut sessions = crate::http_sessions::Sessions::new(http.max_request_bytes)?;
+    let mut sessions = crate::http_sessions::Sessions::new(http.max_request_bytes, http.sessions)?;
     let disk_budget = http
         .disk_cache_budget
         .map(|limits| mount_rs_sdk::DiskCacheBudget::new(limits.workers, limits.fill_copies))
@@ -1020,7 +1020,13 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
             registry.register(configured).map_err(invalid_drive)?;
         }
         if let Some(config) = http.forwarding.as_ref().filter(|config| config.owner) {
-            return crate::http_sessions::start_owner(config, owned, server_options.clone()).await;
+            return crate::http_sessions::start_owner(
+                config,
+                owned,
+                server_options.clone(),
+                http.sessions,
+            )
+            .await;
         }
         sessions
             .start(registry, server_options.clone(), http.forwarding.as_ref())
