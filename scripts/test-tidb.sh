@@ -656,7 +656,7 @@ run_direct_provider_test() {
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
   MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
-    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture --test-threads=1 \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb --test shared_pool -- --ignored --nocapture --test-threads=1 \
       || return "$?"
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
@@ -737,6 +737,24 @@ run_node_provider_test() {
       --minimum-iops "$iops_minimum"
     echo "TIDB_OZONE_IOPS_PASS provider=tidb-r2 target=$iops_minimum output=$iops_output"
   fi
+}
+
+run_consumer_tests() {
+  phase_name="SDK and cluster consumer tests"
+  echo "TiDB phase=$phase_name" >&2
+  # The SDK and the cluster session table are the paths applications use to
+  # reach the provider. Each test uses its own volume keys, so one run after
+  # the restart checks is enough. A caller that also owns a RustFS service
+  # (scripts/test-tidb-rustfs.sh) exports MOUNT_RS_SDK_RUSTFS=1 and
+  # MOUNT_RS_SESSION_TEST_BLOCKS=rustfs to add that block store to both.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-sdk --test tidb \
+      -- --ignored --nocapture --test-threads=1
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TIDB_RUN_DIR="$run_dir" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-cluster --lib \
+      tidb_sessions_preserve_handles_and_reopen_persisted_writes \
+      -- --ignored --nocapture --test-threads=1
 }
 
 run_ambiguous_commit_test() {
@@ -879,6 +897,8 @@ if [ "$topology" = durable ]; then
     exit "$provider_status"
   fi
 fi
+
+run_consumer_tests
 
 # The failure-injection lane deliberately drops a client connection after
 # TiDB has processed COMMIT. Keep it after the durable restart/reopen gate so

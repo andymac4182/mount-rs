@@ -900,7 +900,8 @@ jobs:
         env:
           MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
         # The two skipped tests need scripts/test-redis-restart.sh and
-        # scripts/test-tidb.sh, which this job does not start.
+        # scripts/test-tidb.sh, which this job does not start. The TiDB one
+        # runs in the tidb and tidb-rustfs jobs.
         run: >-
           cargo test --locked -p mount-rs-cluster --features http3 --all-targets --
           --include-ignored

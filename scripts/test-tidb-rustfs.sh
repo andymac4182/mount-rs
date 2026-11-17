@@ -51,6 +51,10 @@ export MOUNT_RS_TIDB_CHUNKED_VOLUME_KEY="${MOUNT_RS_TIDB_CHUNKED_VOLUME_KEY:-mou
 export MOUNT_RS_TIDB_CHUNKED_RUSTFS_FIXTURE="$fixture"
 export MOUNT_RS_TIDB_COMPOSITION_COMMAND="${MOUNT_RS_TIDB_COMPOSITION_COMMAND:-$repo_dir/scripts/test-tidb-rustfs-consumers.sh}"
 export MOUNT_RS_TIDB_CONSUMER_RUN_ID="${MOUNT_RS_TIDB_CONSUMER_RUN_ID:-$run_token}"
+# test-tidb.sh runs the SDK and cluster consumer tests; with RustFS owned by
+# this harness they also cover RustFS blocks.
+export MOUNT_RS_SDK_RUSTFS=1
+export MOUNT_RS_SESSION_TEST_BLOCKS=rustfs
 export RUSTFS_COMBO_NAME="${RUSTFS_COMBO_NAME:-tidb-metadata-rustfs}"
 export RUSTFS_COMBO_TIMEOUT_SECONDS="${RUSTFS_COMBO_TIMEOUT_SECONDS:-1800}"
 export RUSTFS_COMBO_COMMAND="${RUSTFS_COMBO_COMMAND:-sh $repo_dir/scripts/test-tidb.sh}"
