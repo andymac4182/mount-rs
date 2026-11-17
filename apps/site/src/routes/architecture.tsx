@@ -122,10 +122,10 @@ function ArchitecturePage() {
           <p>
             Limits: failover is opt-in and needs split-store drives; sessions
             and requests in flight on a failed owner are lost, not replayed;
-            Redis Sentinel and Redis Cluster are not supported; and the cluster
-            configuration and server-to-server protocol are still outside the
-            v1 compatibility policy, so a cluster is upgraded by stopping every
-            server. See the{' '}
+            Redis Sentinel and Redis Cluster are not supported; and servers of
+            different releases cannot share a cluster, because the
+            server-to-server protocol is internal, so a cluster is upgraded by
+            stopping every server. See the{' '}
             <a href="https://github.com/andymac4182/mount-rs/blob/main/docs/serve-http-failover.md">failover design</a>{' '}
             and the{' '}
             <a href="https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#remote-sessions-on-a-configured-http-server">cluster configuration</a>.

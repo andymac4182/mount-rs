@@ -979,10 +979,11 @@ curl -H 'Authorization: Bearer demo-memory' \
         owner’s storage lease expires (240 s by default); requests in flight
         and sessions on the failed owner are lost, not replayed; nothing
         checks that candidates point at the same storage; and Redis Sentinel
-        and Redis Cluster are not supported. The session and forwarding
-        routes and their configuration are outside the v1 compatibility
-        policy, and clusters of mixed releases are untested, so a cluster is
-        upgraded by stopping every server. The local demo does not prove
+        and Redis Cluster are not supported. The session routes, the
+        cluster configuration and what a client sees from a cluster are
+        covered by the compatibility policy and checked by tests; the
+        server-to-server protocol is internal and clusters of mixed releases
+        are untested, so a cluster is upgraded by stopping every server. The local demo does not prove
         internet-facing deployment security.
       </>
     ),

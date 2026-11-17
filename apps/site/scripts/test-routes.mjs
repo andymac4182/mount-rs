@@ -156,7 +156,7 @@ const routes = [
     path: '/docs/transports/http',
     status: 200,
     contentType: 'text/html',
-    expected: ['HTTP multi-drive API', '/v1/drives', 'Preview', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'outside the v1 compatibility'],
+    expected: ['HTTP multi-drive API', '/v1/drives', 'Preview', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'clusters of mixed releases'],
   },
   {
     path: '/docs/transports/webdav',
