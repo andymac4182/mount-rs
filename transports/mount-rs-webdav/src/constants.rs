@@ -12,6 +12,11 @@ pub const XML_CONTENT_TYPE: &str = "application/xml; charset=\"utf-8\"";
 pub const MAX_XML_BYTES: usize = 256 * 1024;
 pub const MAX_XML_DEPTH: usize = 32;
 pub const MAX_XML_ELEMENTS: usize = 100_000;
+/// Maximum number of attributes, namespace declarations included, accepted on
+/// one element of a request body. WebDAV bodies carry a handful of namespace
+/// declarations per element; a tag beyond this is refused with 400 before its
+/// remaining attributes are examined.
+pub const MAX_XML_ATTRIBUTES: usize = 64;
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum number of child resources materialized by one WebDAV directory
 /// walk. Drivers enforce the bound before returning the directory listing.

@@ -2630,6 +2630,90 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
     );
 }
 
+/// One start tag carrying `count` attributes, each rendered by `attribute`,
+/// inside an otherwise valid PROPFIND body that fits the default XML budget.
+fn propfind_with_attribute_flood(count: usize, attribute: impl Fn(usize) -> String) -> String {
+    let mut body = String::from("<D:propfind xmlns:D=\"DAV:\"");
+    for index in 0..count {
+        body.push(' ');
+        body.push_str(&attribute(index));
+    }
+    body.push_str("><D:allprop/></D:propfind>");
+    assert!(
+        body.len() <= mount_rs_webdav::MAX_XML_BYTES,
+        "the flood must fit the default XML byte budget to reach the parser"
+    );
+    body
+}
+
+#[test]
+fn xml_parser_rejects_attribute_floods_on_one_element_quickly() {
+    // RUSTSEC-2026-0194: quick-xml before 0.41 compared every attribute name
+    // on a start tag with every earlier one, so a single tag inside the
+    // 256 KiB budget cost seconds of CPU. The parser now refuses the tag
+    // after a small, fixed number of attributes.
+    let floods = [
+        (
+            "distinct attributes",
+            propfind_with_attribute_flood(20_000, |index| format!("a{index}=\"\"")),
+        ),
+        (
+            "namespace declarations",
+            propfind_with_attribute_flood(15_000, |index| format!("xmlns:p{index}=\"u\"")),
+        ),
+    ];
+    for (label, body) in floods {
+        let started = std::time::Instant::now();
+        let fault = parse_xml(body.as_bytes(), mount_rs_webdav::MAX_XML_BYTES)
+            .expect_err("an attribute flood must be refused");
+        let elapsed = started.elapsed();
+        assert_eq!(fault.status, 400, "{label}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "{label}: the refusal took {elapsed:?}"
+        );
+    }
+
+    // A repeated attribute name stays a malformed-XML refusal.
+    let duplicates = propfind_with_attribute_flood(20_000, |_| "a=\"\"".to_owned());
+    assert_eq!(
+        parse_xml(duplicates.as_bytes(), mount_rs_webdav::MAX_XML_BYTES)
+            .unwrap_err()
+            .status,
+        400
+    );
+}
+
+#[test]
+fn xml_parser_accepts_the_attribute_limit_and_refuses_one_more() {
+    // The namespace declaration on the root counts toward the limit.
+    let at_limit =
+        propfind_with_attribute_flood(mount_rs_webdav::MAX_XML_ATTRIBUTES - 1, |index| {
+            format!("xmlns:p{index}=\"urn:p{index}\"")
+        });
+    let root = parse_xml(at_limit.as_bytes(), mount_rs_webdav::MAX_XML_BYTES)
+        .expect("a tag at the attribute limit is accepted");
+    assert_eq!((root.ns.as_str(), root.name.as_str()), (DAV_NS, "propfind"));
+
+    let over_limit = propfind_with_attribute_flood(mount_rs_webdav::MAX_XML_ATTRIBUTES, |index| {
+        format!("xmlns:p{index}=\"urn:p{index}\"")
+    });
+    let fault = parse_xml(over_limit.as_bytes(), mount_rs_webdav::MAX_XML_BYTES)
+        .expect_err("one attribute over the limit is refused");
+    assert_eq!(fault.status, 400);
+    assert!(fault.message.contains("too many attributes"), "{fault:?}");
+
+    // The limit is per element, not per document.
+    let mut spread = String::from("<D:propfind xmlns:D=\"DAV:\"><D:prop>");
+    for index in 0..200 {
+        spread.push_str(&format!("<Z:p{index} xmlns:Z=\"urn:z\" a=\"1\" b=\"2\"/>"));
+    }
+    spread.push_str("</D:prop></D:propfind>");
+    let root = parse_xml(spread.as_bytes(), mount_rs_webdav::MAX_XML_BYTES)
+        .expect("many elements with few attributes each are accepted");
+    assert_eq!(root.children[0].children.len(), 200);
+}
+
 #[test]
 fn xml_parser_rejects_raw_invalid_characters() {
     assert_eq!(
