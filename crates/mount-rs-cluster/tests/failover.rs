@@ -519,3 +519,64 @@ async fn redis_three_candidates_never_serve_one_volume_twice_across_repeated_sto
     }
     assert_eq!(published(&observer).await, None, "no candidate is left");
 }
+
+/// A standby whose owner has no published route keeps trying the lease
+/// while the owner keeps writing. Each try must find the lease held and
+/// nothing else: any other error makes the standby back off and stop
+/// announcing itself, as if it could not reach the storage at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opening_a_volume_its_owner_is_writing_to_only_finds_the_lease_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let open = |node: &str| factory(dir.path().to_owned(), node.to_owned(), Arc::default());
+    let owner = open("node-a").open().await.unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (owner, stop) = (owner.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut written = 0u32;
+            while !stop.load(Ordering::SeqCst) {
+                let body = vec![written as u8; 20_000];
+                owner
+                    .driver()
+                    .write_file(&format!("/file-{}", written % 8), &body)
+                    .await
+                    .unwrap();
+                written += 1;
+            }
+            written
+        })
+    };
+    let standby = open("node-b");
+    let mut outcomes = std::collections::BTreeMap::<String, usize>::new();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        let outcome = match standby.open().await {
+            Ok(_) => "opened".to_owned(),
+            Err(error) if error.code == mount_rs_core::ErrorCode::Eagain => "EAGAIN".to_owned(),
+            Err(error) => format!("{error:?}"),
+        };
+        *outcomes.entry(outcome).or_default() += 1;
+    }
+    stop.store(true, Ordering::SeqCst);
+    let written = writer.await.unwrap();
+    assert!(written > 50, "the owner only wrote {written} files");
+    assert_eq!(
+        outcomes.keys().collect::<Vec<_>>(),
+        ["EAGAIN"],
+        "{outcomes:#?} while the owner wrote {written} files"
+    );
+    owner.shutdown().await.unwrap();
+    // The standby's attempts left the owner's files as the owner wrote
+    // them: the next holder of the lease reads the last write of each.
+    let successor = standby.open().await.unwrap();
+    for last in written.saturating_sub(8)..written {
+        let path = format!("/file-{}", last % 8);
+        let handle = successor.driver().open(&path, "r", 0).await.unwrap();
+        let mut read = vec![0u8; 20_001];
+        let count = handle.read(&mut read, Some(0)).await.unwrap();
+        handle.close().await.unwrap();
+        read.truncate(count);
+        assert!(read == vec![last as u8; 20_000], "file {}", last % 8);
+    }
+    successor.shutdown().await.unwrap();
+}
