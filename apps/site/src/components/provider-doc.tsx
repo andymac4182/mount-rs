@@ -629,8 +629,8 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
     slug: 'tidb',
     name: 'TiDB',
     eyebrow: 'Provider / distributed SQL',
-    maturity: 'Preview',
-    maturityNote: 'Functional qualification is complete for the defined hosted TiDB/RustFS scope, including durable 3PD/3TiKV restart, fencing/ambiguous commit, and Linux/macOS consumer rows; production topology, IAM, DR, SLO/capacity, release, canary, and rollback gates remain open.',
+    maturity: 'Validated',
+    maturityNote: 'The provider contract passes against a durable 3PD/3TiKV TiDB in CI, before and after component restarts, with fencing, ambiguous commits, trace parity, a real TLS handshake and its refusals, and composition with RustFS and Ozone blocks. Validated describes the software, not a deployment: topology, IAM, backup and restore drills, capacity and rollout remain the operator’s job.',
     summary: (
       <>
         TiDB can supply either side of the split store using the MySQL wire
@@ -738,44 +738,38 @@ WHERE volume_key = '<owned-volume-key>';`,
     ),
     evidence: (
       <>
-        W08 is 100% complete for its defined functional acceptance scope:
-        terminal hosted jobs qualify the durable 3PD/3TiKV restart sequence,
-        provider fencing and ambiguous-commit behavior, live Linux TiDB/RustFS
-        Node/CLI/FUSE composition, ARM Node, Ubuntu NFS, and macOS native-NFS
-        rows. Authoritative hosted runs include
-        <code>35624385556</code>, <code>35627761501</code>, and
-        <code>35631063978</code>; each remains revision- and scope-specific.
-        The repository now also enforces a credential-free W08.39 backup,
-        restore, and disaster-recovery policy with an eight-case regression:
-        transactionally consistent TiDB metadata snapshots, revision capture,
-        encrypted immutable/versioned blocks, isolated restore without a
-        production-writer identity, fresh-client readback, corruption,
-        partial-object and region-loss cases, bounded 60-minute RPO and
-        240-minute RTO, a second region, and named owner sign-offs are required
-        by the checked-in control. This is implementation/static qualification,
-        not a backup, restore, second-region drill, or production approval.
-        Production is still NO-GO: topology, secret management/IAM, backup and
-        restore, upgrade/rollback, SLOs/capacity, security sign-off, on-call,
-        canary, and release-owner approval remain open. A green functional
-        packet is not production deployment evidence.
-        W08.40 adds the credential-free upgrade, compatibility, and rollback
-        policy: pinned current/previous versions, wire/data compatibility,
-        expand-contract migration, interrupted recovery, quorum-preserving
-        rolling upgrades, retained rollback artifacts, writer fencing, and
-        fresh-client readback. Its eight-case static policy/test passed at
-        source <code>66164b78</code>; hosted run
-        <code>35718296219</code> was cancelled before job creation, so P04
-        remains an implementation/static qualification rather than a live
-        upgrade rehearsal. W08.41 adds the matching credential-free
-        observability, SLO, and alerting policy with retention, redaction,
-        error-budget, paging, acknowledgement, runbook, and health-contract
-        controls. Its eight-case static policy/test is integrated at source
-        <code>c0782e3c</code>; current-tip hosted run
-        <code>35721851677</code> remains queued, so no live collector,
-        dashboard, pager, or acknowledgement evidence is claimed.
+        CI run <code>44141640175</code> on <code>main</code> at source{' '}
+        <code>031050cc</code> is the current evidence, on the pinned TiDB
+        v8.5.7 images. The <code>tidb</code> job ends with{' '}
+        <code>TIDB_ACCEPTANCE evidence=durable-multinode-restart</code>: the
+        split-store contract, provider-clock fencing, concurrent publication
+        and an ambiguous commit that is reported as an unknown outcome and
+        not replayed, before and after TiDB, TiKV and PD restarts on a
+        3PD/3TiKV topology. The same job passes the seeded trace-parity
+        harness for five seeds against the mountx oracle.{' '}
+        <code>tidb-tls</code> completes a verified TLS session and four
+        refused ones (unrelated authority, public roots only, wrong host
+        name, plaintext). <code>tidb-rustfs</code> composes TiDB metadata
+        with RustFS blocks, hosts SQLite on a FUSE mount before and after the
+        restarts, and fails a drive over between two servers with the writer
+        lease in TiDB. <code>ozone-tidb</code> composes TiDB metadata with
+        Apache Ozone blocks and measured 3,738 operations a second against
+        its 1,000 floor; that figure is a gate on shared runners, not a
+        capacity number. Still open, and listed in the readiness notes:
+        error codes 1213 and 9006 for an autocommit statement are
+        unverified; power loss and host fsync are not tested; the mounted
+        SQLite test runs on Linux FUSE only; and the backup, upgrade and
+        observability policies under W08 are static checks, not drills.
       </>
     ),
     sources: [
+      { label: 'Current CI evidence on main (run 44141640175)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175' },
+      { label: 'Durable restart and trace-parity job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706049' },
+      { label: 'TLS handshake and refusal job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706134' },
+      { label: 'TiDB with RustFS blocks, SQLite hosting and failover job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706570' },
+      { label: 'TiDB with Ozone blocks job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706208' },
+      { label: 'TiDB readiness notes', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/production-readiness.md#tidb-provider' },
+      { label: 'Maturity levels', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/maturity.md' },
       { label: 'TiDB provider README', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-tidb/README.md' },
       { label: 'TiDB provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-tidb/src/storage.rs' },
       { label: 'TiDB/RustFS consumer matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w08--tidb' },
@@ -784,9 +778,7 @@ WHERE volume_key = '<owned-volume-key>';`,
       { label: 'TiDB production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-production-rollout.md' },
       { label: 'W08.39 backup and restore policy', href: 'https://github.com/andymac4182/mount-rs/commit/896330a' },
       { label: 'W08.40 upgrade and rollback policy', href: 'https://github.com/andymac4182/mount-rs/commit/66164b78' },
-      { label: 'W08.40 hosted policy boundary', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35718296219' },
       { label: 'W08.41 observability and alerting policy', href: 'https://github.com/andymac4182/mount-rs/commit/c0782e3c' },
-      { label: 'Current-tip W08.41 hosted policy', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35721851677' },
     ],
   },
   foundationdb: {

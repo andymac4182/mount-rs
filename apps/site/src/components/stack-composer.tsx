@@ -17,7 +17,7 @@ type Choice = {
 const edges: Choice[] = [
   { id: 'rust', name: 'Rust API', maturity: 'Library', note: 'call it in-process from Rust, with no mount and no daemon', to: '/docs/rust' },
   { id: 'node', name: 'Node API', maturity: 'Library', note: 'call it in-process from Node through native bindings', to: '/docs/node' },
-  { id: 'http', name: 'HTTP API', maturity: 'Preview', note: 'serve many drives over HTTP from one or more servers', to: '/docs/transports/http' },
+  { id: 'http', name: 'HTTP API', maturity: 'Validated', note: 'serve many drives over HTTP from one or more servers', to: '/docs/transports/http' },
   { id: 'webdav', name: 'WebDAV', maturity: 'Preview', note: 'let existing WebDAV clients browse and edit files', to: '/docs/transports/webdav' },
   { id: 'fuse', name: 'FUSE', maturity: 'Preview', note: 'mount it as a real directory through the kernel’s FUSE interface', to: '/docs/transports/fuse' },
   { id: 'nfs', name: 'NFS', maturity: 'Preview', note: 'mount it with the operating system’s own NFS client', to: '/docs/transports/nfs' },
@@ -29,7 +29,7 @@ const metadataStores: Choice[] = [
   { id: 'memory', name: 'Memory', maturity: 'Validated', note: 'kept in the process, gone when it exits', to: '/docs/providers/memory' },
   { id: 'sqlite', name: 'SQLite', maturity: 'Validated', note: 'in one local file', to: '/docs/providers/sqlite' },
   { id: 'pglite', name: 'PGlite', maturity: 'Preview', note: 'over the PostgreSQL wire protocol', to: '/docs/providers/pglite' },
-  { id: 'tidb', name: 'TiDB', maturity: 'Preview', note: 'in distributed SQL shared by many servers', to: '/docs/providers/tidb' },
+  { id: 'tidb', name: 'TiDB', maturity: 'Validated', note: 'in distributed SQL shared by many servers', to: '/docs/providers/tidb' },
   { id: 'foundationdb', name: 'FoundationDB', maturity: 'Experimental', note: 'in a transactional key-value cluster', to: '/docs/providers/foundationdb' },
   { id: 'slatedb', name: 'SlateDB', maturity: 'Experimental', note: 'in a database that itself lives on object storage', to: '/docs/providers/slatedb' },
 ]
@@ -41,7 +41,7 @@ const blockStores: Choice[] = [
   { id: 'r2', name: 'Cloudflare R2', maturity: 'Validated', note: 'as objects in R2 or another S3-compatible store', to: '/docs/providers/r2' },
   { id: 'rustfs', name: 'RustFS', maturity: 'Validated', note: 'as objects in a self-hosted S3-compatible service', to: '/docs/providers/rustfs' },
   { id: 'pglite', name: 'PGlite', maturity: 'Preview', note: 'as rows over the PostgreSQL wire protocol', to: '/docs/providers/pglite' },
-  { id: 'tidb', name: 'TiDB', maturity: 'Preview', note: 'as rows in distributed SQL', to: '/docs/providers/tidb' },
+  { id: 'tidb', name: 'TiDB', maturity: 'Validated', note: 'as rows in distributed SQL', to: '/docs/providers/tidb' },
   { id: 'foundationdb', name: 'FoundationDB', maturity: 'Experimental', note: 'as keys in a transactional key-value cluster', to: '/docs/providers/foundationdb' },
   { id: 'ozone', name: 'Apache Ozone', maturity: 'Experimental', note: 'as objects behind Ozone’s S3 gateway', to: '/docs/providers/ozone' },
 ]

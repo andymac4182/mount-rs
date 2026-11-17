@@ -101,7 +101,7 @@ const routes = [
     path: '/docs/providers/tidb',
     status: 200,
     contentType: 'text/html',
-    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', '3PD/3TiKV', 'MOUNT_RS_TIDB_URL', 'Preview', 'mount_rs_tidb_inodes', 'mount_rs_tidb_block_authority', 'statement_timeout_ms', 'tls_ca_file', 'unknown outcome'],
+    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', '3PD/3TiKV', 'MOUNT_RS_TIDB_URL', 'Validated', '44141640175', 'mount_rs_tidb_inodes', 'mount_rs_tidb_block_authority', 'statement_timeout_ms', 'tls_ca_file', 'unknown outcome'],
   },
   {
     path: '/docs/providers/foundationdb',
@@ -156,7 +156,7 @@ const routes = [
     path: '/docs/transports/http',
     status: 200,
     contentType: 'text/html',
-    expected: ['HTTP multi-drive API', '/v1/drives', 'Preview', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'clusters of mixed releases'],
+    expected: ['HTTP multi-drive API', '/v1/drives', 'Validated', '44141640175', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'clusters of mixed releases'],
   },
   {
     path: '/docs/transports/webdav',
