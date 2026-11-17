@@ -976,9 +976,47 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     } else {
         None
     };
-    server_options.access_log = access_log
-        .clone()
-        .map(|log| log as Arc<dyn mount_rs_http::AccessLog>);
+    // The metrics are counted from what the access log is told, whether
+    // or not that log is written. The listener is bound before any drive
+    // is opened, so that an address in use costs nothing to back out of;
+    // it is kept until the command returns.
+    let metrics = http
+        .metrics
+        .map(|_| mount_rs_http::HttpMetrics::new(env!("CARGO_PKG_VERSION")));
+    let _metrics_listener = match (http.metrics, &metrics) {
+        (Some(config), Some(metrics)) => {
+            let listener = mount_rs_http::MetricsServer::start(
+                config.listen,
+                config.allow_non_loopback,
+                Arc::clone(metrics),
+            )
+            .await
+            .map_err(|error| CliError::runtime(format!("metrics listener: {error}")))?;
+            let record = serde_json::json!({
+                "event": "http_metrics_listening",
+                "address": listener.local_addr().to_string(),
+            });
+            let _ = writeln!(std::io::stderr().lock(), "{record}");
+            Some(listener)
+        }
+        _ => None,
+    };
+    let mut logs: Vec<Arc<dyn mount_rs_http::AccessLog>> = Vec::new();
+    if let Some(log) = &access_log {
+        logs.push(Arc::clone(log) as Arc<dyn mount_rs_http::AccessLog>);
+        if let Some(metrics) = &metrics {
+            let log = Arc::clone(log);
+            metrics.observe_access_log_dropped(move || log.dropped_lines());
+        }
+    }
+    if let Some(metrics) = &metrics {
+        logs.push(Arc::clone(metrics) as Arc<dyn mount_rs_http::AccessLog>);
+    }
+    server_options.access_log = if logs.len() > 1 {
+        Some(Arc::new(mount_rs_http::AccessLogs(logs)))
+    } else {
+        logs.pop()
+    };
     let mut runtimes = Vec::with_capacity(http.drives.len());
     let mut registry = DriveRegistry::new();
     let mut sessions = crate::http_sessions::Sessions::new(http.max_request_bytes, http.sessions)?;
@@ -1109,6 +1147,9 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                     .map_err(io_error)?;
                 configured = configured.with_health_check(check.health_check());
                 storage_checks.push(check);
+            }
+            if let Some(metrics) = &metrics {
+                metrics.observe_drive(&configured);
             }
             registry.register(configured).map_err(invalid_drive)?;
         }

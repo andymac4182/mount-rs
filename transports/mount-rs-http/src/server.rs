@@ -252,7 +252,7 @@ impl DriveConfig {
 
     /// Whether the drive can serve: its driver has not failed, and the
     /// drive's own check, when it has one, agrees.
-    fn health(&self) -> Result<(), FsError> {
+    pub(crate) fn health(&self) -> Result<(), FsError> {
         self.driver.health()?;
         self.health_check.as_ref().map_or(Ok(()), |check| check())
     }
@@ -366,6 +366,10 @@ pub struct AccessRecord<'a> {
 /// must not block and should hand the line to something that writes it
 /// elsewhere.
 pub trait AccessLog: fmt::Debug + Send + Sync + 'static {
+    /// A request has arrived. Exactly one [`record`](Self::record) follows,
+    /// when the request is finished. Like `record` it must not block.
+    fn begin(&self) {}
+
     fn record(&self, record: &AccessRecord<'_>);
 }
 
@@ -1551,6 +1555,7 @@ impl ObservedRequest {
         let log = state.config.access_log.as_ref()?;
         let id = id?;
         let started = Instant::now();
+        log.begin();
         let (route, drive) = describe_route(request.uri().path(), &state.registry);
         let received = Arc::new(AtomicU64::new(0));
         let body = std::mem::replace(request.body_mut(), empty_body());

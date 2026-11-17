@@ -5,7 +5,10 @@
 //! and that driver; HTTP never mounts or reimplements a filesystem.
 
 mod conditional;
+mod metrics;
 mod server;
+
+pub use metrics::{AccessLogs, HttpMetrics, METRICS_CONTENT_TYPE, MetricsServer};
 
 pub use server::{
     AccessLog, AccessRecord, BoxError, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_REQUEST_BYTES,

@@ -355,6 +355,26 @@ renaming a new one into place.
 `http.forwarding`: those authorize against the token read at startup. A
 server with no token file does not handle `SIGHUP` for tokens.
 
+### Metrics
+
+`http.metrics` turns on a second listener that serves Prometheus text at
+`GET /metrics`, without a token:
+
+```json
+"metrics": {"listen": "127.0.0.1:9464"}
+```
+
+`listen` is an IP address and port and must be loopback unless
+`"allow_non_loopback": true` is set beside it. The API listener never serves
+`/metrics`. The series are requests by route template, method and status
+class (`mount_rs_http_requests_total`), a duration histogram by route
+template (`mount_rs_http_request_duration_seconds`), requests in flight,
+request and response body bytes, readiness per drive
+(`mount_rs_http_drive_ready{drive=...}`), dropped access-log lines,
+`process_start_time_seconds` and `mount_rs_build_info{version=...}`. No path
+or token appears in them. The
+[runbook](../../docs/serve-http-runbook.md#metrics) has the full table.
+
 ### Network exposure
 
 The listener is cleartext HTTP/1.1 on loopback. It has no TLS. Remote clients

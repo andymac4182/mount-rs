@@ -123,6 +123,7 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | `drive_shutdown_timeout_ms` | integer | `30000` | >= 1 | How long shutdown gives the drives, all together, to flush and release their writer leases once the listener has stopped. When it passes the process exits with code 1 without waiting further. See [Shutdown](#shutdown). |
 | `max_connections` | integer | `256` | >= 1 | Concurrent TCP connections. Excess connections are accepted and closed immediately with no HTTP response. |
 | `access_log` | boolean | `false` | | Writes one `http_request` JSON line per request to stderr. No path, query, token or header is written. See [Access log](#access-log). |
+| `metrics` | object | none | `{"listen": "IP:PORT"}`, optionally `"allow_non_loopback": true` | Serves Prometheus text at `GET /metrics` on a listener of its own, without a token. `listen` must be a loopback address unless `allow_non_loopback` is `true`. Off unless set. See [Metrics](#metrics). |
 | `token_reload_seconds` | integer | `30` | 0-3600 | How often the token files of the drives are looked at for a change. `0` turns the timer off, leaving SIGHUP as the only trigger. Only valid when a drive's token is a file. See [Rotation](#rotation). |
 | `tcp_nodelay` | boolean | `true` | | Disables Nagle on accepted connections. |
 | `http2_prior_knowledge` | boolean | `false` | | `true` makes the listener cleartext HTTP/2 only (no HTTP/1.1). Leave `false` at launch; the reference proxy configs below speak HTTP/1.1 upstream. With HTTP/2 a stalled download releases its file handle but its connection is not dropped. |
@@ -597,7 +598,8 @@ State of the default build, without qualification:
 | `{"event":"http_token_reload",...}` JSON line on stderr | Yes, each time a token file is reloaded or refused (see [Rotation](#rotation)) |
 | `{"event":"http_drive_storage",...}` JSON line on stderr | Yes, each time the storage of a `host` or `sqlite` drive becomes unreachable or reachable again (see [Health checks](#health-checks)) |
 | Per-request access log (`http_request` JSON lines on stderr) | Only with `"access_log": true`; off by default (see [Access log](#access-log)) |
-| Metrics endpoint (Prometheus or other) | **No** |
+| Metrics endpoint (Prometheus text) | Only with `http.metrics`; off by default, on its own loopback listener (see [Metrics](#metrics)) |
+| `{"event":"http_metrics_listening","address":...}` JSON line on stderr | Once at startup, with `http.metrics` |
 | Request ids in responses | Yes: every response carries `X-Request-Id` (see [Request ids](#request-ids)) |
 | Trace headers in responses | **No** |
 | Per-request error log (which request got a 500 and why) | Which request: yes, with the access log (status and request id). Why: **no** |
@@ -682,11 +684,92 @@ drive ids are not recorded. The CLI does not install an exporter: without a
 subscriber and exporter provided by an embedding application these signals go
 nowhere. See [`observability.md`](observability.md).
 
-The reverse proxy remains the source of request metrics, and of paths and
-client addresses. Configure its access log (status, method, path, upstream
-time, bytes, `X-Request-Id`, without `Authorization`) and export its
-metrics. The server's access log adds the server's own status and timing per
-request.
+The reverse proxy remains the source of paths and client addresses, and of
+what clients experienced: the server cannot count a request that never
+reached it. Configure the proxy's access log (status, method, path,
+upstream time, bytes, `X-Request-Id`, without `Authorization`) and export
+its metrics. The server's access log adds the server's own status and
+timing per request, and the server's metrics add them up.
+
+### Metrics
+
+With `http.metrics` the process serves its own counters in the Prometheus
+text format. It is off unless configured:
+
+```json
+"metrics": {"listen": "127.0.0.1:9464"}
+```
+
+- The metrics have **their own listener**. `GET /metrics` on that address
+  answers; every other path there is `404`, and the API listener has no
+  `/metrics` route. The reverse proxy that publishes the API therefore
+  cannot publish the metrics by accident.
+- **No token is asked for.** That is why `listen` must be a loopback
+  address: anything else is a config error (exit 2) unless
+  `"allow_non_loopback": true` is set beside it. Set that only where the
+  network to the port admits the scraper and nothing else (a security group
+  or NetworkPolicy), or scrape through a sidecar on loopback.
+- `listen` is an IP address and a port, not a host name. An address already
+  in use exits with code 1 before any drive is opened.
+- When the listener is up, stderr gets
+  `{"event":"http_metrics_listening","address":"127.0.0.1:9464"}`.
+- The listener serves at most 8 connections at once and closes any more
+  without an answer. It stops with the process, after the drives are
+  released.
+
+| Series | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `mount_rs_http_requests_total` | counter | `route`, `method`, `status` | Requests finished. `route` is the route template the access log uses (`/v1/drives/{id}/fs/{path}`, `/readyz`, `unmatched`, `invalid`). `method` is `GET`, `HEAD`, `PUT`, `POST`, `DELETE`, `OPTIONS`, `PATCH` or `other`. `status` is the class: `1xx` to `5xx`, or `none` for a request that ended before a response (the client went away, or a shutdown ran out of drain time). |
+| `mount_rs_http_request_duration_seconds` | histogram | `route` | From a request's arrival until its response body was sent or abandoned: a download's time includes the client reading it. Buckets from 5 ms to 300 s. |
+| `mount_rs_http_requests_in_flight` | gauge | | Requests that have arrived and are not finished. |
+| `mount_rs_http_request_body_bytes_total` | counter | | Request body bytes read. |
+| `mount_rs_http_response_body_bytes_total` | counter | | Response body bytes handed to connections. |
+| `mount_rs_http_drive_ready` | gauge | `drive` | 1 while the drive is ready as `/readyz` counts it, 0 while it is not (see [Health checks](#health-checks)). `drive` is the configured drive id. |
+| `mount_rs_http_access_log_dropped_lines_total` | counter | | Access-log lines dropped because stderr was not being read. Present only with `"access_log": true`. |
+| `process_start_time_seconds` | gauge | | When the process started counting, as Unix time. A change means a restart, and every counter began again at zero. |
+| `mount_rs_build_info` | gauge | `version` | Always 1; `version` is the version of the binary. |
+
+What the labels can hold is fixed by the server: a route template, a method
+from the list, a status class, a configured drive id, the version. **No
+path, query, header, client address or token is ever in the output**, and a
+client cannot add a series by inventing paths or methods.
+
+Limits:
+
+- Request counts and durations are **not split by drive**. Split the
+  proxy's log by the drive id in the path for that.
+- A request is counted when it is finished, so a long download appears in
+  `requests_in_flight` first and in the counters when it ends.
+- Scrapes are not counted: they do not pass through the API listener.
+- Requests refused before they are read (connections over
+  `max_connections`, a connection that sends no valid request) are not
+  counted. `http_accept_failed` is still a stderr line only.
+- With the experimental `forwarding.owner`, drives are served through the
+  peer listener and have no `mount_rs_http_drive_ready` series. The metrics
+  have not been validated with `remote_sessions` or `forwarding`.
+
+Example scrape config and the queries behind the alerts below:
+
+```yaml
+scrape_configs:
+  - job_name: mount-rs-http
+    static_configs:
+      - targets: ["127.0.0.1:9464"]
+```
+
+```promql
+# Share of requests answered 5xx, over 5 minutes
+sum(rate(mount_rs_http_requests_total{status="5xx"}[5m]))
+  / sum(rate(mount_rs_http_requests_total[5m]))
+
+# 99th percentile of metadata requests
+histogram_quantile(0.99, sum by (le) (
+  rate(mount_rs_http_request_duration_seconds_bucket{route="/v1/drives/{id}/stat/{path}"}[5m])))
+
+# A drive that is not ready
+mount_rs_http_drive_ready == 0
+```
+
 
 ### What to alert on
 
@@ -706,6 +789,10 @@ request.
 | `drive shutdown timed out` on stderr at stop | Process stderr | A drive did not flush and release its lease within `drive_shutdown_timeout_ms`; the lease stays held until it expires | Check the storage of the drive named in the message; expect the restart to wait for the lease; raise the bound if the storage was only slow |
 | `HTTP server close timed out` on stderr at stop | Process stderr | The drain deadline passed and requests were aborted | Usually a stalled client; check that `drain_timeout_ms` exceeds `request_timeout_ms` |
 | 401 rate spike | Proxy log | Rotated token not picked up, or probing | Check with the consumer |
+| `mount_rs_http_drive_ready == 0` for more than 1 minute | Server metrics | The same as `/readyz` 503, but naming the drive | As for `/readyz` |
+| 5xx share of `mount_rs_http_requests_total` above the objective | Server metrics | Storage errors, timeouts or a failed drive | See [Failure modes and recovery](#failure-modes-and-recovery) |
+| `mount_rs_http_access_log_dropped_lines_total` rising | Server metrics | stderr is not being read fast enough; access-log lines are being lost | Fix the log collector |
+| `process_start_time_seconds` changed | Server metrics | The process restarted | Expected after a deploy; otherwise find out why |
 | `http_token_reload` line with `"outcome":"refused"` on stderr | Process stderr | A token file is missing, unreadable or not valid. The drive still accepts the tokens it accepted before, so a rotation that was meant to happen has not | Fix the file named in `error`; send `SIGHUP` or wait for the timer; look for `"outcome":"reloaded"` |
 | 413 rate above baseline | Proxy log | Consumers hitting the upload or listing limit | Talk to the consumer; consider the limits |
 | Free disk on the storage volume below threshold | Host | Leads to 507 | Add space |

@@ -288,6 +288,8 @@ pub(crate) struct HttpServiceConfig {
     /// How often token files are looked at for a change, in seconds; zero
     /// reloads them on SIGHUP only.
     pub token_reload_seconds: u64,
+    /// The metrics listener; none unless configured.
+    pub metrics: Option<MetricsConfig>,
     pub drives: Vec<HttpDriveConfig>,
     pub disk_cache_budget: Option<DiskCacheBudgetConfig>,
     pub tidb_metadata_pool_limit: Option<usize>,
@@ -351,6 +353,15 @@ pub(crate) struct HttpDriveConfig {
     pub id: String,
     pub token: TokenSource,
     pub driver: ConfigSpec,
+}
+
+/// The listener that serves `GET /metrics` (`http.metrics`). It is apart
+/// from the API listener and asks for no token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MetricsConfig {
+    pub listen: std::net::SocketAddr,
+    /// Whether `listen` may be other than loopback.
+    pub allow_non_loopback: bool,
 }
 
 /// Where a drive's bearer token comes from.
@@ -679,6 +690,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "request_timeout_ms",
             "access_log",
             "token_reload_seconds",
+            "metrics",
             "disk_cache_budget",
             "tidb_metadata_pool_limit",
             "cache_report_interval_seconds",
@@ -900,6 +912,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         request_timeout_ms,
         access_log,
         token_reload_seconds,
+        metrics: object.get("metrics").map(parse_metrics).transpose()?,
         drives: parsed_drives,
         tidb_metadata_pool_limit: object
             .get("tidb_metadata_pool_limit")
@@ -913,6 +926,33 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             .get("disk_cache_budget")
             .map(parse_disk_budget)
             .transpose()?,
+    })
+}
+
+/// Parse `http.metrics`. The listener asks for no token, so an address
+/// that is not loopback has to be asked for by name.
+fn parse_metrics(value: &Value) -> Result<MetricsConfig, ConfigError> {
+    let path = "config.http.metrics";
+    let fields = object(value, path)?;
+    reject_unknown(fields, &["listen", "allow_non_loopback"], path)?;
+    let listen = required_string(fields, "listen", path)?
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| {
+            ConfigError::at(
+                "config.http.metrics.listen",
+                "must be an IP address and a port, such as 127.0.0.1:9464",
+            )
+        })?;
+    let allow_non_loopback = optional_bool(fields, "allow_non_loopback", path)?.unwrap_or(false);
+    if !allow_non_loopback && !listen.ip().is_loopback() {
+        return Err(ConfigError::at(
+            "config.http.metrics.listen",
+            "must be a loopback address: the metrics are served without a token; set allow_non_loopback only where the network to this listener is private",
+        ));
+    }
+    Ok(MetricsConfig {
+        listen,
+        allow_non_loopback,
     })
 }
 
@@ -4003,6 +4043,61 @@ mod tests {
             let error = parse(&source).unwrap_err().to_string();
             assert!(error.contains("config.http.drives[0].token"), "{error}");
             assert!(!error.contains("a-token-written"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_metrics_listener_is_off_unless_configured_and_loopback_unless_allowed() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[
+            {"id":"c","token":{"env":"TEST_TOKEN"},"driver":{"kind":"memory"}}
+        ]}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("."))
+                .map(|config| config.http.unwrap().metrics)
+        };
+        assert_eq!(parse(&source).unwrap(), None);
+        for (listen, allow) in [
+            ("127.0.0.1:9464", None),
+            ("[::1]:9464", None),
+            ("127.0.0.1:0", Some(false)),
+            ("0.0.0.0:9464", Some(true)),
+            ("10.1.2.3:9464", Some(true)),
+        ] {
+            source["http"]["metrics"] = serde_json::json!({"listen": listen});
+            if let Some(allow) = allow {
+                source["http"]["metrics"]["allow_non_loopback"] = allow.into();
+            }
+            assert_eq!(
+                parse(&source).unwrap(),
+                Some(MetricsConfig {
+                    listen: listen.parse().unwrap(),
+                    allow_non_loopback: allow.unwrap_or(false),
+                }),
+                "{listen}"
+            );
+        }
+        for refused in [
+            serde_json::json!({"listen": "0.0.0.0:9464"}),
+            serde_json::json!({"listen": "10.1.2.3:9464", "allow_non_loopback": false}),
+            serde_json::json!({"listen": "[::]:9464"}),
+        ] {
+            source["http"]["metrics"] = refused;
+            let error = parse(&source).unwrap_err().to_string();
+            assert!(error.contains("config.http.metrics.listen"), "{error}");
+            assert!(error.contains("loopback"), "{error}");
+        }
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!(true),
+            serde_json::json!("127.0.0.1:9464"),
+            serde_json::json!({"listen": "localhost:9464"}),
+            serde_json::json!({"listen": "127.0.0.1"}),
+            serde_json::json!({"listen": 9464}),
+            serde_json::json!({"listen": "127.0.0.1:9464", "path": "/metrics"}),
+            serde_json::json!({"listen": "127.0.0.1:9464", "allow_non_loopback": "yes"}),
+        ] {
+            source["http"]["metrics"] = invalid.clone();
+            assert!(parse(&source).is_err(), "{invalid}");
         }
     }
 

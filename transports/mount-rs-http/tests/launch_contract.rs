@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, Result, Stats,
 };
-use mount_rs_http::{DriveConfig, DriveRegistry, DriveTokens, HttpServer, HttpServerOptions};
+use mount_rs_http::{
+    AccessLog, DriveConfig, DriveRegistry, DriveTokens, HttpMetrics, HttpServer, HttpServerOptions,
+    METRICS_CONTENT_TYPE, MetricsServer,
+};
 use mount_rs_memfs::MemoryFs;
 use mount_rs_sqlite_fs::open_sqlite_memory;
 use reqwest::StatusCode;
@@ -1126,6 +1129,206 @@ async fn an_unknown_operation_is_no_route_with_or_without_a_token() {
         );
     }
     server.close().await.expect("close");
+}
+
+/// The value of one series in a metrics scrape.
+fn sample(text: &str, series: &str) -> Option<f64> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+        .map(|value| value.parse().expect("a number"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_metrics_listener_reports_what_the_server_did_and_no_path_or_token() {
+    let metrics = HttpMetrics::new("9.9.9-test");
+    let reachable = Arc::new(AtomicBool::new(true));
+    let seen = Arc::clone(&reachable);
+    let checked = DriveConfig::new("checked", Arc::new(MemoryFs::empty()), TOKEN)
+        .expect("drive config")
+        .with_health_check(Arc::new(move || {
+            if seen.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Eio))
+            }
+        }));
+    let plain = DriveConfig::new("plain", Arc::new(MemoryFs::empty()), TOKEN).unwrap();
+    metrics.observe_drive(&checked);
+    metrics.observe_drive(&plain);
+    let mut registry = DriveRegistry::new();
+    registry.register(checked).expect("register");
+    registry.register(plain).expect("register");
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            access_log: Some(Arc::clone(&metrics) as Arc<dyn AccessLog>),
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+    let scraper = MetricsServer::start("127.0.0.1:0".parse().unwrap(), false, metrics)
+        .await
+        .expect("metrics listener");
+    let metrics_url = format!("http://{}/metrics", scraper.local_addr());
+    let client = reqwest::Client::new();
+    let scrape = || async {
+        let response = client.get(&metrics_url).send().await.expect("scrape");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"].to_str().unwrap(),
+            METRICS_CONTENT_TYPE
+        );
+        response.text().await.expect("text")
+    };
+
+    let api = |method: reqwest::Method, route: &str, token: &str| {
+        client
+            .request(method, format!("{}{route}", server.url()))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+    };
+    let secret_path = "/v1/drives/plain/fs/a-secret-name.txt";
+    let put = api(reqwest::Method::PUT, secret_path, TOKEN)
+        .body(vec![7_u8; 1000])
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success(), "{}", put.status());
+    for _ in 0..3 {
+        let got = api(reqwest::Method::GET, secret_path, TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(got.bytes().await.unwrap().len(), 1000);
+    }
+    let wrong = api(reqwest::Method::GET, secret_path, "a-wrong-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    let missing = api(reqwest::Method::GET, "/v1/drives/plain/fs/absent", TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(get(&server, "/readyz").await.status(), StatusCode::OK);
+    assert_eq!(
+        get(&server, "/no/such/route").await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    // A request is counted once its response body is finished with, which
+    // can be a moment after the client has read it.
+    let fs = "/v1/drives/{id}/fs/{path}";
+    let requests = |text: &str, route: &str, method: &str, status: &str| {
+        sample(
+            text,
+            &format!(
+                "mount_rs_http_requests_total{{route=\"{route}\",method=\"{method}\",status=\"{status}\"}}"
+            ),
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = scrape().await;
+        if requests(&text, "unmatched", "GET", "4xx") == Some(1.0)
+            && sample(&text, "mount_rs_http_requests_in_flight") == Some(0.0)
+        {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "{text}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(requests(&text, fs, "PUT", "2xx"), Some(1.0), "{text}");
+    assert_eq!(requests(&text, fs, "GET", "2xx"), Some(3.0), "{text}");
+    assert_eq!(requests(&text, fs, "GET", "4xx"), Some(2.0), "{text}");
+    assert_eq!(
+        requests(&text, "/readyz", "GET", "2xx"),
+        Some(1.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!("mount_rs_http_request_duration_seconds_count{{route=\"{fs}\"}}")
+        ),
+        Some(6.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!("mount_rs_http_request_duration_seconds_bucket{{route=\"{fs}\",le=\"+Inf\"}}")
+        ),
+        Some(6.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_request_body_bytes_total"),
+        Some(1000.0)
+    );
+    let sent = sample(&text, "mount_rs_http_response_body_bytes_total").expect("bytes out");
+    assert!(sent >= 3000.0, "{sent}");
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"checked\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"plain\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_build_info{version=\"9.9.9-test\"}"),
+        Some(1.0)
+    );
+    assert!(sample(&text, "process_start_time_seconds").expect("start") > 1.6e9);
+    // Nothing a client typed, and no credential.
+    for private in [
+        "a-secret-name",
+        "absent",
+        "no/such",
+        TOKEN,
+        "a-wrong-token-value",
+    ] {
+        assert!(!text.contains(private), "{private} in {text}");
+    }
+
+    // Readiness per drive follows the drive, as /readyz does.
+    reachable.store(false, Ordering::Release);
+    let text = scrape().await;
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"checked\"}"),
+        Some(0.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"plain\"}"),
+        Some(1.0)
+    );
+    // Scrapes are not requests to the API.
+    assert_eq!(requests(&text, "unmatched", "GET", "4xx"), Some(1.0));
+
+    // The listener serves the metrics and nothing else.
+    let base = format!("http://{}", scraper.local_addr());
+    for other in ["/", "/healthz", "/v1/drives", "/metrics/"] {
+        let response = client.get(format!("{base}{other}")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{other}");
+    }
+    let posted = client.post(&metrics_url).send().await.unwrap();
+    assert_eq!(posted.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(posted.headers()["allow"], "GET, HEAD");
+    let head = client.head(&metrics_url).send().await.unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    // And the API listener does not serve them.
+    assert_eq!(
+        get(&server, "/metrics").await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    drop(scraper);
+    server.close().await.expect("close");
+    assert!(
+        client.get(&metrics_url).send().await.is_err(),
+        "the listener stopped"
+    );
 }
 
 /// Everything a caller can see of a response, for comparing two of them.

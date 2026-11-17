@@ -570,6 +570,13 @@ background. A `503` from `/readyz` says nothing about any one request; a
 drive that is not ready answers its requests with the errors in the table
 above.
 
+## Metrics
+
+The API has no metrics route. An operator can turn on a separate listener,
+on a loopback address, that serves the server's own request counts,
+durations and per-drive readiness in the Prometheus text format; see the
+runbook's "Metrics" section. Nothing in it names a path or a token.
+
 ## Limits
 
 Defaults; the operator can change them.

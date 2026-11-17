@@ -17,16 +17,21 @@ Related documents:
 
 ## Where measurements come from
 
-The server exposes no metrics endpoint. It adds a request id to every
-response, and with `"access_log": true` writes one line per request to
-stderr (status, duration, route template, byte counts, request id), which is
-off by default. The runbook's "Observability" section describes both and
-keeps the reverse proxy as the source of request metrics. Every indicator below is therefore measured at one of
-three places:
+The server adds a request id to every response. With `"access_log": true`
+it writes one line per request to stderr (status, duration, route template,
+byte counts, request id), and with `http.metrics` it serves counters and a
+duration histogram in the Prometheus text format on a loopback listener of
+its own. Both are off by default. The runbook's "Observability" section
+describes them. The server's figures cover what the server did; a request
+that never reached it (refused by the proxy, lost on the way, turned away
+at `max_connections`) is in none of them, so the reverse proxy stays the
+source for what clients experienced. Every indicator below is measured at
+one of these places:
 
 | Source | Gives |
 | --- | --- |
 | The reverse proxy or load balancer | Per-request status, method, path, upstream response time, bytes |
+| The server's metrics (`http.metrics`) | Requests by route template, method and status class; a duration histogram by route template; requests in flight; body bytes; readiness per drive |
 | A probe (load balancer health check or blackbox prober) | `/healthz` and `/readyz` status over time; a synthetic read-after-write |
 | The service manager and process stderr | Exits, restarts, `http_accept_failed` lines, `mount_cache_stats` lines if enabled |
 
@@ -258,18 +263,20 @@ table, or follow from it.
 
 | Wanted | Status in the default build | Workaround |
 | --- | --- | --- |
-| Request count, status and latency from the server itself | **Partly.** Per request, with `"access_log": true`: an `http_request` JSON line on stderr with status and duration. No metrics endpoint and no aggregation | Derive counts and latencies from those lines in the log pipeline, or use the proxy's access log and metrics |
+| Request count, status and latency from the server itself | Available, off by default. With `http.metrics`: `mount_rs_http_requests_total` by route template, method and status class, and the `mount_rs_http_request_duration_seconds` histogram by route template. With `"access_log": true`: one `http_request` line per request | |
+| Requests in flight | Available with `http.metrics`: `mount_rs_http_requests_in_flight` | |
 | Why a request got a `500` | **Not implemented.** The client receives a POSIX code; the underlying storage message is not logged anywhere | Correlate by time with storage-side logs |
 | Request ids in responses | Implemented: every response carries `X-Request-Id`, echoed from the request when it is safe | Have the proxy pass or set `X-Request-Id` and log it |
 | Trace headers in responses | **Not implemented** | |
 | Time spent in storage per request | **Not implemented** | Storage-side metrics |
 | Lease renewal latency or margin before a drive fails closed | **Not implemented.** The only signal is `/readyz` turning `503` after the fact | Monitor the metadata store's latency directly |
-| Health of `sqlite`-kind, `host` and `memory` drives | **Not implemented.** They never report unhealthy | Synthetic read-after-write |
+| Health of `sqlite`-kind and `host` drives | Partly. `/readyz`, and `mount_rs_http_drive_ready` per drive with `http.metrics`, follow whether the database file or root directory can be opened, and a `sqlite` drive's last save. Not whether a `host` drive can be written. A `memory` drive has nothing to lose | Synthetic read-after-write |
 | Current connection count against `max_connections` | **Not implemented** | Count upstream connections at the proxy or on the host |
 | Upload memory budget in use; requests waiting for it | **Not implemented.** Saturation shows only as `504` on uploads | Watch upload `504`s and upload concurrency at the proxy |
-| Per-drive figures | **Not implemented** in the server | Split the proxy log by the drive id in the path |
+| Per-drive figures | Readiness only: `mount_rs_http_drive_ready{drive=...}` with `http.metrics`. Request counts and durations are **not** split by drive | Split the proxy log by the drive id in the path, or the access log by its `drive` field |
+| Access-log lines lost | Available with `http.metrics` and `"access_log": true`: `mount_rs_http_access_log_dropped_lines_total` | |
 | Cache hit rates | Available: `mount_cache_stats` lines on stderr with `cache_report_interval_seconds`, for drives with a cache | |
-| Failed `accept` calls | Available: `http_accept_failed` lines on stderr | |
+| Failed `accept` calls | Available: `http_accept_failed` lines on stderr. Not in the metrics | |
 
 With the CLI built with `--features observability` and run with
 `MOUNT_RS_TELEMETRY=1`, the server records a span, a completion event and the
@@ -287,10 +294,12 @@ subscriber and exporter receives them. See [`observability.md`](observability.md
   High): a stalled TiDB hangs a statement and every operation queues behind
   it. On `serve-http` that would be expected to show as request timeouts
   (`504`); this was not tested.
-- **There is no GitHub issue for the missing metrics endpoint.** (Request
-  ids and an opt-in access log have since been added.) At the time of writing the repository's issue tracker has
-  one open issue, on an unrelated subject. The gap is recorded only in the
-  two documents above. Opening an issue for it is recommended, so that
+- Request ids, an opt-in access log and an opt-in metrics endpoint have
+  been added since this section was first written. What is still missing is
+  in the table above: why a request failed, time spent in storage, lease
+  margin, connection and upload-budget saturation, and request figures per
+  drive. None of these has a GitHub issue; the gap is recorded only in the
+  two documents above. Opening issues for them is recommended, so that
   [`maturity.md`](maturity.md)'s requirement for "the observability a
   deployment needs" has something to close against.
 

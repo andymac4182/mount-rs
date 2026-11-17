@@ -117,7 +117,7 @@ is a breaking change.
 | New optional config keys with a default that preserves existing behaviour | An existing config file keeps working on a newer binary. The reverse is not true; see [Config file compatibility](#config-file-compatibility). |
 | New accepted values for an existing key | Same. |
 | The text of error messages on stderr, beyond the `mount-rs: ` prefix | Alert on exit codes, not on message text. The runbook quotes several messages (`EAGAIN ... acquire writer`, `HTTP server close timed out`); treat those as aids to diagnosis. |
-| New JSON event lines on stderr, and new fields in `mount_cache_stats`, `http_accept_failed`, `http_drive_storage` and `http_token_reload` lines | Parse by `event` name; ignore unknown lines and fields. |
+| New JSON event lines on stderr, and new fields in `mount_cache_stats`, `http_accept_failed`, `http_drive_storage`, `http_token_reload` and `http_metrics_listening` lines | Parse by `event` name; ignore unknown lines and fields. |
 | Signals recorded by the optional `observability` feature | Not part of v1. |
 | On-disk and in-database storage formats | Governed by [`serve-http-upgrade.md`](serve-http-upgrade.md), not by the API version. |
 

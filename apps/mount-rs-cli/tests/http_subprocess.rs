@@ -972,6 +972,264 @@ fn a_token_file_is_rotated_without_a_restart() {
     );
 }
 
+/// With `http.metrics` the process serves Prometheus text on a listener
+/// of its own, counting what the API listener did.
+#[cfg(unix)]
+#[test]
+fn the_metrics_listener_counts_requests_and_follows_drive_readiness() {
+    let root = temporary_root();
+    let host_root = root.join("host-root");
+    fs::create_dir(&host_root).expect("host root");
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {
+            "host": "127.0.0.1",
+            "port": 0,
+            "access_log": true,
+            "metrics": {"listen": "127.0.0.1:0"},
+            "drives": [
+                {
+                    "id": "memory",
+                    "token": {"env": "MOUNT_RS_HTTP_MEMORY_TOKEN"},
+                    "driver": {"kind": "memory"}
+                },
+                {
+                    "id": "host",
+                    "token": {"env": "MOUNT_RS_HTTP_SPLIT_TOKEN"},
+                    "driver": {"kind": "host", "root": host_root}
+                }
+            ]
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    let mut child = HttpChild::start(&config_path, root.clone());
+    let (address, _ready) = child.ready();
+    // The listener announces itself on stderr before the drives open.
+    let metrics_address: SocketAddr = loop {
+        let line = child
+            .stderr
+            .recv_timeout(Duration::from_secs(30))
+            .expect("metrics listener line");
+        if let Ok(record) = serde_json::from_str::<serde_json::Value>(&line)
+            && record["event"] == "http_metrics_listening"
+        {
+            break record["address"].as_str().unwrap().parse().unwrap();
+        }
+    };
+    assert!(metrics_address.ip().is_loopback());
+    assert_ne!(metrics_address, address);
+    let sample = |text: &str, series: &str| -> Option<f64> {
+        text.lines()
+            .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+            .map(|value| value.parse().expect("a number"))
+    };
+    // No token is asked for.
+    let scrape = || {
+        let response = request(metrics_address, "GET", "/metrics", "", &[]);
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header("content-type"),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        String::from_utf8(response.body).expect("metrics text")
+    };
+
+    let put = request(
+        address,
+        "PUT",
+        "/v1/drives/memory/fs/a-private-name.bin",
+        "memory-test-token",
+        &[1_u8; 500],
+    );
+    assert!((200..300).contains(&put.status), "{}", put.status);
+    for _ in 0..2 {
+        let got = request(
+            address,
+            "GET",
+            "/v1/drives/memory/fs/a-private-name.bin",
+            "memory-test-token",
+            &[],
+        );
+        assert_eq!(got.status, 200);
+    }
+    let denied = request(
+        address,
+        "GET",
+        "/v1/drives/memory/stat",
+        "not-the-token",
+        &[],
+    );
+    assert_eq!(denied.status, 401);
+
+    let fs_route = "/v1/drives/{id}/fs/{path}";
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let text = loop {
+        let text = scrape();
+        let denied = sample(
+            &text,
+            "mount_rs_http_requests_total{route=\"/v1/drives/{id}/stat/{path}\",method=\"GET\",status=\"4xx\"}",
+        );
+        if denied == Some(1.0) {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "{text}");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(
+        sample(
+            &text,
+            &format!(
+                "mount_rs_http_requests_total{{route=\"{fs_route}\",method=\"PUT\",status=\"2xx\"}}"
+            )
+        ),
+        Some(1.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!(
+                "mount_rs_http_requests_total{{route=\"{fs_route}\",method=\"GET\",status=\"2xx\"}}"
+            )
+        ),
+        Some(2.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!("mount_rs_http_request_duration_seconds_count{{route=\"{fs_route}\"}}")
+        ),
+        Some(3.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_request_body_bytes_total"),
+        Some(500.0)
+    );
+    assert!(sample(&text, "mount_rs_http_response_body_bytes_total").unwrap() >= 1000.0);
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"memory\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"host\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_access_log_dropped_lines_total"),
+        Some(0.0)
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!(
+                "mount_rs_build_info{{version=\"{}\"}}",
+                env!("CARGO_PKG_VERSION")
+            )
+        ),
+        Some(1.0),
+        "{text}"
+    );
+    assert!(sample(&text, "process_start_time_seconds").unwrap() > 1.6e9);
+    for private in ["a-private-name", "memory-test-token", "not-the-token"] {
+        assert!(!text.contains(private), "{private} in {text}");
+    }
+
+    // A drive that loses its storage shows as not ready, by its id.
+    fs::rename(&host_root, root.join("host-root.moved")).expect("move the host root away");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let text = scrape();
+        if sample(&text, "mount_rs_http_drive_ready{drive=\"host\"}") == Some(0.0) {
+            assert_eq!(
+                sample(&text, "mount_rs_http_drive_ready{drive=\"memory\"}"),
+                Some(1.0)
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "{text}");
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // The two listeners are apart: neither serves the other's routes.
+    assert_eq!(request(address, "GET", "/metrics", "", &[]).status, 404);
+    assert_eq!(
+        request(metrics_address, "GET", "/healthz", "", &[]).status,
+        404
+    );
+    assert_eq!(
+        request(
+            metrics_address,
+            "GET",
+            "/v1/drives",
+            "memory-test-token",
+            &[]
+        )
+        .status,
+        404
+    );
+
+    child.signal(libc::SIGINT);
+    let exit = child.wait_for_exit(Duration::from_secs(10));
+    assert!(exit.success(), "{exit}");
+    // The access log was written as well as counted.
+    let (_stdout, stderr) = child.output();
+    assert!(
+        stderr
+            .iter()
+            .any(|line| line.contains("\"event\":\"http_request\"")),
+        "{stderr:?}"
+    );
+}
+
+/// The metrics are off unless asked for, and a metrics address that is in
+/// use stops the server before it opens a drive.
+#[test]
+fn the_metrics_listener_is_off_by_default_and_a_taken_address_fails_startup() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let root = temporary_root();
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {
+            "host": "127.0.0.1", "port": 0,
+            "metrics": {"listen": taken.local_addr().unwrap().to_string()},
+            "drives": [{
+                "id": "memory",
+                "token": {"env": "MOUNT_RS_HTTP_MEMORY_TOKEN"},
+                "driver": {"kind": "memory"}
+            }]
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    let output = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["serve-http", "--config"])
+        .arg(&config_path)
+        .env("MOUNT_RS_HTTP_MEMORY_TOKEN", "memory-test-token")
+        .output()
+        .expect("run mount-rs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("metrics listener"), "{stderr}");
+    let _ = fs::remove_dir_all(&root);
+
+    // Without the key: no listener, and the API listener has no such route.
+    let root = temporary_root();
+    let config_path = write_http_config(&root);
+    let mut child = HttpChild::start(&config_path, root);
+    let (address, _ready) = child.ready();
+    assert_eq!(request(address, "GET", "/metrics", "", &[]).status, 404);
+    let _ = child.kill_owned();
+    let (_stdout, stderr) = child.output();
+    assert!(
+        !stderr
+            .iter()
+            .any(|line| line.contains("http_metrics_listening")),
+        "{stderr:?}"
+    );
+}
+
 /// A server with no token file leaves SIGHUP alone: it ends the process,
 /// as it did before tokens could be reloaded.
 #[cfg(unix)]
