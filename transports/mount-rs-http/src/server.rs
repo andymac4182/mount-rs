@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -52,6 +52,15 @@ pub const DEFAULT_BUFFERED_UPLOAD_REQUESTS: usize = 4;
 /// Names beginning with this are the server's own: the temporary sibling an
 /// upload is written to before it replaces its target on a driver whose
 /// `write_file` is not atomic. Clients can neither name nor list them.
+/// The header that names a request. A request that carries one valid value
+/// (1 to 128 characters of `A-Z a-z 0-9 . _ -`) keeps it; any other request
+/// is given a generated one. Every response the application produces
+/// carries the value, and so does the request a handler or a forwarding hop
+/// sees.
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+/// Longest client-supplied request id that is echoed.
+pub const MAX_REQUEST_ID_BYTES: usize = 128;
+
 pub const RESERVED_NAME_PREFIX: &str = ".mount-rs-upload.";
 
 /// How long a close that ran out of drain time waits (at most; never longer
@@ -206,6 +215,46 @@ impl DriveRegistry {
     }
 }
 
+/// One request, as an [`AccessLog`] is told about it.
+///
+/// It names no path and no credential: the route is a template, and the
+/// drive is given only when the request named a drive this server is
+/// configured with, so nothing a client typed into the URL is repeated.
+#[derive(Debug, Clone, Copy)]
+pub struct AccessRecord<'a> {
+    /// The value of the response's `x-request-id`.
+    pub request_id: &'a str,
+    pub method: &'a str,
+    /// The route's template, such as `/v1/drives/{id}/fs/{path}`;
+    /// `unmatched` for a path that is no route, and `invalid` for one the
+    /// server rejects before routing.
+    pub route: &'static str,
+    /// The configured drive the request named, whether or not it was
+    /// authorized for it.
+    pub drive: Option<&'a str>,
+    /// The response status; `None` when the request ended before the
+    /// server produced a response (the client went away, or a shutdown
+    /// ran out of drain time).
+    pub status: Option<u16>,
+    /// From the request's arrival until its response body was finished
+    /// with: sent in full, or abandoned.
+    pub duration: Duration,
+    /// Request body bytes the server read.
+    pub bytes_in: u64,
+    /// Response body bytes handed to the connection. A `HEAD` response
+    /// counts none, and a download that was cut short counts what it sent.
+    pub bytes_out: u64,
+}
+
+/// Receives one [`AccessRecord`] per request.
+///
+/// `record` runs on the request's task, as its response body is dropped: it
+/// must not block and should hand the line to something that writes it
+/// elsewhere.
+pub trait AccessLog: fmt::Debug + Send + Sync + 'static {
+    fn record(&self, record: &AccessRecord<'_>);
+}
+
 /// HTTP listener and transport limits.
 #[derive(Debug, Clone)]
 pub struct HttpServerOptions {
@@ -239,6 +288,9 @@ pub struct HttpServerOptions {
     /// `None` is four times `max_request_bytes`; a smaller value than
     /// `max_request_bytes` is raised to it.
     pub max_buffered_upload_bytes: Option<usize>,
+    /// Told about every request once its response is finished with
+    /// (default: none). Without one a request pays for a single check.
+    pub access_log: Option<Arc<dyn AccessLog>>,
     #[cfg(feature = "observability")]
     pub telemetry: Telemetry,
 }
@@ -260,6 +312,7 @@ impl Default for HttpServerOptions {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_buffered_upload_bytes: None,
+            access_log: None,
             #[cfg(feature = "observability")]
             telemetry: Telemetry::disabled(),
         }
@@ -329,6 +382,7 @@ struct RequestConfig {
     request_timeout: Duration,
     upload_budget: Arc<Semaphore>,
     control: RuntimeControl,
+    access_log: Option<Arc<dyn AccessLog>>,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
 }
@@ -502,6 +556,7 @@ impl HttpServer {
                     request_timeout: positive_duration(options.request_timeout),
                     upload_budget: Arc::new(Semaphore::new(upload_budget_units(upload_budget))),
                     control,
+                    access_log: options.access_log,
                     #[cfg(feature = "observability")]
                     telemetry: options.telemetry,
                 },
@@ -543,7 +598,11 @@ impl HttpServer {
             drained: self.drained.clone(),
         };
         if self.closing.load(Ordering::Acquire) != 0 {
-            return error_response(RequestError::server_closing());
+            let mut request = request;
+            let id = assign_request_id(&mut request);
+            let observed = ObservedRequest::begin(&mut request, id.as_ref(), &self.state);
+            let response = with_request_id(error_response(RequestError::server_closing()), id);
+            return ObservedRequest::finish(observed, response);
         }
         match handle_request(request, self.state.clone()).await {
             Ok(response) => response,
@@ -1232,11 +1291,263 @@ impl HttpResponseFailure {
     }
 }
 
+/// Marks a request whose id has been settled, so that an application nested
+/// behind a handler (session routing in front of the drive routes) leaves
+/// the id to the listener that received the request.
+#[derive(Clone, Copy)]
+struct RequestScope;
+
+fn valid_request_id(value: &[u8]) -> bool {
+    (1..=MAX_REQUEST_ID_BYTES).contains(&value.len())
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// A new request id: 32 lowercase hexadecimal characters, unique for
+/// practical purposes across processes. It identifies a request; it is not a
+/// secret and authorizes nothing.
+fn generate_request_id() -> header::HeaderValue {
+    use std::hash::{BuildHasher, RandomState};
+    static KEYS: OnceLock<(RandomState, RandomState)> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let (high, low) = KEYS.get_or_init(|| (RandomState::new(), RandomState::new()));
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let id = format!(
+        "{:016x}{:016x}",
+        high.hash_one(sequence),
+        low.hash_one(sequence)
+    );
+    header::HeaderValue::from_maybe_shared(Bytes::from(id))
+        .expect("hexadecimal digits are a valid header value")
+}
+
+/// Settle the id of a request that does not have one yet: keep the single
+/// valid `x-request-id` the client sent, or replace whatever it sent with a
+/// generated id. The request then carries exactly that value, which is what
+/// a handler forwards. Returns `None` for a request an outer listener has
+/// already settled.
+fn assign_request_id(request: &mut Request<HttpBody>) -> Option<header::HeaderValue> {
+    if request.extensions().get::<RequestScope>().is_some() {
+        return None;
+    }
+    request.extensions_mut().insert(RequestScope);
+    let headers = request.headers_mut();
+    let mut sent = headers.get_all(REQUEST_ID_HEADER).iter();
+    if let (Some(value), None) = (sent.next(), sent.next())
+        && valid_request_id(value.as_bytes())
+    {
+        return Some(value.clone());
+    }
+    let id = generate_request_id();
+    headers.insert(REQUEST_ID_HEADER, id.clone());
+    Some(id)
+}
+
+fn with_request_id(
+    mut response: Response<HttpBody>,
+    id: Option<header::HeaderValue>,
+) -> Response<HttpBody> {
+    if let Some(id) = id {
+        response.headers_mut().insert(REQUEST_ID_HEADER, id);
+    }
+    response
+}
+
 async fn handle_request(
-    request: Request<HttpBody>,
+    mut request: Request<HttpBody>,
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
-    handle_request_instrumented(request, state).await
+    let id = assign_request_id(&mut request);
+    let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state);
+    let response = match handle_request_instrumented(request, state).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    };
+    Ok(ObservedRequest::finish(
+        observed,
+        with_request_id(response, id),
+    ))
+}
+
+/// The template of the route a request path names and, when the path names
+/// a configured drive, that drive's id. Decoding follows `parse_route`, so
+/// a request is labelled as it is routed.
+fn describe_route<'a>(path: &str, registry: &'a DriveRegistry) -> (&'static str, Option<&'a str>) {
+    let Ok(segments) = decode_uri_segments(path) else {
+        return ("invalid", None);
+    };
+    let segment = |index: usize| segments.get(index).map(String::as_str);
+    if segments.len() == 1 {
+        return match segment(0) {
+            Some("healthz") => ("/healthz", None),
+            Some("readyz") => ("/readyz", None),
+            _ => ("unmatched", None),
+        };
+    }
+    if segment(0) != Some("v1") || segment(1) != Some("drives") {
+        return ("unmatched", None);
+    }
+    let Some(drive) = segment(2) else {
+        return ("/v1/drives", None);
+    };
+    let route = match (segment(3), segments.len()) {
+        (Some("fs"), _) => "/v1/drives/{id}/fs/{path}",
+        (Some("entries"), _) => "/v1/drives/{id}/entries/{path}",
+        (Some("stat"), _) => "/v1/drives/{id}/stat/{path}",
+        (Some("lstat"), _) => "/v1/drives/{id}/lstat/{path}",
+        (Some("statfs"), _) => "/v1/drives/{id}/statfs/{path}",
+        (Some("readlink"), _) => "/v1/drives/{id}/readlink/{path}",
+        (Some("ops"), 5) => match segment(4) {
+            Some("mkdir") => "/v1/drives/{id}/ops/mkdir",
+            Some("rename") => "/v1/drives/{id}/ops/rename",
+            Some("truncate") => "/v1/drives/{id}/ops/truncate",
+            Some("sync") => "/v1/drives/{id}/ops/sync",
+            _ => "/v1/drives/{id}/ops/{operation}",
+        },
+        _ => return ("unmatched", None),
+    };
+    (route, registry.get(drive).map(DriveConfig::id))
+}
+
+/// What the access log is told about one request. It reports itself when
+/// it is dropped: with the response body once that has been sent or
+/// abandoned, or with the request's future if that never got as far as a
+/// response.
+struct ObservedRequest {
+    log: Arc<dyn AccessLog>,
+    id: header::HeaderValue,
+    method: Method,
+    route: &'static str,
+    drive: Option<String>,
+    started: Instant,
+    received: Arc<AtomicU64>,
+    status: Option<u16>,
+    sent: u64,
+}
+
+impl ObservedRequest {
+    /// Start observing a request whose id this listener settled, when an
+    /// access log is configured; otherwise nothing is measured or wrapped.
+    fn begin(
+        request: &mut Request<HttpBody>,
+        id: Option<&header::HeaderValue>,
+        state: &AppState,
+    ) -> Option<Box<Self>> {
+        let log = state.config.access_log.as_ref()?;
+        let id = id?;
+        let started = Instant::now();
+        let (route, drive) = describe_route(request.uri().path(), &state.registry);
+        let received = Arc::new(AtomicU64::new(0));
+        let body = std::mem::replace(request.body_mut(), empty_body());
+        *request.body_mut() = CountedRequestBody {
+            inner: body,
+            received: Arc::clone(&received),
+        }
+        .boxed_unsync();
+        Some(Box::new(Self {
+            log: Arc::clone(log),
+            id: id.clone(),
+            method: request.method().clone(),
+            route,
+            drive: drive.map(str::to_owned),
+            started,
+            received,
+            status: None,
+            sent: 0,
+        }))
+    }
+
+    /// Attach the observation to the response, so that it ends with the
+    /// response body.
+    fn finish(observed: Option<Box<Self>>, response: Response<HttpBody>) -> Response<HttpBody> {
+        let Some(mut observed) = observed else {
+            return response;
+        };
+        observed.status = Some(response.status().as_u16());
+        response.map(|inner| ObservedResponseBody { inner, observed }.boxed_unsync())
+    }
+}
+
+impl Drop for ObservedRequest {
+    fn drop(&mut self) {
+        self.log.record(&AccessRecord {
+            request_id: self.id.to_str().unwrap_or(""),
+            method: self.method.as_str(),
+            route: self.route,
+            drive: self.drive.as_deref(),
+            status: self.status,
+            duration: self.started.elapsed(),
+            bytes_in: self.received.load(Ordering::Relaxed),
+            bytes_out: self.sent,
+        });
+    }
+}
+
+/// Counts the request body bytes the application reads.
+struct CountedRequestBody {
+    inner: HttpBody,
+    received: Arc<AtomicU64>,
+}
+
+impl HttpBodyTrait for CountedRequestBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let frame = Pin::new(&mut self.inner).poll_frame(context);
+        if let Poll::Ready(Some(Ok(frame))) = &frame
+            && let Some(data) = frame.data_ref()
+        {
+            self.received
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Counts the response body bytes handed to the connection and reports the
+/// request when the connection is done with the body.
+struct ObservedResponseBody {
+    inner: HttpBody,
+    observed: Box<ObservedRequest>,
+}
+
+impl HttpBodyTrait for ObservedResponseBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let frame = Pin::new(&mut self.inner).poll_frame(context);
+        if let Poll::Ready(Some(Ok(frame))) = &frame
+            && let Some(data) = frame.data_ref()
+        {
+            self.observed.sent += data.len() as u64;
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 async fn handle_request_instrumented(
@@ -1392,6 +1703,7 @@ async fn handle_request_uninstrumented(
             handle_entries(
                 parts.method,
                 &parts.headers,
+                parts.uri.query(),
                 drive,
                 path,
                 state.config.clone(),
@@ -2402,6 +2714,7 @@ async fn remove_abandoned_siblings(driver: &dyn FsDriver, path: &str, max_entrie
 async fn handle_entries(
     method: Method,
     headers: &hyper::HeaderMap,
+    query: Option<&str>,
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
@@ -2409,13 +2722,142 @@ async fn handle_entries(
     if method != Method::GET && method != Method::HEAD {
         return Err(RequestError::method_not_allowed("GET, HEAD"));
     }
+    let page = ListingPage::from_query(query, config.max_directory_entries)?;
     let entries = list_directory(&drive, &path, config.max_directory_entries).await?;
-    let payload = serde_json::to_vec(&entries)
-        .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
+    let payload = match page {
+        // Without `limit` the response is the whole listing, as an array.
+        None => serde_json::to_vec(&entries),
+        Some(page) => serde_json::to_vec(&page.select(entries)),
+    }
+    .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
     if payload.len() > config.max_response_bytes {
         return Err(RequestError::response_too_large());
     }
     entries_response(payload, headers, method == Method::HEAD).await
+}
+
+/// What a continuation token starts with. The rest is the name of the last
+/// entry of the page before, in lowercase hexadecimal.
+const CURSOR_PREFIX: &str = "v1.";
+/// Longest continuation token accepted: a name of 4096 bytes.
+const MAX_CURSOR_BYTES: usize = CURSOR_PREFIX.len() + 2 * 4096;
+
+/// One page of a listing asked for with `limit`: the entries whose names
+/// follow `after` in byte order, at most `limit` of them.
+#[derive(Debug, PartialEq, Eq)]
+struct ListingPage {
+    limit: usize,
+    after: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EntriesPage {
+    entries: Vec<mount_rs_core::DirEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+impl ListingPage {
+    /// Read `limit` and `cursor` from a query string. A query without
+    /// `limit` asks for no page, whatever else it holds: such requests keep
+    /// the unpaginated response they have always had.
+    fn from_query(query: Option<&str>, max_limit: usize) -> Result<Option<Self>, RequestError> {
+        let mut limit = None;
+        let mut cursor = None;
+        for parameter in query.unwrap_or("").split('&') {
+            let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+            let slot = match name {
+                "limit" => &mut limit,
+                "cursor" => &mut cursor,
+                _ => continue,
+            };
+            if slot.replace(value).is_some() {
+                return Err(RequestError::bad_request(format!(
+                    "{name} is given more than once"
+                )));
+            }
+        }
+        let Some(limit) = limit else {
+            return Ok(None);
+        };
+        // Plain decimal digits only: no sign, no leading zero, no encoding.
+        let limit = Some(limit)
+            .filter(|text| {
+                (1..=20).contains(&text.len())
+                    && text.bytes().all(|byte| byte.is_ascii_digit())
+                    && !text.starts_with('0')
+            })
+            .and_then(|text| text.parse::<usize>().ok())
+            .filter(|limit| *limit <= max_limit)
+            .ok_or_else(|| {
+                RequestError::bad_request(format!(
+                    "limit must be a whole number from 1 to {max_limit}"
+                ))
+            })?;
+        let after = cursor
+            .map(|token| {
+                decode_cursor(token).ok_or_else(|| {
+                    RequestError::bad_request("cursor is not a next_cursor returned by this API")
+                })
+            })
+            .transpose()?;
+        Ok(Some(Self { limit, after }))
+    }
+
+    /// The page out of a complete listing: the `limit` smallest names that
+    /// follow `after`, in order, and a cursor when more follow them.
+    fn select(&self, mut entries: Vec<mount_rs_core::DirEntry>) -> EntriesPage {
+        if let Some(after) = &self.after {
+            entries.retain(|entry| entry.name.as_str() > after.as_str());
+        }
+        let more = entries.len() > self.limit;
+        if more {
+            // Only the page is sorted, not the whole directory.
+            entries.select_nth_unstable_by(self.limit, |left, right| left.name.cmp(&right.name));
+            entries.truncate(self.limit);
+        }
+        entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        let next_cursor = entries
+            .last()
+            .filter(|_| more)
+            .map(|last| encode_cursor(&last.name));
+        EntriesPage {
+            entries,
+            next_cursor,
+        }
+    }
+}
+
+fn encode_cursor(name: &str) -> String {
+    use fmt::Write as _;
+    let mut token = String::with_capacity(CURSOR_PREFIX.len() + 2 * name.len());
+    token.push_str(CURSOR_PREFIX);
+    for byte in name.bytes() {
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
+}
+
+/// The name a continuation token stands for, or `None` for anything that
+/// `encode_cursor` could not have produced.
+fn decode_cursor(token: &str) -> Option<String> {
+    if token.len() > MAX_CURSOR_BYTES {
+        return None;
+    }
+    let digits = token.strip_prefix(CURSOR_PREFIX)?.as_bytes();
+    if digits.is_empty() || digits.len() % 2 != 0 {
+        return None;
+    }
+    let nibble = |digit: u8| match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    };
+    let name = digits
+        .chunks_exact(2)
+        .map(|pair| Some(nibble(pair[0])? << 4 | nibble(pair[1])?))
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(name).ok()
 }
 
 // Bound compression work across all drives without occupying async executor threads.
@@ -3408,6 +3850,174 @@ mod tests {
         .await;
         // 10+20+40+80+160+320+640 ms, then one second each for the rest.
         assert_eq!(started.elapsed(), Duration::from_millis(1270 + 3000));
+    }
+
+    fn entry(name: &str) -> mount_rs_core::DirEntry {
+        mount_rs_core::DirEntry {
+            name: name.to_owned(),
+            parent_path: "/".to_owned(),
+            file_type: mount_rs_core::FileType::File,
+        }
+    }
+
+    fn page_query(query: &str) -> Result<Option<ListingPage>, String> {
+        ListingPage::from_query(Some(query), 1000).map_err(|error| match error {
+            RequestError::Client {
+                status,
+                code,
+                message,
+                ..
+            } => {
+                assert_eq!((status, code), (StatusCode::BAD_REQUEST, "EINVAL"));
+                message
+            }
+            RequestError::Fs(error) => panic!("unexpected {error:?}"),
+        })
+    }
+
+    #[test]
+    fn a_query_without_limit_asks_for_no_page() {
+        assert_eq!(ListingPage::from_query(None, 1000).unwrap(), None);
+        for query in [
+            "",
+            "x=1",
+            "cursor=v1.61",
+            "cursor=garbage",
+            "Limit=5",
+            "limit",
+        ] {
+            // `limit` with no value is a limit, and not a number.
+            if query == "limit" {
+                assert!(page_query(query).is_err());
+                continue;
+            }
+            assert_eq!(page_query(query).unwrap(), None, "{query}");
+        }
+    }
+
+    #[test]
+    fn limit_and_cursor_are_validated_strictly() {
+        assert_eq!(
+            page_query("limit=1").unwrap(),
+            Some(ListingPage {
+                limit: 1,
+                after: None
+            })
+        );
+        assert_eq!(
+            page_query("other=x&limit=1000&cursor=v1.61c3a9").unwrap(),
+            Some(ListingPage {
+                limit: 1000,
+                after: Some("a\u{e9}".to_owned())
+            })
+        );
+        for limit in [
+            "",
+            "0",
+            "1001",
+            "-1",
+            "+1",
+            "01",
+            "1.0",
+            "1e2",
+            "ten",
+            "%31",
+            " 1",
+            "1 ",
+            "99999999999999999999999",
+        ] {
+            let message = page_query(&format!("limit={limit}")).unwrap_err();
+            assert!(message.contains("limit must be"), "{limit:?}: {message}");
+        }
+        let long = format!("v1.{}", "61".repeat(4097));
+        for cursor in [
+            "",
+            "v1.",
+            "61",
+            "v2.61",
+            "v1.6",
+            "v1.6g",
+            "v1.6A",
+            "v1.ff",
+            "V1.61",
+            "v1.61%20",
+            long.as_str(),
+        ] {
+            let message = page_query(&format!("limit=5&cursor={cursor}")).unwrap_err();
+            assert!(message.contains("cursor is not"), "{cursor:?}: {message}");
+        }
+        for repeated in ["limit=1&limit=1", "limit=2&cursor=v1.61&cursor=v1.61"] {
+            let message = page_query(repeated).unwrap_err();
+            assert!(message.contains("more than once"), "{repeated}: {message}");
+        }
+    }
+
+    #[test]
+    fn cursors_round_trip_every_name() {
+        let longest = "n".repeat(4096);
+        for name in [
+            "a",
+            "with space",
+            "caf\u{e9}",
+            "\u{1f600}",
+            "%2F",
+            longest.as_str(),
+        ] {
+            let token = encode_cursor(name);
+            assert!(token.len() <= MAX_CURSOR_BYTES);
+            assert!(
+                token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.'),
+                "a cursor needs no escaping in a URL: {token}"
+            );
+            assert_eq!(decode_cursor(&token).as_deref(), Some(name));
+        }
+    }
+
+    #[test]
+    fn pages_walk_a_listing_in_name_order_without_gaps_or_repeats() {
+        // Enumeration order is the drive's; here it is deliberately not sorted.
+        let names = ["m", "b", "zz", "a", "B", "\u{e9}", "z", "10", "9", "c"];
+        let listing = || names.iter().map(|name| entry(name)).collect::<Vec<_>>();
+        let mut sorted: Vec<&str> = names.to_vec();
+        sorted.sort_unstable();
+        for limit in 1..=names.len() + 1 {
+            let mut walked = Vec::new();
+            let mut after = None;
+            loop {
+                let page = ListingPage { limit, after }.select(listing());
+                assert!(page.entries.len() <= limit);
+                walked.extend(page.entries.iter().map(|entry| entry.name.clone()));
+                match page.next_cursor {
+                    Some(cursor) => {
+                        assert_eq!(page.entries.len(), limit, "a short page is the last");
+                        after = Some(decode_cursor(&cursor).expect("cursor"));
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(walked, sorted, "limit {limit}");
+        }
+        // A cursor naming an entry that has since gone still has a place.
+        let page = ListingPage {
+            limit: 2,
+            after: Some("bb".to_owned()),
+        }
+        .select(listing());
+        let names: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["c", "m"]);
+        // Past the last name there is an empty last page.
+        let page = ListingPage {
+            limit: 2,
+            after: Some("\u{e9}".to_owned()),
+        }
+        .select(listing());
+        assert!(page.entries.is_empty() && page.next_cursor.is_none());
     }
 
     #[test]

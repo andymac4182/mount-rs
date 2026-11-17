@@ -30,6 +30,10 @@ const DEFAULT_HTTP_READ_CHUNK_BYTES: usize = 64 * 1024;
 // Longer than the request timeout: a graceful stop lets every accepted
 // request finish or time out by itself before anything is aborted.
 const DEFAULT_HTTP_DRAIN_TIMEOUT_MS: u64 = 35_000;
+/// Long enough for a healthy drive to flush and release its lease many
+/// times over; short enough that a stuck one does not outlast a supervisor's
+/// stop timeout by much.
+const DEFAULT_HTTP_DRIVE_SHUTDOWN_TIMEOUT_MS: u64 = 30_000;
 // Upload memory budget, as a multiple of `max_request_bytes`.
 const DEFAULT_HTTP_BUFFERED_UPLOAD_REQUESTS: usize = 4;
 const DEFAULT_HTTP_MAX_CONNECTIONS: usize = 256;
@@ -275,8 +279,12 @@ pub(crate) struct HttpServiceConfig {
     pub tcp_nodelay: bool,
     pub http2_prior_knowledge: bool,
     pub drain_timeout_ms: u64,
+    /// Longest the drives may take to shut down, all together.
+    pub drive_shutdown_timeout_ms: u64,
     pub max_connections: usize,
     pub request_timeout_ms: u64,
+    /// Write one JSON line per request to stderr.
+    pub access_log: bool,
     pub drives: Vec<HttpDriveConfig>,
     pub disk_cache_budget: Option<DiskCacheBudgetConfig>,
     pub tidb_metadata_pool_limit: Option<usize>,
@@ -315,6 +323,10 @@ pub(crate) struct ForwardingConfig {
     pub private_key: PathBuf,
     pub ca: PathBuf,
     pub redis_url: EnvReference,
+    /// PEM bundle that replaces the system roots for a `rediss://` server.
+    pub redis_ca: Option<PathBuf>,
+    /// Permit an unencrypted `redis://` connection to another host.
+    pub allow_plaintext_redis: bool,
     pub namespace: String,
     pub bind: std::net::SocketAddr,
     pub owner: bool,
@@ -668,8 +680,10 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "tcp_nodelay",
             "http2_prior_knowledge",
             "drain_timeout_ms",
+            "drive_shutdown_timeout_ms",
             "max_connections",
             "request_timeout_ms",
+            "access_log",
             "disk_cache_budget",
             "tidb_metadata_pool_limit",
             "cache_report_interval_seconds",
@@ -752,6 +766,11 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         .map(|value| positive_u64(value, "config.http.drain_timeout_ms"))
         .transpose()?
         .unwrap_or(DEFAULT_HTTP_DRAIN_TIMEOUT_MS);
+    let drive_shutdown_timeout_ms = object
+        .get("drive_shutdown_timeout_ms")
+        .map(|value| positive_u64(value, "config.http.drive_shutdown_timeout_ms"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_DRIVE_SHUTDOWN_TIMEOUT_MS);
     let max_connections = object
         .get("max_connections")
         .map(|value| positive_usize(value, "config.http.max_connections"))
@@ -763,6 +782,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         .transpose()?
         .unwrap_or(DEFAULT_HTTP_REQUEST_TIMEOUT_MS);
     let tcp_nodelay = optional_bool(object, "tcp_nodelay", "config.http")?.unwrap_or(true);
+    let access_log = optional_bool(object, "access_log", "config.http")?.unwrap_or(false);
     let drives = object
         .get("drives")
         .ok_or_else(|| ConfigError::at("config.http.drives", "is required"))?
@@ -869,8 +889,10 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         http2_prior_knowledge: optional_bool(object, "http2_prior_knowledge", "config.http")?
             .unwrap_or(false),
         drain_timeout_ms,
+        drive_shutdown_timeout_ms,
         max_connections,
         request_timeout_ms,
+        access_log,
         drives: parsed_drives,
         tidb_metadata_pool_limit: object
             .get("tidb_metadata_pool_limit")
@@ -944,6 +966,8 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "private_key",
             "ca",
             "redis_url",
+            "redis_ca",
+            "allow_plaintext_redis",
             "namespace",
             "bind",
             "owner",
@@ -1020,6 +1044,9 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
         private_key: required_path(fields, "private_key", path, base)?,
         ca: required_path(fields, "ca", path, base)?,
         redis_url: required_env_reference(fields, "redis_url", path)?,
+        redis_ca: optional_path(fields, "redis_ca", path, base)?,
+        allow_plaintext_redis: optional_bool(fields, "allow_plaintext_redis", path)?
+            .unwrap_or(false),
         namespace: namespace.to_owned(),
         bind: required_string(fields, "bind", path)?
             .parse()
@@ -3699,6 +3726,48 @@ mod tests {
     }
 
     #[test]
+    fn redis_ca_and_plaintext_opt_in_are_optional_and_strictly_typed() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let base = Path::new("/etc/mount-rs");
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), base)
+                .map(|config| config.http.unwrap().forwarding.unwrap())
+        };
+        let defaults = parse(&source).unwrap();
+        assert_eq!(defaults.redis_ca, None);
+        assert!(!defaults.allow_plaintext_redis);
+
+        source["http"]["forwarding"]["redis_ca"] = "redis-ca.pem".into();
+        source["http"]["forwarding"]["allow_plaintext_redis"] = true.into();
+        let set = parse(&source).unwrap();
+        assert_eq!(set.redis_ca, Some(base.join("redis-ca.pem")));
+        assert!(set.allow_plaintext_redis);
+        source["http"]["forwarding"]["redis_ca"] = "/secrets/redis-ca.pem".into();
+        assert_eq!(
+            parse(&source).unwrap().redis_ca,
+            Some(PathBuf::from("/secrets/redis-ca.pem"))
+        );
+
+        for (key, invalid) in [
+            ("redis_ca", serde_json::json!("")),
+            ("redis_ca", serde_json::json!(true)),
+            ("redis_ca", serde_json::json!({"env":"REDIS_CA"})),
+            ("allow_plaintext_redis", serde_json::json!("true")),
+            ("allow_plaintext_redis", serde_json::json!(1)),
+        ] {
+            let mut source = source.clone();
+            source["http"]["forwarding"][key] = invalid;
+            assert!(parse(&source).is_err(), "{key}");
+        }
+        // A misspelled key is refused rather than silently ignored.
+        source["http"]["forwarding"]["allow_plaintext"] = true.into();
+        assert!(parse(&source).is_err());
+    }
+
+    #[test]
     fn route_refresh_idle_window_defaults_to_five_ttls_and_is_bounded() {
         let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
             "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
@@ -4190,6 +4259,73 @@ mod tests {
         assert!(error.to_string().contains("config.http.forwarding.owner"));
         value["forwarding"]["owner"] = false.into();
         assert!(parse_http(&value, Path::new("/tmp")).is_ok());
+    }
+
+    #[test]
+    fn http_access_log_is_off_unless_asked_for_and_requires_boolean() {
+        let mut value = serde_json::json!({
+            "drives": [{"id":"memory", "token":{"env":"TEST_TOKEN"},
+                "driver":{"kind":"memory"}}]
+        });
+        assert!(!parse_http(&value, Path::new("/tmp")).unwrap().access_log);
+        value["access_log"] = true.into();
+        assert!(parse_http(&value, Path::new("/tmp")).unwrap().access_log);
+        for invalid in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!({"enabled": true}),
+            serde_json::Value::Null,
+        ] {
+            value["access_log"] = invalid;
+            let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+            assert!(
+                error.to_string().contains("config.http.access_log"),
+                "{error}"
+            );
+        }
+        // A misspelt key is refused, not ignored.
+        value.as_object_mut().unwrap().remove("access_log");
+        value["access_logs"] = true.into();
+        let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+        assert!(error.to_string().contains("config.http.access_logs"));
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn http_drive_shutdown_timeout_defaults_to_thirty_seconds_and_must_be_positive() {
+        let mut value = serde_json::json!({
+            "drives": [{"id":"memory", "token":{"env":"TEST_TOKEN"},
+                "driver":{"kind":"memory"}}]
+        });
+        let parsed = parse_http(&value, Path::new("/tmp")).unwrap();
+        assert_eq!(parsed.drive_shutdown_timeout_ms, 30_000);
+        value["drive_shutdown_timeout_ms"] = 250.into();
+        let parsed = parse_http(&value, Path::new("/tmp")).unwrap();
+        assert_eq!(parsed.drive_shutdown_timeout_ms, 250);
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("30s"),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+        ] {
+            value["drive_shutdown_timeout_ms"] = invalid;
+            let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("config.http.drive_shutdown_timeout_ms"),
+                "{error}"
+            );
+        }
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("drive_shutdown_timeout_ms");
+        value["drive_shutdown_timeout"] = 30.into();
+        let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     #[test]

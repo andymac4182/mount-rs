@@ -271,11 +271,20 @@ impl Service {
     /// closes the sessions before the caller shuts the drives down. Returns
     /// the first failure.
     pub(crate) async fn close(&self) -> Result<(), CliError> {
-        let mut first = None;
+        let mut first: Option<CliError> = None;
         let mut keep = |result: Result<(), CliError>| {
-            if let Err(error) = result {
-                first.get_or_insert(error);
-            }
+            let Err(error) = result else { return };
+            first = Some(match first.take() {
+                None => error,
+                // A failure that left work running must stay one, whatever
+                // failed before it: the process must not wait on that work.
+                Some(earlier)
+                    if error.abandons_running_work() && !earlier.abandons_running_work() =>
+                {
+                    CliError::abandoning(format!("{earlier}; {error}"))
+                }
+                Some(earlier) => earlier,
+            });
         };
         // No membership reload may start once the service is closing.
         if let Some(reloader) = &self.reloader {
@@ -483,7 +492,7 @@ async fn connect_forwarder(
             .map_err(|e| fail(&e))?,
         ));
     }
-    let registry = connect_registry(config).await?;
+    let registry = crate::redis_connect::connect_registry(config).await?;
     let forwarder = IngressForwarder::with_membership(
         registry,
         membership,
@@ -501,31 +510,13 @@ async fn connect_forwarder(
     Ok((forwarder, peers))
 }
 
-async fn connect_registry(
-    config: &crate::config::ForwardingConfig,
-) -> Result<mount_rs_cluster::RedisRouteRegistry, CliError> {
-    use mount_rs_cluster::RedisRouteRegistry;
-    let url = std::env::var(&config.redis_url.name).map_err(|_| {
-        CliError::runtime(format!(
-            "missing environment variable {}",
-            config.redis_url.name
-        ))
-    })?;
-    let redis =
-        redis::Client::open(url).map_err(|_| CliError::runtime("invalid forwarding Redis URL"))?;
-    let manager = tokio::time::timeout(Duration::from_secs(5), redis.get_connection_manager())
-        .await
-        .map_err(|_| CliError::runtime("forwarding Redis connection timed out"))?
-        .map_err(|_| CliError::runtime("forwarding Redis connection failed"))?;
-    RedisRouteRegistry::with_manager(manager, config.namespace.clone(), Duration::from_secs(2))
-        .map_err(|e| CliError::runtime(e.to_string()))
-}
-
 struct OwnerService {
     /// Routes of the drives opened at startup; `None` on a failover
     /// candidate, whose drives come and go under `failover`.
     registrations: Option<mount_rs_cluster::RegistrationSupervisor>,
     failover: Option<mount_rs_cluster::FailoverSupervisor>,
+    /// How long `close` waits for `failover` to release its drives.
+    release_timeout: Duration,
     router: mount_rs_cluster::OwnerHttpRouter,
     stop: tokio_util::sync::CancellationToken,
     /// The peer listener. Its error text is reported by the first `close`.
@@ -550,11 +541,16 @@ impl OwnerService {
             Some(registrations) => registrations.shutdown().await,
             None => Ok(()),
         };
-        if let Some(failover) = &self.failover {
-            // Withdraws each owned drive's route, drains it and releases
-            // its writer lease, so a standby can take over at once.
-            failover.shutdown().await;
-        }
+        // Withdraws each owned drive's route, drains it and releases its
+        // writer lease, so a standby can take over at once. Storage that
+        // has stopped answering must not keep the process from exiting: its
+        // lease then expires by itself.
+        let released = match &self.failover {
+            Some(failover) => tokio::time::timeout(self.release_timeout, failover.shutdown())
+                .await
+                .is_ok(),
+            None => true,
+        };
         self.stop.cancel();
         self.task.join().await.map_err(CliError::runtime)?;
         self.router
@@ -562,6 +558,12 @@ impl OwnerService {
             .await
             .map_err(|e| CliError::runtime(e.to_string()))?;
         registration?;
+        if !released {
+            return Err(CliError::abandoning(format!(
+                "failover drives were not released within {} ms; their writer leases are left to expire",
+                self.release_timeout.as_millis()
+            )));
+        }
         Ok(())
     }
 }
@@ -574,7 +576,11 @@ pub(crate) enum OwnedDrives {
     Open(Vec<OwnedDrive>),
     /// `forwarding.failover`: each is opened when this server takes it over
     /// and released when it loses or hands back the drive.
-    Candidates(Vec<mount_rs_cluster::FailoverDrive>),
+    Candidates {
+        drives: Vec<mount_rs_cluster::FailoverDrive>,
+        /// How long a stop waits for the drives owned then to be released.
+        release_timeout: Duration,
+    },
 }
 
 /// How long a published route and a failover announcement live in Redis.
@@ -654,14 +660,17 @@ pub(crate) async fn start_owner(
     let tls = load_peer_server_config_from_pem(&files.certificate, &files.key, &files.ca)
         .map_err(|e| fail(&e))?;
     let endpoint = quinn::Endpoint::server(tls, member.address).map_err(|e| fail(&e))?;
-    let registry = connect_registry(config).await?;
+    let registry = crate::redis_connect::connect_registry(config).await?;
     let budget = mount_rs_cluster::SessionBudget::new(session_limits.max_sessions)?;
     let mut handlers = Vec::new();
     let mut registrations = Vec::new();
     let mut sessions = Vec::new();
-    let (drives, candidates) = match drives {
-        OwnedDrives::Open(drives) => (drives, None),
-        OwnedDrives::Candidates(candidates) => (Vec::new(), Some(candidates)),
+    let (drives, candidates, release_timeout) = match drives {
+        OwnedDrives::Open(drives) => (drives, None, Duration::ZERO),
+        OwnedDrives::Candidates {
+            drives,
+            release_timeout,
+        } => (Vec::new(), Some(drives), release_timeout),
     };
     for (volume, token, fs, credentials) in drives {
         let mut nonce = [0u8; 16];
@@ -779,7 +788,9 @@ pub(crate) async fn start_owner(
             RegistrationRecovery {
                 initial_delay: Duration::from_millis(100),
                 max_delay: Duration::from_secs(2),
-                max_attempts: 10,
+                // A Redis outage of any length must not stop this server: its
+                // own drives do not depend on Redis.
+                max_attempts: RegistrationRecovery::UNLIMITED_ATTEMPTS,
             },
             Duration::from_secs(10),
         )
@@ -797,6 +808,7 @@ pub(crate) async fn start_owner(
     let owner = OwnerService {
         registrations,
         failover,
+        release_timeout,
         router,
         stop,
         task,

@@ -157,6 +157,7 @@ paths; native-mount selection remains a separate evidence boundary.
 | Underprovisioned diagnostic | `MOUNT_RS_TIDB_ALLOW_UNDERPROVISIONED=1 ./scripts/test-tidb.sh` | A diagnostic attempt when the Docker host is below the durable resource floor. | Durable acceptance; the result is labeled `diagnostic-underprovisioned-not-durable-acceptance`. |
 | Direct TiDB provider contract | `MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' ./scripts/cargo-shared test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture` | A reachable server that passes `SELECT tidb_version(), VERSION()` before provider schemas are opened, then schema, UTF-8/trailing-space, provider-clock, fencing, concurrent-CAS, reconnect, block, and flush checks. | Docker topology or component restart evidence. A `mysql://` URL is only a protocol URL; MySQL or another compatible server is rejected by the identity check. |
 | TLS TiDB provider contract | `MOUNT_RS_TIDB_TLS_URL='mysql://user:password@host:4000/test?require_ssl=true' ./scripts/test-tidb-tls.sh` | The wrapper requires TLS, CA and hostname verification, keeps credentials out of logs, and runs the same direct provider contract with `rustls` against the actual endpoint. | A compile gate or URL-only validation; production IAM, certificate rotation and deployment approval remain separate. |
+| Local TLS handshake | `./scripts/test-tidb-tls-local.sh` | A throwaway certificate authority and a single-node TiDB serving a certificate it issued for `localhost`: the wrapper above runs for real over the verified session, the session reports a TLS cipher, and the provider refuses an unrelated authority, the public roots alone, the wrong host name and, with `require_secure_transport` on, a plaintext session. A pass prints `TIDB_TLS_HANDSHAKE_ACCEPTANCE`. | A managed or production endpoint, public-root trust, certificate rotation, client certificates, or replicated topology. |
 | TiDB plus RustFS ChunkedFs | Use the opt-in command in [TiDB metadata plus RustFS chunks](#tidb-metadata-plus-rustfs-chunks). | Real TiDB identity, RustFS-backed immutable blocks, partial writes/truncate, close/reopen, fencing/CAS, and scoped block/metadata cleanup. A successful reopen prints `TIDB_CHUNKED_RUSTFS_REOPEN_PASS`. | Node/N-API, CLI, FUSE/NFS/9P/WebDAV, FSKit, or hosted-CI acceptance. RustFS is not TiDB and S3-compatible evidence is not Cloudflare R2 evidence. |
 
 The direct provider and ambiguous-commit tests are `#[ignore]` and require an
@@ -213,6 +214,12 @@ secret injection and live handshake still require a provider-backed test.
 `MOUNT_RS_TIDB_TLS_VALIDATE_ONLY=1` mode checks deployment URL policy without
 connecting or resolving credentials; only a run without that flag and with a
 real endpoint produces `TIDB_TLS_ACCEPTANCE_PASS`.
+
+`scripts/test-tidb-tls-local.sh` gives that entry point a real endpoint
+without credentials, and is what the `tidb-tls` CI job runs. A server
+certificate from a private authority is trusted through the provider's
+`tls_ca_file` URL parameter, which adds the named PEM file to the trusted
+roots without turning off certificate or host name verification.
 
 The provider's `durable(true)` flag remains caller-declared. The `flush` hook
 is an acknowledged TiDB round trip, not proof of storage-engine fsync, and a

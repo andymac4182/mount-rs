@@ -32,7 +32,14 @@ pub use owner_http::{HOP_HEADER, OwnerHttpHandler, OwnerHttpRouter, ROUTE_HEADER
 
 use redis::aio::{ConnectionManager, MultiplexedConnection};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::Duration,
+};
 
 #[cfg(feature = "http3")]
 mod session_auth;
@@ -123,12 +130,106 @@ pub struct RedisRouteRegistry {
 enum RegistryConnection {
     Fixed(MultiplexedConnection),
     Managed(ConnectionManager),
+    Replaceable(ReplaceableManager),
 }
 impl RegistryConnection {
     async fn query<T: redis::FromRedisValue>(&self, command: &redis::Cmd) -> redis::RedisResult<T> {
         match self {
             Self::Fixed(connection) => command.query_async(&mut connection.clone()).await,
             Self::Managed(connection) => command.query_async(&mut connection.clone()).await,
+            Self::Replaceable(connection) => connection.query(command).await,
+        }
+    }
+}
+
+/// Consecutive unanswered commands after which a connection is replaced.
+const UNANSWERED_BEFORE_REPLACEMENT: u32 = 3;
+
+/// A reconnecting client that is also replaced when it stops answering.
+///
+/// The connection manager reconnects after a refused, reset or closed
+/// connection, but a timeout leaves its connection in place. A connection
+/// that stays open and silent (a firewall or load balancer that lost its
+/// state, a host that vanished without a reset) would then fail every
+/// command until the operating system gave up on it, long after the service
+/// was reachable again on a new connection.
+#[derive(Clone)]
+struct ReplaceableManager {
+    /// What every replacement is built from.
+    source: Arc<(redis::Client, redis::aio::ConnectionManagerConfig)>,
+    current: Arc<arc_swap::ArcSwap<ManagerGeneration>>,
+}
+struct ManagerGeneration {
+    manager: ConnectionManager,
+    unanswered: AtomicU32,
+}
+impl ReplaceableManager {
+    fn new(
+        client: redis::Client,
+        config: redis::aio::ConnectionManagerConfig,
+    ) -> redis::RedisResult<Self> {
+        let manager = ConnectionManager::new_lazy_with_config(client.clone(), config.clone())?;
+        Ok(Self {
+            source: Arc::new((client, config)),
+            current: Arc::new(arc_swap::ArcSwap::from_pointee(ManagerGeneration {
+                manager,
+                unanswered: AtomicU32::new(0),
+            })),
+        })
+    }
+
+    async fn query<T: redis::FromRedisValue>(&self, command: &redis::Cmd) -> redis::RedisResult<T> {
+        struct Watch<'a> {
+            owner: &'a ReplaceableManager,
+            generation: Arc<ManagerGeneration>,
+            unanswered: bool,
+        }
+        impl Drop for Watch<'_> {
+            fn drop(&mut self) {
+                if self.unanswered {
+                    self.owner.unanswered(&self.generation);
+                } else {
+                    self.generation.unanswered.store(0, Ordering::Release);
+                }
+            }
+        }
+        // Armed across the await: a caller's deadline drops this future, and
+        // that is an unanswered command too.
+        let mut watch = Watch {
+            owner: self,
+            generation: self.current.load_full(),
+            unanswered: true,
+        };
+        let result = command
+            .query_async(&mut watch.generation.manager.clone())
+            .await;
+        // Any reply, and any failure the manager itself recovers from, shows
+        // that this connection is not silently stuck.
+        watch.unanswered = matches!(&result, Err(error) if error.is_timeout());
+        result
+    }
+
+    /// Count an unanswered command against the connection it used, and
+    /// replace that connection once, when it reaches the limit. Commands
+    /// still in flight on an older connection cannot replace a newer one.
+    fn unanswered(&self, generation: &Arc<ManagerGeneration>) {
+        if generation.unanswered.fetch_add(1, Ordering::AcqRel) + 1 < UNANSWERED_BEFORE_REPLACEMENT
+            || !Arc::ptr_eq(&self.current.load(), generation)
+            // A deadline can also fire while the runtime is shutting down.
+            || tokio::runtime::Handle::try_current().is_err()
+        {
+            return;
+        }
+        if let Ok(manager) =
+            ConnectionManager::new_lazy_with_config(self.source.0.clone(), self.source.1.clone())
+        {
+            self.current.compare_and_swap(
+                generation,
+                Arc::new(ManagerGeneration {
+                    manager,
+                    unanswered: AtomicU32::new(0),
+                }),
+            );
         }
     }
 }
@@ -230,6 +331,32 @@ impl RedisRouteRegistry {
         timeout: Duration,
     ) -> Result<Self, RegistryError> {
         Self::with_connection(RegistryConnection::Managed(connection), namespace, timeout)
+    }
+
+    /// Use a reconnecting client built from `client`, and replace it when it
+    /// stops answering: after three consecutive commands time out on one
+    /// connection, the next command opens a new one. Prefer this to
+    /// [`Self::with_manager`], whose manager reconnects after a refused or
+    /// reset connection but keeps a connection that is open and silent.
+    ///
+    /// Nothing is connected here; the first command connects. Establish and
+    /// check a connection from the same `client` first if a wrong address,
+    /// certificate or password must be reported at startup. TLS and
+    /// credentials come from `client`; timeouts and the reconnect policy
+    /// from `config`. Must be called within a Tokio runtime.
+    pub fn with_client(
+        client: redis::Client,
+        config: redis::aio::ConnectionManagerConfig,
+        namespace: String,
+        timeout: Duration,
+    ) -> Result<Self, RegistryError> {
+        let connection =
+            ReplaceableManager::new(client, config).map_err(|_| RegistryError::InvalidInput)?;
+        Self::with_connection(
+            RegistryConnection::Replaceable(connection),
+            namespace,
+            timeout,
+        )
     }
 
     fn with_connection(

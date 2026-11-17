@@ -191,6 +191,20 @@ renewal.
   nothing changes.
 - A Redis that loses announcements only changes how long a standby waits
   (`k x S`), never who may write.
+- **An owner cut off from Redis while its standby is not.** The owner keeps
+  renewing its lease in storage and keeps serving, for as long as the outage
+  lasts (a server never exits because of Redis), and its route expires after
+  15 s. The standby then reads "no route" and tries to open the drive. The
+  attempt fails with `EAGAIN` because the lease is held, the standby logs
+  `lease_held` once, publishes nothing and tries again every `5P` at most.
+  The owner is not displaced and there is one writer throughout. Requests
+  that reach the owner directly are served; requests that need forwarding
+  get 503 until the owner can publish again, which it does within about 2 s
+  of reaching Redis. If the owner really is gone, the same attempts succeed
+  once its lease expires.
+- **Every node cut off from Redis.** Nothing moves. If the owner also dies
+  during the outage, the drive stays unavailable until a standby can read
+  Redis again: a standby never opens a drive on a registry it cannot read.
 
 ## What clients see
 
@@ -199,7 +213,7 @@ renewal.
 | Request arrives while no owner is published | `503`, `x-mount-dispatch: not-dispatched`, `Retry-After: 1`. Nothing was executed; retry. |
 | Request was in flight on the owner that failed | `502`, `x-mount-dispatch: unknown`. The outcome is unknown and the request is not replayed. Reads may be retried; a write must be reconciled by the client (for example with `If-Match`). |
 | Request forwarded while the crashed owner's route is still published (up to 15 s after the crash) | The forwarder waits on the dead owner for up to its 30 s operation timeout, then answers `502`, `x-mount-dispatch: unknown`. Clients should use their own shorter timeout and treat it the same way. |
-| First requests an ingress forwards to an owner process that replaced a crashed one at the same address | `502`, `x-mount-dispatch: unknown`, at most once per pooled connection (`peer_connections`) of that ingress: each stale connection fails one request and is then replaced. |
+| First requests an ingress forwards to an owner process that replaced a crashed one at the same address | `502`, `x-mount-dispatch: unknown`, at most once per pooled connection (`peer_connections`) of that ingress: each stale connection fails one request and is then replaced. Until the ingress has noticed that the old process is gone, such a request waits like the row above instead of failing at once. |
 | Request reaches an owner that is releasing the drive | `503` (`server is shutting down` or `not-dispatched`). Retry. |
 | Remote session or open handle that lived on the old owner | Lost. Session requests carrying the old session are refused by the new owner with `403 EACCES`; the client must create a new session and reopen its handles. Writes acknowledged before the failure are durable. |
 
@@ -222,7 +236,12 @@ and does not stop the server or its other drives.
 
 On SIGTERM the server drains its public listener, then for each drive it
 owns withdraws the route and its announcement, drains, and releases the
-lease, so a standby takes over without waiting for anything to expire.
+lease, so a standby takes over without waiting for anything to expire. The
+release is given `drain_timeout_ms + drive_shutdown_timeout_ms`. If storage
+does not answer in that time the server stops waiting, reports the drives as
+abandoned and exits non-zero, as a server without failover does for a drive
+that will not shut down; the lease then expires by itself and a standby
+takes over after `L`.
 
 Each state change is one JSON line on stderr:
 

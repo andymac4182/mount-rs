@@ -70,6 +70,7 @@ impl Drop for StatusGuard {
 /// Bounded exponential backoff for one outage. Each wait is independently
 /// jittered between half and all of its exponential ceiling. Successful
 /// reconciliation resets the attempt budget. No filesystem operation is retried.
+/// `max_attempts` is 1–100, or [`Self::UNLIMITED_ATTEMPTS`].
 #[derive(Clone, Copy, Debug)]
 pub struct RegistrationRecovery {
     pub initial_delay: Duration,
@@ -77,11 +78,19 @@ pub struct RegistrationRecovery {
     pub max_attempts: usize,
 }
 impl RegistrationRecovery {
+    /// A `max_attempts` that never gives up on an unavailable registry. The
+    /// owner keeps reconciling at `max_delay` until the registry answers,
+    /// the worker is cancelled, or a terminal error (lost ownership, a
+    /// conflicting registration, invalid data) ends it. For a server whose
+    /// own volumes do not depend on the registry and must outlive its outage.
+    pub const UNLIMITED_ATTEMPTS: usize = usize::MAX;
+
     pub(crate) fn validate(self) -> Result<(), RegistrationError> {
         if self.initial_delay.is_zero()
             || self.initial_delay > self.max_delay
             || self.max_delay > Duration::from_secs(30)
-            || !(1..=100).contains(&self.max_attempts)
+            || !((1..=100).contains(&self.max_attempts)
+                || self.max_attempts == Self::UNLIMITED_ATTEMPTS)
         {
             return Err(RegistrationError::Registry(RegistryError::InvalidInput));
         }
@@ -387,9 +396,18 @@ mod tests {
                 max_attempts: 101,
                 ..valid
             },
+            RegistrationRecovery {
+                max_attempts: usize::MAX - 1,
+                ..valid
+            },
         ] {
             assert!(invalid.validate().is_err());
         }
+        let unlimited = RegistrationRecovery {
+            max_attempts: RegistrationRecovery::UNLIMITED_ATTEMPTS,
+            ..valid
+        };
+        assert!(unlimited.validate().is_ok());
         assert!(!terminal_recovery_error(RegistrationError::Conflict, false));
         assert!(terminal_recovery_error(RegistrationError::Conflict, true));
         for reconciled in [false, true] {

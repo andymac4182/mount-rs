@@ -550,14 +550,20 @@ def failover():
             time.sleep(0.05)
         return None
 
-    def retried(via, method, path, body=None, seconds=30):
-        """The request, repeated while the answer is 5xx. An ingress keeps
-        one pooled connection per `peer_connections` to each owner; after an
-        owner process is replaced, each stale one fails a single request
-        with 502. Only used for requests that are safe to repeat."""
+    def retried(via, method, path, body=None, seconds=90):
+        """The request, repeated while it gets a 5xx or no answer. An
+        ingress keeps one pooled connection per `peer_connections` to each
+        owner; after an owner process is replaced, a request on a stale one
+        gets a 502 once the ingress has noticed the old process is gone, and
+        until then waits for up to the 30 s operation timeout. Give up on
+        each attempt sooner, as a client would. Only used for requests that
+        are safe to repeat."""
         deadline = time.time() + seconds
         while True:
-            s, h, d = req(via, method, path, body)
+            try:
+                s, h, d = req(via, method, path, body, timeout=5)
+            except TimeoutError:
+                s, h, d = 504, {}, b"no answer within the client's 5 s"
             if s < 500 or time.time() > deadline:
                 return s, h, d
             time.sleep(0.2)
