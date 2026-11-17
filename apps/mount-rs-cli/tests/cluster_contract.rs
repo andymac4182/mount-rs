@@ -20,16 +20,21 @@
 //!
 //! The tests that need a forwarding cluster need Redis: they are ignored
 //! unless run with `--include-ignored` and `MOUNT_RS_REDIS_TEST_URL`.
-#![cfg(unix)]
+//!
+//! Every test compiles and runs on Windows as on Unix, with one difference:
+//! a server is stopped there by terminating it, because Windows has no
+//! SIGTERM, so the clean exit that `Server::stop` requires is checked on
+//! Unix only.
 
 #[path = "../../../transports/mount-rs-http/tests/support/blackbox.rs"]
 mod blackbox;
+mod common;
 #[path = "../../../transports/mount-rs-http/tests/support/openapi.rs"]
 mod openapi;
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -163,6 +168,7 @@ impl Server {
     }
 
     /// Stop with SIGTERM, as a deploy does, and require a clean exit.
+    #[cfg(unix)]
     fn stop(mut self, name: &str) {
         // SAFETY: the pid is this test's own child, which has not been waited for.
         unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
@@ -172,6 +178,23 @@ impl Server {
             "{name} exited with {status}; stderr={:?}",
             self.stderr.lock().unwrap()
         );
+    }
+
+    /// Stop the server. Unix only for the clean exit: Windows has no
+    /// SIGTERM, and the standard library can only terminate a child there,
+    /// so the server is required to be running until then and no more.
+    /// Every answer the tests check has been received by the time they stop
+    /// a server.
+    #[cfg(not(unix))]
+    fn stop(mut self, name: &str) {
+        if let Some(status) = self.child.try_wait().unwrap() {
+            panic!(
+                "{name} exited early with {status}; stderr={:?}",
+                self.stderr.lock().unwrap()
+            );
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     /// Kill without warning, as a crash does.
@@ -278,12 +301,8 @@ impl Cluster {
             let pin = mount_rs_cluster::transport::spki_sha256_from_der(identity.cert.der())
                 .unwrap()
                 .to_hex();
-            let address = UdpSocket::bind("127.0.0.1:0")
-                .unwrap()
-                .local_addr()
-                .unwrap();
             members.push(json!({
-                "node": node, "boot": format!("{node}-boot"), "address": address,
+                "node": node, "boot": format!("{node}-boot"), "address": common::free_udp(),
                 "tls_server_name": "localhost", "spki_sha256": pin,
             }));
         }

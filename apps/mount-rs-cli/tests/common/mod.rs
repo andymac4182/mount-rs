@@ -61,19 +61,81 @@ pub fn peer(ca: &Identity, node: &str) -> Identity {
     }
 }
 
-pub fn free_udp() -> SocketAddr {
-    UdpSocket::bind("127.0.0.1:0")
+/// The sockets that keep this process's claims on port numbers (see
+/// `claim_port`), until it exits.
+static CLAIMS: Mutex<Vec<Box<dyn std::any::Any + Send>>> = Mutex::new(Vec::new());
+
+/// A port number in `first..first + count` that nothing else will be given
+/// before the caller's server binds it, where `claim` binds the socket that
+/// marks a number as taken and `free` says whether the server could bind it
+/// now.
+///
+/// A server that is told its address has to be given a port that is free
+/// when it starts, some time after the port was chosen. Binding port 0 and
+/// closing the socket does not do that: the system hands the same number to
+/// the next socket bound to port 0, in this or any other test process. So
+/// the number comes from below every system's range for port 0 (32768 on
+/// Linux, 49152 on macOS and Windows), and is claimed for the life of this
+/// process by a socket of the *other* protocol on the same number, which the
+/// server never asks for. Every test that chooses a port this way, in any
+/// process, skips a number so claimed. That leaves only a program outside
+/// the tests that binds this number in between.
+fn claim_port<C: Send + 'static>(
+    first: u16,
+    count: u16,
+    claim: impl Fn(u16) -> std::io::Result<C>,
+    free: impl Fn(u16) -> bool,
+) -> u16 {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Somewhere different for each process and each call, so that tests
+    // starting together rarely try the same number first.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .local_addr()
-        .unwrap()
+        .subsec_nanos();
+    let start = u64::from(std::process::id())
+        .wrapping_mul(7919)
+        .wrapping_add(u64::from(nanos))
+        .wrapping_add(
+            SEQUENCE
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_mul(104_729),
+        );
+    for offset in 0..u64::from(count) {
+        let port = first + ((start.wrapping_add(offset)) % u64::from(count)) as u16;
+        // Refused for a number another test holds, and on Windows for one
+        // in a range the system has reserved.
+        let Ok(claimed) = claim(port) else { continue };
+        if !free(port) {
+            continue;
+        }
+        CLAIMS.lock().unwrap().push(Box::new(claimed));
+        return port;
+    }
+    panic!("no free port in {first}..{}", first + count);
 }
 
+/// A loopback UDP address for a server started later: a peer's address is
+/// in the directory every server reads, so its listener cannot choose its
+/// own port. See `claim_port` for why nothing else takes it meanwhile.
+pub fn free_udp() -> SocketAddr {
+    let port = claim_port(
+        20_000,
+        8_000,
+        |port| TcpListener::bind(("127.0.0.1", port)),
+        |port| UdpSocket::bind(("127.0.0.1", port)).is_ok(),
+    );
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+/// A loopback TCP port for a server started later (see `claim_port`).
 pub fn free_tcp_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    claim_port(
+        28_000,
+        4_000,
+        |port| UdpSocket::bind(("127.0.0.1", port)),
+        |port| TcpListener::bind(("127.0.0.1", port)).is_ok(),
+    )
 }
 
 pub fn unique(prefix: &str) -> String {
@@ -169,7 +231,9 @@ impl Server {
         }
     }
 
-    /// Send `signal` (a `libc::SIG*`) to the server process.
+    /// Send `signal` (a `libc::SIG*`) to the server process. Unix only:
+    /// Windows has no signals to send a process.
+    #[cfg(unix)]
     pub fn signal(&self, signal: i32) {
         // SAFETY: the pid is this test's own live child process.
         let sent = unsafe { libc::kill(self.child.id() as libc::pid_t, signal) };
