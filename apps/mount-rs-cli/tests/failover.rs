@@ -166,8 +166,10 @@ impl Cluster {
     }
 }
 
-/// The fence under which `server` last reported acquiring the drive.
+/// The fence under which `server` last reported acquiring the drive. Its
+/// report reaches this process a moment after the route reaches Redis.
 fn acquired_fence(server: &Server) -> u64 {
+    wait_states(server, "acquired", 1, SLACK);
     server
         .states("acquired")
         .last()
@@ -375,8 +377,11 @@ fn owner_cut_off_from_redis(link: Link) {
     assert_eq!(a.get("after.bin").unwrap(), (200, b"after".to_vec()));
     // One owner throughout, under one fence, and still exactly one episode.
     assert_eq!(cluster.lease(), (Some("a".into()), fence));
+    // The owner reports the route as published again once Redis has
+    // answered it, which can be a poll after the record itself appeared.
+    wait_states(&a, "published", 2, Duration::from_secs(60));
     assert_eq!(a.states("acquired").len(), 1, "{:?}", a.events());
-    assert_eq!(a.states("published").len(), 2, "{:?}", a.events());
+    assert!(a.states("released").is_empty(), "{:?}", a.events());
     assert!(b.states("acquired").is_empty(), "{:?}", b.events());
     assert_eq!(b.states("lease_held").len(), 1, "{:?}", b.events());
 }
@@ -502,6 +507,7 @@ fn fail_back_returns_the_drive_to_the_preferred_node_once_and_it_stays() {
         took >= after,
         "handed back after {took:?}, before the preference lasted {after:?}"
     );
+    wait_states(&second, "released", 1, SLACK);
     assert_eq!(
         second.states("released")[0]["reason"],
         "fail_back",
