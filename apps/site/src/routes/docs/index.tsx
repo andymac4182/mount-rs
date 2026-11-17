@@ -127,7 +127,7 @@ function DocsOverview() {
       <section className="cli-artifact-card" aria-labelledby="cli-artifact-heading">
         <div className="cli-artifact-copy">
           <p className="eyebrow">GitHub Release · Preview</p>
-          <h2 id="cli-artifact-heading">mount-rs 0.1.0</h2>
+          <h2 id="cli-artifact-heading">mount-rs {cliRelease.version}</h2>
           <p>
             The repository's only CLI target, built in release mode and
             published as a GitHub prerelease. This artifact is
