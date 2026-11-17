@@ -520,6 +520,8 @@ async fn file_request(
         )
         .header(mount_rs_cluster::HOP_HEADER, "1")
         .header("authorization", format!("Bearer {token}"))
+        // What an ingress sends: the id it settled for the public request.
+        .header("x-request-id", "ingress-settled.id-1")
         .header("content-length", data.len());
     if let Some(range) = range {
         request = request.header("range", range);
@@ -537,6 +539,10 @@ async fn file_request(
         .headers()
         .get("x-mount-dispatch")
         .is_some_and(|v| v == "not-dispatched");
+    if response.status().is_success() {
+        // The owner's application names the request as the ingress did.
+        assert_eq!(response.headers()["x-request-id"], "ingress-settled.id-1");
+    }
     let mut received = Vec::new();
     while let Some(chunk) = stream.recv_chunk().await.unwrap() {
         received.extend_from_slice(chunk.as_bytes());

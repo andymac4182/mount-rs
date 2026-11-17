@@ -16,9 +16,10 @@ the exclusive writer lease of every split-store drive it serves, so **exactly
 one instance may serve a given drive**. There is no active-active mode at
 launch; a second instance pointed at the same storage fails to start.
 
-The process does not terminate TLS and does not write an access log, and by
-default it listens only on a loopback address. A reverse proxy in front of it
-provides all three. Where the network up to the listener is private (a
+The process does not terminate TLS, and by default it listens only on a
+loopback address and writes no access log. A reverse proxy in front of it
+provides the first two; the process's own access log is opt-in (see
+[Access log](#access-log)). Where the network up to the listener is private (a
 container network, or a VPC behind a load balancer that terminates TLS),
 `allow_non_loopback` lets it listen on that network directly; see
 [Listening beyond loopback](#listening-beyond-loopback).
@@ -69,8 +70,9 @@ attestation (`gh attestation verify oci://ghcr.io/andymac4182/mount-rs:<version>
   The forwarding listener (`forwarding.bind`) may bind `0.0.0.0` for peers on
   other hosts.
 - Stopping the container sends SIGTERM, which drains as described under
-  [Shutdown](#shutdown). Give it a stop timeout above `drain_timeout_ms`
-  (`docker stop -t 40`, or `terminationGracePeriodSeconds: 40` in Kubernetes).
+  [Shutdown](#shutdown). Give it a stop timeout above `drain_timeout_ms` +
+  5 s + `drive_shutdown_timeout_ms` (`docker stop -t 75`, or
+  `terminationGracePeriodSeconds: 75` in Kubernetes, with the defaults).
 - Probe `/readyz` and `/healthz` from the sidecar or with an HTTP probe sent
   through it.
 
@@ -111,12 +113,14 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | `max_request_bytes` | integer | `8388608` (8 MiB) | >= 1 | Largest body received whole in memory: JSON bodies, session writes, and file uploads up to this size. A file upload above it is streamed to storage instead (see `max_upload_bytes`). Other larger requests get 413. |
 | `max_upload_bytes` | integer | `5368709120` (5 GiB) | >= `max_request_bytes` | Largest file a `PUT` may upload. Larger uploads get 413 and leave the target unchanged. Uploads above `max_request_bytes`, or without a `Content-Length` that grow past it, are stored as they arrive and published once complete: a split-store drive stores the blocks and publishes the file in one step; other drives write a hidden temporary file in up to 8 MiB writes and rename it over the target. |
 | `max_buffered_upload_bytes` | integer | 4 x `max_request_bytes` | >= `max_request_bytes` (a smaller value is a config error, exit 2) | Upload bytes the server holds in memory across all in-flight `PUT`s. A `PUT` reserves its `Content-Length` (or `max_request_bytes` without one) before its body is read; a streamed upload reserves one write buffer (the smaller of 8 MiB and `max_request_bytes`). Uploads beyond the budget wait in arrival order, up to `request_timeout_ms`. |
-| `max_response_bytes` | integer | `33554432` (32 MiB) | >= 1 | Largest directory listing (uncompressed JSON). Larger listings get 413. Does not limit file downloads. |
-| `max_directory_entries` | integer | `100000` | >= 1 | Largest directory that can be listed. Larger directories get 413. An entry is about 70 bytes of JSON with short names, so 100,000 entries is about 7 MB (0.3 MB gzipped from `/entries`). |
+| `max_response_bytes` | integer | `33554432` (32 MiB) | >= 1 | Largest directory listing, or page of one (uncompressed JSON). Larger listings get 413; a consumer can then list in pages with `?limit=`. Does not limit file downloads. |
+| `max_directory_entries` | integer | `100000` | >= 1 | Largest directory that can be listed, in one response or in pages, and the largest page `limit`. Larger directories get 413. An entry is about 70 bytes of JSON with short names, so 100,000 entries is about 7 MB (0.3 MB gzipped from `/entries`). |
 | `read_chunk_bytes` | integer | `65536` | >= 1 | Read size per chunk when streaming a download. |
 | `request_timeout_ms` | integer | `30000` | >= 1 | Limit for one request up to its response headers, including receiving the body and waiting for upload budget; exceeding it returns 504. A streamed upload (above `max_request_bytes`, or without a `Content-Length`) has no overall limit: instead each piece of its body, each write to the drive and the final publication must happen within this time, or it gets 504 and leaves the target unchanged. Also the header-read and idle keep-alive timeout (the connection is closed without a response) and the time a download may make no progress before it is cut. |
 | `drain_timeout_ms` | integer | `35000` | >= 1 | How long shutdown waits for in-flight requests before aborting them. Keep it above `request_timeout_ms`. |
+| `drive_shutdown_timeout_ms` | integer | `30000` | >= 1 | How long shutdown gives the drives, all together, to flush and release their writer leases once the listener has stopped. When it passes the process exits with code 1 without waiting further. See [Shutdown](#shutdown). |
 | `max_connections` | integer | `256` | >= 1 | Concurrent TCP connections. Excess connections are accepted and closed immediately with no HTTP response. |
+| `access_log` | boolean | `false` | | Writes one `http_request` JSON line per request to stderr. No path, query, token or header is written. See [Access log](#access-log). |
 | `tcp_nodelay` | boolean | `true` | | Disables Nagle on accepted connections. |
 | `http2_prior_knowledge` | boolean | `false` | | `true` makes the listener cleartext HTTP/2 only (no HTTP/1.1). Leave `false` at launch; the reference proxy configs below speak HTTP/1.1 upstream. With HTTP/2 a stalled download releases its file handle but its connection is not dropped. |
 | `drives` | array | required | at least one drive | See below. |
@@ -226,7 +230,7 @@ Requirements:
 | Terminate TLS at the proxy | The server has no TLS. |
 | Run in the same network namespace as the server (same host, or same pod as a sidecar) | The server binds loopback only. A proxy on another host or in another container network cannot reach it. |
 | Forward the request path unmodified | The server validates percent-encoding itself. Do not let the proxy decode, normalise or merge slashes in the upstream URI. |
-| Forward `Authorization`, `Range`, `If-Range`, `If-Match`, `If-None-Match`, `Accept-Encoding` and the response's `ETag` unchanged; do not cache | Authentication is per request. Responses depend on the token. Conditional writes rely on the tags reaching both ways intact. |
+| Forward `Authorization`, `Range`, `If-Range`, `If-Match`, `If-None-Match`, `Accept-Encoding`, `X-Request-Id` and the response's `ETag` and `X-Request-Id` unchanged; do not cache | Authentication is per request. Responses depend on the token. Conditional writes rely on the tags reaching both ways intact. |
 | Request body cap >= `max_upload_bytes` | A smaller cap rejects uploads the server would accept. Equal is best: then the proxy rejects oversize uploads without opening an upstream connection. |
 | Stream request bodies upstream; do not buffer them | Large uploads are streamed to storage as they arrive. A proxy that buffers a multi-gigabyte upload to its own disk first doubles the disk traffic and delays the upload's start. The server gives up on an upload that stalls for `request_timeout_ms`, so a slow client cannot hold it forever. |
 | Do not buffer or cap response bodies | Downloads have no size limit and are streamed. |
@@ -234,7 +238,7 @@ Requirements:
 | Upstream keep-alive idle timeout shorter than `request_timeout_ms` | The server closes a keep-alive connection that has been idle for `request_timeout_ms`. A proxy that reuses such a connection at that moment gets a reset. |
 | Upstream connections < `max_connections` | Connections beyond the limit are closed without a response, which the proxy reports as 502. |
 | Do not retry non-idempotent requests upstream | A retried `rename` or non-recursive `mkdir` can fail spuriously. Safest is no automatic retry at all; consumers have retry rules. |
-| Write an access log without the `Authorization` header | The server has no access log. |
+| Write an access log without the `Authorization` header | The server's own access log is off by default and, when on, records route templates rather than paths. The proxy's log is where paths and client addresses are. |
 | Keep `/readyz` and `/healthz` reachable by the load balancer only | They are unauthenticated. |
 
 Errors generated by the proxy do not have the API's JSON error body. Consumers
@@ -385,7 +389,8 @@ SIGINT and SIGTERM (Unix; Ctrl-C on Windows) start a graceful shutdown:
    body shorter than `Content-Length` and retries. Other requests in progress
    get up to `drain_timeout_ms` to finish.
 4. Every drive is shut down in reverse config order. This flushes the storage
-   and releases the writer lease.
+   and releases the writer lease. The drives have `drive_shutdown_timeout_ms`
+   for this, all together.
 5. The process prints `http stopped` to stdout and exits with code 0.
 
 If connections are still open when `drain_timeout_ms` passes (for example a
@@ -394,15 +399,52 @@ client that has stopped reading a download), they are aborted. Drive shutdown
 `mount-rs: HTTP server close timed out` to stderr, does not print
 `http stopped`, and exits with code 1.
 
-Worst-case stop time is `drain_timeout_ms`, plus up to 5 seconds for aborted
-requests to release their file handles, plus drive shutdown. Drive shutdown
-has no time bound of its own.
+If the drives have not all shut down when `drive_shutdown_timeout_ms` passes
+(storage that has stopped answering, or a flush that needs longer than the
+bound), the process stops waiting. It prints, for example,
+
+```text
+mount-rs: drive shutdown timed out after 30000 ms: drive 'files' did not finish and 'scratch' not attempted; a writer lease not released stays held until it expires, and writeback data not yet flushed may be lost
+```
+
+to stderr, does not print `http stopped`, and exits with code 1 at once. It
+does not claim anything that did not happen:
+
+- The drive named as not finished was abandoned mid-shutdown, and the
+  drives named as not attempted (those before it in the config) were never
+  shut down. Their writer leases were **not** released; the next start
+  waits for them as after a SIGKILL (see
+  [Lease takeover wait](#lease-takeover-wait)). Drives listed after the
+  stuck one in the config had already been shut down.
+- Every write that was acknowledged as durable is still durable: a `200`
+  for a `PUT` is sent only after the data is stored, and the timeout
+  changes nothing that is stored. The exception is the one that always
+  applies to an unclean stop: a drive with `writeback` may lose
+  acknowledged data it had not yet flushed.
+- Nothing is cleaned up on the way out. The process exits without running
+  the remaining teardown, because that teardown can block on the same
+  storage. This is the same state as after a SIGKILL at that moment, and
+  the next start recovers from it in the same way.
+
+Worst-case stop time is therefore bounded: `drain_timeout_ms`, plus up to 5
+seconds for aborted requests to release their file handles, plus
+`drive_shutdown_timeout_ms` (plus up to 2 seconds to flush the access log
+when it is enabled). With the defaults that is 70 seconds. A stop with no
+stalled client and healthy storage does not wait for any of these.
 
 Operational consequences:
 
 - Give the service manager a stop timeout above that worst case (for systemd,
-  `TimeoutStopSec=60` with the defaults) and let it fall back to SIGKILL
-  afterwards, because drive shutdown against unreachable storage can hang.
+  `TimeoutStopSec=75` with the defaults) and let it fall back to SIGKILL
+  afterwards. The process now ends by itself when storage hangs; SIGKILL
+  remains the backstop.
+- Size `drive_shutdown_timeout_ms` for the slowest legitimate flush, not the
+  typical one. Cutting a healthy but slow shutdown short leaves the lease
+  held, and the replacement then waits out the lease instead of starting at
+  once. Raise it for drives with `writeback` or large unflushed caches.
+- With several drives in one process, a drive that hangs keeps the drives
+  before it in the config from being shut down within the bound. One drive
+  per process avoids that.
 - A second SIGTERM does not speed the shutdown up.
 - SIGKILL skips step 4. A split-store drive's writer lease then stays held
   until it expires; see [Lease takeover wait](#lease-takeover-wait).
@@ -421,7 +463,7 @@ Operational consequences:
 ExecStart=/usr/local/bin/mount-rs serve-http --config /etc/mount-rs/http.json
 EnvironmentFile=/etc/mount-rs/tokens.env
 KillSignal=SIGTERM
-TimeoutStopSec=60
+TimeoutStopSec=75
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -432,7 +474,7 @@ LimitNOFILE=65536
 | Code | Meaning | Typical stderr |
 | --- | --- | --- |
 | 0 | Clean stop after a signal. `http stopped` was printed. | |
-| 1 | Runtime failure: missing token variable (`missing environment variable NAME`), drive failed to open (storage unreachable; lease held: `EAGAIN: resource temporarily unavailable, acquire writer`; corrupt block), bind failure (port in use), signal during startup, listener exited unexpectedly, drain deadline exceeded (`HTTP server close timed out`), drive shutdown failed. | `mount-rs: <message>` |
+| 1 | Runtime failure: missing token variable (`missing environment variable NAME`), drive failed to open (storage unreachable; lease held: `EAGAIN: resource temporarily unavailable, acquire writer`; corrupt block), bind failure (port in use), signal during startup, listener exited unexpectedly, drain deadline exceeded (`HTTP server close timed out`), drive shutdown failed, drive shutdown deadline exceeded (`drive shutdown timed out after N ms: ...`). | `mount-rs: <message>` |
 | 2 | Usage or configuration error: bad arguments, invalid or unknown config key, non-loopback host, invalid drive id, token with whitespace, config without an `http` section. | `mount-rs: <message>` then `try --help` |
 
 Error messages go to stderr with the prefix `mount-rs: `. Secrets in messages
@@ -453,10 +495,79 @@ State of the default build, without qualification:
 | Fatal error on stderr at exit | Yes |
 | `mount_cache_stats` JSON lines on stderr | Only with `cache_report_interval_seconds`, only for drives with a cache |
 | `{"event":"http_accept_failed","total":N}` JSON line on stderr | Yes, each time the count of failed `accept` calls rises |
-| Per-request access log | **No** |
+| Per-request access log (`http_request` JSON lines on stderr) | Only with `"access_log": true`; off by default (see [Access log](#access-log)) |
 | Metrics endpoint (Prometheus or other) | **No** |
-| Request ids, trace headers in responses | **No** |
-| Per-request error log (which request got a 500 and why) | **No** |
+| Request ids in responses | Yes: every response carries `X-Request-Id` (see [Request ids](#request-ids)) |
+| Trace headers in responses | **No** |
+| Per-request error log (which request got a 500 and why) | Which request: yes, with the access log (status and request id). Why: **no** |
+
+### Request ids
+
+Every response the process produces carries `X-Request-Id`. A request that
+sends exactly one `X-Request-Id` of 1 to 128 characters from
+`A-Z a-z 0-9 . _ -` keeps its value; any other request is given a generated
+id of 32 hexadecimal characters. A value outside that set is never echoed
+or forwarded. Nothing needs configuring.
+
+- Let the proxy pass the client's `X-Request-Id` through, or set one itself
+  (nginx: `proxy_set_header X-Request-Id $request_id;`), and log the
+  response's `X-Request-Id` in the proxy access log. That joins the proxy's
+  line and the client's report.
+- With `forwarding`, the server that receives a request sends the same id
+  to the owner, so both servers name the request alike.
+- A response without the header came from the proxy, or is the bare `400`
+  the HTTP parser sends for a request that is not valid HTTP.
+
+### Access log
+
+`"access_log": true` in the `http` object makes the process write one JSON
+line to stderr for every request, when the request is over:
+
+```json
+{"event":"http_request","unix_ms":1794439474775,"request_id":"3f9c1d2e4b5a69788796a5b4c3d2e1f0","method":"PUT","route":"/v1/drives/{id}/fs/{path}","drive":"files","status":200,"duration_ms":12.345,"bytes_in":19,"bytes_out":44}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `event` | Always `http_request`. |
+| `unix_ms` | When the line was recorded, in milliseconds since the Unix epoch. |
+| `request_id` | The response's `X-Request-Id`. |
+| `method` | The request method. |
+| `route` | The route's template as in the API guide's route table, for example `/v1/drives/{id}/fs/{path}` (also for the drive root) or `/v1/drives/{id}/ops/rename`. `unmatched` for a path that is no route (404), `invalid` for a path rejected before routing (400). **Never the path.** |
+| `drive` | The drive id, only when the request named a drive of this config, whether or not its token was right. Absent otherwise: an id that is not configured is client text and is not written. With `remote_sessions` or `forwarding` the field is always absent. |
+| `status` | The response status. `null` when there was no response: the client disconnected first, or shutdown ran out of drain time. |
+| `duration_ms` | From the request's arrival until its response body was sent in full or abandoned. For a download this includes the time the client took to read it. |
+| `bytes_in` | Request body bytes the server read. |
+| `bytes_out` | Response body bytes handed to the connection. `0` for `HEAD`; less than the file size for a download that was cut short. |
+
+What is never written: the request path, the query string, the bearer token,
+any request header, the client address, and the storage error behind a 500.
+That is why the log can be shipped without redaction, and why it does not
+replace the proxy's log, which has the path and the client.
+
+It is **off by default**. The process has never written request data, the
+proxy in front of it already keeps an access log, and stderr is where the
+alerts above look for `mount-rs:` and `http_accept_failed` lines: an upgrade
+should not start sending a line per request there unasked. Turn it on when
+you want the server's own view: status and timing as the server saw them, a
+line for requests the proxy never got an answer to, and the request id to
+join the two.
+
+Operational notes:
+
+- Lines are written by one background thread from a queue of 8,192 lines. If
+  stderr is not being read (a blocked pipe, a full journal), requests are
+  never delayed: lines are dropped instead, and
+  `{"event":"http_access_log_dropped","total":N}` reports the running count
+  once writing resumes.
+- A request costs a few small allocations and a queue push when the log is on,
+  and one branch when it is off.
+- At shutdown the lines of the last requests are written before the drives
+  are closed (the process waits up to 2 seconds for stderr).
+- A line is written when the response is finished, so lines are ordered by
+  completion, not arrival.
+- With `forwarding`, the ingress and the owner each write a line, with the
+  same `request_id`.
 
 The error detail a client receives is the POSIX code only; the underlying
 storage message is not logged anywhere in the default build.
@@ -470,9 +581,11 @@ drive ids are not recorded. The CLI does not install an exporter: without a
 subscriber and exporter provided by an embedding application these signals go
 nowhere. See [`observability.md`](observability.md).
 
-In practice, at launch, **the reverse proxy is the source of request
-telemetry**. Configure its access log (status, method, path, upstream time,
-bytes, without `Authorization`) and export its metrics.
+The reverse proxy remains the source of request metrics, and of paths and
+client addresses. Configure its access log (status, method, path, upstream
+time, bytes, `X-Request-Id`, without `Authorization`) and export its
+metrics. The server's access log adds the server's own status and timing per
+request.
 
 ### What to alert on
 
@@ -486,7 +599,9 @@ bytes, without `Authorization`) and export its metrics.
 | 500 rate above baseline | Proxy log | Storage errors | Check storage health and disk |
 | 504 rate above baseline | Proxy log | Slow storage, or upload memory budget saturated | Check storage latency and upload concurrency |
 | 502 from the proxy | Proxy log | Connection limit reached, process down, or keep-alive race | Check connection count against `max_connections` and the proxy keep-alive timeout |
+| `http_access_log_dropped` line on stderr | Process stderr | Access-log lines were dropped because stderr was not being read fast enough | Check the log collector; requests were not affected |
 | `http_accept_failed` line on stderr | Process stderr | The process could not accept connections, usually out of file descriptors (`EMFILE`/`ENFILE`). It keeps retrying with a 10 ms to 1 s back-off; clients are turned away meanwhile | Raise `LimitNOFILE`; look for leaked connections |
+| `drive shutdown timed out` on stderr at stop | Process stderr | A drive did not flush and release its lease within `drive_shutdown_timeout_ms`; the lease stays held until it expires | Check the storage of the drive named in the message; expect the restart to wait for the lease; raise the bound if the storage was only slow |
 | `HTTP server close timed out` on stderr at stop | Process stderr | The drain deadline passed and requests were aborted | Usually a stalled client; check that `drain_timeout_ms` exceeds `request_timeout_ms` |
 | 401 rate spike | Proxy log | Rotated token not picked up, or probing | Check with the consumer |
 | 413 rate above baseline | Proxy log | Consumers hitting the upload or listing limit | Talk to the consumer; consider the limits |
@@ -506,11 +621,12 @@ bytes, without `Authorization`) and export its metrics.
 | Start fails with code 1 and `missing environment variable` | Token variable not set | Fix the environment source. |
 | `HTTP listener exited unexpectedly`, exit 1 | The accept task ended | Restart. Accept errors, including `EMFILE`/`ENFILE`, are retried with back-off and logged as `http_accept_failed`; they do not cause this. |
 | `http_accept_failed` lines, clients time out connecting | Out of file descriptors | Raise `LimitNOFILE`; the listener recovers by itself when descriptors are free. |
+| Stop ends with code 1 and `drive shutdown timed out after N ms: drive 'X' did not finish` | The drive's storage did not answer in time while flushing or releasing the lease | Fix the storage. The lease of that drive, and of any drive named as not attempted, stays held until it expires, so restarts fail with `EAGAIN ... acquire writer` until then. Acknowledged durable writes are intact. |
 | Downloads cut off after `request_timeout_ms` | The client (or the proxy, if it buffers to a slow client) stopped reading | Expected: a download that makes no progress for `request_timeout_ms` is dropped to free its connection and file handle. |
 | 507 on writes | Storage full | Free space or grow the volume. No restart needed. |
 | Clients get connection resets or the proxy logs 502 | `max_connections` reached, or keep-alive idle race | Lower proxy keep-alive count and idle time, or raise `max_connections` and `LimitNOFILE`. |
 | Uploads return 504 under load | Upload memory budget saturated or slow storage | Raise `max_buffered_upload_bytes` if memory allows; reduce upload concurrency at the proxy. |
-| A directory returns `413 EOVERFLOW` | More than `max_directory_entries` entries, or listing above `max_response_bytes` | Raise the limits (needs restart) or have the consumer restructure. |
+| A directory returns `413 EOVERFLOW` | More than `max_directory_entries` entries, or listing above `max_response_bytes` | Above `max_response_bytes` only: have the consumer list in pages (`?limit=N`). Above `max_directory_entries`: pagination does not help, because every page enumerates the whole directory; raise the limit (needs restart, and memory for one full enumeration per listing request in flight) or have the consumer restructure. |
 | A file starting with `.mount-rs-upload.` exists in a `host` drive's directory | The process was killed during a `PUT` on a `host` drive | It stays on disk, hidden from the API, and is removed when its otherwise-empty directory is deleted through the API. Safe to delete by hand while no upload to that directory is in flight. Only `host` drives create such files. |
 
 ### Lease takeover wait
@@ -578,7 +694,11 @@ after a kill is up to one full lifetime.
   directories concurrently. Measured on a SQLite split-store drive, listing a
   100,000-entry directory took 16 ms and produced 6.8 MB of JSON; the entries
   and their JSON are held together while the response is built, so budget
-  about 15-20 MB for each such listing in flight.
+  about 15-20 MB for each such listing in flight. A paginated listing
+  (`?limit=N`) sends less but does not cost less: each page enumerates the
+  whole directory and keeps its entries in memory while it picks the page,
+  so reading a directory of E entries in pages of N costs E/N enumerations.
+  Pagination is for bounding response size, not server work.
 - **Download memory.** About two chunks of `read_chunk_bytes` per active
   download.
 - **Throughput.** One process, one writer per drive. Capacity is added by
@@ -661,6 +781,7 @@ Configuration
       `http2_prior_knowledge` is `false`.
 - [ ] No `memory` drive.
 - [ ] `drain_timeout_ms` > `request_timeout_ms`.
+- [ ] `drive_shutdown_timeout_ms` covers the slowest flush the drives need.
 - [ ] Twice `max_buffered_upload_bytes` fits the memory limit of the process.
 - [ ] No drive sets `writeback`, unless its consumers accept non-durable `200`s.
 - [ ] `mount-rs validate-config --config <path>` passes.
@@ -682,14 +803,14 @@ Proxy
       below it; upstream pool below `max_connections`.
 - [ ] No automatic upstream retries.
 - [ ] Request URI forwarded unmodified (`a%2Fb` test returns the server's 400).
-- [ ] Access log on, `Authorization` not logged; `/healthz` and `/readyz` not
-      public.
+- [ ] Access log on, `Authorization` not logged, `X-Request-Id` logged;
+      `/healthz` and `/readyz` not public.
 
 Process
 
 - [ ] Exactly one instance per drive.
 - [ ] Stop signal SIGTERM; stop timeout above `drain_timeout_ms` + 5 s +
-      storage flush, with SIGKILL as the fallback.
+      `drive_shutdown_timeout_ms`, with SIGKILL as the fallback.
 - [ ] Restart on failure with a delay of several seconds; no restart on exit
       code 2.
 - [ ] `LimitNOFILE` raised.

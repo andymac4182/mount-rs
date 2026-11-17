@@ -680,6 +680,109 @@ fn unix_http_subprocess_stops_gracefully_and_boundedly() {
         stdout.iter().any(|line| line == "http stopped"),
         "HTTP subprocess did not report bounded shutdown: stdout={stdout:?}, stderr={stderr:?}"
     );
+    // The access log is off unless the config asks for it.
+    assert!(
+        !stderr.iter().any(|line| line.contains("http_request")),
+        "stderr={stderr:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_access_log_writes_one_line_per_request_and_no_path_or_token() {
+    let root = temporary_root();
+    let path = write_http_config(&root);
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["http"]["access_log"] = true.into();
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut child = HttpChild::start(&path, root);
+    let (address, _ready) = child.ready();
+
+    let token = "memory-test-token";
+    let put = request(
+        address,
+        "PUT",
+        "/v1/drives/memory/fs/private-report.txt?note=confidential",
+        token,
+        b"nineteen bytes here",
+    );
+    assert_eq!(put.status, 200);
+    let get = request(
+        address,
+        "GET",
+        "/v1/drives/memory/fs/private-report.txt",
+        token,
+        &[],
+    );
+    assert_eq!(get.body, b"nineteen bytes here");
+    let refused = request(
+        address,
+        "GET",
+        "/v1/drives/memory/fs/private-report.txt",
+        "not-the-memory-token",
+        &[],
+    );
+    assert_eq!(refused.status, 401);
+    let probe = request(address, "GET", "/readyz", "", &[]);
+    assert_eq!(probe.status, 200);
+    let ids: Vec<String> = [&put, &get, &refused, &probe]
+        .iter()
+        .map(|response| {
+            response
+                .header("x-request-id")
+                .expect("request id")
+                .to_owned()
+        })
+        .collect();
+
+    child.signal(libc::SIGTERM);
+    let status = child.wait_for_exit(Duration::from_secs(10));
+    assert!(status.success(), "exit status: {status}");
+    let (_stdout, stderr) = child.output();
+    let lines: Vec<serde_json::Value> = stderr
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|line| line["event"] == "http_request")
+        .collect();
+    // Every request, in the order they finished, flushed before the exit.
+    let logged: Vec<_> = lines
+        .iter()
+        .map(|line| line["request_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(logged, ids, "stderr={stderr:?}");
+    let fs_route = "/v1/drives/{id}/fs/{path}";
+    for (line, (method, route, drive, status, bytes_in, bytes_out)) in lines.iter().zip([
+        ("PUT", fs_route, Some("memory"), 200, 19, put.body.len()),
+        ("GET", fs_route, Some("memory"), 200, 0, 19),
+        ("GET", fs_route, Some("memory"), 401, 0, refused.body.len()),
+        ("GET", "/readyz", None, 200, 0, probe.body.len()),
+    ]) {
+        assert_eq!(line["method"], method, "{line}");
+        assert_eq!(line["route"], route, "{line}");
+        assert_eq!(line["drive"].as_str(), drive, "{line}");
+        assert_eq!(line["status"], status, "{line}");
+        assert_eq!(line["bytes_in"], bytes_in, "{line}");
+        assert_eq!(line["bytes_out"], bytes_out, "{line}");
+        assert!(line["duration_ms"].as_f64().unwrap() >= 0.0, "{line}");
+        assert!(
+            line["unix_ms"].as_u64().unwrap() > 1_600_000_000_000,
+            "{line}"
+        );
+        assert_eq!(
+            line.as_object().unwrap().len(),
+            9 + usize::from(drive.is_some())
+        );
+    }
+    let everything = stderr.join("\n");
+    for private in [
+        "private-report",
+        "confidential",
+        "memory-test-token",
+        "not-the-memory-token",
+        "Bearer",
+    ] {
+        assert!(!everything.contains(private), "{private} reached stderr");
+    }
 }
 
 /// A config serving one SQLite-backed split-store drive, `durable`.
@@ -1472,6 +1575,89 @@ async fn tidb_remote_sessions_recover_after_process_kill_and_lease_expiry() {
 #[ignore = "requires isolated actual TiDB and RustFS; waits for crashed owner lease expiry"]
 async fn tidb_remote_sessions_recover_rustfs_after_process_kill_and_lease_expiry() {
     run_configured_session_case(true, true, true).await;
+}
+
+/// A drive whose storage has stopped answering: the test holds SQLite's
+/// write lock on the metadata database, so the lease release at shutdown
+/// waits (for SQLite's five-second busy timeout, far beyond the bound set
+/// here).
+#[cfg(unix)]
+#[test]
+fn a_drive_that_cannot_shut_down_in_time_ends_the_process_with_a_failure() {
+    let root = temporary_root();
+    let lease_ttl_ms = 120_000;
+    let http = serde_json::json!({
+        "drain_timeout_ms": 1000,
+        "drive_shutdown_timeout_ms": 300
+    });
+    let config = write_sqlite_split_config(
+        &root,
+        "stuck.json",
+        "http-stuck-owner",
+        lease_ttl_ms,
+        http.clone(),
+    );
+    let successor_config = write_sqlite_split_config(
+        &root,
+        "successor.json",
+        "http-successor-owner",
+        lease_ttl_ms,
+        http,
+    );
+    let mut child = HttpChild::start(&config, root.clone());
+    let (address, _ready) = child.ready();
+    let token = "splitstore-test-token-for-sessions";
+    let kept = request(
+        address,
+        "PUT",
+        "/v1/drives/durable/fs/kept",
+        token,
+        b"acknowledged before the stop",
+    );
+    assert_eq!(kept.status, 200);
+
+    let blocker = rusqlite::Connection::open(root.join("metadata.db")).expect("open metadata");
+    blocker
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("take the metadata write lock");
+
+    let stopping = Instant::now();
+    child.signal(libc::SIGTERM);
+    let status = child.wait_for_exit(Duration::from_secs(10));
+    let took = stopping.elapsed();
+    // Bounded by the configured limit, not by how long the storage takes
+    // to give up: the blocked release alone would have waited five seconds.
+    assert!(took < Duration::from_secs(4), "the stop took {took:?}");
+    assert_eq!(status.code(), Some(1), "exit status: {status}");
+    let (stdout, stderr) = child.output();
+    assert!(
+        !stdout.iter().any(|line| line == "http stopped"),
+        "a shutdown that did not finish was reported as clean: stdout={stdout:?}"
+    );
+    assert!(
+        stderr.iter().any(|line| line
+            .contains("drive shutdown timed out after 300 ms: drive 'durable' did not finish")),
+        "stderr={stderr:?}"
+    );
+    blocker.execute_batch("ROLLBACK").expect("release the lock");
+    drop(blocker);
+
+    // Nothing was claimed that did not happen: the lease was not released,
+    // so a successor is kept out until it expires...
+    let mut successor = HttpChild::start(&successor_config, root.clone());
+    let status = successor.wait_for_exit(Duration::from_secs(30));
+    assert_eq!(status.code(), Some(1), "exit status: {status}");
+    let (_stdout, stderr) = successor.output();
+    assert!(
+        stderr.iter().any(|line| line.contains("EAGAIN")),
+        "stderr={stderr:?}"
+    );
+    // ...and the acknowledged upload is in the store, untouched.
+    let metadata = rusqlite::Connection::open(root.join("metadata.db")).expect("open metadata");
+    let integrity: String = metadata
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("integrity check");
+    assert_eq!(integrity, "ok");
 }
 
 #[test]

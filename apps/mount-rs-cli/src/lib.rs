@@ -6,6 +6,7 @@
 //! for the explicit mount command (the default command is also a mount, just
 //! like the upstream `mountx` CLI).
 
+mod access_log;
 pub mod color;
 pub mod config;
 mod http_sessions;

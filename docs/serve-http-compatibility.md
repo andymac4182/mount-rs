@@ -53,8 +53,9 @@ The v1 contract is plain `serve-http` with `remote_sessions: false` and no
 | The meaning of each success status and the documented fields of each success body | README "Routes", "Semantics" |
 | The error envelope `{"error":{"code","message"}}`, and the mapping from condition to HTTP status and `code` | README "Status codes and errors" |
 | The order in which a request is checked (shutdown, path syntax, route, drive and token, body size, method, operation) | README "Status codes and errors"; `openapi.yaml` "Order of checks" |
-| Documented request headers: `Authorization`, `Range`, `If-Range`, `If-Match`, `If-None-Match`, `Accept-Encoding`, `Content-Length` | README "Authentication", "Reading", "Entity tags" |
-| Documented response headers: `ETag`, `Content-Range`, `Accept-Ranges`, `Allow`, `WWW-Authenticate: Bearer`, `Retry-After`, `Content-Encoding`, `Vary`, `Connection: close` where documented, `Cache-Control: no-store` on probes | Same |
+| Documented request headers: `Authorization`, `Range`, `If-Range`, `If-Match`, `If-None-Match`, `Accept-Encoding`, `Content-Length`, `X-Request-Id` | README "Authentication", "Request ids", "Reading", "Entity tags" |
+| Documented query parameters: `limit` and `cursor` on the `entries` route, the page object `{"entries","next_cursor"}`, and that a request without `limit` gets the complete array. The cursor's content is opaque and not covered | README "Listings" |
+| Documented response headers: `ETag`, `Content-Range`, `Accept-Ranges`, `Allow`, `WWW-Authenticate: Bearer`, `Retry-After`, `Content-Encoding`, `Vary`, `Connection: close` where documented, `Cache-Control: no-store` on probes, `X-Request-Id` on every response (the rule for echoing a client's value; not the format of a generated id beyond its character set) | Same |
 | Path rules: one percent-decode per segment, the rejected forms, the reserved prefix `.mount-rs-upload.` | README "Paths" |
 | Semantics: atomic `PUT`, durable before `200` (with the two documented operator exceptions), conditional requests, non-recursive `DELETE`, POSIX `rename`, the idempotency table | README "Semantics", "Retries and idempotency" |
 | The existence and meaning of each limit, and the response when it is exceeded | README "Limits" |

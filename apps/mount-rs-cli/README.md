@@ -307,7 +307,9 @@ Listener and limit keys, all optional:
 | `read_chunk_bytes` | 65536 | Download read size. |
 | `request_timeout_ms` | 30000 | Per-request, header-read, idle keep-alive and stalled-download timeout. |
 | `drain_timeout_ms` | 35000 | Shutdown drain. Keep it above `request_timeout_ms`. |
+| `drive_shutdown_timeout_ms` | 30000 | Longest the drives may take, together, to shut down after the listener has stopped; past it the process exits `1` without waiting. |
 | `max_connections` | 256 | Concurrent connections; excess connections are closed. |
+| `access_log` | `false` | `true` writes one `http_request` JSON line per request to stderr: request id, method, route template, status, duration and byte counts; never the path or the token. |
 | `tcp_nodelay` | `true` | Set `false` to restore TCP packet coalescing. |
 | `http2_prior_knowledge` | `false` | `true` makes the listener cleartext HTTP/2 only; the proxy must then send the HTTP/2 preface upstream. |
 
@@ -352,11 +354,16 @@ accepting, in-flight requests get up to `drain_timeout_ms`, the drives are
 shut down (which releases split-store writer leases), and the process prints
 `http stopped` and exits `0`. If the drain deadline passes, in-flight requests
 are aborted, the drives are still shut down, and the process exits `1` with
-`HTTP server close timed out` on stderr and no `http stopped` line.
+`HTTP server close timed out` on stderr and no `http stopped` line. The
+drives in turn have `drive_shutdown_timeout_ms` to shut down; if storage does
+not answer in that time the process exits `1` at once with
+`drive shutdown timed out after N ms: ...` naming the drives it left, whose
+writer leases then stay held until they expire.
 
 Exit codes: `0` clean stop; `1` runtime failure (missing token variable, drive
 could not be opened, bind failure, signal during startup, listener failure,
-drain deadline exceeded); `2` usage or configuration error.
+drain deadline exceeded, drive shutdown deadline exceeded); `2` usage or
+configuration error.
 
 A split-store drive is served by exactly one process. After an unclean exit
 (SIGKILL, crash) its writer lease remains until it expires (`lease_ttl_ms`,

@@ -1232,3 +1232,819 @@ async fn mkdir_takes_only_permission_bits_from_the_client() {
     assert_eq!(stats.mode & 0o7777, 0o777);
     server.close().await.expect("close");
 }
+
+// ------------------------------------------------------------ request ids
+
+fn request_id_of(response: &reqwest::Response) -> String {
+    let mut values = response.headers().get_all("x-request-id").iter();
+    let id = values.next().expect("x-request-id header");
+    assert!(values.next().is_none(), "one x-request-id header");
+    id.to_str().expect("request id text").to_owned()
+}
+
+fn is_generated_request_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_response_carries_a_request_id_and_the_error_body_is_unchanged() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+    let client = reqwest::Client::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for route in ["/healthz", "/readyz", "/v1/drives", "/v1/drives/d/entries"] {
+        let response = get(&server, route).await;
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        let id = request_id_of(&response);
+        assert!(is_generated_request_id(&id), "{route}: {id}");
+        assert!(seen.insert(id), "{route}: a request id was reused");
+    }
+    let written = put(&server, "d", "file", b"body".to_vec()).await;
+    assert_eq!(written.status(), StatusCode::OK);
+    assert!(seen.insert(request_id_of(&written)));
+
+    // Errors name their request in the header only: the body keeps its
+    // two fields.
+    for (route, authorized, status, code) in [
+        ("/v1/drives/d/fs/missing", true, 404, "ENOENT"),
+        ("/v1/drives/d/fs/file", false, 401, "EACCES"),
+        ("/v1/drives/d/fs/a%2Fb", true, 400, "EINVAL"),
+        ("/v1/unknown", true, 404, "ENOENT"),
+    ] {
+        let mut request = client.get(format!("{}{route}", server.url()));
+        if authorized {
+            request = request.header(AUTHORIZATION, bearer());
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status().as_u16(), status, "{route}");
+        let id = request_id_of(&response);
+        assert!(is_generated_request_id(&id), "{route}: {id}");
+        assert!(seen.insert(id), "{route}: a request id was reused");
+        assert_eq!(error_of(response).await.0, code, "{route}");
+    }
+
+    let head = client
+        .head(format!("{}/v1/drives/d/fs/file", server.url()))
+        .header(AUTHORIZATION, bearer())
+        .send()
+        .await
+        .unwrap();
+    assert!(is_generated_request_id(&request_id_of(&head)));
+    server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_safe_client_request_id_is_echoed_and_any_other_is_replaced() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+    let client = reqwest::Client::new();
+    let send = |values: Vec<String>| {
+        let mut request = client.get(format!("{}/v1/drives/d/fs/missing", server.url()));
+        for value in values {
+            request = request.header("x-request-id", value);
+        }
+        async move {
+            let response = request.send().await.unwrap();
+            // With or without a token, the id comes back.
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            request_id_of(&response)
+        }
+    };
+
+    let longest = "a".repeat(128);
+    for accepted in [
+        "a",
+        "Req_01.trace-9",
+        "0123456789abcdef0123456789abcdef",
+        longest.as_str(),
+    ] {
+        assert_eq!(send(vec![accepted.to_owned()]).await, accepted);
+    }
+    let too_long = "a".repeat(129);
+    for refused in [
+        "",
+        too_long.as_str(),
+        "has space",
+        "slash/inside",
+        "colon:inside",
+        "quote\"inside",
+        "caf\u{e9}",
+    ] {
+        let id = send(vec![refused.to_owned()]).await;
+        assert!(
+            is_generated_request_id(&id),
+            "{refused:?} came back as {id}"
+        );
+    }
+    // Two values name no one request.
+    let id = send(vec!["first".to_owned(), "second".to_owned()]).await;
+    assert!(is_generated_request_id(&id), "{id}");
+    server.close().await.expect("close");
+}
+
+/// What the CLI does with sessions or forwarding enabled: a handler in front
+/// of the drive routes, which are a second, unbound application.
+struct RecordsRequestId {
+    application: HttpServer,
+    seen: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl mount_rs_http::HttpRequestHandler for RecordsRequestId {
+    fn handle(
+        &self,
+        request: hyper::Request<mount_rs_http::HttpBody>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = hyper::Response<mount_rs_http::HttpBody>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let ids = request
+                .headers()
+                .get_all("x-request-id")
+                .iter()
+                .map(|value| value.to_str().unwrap().to_owned())
+                .collect();
+            self.seen.lock().unwrap().push(ids);
+            self.application.handle(request).await
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handler_is_given_the_request_id_the_response_carries() {
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(DriveConfig::new("d", Arc::new(MemoryFs::empty()), TOKEN).unwrap())
+        .unwrap();
+    let handler = Arc::new(RecordsRequestId {
+        application: HttpServer::unbound(registry, HttpServerOptions::default()),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let server = HttpServer::start_with_handler(handler.clone(), HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/drives/d/entries", server.url());
+
+    let generated = client
+        .get(&url)
+        .header(AUTHORIZATION, bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(generated.status(), StatusCode::OK);
+    let generated = request_id_of(&generated);
+    assert!(is_generated_request_id(&generated), "{generated}");
+
+    let echoed = client
+        .get(&url)
+        .header(AUTHORIZATION, bearer())
+        .header("x-request-id", "caller-7")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(request_id_of(&echoed), "caller-7");
+
+    // An unsafe value never reaches the handler, or a forwarding hop.
+    let replaced = client
+        .get(&url)
+        .header(AUTHORIZATION, bearer())
+        .header("x-request-id", "not safe")
+        .header("x-request-id", "second")
+        .send()
+        .await
+        .unwrap();
+    let replaced = request_id_of(&replaced);
+    assert!(is_generated_request_id(&replaced), "{replaced}");
+
+    assert_eq!(
+        *handler.seen.lock().unwrap(),
+        vec![vec![generated], vec!["caller-7".to_owned()], vec![replaced]]
+    );
+    server.close().await.expect("close");
+    handler.application.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_request_refused_during_shutdown_still_carries_its_request_id() {
+    use http_body_util::BodyExt;
+
+    let server = HttpServer::unbound(DriveRegistry::new(), HttpServerOptions::default());
+    server.close().await.expect("close");
+    let empty = http_body_util::Empty::<bytes::Bytes>::new()
+        .map_err(|never| -> mount_rs_http::BoxError { match never {} })
+        .boxed_unsync();
+    let request = hyper::Request::builder()
+        .uri("/healthz")
+        .header("x-request-id", "probe-1")
+        .body(empty)
+        .unwrap();
+    let response = server.handle(request).await;
+    assert_eq!(response.status().as_u16(), 503);
+    assert_eq!(response.headers()["x-request-id"], "probe-1");
+}
+
+// ------------------------------------------------------------- access log
+
+/// One access record, kept as its owner would write it.
+#[derive(Debug, Clone, PartialEq)]
+struct Logged {
+    request_id: String,
+    method: String,
+    route: &'static str,
+    drive: Option<String>,
+    status: Option<u16>,
+    bytes_in: u64,
+    bytes_out: u64,
+}
+
+#[derive(Debug, Default)]
+struct CollectingLog(std::sync::Mutex<Vec<Logged>>);
+
+impl mount_rs_http::AccessLog for CollectingLog {
+    fn record(&self, record: &mount_rs_http::AccessRecord<'_>) {
+        self.0.lock().unwrap().push(Logged {
+            request_id: record.request_id.to_owned(),
+            method: record.method.to_owned(),
+            route: record.route,
+            drive: record.drive.map(str::to_owned),
+            status: record.status,
+            bytes_in: record.bytes_in,
+            bytes_out: record.bytes_out,
+        });
+    }
+}
+
+impl CollectingLog {
+    /// The next record, in the order requests finished.
+    async fn next(&self, seen: &mut usize) -> Logged {
+        let index = *seen;
+        until("an access record", || self.0.lock().unwrap().len() > index).await;
+        *seen += 1;
+        self.0.lock().unwrap()[index].clone()
+    }
+}
+
+fn logged_options(log: &Arc<CollectingLog>) -> HttpServerOptions {
+    HttpServerOptions {
+        access_log: Some(log.clone()),
+        ..HttpServerOptions::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_access_log_gets_one_record_per_request_without_paths_or_tokens() {
+    let log = Arc::new(CollectingLog::default());
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let server = start(vec![("d", driver)], logged_options(&log)).await;
+    let client = reqwest::Client::new();
+    let mut seen = 0;
+    let fs = "/v1/drives/{id}/fs/{path}";
+
+    let body = vec![7_u8; 3000];
+    let written = client
+        .put(format!("{}/v1/drives/d/fs/secret-name.txt", server.url()))
+        .header(AUTHORIZATION, bearer())
+        .header("x-request-id", "upload-1")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(written.status(), StatusCode::OK);
+    let reply = written.bytes().await.unwrap();
+    assert_eq!(
+        log.next(&mut seen).await,
+        Logged {
+            request_id: "upload-1".to_owned(),
+            method: "PUT".to_owned(),
+            route: fs,
+            drive: Some("d".to_owned()),
+            status: Some(200),
+            bytes_in: 3000,
+            bytes_out: reply.len() as u64,
+        }
+    );
+
+    // A download counts the bytes sent; the id is the one the response had.
+    let read = get(&server, "/v1/drives/d/fs/secret-name.txt?download=1").await;
+    let id = request_id_of(&read);
+    assert_eq!(read.bytes().await.unwrap().len(), 3000);
+    let record = log.next(&mut seen).await;
+    assert_eq!(record.request_id, id);
+    assert_eq!(
+        (record.method.as_str(), record.route, record.status),
+        ("GET", fs, Some(200))
+    );
+    assert_eq!((record.bytes_in, record.bytes_out), (0, 3000));
+
+    // HEAD sends no body, whatever length it announces.
+    let head = client
+        .head(format!("{}/v1/drives/d/fs/secret-name.txt", server.url()))
+        .header(AUTHORIZATION, bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.headers()["content-length"], "3000");
+    let record = log.next(&mut seen).await;
+    assert_eq!(
+        (record.method.as_str(), record.status, record.bytes_out),
+        ("HEAD", Some(200), 0)
+    );
+
+    // (request, route template, drive named, status)
+    let cases: [(reqwest::RequestBuilder, &str, Option<&str>, u16); 9] = [
+        (
+            client.get(format!("{}/healthz", server.url())),
+            "/healthz",
+            None,
+            200,
+        ),
+        (
+            client
+                .get(format!("{}/v1/drives", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "/v1/drives",
+            None,
+            200,
+        ),
+        // A wrong token on a configured drive names the drive: it is the
+        // operator's own id, not something the client supplied.
+        (
+            client
+                .get(format!("{}/v1/drives/d/fs/x", server.url()))
+                .header(AUTHORIZATION, "Bearer wrong-secret-token"),
+            fs,
+            Some("d"),
+            401,
+        ),
+        // An unknown drive id is client text and is not repeated.
+        (
+            client
+                .get(format!("{}/v1/drives/guessed-drive/entries", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "/v1/drives/{id}/entries/{path}",
+            None,
+            401,
+        ),
+        (
+            client
+                .get(format!("{}/v1/drives/d/stat/secret-name.txt", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "/v1/drives/{id}/stat/{path}",
+            Some("d"),
+            200,
+        ),
+        (
+            client
+                .post(format!("{}/v1/drives/d/ops/mkdir", server.url()))
+                .header(AUTHORIZATION, bearer())
+                .json(&json!({"path": "/private-dir"})),
+            "/v1/drives/{id}/ops/mkdir",
+            Some("d"),
+            200,
+        ),
+        (
+            client
+                .post(format!("{}/v1/drives/d/ops/chown-everything", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "/v1/drives/{id}/ops/{operation}",
+            Some("d"),
+            404,
+        ),
+        (
+            client.get(format!("{}/v2/secret-route", server.url())),
+            "unmatched",
+            None,
+            404,
+        ),
+        (
+            client
+                .get(format!("{}/v1/drives/d/fs/a%2Fb", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "invalid",
+            None,
+            400,
+        ),
+    ];
+    for (request, route, drive, status) in cases {
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status().as_u16(), status, "{route}");
+        let id = request_id_of(&response);
+        let _ = response.bytes().await;
+        let record = log.next(&mut seen).await;
+        assert_eq!(record.request_id, id, "{route}");
+        assert_eq!(record.route, route);
+        assert_eq!(record.drive.as_deref(), drive, "{route}");
+        assert_eq!(record.status, Some(status), "{route}");
+    }
+
+    server.close().await.expect("close");
+    // Nothing a client put in a URL, a query or a header was recorded.
+    let everything = format!("{:?}", log.0.lock().unwrap());
+    for private in [
+        "secret-name",
+        "private-dir",
+        "guessed-drive",
+        "chown-everything",
+        "secret-route",
+        "download",
+        TOKEN,
+        "wrong-secret-token",
+        "Bearer",
+    ] {
+        assert!(!everything.contains(private), "{private} was recorded");
+    }
+    assert_eq!(log.0.lock().unwrap().len(), seen, "one record per request");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_behind_a_handler_is_recorded_once() {
+    let log = Arc::new(CollectingLog::default());
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(DriveConfig::new("d", Arc::new(MemoryFs::empty()), TOKEN).unwrap())
+        .unwrap();
+    // As the CLI does, both applications are given the same options.
+    let handler = Arc::new(RecordsRequestId {
+        application: HttpServer::unbound(registry, logged_options(&log)),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let server = HttpServer::start_with_handler(handler.clone(), logged_options(&log))
+        .await
+        .expect("HTTP server");
+    for _ in 0..3 {
+        let response = get(&server, "/v1/drives/d/entries").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = response.bytes().await;
+    }
+    server.close().await.expect("close");
+    handler.application.close().await.expect("close");
+    let records = log.0.lock().unwrap().clone();
+    assert_eq!(records.len(), 3, "{records:?}");
+    for (record, ids) in records.iter().zip(handler.seen.lock().unwrap().iter()) {
+        assert_eq!(ids, &vec![record.request_id.clone()]);
+        assert_eq!(record.route, "/v1/drives/{id}/entries/{path}");
+        assert_eq!(record.status, Some(200));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_whose_client_leaves_before_the_response_is_recorded_without_a_status() {
+    let log = Arc::new(CollectingLog::default());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let driver = Arc::new(StuckFs {
+        entered: entered.clone(),
+    });
+    let server = start(vec![("d", driver)], logged_options(&log)).await;
+    let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .unwrap();
+    let head = format!(
+        "GET /v1/drives/d/stat/x HTTP/1.1\r\nHost: h\r\nAuthorization: {}\r\nX-Request-Id: gone-1\r\n\r\n",
+        bearer()
+    );
+    socket.write_all(head.as_bytes()).await.unwrap();
+    // The request is with the drive, which will never answer it.
+    entered.notified().await;
+    drop(socket);
+    let mut seen = 0;
+    let record = log.next(&mut seen).await;
+    assert_eq!(
+        record,
+        Logged {
+            request_id: "gone-1".to_owned(),
+            method: "GET".to_owned(),
+            route: "/v1/drives/{id}/stat/{path}",
+            drive: Some("d".to_owned()),
+            status: None,
+            bytes_in: 0,
+            bytes_out: 0,
+        }
+    );
+    server.close().await.expect("close");
+}
+
+// ------------------------------------------------------ listing pagination
+
+async fn make_files(driver: &dyn FsDriver, directory: &str, names: &[String]) {
+    driver
+        .mkdir(directory, MkdirOptions::default())
+        .await
+        .expect("directory");
+    for name in names {
+        driver
+            .write_file(&format!("{directory}/{name}"), b"x")
+            .await
+            .expect("file");
+    }
+}
+
+/// One page: its entry names and its `next_cursor`, with the shape checked.
+async fn page_of(server: &HttpServer, route: &str) -> (Vec<String>, Option<String>) {
+    let response = get(server, route).await;
+    assert_eq!(response.status(), StatusCode::OK, "{route}");
+    let body: Value = response.json().await.expect("page JSON");
+    let page = body.as_object().expect("a page is an object");
+    let names = page["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .map(|entry| {
+            assert_eq!(entry.as_object().expect("entry").len(), 3, "{entry}");
+            entry["name"].as_str().expect("name").to_owned()
+        })
+        .collect();
+    let cursor = match page.get("next_cursor") {
+        Some(cursor) => {
+            assert_eq!(page.len(), 2, "{body}");
+            Some(cursor.as_str().expect("next_cursor is a string").to_owned())
+        }
+        None => {
+            assert_eq!(page.len(), 1, "{body}");
+            None
+        }
+    };
+    (names, cursor)
+}
+
+/// Follow `next_cursor` from the first page to the last.
+async fn walk(server: &HttpServer, route: &str, limit: usize) -> Vec<Vec<String>> {
+    let mut pages = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let query = match &cursor {
+            Some(cursor) => format!("{route}?limit={limit}&cursor={cursor}"),
+            None => format!("{route}?limit={limit}"),
+        };
+        let (names, next) = page_of(server, &query).await;
+        assert!(names.len() <= limit, "{query}");
+        pages.push(names);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => return pages,
+        }
+        assert!(pages.len() < 10_000, "the walk does not end");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listing_without_limit_is_the_same_array_whatever_else_the_query_holds() {
+    for (kind, driver) in drive_kinds().await {
+        let names: Vec<String> = (0..7).map(|index| format!("f{index}")).collect();
+        make_files(driver.as_ref(), "/dir", &names).await;
+        let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+        let plain = get(&server, "/v1/drives/d/entries/dir").await;
+        assert_eq!(plain.status(), StatusCode::OK);
+        let plain = plain.bytes().await.unwrap();
+        let listed: Value = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(listed.as_array().expect("an array").len(), 7, "{kind}");
+        // Only `limit` asks for a page. Anything else in the query, a
+        // cursor included, is ignored as the query string always was.
+        for query in [
+            "?",
+            "?cursor=v1.6630",
+            "?cursor=garbage",
+            "?x=1&y",
+            "?Limit=2",
+        ] {
+            let same = get(&server, &format!("/v1/drives/d/entries/dir{query}")).await;
+            assert_eq!(same.status(), StatusCode::OK, "{kind} {query}");
+            assert_eq!(same.bytes().await.unwrap(), plain, "{kind} {query}");
+        }
+        server.close().await.expect("close");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paginated_listing_returns_every_entry_once_in_name_order() {
+    for (kind, driver) in drive_kinds().await {
+        // Names whose byte order differs from their creation order.
+        let mut names: Vec<String> = (0..25).rev().map(|index| format!("n{index}")).collect();
+        names.push("caf\u{e9} au lait".to_owned());
+        names.push("Upper".to_owned());
+        make_files(driver.as_ref(), "/dir", &names).await;
+        let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+
+        for limit in [1, 10, 27, 28, 100_000] {
+            let pages = walk(&server, "/v1/drives/d/entries/dir", limit).await;
+            for page in &pages[..pages.len() - 1] {
+                assert_eq!(page.len(), limit, "{kind}: only the last page is short");
+            }
+            assert_eq!(pages.concat(), sorted, "{kind} limit {limit}");
+        }
+        // The root lists the same way, and HEAD announces the page's length.
+        let (root, next) = page_of(&server, "/v1/drives/d/entries?limit=5").await;
+        assert_eq!((root, next), (vec!["dir".to_owned()], None), "{kind}");
+        let route = format!("{}/v1/drives/d/entries/dir?limit=3", server.url());
+        let client = reqwest::Client::new();
+        let head = client
+            .head(&route)
+            .header(AUTHORIZATION, bearer())
+            .send()
+            .await
+            .unwrap();
+        let body = client
+            .get(&route)
+            .header(AUTHORIZATION, bearer())
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(
+            head.headers()["content-length"],
+            body.len().to_string().as_str(),
+            "{kind}"
+        );
+        server.close().await.expect("close");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn entries_that_do_not_change_during_a_paginated_walk_appear_exactly_once() {
+    for (kind, driver) in drive_kinds().await {
+        let names: Vec<String> = (10..40).map(|index| format!("e{index}")).collect();
+        make_files(driver.as_ref(), "/dir", &names).await;
+        let server = start(vec![("d", driver.clone())], HttpServerOptions::default()).await;
+        let route = "/v1/drives/d/entries/dir";
+
+        let (first, cursor) = page_of(&server, &format!("{route}?limit=10")).await;
+        assert_eq!(first, names[..10]);
+        let cursor = cursor.expect("more pages");
+        // Between two pages: one listed entry and one unlisted entry go,
+        // and entries arrive before and after the cursor's position.
+        driver.unlink("/dir/e12").await.unwrap();
+        driver.unlink("/dir/e25").await.unwrap();
+        driver.write_file("/dir/a-early", b"x").await.unwrap();
+        driver.write_file("/dir/e205", b"x").await.unwrap();
+        // The cursor's own entry goes too: the cursor is a position, not a
+        // reference to an entry.
+        driver.unlink("/dir/e19").await.unwrap();
+
+        let mut rest = Vec::new();
+        let mut cursor = Some(cursor);
+        while let Some(token) = cursor {
+            let (names, next) = page_of(&server, &format!("{route}?limit=10&cursor={token}")).await;
+            rest.extend(names);
+            cursor = next;
+        }
+        let mut expected: Vec<String> = names[10..]
+            .iter()
+            .filter(|name| *name != "e25")
+            .cloned()
+            .collect();
+        // Created after the cursor's position: seen. Created before it: not.
+        expected.push("e205".to_owned());
+        expected.sort_unstable();
+        assert_eq!(rest, expected, "{kind}");
+        let mut all = first;
+        all.extend(rest);
+        let unique: std::collections::BTreeSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len(), "{kind}: a name was repeated");
+        server.close().await.expect("close");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listing_too_large_for_one_response_can_be_read_in_pages() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let names: Vec<String> = (100..200).map(|index| format!("entry-{index}")).collect();
+    make_files(driver.as_ref(), "/big", &names).await;
+    let server = start(
+        vec![("d", driver.clone())],
+        HttpServerOptions {
+            max_response_bytes: 2048,
+            max_directory_entries: 100,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await;
+    let route = "/v1/drives/d/entries/big";
+
+    // As before: the whole listing does not fit one response.
+    let whole = get(&server, route).await;
+    assert_eq!(whole.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_of(whole).await.0, "EOVERFLOW");
+    // In pages it does.
+    let pages = walk(&server, route, 20).await;
+    assert_eq!(pages.len(), 5);
+    assert_eq!(pages.concat(), names);
+    // A page is held to the same response limit as a listing.
+    let page = get(&server, &format!("{route}?limit=100")).await;
+    assert_eq!(page.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_of(page).await.0, "EOVERFLOW");
+
+    // The entry limit is the size of directory the server will enumerate,
+    // and paging does not lift it.
+    driver.write_file("/big/one-more", b"x").await.unwrap();
+    let over = get(&server, &format!("{route}?limit=20")).await;
+    assert_eq!(over.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(error_of(over).await.0, "EOVERFLOW");
+    server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bad_limit_or_cursor_is_400_einval() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    make_files(driver.as_ref(), "/dir", &["a".to_owned(), "b".to_owned()]).await;
+    let server = start(
+        vec![("d", driver)],
+        HttpServerOptions {
+            max_directory_entries: 50,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await;
+    let route = "/v1/drives/d/entries/dir";
+    for query in [
+        "limit=",
+        "limit=0",
+        "limit=-1",
+        "limit=01",
+        "limit=1.5",
+        "limit=many",
+        "limit=%35",
+        // Above `max_directory_entries`.
+        "limit=51",
+        "limit=1&limit=2",
+        "limit=1&cursor=",
+        "limit=1&cursor=a",
+        "limit=1&cursor=v1.",
+        "limit=1&cursor=v1.zz",
+        "limit=1&cursor=v1.ff",
+        "limit=1&cursor=v2.61",
+        "limit=1&cursor=v1.61&cursor=v1.62",
+    ] {
+        let response = get(&server, &format!("{route}?{query}")).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        assert!(response.headers().get("connection").is_none(), "{query}");
+        assert_eq!(error_of(response).await.0, "EINVAL", "{query}");
+    }
+    // The largest limit is accepted, and a cursor past the end is an empty
+    // last page rather than an error.
+    let (names, next) = page_of(&server, &format!("{route}?limit=50")).await;
+    assert_eq!((names.len(), next), (2, None));
+    let (names, next) = page_of(&server, &format!("{route}?limit=1&cursor=v1.7a7a")).await;
+    assert_eq!((names.len(), next), (0, None));
+
+    // The checks keep their order: token before method, method before query.
+    let client = reqwest::Client::new();
+    let unauthorized = client
+        .get(format!("{}{route}?limit=0", server.url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let wrong_method = client
+        .post(format!("{}{route}?limit=0", server.url()))
+        .header(AUTHORIZATION, bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    // And a missing directory is still a 404 with a valid page request.
+    let missing = get(&server, "/v1/drives/d/entries/nowhere?limit=5").await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_is_compressed_like_any_listing() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let names: Vec<String> = (0..200)
+        .map(|index| format!("compressible-{index:04}"))
+        .collect();
+    make_files(driver.as_ref(), "/dir", &names).await;
+    let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/drives/d/entries/dir?limit=150",
+            server.url()
+        ))
+        .header(AUTHORIZATION, bearer())
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(response.headers()["vary"], "Accept-Encoding");
+    let compressed = response.bytes().await.unwrap();
+    let mut json = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(compressed.as_ref()),
+        &mut json,
+    )
+    .unwrap();
+    let page: Value = serde_json::from_slice(&json).unwrap();
+    assert_eq!(page["entries"].as_array().unwrap().len(), 150);
+    assert!(page["next_cursor"].is_string());
+    server.close().await.expect("close");
+}

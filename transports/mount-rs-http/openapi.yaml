@@ -46,8 +46,8 @@ info:
     | --- | --- | --- |
     | Upload (`max_upload_bytes`) | 5 GiB (5368709120 bytes) | 413 `EFBIG`, connection closed. A file `PUT` body. |
     | Request body received in full (`max_request_bytes`) | 8 MiB (8388608 bytes) | JSON bodies: 413 `EFBIG`, connection closed. A larger `PUT` body is streamed to storage instead. |
-    | Directory entries (`max_directory_entries`) | 100000 | 413 `EOVERFLOW`, connection closed. The directory cannot be listed. There is no pagination. |
-    | Listing response size (`max_response_bytes`) | 32 MiB | 413 `EOVERFLOW`, connection closed. Measured on the uncompressed JSON. |
+    | Directory entries (`max_directory_entries`) | 100000 | 413 `EOVERFLOW`, connection closed. The directory cannot be listed, with or without `limit`. Also the largest `limit`. |
+    | Listing response size (`max_response_bytes`) | 32 MiB | 413 `EOVERFLOW`, connection closed. Measured on the uncompressed JSON of the listing, or of one page when `limit` is given. |
     | Request time (`request_timeout_ms`) | 30 s | 504 `ETIMEDOUT`, connection closed. Covers receiving the request body, waiting for upload memory, and the operation up to the response headers. A streamed upload instead has this long for each piece of its body and each storage step. |
     | Idle keep-alive / header read | same as request time | The server closes the connection without sending a response. |
     | Buffered upload bytes (`max_buffered_upload_bytes`) | 4 x request body limit | `PUT`s wait for room in arrival order; the wait counts against the request time. |
@@ -56,6 +56,20 @@ info:
     File downloads are not limited in size. An upload is limited to one
     request body of at most `max_upload_bytes`; there is no ranged,
     chunked-resume or multipart upload.
+
+    ## Request ids
+
+    Every response the server produces carries an `X-Request-Id` header,
+    on success and on error, with or without a valid token. A request that
+    sends exactly one `X-Request-Id` of 1 to 128 characters from
+    `A-Z a-z 0-9 . _ -` gets that value back. Any other request (no header,
+    several headers, an empty, longer or otherwise different value) gets an
+    id the server generates: 32 lowercase hexadecimal characters. The id is
+    not part of the JSON error body. It identifies the request in the
+    server's access log; it is not a secret and grants nothing. A response
+    without the header was not produced by the server's routes: it came
+    from the reverse proxy, or it is the bare 400 sent for a request that is
+    not valid HTTP.
 
     ## Not part of this contract
 
@@ -534,8 +548,11 @@ paths:
       description: Equivalent to `GET /v1/drives/{id}/entries/{path}` for `/`.
       parameters:
         - $ref: "#/components/parameters/AcceptEncoding"
+        - $ref: "#/components/parameters/ListingLimit"
+        - $ref: "#/components/parameters/ListingCursor"
       responses:
         "200": {$ref: "#/components/responses/EntryList"}
+        "400": {$ref: "#/components/responses/BadRequest"}
         "401": {$ref: "#/components/responses/Unauthorized"}
         "406": {$ref: "#/components/responses/NotAcceptable"}
         "413": {$ref: "#/components/responses/TooLarge"}
@@ -551,12 +568,35 @@ paths:
       tags: [directories]
       summary: List the entries of a directory.
       description: |
-        Returns a JSON array with one object per entry. `.` and `..` are not
-        listed. The order is the drive's enumeration order and is not
-        guaranteed to be sorted. The listing is complete or it fails: a
-        directory with more than `max_directory_entries` entries, or whose
-        JSON exceeds `max_response_bytes`, returns 413 `EOVERFLOW`. There is
-        no pagination.
+        Without `limit`: returns a JSON array with one object per entry.
+        `.` and `..` are not listed. The order is the drive's enumeration
+        order and is not guaranteed to be sorted. The listing is complete or
+        it fails: a directory with more than `max_directory_entries`
+        entries, or whose JSON exceeds `max_response_bytes`, returns 413
+        `EOVERFLOW`. Every other query parameter, `cursor` included, is
+        ignored.
+
+        **Pagination.** With `limit`, the response is an `EntryPage` object:
+        at most `limit` entries, ordered by the byte order of their UTF-8
+        names, and a `next_cursor` exactly when more entries follow. Send
+        `next_cursor` back as `cursor` for the next page; a page without
+        `next_cursor` is the last. A `limit` that is not a whole number from
+        1 to `max_directory_entries` in plain decimal digits, a `cursor`
+        that is not a `next_cursor` of this API, or either parameter given
+        twice, returns 400 `EINVAL`.
+
+        Each page reads the directory afresh, so a walk is not a snapshot.
+        An entry that exists under one name for the whole walk is returned
+        exactly once, and no name is returned twice. An entry created,
+        removed or renamed during the walk may or may not appear. A cursor
+        is a position in the name order: it stays valid when the entry it
+        came from is removed, and it does not expire.
+
+        Pagination bounds each response; it does not lift
+        `max_directory_entries`. The server enumerates the whole directory
+        for every page, so a directory above that limit returns 413
+        `EOVERFLOW` with or without `limit`, and a page whose JSON exceeds
+        `max_response_bytes` returns 413 `EOVERFLOW` as well.
 
         **Encoding.** With `Accept-Encoding: gzip` (quality above zero and
         not lower than identity) a listing of 1024 bytes or more is returned
@@ -566,6 +606,8 @@ paths:
         identity returns 406. No other content coding is supported.
       parameters:
         - $ref: "#/components/parameters/AcceptEncoding"
+        - $ref: "#/components/parameters/ListingLimit"
+        - $ref: "#/components/parameters/ListingCursor"
       responses:
         "200": {$ref: "#/components/responses/EntryList"}
         "400": {$ref: "#/components/responses/BadRequest"}
@@ -592,12 +634,16 @@ paths:
         report the `Content-Length` and `Content-Encoding` GET would send.
       parameters:
         - $ref: "#/components/parameters/AcceptEncoding"
+        - $ref: "#/components/parameters/ListingLimit"
+        - $ref: "#/components/parameters/ListingCursor"
       responses:
         "200":
-          description: The directory can be listed.
+          description: The directory, or the page, can be listed.
           headers:
             Vary: {$ref: "#/components/headers/VaryAcceptEncoding"}
             Content-Encoding: {$ref: "#/components/headers/ContentEncodingGzip"}
+        "400":
+          description: Invalid path, `limit` or `cursor`.
         "401":
           description: Missing or wrong token, or unknown drive.
           headers:
@@ -1045,6 +1091,36 @@ components:
         creates only.
       schema: {type: string}
       example: "*"
+    XRequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: |
+        An id for this request, accepted on every route and returned in the
+        response's `X-Request-Id`. A value that does not match the pattern
+        is not an error: the server replaces it with a generated id.
+      schema: {type: string, pattern: "^[A-Za-z0-9._-]{1,128}$"}
+      example: checkout-7f3a.retry-2
+    ListingLimit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        Turns pagination on: the response is an `EntryPage` with at most
+        this many entries in name order. Plain decimal digits without a
+        sign or leading zero. The maximum is the server's
+        `max_directory_entries` (100000 by default).
+      schema: {type: integer, minimum: 1, maximum: 100000}
+      example: 1000
+    ListingCursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        The `next_cursor` of the previous page, unchanged. Opaque. Only
+        read together with `limit`; ignored without it.
+      schema: {type: string, pattern: "^v1\\.([0-9a-f]{2}){1,4096}$"}
+      example: v1.71332e637376
     AcceptEncoding:
       name: Accept-Encoding
       in: header
@@ -1056,6 +1132,14 @@ components:
         type: string
       example: gzip
   headers:
+    XRequestId:
+      description: |
+        The request's id, on every response: the request's own
+        `X-Request-Id` when it sent exactly one of 1 to 128 characters from
+        `A-Z a-z 0-9 . _ -`, otherwise 32 hexadecimal characters generated
+        by the server.
+      schema: {type: string, pattern: "^[A-Za-z0-9._-]{1,128}$"}
+      example: 3f9c1d2e4b5a69788796a5b4c3d2e1f0
     ETag:
       description: |
         The file's entity tag, quoted. On a split-store drive it is derived
@@ -1098,18 +1182,32 @@ components:
           schema: {$ref: "#/components/schemas/Stats"}
           example: {dev: 0, ino: 5, mode: 33206, nlink: 1, uid: 501, gid: 20, rdev: 0, size: 5, blksize: 4096, blocks: 1, atime_ms: 1794439474775, mtime_ms: 1794439474550, ctime_ms: 1794439474550, birthtime_ms: 1794439474531}
     EntryList:
-      description: The directory's entries.
+      description: |
+        The directory's entries: an array without `limit`, an `EntryPage`
+        with it.
       headers:
         Vary: {$ref: "#/components/headers/VaryAcceptEncoding"}
         Content-Encoding: {$ref: "#/components/headers/ContentEncodingGzip"}
       content:
         application/json:
           schema:
-            type: array
-            items: {$ref: "#/components/schemas/DirEntry"}
-          example:
-            - {name: q3.csv, parent_path: /reports, file_type: File}
-            - {name: archive, parent_path: /reports, file_type: Directory}
+            oneOf:
+              - type: array
+                items: {$ref: "#/components/schemas/DirEntry"}
+              - {$ref: "#/components/schemas/EntryPage"}
+          examples:
+            complete:
+              summary: Without `limit`
+              value:
+                - {name: q3.csv, parent_path: /reports, file_type: File}
+                - {name: archive, parent_path: /reports, file_type: Directory}
+            page:
+              summary: With `limit=2`, more entries remaining
+              value:
+                entries:
+                  - {name: archive, parent_path: /reports, file_type: Directory}
+                  - {name: q3.csv, parent_path: /reports, file_type: File}
+                next_cursor: v1.71332e637376
     BadRequest:
       description: |
         The request is malformed (`EINVAL`): invalid path, invalid or
@@ -1381,6 +1479,21 @@ components:
         file_type:
           $ref: "#/components/schemas/FileType"
           description: Type of the entry itself; a symbolic link is reported as `Symlink`.
+    EntryPage:
+      type: object
+      description: One page of a listing requested with `limit`.
+      required: [entries]
+      additionalProperties: false
+      properties:
+        entries:
+          type: array
+          description: At most `limit` entries, ordered by the byte order of `name`.
+          items: {$ref: "#/components/schemas/DirEntry"}
+        next_cursor:
+          type: string
+          description: |
+            Present exactly when more entries follow. Pass it as `cursor`
+            to get the next page. Opaque.
     Stats:
       type: object
       description: |
