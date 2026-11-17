@@ -440,15 +440,16 @@ impl Worker {
             if self.cancel.is_cancelled() {
                 return false;
             }
-            let route = match self.registry.lookup(&self.drive.volume).await {
+            let found = self.registry.lookup(&self.drive.volume).await;
+            let route = match &found {
                 Err(_) => RouteView::Unknown,
                 Ok(None) => RouteView::Absent,
                 // This process holds no route while it is a standby, so a
                 // route naming this node was left behind by an earlier one.
                 Ok(Some(route)) if route.node == self.options.node => RouteView::Absent,
-                Ok(Some(_)) => RouteView::Published,
+                Ok(Some(route)) => RouteView::Published(&route.node),
             };
-            if route == RouteView::Published {
+            if matches!(route, RouteView::Published(_)) {
                 self.lease_held_reported = false;
             }
             self.refresh_candidates(Instant::now(), route == RouteView::Absent)
