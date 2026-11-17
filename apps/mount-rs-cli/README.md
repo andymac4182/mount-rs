@@ -268,7 +268,8 @@ mount.
 The full documentation is in three places:
 
 - API guide for consumers: [`transports/mount-rs-http/README.md`](../../transports/mount-rs-http/README.md)
-- OpenAPI 3.1 contract: [`transports/mount-rs-http/openapi.yaml`](../../transports/mount-rs-http/openapi.yaml)
+- OpenAPI 3.1 contract: [`transports/mount-rs-http/openapi.yaml`](../../transports/mount-rs-http/openapi.yaml),
+  checked against the server by `transports/mount-rs-http/tests/openapi_conformance.rs`
 - Operator runbook (config reference, proxy, health, shutdown, recovery):
   [`docs/serve-http-runbook.md`](../../docs/serve-http-runbook.md)
 

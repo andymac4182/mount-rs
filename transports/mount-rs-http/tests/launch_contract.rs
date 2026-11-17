@@ -1023,6 +1023,34 @@ async fn an_unknown_drive_is_indistinguishable_from_a_wrong_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_operation_is_no_route_with_or_without_a_token() {
+    let server = start(
+        vec![("d", Arc::new(MemoryFs::empty()) as Arc<dyn FsDriver>)],
+        HttpServerOptions::default(),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/drives/d/ops/chown", server.url());
+    // Whatever the method, and before the token is looked at: the route
+    // check comes before authentication, so this is not a 401 or a 405.
+    for request in [
+        client.post(&url),
+        client.post(&url).header(AUTHORIZATION, bearer()),
+        client.get(&url).header(AUTHORIZATION, bearer()),
+        client.post(format!("{}/v1/drives/absent/ops/chown", server.url())),
+    ] {
+        let response = request.send().await.expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let (code, message) = error_of(response).await;
+        assert_eq!(
+            (code.as_str(), message.as_str()),
+            ("ENOENT", "drive or route not found")
+        );
+    }
+    server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_bearer_scheme_is_matched_without_regard_to_case() {
     let server = start(
         vec![("d", Arc::new(MemoryFs::empty()) as Arc<dyn FsDriver>)],
@@ -1610,8 +1638,8 @@ async fn the_access_log_gets_one_record_per_request_without_paths_or_tokens() {
             client
                 .post(format!("{}/v1/drives/d/ops/chown-everything", server.url()))
                 .header(AUTHORIZATION, bearer()),
-            "/v1/drives/{id}/ops/{operation}",
-            Some("d"),
+            "unmatched",
+            None,
             404,
         ),
         (

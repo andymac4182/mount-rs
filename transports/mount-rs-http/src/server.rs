@@ -1403,7 +1403,7 @@ fn describe_route<'a>(path: &str, registry: &'a DriveRegistry) -> (&'static str,
             Some("rename") => "/v1/drives/{id}/ops/rename",
             Some("truncate") => "/v1/drives/{id}/ops/truncate",
             Some("sync") => "/v1/drives/{id}/ops/sync",
-            _ => "/v1/drives/{id}/ops/{operation}",
+            _ => return ("unmatched", None),
         },
         _ => return ("unmatched", None),
     };
@@ -3190,8 +3190,13 @@ fn parse_route(raw_path: &str) -> Result<Route, RequestError> {
                 kind: kind.clone(),
             })
         }
+        // An operation that does not exist is no route: it answers 404
+        // before the token is looked at, as any other unknown path does.
         [version, drives, drive, kind, operation]
-            if version == "v1" && drives == "drives" && kind == "ops" =>
+            if version == "v1"
+                && drives == "drives"
+                && kind == "ops"
+                && matches!(operation.as_str(), "mkdir" | "rename" | "truncate" | "sync") =>
         {
             Ok(Route::Operation {
                 drive: drive.clone(),

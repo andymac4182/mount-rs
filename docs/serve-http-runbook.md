@@ -10,8 +10,9 @@ configuration, which is plain `serve-http` with `remote_sessions: false` and no
 
 ## What the process is
 
-One process serves one or more named drives over cleartext HTTP/1.1 on a
-loopback address. Each drive has one static bearer token. The process holds
+One process serves one or more named drives over cleartext HTTP/1.1, on a
+loopback address unless configured otherwise. Each drive has one static
+bearer token. The process holds
 the exclusive writer lease of every split-store drive it serves, so **exactly
 one instance may serve a given drive**. There is no active-active mode at
 launch; a second instance pointed at the same storage fails to start.

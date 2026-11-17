@@ -7,6 +7,8 @@ with `mount-rs serve-http --config <path>`.
 This file is the guide for services that call the API.
 
 - Machine-readable contract: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.1).
+  `tests/openapi_conformance.rs` checks it against a running server on
+  every change.
 - Running the server: [`docs/serve-http-runbook.md`](../../docs/serve-http-runbook.md).
 - Configuration file and local demo: [`apps/mount-rs-cli/README.md`](../../apps/mount-rs-cli/README.md#unmounted-http-service).
 
@@ -15,8 +17,9 @@ and no forwarding.
 
 ## Quick start
 
-The server listens on a loopback address. In production you reach it through
-the operator's TLS reverse proxy. The examples use two shell variables:
+The server listens on a loopback address unless the operator binds another
+one on a private network. In production you reach it through the operator's
+TLS reverse proxy or load balancer. The examples use two shell variables:
 
 ```sh
 BASE=http://127.0.0.1:8080        # or https://files.example.com
@@ -156,7 +159,10 @@ curl -i -H "Authorization: Bearer $TOKEN" -X DELETE \
 
 `{path}` may contain several `/`-separated segments. Leave it out
 (`/v1/drives/{id}/fs`, `/v1/drives/{id}/entries`, `/v1/drives/{id}/stat`,
-`/v1/drives/{id}/statfs`) to address the drive root.
+`/v1/drives/{id}/lstat`, `/v1/drives/{id}/statfs`,
+`/v1/drives/{id}/readlink`) to address the drive root. The root is a
+directory like any other: `PUT` on it is `409 EISDIR`, `DELETE` and
+`readlink` are `400 EINVAL`.
 
 ## Authentication
 
@@ -270,7 +276,8 @@ Other things a client sees:
 The server checks a request in this order: shutting down (503), path syntax
 (400), route (404), drive and token (401), declared body size (413), method
 (405), then the operation. A `405` on a drive route is only returned to an
-authenticated caller. An unknown route is `404` with or without a token.
+authenticated caller. An unknown route is `404` with or without a token;
+that includes an operation name under `/ops/` other than the four above.
 
 ## Semantics
 

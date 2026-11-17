@@ -7,7 +7,9 @@ introduced.
 Related documents:
 
 - API guide: [`transports/mount-rs-http/README.md`](../transports/mount-rs-http/README.md)
-- Machine-readable contract: [`transports/mount-rs-http/openapi.yaml`](../transports/mount-rs-http/openapi.yaml) (`info.version` `1.0.0`)
+- Machine-readable contract: [`transports/mount-rs-http/openapi.yaml`](../transports/mount-rs-http/openapi.yaml) (`info.version` `1.0.1`),
+  checked against a running server by
+  `transports/mount-rs-http/tests/openapi_conformance.rs` on every change
 - Operator runbook: [`serve-http-runbook.md`](serve-http-runbook.md)
 - Upgrade and rollback: [`serve-http-upgrade.md`](serve-http-upgrade.md)
 - Security: [`serve-http-security.md`](serve-http-security.md)
@@ -32,7 +34,7 @@ They are independent. Do not infer one from another.
 | Number | Where | Current value | Changes when |
 | --- | --- | --- | --- |
 | API version | URL prefix `/v1` | `v1` | A breaking change to the HTTP API |
-| Contract document version | `openapi.yaml` `info.version` | `1.0.0` | Any change to the document. Proposed rule: additions raise the minor part, corrections raise the patch part, and the major part equals the API version. |
+| Contract document version | `openapi.yaml` `info.version` | `1.0.1` | Any change to the document. Proposed rule: additions raise the minor part, corrections raise the patch part, and the major part equals the API version. |
 | Config file version | Top-level `"version"` in the JSON config | `1` | A breaking change to the config format |
 | Binary version | `mount-rs --version` | Cargo package version | Every release |
 
