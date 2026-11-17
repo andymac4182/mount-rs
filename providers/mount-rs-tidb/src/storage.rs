@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// A conservative default below TiDB's default single-entry and packet
@@ -42,6 +43,13 @@ pub const DEFAULT_STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Connection-URL parameter that sets the statement timeout in milliseconds.
 /// The provider removes it before `mysql_async` parses the URL.
 pub const STATEMENT_TIMEOUT_URL_PARAMETER: &str = "statement_timeout_ms";
+
+/// Connection-URL parameter naming a PEM file of certificate authorities to
+/// trust in addition to the built-in public roots, for a TiDB whose server
+/// certificate is issued by a private authority. It requires
+/// `require_ssl=true` and does not relax certificate or host name
+/// verification. The provider removes it before `mysql_async` parses the URL.
+pub const TLS_CA_FILE_URL_PARAMETER: &str = "tls_ca_file";
 
 /// The client deadline is this much later than the server-side limit, so a
 /// SELECT that TiDB can interrupt itself returns a server error on a
@@ -212,13 +220,11 @@ impl Database {
             return Err(FsError::new(ErrorCode::Einval).with_message("TiDB URL must not be empty"));
         }
         options.validate()?;
-        let (url, url_timeout) = split_statement_timeout(url)?;
+        let (opts, parameters) = driver_options(url)?;
         let statement_timeout = options
             .statement_timeout
-            .or(url_timeout)
+            .or(parameters.statement_timeout)
             .unwrap_or(DEFAULT_STATEMENT_TIMEOUT);
-        let opts = Opts::from_url(&url)
-            .map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
         // This pool is private to the mount-rs provider. Keep the verified
         // pessimistic transaction mode on each session instead of paying
         // mysql_async's COM_RESET_CONNECTION round trip every time a pooled
@@ -381,10 +387,10 @@ fn shared_pool_options(url: &str, max_connections: usize) -> Result<(OptsBuilder
     }
     let constraints = PoolConstraints::new(0, max_connections)
         .ok_or_else(|| FsError::new(ErrorCode::Einval).with_message("invalid TiDB pool limit"))?;
-    let (url, url_timeout) = split_statement_timeout(url)?;
-    let statement_timeout = url_timeout.unwrap_or(DEFAULT_STATEMENT_TIMEOUT);
-    let opts =
-        Opts::from_url(&url).map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+    let (opts, parameters) = driver_options(url)?;
+    let statement_timeout = parameters
+        .statement_timeout
+        .unwrap_or(DEFAULT_STATEMENT_TIMEOUT);
     // Same session policy as a private pool: every new session is configured
     // and verified for pessimistic transactions, so returned connections do
     // not need COM_RESET_CONNECTION.
@@ -701,37 +707,92 @@ fn client_deadline(statement_timeout: Duration) -> Duration {
     statement_timeout.saturating_add(CLIENT_DEADLINE_GRACE)
 }
 
-/// Remove the provider's own `statement_timeout_ms` parameter from a
-/// connection URL, which `mysql_async` would otherwise reject as unknown.
+/// What the provider reads from a connection URL for itself.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UrlParameters {
+    statement_timeout: Option<Duration>,
+    tls_ca_file: Option<PathBuf>,
+}
+
+/// Parse a connection URL into driver options, applying the provider's own
+/// parameters.
+fn driver_options(url: &str) -> Result<(Opts, UrlParameters)> {
+    let (url, parameters) = split_url_parameters(url)?;
+    let opts =
+        Opts::from_url(&url).map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+    let Some(authority) = &parameters.tls_ca_file else {
+        return Ok((opts, parameters));
+    };
+    // The file is an addition to the trust roots of a connection that
+    // already requires TLS. Accepting it on a plaintext URL would look like
+    // protection that is not there.
+    let Some(tls) = opts.ssl_opts().cloned() else {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("TiDB tls_ca_file requires require_ssl=true in the connection URL"));
+    };
+    let tls = tls.with_root_certs(vec![authority.clone().into()]);
+    Ok((
+        Opts::from(OptsBuilder::from_opts(opts).ssl_opts(tls)),
+        parameters,
+    ))
+}
+
+/// Decode the `%XX` escapes of a URL query value.
+fn percent_decode(value: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte != b'%' {
+            bytes.push(byte);
+            rest = tail;
+            continue;
+        }
+        let escape = std::str::from_utf8(tail.get(..2)?).ok()?;
+        bytes.push(u8::from_str_radix(escape, 16).ok()?);
+        rest = &tail[2..];
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Remove the provider's own parameters (`statement_timeout_ms`,
+/// `tls_ca_file`) from a connection URL, which `mysql_async` would otherwise
+/// reject as unknown.
 ///
-/// Carrying the bound in the URL lets the SDK, the CLI and the Node bindings
-/// set it without a field of their own: each already passes the URL through
+/// Carrying them in the URL lets the SDK, the CLI and the Node bindings set
+/// them without a field of their own: each already passes the URL through
 /// unchanged. Error messages never repeat any part of the URL.
-fn split_statement_timeout(url: &str) -> Result<(Cow<'_, str>, Option<Duration>)> {
+fn split_url_parameters(url: &str) -> Result<(Cow<'_, str>, UrlParameters)> {
+    let mut parameters = UrlParameters::default();
     let Some(query_start) = url.find('?') else {
-        return Ok((Cow::Borrowed(url), None));
+        return Ok((Cow::Borrowed(url), parameters));
     };
     let query_end = url[query_start..]
         .find('#')
         .map_or(url.len(), |offset| query_start + offset);
-    let mut timeout = None;
     let mut kept = Vec::new();
     for pair in url[query_start + 1..query_end].split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if key != STATEMENT_TIMEOUT_URL_PARAMETER {
+        if key == STATEMENT_TIMEOUT_URL_PARAMETER {
+            let millis = value.parse::<u64>().ok().filter(|millis| *millis > 0);
+            let Some(millis) = millis else {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "TiDB statement_timeout_ms must be a positive whole number of milliseconds",
+                ));
+            };
+            parameters.statement_timeout = Some(Duration::from_millis(millis));
+        } else if key == TLS_CA_FILE_URL_PARAMETER {
+            let path = percent_decode(value).filter(|path| !path.is_empty());
+            let Some(path) = path else {
+                return Err(FsError::new(ErrorCode::Einval)
+                    .with_message("TiDB tls_ca_file must name a certificate authority file"));
+            };
+            parameters.tls_ca_file = Some(PathBuf::from(path));
+        } else {
             kept.push(pair);
-            continue;
         }
-        let millis = value.parse::<u64>().ok().filter(|millis| *millis > 0);
-        let Some(millis) = millis else {
-            return Err(FsError::new(ErrorCode::Einval).with_message(
-                "TiDB statement_timeout_ms must be a positive whole number of milliseconds",
-            ));
-        };
-        timeout = Some(Duration::from_millis(millis));
     }
-    if timeout.is_none() {
-        return Ok((Cow::Borrowed(url), None));
+    if parameters == UrlParameters::default() {
+        return Ok((Cow::Borrowed(url), parameters));
     }
     let mut stripped = url[..query_start].to_owned();
     if !kept.is_empty() {
@@ -739,7 +800,7 @@ fn split_statement_timeout(url: &str) -> Result<(Cow<'_, str>, Option<Duration>)
         stripped.push_str(&kept.join("&"));
     }
     stripped.push_str(&url[query_end..]);
-    Ok((Cow::Owned(stripped), timeout))
+    Ok((Cow::Owned(stripped), parameters))
 }
 
 /// Give TiDB the same bound the client enforces.
@@ -3122,26 +3183,27 @@ mod tests {
     }
 
     #[test]
-    fn statement_timeout_url_parameter_is_removed_before_the_driver_sees_it() {
+    fn provider_url_parameters_are_removed_before_the_driver_sees_them() {
+        let timeout = |url: &str| split_url_parameters(url).unwrap().1.statement_timeout;
         let plain = "mysql://root@127.0.0.1:4000/test";
-        let (url, timeout) = split_statement_timeout(plain).unwrap();
+        let (url, parameters) = split_url_parameters(plain).unwrap();
         assert!(
             matches!(url, Cow::Borrowed(_)),
             "an untouched URL is not rebuilt"
         );
-        assert_eq!((url.as_ref(), timeout), (plain, None));
+        assert_eq!(url, plain);
+        assert_eq!(parameters, UrlParameters::default());
 
         let other = "mysql://root@127.0.0.1:4000/test?tcp_keepalive=5000";
-        let (url, timeout) = split_statement_timeout(other).unwrap();
-        assert_eq!((url.as_ref(), timeout), (other, None));
+        let (url, parameters) = split_url_parameters(other).unwrap();
+        assert_eq!(url, other);
+        assert_eq!(parameters, UrlParameters::default());
 
-        let (url, timeout) =
-            split_statement_timeout("mysql://root@127.0.0.1:4000/test?statement_timeout_ms=2500")
-                .unwrap();
-        assert_eq!(url, plain);
-        assert_eq!(timeout, Some(Duration::from_millis(2500)));
+        let with_timeout = "mysql://root@127.0.0.1:4000/test?statement_timeout_ms=2500";
+        assert_eq!(split_url_parameters(with_timeout).unwrap().0, plain);
+        assert_eq!(timeout(with_timeout), Some(Duration::from_millis(2500)));
 
-        let (url, timeout) = split_statement_timeout(
+        let (url, parameters) = split_url_parameters(
             "mysql://root@127.0.0.1:4000/test?tcp_keepalive=5000&statement_timeout_ms=30000&tcp_nodelay=true",
         )
         .unwrap();
@@ -3149,17 +3211,66 @@ mod tests {
             url,
             "mysql://root@127.0.0.1:4000/test?tcp_keepalive=5000&tcp_nodelay=true"
         );
-        assert_eq!(timeout, Some(Duration::from_secs(30)));
+        assert_eq!(parameters.statement_timeout, Some(Duration::from_secs(30)));
         // The remaining URL is one the driver accepts.
         Opts::from_url(&url).unwrap();
 
         let password = "tidb-test-secret";
         for value in ["0", "-1", "1.5", "soon", ""] {
-            let error = split_statement_timeout(&format!(
+            let error = split_url_parameters(&format!(
                 "mysql://mount:{password}@127.0.0.1/test?statement_timeout_ms={value}"
             ))
             .expect_err("an unusable statement timeout must be rejected");
             assert!(error.is(ErrorCode::Einval));
+            assert!(!error.to_string().contains(password));
+        }
+    }
+
+    #[test]
+    fn tls_ca_file_adds_a_trusted_root_without_relaxing_verification() {
+        let (url, parameters) = split_url_parameters(
+            "mysql://root@tidb.internal:4000/test?require_ssl=true&tls_ca_file=/etc/tidb/ca%20bundle.pem",
+        )
+        .unwrap();
+        assert_eq!(url, "mysql://root@tidb.internal:4000/test?require_ssl=true");
+        assert_eq!(
+            parameters.tls_ca_file,
+            Some(PathBuf::from("/etc/tidb/ca bundle.pem"))
+        );
+
+        let (opts, _) = driver_options(
+            "mysql://root@tidb.internal:4000/test?require_ssl=true&tls_ca_file=/etc/tidb/ca.pem",
+        )
+        .unwrap();
+        let tls = opts.ssl_opts().expect("TLS stays required");
+        assert_eq!(tls.root_certs().len(), 1);
+        assert!(!tls.accept_invalid_certs(), "the certificate is verified");
+        assert!(!tls.skip_domain_validation(), "the host name is verified");
+        assert!(
+            !tls.disable_built_in_roots(),
+            "public roots stay trusted unless the URL removes them"
+        );
+
+        // Without the parameter the driver options are exactly the URL's.
+        let (opts, _) =
+            driver_options("mysql://root@tidb.internal:4000/test?require_ssl=true").unwrap();
+        assert!(opts.ssl_opts().unwrap().root_certs().is_empty());
+
+        // An authority file on a plaintext URL would protect nothing.
+        let password = "tidb-test-secret";
+        for url in [
+            format!("mysql://mount:{password}@127.0.0.1/test?tls_ca_file=/etc/tidb/ca.pem"),
+            format!(
+                "mysql://mount:{password}@127.0.0.1/test?require_ssl=false&tls_ca_file=/etc/tidb/ca.pem"
+            ),
+            format!("mysql://mount:{password}@127.0.0.1/test?require_ssl=true&tls_ca_file="),
+            format!("mysql://mount:{password}@127.0.0.1/test?require_ssl=true&tls_ca_file=%zz"),
+        ] {
+            let error = match driver_options(&url) {
+                Ok(_) => panic!("an unusable tls_ca_file must be rejected"),
+                Err(error) => error,
+            };
+            assert!(error.is(ErrorCode::Einval), "{error}");
             assert!(!error.to_string().contains(password));
         }
     }
@@ -3359,6 +3470,109 @@ mod tests {
             .unwrap();
         drop(session);
         cleanup.close().await.unwrap();
+    }
+
+    /// Run by `scripts/test-tidb-tls-local.sh` against a throwaway TiDB that
+    /// presents a certificate issued for `localhost` by a throwaway
+    /// authority.
+    #[cfg(feature = "rustls")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires the TLS-enabled TiDB started by scripts/test-tidb-tls-local.sh"]
+    async fn actual_tidb_tls_handshake_is_verified() {
+        fn lane_url(name: &str) -> String {
+            std::env::var(name)
+                .unwrap_or_else(|_| panic!("{name} must be set by scripts/test-tidb-tls-local.sh"))
+        }
+        let key = format!(
+            "tls-handshake-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        // The verified session is really encrypted.
+        let store = TidbMetadataStore::connect_with_key(&lane_url("MOUNT_RS_TIDB_TLS_URL"), &key)
+            .await
+            .expect("a server certificate issued by the trusted authority must be accepted");
+        let mut session = store.0.session().await.unwrap();
+        let mut status = BTreeMap::new();
+        for name in ["Ssl_cipher", "Ssl_version"] {
+            let (_, value): (String, String) = session
+                .query_first(format!("SHOW SESSION STATUS LIKE '{name}'"))
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("TiDB reports no {name}"));
+            status.insert(name, value);
+        }
+        println!("TIDB_TLS_SESSION status={status:?}");
+        assert!(
+            !status["Ssl_cipher"].is_empty(),
+            "the session is not encrypted"
+        );
+        assert!(status["Ssl_version"].starts_with("TLS"), "{status:?}");
+        // TiDB takes this as a global variable, not a configuration file
+        // setting, and only accepts it from a session that is itself
+        // encrypted. From here on the lane's throwaway server refuses
+        // plaintext sessions, which the last case below relies on.
+        session
+            .query_drop("SET GLOBAL require_secure_transport = ON")
+            .await
+            .unwrap();
+        session
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap();
+        drop(session);
+        store.close().await.unwrap();
+
+        // Each of these reaches the same server and must be refused.
+        for (case, variable, markers) in [
+            (
+                "an authority that did not issue the server certificate",
+                "MOUNT_RS_TIDB_TLS_UNTRUSTED_URL",
+                &["UnknownIssuer"][..],
+            ),
+            (
+                "the public roots alone",
+                "MOUNT_RS_TIDB_TLS_PUBLIC_ROOTS_URL",
+                &["UnknownIssuer"][..],
+            ),
+            (
+                "a host name the certificate was not issued for",
+                "MOUNT_RS_TIDB_TLS_MISNAMED_URL",
+                &["not valid for name"][..],
+            ),
+            (
+                "a plaintext session",
+                "MOUNT_RS_TIDB_TLS_PLAINTEXT_URL",
+                // TiDB v8.5.7 answers the plaintext handshake with an error
+                // the driver reports only as an unexpected packet.
+                &["Unexpected packet", "insecure transport"][..],
+            ),
+        ] {
+            let attempt = tokio::time::timeout(
+                Duration::from_secs(60),
+                TidbMetadataStore::connect_with_key(&lane_url(variable), &key),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("the connection with {case} neither failed nor succeeded"));
+            let error = match attempt {
+                Ok(_) => panic!("the provider connected with {case}"),
+                Err(error) => error,
+            };
+            let rendered = error.to_string();
+            println!("TIDB_TLS_REJECTED case={case:?} error={rendered}");
+            assert!(error.is(ErrorCode::Eio), "{rendered}");
+            assert!(
+                markers.iter().any(|marker| rendered.contains(marker)),
+                "the connection with {case} failed for another reason: {rendered}"
+            );
+        }
     }
 
     /// A provider-configured session on a raw pool, so the test can run the

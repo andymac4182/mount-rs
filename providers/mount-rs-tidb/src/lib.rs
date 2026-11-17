@@ -40,6 +40,6 @@ mod storage;
 
 pub use storage::{
     DEFAULT_MAX_BLOCK_BYTES, DEFAULT_MAX_NAMESPACE_BYTES, DEFAULT_STATEMENT_TIMEOUT,
-    STATEMENT_TIMEOUT_URL_PARAMETER, TidbBlockStore, TidbMetadataStore, TidbStorageOptions,
-    TidbStorePool,
+    STATEMENT_TIMEOUT_URL_PARAMETER, TLS_CA_FILE_URL_PARAMETER, TidbBlockStore, TidbMetadataStore,
+    TidbStorageOptions, TidbStorePool,
 };

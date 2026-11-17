@@ -152,6 +152,28 @@ endpoint uses the crate's optional `rustls` feature:
 cargo test -p mount-rs-tidb --features rustls --test tidb -- --ignored --nocapture
 ```
 
+With `require_ssl=true` the server certificate and its host name are
+verified against the built-in public roots. A TiDB whose certificate comes
+from a private authority adds that authority with the provider's
+`tls_ca_file` URL parameter, which names a PEM file:
+
+```text
+mysql://user:password@tidb.internal:4000/mount?require_ssl=true&tls_ca_file=/etc/tidb/ca.pem
+```
+
+The parameter extends the trusted roots and leaves certificate and host name
+verification on. It is rejected without `require_ssl=true`, and a path with
+characters that are special in a URL query must be percent-encoded.
+
+`scripts/test-tidb-tls-local.sh` performs the handshake for real with no
+credentials: it creates a throwaway authority, starts a single-node TiDB
+serving a certificate issued for `localhost`, runs the provider contract over
+the verified session, and checks that the provider refuses an unrelated
+authority, the public roots alone, the same server reached as `127.0.0.1`,
+and, once `require_secure_transport` is on, a plaintext session. It ran
+against TiDB v8.5.7 (TLS 1.3, `TLS_AES_128_GCM_SHA256`). It does not cover a
+managed endpoint, certificate rotation or client certificates.
+
 The explicit ambiguous-commit lane uses a small plaintext MySQL-wire proxy to
 forward a real TiDB session and drop the successful publication response after
 the server commits the conditional UPDATE or explicit transaction. It verifies

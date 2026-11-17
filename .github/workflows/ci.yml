@@ -485,8 +485,9 @@ jobs:
 
   tidb-tls-compile:
     # This verifies that every public TiDB consumer can ship the TLS-capable
-    # client graph. It is intentionally a compile gate; credentials, CA
-    # policy, and a real TLS handshake remain production provider gates.
+    # client graph. It is intentionally a compile gate; the `tidb-tls` job
+    # performs a real handshake against a throwaway local TiDB. Credentials,
+    # CA policy, and the production endpoint remain production provider gates.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -514,6 +515,25 @@ jobs:
             echo 'TLS guard accepted require_ssl=false' >&2
             exit 1
           fi
+
+  tidb-tls:
+    # A real TLS handshake between the provider and TiDB, with no secrets:
+    # the job creates a throwaway certificate authority, starts a single-node
+    # TiDB that serves a certificate it issued, runs the provider contract
+    # through scripts/test-tidb-tls.sh, and checks that an untrusted
+    # authority, a wrong host name and a plaintext session are all refused.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Verify the TiDB TLS handshake against a throwaway authority
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-tls-live-cargo-target
+        run: ./scripts/test-tidb-tls-local.sh
       - name: Verify W08 production config policy without credentials or network
         env:
           MOUNT_RS_TIDB_TLS_URL: mysql://tls-policy-user@tidb-policy.invalid:4000/app?require_ssl=true

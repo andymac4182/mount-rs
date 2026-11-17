@@ -28,6 +28,41 @@ const PERSISTED_BYTES: &[u8] = b"mount-rs TiDB persisted sentinel";
 
 type SchemaColumn = (String, String, String, Option<u64>, Option<String>);
 
+/// A raw driver pool for the fixture checks that bypass the provider.
+///
+/// The driver does not know the provider's own URL parameters, so they are
+/// removed here; `tls_ca_file` becomes a trusted root, as it does in the
+/// provider, so the same URL works against a TiDB with a private authority.
+fn fixture_pool(url: &str) -> Pool {
+    let mut parsed =
+        url::Url::parse(url).unwrap_or_else(|_| panic!("the TiDB fixture URL could not be parsed"));
+    let mut authority = None;
+    let mut kept = Vec::new();
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "tls_ca_file" => authority = Some(std::path::PathBuf::from(value.as_ref())),
+            "statement_timeout_ms" => {}
+            _ => kept.push((key.into_owned(), value.into_owned())),
+        }
+    }
+    if kept.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    let opts = mysql_async::Opts::from_url(parsed.as_str())
+        .unwrap_or_else(|_| panic!("the TiDB fixture URL was rejected by the driver"));
+    let Some(authority) = authority else {
+        return Pool::new(opts);
+    };
+    let tls = opts
+        .ssl_opts()
+        .cloned()
+        .expect("tls_ca_file requires require_ssl=true")
+        .with_root_certs(vec![authority.into()]);
+    Pool::new(mysql_async::OptsBuilder::from_opts(opts).ssl_opts(tls))
+}
+
 fn tidb_url() -> String {
     std::env::var("MOUNT_RS_TIDB_URL")
         .ok()
@@ -69,8 +104,7 @@ fn block_id(bytes: &[u8]) -> BlockId {
 }
 
 async fn assert_actual_tidb(url: &str) {
-    let pool =
-        Pool::from_url(url).unwrap_or_else(|_| panic!("the TiDB identity URL could not be parsed"));
+    let pool = fixture_pool(url);
     let mut connection = pool
         .get_conn()
         .await
@@ -94,7 +128,7 @@ async fn assert_actual_tidb(url: &str) {
 }
 
 async fn assert_binary_identity_schema(url: &str) {
-    let pool = Pool::from_url(url).expect("the TiDB schema URL could not be parsed");
+    let pool = fixture_pool(url);
     let mut connection = pool
         .get_conn()
         .await
@@ -481,7 +515,7 @@ async fn volume_keys_preserve_exact_utf8_and_trailing_spaces() {
         .publish(0, &lease, root_namespace().await)
         .await
         .unwrap();
-    let pool = Pool::from_url(&url).unwrap();
+    let pool = fixture_pool(&url);
     let mut connection = pool.get_conn().await.unwrap();
     let stored_owner: Option<Vec<u8>> = connection
         .exec_first(
@@ -728,7 +762,7 @@ async fn actual_tidb_conditional_metadata_load() {
         metadata.load_if_changed(0).await.unwrap().unwrap().revision,
         0
     );
-    let pool = Pool::from_url(&url).unwrap();
+    let pool = fixture_pool(&url);
     let mut connection = pool.get_conn().await.unwrap();
     let namespace = root_namespace().await;
     let json = serde_json::to_string(&namespace).unwrap();
