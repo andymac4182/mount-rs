@@ -36,6 +36,9 @@ use crate::watch::{WatchOptions, watch_driver};
 pub struct CliError {
     code: u8,
     message: String,
+    /// The filesystem error this was made from, for a caller that must
+    /// tell a held writer lease (`EAGAIN`) from other open failures.
+    filesystem: Option<ErrorCode>,
 }
 
 impl CliError {
@@ -43,6 +46,7 @@ impl CliError {
         Self {
             code: 2,
             message: redact_diagnostic(&message.into()),
+            filesystem: None,
         }
     }
 
@@ -50,6 +54,7 @@ impl CliError {
         Self {
             code: 1,
             message: redact_diagnostic(&message.into()),
+            filesystem: None,
         }
     }
 
@@ -161,7 +166,10 @@ impl From<ConfigError> for CliError {
 
 impl From<FsError> for CliError {
     fn from(error: FsError) -> Self {
-        Self::runtime(error.to_string())
+        Self {
+            filesystem: Some(error.code),
+            ..Self::runtime(error.to_string())
+        }
     }
 }
 
@@ -958,8 +966,13 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
         configured_drives.push((drive, token, credentials));
     }
     let mut ctrl_c = CtrlCHandler::install().await?;
+    let failover = http
+        .forwarding
+        .as_ref()
+        .filter(|config| config.owner && config.failover.is_some());
     let startup = async {
         let mut owned = Vec::new();
+        let mut candidates = Vec::new();
         for (drive, token, credentials) in configured_drives {
             let options = drive.driver.to_options();
             let metadata_pool = match (
@@ -980,6 +993,38 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                 }
                 _ => None,
             };
+            if failover.is_some() {
+                // A failover candidate opens a drive only when it takes it
+                // over, and may do so many times while the process runs.
+                let disk_budget = disk_budget.clone();
+                let factory = move || {
+                    let (options, disk_budget, metadata_pool) =
+                        (options.clone(), disk_budget.clone(), metadata_pool.clone());
+                    async move {
+                        let shared = SharedResources {
+                            disk_budget,
+                            metadata_pool,
+                        };
+                        let opened =
+                            DriverRuntime::open_inner(&options, uid, gid, None, shared).await;
+                        let runtime = opened.map_err(|error| {
+                            FsError::new(error.filesystem.unwrap_or(ErrorCode::Eio))
+                                .with_syscall("open drive")
+                                .with_message(error.message)
+                        })?;
+                        runtime.local().cloned().ok_or_else(|| {
+                            FsError::new(ErrorCode::Enotsup).with_syscall("open drive")
+                        })
+                    }
+                };
+                candidates.push(mount_rs_cluster::FailoverDrive {
+                    volume: drive.id.clone(),
+                    bearer_token: token,
+                    sessions: credentials,
+                    factory: Arc::new(factory),
+                });
+                continue;
+            }
             let runtime = DriverRuntime::open_inner(
                 &options,
                 uid,
@@ -1020,9 +1065,14 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
             registry.register(configured).map_err(invalid_drive)?;
         }
         if let Some(config) = http.forwarding.as_ref().filter(|config| config.owner) {
+            let drives = if failover.is_some() {
+                crate::http_sessions::OwnedDrives::Candidates(candidates)
+            } else {
+                crate::http_sessions::OwnedDrives::Open(owned)
+            };
             return crate::http_sessions::start_owner(
                 config,
-                owned,
+                drives,
                 server_options.clone(),
                 http.sessions,
             )
@@ -1070,7 +1120,7 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     }
 
     let signal_result = tokio::select! {
-        _ = report_cache_stats(http, &runtimes), if http.cache_report_interval_seconds.is_some() => unreachable!(),
+        _ = report_cache_stats(http, &runtimes, &server), if http.cache_report_interval_seconds.is_some() => unreachable!(),
         result = ctrl_c.wait() => result,
         reason = async {
             let mut accept_failures = 0;
@@ -1104,7 +1154,11 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntime]) {
+async fn report_cache_stats(
+    config: &HttpServiceConfig,
+    runtimes: &[DriverRuntime],
+    server: &crate::http_sessions::Service,
+) {
     let period = Duration::from_secs(
         config
             .cache_report_interval_seconds
@@ -1112,10 +1166,15 @@ async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntim
     );
     loop {
         tokio::time::sleep(period).await;
-        for (drive, runtime) in config.drives.iter().zip(runtimes) {
-            let Some(fs) = runtime.local() else {
-                continue;
-            };
+        // Drives opened at startup, then the drives a failover candidate
+        // owns at this moment (it opens none at startup).
+        let open = config
+            .drives
+            .iter()
+            .zip(runtimes)
+            .filter_map(|(drive, runtime)| Some((drive.id.clone(), runtime.local()?.clone())))
+            .chain(server.failover_filesystems());
+        for (drive, fs) in open {
             let ram = fs.block_cache_stats().await.map(|s| {
                 serde_json::json!({
                     "hits": s.hits, "misses": s.misses, "evictions": s.evictions,
@@ -1135,7 +1194,7 @@ async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntim
                 Err(error) => Some(serde_json::json!({"error": error.code.as_str()})),
             };
             if ram.is_some() || disk.is_some() {
-                let record = serde_json::json!({"event":"mount_cache_stats", "drive":drive.id, "ram":ram, "disk":disk});
+                let record = serde_json::json!({"event":"mount_cache_stats", "drive":drive, "ram":ram, "disk":disk});
                 let _ = tokio::task::spawn_blocking(move || {
                     writeln!(std::io::stderr().lock(), "{record}")
                 })

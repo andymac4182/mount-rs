@@ -1225,10 +1225,17 @@ impl mount_rs_http::HttpRequestHandler for IngressForwarder {
                     // No endpoint, credentials or provider diagnostics leave ingress.
                     let body = http_body_util::Full::new(hyper::body::Bytes::from_static(b"{\"error\":{\"code\":\"EIO\",\"message\":\"volume request unavailable\"}}"))
                         .map_err(|never| match never {}).boxed_unsync();
-                    Response::builder()
+                    let mut response = Response::builder()
                         .status(status)
                         .header("content-type", "application/json")
-                        .header("x-mount-dispatch", certainty)
+                        .header("x-mount-dispatch", certainty);
+                    if status == http::StatusCode::SERVICE_UNAVAILABLE {
+                        // Nothing was executed and an owner may be published
+                        // shortly (a restart or a failover): tell the client
+                        // to retry, as the filesystem's own 503s do.
+                        response = response.header(http::header::RETRY_AFTER, "1");
+                    }
+                    response
                         .body(body)
                         .expect("static forwarding error response")
                 }

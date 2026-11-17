@@ -241,6 +241,14 @@ impl Service {
     pub(crate) fn accept_failures(&self) -> u64 {
         self.listener.accept_failures()
     }
+    /// The drives a failover candidate owns now; empty on any other server.
+    pub(crate) fn failover_filesystems(&self) -> Vec<(String, Arc<Filesystem>)> {
+        self.owner
+            .as_ref()
+            .and_then(|owner| owner.failover.as_ref())
+            .map(mount_rs_cluster::FailoverSupervisor::filesystems)
+            .unwrap_or_default()
+    }
     pub(crate) fn failure(&self) -> Option<&'static str> {
         if self.owner.as_ref().is_some_and(OwnerService::failed) {
             Some("peer listener or volume registration failed")
@@ -514,7 +522,10 @@ async fn connect_registry(
 }
 
 struct OwnerService {
-    registrations: mount_rs_cluster::RegistrationSupervisor,
+    /// Routes of the drives opened at startup; `None` on a failover
+    /// candidate, whose drives come and go under `failover`.
+    registrations: Option<mount_rs_cluster::RegistrationSupervisor>,
+    failover: Option<mount_rs_cluster::FailoverSupervisor>,
     router: mount_rs_cluster::OwnerHttpRouter,
     stop: tokio_util::sync::CancellationToken,
     /// The peer listener. Its error text is reported by the first `close`.
@@ -523,10 +534,27 @@ struct OwnerService {
 impl OwnerService {
     fn failed(&self) -> bool {
         // The listener ending is a failure unless `close` asked it to end.
-        self.registrations.failed() || (self.task.is_finished() && !self.stop.is_cancelled())
+        // A failover candidate does not fail when one drive does: that drive
+        // goes back to standby and the others are untouched.
+        self.registrations
+            .as_ref()
+            .is_some_and(mount_rs_cluster::RegistrationSupervisor::failed)
+            || self
+                .failover
+                .as_ref()
+                .is_some_and(mount_rs_cluster::FailoverSupervisor::failed)
+            || (self.task.is_finished() && !self.stop.is_cancelled())
     }
     async fn close(&self) -> Result<(), CliError> {
-        let registration = self.registrations.shutdown().await;
+        let registration = match &self.registrations {
+            Some(registrations) => registrations.shutdown().await,
+            None => Ok(()),
+        };
+        if let Some(failover) = &self.failover {
+            // Withdraws each owned drive's route, drains it and releases
+            // its writer lease, so a standby can take over at once.
+            failover.shutdown().await;
+        }
         self.stop.cancel();
         self.task.join().await.map_err(CliError::runtime)?;
         self.router
@@ -540,9 +568,60 @@ impl OwnerService {
 
 type OwnedDrive = (String, String, Arc<Filesystem>, Option<SessionCredentials>);
 
+/// The drives of an owner.
+pub(crate) enum OwnedDrives {
+    /// Opened at startup and owned until the process stops.
+    Open(Vec<OwnedDrive>),
+    /// `forwarding.failover`: each is opened when this server takes it over
+    /// and released when it loses or hands back the drive.
+    Candidates(Vec<mount_rs_cluster::FailoverDrive>),
+}
+
+/// How long a published route and a failover announcement live in Redis.
+const ROUTE_TTL: Duration = Duration::from_secs(15);
+
+/// One JSON line on stderr per failover state change of a drive.
+fn report_failover(event: &mount_rs_cluster::FailoverEvent) {
+    use mount_rs_cluster::{FailoverEvent as Event, ReleaseReason};
+    use std::io::Write;
+    let record = match event {
+        Event::Acquired { volume, fence } => {
+            serde_json::json!({"drive":volume,"state":"acquired","fence":fence})
+        }
+        Event::Published { volume, fence } => {
+            serde_json::json!({"drive":volume,"state":"published","fence":fence})
+        }
+        Event::Released {
+            volume,
+            fence,
+            reason,
+        } => {
+            let reason = match reason {
+                ReleaseReason::LeaseLost => "lease_lost",
+                ReleaseReason::FailBack => "fail_back",
+                ReleaseReason::Shutdown => "shutdown",
+            };
+            serde_json::json!({"drive":volume,"state":"released","fence":fence,"reason":reason})
+        }
+        Event::LeaseHeld { volume } => serde_json::json!({"drive":volume,"state":"lease_held"}),
+        Event::OpenFailed { volume, error } => {
+            serde_json::json!({"drive":volume,"state":"open_failed","error":error})
+        }
+        Event::RouteUnpublished { volume, error } => {
+            serde_json::json!({"drive":volume,"state":"route_unpublished","error":error})
+        }
+        Event::ReleaseFailed { volume, error } => {
+            serde_json::json!({"drive":volume,"state":"release_failed","error":error})
+        }
+    };
+    let mut record = record;
+    record["event"] = "drive_failover".into();
+    let _ = writeln!(std::io::stderr().lock(), "{record}");
+}
+
 pub(crate) async fn start_owner(
     config: &crate::config::ForwardingConfig,
-    drives: Vec<OwnedDrive>,
+    drives: OwnedDrives,
     options: HttpServerOptions,
     session_limits: SessionLimitsConfig,
 ) -> Result<Service, CliError> {
@@ -580,6 +659,10 @@ pub(crate) async fn start_owner(
     let mut handlers = Vec::new();
     let mut registrations = Vec::new();
     let mut sessions = Vec::new();
+    let (drives, candidates) = match drives {
+        OwnedDrives::Open(drives) => (drives, None),
+        OwnedDrives::Candidates(candidates) => (Vec::new(), Some(candidates)),
+    };
     for (volume, token, fs, credentials) in drives {
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce)
@@ -593,14 +676,10 @@ pub(crate) async fn start_owner(
             fence: fs.checked_owner_fence().await?,
             registration: format!("{:032x}", u128::from_be_bytes(nonce)),
         };
-        let registration = OwnedVolumeRegistration::new(
-            fs.clone(),
-            registry.clone(),
-            route.clone(),
-            Duration::from_secs(15),
-        )
-        .await
-        .map_err(|e| CliError::runtime(format!("owner registration: {e:?}")))?;
+        let registration =
+            OwnedVolumeRegistration::new(fs.clone(), registry.clone(), route.clone(), ROUTE_TTL)
+                .await
+                .map_err(|e| CliError::runtime(format!("owner registration: {e:?}")))?;
         let mut handler = OwnerHttpHandler::new(fs, route, token, options.clone())
             .await
             .map_err(|e| fail(&e))?;
@@ -634,6 +713,7 @@ pub(crate) async fn start_owner(
     // every handshake and request, the policy at every request. A peer
     // removed or re-keyed by a reload is refused from then on.
     let pins = membership.pins();
+    let members = membership.clone();
     let policy = move |identity: &TlsIdentity, _: &http::Request<()>| membership.accepts(identity);
     let server = PeerServer::new_with_pin_provider(endpoint, pins, limits, policy, router.clone())
         .map_err(|e| fail(&e))?;
@@ -648,27 +728,75 @@ pub(crate) async fn start_owner(
         async move { serving.await.map_err(|e| e.to_string()) },
         || "peer listener task ended without a result".to_owned(),
     );
-    let startup = RegistrationSupervisor::start_ready(
-        registrations,
-        RegistrationRecovery {
-            initial_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(2),
-            max_attempts: 10,
-        },
-        Duration::from_secs(10),
-    )
-    .await;
-    let registrations = match startup {
-        Ok(registrations) => registrations,
-        Err(error) => {
-            stop.cancel();
-            let _ = task.join().await;
-            router.close().await.map_err(|e| fail(&e))?;
-            return Err(error.into());
+    let (registrations, failover) = if let Some(candidates) = candidates {
+        let timings = config.failover.expect("candidates come from failover");
+        let options = mount_rs_cluster::FailoverOptions {
+            timings: mount_rs_cluster::FailoverTimings {
+                poll: Duration::from_millis(timings.poll_interval_ms),
+                stagger: Duration::from_millis(timings.takeover_stagger_ms),
+                fail_back_after: timings
+                    .fail_back
+                    .then(|| Duration::from_secs(timings.fail_back_after_seconds)),
+                fail_back_hold_off: ROUTE_TTL,
+            },
+            route_ttl: ROUTE_TTL,
+            node: member.node.clone(),
+            boot: member.boot.clone(),
+            address: member.address,
+            tls_server_name: member.tls_server_name.clone(),
+            http: options.clone(),
+            max_sessions_per_drive: session_limits.max_sessions_per_drive,
+            max_handles_per_session: session_limits.max_handles_per_session,
+            session_idle_timeout: Duration::from_secs(session_limits.idle_timeout_seconds),
+            session_budget: budget.clone(),
+            // Redis only lists names; a candidate counts if the membership
+            // file in force now has it.
+            trusted: Arc::new(move |node| members.directory().member(node).is_some()),
+            events: Arc::new(report_failover),
+        };
+        let started = mount_rs_cluster::FailoverSupervisor::start(
+            registry.clone(),
+            router.clone(),
+            candidates,
+            options,
+        );
+        let failover = match started {
+            Ok(failover) => failover,
+            Err(error) => {
+                stop.cancel();
+                let _ = task.join().await;
+                return Err(fail(&error));
+            }
+        };
+        // Let every drive make its first decision, so that a server which
+        // can take its drives at once is serving them when it reports
+        // ready. A drive whose lease is still held stays a standby.
+        failover.settled(Duration::from_secs(15)).await;
+        (None, Some(failover))
+    } else {
+        let startup = RegistrationSupervisor::start_ready(
+            registrations,
+            RegistrationRecovery {
+                initial_delay: Duration::from_millis(100),
+                max_delay: Duration::from_secs(2),
+                max_attempts: 10,
+            },
+            Duration::from_secs(10),
+        )
+        .await;
+        match startup {
+            Ok(registrations) => (Some(registrations), None),
+            Err(error) => {
+                stop.cancel();
+                let _ = task.join().await;
+                router.close().await.map_err(|e| fail(&e))?;
+                return Err(error.into());
+            }
         }
     };
     let owner = OwnerService {
         registrations,
+        failover,
         router,
         stop,
         task,

@@ -170,6 +170,44 @@ Status is observational: no cached Ready message authorizes a request, and
 mandatory. Redis delay/partition and cancellation during an ambiguous update
 still need combined failure testing.
 
+## Failover of volume ownership
+
+Several servers may be candidate owners of one volume. Which of them serves
+it is still decided only by the storage writer lease; these pieces decide
+who tries to take it, and when. Design and timing bounds:
+[`docs/serve-http-failover.md`](../../docs/serve-http-failover.md).
+
+- `placement` ranks a volume's candidates by rendezvous hashing of
+  `(volume, node)`. The hash is fixed (FNV-1a and a SplitMix64 finish) and
+  pinned by a test: every node must compute the same ranking.
+- `RedisRouteRegistry::announce_candidate`, `candidates` and
+  `withdraw_candidate` keep one sorted set per volume
+  (`mount-rs:<namespace>:candidates:<volume>`) of node ids scored with an
+  expiry on the Redis server clock. The set is a hint and must be
+  intersected with trusted membership.
+- `FailoverMachine` is the per-volume decision logic with no I/O: a standby
+  opens a volume only after reading that no route is published and waiting
+  `rank x stagger`; a registry that cannot be read is never evidence; an
+  owner lets go when it loses the lease or, if enabled, to hand the volume
+  back to a better-ranked live candidate.
+- `FailoverSupervisor` (feature `http3`) runs the machine for each candidate
+  volume of a server. It opens a volume through a caller-supplied
+  `DriveFactory`, installs it in the `OwnerHttpRouter` (`insert`), publishes
+  its route under the lease's fence, and on release withdraws the route,
+  removes and drains the handler, and shuts the volume down. A route is
+  never published for a volume that is not open. `mount-rs serve-http`
+  starts it for an owner configured with `http.forwarding.failover`.
+
+`OwnerHttpRouter` now serves a set of volumes that can change while it runs;
+requests read an immutable snapshot. An ingress answers `503` with
+`x-mount-dispatch: not-dispatched` and `Retry-After: 1` when no route is
+published.
+
+`tests/failover.rs` runs candidates against a real Redis and a SQLite-backed
+split store: clean handover, a crashed owner replaced only after its lease
+expires, a lost lease, a candidate that cannot open the volume, fail-back
+on and off, and three candidates across repeated stops.
+
 ## HTTP/3 owner application
 
 `OwnerHttpHandler` serves one SDK volume through the existing `mount-rs-http`
