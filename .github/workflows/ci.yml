@@ -545,6 +545,32 @@ jobs:
             echo 'W08 production config policy accepted an insecure fixture' >&2
             exit 1
           fi
+          # The provider's own URL parameters, a private authority file and
+          # a statement timeout, must pass every credential-free URL check,
+          # and must not hide a URL that turns verification off.
+          provider_parameters='tls_ca_file=/etc/mount-rs/tidb-ca.pem&statement_timeout_ms=30000'
+          policy_url="mysql://tls-policy-user@tidb-policy.invalid:4000/app?require_ssl=true&$provider_parameters"
+          MOUNT_RS_TIDB_TLS_URL="$policy_url" \
+            node scripts/verify-w08-production-config.mjs \
+              tests/tidb/production-config-policy.json
+          MOUNT_RS_TIDB_TLS_URL="$policy_url" \
+            node scripts/verify-w26-ozone-production-config.mjs \
+              tests/ozone/production-config-policy-tidb.json
+          MOUNT_RS_TIDB_TLS_VALIDATE_ONLY=1 MOUNT_RS_TIDB_TLS_URL="$policy_url" \
+            ./scripts/test-tidb-tls.sh
+          if MOUNT_RS_TIDB_TLS_URL="$policy_url&verify_ca=false" \
+            node scripts/verify-w08-production-config.mjs \
+              tests/tidb/production-config-policy.json; then
+            echo 'W08 production config policy accepted verify_ca=false beside tls_ca_file' >&2
+            exit 1
+          fi
+          if MOUNT_RS_TIDB_TLS_VALIDATE_ONLY=1 \
+            MOUNT_RS_TIDB_TLS_URL="$policy_url&verify_identity=false" \
+            ./scripts/test-tidb-tls.sh; then
+            echo 'TLS guard accepted verify_identity=false beside tls_ca_file' >&2
+            exit 1
+          fi
+          echo 'TIDB_PROVIDER_URL_PARAMETERS_POLICY_PASS parameters=tls_ca_file,statement_timeout_ms'
 
   tidb-rustfs:
     # This job keeps the real RustFS service alive while test-tidb.sh owns the
@@ -573,6 +599,10 @@ jobs:
           CARGOFLAGS: --locked
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
         run: pnpm --dir bindings/mount-rs-napi build
+      - name: Build the mounted SQLite-hosting test before the timed harness
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
+        run: cargo test --locked -p mount-rs-core --test native_tidb_sqlite --no-run
       - name: Install and verify the Linux FUSE prerequisite for the consumer gate
         run: |
           sh scripts/ci-apt-install.sh fuse3

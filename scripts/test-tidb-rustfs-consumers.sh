@@ -40,6 +40,19 @@ if [ "${MOUNT_RS_TIDB_EXPECT_PERSISTED:-0}" = 0 ]; then
   "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb \
     --test lost_block_ack_rustfs -- --ignored --nocapture
 fi
+
+# Host a real SQLite database file on a FUSE mount whose metadata is this
+# TiDB, with TiDB blocks and then with RustFS blocks. The test is Linux-only
+# and fails, instead of skipping, when /dev/fuse or fusermount3 is missing.
+# It runs before and after the TiDB component restarts.
+if [ "$(uname -s)" = Linux ]; then
+  MOUNT_RS_RUN_NATIVE_TIDB_SQLITE=1 \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core \
+      --test native_tidb_sqlite -- --ignored --nocapture --test-threads=1
+else
+  echo "TIDB_SQLITE_HOSTING_SKIP reason=linux-fuse-required host=$(uname -s)" >&2
+fi
+
 node "$repo_dir/tests/provider_matrix/node-sdk.mjs"
 node "$repo_dir/tests/provider_matrix/cli.mjs"
 node "$repo_dir/tests/provider_matrix/tidb-rustfs-soak.mjs"
