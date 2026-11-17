@@ -276,6 +276,8 @@ pub(crate) struct HttpServiceConfig {
     pub drain_timeout_ms: u64,
     pub max_connections: usize,
     pub request_timeout_ms: u64,
+    /// Write one JSON line per request to stderr.
+    pub access_log: bool,
     pub drives: Vec<HttpDriveConfig>,
     pub disk_cache_budget: Option<DiskCacheBudgetConfig>,
     pub tidb_metadata_pool_limit: Option<usize>,
@@ -624,6 +626,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "drain_timeout_ms",
             "max_connections",
             "request_timeout_ms",
+            "access_log",
             "disk_cache_budget",
             "tidb_metadata_pool_limit",
             "cache_report_interval_seconds",
@@ -716,6 +719,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         .transpose()?
         .unwrap_or(DEFAULT_HTTP_REQUEST_TIMEOUT_MS);
     let tcp_nodelay = optional_bool(object, "tcp_nodelay", "config.http")?.unwrap_or(true);
+    let access_log = optional_bool(object, "access_log", "config.http")?.unwrap_or(false);
     let drives = object
         .get("drives")
         .ok_or_else(|| ConfigError::at("config.http.drives", "is required"))?
@@ -784,6 +788,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         drain_timeout_ms,
         max_connections,
         request_timeout_ms,
+        access_log,
         drives: parsed_drives,
         tidb_metadata_pool_limit: object
             .get("tidb_metadata_pool_limit")
@@ -3744,6 +3749,36 @@ mod tests {
         assert!(error.to_string().contains("config.http.forwarding.owner"));
         value["forwarding"]["owner"] = false.into();
         assert!(parse_http(&value, Path::new("/tmp")).is_ok());
+    }
+
+    #[test]
+    fn http_access_log_is_off_unless_asked_for_and_requires_boolean() {
+        let mut value = serde_json::json!({
+            "drives": [{"id":"memory", "token":{"env":"TEST_TOKEN"},
+                "driver":{"kind":"memory"}}]
+        });
+        assert!(!parse_http(&value, Path::new("/tmp")).unwrap().access_log);
+        value["access_log"] = true.into();
+        assert!(parse_http(&value, Path::new("/tmp")).unwrap().access_log);
+        for invalid in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!({"enabled": true}),
+            serde_json::Value::Null,
+        ] {
+            value["access_log"] = invalid;
+            let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+            assert!(
+                error.to_string().contains("config.http.access_log"),
+                "{error}"
+            );
+        }
+        // A misspelt key is refused, not ignored.
+        value.as_object_mut().unwrap().remove("access_log");
+        value["access_logs"] = true.into();
+        let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+        assert!(error.to_string().contains("config.http.access_logs"));
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]

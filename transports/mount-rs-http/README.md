@@ -530,7 +530,13 @@ The crate exposes `HttpServer`, `HttpServerOptions`, `DriveRegistry` and
 `DriveConfig`. A drive is an id, a token and an `Arc<dyn FsDriver>`; the
 transport does not mount a filesystem and does not implement one.
 `HttpServer::start` refuses any host that is not loopback (`127.0.0.1`, `::1`,
-`localhost`) unless `HttpServerOptions::allow_non_loopback` is set. The `observability` feature records one `http.request` span and
+`localhost`) unless `HttpServerOptions::allow_non_loopback` is set.
+`HttpServerOptions::access_log` takes an `AccessLog`, which is told about
+every request once its response is finished with: request id, method, route
+template, the configured drive it named, status, duration and body byte
+counts, and never the path or a header. It is off by default and needs no
+feature; `mount-rs serve-http` writes these as JSON lines with
+`"access_log": true`. The `observability` feature records one `http.request` span and
 completion event per request through an application-supplied `Telemetry`
 handle; `observability-otlp` also reads the W3C trace context headers. Both are
 off by default.

@@ -8,8 +8,8 @@ mod conditional;
 mod server;
 
 pub use server::{
-    BoxError, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_MAX_UPLOAD_BYTES,
-    DEFAULT_READ_CHUNK_BYTES, DriveConfig, DriveRegistry, HttpBody, HttpRequestHandler, HttpServer,
-    HttpServerError, HttpServerOptions, MAX_REQUEST_ID_BYTES, REQUEST_ID_HEADER, RegistryError,
-    is_file_upload, streams_upload,
+    AccessLog, AccessRecord, BoxError, DEFAULT_DRAIN_TIMEOUT, DEFAULT_MAX_REQUEST_BYTES,
+    DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_READ_CHUNK_BYTES, DriveConfig, DriveRegistry, HttpBody,
+    HttpRequestHandler, HttpServer, HttpServerError, HttpServerOptions, MAX_REQUEST_ID_BYTES,
+    REQUEST_ID_HEADER, RegistryError, is_file_upload, streams_upload,
 };

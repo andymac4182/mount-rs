@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -215,6 +215,46 @@ impl DriveRegistry {
     }
 }
 
+/// One request, as an [`AccessLog`] is told about it.
+///
+/// It names no path and no credential: the route is a template, and the
+/// drive is given only when the request named a drive this server is
+/// configured with, so nothing a client typed into the URL is repeated.
+#[derive(Debug, Clone, Copy)]
+pub struct AccessRecord<'a> {
+    /// The value of the response's `x-request-id`.
+    pub request_id: &'a str,
+    pub method: &'a str,
+    /// The route's template, such as `/v1/drives/{id}/fs/{path}`;
+    /// `unmatched` for a path that is no route, and `invalid` for one the
+    /// server rejects before routing.
+    pub route: &'static str,
+    /// The configured drive the request named, whether or not it was
+    /// authorized for it.
+    pub drive: Option<&'a str>,
+    /// The response status; `None` when the request ended before the
+    /// server produced a response (the client went away, or a shutdown
+    /// ran out of drain time).
+    pub status: Option<u16>,
+    /// From the request's arrival until its response body was finished
+    /// with: sent in full, or abandoned.
+    pub duration: Duration,
+    /// Request body bytes the server read.
+    pub bytes_in: u64,
+    /// Response body bytes handed to the connection. A `HEAD` response
+    /// counts none, and a download that was cut short counts what it sent.
+    pub bytes_out: u64,
+}
+
+/// Receives one [`AccessRecord`] per request.
+///
+/// `record` runs on the request's task, as its response body is dropped: it
+/// must not block and should hand the line to something that writes it
+/// elsewhere.
+pub trait AccessLog: fmt::Debug + Send + Sync + 'static {
+    fn record(&self, record: &AccessRecord<'_>);
+}
+
 /// HTTP listener and transport limits.
 #[derive(Debug, Clone)]
 pub struct HttpServerOptions {
@@ -248,6 +288,9 @@ pub struct HttpServerOptions {
     /// `None` is four times `max_request_bytes`; a smaller value than
     /// `max_request_bytes` is raised to it.
     pub max_buffered_upload_bytes: Option<usize>,
+    /// Told about every request once its response is finished with
+    /// (default: none). Without one a request pays for a single check.
+    pub access_log: Option<Arc<dyn AccessLog>>,
     #[cfg(feature = "observability")]
     pub telemetry: Telemetry,
 }
@@ -269,6 +312,7 @@ impl Default for HttpServerOptions {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_buffered_upload_bytes: None,
+            access_log: None,
             #[cfg(feature = "observability")]
             telemetry: Telemetry::disabled(),
         }
@@ -338,6 +382,7 @@ struct RequestConfig {
     request_timeout: Duration,
     upload_budget: Arc<Semaphore>,
     control: RuntimeControl,
+    access_log: Option<Arc<dyn AccessLog>>,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
 }
@@ -511,6 +556,7 @@ impl HttpServer {
                     request_timeout: positive_duration(options.request_timeout),
                     upload_budget: Arc::new(Semaphore::new(upload_budget_units(upload_budget))),
                     control,
+                    access_log: options.access_log,
                     #[cfg(feature = "observability")]
                     telemetry: options.telemetry,
                 },
@@ -554,7 +600,9 @@ impl HttpServer {
         if self.closing.load(Ordering::Acquire) != 0 {
             let mut request = request;
             let id = assign_request_id(&mut request);
-            return with_request_id(error_response(RequestError::server_closing()), id);
+            let observed = ObservedRequest::begin(&mut request, id.as_ref(), &self.state);
+            let response = with_request_id(error_response(RequestError::server_closing()), id);
+            return ObservedRequest::finish(observed, response);
         }
         match handle_request(request, self.state.clone()).await {
             Ok(response) => response,
@@ -1311,11 +1359,195 @@ async fn handle_request(
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
     let id = assign_request_id(&mut request);
+    let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state);
     let response = match handle_request_instrumented(request, state).await {
         Ok(response) => response,
         Err(never) => match never {},
     };
-    Ok(with_request_id(response, id))
+    Ok(ObservedRequest::finish(
+        observed,
+        with_request_id(response, id),
+    ))
+}
+
+/// The template of the route a request path names and, when the path names
+/// a configured drive, that drive's id. Decoding follows `parse_route`, so
+/// a request is labelled as it is routed.
+fn describe_route<'a>(path: &str, registry: &'a DriveRegistry) -> (&'static str, Option<&'a str>) {
+    let Ok(segments) = decode_uri_segments(path) else {
+        return ("invalid", None);
+    };
+    let segment = |index: usize| segments.get(index).map(String::as_str);
+    if segments.len() == 1 {
+        return match segment(0) {
+            Some("healthz") => ("/healthz", None),
+            Some("readyz") => ("/readyz", None),
+            _ => ("unmatched", None),
+        };
+    }
+    if segment(0) != Some("v1") || segment(1) != Some("drives") {
+        return ("unmatched", None);
+    }
+    let Some(drive) = segment(2) else {
+        return ("/v1/drives", None);
+    };
+    let route = match (segment(3), segments.len()) {
+        (Some("fs"), _) => "/v1/drives/{id}/fs/{path}",
+        (Some("entries"), _) => "/v1/drives/{id}/entries/{path}",
+        (Some("stat"), _) => "/v1/drives/{id}/stat/{path}",
+        (Some("lstat"), _) => "/v1/drives/{id}/lstat/{path}",
+        (Some("statfs"), _) => "/v1/drives/{id}/statfs/{path}",
+        (Some("readlink"), _) => "/v1/drives/{id}/readlink/{path}",
+        (Some("ops"), 5) => match segment(4) {
+            Some("mkdir") => "/v1/drives/{id}/ops/mkdir",
+            Some("rename") => "/v1/drives/{id}/ops/rename",
+            Some("truncate") => "/v1/drives/{id}/ops/truncate",
+            Some("sync") => "/v1/drives/{id}/ops/sync",
+            _ => "/v1/drives/{id}/ops/{operation}",
+        },
+        _ => return ("unmatched", None),
+    };
+    (route, registry.get(drive).map(DriveConfig::id))
+}
+
+/// What the access log is told about one request. It reports itself when
+/// it is dropped: with the response body once that has been sent or
+/// abandoned, or with the request's future if that never got as far as a
+/// response.
+struct ObservedRequest {
+    log: Arc<dyn AccessLog>,
+    id: header::HeaderValue,
+    method: Method,
+    route: &'static str,
+    drive: Option<String>,
+    started: Instant,
+    received: Arc<AtomicU64>,
+    status: Option<u16>,
+    sent: u64,
+}
+
+impl ObservedRequest {
+    /// Start observing a request whose id this listener settled, when an
+    /// access log is configured; otherwise nothing is measured or wrapped.
+    fn begin(
+        request: &mut Request<HttpBody>,
+        id: Option<&header::HeaderValue>,
+        state: &AppState,
+    ) -> Option<Box<Self>> {
+        let log = state.config.access_log.as_ref()?;
+        let id = id?;
+        let started = Instant::now();
+        let (route, drive) = describe_route(request.uri().path(), &state.registry);
+        let received = Arc::new(AtomicU64::new(0));
+        let body = std::mem::replace(request.body_mut(), empty_body());
+        *request.body_mut() = CountedRequestBody {
+            inner: body,
+            received: Arc::clone(&received),
+        }
+        .boxed_unsync();
+        Some(Box::new(Self {
+            log: Arc::clone(log),
+            id: id.clone(),
+            method: request.method().clone(),
+            route,
+            drive: drive.map(str::to_owned),
+            started,
+            received,
+            status: None,
+            sent: 0,
+        }))
+    }
+
+    /// Attach the observation to the response, so that it ends with the
+    /// response body.
+    fn finish(observed: Option<Box<Self>>, response: Response<HttpBody>) -> Response<HttpBody> {
+        let Some(mut observed) = observed else {
+            return response;
+        };
+        observed.status = Some(response.status().as_u16());
+        response.map(|inner| ObservedResponseBody { inner, observed }.boxed_unsync())
+    }
+}
+
+impl Drop for ObservedRequest {
+    fn drop(&mut self) {
+        self.log.record(&AccessRecord {
+            request_id: self.id.to_str().unwrap_or(""),
+            method: self.method.as_str(),
+            route: self.route,
+            drive: self.drive.as_deref(),
+            status: self.status,
+            duration: self.started.elapsed(),
+            bytes_in: self.received.load(Ordering::Relaxed),
+            bytes_out: self.sent,
+        });
+    }
+}
+
+/// Counts the request body bytes the application reads.
+struct CountedRequestBody {
+    inner: HttpBody,
+    received: Arc<AtomicU64>,
+}
+
+impl HttpBodyTrait for CountedRequestBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let frame = Pin::new(&mut self.inner).poll_frame(context);
+        if let Poll::Ready(Some(Ok(frame))) = &frame
+            && let Some(data) = frame.data_ref()
+        {
+            self.received
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Counts the response body bytes handed to the connection and reports the
+/// request when the connection is done with the body.
+struct ObservedResponseBody {
+    inner: HttpBody,
+    observed: Box<ObservedRequest>,
+}
+
+impl HttpBodyTrait for ObservedResponseBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let frame = Pin::new(&mut self.inner).poll_frame(context);
+        if let Poll::Ready(Some(Ok(frame))) = &frame
+            && let Some(data) = frame.data_ref()
+        {
+            self.observed.sent += data.len() as u64;
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 async fn handle_request_instrumented(

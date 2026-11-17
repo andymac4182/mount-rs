@@ -926,9 +926,17 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     })?;
     let (uid, gid) = effective_identity();
     #[cfg(feature = "observability")]
-    let server_options = http_server_options(http, mount_rs_observability::global());
+    let mut server_options = http_server_options(http, mount_rs_observability::global());
     #[cfg(not(feature = "observability"))]
-    let server_options = http_server_options(http);
+    let mut server_options = http_server_options(http);
+    let access_log = if http.access_log {
+        Some(crate::access_log::JsonAccessLog::stderr().map_err(io_error)?)
+    } else {
+        None
+    };
+    server_options.access_log = access_log
+        .clone()
+        .map(|log| log as Arc<dyn mount_rs_http::AccessLog>);
     let mut runtimes = Vec::with_capacity(http.drives.len());
     let mut registry = DriveRegistry::new();
     let mut sessions = crate::http_sessions::Sessions::new(http.max_request_bytes)?;
@@ -1084,6 +1092,11 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     };
     // Keep SDK ownership alive through the listener/session drain.
     let closed = server.close().await;
+    if let Some(log) = access_log {
+        // The listener has stopped: write out the lines of the last
+        // requests before the drives, which may take a while, are closed.
+        let _ = tokio::task::spawn_blocking(move || log.flush(Duration::from_secs(2))).await;
+    }
     // A drain that ran out of time has aborted what it was still serving.
     // Release the drives regardless, so the writer lease is free for the
     // replacement process, and still exit with the failure. A session,
@@ -1158,6 +1171,8 @@ fn http_server_options(
         max_connections: config.max_connections,
         request_timeout: Duration::from_millis(config.request_timeout_ms),
         max_buffered_upload_bytes: Some(config.max_buffered_upload_bytes),
+        // Set by the caller, which owns the log's writer.
+        access_log: None,
         #[cfg(feature = "observability")]
         telemetry,
     }

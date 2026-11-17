@@ -1446,3 +1446,283 @@ async fn a_request_refused_during_shutdown_still_carries_its_request_id() {
     assert_eq!(response.status().as_u16(), 503);
     assert_eq!(response.headers()["x-request-id"], "probe-1");
 }
+
+// ------------------------------------------------------------- access log
+
+/// One access record, kept as its owner would write it.
+#[derive(Debug, Clone, PartialEq)]
+struct Logged {
+    request_id: String,
+    method: String,
+    route: &'static str,
+    drive: Option<String>,
+    status: Option<u16>,
+    bytes_in: u64,
+    bytes_out: u64,
+}
+
+#[derive(Debug, Default)]
+struct CollectingLog(std::sync::Mutex<Vec<Logged>>);
+
+impl mount_rs_http::AccessLog for CollectingLog {
+    fn record(&self, record: &mount_rs_http::AccessRecord<'_>) {
+        self.0.lock().unwrap().push(Logged {
+            request_id: record.request_id.to_owned(),
+            method: record.method.to_owned(),
+            route: record.route,
+            drive: record.drive.map(str::to_owned),
+            status: record.status,
+            bytes_in: record.bytes_in,
+            bytes_out: record.bytes_out,
+        });
+    }
+}
+
+impl CollectingLog {
+    /// The next record, in the order requests finished.
+    async fn next(&self, seen: &mut usize) -> Logged {
+        let index = *seen;
+        until("an access record", || self.0.lock().unwrap().len() > index).await;
+        *seen += 1;
+        self.0.lock().unwrap()[index].clone()
+    }
+}
+
+fn logged_options(log: &Arc<CollectingLog>) -> HttpServerOptions {
+    HttpServerOptions {
+        access_log: Some(log.clone()),
+        ..HttpServerOptions::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_access_log_gets_one_record_per_request_without_paths_or_tokens() {
+    let log = Arc::new(CollectingLog::default());
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let server = start(vec![("d", driver)], logged_options(&log)).await;
+    let client = reqwest::Client::new();
+    let mut seen = 0;
+    let fs = "/v1/drives/{id}/fs/{path}";
+
+    let body = vec![7_u8; 3000];
+    let written = client
+        .put(format!("{}/v1/drives/d/fs/secret-name.txt", server.url()))
+        .header(AUTHORIZATION, bearer())
+        .header("x-request-id", "upload-1")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(written.status(), StatusCode::OK);
+    let reply = written.bytes().await.unwrap();
+    assert_eq!(
+        log.next(&mut seen).await,
+        Logged {
+            request_id: "upload-1".to_owned(),
+            method: "PUT".to_owned(),
+            route: fs,
+            drive: Some("d".to_owned()),
+            status: Some(200),
+            bytes_in: 3000,
+            bytes_out: reply.len() as u64,
+        }
+    );
+
+    // A download counts the bytes sent; the id is the one the response had.
+    let read = get(&server, "/v1/drives/d/fs/secret-name.txt?download=1").await;
+    let id = request_id_of(&read);
+    assert_eq!(read.bytes().await.unwrap().len(), 3000);
+    let record = log.next(&mut seen).await;
+    assert_eq!(record.request_id, id);
+    assert_eq!(
+        (record.method.as_str(), record.route, record.status),
+        ("GET", fs, Some(200))
+    );
+    assert_eq!((record.bytes_in, record.bytes_out), (0, 3000));
+
+    // HEAD sends no body, whatever length it announces.
+    let head = client
+        .head(format!("{}/v1/drives/d/fs/secret-name.txt", server.url()))
+        .header(AUTHORIZATION, bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.headers()["content-length"], "3000");
+    let record = log.next(&mut seen).await;
+    assert_eq!(
+        (record.method.as_str(), record.status, record.bytes_out),
+        ("HEAD", Some(200), 0)
+    );
+
+    // (request, route template, drive named, status)
+    let cases: [(reqwest::RequestBuilder, &str, Option<&str>, u16); 9] = [
+        (
+            client.get(format!("{}/healthz", server.url())),
+            "/healthz",
+            None,
+            200,
+        ),
+        (
+            client
+                .get(format!("{}/v1/drives", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "/v1/drives",
+            None,
+            200,
+        ),
+        // A wrong token on a configured drive names the drive: it is the
+        // operator's own id, not something the client supplied.
+        (
+            client
+                .get(format!("{}/v1/drives/d/fs/x", server.url()))
+                .header(AUTHORIZATION, "Bearer wrong-secret-token"),
+            fs,
+            Some("d"),
+            401,
+        ),
+        // An unknown drive id is client text and is not repeated.
+        (
+            client
+                .get(format!("{}/v1/drives/guessed-drive/entries", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "/v1/drives/{id}/entries/{path}",
+            None,
+            401,
+        ),
+        (
+            client
+                .get(format!("{}/v1/drives/d/stat/secret-name.txt", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "/v1/drives/{id}/stat/{path}",
+            Some("d"),
+            200,
+        ),
+        (
+            client
+                .post(format!("{}/v1/drives/d/ops/mkdir", server.url()))
+                .header(AUTHORIZATION, bearer())
+                .json(&json!({"path": "/private-dir"})),
+            "/v1/drives/{id}/ops/mkdir",
+            Some("d"),
+            200,
+        ),
+        (
+            client
+                .post(format!("{}/v1/drives/d/ops/chown-everything", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "/v1/drives/{id}/ops/{operation}",
+            Some("d"),
+            404,
+        ),
+        (
+            client.get(format!("{}/v2/secret-route", server.url())),
+            "unmatched",
+            None,
+            404,
+        ),
+        (
+            client
+                .get(format!("{}/v1/drives/d/fs/a%2Fb", server.url()))
+                .header(AUTHORIZATION, bearer()),
+            "invalid",
+            None,
+            400,
+        ),
+    ];
+    for (request, route, drive, status) in cases {
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status().as_u16(), status, "{route}");
+        let id = request_id_of(&response);
+        let _ = response.bytes().await;
+        let record = log.next(&mut seen).await;
+        assert_eq!(record.request_id, id, "{route}");
+        assert_eq!(record.route, route);
+        assert_eq!(record.drive.as_deref(), drive, "{route}");
+        assert_eq!(record.status, Some(status), "{route}");
+    }
+
+    server.close().await.expect("close");
+    // Nothing a client put in a URL, a query or a header was recorded.
+    let everything = format!("{:?}", log.0.lock().unwrap());
+    for private in [
+        "secret-name",
+        "private-dir",
+        "guessed-drive",
+        "chown-everything",
+        "secret-route",
+        "download",
+        TOKEN,
+        "wrong-secret-token",
+        "Bearer",
+    ] {
+        assert!(!everything.contains(private), "{private} was recorded");
+    }
+    assert_eq!(log.0.lock().unwrap().len(), seen, "one record per request");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_behind_a_handler_is_recorded_once() {
+    let log = Arc::new(CollectingLog::default());
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(DriveConfig::new("d", Arc::new(MemoryFs::empty()), TOKEN).unwrap())
+        .unwrap();
+    // As the CLI does, both applications are given the same options.
+    let handler = Arc::new(RecordsRequestId {
+        application: HttpServer::unbound(registry, logged_options(&log)),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let server = HttpServer::start_with_handler(handler.clone(), logged_options(&log))
+        .await
+        .expect("HTTP server");
+    for _ in 0..3 {
+        let response = get(&server, "/v1/drives/d/entries").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = response.bytes().await;
+    }
+    server.close().await.expect("close");
+    handler.application.close().await.expect("close");
+    let records = log.0.lock().unwrap().clone();
+    assert_eq!(records.len(), 3, "{records:?}");
+    for (record, ids) in records.iter().zip(handler.seen.lock().unwrap().iter()) {
+        assert_eq!(ids, &vec![record.request_id.clone()]);
+        assert_eq!(record.route, "/v1/drives/{id}/entries/{path}");
+        assert_eq!(record.status, Some(200));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_whose_client_leaves_before_the_response_is_recorded_without_a_status() {
+    let log = Arc::new(CollectingLog::default());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let driver = Arc::new(StuckFs {
+        entered: entered.clone(),
+    });
+    let server = start(vec![("d", driver)], logged_options(&log)).await;
+    let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .unwrap();
+    let head = format!(
+        "GET /v1/drives/d/stat/x HTTP/1.1\r\nHost: h\r\nAuthorization: {}\r\nX-Request-Id: gone-1\r\n\r\n",
+        bearer()
+    );
+    socket.write_all(head.as_bytes()).await.unwrap();
+    // The request is with the drive, which will never answer it.
+    entered.notified().await;
+    drop(socket);
+    let mut seen = 0;
+    let record = log.next(&mut seen).await;
+    assert_eq!(
+        record,
+        Logged {
+            request_id: "gone-1".to_owned(),
+            method: "GET".to_owned(),
+            route: "/v1/drives/{id}/stat/{path}",
+            drive: Some("d".to_owned()),
+            status: None,
+            bytes_in: 0,
+            bytes_out: 0,
+        }
+    );
+    server.close().await.expect("close");
+}

@@ -308,6 +308,7 @@ Listener and limit keys, all optional:
 | `request_timeout_ms` | 30000 | Per-request, header-read, idle keep-alive and stalled-download timeout. |
 | `drain_timeout_ms` | 35000 | Shutdown drain. Keep it above `request_timeout_ms`. |
 | `max_connections` | 256 | Concurrent connections; excess connections are closed. |
+| `access_log` | `false` | `true` writes one `http_request` JSON line per request to stderr: request id, method, route template, status, duration and byte counts; never the path or the token. |
 | `tcp_nodelay` | `true` | Set `false` to restore TCP packet coalescing. |
 | `http2_prior_knowledge` | `false` | `true` makes the listener cleartext HTTP/2 only; the proxy must then send the HTTP/2 preface upstream. |
 
