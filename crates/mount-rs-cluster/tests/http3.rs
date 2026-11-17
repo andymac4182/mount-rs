@@ -2739,3 +2739,334 @@ async fn run_renewal_handoff(disconnect: bool) {
     .await
     .expect("owner handoff timed out");
 }
+
+/// One forwarding server's view in the membership reload test: its own
+/// membership, the client built on that membership's pins, and a forwarder.
+struct ReloadIngress {
+    membership: Arc<mount_rs_cluster::PeerMembership>,
+    client: Arc<PeerClient>,
+    forwarder: mount_rs_cluster::IngressForwarder,
+}
+
+impl ReloadIngress {
+    /// GET the test file through this ingress.
+    async fn read(&self) -> Result<Vec<u8>, mount_rs_cluster::ForwardError> {
+        use http_body_util::BodyExt;
+        let response = self
+            .forwarder
+            .forward(public_request("GET", "secret-token", &[]))
+            .await?;
+        if !response.status().is_success() {
+            return Err(mount_rs_cluster::ForwardError::RouteUnavailable);
+        }
+        response
+            .into_body()
+            .collect()
+            .await
+            .map(|body| body.to_bytes().to_vec())
+            .map_err(|_| mount_rs_cluster::ForwardError::OutcomeUnknown)
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated MOUNT_RS_REDIS_TEST_URL"]
+async fn membership_reload_admits_added_peers_and_cuts_off_removed_ones() {
+    use mount_rs_cluster::*;
+    use mount_rs_sdk::{Filesystem, SplitOptions, StoreConfig};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let root = tempfile::tempdir().unwrap();
+        let namespace = format!(
+            "reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut options = SplitOptions::memory("owner", 4096);
+        options.metadata = StoreConfig::Sqlite {
+            path: root.path().join("metadata.sqlite"),
+        };
+        options.blocks = StoreConfig::Local {
+            path: root.path().join("blocks"),
+        };
+        std::fs::create_dir(root.path().join("blocks")).unwrap();
+        let filesystem = Arc::new(Filesystem::split(options).await.unwrap());
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let ca = Identity {
+            cert: params.self_signed(&key).unwrap(),
+            key,
+        };
+        let staged = |identity: &Identity| {
+            StagedPeerIdentity::from_pem(
+                identity.cert.pem().as_bytes(),
+                identity.key.serialize_pem().as_bytes(),
+                ca.cert.pem().as_bytes(),
+            )
+            .unwrap()
+            .identity()
+            .clone()
+        };
+        let owner = peer(&ca, "owner");
+        let owner_endpoint = quinn::Endpoint::server(
+            load_peer_server_config_from_pem(
+                owner.cert.pem().as_bytes(),
+                owner.key.serialize_pem().as_bytes(),
+                ca.cert.pem().as_bytes(),
+            )
+            .unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let owner_address = owner_endpoint.local_addr().unwrap();
+        let ingress_a = peer(&ca, "ingress-a");
+        let ingress_b = peer(&ca, "ingress-b");
+        // One membership record as it appears in the file. Ingresses do not
+        // listen for peers; their address is never dialled.
+        let record = |node: &str, identity: &Identity, address: std::net::SocketAddr| {
+            serde_json::json!({
+                "node": node, "boot": "boot-a", "address": address,
+                "tls_server_name": "localhost",
+                "spki_sha256": spki_sha256_from_der(identity.cert.der()).unwrap().to_hex(),
+            })
+        };
+        let unused: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let owner_record = record("owner", &owner, owner_address);
+        let a_record = record("ingress-a", &ingress_a, unused);
+        let b_record = record("ingress-b", &ingress_b, unused);
+        let file = |records: &[&serde_json::Value]| serde_json::json!(records).to_string();
+        let parse = |text: &str| PeerDirectory::parse(text.as_bytes()).unwrap();
+
+        // The owner starts trusting ingress-a only.
+        let owner_membership = Arc::new(
+            PeerMembership::new(Arc::new(parse(&file(&[&owner_record, &a_record]))), 8)
+                .unwrap()
+                .with_local_listener(staged(&owner))
+                .unwrap(),
+        );
+        let route = VolumeRoute {
+            volume: "volume".into(),
+            node: "owner".into(),
+            boot: "boot-a".into(),
+            registration: "first".into(),
+            fence: filesystem.checked_owner_fence().await.unwrap(),
+            address: owner_address,
+            tls_server_name: "localhost".into(),
+        };
+        let redis = redis::Client::open(std::env::var("MOUNT_RS_REDIS_TEST_URL").unwrap()).unwrap();
+        let registry = RedisRouteRegistry::new(
+            redis.get_multiplexed_async_connection().await.unwrap(),
+            namespace,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let registration = OwnedVolumeRegistration::new(
+            filesystem.clone(),
+            registry.clone(),
+            route.clone(),
+            Duration::from_secs(20),
+        )
+        .await
+        .unwrap();
+        registration.advertise().await.unwrap();
+        let handler = OwnerHttpHandler::new(
+            filesystem.clone(),
+            route.clone(),
+            "secret-token".into(),
+            mount_rs_http::HttpServerOptions::default(),
+        )
+        .await
+        .unwrap();
+        let policy_membership = owner_membership.clone();
+        let server = PeerServer::new_with_pin_provider(
+            owner_endpoint,
+            owner_membership.pins(),
+            PeerTransportLimits::default(),
+            move |identity: &TlsIdentity, _: &Request<()>| policy_membership.accepts(identity),
+            move |identity, request, stream| {
+                let handler = handler.clone();
+                async move { handler.handle(identity, request, stream).await }
+            },
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let server_task = tokio::spawn(server.serve(cancel.clone()));
+
+        // Each ingress has its own copy of the membership: the owner and
+        // itself.
+        let ingress = |identity: &Identity, own: &serde_json::Value| {
+            let membership = Arc::new(
+                PeerMembership::new(Arc::new(parse(&file(&[&owner_record, own]))), 8)
+                    .unwrap()
+                    .with_local_identity(staged(identity))
+                    .unwrap(),
+            );
+            let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            endpoint.set_default_client_config(
+                load_peer_client_config_from_pem(
+                    identity.cert.pem().as_bytes(),
+                    identity.key.serialize_pem().as_bytes(),
+                    ca.cert.pem().as_bytes(),
+                )
+                .unwrap(),
+            );
+            let client = Arc::new(
+                PeerClient::new_with_pin_provider(
+                    endpoint,
+                    membership.pins(),
+                    PeerTransportLimits::default(),
+                )
+                .unwrap(),
+            );
+            let forwarder = IngressForwarder::with_membership(
+                registry.clone(),
+                membership.clone(),
+                client.clone(),
+                ForwardOptions {
+                    operation_timeout: Duration::from_secs(5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            ReloadIngress {
+                membership,
+                client,
+                forwarder,
+            }
+        };
+        let a = ingress(&ingress_a, &a_record);
+        let b = ingress(&ingress_b, &b_record);
+        let owner_destination = PeerDestination::new(owner_address, "localhost");
+        let data = b"served by the owner";
+        let response = a
+            .forwarder
+            .forward(public_request("PUT", "secret-token", data))
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap();
+        assert_eq!(a.read().await.unwrap(), data);
+        // ingress-b holds a certificate from the same authority, but the
+        // owner's membership does not list it.
+        assert!(b.read().await.is_err(), "unlisted peer was served");
+
+        // (a) A peer added by reload can forward, with no restart.
+        let change = owner_membership
+            .reload_from_reader(file(&[&owner_record, &a_record, &b_record]).as_bytes())
+            .unwrap();
+        assert_eq!(change.added, ["ingress-b"]);
+        assert_eq!(b.read().await.unwrap(), data);
+        assert_eq!(a.read().await.unwrap(), data);
+
+        // (c) A file that is invalid, or that would cut this server off,
+        // leaves the membership as it was, and both peers keep being served.
+        let revision = owner_membership.pins().snapshot().revision();
+        let mut rekeyed_owner = owner_record.clone();
+        rekeyed_owner["spki_sha256"] = b_record["spki_sha256"].clone();
+        let mut moved_owner = owner_record.clone();
+        moved_owner["address"] = "127.0.0.1:1".into();
+        let mut unknown_field = b_record.clone();
+        unknown_field["role"] = "ingress".into();
+        for refused in [
+            "[{\"node\":\"owner\",".to_owned(),
+            "[]".to_owned(),
+            file(&[&owner_record, &a_record, &a_record]),
+            file(&[&owner_record, &unknown_field]),
+            // The owner's own record removed, re-keyed, or moved.
+            file(&[&a_record, &b_record]),
+            file(&[&rekeyed_owner, &a_record]),
+            file(&[&moved_owner, &a_record, &b_record]),
+        ] {
+            assert!(
+                owner_membership
+                    .reload_from_reader(refused.as_bytes())
+                    .is_err(),
+                "accepted {refused}"
+            );
+            assert_eq!(owner_membership.directory().len(), 3);
+            assert_eq!(owner_membership.pins().snapshot().revision(), revision);
+        }
+        assert_eq!(a.read().await.unwrap(), data);
+        assert_eq!(b.read().await.unwrap(), data);
+        // An ingress refuses a file that drops its own record, too.
+        assert_eq!(
+            b.forwarder
+                .reload_membership(parse(&file(&[&owner_record, &a_record])))
+                .await,
+            Err(MembershipError::LocalMemberMissing {
+                node: "ingress-b".into()
+            })
+        );
+        assert_eq!(b.read().await.unwrap(), data);
+
+        // (b) A peer removed by reload is cut off: the connection it already
+        // had is closed, and it cannot open another.
+        let before = a.client.pool_stats_for(&owner_destination).await.unwrap();
+        assert!(!before.closed);
+        let change = owner_membership
+            .reload_from_reader(file(&[&owner_record, &b_record]).as_bytes())
+            .unwrap();
+        assert_eq!(change.removed, ["ingress-a"]);
+        // The owner closes it; ingress-a has sent nothing since the reload.
+        while a
+            .client
+            .pool_stats_for(&owner_destination)
+            .await
+            .is_some_and(|connection| !connection.closed)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for _ in 0..3 {
+            assert!(a.read().await.is_err(), "removed peer was served");
+        }
+        assert_eq!(b.read().await.unwrap(), data);
+
+        // The same from the dialling side: an ingress whose file no longer
+        // lists the owner stops forwarding to it and drops its connection.
+        assert!(b.client.pool_stats_for(&owner_destination).await.is_some());
+        let change = b
+            .forwarder
+            .reload_membership(parse(&file(&[&b_record, &a_record])))
+            .await
+            .unwrap();
+        assert_eq!(change.removed, ["owner"]);
+        assert!(b.client.pool_stats_for(&owner_destination).await.is_none());
+        assert_eq!(b.read().await, Err(ForwardError::UntrustedRoute));
+        // Listed again under a key the owner does not hold, the pin check
+        // of the new handshake refuses it.
+        let mut wrong_key = owner_record.clone();
+        wrong_key["spki_sha256"] = a_record["spki_sha256"].clone();
+        b.forwarder
+            .reload_membership(parse(&file(&[&wrong_key, &b_record])))
+            .await
+            .unwrap();
+        assert!(
+            b.read().await.is_err(),
+            "a server with the wrong key was used"
+        );
+        // Listed under its real key, it is used again: a rotated pin takes
+        // effect at the next handshake.
+        let change = b
+            .forwarder
+            .reload_membership(parse(&file(&[&owner_record, &b_record])))
+            .await
+            .unwrap();
+        assert_eq!(change.changed, ["owner"]);
+        assert_eq!(b.read().await.unwrap(), data);
+        assert_eq!(b.membership.directory().len(), 2);
+
+        registry.remove(&route).await.unwrap();
+        a.client.shutdown().await.unwrap();
+        b.client.shutdown().await.unwrap();
+        cancel.cancel();
+        server_task.await.unwrap().unwrap();
+        filesystem.shutdown().await.unwrap();
+    })
+    .await
+    .expect("membership reload test timed out");
+}

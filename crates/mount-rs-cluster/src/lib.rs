@@ -15,6 +15,10 @@ mod forwarding;
 #[cfg(feature = "http3")]
 pub use forward_trace::{ForwardRequestTiming, ForwardRequestTrace};
 #[cfg(feature = "http3")]
+mod membership;
+#[cfg(feature = "http3")]
+pub use membership::{MembershipChange, MembershipError, PeerMembership};
+#[cfg(feature = "http3")]
 mod request_class;
 #[cfg(feature = "http3")]
 pub use forwarding::{

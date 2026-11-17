@@ -322,6 +322,11 @@ pub(crate) struct ForwardingConfig {
     pub route_refresh_idle_ttls: u32,
     /// QUIC connections this server keeps to each peer for forwarding.
     pub peer_connections: usize,
+    /// How often to look for a changed membership file; 0 turns polling off.
+    pub membership_reload_seconds: u64,
+    /// Most members a reload may install. `None` is the larger of 64 and
+    /// the number in the file at startup.
+    pub max_members: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -903,6 +908,8 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "refresh_active_routes",
             "route_refresh_idle_ttls",
             "peer_connections",
+            "membership_reload_seconds",
+            "max_members",
         ],
         path,
     )?;
@@ -933,8 +940,25 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "must be between 1 and 16",
         ));
     }
+    let membership_reload_seconds =
+        optional_u32(fields, "membership_reload_seconds", path)?.unwrap_or(30);
+    if membership_reload_seconds > 3600 {
+        return Err(ConfigError::at(
+            "config.http.forwarding.membership_reload_seconds",
+            "must be between 0 and 3600; 0 turns polling off",
+        ));
+    }
+    let max_members = optional_u32(fields, "max_members", path)?;
+    if max_members.is_some_and(|members| !(1..=1024).contains(&members)) {
+        return Err(ConfigError::at(
+            "config.http.forwarding.max_members",
+            "must be between 1 and 1024",
+        ));
+    }
     Ok(ForwardingConfig {
         route_refresh_idle_ttls,
+        membership_reload_seconds: u64::from(membership_reload_seconds),
+        max_members: max_members.map(|members| members as usize),
         peer_connections: peer_connections as usize,
         refresh_active_routes: optional_bool(fields, "refresh_active_routes", path)?
             .unwrap_or(true),
@@ -3666,6 +3690,67 @@ mod tests {
             source["http"]["forwarding"]["peer_connections"] = invalid;
             assert!(parse(&source).is_err());
         }
+    }
+
+    #[test]
+    fn membership_reload_polls_every_thirty_seconds_and_can_be_turned_off() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new(".")).map(|config| {
+                config
+                    .http
+                    .unwrap()
+                    .forwarding
+                    .unwrap()
+                    .membership_reload_seconds
+            })
+        };
+        assert_eq!(parse(&source).unwrap(), 30);
+        for valid in [0, 1, 3600] {
+            source["http"]["forwarding"]["membership_reload_seconds"] = valid.into();
+            assert_eq!(parse(&source).unwrap(), valid);
+        }
+        for invalid in [
+            serde_json::json!(3601),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("30"),
+            serde_json::json!(false),
+        ] {
+            source["http"]["forwarding"]["membership_reload_seconds"] = invalid;
+            assert!(parse(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn member_capacity_is_derived_unless_set_and_is_bounded() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("."))
+                .map(|config| config.http.unwrap().forwarding.unwrap().max_members)
+        };
+        assert_eq!(parse(&source).unwrap(), None);
+        for valid in [1, 1024] {
+            source["http"]["forwarding"]["max_members"] = valid.into();
+            assert_eq!(parse(&source).unwrap(), Some(valid));
+        }
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(1025),
+            serde_json::json!("64"),
+        ] {
+            source["http"]["forwarding"]["max_members"] = invalid;
+            assert!(parse(&source).is_err());
+        }
+        source["http"]["forwarding"]["max_members"] = 64.into();
+        source["http"]["forwarding"]["membership_reload"] = 30.into();
+        assert!(parse(&source).is_err());
     }
 
     #[test]
