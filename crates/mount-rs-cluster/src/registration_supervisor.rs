@@ -245,6 +245,7 @@ mod tests {
                 fence: fs.checked_owner_fence().await.unwrap(),
                 address: "127.0.0.1:4443".parse().unwrap(),
                 tls_server_name: "node.example".into(),
+                protocols: crate::PeerProtocolRange::SUPPORTED,
             };
             registrations.push(Arc::new(
                 OwnedVolumeRegistration::new(

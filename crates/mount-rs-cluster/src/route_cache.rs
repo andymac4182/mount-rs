@@ -165,6 +165,7 @@ mod tests {
             registration: "registration".into(),
             address: "127.0.0.1:1234".parse().unwrap(),
             tls_server_name: "localhost".into(),
+            protocols: crate::PeerProtocolRange::SUPPORTED,
         }
     }
     #[test]

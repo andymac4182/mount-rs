@@ -506,7 +506,8 @@ async fn connect_forwarder(
         },
     )
     .map_err(|e| fail(&e))?
-    .with_additional_clients(peers[1..].to_vec());
+    .with_additional_clients(peers[1..].to_vec())
+    .with_peer_protocol_observer(Arc::new(report_peer_protocol));
     Ok((forwarder, peers))
 }
 
@@ -625,6 +626,76 @@ fn report_failover(event: &mount_rs_cluster::FailoverEvent) {
     let _ = writeln!(std::io::stderr().lock(), "{record}");
 }
 
+/// At most one `peer_protocol_refused` line is written in this long; the
+/// refusals in between are counted on the next line.
+const PEER_PROTOCOL_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// One JSON line on stderr when a request was not run because this server
+/// and a peer share no version of the server-to-server protocol. Every
+/// request to the drive is refused while that lasts, so the lines are
+/// limited: the first is written at once.
+fn report_peer_protocol(refusal: &mount_rs_cluster::PeerProtocolRefusal) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Milliseconds since `START` at which the next line may be written.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let now = START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64;
+    let next = NEXT.load(Ordering::Acquire);
+    let turn = now >= next
+        && NEXT
+            .compare_exchange(
+                next,
+                now + PEER_PROTOCOL_REPORT_INTERVAL.as_millis() as u64,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok();
+    if !turn {
+        SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let record = peer_protocol_record(refusal, SUPPRESSED.swap(0, Ordering::Relaxed));
+    let _ = {
+        use std::io::Write;
+        writeln!(std::io::stderr().lock(), "{record}")
+    };
+}
+
+fn peer_protocol_record(
+    refusal: &mount_rs_cluster::PeerProtocolRefusal,
+    suppressed: u64,
+) -> serde_json::Value {
+    use mount_rs_cluster::PeerProtocolRefusal as Refusal;
+    let mut record = match refusal {
+        Refusal::Request { peer, offered } => serde_json::json!({
+            "role":"owner","peer":peer,"offered":offered,
+            "error":"a peer sent a request in a protocol version this server does not speak; the request was not run",
+        }),
+        Refusal::Route {
+            volume,
+            owner,
+            accepts,
+        } => serde_json::json!({
+            "role":"forwarder","drive":volume,"peer":owner,"accepts":accepts.to_string(),
+            "error":"the drive's owner accepts no protocol version this server speaks; the request was not sent",
+        }),
+        Refusal::Refused { volume, owner } => serde_json::json!({
+            "role":"forwarder","drive":volume,"peer":owner,
+            "error":"the drive's owner does not speak this server's protocol version; the request was not run",
+        }),
+    };
+    record["event"] = "peer_protocol_refused".into();
+    record["speaks"] = mount_rs_cluster::PeerProtocolRange::SUPPORTED
+        .to_string()
+        .into();
+    record["suppressed"] = suppressed.into();
+    record
+}
+
 pub(crate) async fn start_owner(
     config: &crate::config::ForwardingConfig,
     drives: OwnedDrives,
@@ -684,6 +755,7 @@ pub(crate) async fn start_owner(
             tls_server_name: member.tls_server_name.clone(),
             fence: fs.checked_owner_fence().await?,
             registration: format!("{:032x}", u128::from_be_bytes(nonce)),
+            protocols: mount_rs_cluster::PeerProtocolRange::SUPPORTED,
         };
         let registration =
             OwnedVolumeRegistration::new(fs.clone(), registry.clone(), route.clone(), ROUTE_TTL)
@@ -707,7 +779,9 @@ pub(crate) async fn start_owner(
         registrations.push(Arc::new(registration));
         handlers.push(handler);
     }
-    let router = OwnerHttpRouter::new(handlers).map_err(|e| fail(&e))?;
+    let router = OwnerHttpRouter::new(handlers)
+        .map_err(|e| fail(&e))?
+        .with_peer_protocol_observer(Arc::new(report_peer_protocol));
     let (remote, peers) = connect_forwarder(
         config,
         options.max_request_bytes,
@@ -828,5 +902,54 @@ pub(crate) async fn start_owner(
             owner.close().await?;
             Err(fail(&error))
         }
+    }
+}
+
+#[cfg(test)]
+mod peer_protocol_tests {
+    use super::peer_protocol_record;
+    use mount_rs_cluster::{PeerProtocolRange, PeerProtocolRefusal};
+
+    /// The stderr line names the peer, what it offered or accepts, and
+    /// what this server speaks, for each of the three refusals.
+    #[test]
+    fn a_refusal_is_logged_with_the_peer_and_both_version_ranges() {
+        let speaks = PeerProtocolRange::SUPPORTED.to_string();
+        let owner = peer_protocol_record(
+            &PeerProtocolRefusal::Request {
+                peer: "edge-1".into(),
+                offered: "7".into(),
+            },
+            0,
+        );
+        assert_eq!(owner["event"], "peer_protocol_refused");
+        assert_eq!(owner["role"], "owner");
+        assert_eq!(owner["peer"], "edge-1");
+        assert_eq!(owner["offered"], "7");
+        assert_eq!(owner["speaks"], speaks.as_str());
+        assert_eq!(owner["suppressed"], 0);
+        let forwarder = peer_protocol_record(
+            &PeerProtocolRefusal::Route {
+                volume: "drive".into(),
+                owner: "owner-1".into(),
+                accepts: PeerProtocolRange { min: 7, max: 9 },
+            },
+            12,
+        );
+        assert_eq!(forwarder["role"], "forwarder");
+        assert_eq!(forwarder["drive"], "drive");
+        assert_eq!(forwarder["peer"], "owner-1");
+        assert_eq!(forwarder["accepts"], "7-9");
+        assert_eq!(forwarder["suppressed"], 12);
+        let refused = peer_protocol_record(
+            &PeerProtocolRefusal::Refused {
+                volume: "drive".into(),
+                owner: "owner-1".into(),
+            },
+            0,
+        );
+        assert_eq!(refused["role"], "forwarder");
+        assert_eq!(refused["peer"], "owner-1");
+        assert!(refused["error"].as_str().unwrap().contains("not run"));
     }
 }
