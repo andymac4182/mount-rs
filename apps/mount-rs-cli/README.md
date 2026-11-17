@@ -1153,14 +1153,72 @@ being rotated is restarted; no other server is.
   One record holds one key, so there is no period in which both keys are
   accepted.
 
-On a volume owner, set `http.forwarding.owner` to `true`, supply the owner's certificate and key, and configure its assigned drives. The owner listens for peer requests at its membership address. The forwarding `bind` setting controls the outbound QUIC endpoint. Enable `http.remote_sessions` on the owner for remote mount clients. Ownership assignment is operator-configured. Serve the public endpoint through HTTPS termination for bearer credentials.
+On a volume owner, set `http.forwarding.owner` to `true`, supply the owner's certificate and key, and configure its assigned drives. The owner listens for peer requests at its membership address. The forwarding `bind` setting controls the outbound QUIC endpoint. Enable `http.remote_sessions` on the owner for remote mount clients. Ownership assignment is operator-configured unless failover is enabled (below). Serve the public endpoint through HTTPS termination for bearer credentials.
+
+#### Drive failover
+
+By default each owner opens the drives in its own `http.drives` at startup
+and owns them until it stops; if it dies, they are unavailable until it is
+restarted. Add a `failover` object to `http.forwarding` on two or more
+owners that list the same drive to have the drive move by itself:
+
+```json
+"forwarding": {
+  "owner": true,
+  "failover": {}
+}
+```
+
+Every drive of such a server is then a drive it is a *candidate* for. One
+candidate holds the drive open and publishes its route; the others are
+standbys that forward to it. When the route disappears (the owner crashed,
+was partitioned or stopped), a standby opens the drive, which succeeds only
+once the storage writer lease can be acquired, and then publishes itself.
+The lease stays the only authority: Redis decides nothing about who may
+write. Design, invariants and limits:
+[`docs/serve-http-failover.md`](../../docs/serve-http-failover.md).
+
+| Key | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `poll_interval_ms` | `1000` | `100`–`10000` | How often a standby reads the route and an owner checks its lease. |
+| `takeover_stagger_ms` | `2000` | `0`–`60000` | A standby ranked `k` among the live candidates (rendezvous hash of drive id and node id) waits `k` times this before trying to take a drive. |
+| `fail_back` | `false` | boolean | Hand a drive back to a better-ranked candidate that has returned. Off, a drive stays where it is until its owner stops. |
+| `fail_back_after_seconds` | `60` | `10`–`86400` | With `fail_back`: how long that candidate must have ranked first without interruption. |
+
+Unknown keys are rejected. `failover` requires `owner: true`, at least one
+drive, and `splitstore` drives with exclusive ownership whose metadata is
+not `memory`.
+
+Requirements and behaviour:
+
+- All candidates for a drive must configure the **same storage** (metadata
+  store and volume, block store) and the same token and `remote_sessions`
+  setting. Nothing checks this: candidates pointed at different storage
+  would each serve their own copy in turn.
+- Recovery after a crash takes at most
+  `max(15 s + rank x takeover_stagger_ms, lease_ttl_ms) + 5 x poll_interval_ms`
+  plus the time to open the drive: about four minutes with the default
+  240-second lease, about 25 seconds with `lease_ttl_ms: 20000`. A clean
+  stop (SIGTERM) hands over in a second or two.
+- While no owner is published, requests get `503` with
+  `x-mount-dispatch: not-dispatched` and `Retry-After: 1`. Requests in
+  flight on the failed owner get `502` with `x-mount-dispatch: unknown` and
+  are not replayed. Remote sessions and open handles on the failed owner are
+  lost: the new owner answers `403 EACCES` and the client must open a new
+  session.
+- A candidate does not exit when a drive's lease is held elsewhere or the
+  drive cannot be opened; it stays a standby and reports each change as a
+  `drive_failover` JSON line on stderr.
+- A Redis outage moves nothing: standbys wait, owners keep their leases and
+  keep serving requests that reach them directly.
 
 `scripts/serve-http-cluster-e2e.py` starts two owners on loopback against a
 disposable Redis and checks the cluster as a round-robin load balancer would
 use it: every drive through every ingress, read-after-write across ingresses,
 uploads at and over the size limit, sessions carried by either ingress, an
 owner stopping and restarting, and a membership file reloaded on the timer
-and on `SIGHUP` to add and then remove an ingress. CI runs it. A request whose cached route names
+and on `SIGHUP` to add and then remove an ingress, and a drive with two
+failover candidates whose owner is killed and then stopped cleanly. CI runs it. A request whose cached route names
 an owner with no live peer connection re-reads the route before dialing, so a
 cleanly stopped owner's drive answers 503 at once rather than after the QUIC
 handshake timeout.

@@ -339,6 +339,21 @@ pub(crate) struct ForwardingConfig {
     /// Most members a reload may install. `None` is the larger of 64 and
     /// the number in the file at startup.
     pub max_members: Option<usize>,
+    /// Present on an owner that is a failover candidate for its drives.
+    pub failover: Option<FailoverConfig>,
+}
+
+/// `http.forwarding.failover`. See `docs/serve-http-failover.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FailoverConfig {
+    /// How often a standby reads the route and an owner checks its lease.
+    pub poll_interval_ms: u64,
+    /// Extra wait per rank before a standby tries to take a drive.
+    pub takeover_stagger_ms: u64,
+    /// Hand a drive back to a better-ranked candidate that has returned.
+    pub fail_back: bool,
+    /// How long that candidate must have ranked first without interruption.
+    pub fail_back_after_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -830,6 +845,33 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             ));
         }
     }
+    if forwarding
+        .as_ref()
+        .is_some_and(|config| config.failover.is_some())
+    {
+        // A failover candidate takes a drive by acquiring its writer lease,
+        // so every drive needs one, on storage the other candidates share.
+        let path = "config.http.forwarding.failover";
+        if parsed_drives.is_empty() {
+            return Err(ConfigError::at(path, "requires at least one drive"));
+        }
+        for drive in &parsed_drives {
+            let Some(storage) = &drive.driver.storage else {
+                continue;
+            };
+            let reason = if storage.concurrent_writes || storage.delegated {
+                "requires exclusive ownership"
+            } else if storage.metadata == StorageProvider::Memory {
+                "requires metadata storage that the other candidates share, not memory"
+            } else {
+                continue;
+            };
+            return Err(ConfigError::at(
+                path,
+                format!("{reason} for every drive (drive '{}')", drive.id),
+            ));
+        }
+    }
     Ok(HttpServiceConfig {
         forwarding,
         remote_sessions,
@@ -934,9 +976,18 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "peer_connections",
             "membership_reload_seconds",
             "max_members",
+            "failover",
         ],
         path,
     )?;
+    let owner = optional_bool(fields, "owner", path)?.unwrap_or(false);
+    let failover = fields.get("failover").map(parse_failover).transpose()?;
+    if failover.is_some() && !owner {
+        return Err(ConfigError::at(
+            "config.http.forwarding.failover",
+            "requires owner to be true",
+        ));
+    }
     let namespace = required_string(fields, "namespace", path)?;
     if namespace.is_empty()
         || namespace.len() > 256
@@ -986,7 +1037,8 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
         peer_connections: peer_connections as usize,
         refresh_active_routes: optional_bool(fields, "refresh_active_routes", path)?
             .unwrap_or(true),
-        owner: optional_bool(fields, "owner", path)?.unwrap_or(false),
+        owner,
+        failover,
         peers: required_path(fields, "peers", path, base)?,
         certificate: required_path(fields, "certificate", path, base)?,
         private_key: required_path(fields, "private_key", path, base)?,
@@ -1001,6 +1053,38 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             .map_err(|_| {
                 ConfigError::at("config.http.forwarding.bind", "invalid UDP socket address")
             })?,
+    })
+}
+
+/// Parse `http.forwarding.failover`. An empty object takes every default.
+fn parse_failover(value: &Value) -> Result<FailoverConfig, ConfigError> {
+    let path = "config.http.forwarding.failover";
+    let fields = object(value, path)?;
+    reject_unknown(
+        fields,
+        &[
+            "poll_interval_ms",
+            "takeover_stagger_ms",
+            "fail_back",
+            "fail_back_after_seconds",
+        ],
+        path,
+    )?;
+    let bounded = |key: &str, default: u32, minimum: u32, maximum: u32| {
+        let value = optional_u32(fields, key, path)?.unwrap_or(default);
+        if !(minimum..=maximum).contains(&value) {
+            return Err(ConfigError::at(
+                &format!("{path}.{key}"),
+                format!("must be between {minimum} and {maximum}"),
+            ));
+        }
+        Ok(u64::from(value))
+    };
+    Ok(FailoverConfig {
+        poll_interval_ms: bounded("poll_interval_ms", 1000, 100, 10_000)?,
+        takeover_stagger_ms: bounded("takeover_stagger_ms", 2000, 0, 60_000)?,
+        fail_back: optional_bool(fields, "fail_back", path)?.unwrap_or(false),
+        fail_back_after_seconds: bounded("fail_back_after_seconds", 60, 10, 86_400)?,
     })
 }
 
@@ -3734,6 +3818,96 @@ mod tests {
         assert!(!parse(&source).unwrap());
         source["http"]["forwarding"]["refresh_active_routes"] = "false".into();
         assert!(parse(&source).is_err());
+    }
+
+    #[test]
+    fn failover_is_off_by_default_and_its_keys_are_bounded() {
+        let drive = |metadata: serde_json::Value| {
+            serde_json::json!({"id":"shared","token":{"env":"TOKEN"},"driver":{
+                "kind":"splitstore","storage":{
+                    "metadata":metadata,
+                    "blocks":{"kind":"local","path":"blocks"},
+                    "chunk_size_bytes":65536}}})
+        };
+        let sqlite = serde_json::json!({"kind":"sqlite","path":"meta.db"});
+        let mut source = serde_json::json!({"version":1,"http":{
+            "drives":[drive(sqlite.clone())],
+            "forwarding":{
+                "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem",
+                "ca":"ca.pem","bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},
+                "namespace":"prod","owner":true
+        }}});
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), Path::new("."))
+                .map(|config| config.http.unwrap().forwarding.unwrap().failover)
+        };
+        // An owner without the key is not a candidate: nothing changes.
+        assert_eq!(parse(&source).unwrap(), None);
+        source["http"]["forwarding"]["failover"] = serde_json::json!({});
+        assert_eq!(
+            parse(&source).unwrap(),
+            Some(FailoverConfig {
+                poll_interval_ms: 1000,
+                takeover_stagger_ms: 2000,
+                fail_back: false,
+                fail_back_after_seconds: 60,
+            })
+        );
+        source["http"]["forwarding"]["failover"] = serde_json::json!({
+            "poll_interval_ms":100,"takeover_stagger_ms":0,"fail_back":true,
+            "fail_back_after_seconds":86400});
+        assert_eq!(
+            parse(&source).unwrap(),
+            Some(FailoverConfig {
+                poll_interval_ms: 100,
+                takeover_stagger_ms: 0,
+                fail_back: true,
+                fail_back_after_seconds: 86_400,
+            })
+        );
+        for (key, invalid) in [
+            ("poll_interval_ms", serde_json::json!(99)),
+            ("poll_interval_ms", serde_json::json!(10_001)),
+            ("poll_interval_ms", serde_json::json!("1000")),
+            ("takeover_stagger_ms", serde_json::json!(60_001)),
+            ("takeover_stagger_ms", serde_json::json!(-1)),
+            ("fail_back", serde_json::json!("true")),
+            ("fail_back_after_seconds", serde_json::json!(9)),
+            ("fail_back_after_seconds", serde_json::json!(86_401)),
+            ("route_ttl_ms", serde_json::json!(15_000)),
+        ] {
+            let mut bad = source.clone();
+            bad["http"]["forwarding"]["failover"] = serde_json::json!({});
+            bad["http"]["forwarding"]["failover"][key] = invalid.clone();
+            let error = parse(&bad).unwrap_err();
+            assert!(error.message().contains(key), "{key} {invalid}: {error:?}");
+        }
+        source["http"]["forwarding"]["failover"] = serde_json::json!([]);
+        assert!(parse(&source).is_err());
+        source["http"]["forwarding"]["failover"] = serde_json::json!({});
+
+        // Only an owner can be a candidate, and only for drives with a
+        // writer lease on storage that another server can also reach.
+        let mut ingress = source.clone();
+        ingress["http"]["forwarding"]["owner"] = false.into();
+        let error = parse(&ingress).unwrap_err();
+        assert!(error.message().contains("requires owner"), "{error:?}");
+        let mut empty = source.clone();
+        empty["http"]["drives"] = serde_json::json!([]);
+        assert!(parse(&empty).is_err());
+        let mut memory = source.clone();
+        memory["http"]["drives"] = serde_json::json!([drive(serde_json::json!({"kind":"memory"}))]);
+        let error = parse(&memory).unwrap_err();
+        assert!(error.message().contains("not memory"), "{error:?}");
+        let mut concurrent = source.clone();
+        concurrent["http"]["drives"][0]["driver"]["storage"]["concurrent_writes"] = true.into();
+        assert!(parse(&concurrent).is_err());
+        // Without failover the same storage is accepted as before.
+        memory["http"]["forwarding"]
+            .as_object_mut()
+            .unwrap()
+            .remove("failover");
+        assert_eq!(parse(&memory).unwrap(), None);
     }
 
     #[test]

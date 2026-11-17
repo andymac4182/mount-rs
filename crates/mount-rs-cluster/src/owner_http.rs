@@ -158,6 +158,10 @@ impl OwnerHttpHandler {
         ));
         Ok(self)
     }
+    /// The route this handler serves; forwarded requests must carry it.
+    pub fn route(&self) -> &VolumeRoute {
+        &self.route
+    }
     pub fn session_registry(&self) -> Option<Arc<VolumeSessions>> {
         self.sessions.as_ref().map(|handler| handler.registry())
     }
@@ -361,28 +365,70 @@ impl Drop for CancelSend {
 }
 
 /// Bounded multi-volume dispatch on one Mount Server's private peer listener.
+///
+/// The set of volumes may change while the server runs (`insert`, `remove`):
+/// a failover candidate serves a volume only while it holds its writer
+/// lease. Requests read an immutable snapshot and take no lock.
 #[derive(Clone)]
 pub struct OwnerHttpRouter {
-    owners: Arc<std::collections::BTreeMap<String, OwnerHttpHandler>>,
+    owners: Arc<arc_swap::ArcSwap<Owners>>,
+    /// Serializes `insert` and `remove`; never held across an await.
+    changes: Arc<std::sync::Mutex<()>>,
 }
+type Owners = std::collections::BTreeMap<String, Arc<OwnerHttpHandler>>;
+const MAX_OWNED_VOLUMES: usize = 4096;
 impl OwnerHttpRouter {
     pub fn new(owners: Vec<OwnerHttpHandler>) -> Result<Self, RegistryError> {
-        if owners.len() > 4096 {
+        if owners.len() > MAX_OWNED_VOLUMES {
             return Err(RegistryError::InvalidInput);
         }
-        let mut map = std::collections::BTreeMap::new();
+        let mut map = Owners::new();
         for owner in owners {
-            if map.insert(owner.route.volume.clone(), owner).is_some() {
+            if map
+                .insert(owner.route.volume.clone(), Arc::new(owner))
+                .is_some()
+            {
                 return Err(RegistryError::InvalidInput);
             }
         }
         Ok(Self {
-            owners: Arc::new(map),
+            owners: Arc::new(arc_swap::ArcSwap::from_pointee(map)),
+            changes: Arc::default(),
         })
+    }
+    /// Start serving `owner`'s volume. Refused if the volume is already
+    /// served here: remove and close the old handler first.
+    pub fn insert(&self, owner: OwnerHttpHandler) -> Result<(), RegistryError> {
+        let _change = self.changes.lock().unwrap_or_else(|e| e.into_inner());
+        let current = self.owners.load();
+        if current.len() >= MAX_OWNED_VOLUMES || current.contains_key(&owner.route.volume) {
+            return Err(RegistryError::InvalidInput);
+        }
+        let mut next = Owners::clone(&current);
+        next.insert(owner.route.volume.clone(), Arc::new(owner));
+        self.owners.store(Arc::new(next));
+        Ok(())
+    }
+    /// Stop routing new requests to `volume` and return its handler, which
+    /// the caller must `close` before shutting the filesystem down. A
+    /// request that already holds the handler finishes or is refused by it.
+    pub fn remove(&self, volume: &str) -> Option<Arc<OwnerHttpHandler>> {
+        let _change = self.changes.lock().unwrap_or_else(|e| e.into_inner());
+        let current = self.owners.load();
+        let removed = current.get(volume)?.clone();
+        let mut next = Owners::clone(&current);
+        next.remove(volume);
+        self.owners.store(Arc::new(next));
+        Some(removed)
+    }
+    /// The volumes served here now.
+    pub fn volumes(&self) -> Vec<String> {
+        self.owners.load().keys().cloned().collect()
     }
     pub async fn close(&self) -> Result<(), mount_rs_http::HttpServerError> {
         let mut failure = None;
-        for owner in self.owners.values() {
+        let owners = self.owners.load_full();
+        for owner in owners.values() {
             if let Err(error) = owner.close().await {
                 failure.get_or_insert(error);
             }
@@ -395,6 +441,7 @@ impl OwnerHttpRouter {
     /// Bounded per-owner counters, without volume names or endpoint information.
     pub fn timing_snapshots(&self) -> Vec<OwnerTimingSnapshot> {
         self.owners
+            .load()
             .values()
             .map(|owner| OwnerTimingSnapshot {
                 reads: owner.diagnostics.reads.snapshot(),
@@ -411,8 +458,8 @@ impl OwnerHttpRouter {
             })
             .collect()
     }
-    pub(crate) fn local(&self, volume: &str) -> Option<&OwnerHttpHandler> {
-        self.owners.get(volume)
+    pub(crate) fn local(&self, volume: &str) -> Option<Arc<OwnerHttpHandler>> {
+        self.owners.load().get(volume).cloned()
     }
 }
 impl PeerRequestHandler for OwnerHttpRouter {
@@ -423,11 +470,7 @@ impl PeerRequestHandler for OwnerHttpRouter {
         mut stream: PeerServerStream,
     ) -> PeerHandlerFuture {
         let route = request_route(&request);
-        if let Some(owner) = route
-            .as_ref()
-            .and_then(|r| self.owners.get(&r.volume))
-            .cloned()
-        {
+        if let Some(owner) = route.as_ref().and_then(|r| self.local(&r.volume)) {
             return Box::pin(async move { owner.serve(request, stream, route).await });
         }
         Box::pin(async move {

@@ -57,6 +57,20 @@ pub use session_supervisor::SessionSupervisor;
 mod registration_supervisor;
 pub use registration_supervisor::RegistrationSupervisor;
 
+pub mod placement;
+
+mod failover;
+pub use failover::{
+    FailoverMachine, FailoverTimings, OpenOutcome, OwnerAction, OwnerView, ReleaseReason,
+    RouteView, StandbyAction,
+};
+#[cfg(feature = "http3")]
+mod failover_supervisor;
+#[cfg(feature = "http3")]
+pub use failover_supervisor::{
+    DriveFactory, DriveStatus, FailoverDrive, FailoverEvent, FailoverOptions, FailoverSupervisor,
+};
+
 mod sessions;
 pub use sessions::{SessionBudget, SessionToken, VolumeSessions};
 
@@ -278,6 +292,23 @@ redis.call('DEL', KEYS[1])
 return 1
 "#;
 
+// Candidate liveness for failover: one sorted set per volume, node ids scored
+// with an expiry on the Redis server clock, so no node clock is compared.
+// Expired members are dropped on every call. An empty node only reads.
+const CANDIDATES: &str = r#"
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+if ARGV[1] ~= '' then
+  if redis.call('ZCARD', KEYS[1]) >= 1024 and not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
+    return redis.error_reply('too many candidates')
+  end
+  redis.call('ZADD', KEYS[1], now + ARGV[2], ARGV[1])
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return redis.call('ZRANGE', KEYS[1], 0, 1023)
+"#;
+
 impl RedisRouteRegistry {
     /// Set an outer deadline for registry commands. The supplied Redis
     /// connection retains its own response timeout; a shorter client timeout
@@ -389,6 +420,67 @@ impl RedisRouteRegistry {
     }
     pub async fn remove(&self, route: &VolumeRoute) -> Result<bool, RegistryError> {
         self.change(REMOVE, route, Duration::from_secs(1)).await
+    }
+    fn candidates_key(&self, volume: &str) -> Result<String, RegistryError> {
+        if !identifier(volume) {
+            return Err(RegistryError::InvalidInput);
+        }
+        Ok(format!("mount-rs:{}:candidates:{volume}", self.namespace))
+    }
+    async fn candidate_set(
+        &self,
+        volume: &str,
+        node: &str,
+        ttl: Duration,
+    ) -> Result<Vec<String>, RegistryError> {
+        let mut cmd = redis::cmd("EVAL");
+        cmd.arg(CANDIDATES)
+            .arg(1)
+            .arg(self.candidates_key(volume)?)
+            .arg(node)
+            .arg(ttl.as_millis() as u64);
+        let members: Vec<String> = tokio::time::timeout(self.timeout, self.connection.query(&cmd))
+            .await
+            .map_err(|_| RegistryError::Unavailable)?
+            .map_err(|_| RegistryError::Unavailable)?;
+        // Redis content is a hint; never let it hand back a malformed id.
+        Ok(members.into_iter().filter(|m| identifier(m)).collect())
+    }
+    /// Announce `node` as a live failover candidate for `volume` for `ttl`,
+    /// and return every candidate currently announced, this one included.
+    ///
+    /// The set is advice about who should try to open a volume first. It
+    /// grants nothing and must be intersected with trusted membership.
+    /// Repeating an announcement is harmless, so a lost reply needs no
+    /// reconciliation.
+    pub async fn announce_candidate(
+        &self,
+        volume: &str,
+        node: &str,
+        ttl: Duration,
+    ) -> Result<Vec<String>, RegistryError> {
+        if !identifier(node) || ttl < Duration::from_millis(20) || ttl > Duration::from_secs(30) {
+            return Err(RegistryError::InvalidInput);
+        }
+        self.candidate_set(volume, node, ttl).await
+    }
+    /// The candidates currently announced for `volume`.
+    pub async fn candidates(&self, volume: &str) -> Result<Vec<String>, RegistryError> {
+        self.candidate_set(volume, "", Duration::from_secs(1)).await
+    }
+    /// Stop counting `node` as a candidate for `volume` at once, rather than
+    /// when its announcement expires.
+    pub async fn withdraw_candidate(&self, volume: &str, node: &str) -> Result<(), RegistryError> {
+        if !identifier(node) {
+            return Err(RegistryError::InvalidInput);
+        }
+        let mut cmd = redis::cmd("ZREM");
+        cmd.arg(self.candidates_key(volume)?).arg(node);
+        let _removed: i64 = tokio::time::timeout(self.timeout, self.connection.query(&cmd))
+            .await
+            .map_err(|_| RegistryError::Unavailable)?
+            .map_err(|_| RegistryError::Unavailable)?;
+        Ok(())
     }
     // GETRANGE includes its end offset. Read one extra byte so a record with
     // the expected prefix and any trailing bytes can never confirm ownership.
