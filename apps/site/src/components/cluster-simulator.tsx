@@ -9,20 +9,47 @@ type Op = 'stat' | 'mkdir-durable' | 'mkdir-writeback' | 'upload'
 type Landing = 'auto' | 0 | 1 | 2
 type Service = 'redis' | 'tidb' | 'rustfs'
 
+// The cluster's state. A drive is not tied to a node: its owner is whichever
+// candidate holds the storage writer lease and has published a route for it.
+// `stale` names a crashed owner whose route is still in Redis; `home` is the
+// node a drive is drawn on, which is its last owner while it has none.
+type Cluster = {
+  up: boolean[]
+  owner: (number | null)[]
+  stale: (number | null)[]
+  home: number[]
+  fence: number[]
+}
+
 type Step = {
   title: string
   body: string
   path?: Pt[]
   actors: string[]
   afterAck?: boolean
+  // Applied to the cluster when the step completes. Failover steps only.
+  effect?: (cluster: Cluster) => Cluster
 }
 
-type Request = {
-  drive: number
-  op: Op
-  ingress: number
-  warm: boolean
+type Scenario = {
+  kind: 'request' | 'failover'
+  kicker: string
   steps: Step[]
+  // The drive highlighted while the scenario plays.
+  target: number | null
+  // Shown once the last step has played.
+  note: string | null
+  // Node counters to bump when a request completes.
+  served: number | null
+  forwarded: number | null
+}
+
+const initialCluster: Cluster = {
+  up: [true, true, true],
+  owner: [0, 1, 2],
+  stale: [null, null, null],
+  home: [0, 1, 2],
+  fence: [1, 1, 1],
 }
 
 const nodeX = [170, 500, 830]
@@ -33,6 +60,7 @@ const busY = 428
 const serviceTop = 470
 const serviceX: Record<Service, number> = { redis: 170, tidb: 500, rustfs: 830 }
 const drives = ['drive-a', 'drive-b', 'drive-c']
+const nodeName = (node: number) => `Node ${node + 1}`
 
 const ops: { id: Op; label: string; verb: string }[] = [
   { id: 'stat', label: 'Read (stat)', verb: 'stat' },
@@ -90,13 +118,11 @@ function reverse(path: Pt[]): Pt[] {
   return [...path].reverse()
 }
 
-function buildRequest(drive: number, op: Op, ingress: number, warm: boolean): Request {
-  const owner = drive
+function buildRequest(cluster: Cluster, drive: number, op: Op, ingress: number | null, warm: boolean): Scenario {
   const name = drives[drive]
-  const verb = ops.find((o) => o.id === op)?.verb ?? 'request'
-  const n = `Node ${ingress + 1}`
-  const o = `Node ${owner + 1}`
-  const forwarded = ingress !== owner
+  const option = ops.find((o) => o.id === op)
+  const verb = option?.verb ?? 'request'
+  const label = option?.label ?? 'Request'
   const steps: Step[] = []
 
   steps.push({
@@ -105,12 +131,70 @@ function buildRequest(drive: number, op: Op, ingress: number, warm: boolean): Re
     path: clientToLb,
     actors: ['client', 'lb'],
   })
+
+  if (ingress === null) {
+    steps.push({
+      title: 'No node is running',
+      body: 'Every node is stopped, so the load balancer has no healthy node to send the request to. Restart a node to bring the cluster back.',
+      actors: ['lb'],
+    })
+    return { kind: 'request', kicker: `${label} · ${name} · no node running`, steps, target: drive, note: null, served: null, forwarded: null }
+  }
+
+  const n = nodeName(ingress)
+  const toIngress = [...clientToLb, ...lbToNode(ingress)]
   steps.push({
     title: `The load balancer picks ${n}`,
     body: 'It only spreads connections across healthy nodes. It has no drive table and needs none: any node can take any request.',
     path: lbToNode(ingress),
     actors: ['lb', `n${ingress}`],
   })
+
+  const owner = cluster.owner[drive]
+  const stale = cluster.stale[drive]
+
+  if (owner === null && stale !== null) {
+    // The owner crashed moments ago and its route has not lapsed yet.
+    const gone = nodeName(stale)
+    steps.push({
+      title: `The route still names ${gone}`,
+      body: `${n} checks the token and looks up ${name}. ${gone} stopped without withdrawing its route, and a route stays published for up to 15 s after a crash.`,
+      path: warm ? undefined : thereAndBack(toService(ingress, 'redis')),
+      actors: warm ? [`n${ingress}`] : [`n${ingress}`, 'redis'],
+    })
+    steps.push({
+      title: `${gone} does not answer`,
+      body: `${n} forwards the request over HTTP/3, but nothing is listening. It waits for an answer for up to its 30 s operation timeout.`,
+      path: hop(ingress, stale),
+      actors: [`n${ingress}`, `n${stale}`],
+    })
+    steps.push({
+      title: '502: the outcome is unknown',
+      body: `${n} answers 502 with x-mount-dispatch: unknown. It cannot tell whether the owner acted, so the request is never replayed. A read may be retried; a write has to be reconciled by the client, for example with If-Match.`,
+      path: reverse(toIngress),
+      actors: ['client', 'lb', `n${ingress}`],
+    })
+    return { kind: 'request', kicker: `${label} · ${name} · via ${n} → ${gone} (stopped)`, steps, target: drive, note: null, served: null, forwarded: null }
+  }
+
+  if (owner === null) {
+    steps.push({
+      title: 'No route is published',
+      body: `${n} checks the token and reads the route for ${name} from the registry. There is none: the old owner’s route has lapsed and no standby has published one yet.`,
+      path: thereAndBack(toService(ingress, 'redis')),
+      actors: [`n${ingress}`, 'redis'],
+    })
+    steps.push({
+      title: '503: retry in a second',
+      body: `${n} answers 503 with x-mount-dispatch: not-dispatched and Retry-After: 1. Nothing was executed, so the client can retry safely, and the retry succeeds once a standby has published itself.`,
+      path: reverse(toIngress),
+      actors: ['client', 'lb', `n${ingress}`],
+    })
+    return { kind: 'request', kicker: `${label} · ${name} · via ${n} · no owner`, steps, target: drive, note: null, served: null, forwarded: null }
+  }
+
+  const o = nodeName(owner)
+  const forwarded = ingress !== owner
 
   if (!forwarded) {
     steps.push({
@@ -180,9 +264,7 @@ function buildRequest(drive: number, op: Op, ingress: number, warm: boolean): Re
     })
   }
 
-  const inbound = forwarded
-    ? [...clientToLb, ...lbToNode(ingress), [nodeX[ingress], nodeMid] as Pt, ...hop(ingress, owner)]
-    : [...clientToLb, ...lbToNode(ingress)]
+  const inbound = forwarded ? [...toIngress, [nodeX[ingress], nodeMid] as Pt, ...hop(ingress, owner)] : toIngress
   steps.push({
     title: 'The response returns',
     body: forwarded
@@ -202,7 +284,205 @@ function buildRequest(drive: number, op: Op, ingress: number, warm: boolean): Re
     })
   }
 
-  return { drive, op, ingress, warm, steps }
+  return {
+    kind: 'request',
+    kicker: `${label} · ${name} · via ${n}${forwarded ? ` → ${o}` : ' (the owner)'}`,
+    steps,
+    target: drive,
+    note: measured(op, forwarded),
+    served: owner,
+    forwarded: forwarded ? ingress : null,
+  }
+}
+
+// Failover. In this simulation every node is a candidate for every drive.
+// The real ranking is a rendezvous hash of (drive, node); a fixed order
+// stands in for it here, so that the outcome is the same on every visit.
+function successor(cluster: Cluster, drive: number): number | null {
+  for (let i = 0; i < 3; i += 1) {
+    const node = (drive + i) % 3
+    if (cluster.up[node]) return node
+  }
+  return null
+}
+
+function listNames(group: number[]) {
+  const names = group.map((d) => drives[d])
+  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
+function withAll<T>(values: T[], group: number[], value: (previous: T) => T): T[] {
+  return values.map((previous, index) => (group.includes(index) ? value(previous) : previous))
+}
+
+// The two steps by which a node becomes the owner of a group of drives:
+// acquire each storage writer lease, and only then publish the routes.
+function takeoverSteps(cluster: Cluster, node: number, group: number[], why: string): Step[] {
+  const s = nodeName(node)
+  const names = listNames(group)
+  const fences = group.map((d) => `${drives[d]} is now at fence ${cluster.fence[d] + 1}`).join(', ')
+  return [
+    {
+      title: `${s} acquires the writer lease`,
+      body: `${why} That succeeds only when the metadata store grants the exclusive writer lease, and it will not while the crashed process’s lease is still valid: 240 s by default. Until then the attempt fails with EAGAIN and is retried. Each acquisition raises the fence: ${fences}.`,
+      path: thereAndBack(toService(node, 'tidb')),
+      actors: [`n${node}`, 'tidb'],
+      effect: (c) => ({ ...c, fence: withAll(c.fence, group, (fence) => fence + 1) }),
+    },
+    {
+      title: `${s} publishes the route`,
+      body: `Only now, with the lease held and ${names} open, does ${s} publish itself as the owner under the new fence. Redis will not replace a live route with a lower or equal fence, so routes only move forward. Other nodes see the new owner within about a second.`,
+      path: thereAndBack(toService(node, 'redis')),
+      actors: [`n${node}`, 'redis'],
+      effect: (c) => ({
+        ...c,
+        owner: withAll(c.owner, group, () => node),
+        home: withAll(c.home, group, () => node),
+      }),
+    },
+  ]
+}
+
+const failoverMeasured =
+  'Measured with real binaries, SQLite metadata and a 20 s lease: about 21 s from kill -9 to the new route. With the default 240 s lease it is about four minutes. A clean stop releases the lease and handed over in 0.1 to 1 s.'
+
+function buildStop(cluster: Cluster, node: number): { next: Cluster; scenario: Scenario } {
+  const x = nodeName(node)
+  const lost = drives.map((_, d) => d).filter((d) => cluster.owner[d] === node)
+  const next: Cluster = {
+    ...cluster,
+    up: cluster.up.map((up, index) => (index === node ? false : up)),
+    owner: withAll(cluster.owner, lost, () => null),
+    stale: withAll(cluster.stale, lost, () => node),
+    home: withAll(cluster.home, lost, () => node),
+  }
+
+  if (lost.length === 0) {
+    return {
+      next,
+      scenario: {
+        kind: 'failover',
+        kicker: `${x} stopped · it owned no drive`,
+        steps: [
+          {
+            title: `${x} stops`,
+            body: `${x} was a standby and held no drive, so nothing has to move. The load balancer’s health check fails and it stops sending requests here.`,
+            actors: [`n${node}`, 'lb'],
+          },
+        ],
+        target: null,
+        note: null,
+        served: null,
+        forwarded: null,
+      },
+    }
+  }
+
+  const names = listNames(lost)
+  const steps: Step[] = [
+    {
+      title: `${x} stops without warning`,
+      body: `The process is killed, as by kill -9 or a power loss. It cannot withdraw its route for ${names} or release the writer lease, so both stay in place until they expire. The load balancer’s health check fails and it stops sending requests here.`,
+      actors: [`n${node}`, 'lb'],
+    },
+    {
+      title: `The route for ${names} lapses`,
+      body: `An owner refreshes its route every 5 s and a route lives for 15 s. Nobody refreshes this one now, so Redis drops it within 15 s. Until it does, other nodes still forward to ${x} and those requests end in 502.`,
+      actors: ['redis'],
+      effect: (c) => ({ ...c, stale: withAll(c.stale, lost, () => null) }),
+    },
+  ]
+
+  const takers = [0, 1, 2].filter((candidate) => lost.some((d) => successor(next, d) === candidate))
+  for (const taker of takers) {
+    const group = lost.filter((d) => successor(next, d) === taker)
+    const s = nodeName(taker)
+    const groupNames = listNames(group)
+    steps.push({
+      title: `${s} reads no route for ${groupNames}`,
+      body: `A standby reads each drive’s route once a second. ${s} ranks first among the running candidates for ${groupNames}, so it acts at once; a lower-ranked standby waits 2 s per rank. A registry that cannot be read is never taken to mean “no route”.`,
+      path: thereAndBack(toService(taker, 'redis')),
+      actors: [`n${taker}`, 'redis'],
+    })
+    steps.push(...takeoverSteps(next, taker, group, `${s} opens ${groupNames}.`))
+  }
+
+  if (takers.length === 0) {
+    steps.push({
+      title: 'No standby is running',
+      body: `Every candidate for ${names} is stopped, so nothing can take over. Requests get 503 until a node is restarted and acquires the lease.`,
+      actors: [],
+    })
+  }
+
+  const moves = takers.map((taker) => `${listNames(lost.filter((d) => successor(next, d) === taker))} → ${nodeName(taker)}`)
+  return {
+    next,
+    scenario: {
+      kind: 'failover',
+      kicker: `${x} stopped · ${takers.length ? moves.join(' · ') : `${names} ${lost.length > 1 ? 'have' : 'has'} no owner`}`,
+      steps,
+      target: lost.length === 1 ? lost[0] : null,
+      note: takers.length ? failoverMeasured : null,
+      served: null,
+      forwarded: null,
+    },
+  }
+}
+
+function buildRestart(cluster: Cluster, node: number): { next: Cluster; scenario: Scenario } {
+  const x = nodeName(node)
+  const next: Cluster = { ...cluster, up: cluster.up.map((up, index) => (index === node ? true : up)) }
+  const orphans = drives.map((_, d) => d).filter((d) => next.owner[d] === null)
+  const steps: Step[] = [
+    {
+      title: `${x} starts`,
+      body: `Before it opens any drive, ${x} reads the route registry. The load balancer’s health check passes again, so requests can land here.`,
+      path: thereAndBack(toService(node, 'redis')),
+      actors: [`n${node}`, 'redis', 'lb'],
+    },
+  ]
+
+  if (orphans.length) {
+    const names = listNames(orphans)
+    steps.push(...takeoverSteps(next, node, orphans, `No route is published for ${names} and no other candidate is running, so ${x} opens ${orphans.length > 1 ? 'them' : 'it'}.`))
+    return {
+      next,
+      scenario: {
+        kind: 'failover',
+        kicker: `${x} restarted · takes ${names}`,
+        steps,
+        target: orphans.length === 1 ? orphans[0] : null,
+        note: null,
+        served: null,
+        forwarded: null,
+      },
+    }
+  }
+
+  const owners = [0, 1, 2].filter((candidate) => next.owner.includes(candidate))
+  steps.push({
+    title: `${x} is a standby`,
+    body: `Every drive already has a published owner, so ${x} opens nothing and holds no lease. It forwards requests like any other node, and takes a drive only if that drive’s route disappears.`,
+    actors: [`n${node}`],
+  })
+  steps.push({
+    title: 'Drives stay where they are',
+    body: 'There is no automatic fail-back by default: moving a drive means draining it, and that breaks its open sessions. With fail_back: true an owner hands a drive back once a better-ranked candidate has ranked first for 60 s without interruption.',
+    actors: owners.map((owner) => `n${owner}`),
+  })
+  return {
+    next,
+    scenario: {
+      kind: 'failover',
+      kicker: `${x} restarted · standby, no fail-back`,
+      steps,
+      target: null,
+      note: null,
+      served: null,
+      forwarded: null,
+    },
+  }
 }
 
 const fmt = (ms: number) => ms.toFixed(2)
@@ -249,13 +529,19 @@ function pointAt(path: Pt[], t: number): Pt {
 }
 
 const points = (path: Pt[]) => path.map((p) => p.join(',')).join(' ')
+const peerPairs: [number, number][] = [
+  [0, 1],
+  [1, 2],
+  [0, 2],
+]
 
 export function ClusterSimulator() {
   const [drive, setDrive] = useState(1)
   const [op, setOp] = useState<Op>('stat')
   const [landing, setLanding] = useState<Landing>('auto')
   const [warm, setWarm] = useState(true)
-  const [request, setRequest] = useState<Request | null>(null)
+  const [cluster, setCluster] = useState(initialCluster)
+  const [scenario, setScenario] = useState<Scenario | null>(null)
   const [cursor, setCursor] = useState(-1)
   const [playing, setPlaying] = useState(false)
   const [traffic, setTraffic] = useState(false)
@@ -264,27 +550,82 @@ export function ClusterSimulator() {
   const packet = useRef<SVGCircleElement>(null)
   const settings = useRef({ drive, op, landing, warm })
   settings.current = { drive, op, landing, warm }
+  const live = useRef({ scenario, cursor, playing })
+  live.current = { scenario, cursor, playing }
+  // The cluster is read synchronously when a request or a failover is built.
+  const clusterNow = useRef(cluster)
+  // A failover whose later steps have not changed the cluster yet.
+  const pending = useRef<{ steps: Step[]; next: number } | null>(null)
+  // A failover that a request interrupted; it resumes when the request ends.
+  const suspended = useRef<{ scenario: Scenario; cursor: number } | null>(null)
 
-  function nextIngress(choice: Landing) {
-    if (choice !== 'auto') return choice
-    const node = roundRobin.current % 3
+  function commit(next: Cluster) {
+    clusterNow.current = next
+    setCluster(next)
+  }
+
+  function applyThrough(index: number) {
+    const job = pending.current
+    if (!job) return
+    let next = clusterNow.current
+    for (let i = job.next; i <= index && i < job.steps.length; i += 1) {
+      const effect = job.steps[i].effect
+      if (effect) next = effect(next)
+    }
+    job.next = Math.max(job.next, index + 1)
+    if (job.next >= job.steps.length) pending.current = null
+    commit(next)
+  }
+
+  // Finish a failover that is still under way, so the cluster is consistent
+  // before something else changes it.
+  function settle() {
+    const job = pending.current
+    if (job) applyThrough(job.steps.length - 1)
+    suspended.current = null
+  }
+
+  function nextIngress(choice: Landing, up: boolean[]): number | null {
+    if (choice !== 'auto' && up[choice]) return choice
+    const healthy = [0, 1, 2].filter((node) => up[node])
+    if (healthy.length === 0) return null
+    const node = healthy[roundRobin.current % healthy.length]
     roundRobin.current += 1
     return node
   }
 
   function send(randomDrive: boolean) {
     const current = settings.current
+    const now = live.current
+    if (now.playing && now.scenario?.kind === 'failover' && pending.current?.steps === now.scenario.steps) {
+      suspended.current = { scenario: now.scenario, cursor: now.cursor }
+    }
+    const state = clusterNow.current
     const target = randomDrive ? Math.floor(Math.random() * 3) : current.drive
-    const next = buildRequest(target, current.op, nextIngress(current.landing), current.warm)
-    setRequest(next)
+    const next = buildRequest(state, target, current.op, nextIngress(current.landing, state.up), current.warm)
+    setScenario(next)
+    setCursor(0)
+    setPlaying(true)
+  }
+
+  function toggleNode(node: number) {
+    setTraffic(false)
+    settle()
+    const state = clusterNow.current
+    const stopping = state.up[node]
+    const { next, scenario: story } = stopping ? buildStop(state, node) : buildRestart(state, node)
+    commit(next)
+    pending.current = { steps: story.steps, next: 0 }
+    if (stopping && settings.current.landing === node) setLanding('auto')
+    setScenario(story)
     setCursor(0)
     setPlaying(true)
   }
 
   // Drive the packet along the current step, then advance.
   useEffect(() => {
-    if (!playing || !request || cursor < 0) return
-    const step = request.steps[cursor]
+    if (!playing || !scenario || cursor < 0) return
+    const step = scenario.steps[cursor]
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     const speed = traffic ? 3.2 : 1
     const dot = packet.current
@@ -292,21 +633,35 @@ export function ClusterSimulator() {
     let timer = 0
 
     const finish = () => {
-      if (cursor < request.steps.length - 1) {
+      if (pending.current?.steps === scenario.steps) applyThrough(cursor)
+      if (cursor < scenario.steps.length - 1) {
         setCursor(cursor + 1)
         return
       }
+      if (scenario.kind === 'request') {
+        const { served: servedBy, forwarded: forwardedBy } = scenario
+        if (servedBy !== null) {
+          setCounts((previous) => {
+            const served = [...previous.served]
+            const forwarded = [...previous.forwarded]
+            served[servedBy] += 1
+            if (forwardedBy !== null) forwarded[forwardedBy] += 1
+            return { served, forwarded }
+          })
+        }
+        const resume = suspended.current
+        if (resume) {
+          suspended.current = null
+          setScenario(resume.scenario)
+          setCursor(resume.cursor)
+          return
+        }
+      }
       setPlaying(false)
-      setCounts((previous) => {
-        const served = [...previous.served]
-        const forwarded = [...previous.forwarded]
-        served[request.drive] += 1
-        if (request.ingress !== request.drive) forwarded[request.ingress] += 1
-        return { served, forwarded }
-      })
     }
 
     if (!step.path) {
+      if (dot) dot.setAttribute('opacity', '0')
       timer = window.setTimeout(finish, (reduced ? 1500 : 1300) / speed)
       return () => window.clearTimeout(timer)
     }
@@ -341,21 +696,22 @@ export function ClusterSimulator() {
       window.cancelAnimationFrame(frame)
       window.clearTimeout(timer)
     }
-  }, [playing, request, cursor, traffic])
+  }, [playing, scenario, cursor, traffic])
 
   // In traffic mode, start the next request shortly after one finishes.
   useEffect(() => {
     if (!traffic || playing) return
-    const timer = window.setTimeout(() => send(true), request ? 350 : 0)
+    const timer = window.setTimeout(() => send(true), scenario ? 350 : 0)
     return () => window.clearTimeout(timer)
   }, [traffic, playing])
 
   function showStep(index: number) {
-    if (!request) return
+    if (!scenario) return
     setTraffic(false)
     setPlaying(false)
+    settle()
     setCursor(index)
-    const path = request.steps[index].path
+    const path = scenario.steps[index].path
     const dot = packet.current
     if (!dot) return
     if (!path) {
@@ -371,17 +727,21 @@ export function ClusterSimulator() {
   function reset() {
     setTraffic(false)
     setPlaying(false)
-    setRequest(null)
+    setScenario(null)
     setCursor(-1)
     setCounts({ served: [0, 0, 0], forwarded: [0, 0, 0] })
+    pending.current = null
+    suspended.current = null
+    commit(initialCluster)
     roundRobin.current = 0
     packet.current?.setAttribute('opacity', '0')
   }
 
-  const step = request && cursor >= 0 ? request.steps[cursor] : null
+  const step = scenario && cursor >= 0 ? scenario.steps[cursor] : null
   const active = useMemo(() => new Set(step?.actors ?? []), [step])
-  const done = request !== null && !playing && cursor === request.steps.length - 1
+  const done = scenario !== null && !playing && cursor === scenario.steps.length - 1
   const cls = (id: string, base: string) => (active.has(id) ? `${base} is-active` : base)
+  const edge = (base: string, ...nodes: number[]) => (nodes.every((node) => cluster.up[node]) ? base : `${base} is-off`)
 
   return (
     <div className="sim">
@@ -390,29 +750,31 @@ export function ClusterSimulator() {
           <svg className="dg sim-svg" viewBox="0 0 1000 560" role="img" aria-labelledby="sim-title sim-desc">
             <title id="sim-title">Three mount-rs nodes behind one load balancer</title>
             <desc id="sim-desc">
-              Clients reach a load balancer that sends each request to any of three nodes. Every
+              Clients reach a load balancer that sends each request to any running node. Every
               node is connected to the other two over HTTP/3, and all three share a Redis route
-              registry, a metadata store and an object store. Each drive is owned by one node.
+              registry, a metadata store and an object store. Each drive is owned by one node at
+              a time; when that node stops, a standby takes the drive over. The controls and the
+              step list beside the diagram give the same information as text.
             </desc>
 
             {/* client-facing edges */}
             <polyline className="sim-edge" points={points(clientToLb)} />
             {[0, 1, 2].map((node) => (
-              <polyline key={`lb-${node}`} className="sim-edge" points={points(lbToNode(node))} />
+              <polyline key={`lb-${node}`} className={edge('sim-edge', node)} points={points(lbToNode(node))} />
             ))}
 
             {/* peer mesh: every node reaches both others directly */}
-            <polyline className="sim-edge sim-edge-peer" points={points(hop(0, 1))} />
-            <polyline className="sim-edge sim-edge-peer" points={points(hop(1, 2))} />
-            <polyline className="sim-edge sim-edge-peer" points={points(hop(0, 2))} />
+            {peerPairs.map(([from, to]) => (
+              <polyline key={`peer-${from}-${to}`} className={edge('sim-edge sim-edge-peer', from, to)} points={points(hop(from, to))} />
+            ))}
             <text className="dg-tag sim-peer-label" x={500} y={416} textAnchor="middle">
               HTTP/3 peer mesh · mutual TLS · pooled
             </text>
 
             {/* shared services bus */}
             <line className="sim-edge sim-edge-store" x1={170} x2={830} y1={busY} y2={busY} />
-            {nodeX.map((x) => (
-              <line key={`stub-${x}`} className="sim-edge sim-edge-store" x1={x} x2={x} y1={nodeBottom} y2={busY} />
+            {nodeX.map((x, node) => (
+              <line key={`stub-${x}`} className={edge('sim-edge sim-edge-store', node)} x1={x} x2={x} y1={nodeBottom} y2={busY} />
             ))}
             {(Object.keys(serviceX) as Service[]).map((service) => (
               <line
@@ -427,7 +789,7 @@ export function ClusterSimulator() {
 
             {step?.path ? (
               <polyline
-                key={`${cursor}-${request?.ingress}-${request?.drive}`}
+                key={`${cursor}-${scenario?.kicker}`}
                 className={step.afterAck ? 'sim-active sim-active-late' : 'sim-active'}
                 points={points(step.path)}
               />
@@ -453,34 +815,56 @@ export function ClusterSimulator() {
               </text>
             </g>
 
-            {nodeX.map((x, node) => (
-              <g key={x} className={cls(`n${node}`, 'sim-box sim-box-node')}>
-                <rect x={x - 120} y={nodeTop} width={240} height={nodeBottom - nodeTop} rx={14} />
-                <text className="dg-title" x={x - 102} y={nodeTop + 28}>
-                  Node {node + 1}
-                </text>
-                <text className="dg-tag" x={x + 102} y={nodeTop + 27} textAnchor="end">
-                  serve-http
-                </text>
-                <rect
-                  className={request && request.drive === node && step ? 'sim-drive is-target' : 'sim-drive'}
-                  x={x - 102}
-                  y={nodeTop + 42}
-                  width={204}
-                  height={30}
-                  rx={8}
-                />
-                <text className="dg-sub dg-sub-strong" x={x - 90} y={nodeTop + 62}>
-                  owns {drives[node]} · in memory
-                </text>
-                <text className="dg-sub" x={x - 102} y={nodeTop + 94}>
-                  route cache · block cache
-                </text>
-                <text className="dg-label" x={x - 102} y={nodeTop + 113}>
-                  served {counts.served[node]} · forwarded {counts.forwarded[node]}
-                </text>
-              </g>
-            ))}
+            {nodeX.map((x, node) => {
+              const up = cluster.up[node]
+              const held = drives.map((_, d) => d).filter((d) => cluster.home[d] === node)
+              const owns = held.some((d) => cluster.owner[d] === node)
+              return (
+                <g
+                  key={x}
+                  className={cls(`n${node}`, up ? 'sim-box sim-box-node' : 'sim-box sim-box-node is-down')}
+                  onClick={() => toggleNode(node)}
+                >
+                  <rect x={x - 120} y={nodeTop} width={240} height={nodeBottom - nodeTop} rx={14} />
+                  <text className="dg-title" x={x - 102} y={nodeTop + 28}>
+                    Node {node + 1}
+                  </text>
+                  <text className="dg-tag" x={x + 102} y={nodeTop + 27} textAnchor="end">
+                    {up ? 'serve-http' : 'stopped'}
+                  </text>
+                  {held.map((d, slot) => {
+                    const lost = cluster.owner[d] === null
+                    const target = scenario !== null && scenario.target === d && step !== null
+                    return (
+                      <g key={drives[d]}>
+                        <rect
+                          className={`sim-drive${lost ? ' is-lost' : ''}${target ? ' is-target' : ''}`}
+                          x={x - 102 + slot * 70}
+                          y={nodeTop + 42}
+                          width={64}
+                          height={30}
+                          rx={8}
+                        />
+                        <text className="dg-sub dg-sub-strong" x={x - 70 + slot * 70} y={nodeTop + 62} textAnchor="middle">
+                          {drives[d]}
+                        </text>
+                      </g>
+                    )
+                  })}
+                  {held.length === 0 ? (
+                    <text className="dg-sub" x={x - 102} y={nodeTop + 62}>
+                      holds no drive
+                    </text>
+                  ) : null}
+                  <text className="dg-sub" x={x - 102} y={nodeTop + 94}>
+                    {!up ? 'not running' : owns ? 'owner · namespace in memory' : 'standby · forwards only'}
+                  </text>
+                  <text className="dg-label" x={x - 102} y={nodeTop + 113}>
+                    served {counts.served[node]} · forwarded {counts.forwarded[node]}
+                  </text>
+                </g>
+              )
+            })}
 
             <g className={cls('redis', 'sim-box sim-box-store')}>
               <rect x={50} y={serviceTop} width={240} height={66} rx={12} />
@@ -518,6 +902,12 @@ export function ClusterSimulator() {
           <span className="sim-key sim-key-peer" aria-hidden="true" /> node-to-node HTTP/3
           <span className="sim-key sim-key-store" aria-hidden="true" /> shared services
           <span className="sim-scroll-hint">Swipe the diagram sideways to see all three nodes.</span>
+          <span className="sim-note">
+            Here every node is a failover candidate for every drive. Stop a node, with its button
+            or by clicking it, and a standby takes its drives once it holds the storage writer
+            lease. A restarted node comes back as a standby: there is no automatic fail-back by
+            default.
+          </span>
         </figcaption>
       </figure>
 
@@ -525,12 +915,15 @@ export function ClusterSimulator() {
         <div className="sim-controls">
           <fieldset className="seg">
             <legend>Drive</legend>
-            {drives.map((name, index) => (
-              <button key={name} type="button" aria-pressed={drive === index} onClick={() => setDrive(index)}>
-                {name}
-                <small>Node {index + 1}</small>
-              </button>
-            ))}
+            {drives.map((name, index) => {
+              const owner = cluster.owner[index]
+              return (
+                <button key={name} type="button" aria-pressed={drive === index} onClick={() => setDrive(index)}>
+                  {name}
+                  <small>{owner === null ? 'no owner' : `${nodeName(owner)} · fence ${cluster.fence[index]}`}</small>
+                </button>
+              )
+            })}
           </fieldset>
           <fieldset className="seg">
             <legend>Operation</legend>
@@ -550,6 +943,7 @@ export function ClusterSimulator() {
                 key={node}
                 type="button"
                 aria-pressed={landing === node}
+                disabled={!cluster.up[node]}
                 onClick={() => setLanding(node as Landing)}
               >
                 Node {node + 1}
@@ -564,6 +958,21 @@ export function ClusterSimulator() {
             <button type="button" aria-pressed={!warm} onClick={() => setWarm(false)}>
               Cold
             </button>
+          </fieldset>
+          <fieldset className="seg sim-nodes">
+            <legend>Failover: stop a node</legend>
+            {[0, 1, 2].map((node) => (
+              <button
+                key={node}
+                type="button"
+                aria-pressed={!cluster.up[node]}
+                aria-label={`Stop Node ${node + 1}`}
+                onClick={() => toggleNode(node)}
+              >
+                Node {node + 1}
+                <small>{cluster.up[node] ? 'running · stop it' : 'stopped · restart it'}</small>
+              </button>
+            ))}
           </fieldset>
         </div>
 
@@ -587,15 +996,12 @@ export function ClusterSimulator() {
         </div>
 
         <div className="sim-story" aria-live={traffic ? 'off' : 'polite'}>
-          {request && step ? (
+          {scenario && step ? (
             <>
-              <p className="sim-story-kicker">
-                {ops.find((o) => o.id === request.op)?.label} · {drives[request.drive]} · via Node {request.ingress + 1}
-                {request.ingress === request.drive ? ' (the owner)' : ` → Node ${request.drive + 1}`}
-              </p>
+              <p className="sim-story-kicker">{scenario.kicker}</p>
               <ol className="sim-steps">
-                {request.steps.map((item, index) => (
-                  <li key={item.title} className={index === cursor ? 'is-current' : index < cursor ? 'is-done' : undefined}>
+                {scenario.steps.map((item, index) => (
+                  <li key={`${index}-${item.title}`} className={index === cursor ? 'is-current' : index < cursor ? 'is-done' : undefined}>
                     <button type="button" onClick={() => showStep(index)} aria-current={index === cursor ? 'step' : undefined}>
                       <span className="sim-step-index">{index + 1}</span>
                       <span>
@@ -606,13 +1012,14 @@ export function ClusterSimulator() {
                   </li>
                 ))}
               </ol>
-              {done ? <p className="sim-measured">{measured(request.op, request.ingress !== request.drive)}</p> : null}
+              {done && scenario.note ? <p className="sim-measured">{scenario.note}</p> : null}
             </>
           ) : (
             <p className="sim-empty">
               Pick a drive and an operation, then send a request. Choose a node that does not own the
               drive to see forwarding, or run traffic to watch the load balancer share requests
-              across all three.
+              across all three. Stop a node to watch a standby take over its drive, and send a
+              request while the takeover is running to see the retryable 503.
             </p>
           )}
         </div>

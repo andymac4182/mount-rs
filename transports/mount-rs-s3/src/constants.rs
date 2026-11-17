@@ -5,10 +5,10 @@
 //! parser and the session's incremental body state remain outside this facade.
 
 pub use crate::protocol::{
-    MAX_KEY_BYTES, MAX_KEYS, MAX_PART_SIZE, MAX_PARTS, MAX_PARTS_PER_PAGE, MAX_XML_BYTES,
-    MIN_PART_SIZE, MULTIPART_PREFIX, OBJECT_CONTENT_TYPE, S3Error, S3Failure, S3Result,
-    SYNTHETIC_OWNER_ID, SYNTHETIC_OWNER_NAME, XML_CONTENT_TYPE, error_with_message, s3_error,
-    s3_error_of,
+    MAX_KEY_BYTES, MAX_KEYS, MAX_PART_SIZE, MAX_PARTS, MAX_PARTS_PER_PAGE, MAX_XML_ATTRIBUTES,
+    MAX_XML_BYTES, MIN_PART_SIZE, MULTIPART_PREFIX, OBJECT_CONTENT_TYPE, S3Error, S3Failure,
+    S3Result, SYNTHETIC_OWNER_ID, SYNTHETIC_OWNER_NAME, XML_CONTENT_TYPE, error_with_message,
+    s3_error, s3_error_of,
 };
 pub use crate::sigv4::{
     EMPTY_PAYLOAD_SHA256, STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER,

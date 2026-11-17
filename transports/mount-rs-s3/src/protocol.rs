@@ -7,6 +7,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use mount_rs_core::{ErrorCode, FsError};
 use percent_encoding::percent_decode_str;
+use quick_xml::events::Event;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -19,6 +20,10 @@ pub const MIN_PART_SIZE: u64 = 5 * 1024 * 1024;
 pub const MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 pub const MAX_KEY_BYTES: usize = 1024;
 pub const MAX_XML_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum number of attributes, namespace declarations included, accepted on
+/// one element of a request document. S3 request documents carry at most a
+/// namespace declaration on the root, so a tag beyond this is `MalformedXML`.
+pub const MAX_XML_ATTRIBUTES: usize = 64;
 pub const MULTIPART_PREFIX: &str = ".mountx-multipart";
 pub const STREAMING_STAGING_PREFIX: &str = ".mountx-put-";
 pub const OBJECT_CONTENT_TYPE: &str = "application/octet-stream";
@@ -1146,10 +1151,39 @@ struct DeleteDocumentObject {
     key: String,
 }
 
+/// Refuse a request document in which any one start tag carries more than
+/// [`MAX_XML_ATTRIBUTES`] attributes.
+///
+/// The serde deserializer resolves namespaces and checks attribute names for
+/// every start tag before this crate sees the event, so the bound is applied
+/// here first, in one linear pass that neither resolves namespaces nor
+/// compares attribute names with each other.
+fn check_xml_attribute_budget(bytes: &[u8]) -> S3Result<()> {
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start) | Event::Empty(start)) => {
+                let attributes = start
+                    .attributes()
+                    .with_checks(false)
+                    .take(MAX_XML_ATTRIBUTES + 1)
+                    .count();
+                if attributes > MAX_XML_ATTRIBUTES {
+                    return Err(S3Failure::s3("MalformedXML"));
+                }
+            }
+            Ok(Event::Eof) => return Ok(()),
+            Ok(_) => {}
+            Err(_) => return Err(S3Failure::s3("MalformedXML")),
+        }
+    }
+}
+
 pub fn parse_delete_document(bytes: &[u8], max_xml_bytes: usize) -> S3Result<(Vec<String>, bool)> {
     if bytes.len() > max_xml_bytes.min(MAX_XML_BYTES) {
         return Err(S3Failure::s3("MaxMessageLengthExceeded"));
     }
+    check_xml_attribute_budget(bytes)?;
     let document: DeleteDocument =
         quick_xml::de::from_reader(bytes).map_err(|_| S3Failure::s3("MalformedXML"))?;
     if document.objects.is_empty() || document.objects.len() > MAX_KEYS {
@@ -1183,6 +1217,7 @@ pub fn parse_complete_document(bytes: &[u8], max_xml_bytes: usize) -> S3Result<V
     if bytes.len() > max_xml_bytes.min(MAX_XML_BYTES) {
         return Err(S3Failure::s3("MaxMessageLengthExceeded"));
     }
+    check_xml_attribute_budget(bytes)?;
     let document: CompleteDocument =
         quick_xml::de::from_reader(bytes).map_err(|_| S3Failure::s3("MalformedXML"))?;
     if document.parts.is_empty() {

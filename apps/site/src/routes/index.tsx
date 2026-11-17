@@ -56,7 +56,7 @@ const benefits = [
     tone: 'blue',
     kicker: 'Scale out simply',
     title: 'Any server can take any request.',
-    body: 'A plain load balancer is enough. A node that does not own the drive forwards the request once, over HTTP/3, to the node that does.',
+    body: 'A plain load balancer is enough. A node that does not own the drive forwards the request once, over HTTP/3, to the node that does. With failover on, a standby takes over the drives of a node that stops.',
     to: '/architecture',
     link: 'Watch a request',
   },
@@ -189,7 +189,9 @@ function HomePage() {
             <p>
               Each drive has one owner that keeps its namespace in memory. Any
               server can take a request and forward it in one HTTP/3 hop, so a
-              load balancer never needs to know where a drive lives.
+              load balancer never needs to know where a drive lives. If an
+              owner stops, a standby can take the drive over once it holds the
+              storage writer lease.
             </p>
           </div>
           <div className="home-fast-grid">
