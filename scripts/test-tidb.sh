@@ -104,6 +104,20 @@ if [ "${MOUNT_RS_TIDB_NAPI:-0}" = "1" ]; then
     exit 2
   fi
 fi
+run_trace=0
+if [ "${MOUNT_RS_TIDB_TRACE:-0}" = "1" ]; then
+  # The seeded differential trace compares the provider with the pinned
+  # mountx oracle. Asking for it without the oracle is an error, not a skip.
+  run_trace=1
+  if ! command -v node >/dev/null 2>&1; then
+    echo "test-tidb.sh: MOUNT_RS_TIDB_TRACE=1 requires node" >&2
+    exit 2
+  fi
+  if [ -z "${MOUNTX_SOURCE:-}" ] || [ ! -d "$MOUNTX_SOURCE" ]; then
+    echo "test-tidb.sh: MOUNT_RS_TIDB_TRACE=1 requires MOUNTX_SOURCE to name the pinned mountx checkout" >&2
+    exit 2
+  fi
+fi
 run_iops=0
 if [ "${MOUNT_RS_TIDB_IOPS:-0}" = "1" ]; then
   run_iops=1
@@ -757,6 +771,20 @@ run_consumer_tests() {
       -- --ignored --nocapture --test-threads=1
 }
 
+run_trace_test() {
+  if [ "$run_trace" -ne 1 ]; then
+    return 0
+  fi
+  phase_name="seeded differential trace"
+  echo "TiDB phase=$phase_name" >&2
+  # Only the TiDB backend runs here; the local backends are compared with the
+  # same oracle and seeds by the node job. The harness exits non-zero on any
+  # divergence, and it cannot skip because MOUNTX_SOURCE was checked above.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TRACE_BACKENDS=chunked-tidb \
+    node "$repo_dir/scripts/check-trace-parity.mjs"
+}
+
 run_ambiguous_commit_test() {
   phase_name="ambiguous commit test"
   echo "TiDB phase=$phase_name" >&2
@@ -899,6 +927,7 @@ if [ "$topology" = durable ]; then
 fi
 
 run_consumer_tests
+run_trace_test
 
 # The failure-injection lane deliberately drops a client connection after
 # TiDB has processed COMMIT. Keep it after the durable restart/reopen gate so

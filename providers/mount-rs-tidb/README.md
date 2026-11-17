@@ -178,6 +178,22 @@ crash-recovery acceptance. macOS and Linux compile lanes can use the same
 remote/local TiDB endpoint; the native client is the MySQL protocol driver and
 does not require a TiDB SDK.
 
+With `MOUNT_RS_TIDB_TRACE=1` and `MOUNTX_SOURCE` naming the pinned mountx
+checkout, `scripts/test-tidb.sh` also runs the seeded differential traces of
+`scripts/check-trace-parity.mjs` against the `chunked-tidb` backend: TiDB
+metadata and TiDB blocks under the chunked filesystem, compared operation by
+operation with the mountx memory oracle for each seed. To run only that
+comparison against an endpoint you own:
+
+```text
+MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' \
+MOUNTX_SOURCE=/absolute/path/to/mountx \
+MOUNT_RS_TRACE_BACKENDS=chunked-tidb \
+  node scripts/check-trace-parity.mjs
+```
+
+Each trace writes under its own volume key and leaves its rows behind.
+
 The standard `scripts/test-tidb.sh` gate also runs the concurrent contracts
 and four-coordinator load before and after component restarts. Its owned
 cluster enables a global-autocommit regression, restores the original setting

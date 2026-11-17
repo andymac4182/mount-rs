@@ -1927,6 +1927,7 @@ dependencies = [
  "mount-rs-s3",
  "mount-rs-sqlite",
  "mount-rs-sqlite-fs",
+ "mount-rs-tidb",
  "mount-rs-webdav",
  "object_store 0.12.5",
  "rusqlite",

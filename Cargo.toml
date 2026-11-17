@@ -87,6 +87,7 @@ mount-rs-aws-s3 = { path = "providers/mount-rs-aws-s3" }
 mount-rs-r2-fs = { path = "filesystems/mount-rs-r2-fs" }
 mount-rs-pglite = { path = "providers/mount-rs-pglite" }
 mount-rs-pglite-fs = { path = "filesystems/mount-rs-pglite-fs" }
+mount-rs-tidb = { path = "providers/mount-rs-tidb" }
 mount-rs-persist = { path = "filesystems/mount-rs-persist" }
 mount-rs-sqlite = { path = "providers/mount-rs-sqlite" }
 mount-rs-sqlite-fs = { path = "filesystems/mount-rs-sqlite-fs" }

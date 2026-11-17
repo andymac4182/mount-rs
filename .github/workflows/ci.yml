@@ -461,10 +461,26 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: pithings/mountx
+          ref: 85361a8212ff9bff8e69f62fa8993ef2c2ec51e8
+          path: mountx-source
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 11
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Install pinned oracle dependencies without lifecycle scripts
+        run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - name: Verify durable TiDB, PD, and TiKV restart acceptance
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-cargo-target
+          # Compare TiDB with the pinned mountx oracle over the seeded traces.
+          MOUNT_RS_TIDB_TRACE: '1'
+          MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source
         run: ./scripts/test-tidb.sh
 
   tidb-tls-compile:
