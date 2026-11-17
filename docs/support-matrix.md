@@ -86,6 +86,12 @@ image, and publishes both under one tag on the same preview tags.
   only: it needs a Redis service container, and GitHub runs service
   containers only on Linux runners. Cluster forwarding is not exercised as a
   running binary on macOS, Windows or Linux arm64.
+- **Mixed-release cluster test** (`ci.yml`, job `cluster-mixed-release`):
+  the same script with one server built from the commit under test and one
+  from a pinned earlier commit of `main` (`031050cc`), in both arrangements.
+  Linux x86_64 only, for the same reason. It tests that one pair of builds,
+  not a pair of published releases; see
+  [`serve-http-upgrade.md`](serve-http-upgrade.md#clusters).
 
 The workspace's unit and integration tests (`ci.yml`, job `rust`) run on
 `ubuntu-latest`, `macos-latest` and `windows-latest`, that is Linux x86_64,

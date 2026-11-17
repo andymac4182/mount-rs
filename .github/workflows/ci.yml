@@ -1065,6 +1065,69 @@ jobs:
         # of this file that need no Redis also run in the workspace job.
         run: cargo test --locked -p mount-rs-cli --test cluster_contract -- --include-ignored
 
+  cluster-mixed-release:
+    # A forwarding cluster with one server on this commit and one on an
+    # earlier release, in both arrangements: the two forward to each other,
+    # carry each other's sessions, take a membership reload and hand a drive
+    # over in a failover, after a crash and after a clean stop. This is what
+    # the rolling upgrade in docs/serve-http-upgrade.md rests on. The version
+    # rule itself (a peer protocol version neither side speaks is refused,
+    # not run) is tested in the cluster-http3 job, and by this driver's
+    # "a later owner's record" checks.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: redis:8.4@sha256:319f54e668c14f68cee51d1fdf9dba699deecac048fc0e52962433a3ef5562c0
+        ports:
+          - 127.0.0.1:6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 15
+    env:
+      # The earlier release: main at the merge of #148, before the peer
+      # protocol version marker existed. Move it forward to the previous
+      # release when a release is cut; see "Clusters" in
+      # docs/serve-http-upgrade.md, which names this commit.
+      MIXED_RELEASE_BASELINE: 031050cc78032e4827b06264fd771344d1f6967a
+      MOUNT_RS_REDIS_URL: redis://127.0.0.1:6379/
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # The baseline commit must be in the clone.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Build this commit's CLI
+        run: cargo build --locked --release -p mount-rs-cli
+      - name: Build the baseline CLI
+        # From its own checkout and into its own target directory, so that
+        # neither build can hand the other a stale artifact.
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/baseline" "$MIXED_RELEASE_BASELINE"
+          cd "$RUNNER_TEMP/baseline"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/baseline-target" cargo build --locked --release -p mount-rs-cli
+          "$RUNNER_TEMP/baseline-target/release/mount-rs" --version
+      - name: Baseline as node a, this commit as nodes b and c
+        # The first owner of the failover drive is usually a, the first
+        # started: the drive then moves baseline -> this commit after the
+        # kill and back after the clean stop.
+        env:
+          MOUNT_RS_E2E_BINARY_A: ${{ runner.temp }}/baseline-target/release/mount-rs
+        run: |
+          work="$RUNNER_TEMP/mixed-baseline-a"
+          mkdir -p "$work"
+          timeout 420 python3 -I scripts/serve-http-cluster-e2e.py target/release/mount-rs "$work"
+      - name: This commit as node a, baseline as nodes b and c
+        env:
+          MOUNT_RS_E2E_BINARY_B: ${{ runner.temp }}/baseline-target/release/mount-rs
+          MOUNT_RS_E2E_BINARY_C: ${{ runner.temp }}/baseline-target/release/mount-rs
+        run: |
+          work="$RUNNER_TEMP/mixed-baseline-b"
+          mkdir -p "$work"
+          timeout 420 python3 -I scripts/serve-http-cluster-e2e.py target/release/mount-rs "$work"
+
   observability-qualification:
     name: Observability qualification (${{ matrix.os }})
     strategy:

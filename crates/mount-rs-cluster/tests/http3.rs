@@ -248,6 +248,7 @@ async fn run_case(with_redis: bool) {
             fence: filesystem.checked_owner_fence().await.unwrap(),
             address: endpoint.local_addr().unwrap(),
             tls_server_name: "localhost".into(),
+            protocols: mount_rs_cluster::PeerProtocolRange::SUPPORTED,
         };
         let destination = PeerDestination::new(route.address, route.tls_server_name.clone());
         let handler = mount_rs_cluster::OwnerHttpHandler::new(
@@ -2564,6 +2565,7 @@ async fn run_renewal_handoff(disconnect: bool) {
             fence: first.checked_owner_fence().await.unwrap(),
             address: trusted[0].address,
             tls_server_name: "localhost".into(),
+            protocols: mount_rs_cluster::PeerProtocolRange::SUPPORTED,
         };
         let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         endpoint.set_default_client_config(
@@ -2669,6 +2671,7 @@ async fn run_renewal_handoff(disconnect: bool) {
             fence: second.checked_owner_fence().await.unwrap(),
             address: trusted[1].address,
             tls_server_name: "localhost".into(),
+            protocols: mount_rs_cluster::PeerProtocolRange::SUPPORTED,
         };
         assert!(second_route.fence > first_route.fence);
         let second_handler = OwnerHttpHandler::new(
@@ -2904,6 +2907,7 @@ async fn membership_reload_admits_added_peers_and_cuts_off_removed_ones() {
             fence: filesystem.checked_owner_fence().await.unwrap(),
             address: owner_address,
             tls_server_name: "localhost".into(),
+            protocols: mount_rs_cluster::PeerProtocolRange::SUPPORTED,
         };
         let redis = redis::Client::open(std::env::var("MOUNT_RS_REDIS_TEST_URL").unwrap()).unwrap();
         let registry = RedisRouteRegistry::new(
