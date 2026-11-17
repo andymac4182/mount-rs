@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """End-to-end probe of `mount-rs serve-http` on a durable split-store drive.
 
-usage: scripts/serve-http-e2e.py <mount-rs binary> <empty work dir>
+usage: scripts/serve-http-e2e.py [--smoke] <mount-rs binary> <empty work dir>
 Prints one line per check: PASS/FAIL name detail. Exits 1 on any FAIL.
+
+Runs on Linux, macOS and Windows. `--smoke` keeps the version check, the
+basic round trip (health, auth, put, get, list), both graceful stops and the
+restart, and leaves out the path, limit and concurrency suites; the release
+workflow runs it against each packaged binary.
+
+Graceful shutdown is asked for the way an operator on that platform would:
+SIGTERM and then SIGINT on Unix; Ctrl-C and then Ctrl-Break on Windows,
+delivered as console control events to the server's own console.
 """
 import concurrent.futures as cf
 import hashlib
@@ -16,7 +25,15 @@ import sys
 import threading
 import time
 
-BIN, WORK = sys.argv[1], sys.argv[2]
+ARGS = [a for a in sys.argv[1:] if a != "--smoke"]
+SMOKE = len(ARGS) != len(sys.argv) - 1
+if len(ARGS) != 2:
+    raise SystemExit(__doc__)
+WINDOWS = os.name == "nt"
+# Absolute, so the path means the same thing whatever the server's directory.
+BIN, WORK = os.path.abspath(ARGS[0]), os.path.abspath(ARGS[1])
+if WINDOWS and not os.path.exists(BIN) and os.path.exists(BIN + ".exe"):
+    BIN += ".exe"
 TOKEN = "e2e-token-" + "x" * 24
 CAP = 1 << 20  # 1 MiB request cap for the test
 UPLOAD = 4 << 20  # largest file; bodies above CAP are streamed to storage
@@ -67,12 +84,23 @@ def write_config():
 
 def start(config):
     env = dict(os.environ, E2E_TOKEN=TOKEN)
+    # On Windows the server gets a console of its own, so a control event can
+    # be sent to it without also reaching this script or the CI shell.
+    flags = 0
+    if WINDOWS:
+        import ctypes
+        flags = subprocess.CREATE_NEW_CONSOLE
+        # A child inherits "ignore Ctrl-C" from its parent, and a CI runner
+        # may start this script with it set. A console an operator opens
+        # does not have it set, so clear it before starting the server.
+        ctypes.WinDLL("kernel32").SetConsoleCtrlHandler(None, False)
     proc = subprocess.Popen(
         [BIN, "serve-http", "--config", config],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
         text=True,
+        creationflags=flags,
     )
     line = proc.stdout.readline()
     m = re.search(r"http://127\.0\.0\.1:(\d+)", line)
@@ -82,6 +110,51 @@ def start(config):
     threading.Thread(target=proc.stdout.read, daemon=True).start()
     threading.Thread(target=proc.stderr.read, daemon=True).start()
     return proc, int(m.group(1))
+
+
+# Windows has no signals to send to another process. What an operator has is
+# the console: Ctrl-C, Ctrl-Break, or closing the window. This helper joins
+# the server's console and raises the event there, which is what the console
+# does when the key is pressed. It ignores the event itself.
+CONSOLE_EVENT_HELPER = """
+import ctypes, signal, sys
+pid, event = int(sys.argv[1]), int(sys.argv[2])
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.FreeConsole()
+if not kernel32.AttachConsole(pid):
+    sys.exit("AttachConsole failed: %d" % ctypes.get_last_error())
+if not kernel32.GenerateConsoleCtrlEvent(event, 0):
+    sys.exit("GenerateConsoleCtrlEvent failed: %d" % ctypes.get_last_error())
+"""
+
+
+def request_stop(proc, second=False):
+    """Ask the server to stop gracefully; returns the name of what was sent."""
+    if WINDOWS:
+        event = signal.CTRL_BREAK_EVENT if second else signal.CTRL_C_EVENT
+        sent = subprocess.run(
+            [sys.executable, "-I", "-c", CONSOLE_EVENT_HELPER, str(proc.pid), str(int(event))],
+            capture_output=True, text=True, timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if sent.returncode != 0:
+            raise SystemExit(f"could not send a console event: {sent.stderr.strip()}")
+        return "Ctrl-Break" if second else "Ctrl-C"
+    proc.send_signal(signal.SIGINT if second else signal.SIGTERM)
+    return "SIGINT" if second else "SIGTERM"
+
+
+def stop(proc, second=False):
+    """Ask for a graceful stop and check the server exits 0 within 30 s."""
+    name = request_stop(proc, second)
+    try:
+        code = proc.wait(30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        code = "no exit within 30 s"
+    check(f"{name} exits 0", code == 0, code)
 
 
 PORT = None
@@ -147,6 +220,9 @@ def basics():
     check("delete then 404", s == 204 and s2 == 404, (s, s2))
     s, _, d = req("GET", "/v1/drives/files/stat/a/b")
     check("stat dir", s == 200 and "mode" in json.loads(d), s)
+    req("PUT", FS + "/a/b/listed.txt", b"listed")
+    s, _, d = req("GET", "/v1/drives/files/entries/a/b")
+    check("list shows the file", s == 200 and "listed.txt" in d.decode(), (s, d[:120]))
     s, _, d = req("POST", "/v1/drives/files/ops/sync")
     check("sync", s == 204, s)
 
@@ -247,10 +323,8 @@ def shutdown_and_restart(proc, config):
     t = threading.Thread(target=slow_put)
     t.start()
     time.sleep(0.01)
-    proc.send_signal(signal.SIGTERM)
+    stop(proc)
     t.join(30)
-    code = proc.wait(30)
-    check("SIGTERM exits 0", code == 0, code)
     proc2, PORT = start(config)
     s, _, d = req("GET", FS + "/durable")
     check("data survives restart", s == 200 and d == marker, s)
@@ -259,20 +333,26 @@ def shutdown_and_restart(proc, config):
     check("in-flight upload: acknowledged means stored, else absent or whole",
           (acked and s == 200 and d == big) or (not acked and (s == 404 or d == big)),
           (result.get("status"), s, len(d)))
-    s, _, d = req("GET", FS + "/conc/7")
-    check("earlier files survive restart", s == 200 and len(d) == 50_007, s)
+    if not SMOKE:
+        s, _, d = req("GET", FS + "/conc/7")
+        check("earlier files survive restart", s == 200 and len(d) == 50_007, s)
     return proc2
 
 
 def main():
     global PORT
+    version = subprocess.run([BIN, "--version"], capture_output=True, text=True, timeout=30)
+    check("--version", version.returncode == 0 and version.stdout.startswith("mount-rs "),
+          (version.returncode, version.stdout.strip()))
     config = write_config()
     proc, PORT = start(config)
+    stopped = False
     try:
         basics()
-        paths()
-        limits()
-        concurrency()
+        if not SMOKE:
+            paths()
+            limits()
+            concurrency()
         proc = shutdown_and_restart(proc, config)
         # A second instance on the same storage must refuse to start.
         env = dict(os.environ, E2E_TOKEN=TOKEN)
@@ -280,9 +360,13 @@ def main():
                                 capture_output=True, text=True, timeout=30)
         check("second instance on the same drive refuses", second.returncode != 0,
               (second.returncode, second.stderr.strip()[-120:]))
+        # The other stop an operator has: SIGINT on Unix, Ctrl-Break on Windows.
+        stopped = True
+        stop(proc, second=True)
     finally:
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(30)
+        if not stopped and proc.poll() is None:
+            proc.kill()
+            proc.wait(30)
     print("FAILURES:", failures if failures else "none")
     sys.exit(1 if failures else 0)
 
