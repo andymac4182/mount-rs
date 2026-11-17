@@ -9,19 +9,18 @@
 ignore = [
     # --- Vulnerabilities whose fix is a breaking upgrade -------------------
 
-    # quick-xml 0.38.4: quadratic duplicate-attribute check. REACHABLE from
-    # the network in the WebDAV transport (`attributes().with_checks(true)`
-    # on request bodies, capped at 64 MiB) and the S3 transport
-    # (`quick_xml::de` on request bodies, capped at 16 MiB); a request can pin
-    # one worker's CPU for a long time. Also in object_store 0.12, which only
-    # parses responses from the operator-configured object store. The fix is
-    # quick-xml 0.41 (breaking) in both transports plus object_store 0.14.
+    # quick-xml 0.38.4, now only through object_store 0.12.5 (the AWS S3, R2,
+    # RustFS, object-store-blocks and TiDB providers). The WebDAV and S3
+    # transports, which parse client request bodies, are on quick-xml 0.41 and
+    # cap attributes per element themselves. object_store deserializes XML
+    # only from HTTP responses of the operator-configured object store and its
+    # credential endpoint (list, multipart and copy results, AssumeRole and
+    # CreateSession), and from part ids it built itself out of that store's
+    # ETag response headers. Both advisories are reachable there, since
+    # `quick_xml::de` wraps an `NsReader`, but only by the store the operator
+    # chose to trust, never by a mount-rs client. object_store 0.14 uses
+    # quick-xml 0.41; moving the providers to it is a breaking upgrade.
     "RUSTSEC-2026-0194",
-    # quick-xml 0.38.4: unbounded namespace-declaration allocation in
-    # `NsReader`. REACHABLE in the S3 transport through `quick_xml::de`, which
-    # wraps an `NsReader`; growth is bounded by the 16 MiB XML body cap (about
-    # three times the body per request). The WebDAV transport uses a plain
-    # `Reader` and is not affected. Same breaking upgrade as above.
     "RUSTSEC-2026-0195",
     # libsqlite3-sys 0.37.0 (bundled SQLite, CVE-2026-119375): a crafted
     # database/-wal pair can leak page-cache memory. Affects every binary that
