@@ -29,7 +29,8 @@ export const Route = createRootRoute({
         content:
           'A Rust and Node filesystem contract for separate metadata, immutable blocks, and mount-free storage.',
       },
-      { name: 'theme-color', content: '#14243b' },
+      { name: 'theme-color', content: '#fafbfe', media: '(prefers-color-scheme: light)' },
+      { name: 'theme-color', content: '#070d18', media: '(prefers-color-scheme: dark)' },
     ],
     links: [
       { rel: 'stylesheet', href: appCss },
@@ -65,10 +66,10 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
             __html: `(() => {
   try {
     const stored = localStorage.getItem('mount-rs-theme')
-    const theme = stored === 'light' || stored === 'dark'
-      ? stored
-      : window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-    document.documentElement.dataset.theme = theme
+    const pref = stored === 'light' || stored === 'dark' ? stored : 'system'
+    const dark = pref === 'dark' || (pref === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    document.documentElement.dataset.themePref = pref
   } catch {}
 })()`,
           }}

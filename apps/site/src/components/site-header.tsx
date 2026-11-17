@@ -1,23 +1,48 @@
 import { useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 
-type Theme = 'light' | 'dark'
+type ThemePref = 'system' | 'light' | 'dark'
+
+const themeOptions: { pref: ThemePref; label: string; icon: string }[] = [
+  { pref: 'system', label: 'Auto', icon: '◐' },
+  { pref: 'light', label: 'Light', icon: '☼' },
+  { pref: 'dark', label: 'Dark', icon: '☾' },
+]
+
+function systemPrefersDark() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches
+}
+
+function applyTheme(pref: ThemePref) {
+  const dark = pref === 'dark' || (pref === 'system' && systemPrefersDark())
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+  document.documentElement.dataset.themePref = pref
+}
 
 export function SiteHeader() {
-  const [theme, setTheme] = useState<Theme>('light')
+  // "system" follows the operating system, including live changes.
+  const [pref, setPref] = useState<ThemePref>('system')
 
   useEffect(() => {
-    const currentTheme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'
-    setTheme(currentTheme)
+    const stored = document.documentElement.dataset.themePref
+    if (stored === 'light' || stored === 'dark') setPref(stored)
   }, [])
 
-  function toggleTheme() {
-    const nextTheme: Theme = theme === 'dark' ? 'light' : 'dark'
-    document.documentElement.dataset.theme = nextTheme
+  useEffect(() => {
+    if (pref !== 'system') return
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = () => applyTheme('system')
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }, [pref])
+
+  function choose(next: ThemePref) {
+    applyTheme(next)
     try {
-      localStorage.setItem('mount-rs-theme', nextTheme)
+      if (next === 'system') localStorage.removeItem('mount-rs-theme')
+      else localStorage.setItem('mount-rs-theme', next)
     } catch {}
-    setTheme(nextTheme)
+    setPref(next)
   }
 
   return (
@@ -34,9 +59,7 @@ export function SiteHeader() {
           </span>
         </Link>
         <nav className="primary-nav" aria-label="Primary navigation">
-          <a href="/#problem">
-            Why mount-rs
-          </a>
+          <a href="/#why">Why mount-rs</a>
           <Link to="/architecture" activeOptions={{ exact: true }}>
             Architecture
           </Link>
@@ -49,28 +72,28 @@ export function SiteHeader() {
           <Link to="/downloads" activeOptions={{ exact: true }}>
             Downloads
           </Link>
-          <Link to="/brand-lab" activeOptions={{ exact: true }}>
-            Brand Lab
-          </Link>
           <a href="https://github.com/andymac4182/mount-rs">GitHub</a>
-          <button
-            className="theme-toggle"
-            type="button"
-            aria-pressed={theme === 'dark'}
-            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-            onClick={toggleTheme}
-          >
-            <span className="theme-toggle-icon" aria-hidden="true">
-              {theme === 'dark' ? '☼' : '☾'}
-            </span>
-            <span>{theme === 'dark' ? 'Light' : 'Dark'} mode</span>
-          </button>
+        </nav>
+        <div className="header-tools">
+          <div className="theme-switch" role="group" aria-label="Colour theme">
+            {themeOptions.map((option) => (
+              <button
+                key={option.pref}
+                type="button"
+                aria-pressed={pref === option.pref}
+                title={option.pref === 'system' ? 'Follow the system theme' : `${option.label} theme`}
+                onClick={() => choose(option.pref)}
+              >
+                <span aria-hidden="true">{option.icon}</span>
+                <span className="theme-switch-label">{option.label}</span>
+              </button>
+            ))}
+          </div>
           <span className="status-chip">
             <span className="status-dot" aria-hidden="true" />
             prerelease
           </span>
-        </nav>
+        </div>
       </div>
     </header>
   )

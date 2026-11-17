@@ -1,5 +1,6 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { CodeBlock } from '../components/code-block'
+import { StackComposer } from '../components/stack-composer'
 import { benchRow } from '../content/benchmarks'
 
 const fmt = (ms: number) => ms.toFixed(2)
@@ -7,95 +8,215 @@ const fmt = (ms: number) => ms.toFixed(2)
 export const Route = createFileRoute('/')({
   head: () => ({
     meta: [
-      { title: 'mount-rs — the file boundary for modern applications' },
+      { title: 'mount-rs — a real filesystem for your app, on any storage' },
       {
         name: 'description',
         content:
-          'Build file features without making a platform mount, metadata database, or object store your application boundary.',
+          'mount-rs gives your product paths, handles and directories through one contract. Use it in-process, mount it, or serve it over HTTP, on the metadata and block stores you choose.',
       },
     ],
   }),
   component: HomePage,
 })
 
+const benefits = [
+  {
+    tone: 'blue',
+    kicker: 'No mount required',
+    title: 'File semantics inside your process.',
+    body: 'Call mount-rs from Rust or Node. There is no kernel module, daemon or root permission between your product and its files.',
+    to: '/docs/rust',
+    link: 'Explore the API',
+  },
+  {
+    tone: 'lilac',
+    kicker: 'Mount it when you want one',
+    title: 'The same drive, as a real directory.',
+    body: 'Expose a drive through FUSE or NFS for tools that expect a path, or over HTTP and WebDAV when the edge is a network.',
+    to: '/docs/transports',
+    link: 'Compare the edges',
+  },
+  {
+    tone: 'cream',
+    kicker: 'Storage you can swap',
+    title: 'SQLite today. TiDB and S3 later.',
+    body: 'Names and bytes are separate choices. Move either one to a different store and the file API your product uses does not change.',
+    to: '/docs/providers',
+    link: 'See every provider',
+  },
+  {
+    tone: 'green',
+    kicker: 'Fast where it counts',
+    title: 'Metadata in well under a millisecond.',
+    body: 'Each drive’s namespace is served from memory by its owner. The numbers come from a benchmark that runs in CI, not from estimates.',
+    to: '/benchmarks',
+    link: 'Read the benchmarks',
+  },
+  {
+    tone: 'blue',
+    kicker: 'Scale out simply',
+    title: 'Any server can take any request.',
+    body: 'A plain load balancer is enough. A node that does not own the drive forwards the request once, over HTTP/3, to the node that does.',
+    to: '/architecture',
+    link: 'Watch a request',
+  },
+  {
+    tone: 'lilac',
+    kicker: 'Safe by construction',
+    title: 'Bytes first, then the name.',
+    body: 'Blocks reach storage before metadata refers to them, and every commit carries a writer fence. If ownership is lost, writes fail closed.',
+    to: '/architecture',
+    link: 'See the write path',
+  },
+] as const
+
 function HomePage() {
   return (
     <>
-      <section className="hero-section business-hero">
-        <div className="page-frame hero-grid">
-          <div className="hero-copy">
-            <p className="eyebrow eyebrow-light">File infrastructure for modern applications</p>
+      <section className="hero home-hero">
+        <div className="page-frame home-hero-grid">
+          <div className="home-hero-copy">
+            <p className="eyebrow">Open-source file infrastructure · Rust and Node</p>
             <h1>
-              Build file features.
-              <span> Keep the storage boundary changeable.</span>
+              A real filesystem for your app. <span className="grad-text">Any storage underneath.</span>
             </h1>
-            <p className="hero-lede">
-              When your product needs paths, handles, directories, and sync
-              semantics, mount-rs gives you a stable Rust and Node contract for
-              direct access—or a real mounted filesystem through FUSE, NFS, 9P,
-              or FSKit. HTTP and WebDAV provide network edges when a mount is
-              not the right fit, while namespace metadata and immutable blocks
-              stay explicit and replaceable.
+            <p className="home-hero-lede">
+              mount-rs gives your product paths, handles and directories through
+              one small contract. Use it in-process, mount it with FUSE or NFS,
+              or serve it over HTTP. Keep names and file bytes in the stores you
+              choose, and change them later without rewriting the product.
             </p>
             <div className="button-row">
-              <a className="button button-warm" href="#storage-model">See the storage model</a>
-              <a className="button button-ghost" href="#use-mount-rs">Start with the workflow</a>
+              <a className="button button-primary" href="#flexible">Build your stack</a>
+              <Link className="button button-secondary" to="/architecture">See how it works</Link>
+              <Link className="text-link" to="/downloads">Get the CLI <span aria-hidden="true">→</span></Link>
             </div>
-            <p className="hero-footnote">Open source · Apache-2.0 · prerelease · evidence-led</p>
+            <dl className="home-hero-stats">
+              <div>
+                <dt>{fmt(benchRow('durable-refresh', 'forwarded', 'stat').p99)} ms</dt>
+                <dd>p99 metadata read, forwarded between servers</dd>
+              </div>
+              <div>
+                <dt>7</dt>
+                <dd>ways in: two APIs, three mounts, HTTP and WebDAV</dd>
+              </div>
+              <div>
+                <dt>10</dt>
+                <dd>storage providers, from memory to S3</dd>
+              </div>
+              <div>
+                <dt>Apache-2.0</dt>
+                <dd>open source, prerelease, evidence-led</dd>
+              </div>
+            </dl>
           </div>
-          <div className="business-diagram" aria-label="Application, mount-rs, and explicit storage planes">
-            <p className="business-diagram-kicker">one contract / explicit choices</p>
-            <div className="business-diagram-node business-diagram-app">
-              <span className="diagram-index">01</span>
-              <strong>Your application</strong>
-              <small>reads · writes · file semantics</small>
+          <div className="hero-stack" role="img" aria-label="Your application reaches mount-rs through an API, a mount or HTTP; mount-rs keeps metadata and immutable blocks in separate stores">
+            <div className="hero-stack-card">
+              <span className="hero-stack-kicker">Your application</span>
+              <div className="hero-pills">
+                <span>Rust</span><span>Node</span><span>FUSE</span><span>NFS</span><span>9P</span><span>HTTP</span><span>WebDAV</span>
+              </div>
             </div>
-            <div className="business-diagram-arrow" aria-hidden="true">↓</div>
-            <div className="business-diagram-node business-diagram-core">
-              <span className="diagram-index">02</span>
-              <strong>mount-rs contract</strong>
-              <small>Rust core · Node bindings · mountable edges</small>
+            <span className="hero-stack-flow" aria-hidden="true" />
+            <div className="hero-stack-card hero-stack-core">
+              <span className="hero-stack-kicker">mount-rs</span>
+              <strong>One file contract</strong>
+              <small>paths · handles · directories · sync</small>
             </div>
-            <div className="business-diagram-arrow" aria-hidden="true">↓</div>
-            <div className="business-diagram-split">
-              <div><span className="diagram-index">03A</span><strong>Metadata</strong><small>namespace · revisions · leases</small></div>
-              <div><span className="diagram-index">03B</span><strong>Immutable blocks</strong><small>chunks · bytes · barriers</small></div>
+            <span className="hero-stack-flow hero-stack-flow-split" aria-hidden="true" />
+            <div className="hero-stack-planes">
+              <div className="hero-stack-card">
+                <span className="hero-stack-kicker">Metadata</span>
+                <div className="hero-pills">
+                  <span>SQLite</span><span>TiDB</span><span>FoundationDB</span><span>PGlite</span>
+                </div>
+              </div>
+              <div className="hero-stack-card">
+                <span className="hero-stack-kicker">Immutable blocks</span>
+                <div className="hero-pills">
+                  <span>S3</span><span>R2</span><span>RustFS</span><span>SQLite</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section className="page-frame problem-section" id="problem">
+      <section className="page-frame why-section" id="why">
         <div className="section-heading split-heading">
           <div>
-            <p className="eyebrow">The problem</p>
-            <h2>File features turn infrastructure assumptions into product risk.</h2>
+            <p className="eyebrow">Why mount-rs</p>
+            <h2>File features, without the infrastructure lock-in.</h2>
           </div>
           <p>
-            A mount can work on one laptop and still be the wrong boundary for
-            a container, serverless process, desktop app, or Node service. The
-            hard part is not reading a file. It is keeping namespace, bytes,
-            lifecycles, and deployment choices coherent.
+            A mount can work on one laptop and still be the wrong boundary for a
+            container, a serverless process or a desktop app. mount-rs keeps the
+            file contract in your code and makes everything behind it a choice.
           </p>
         </div>
-        <div className="problem-grid">
-          <article className="problem-card"><span className="problem-card-number">01 / deployment</span><h3>Mounts are a runtime dependency.</h3><p>FUSE, NFS, FSKit, permissions, daemons, and platform-specific setup become part of the application you are trying to ship.</p></article>
-          <article className="problem-card"><span className="problem-card-number">02 / correctness</span><h3>Metadata and bytes do different jobs.</h3><p>Namespace and revisions need publication and fencing. Object or block storage needs immutable bytes and durable barriers. Mixing the two makes failure behavior difficult to reason about.</p></article>
-          <article className="problem-card"><span className="problem-card-number">03 / change</span><h3>Infrastructure choices become API choices.</h3><p>Switching from local files to SQLite, a database service, or an object store should not require rewriting every file operation in the product.</p></article>
+        <div className="benefit-grid">
+          {benefits.map((benefit) => (
+            <article className={`benefit-card benefit-${benefit.tone}`} key={benefit.kicker}>
+              <span className="benefit-kicker">{benefit.kicker}</span>
+              <h3>{benefit.title}</h3>
+              <p>{benefit.body}</p>
+              <Link to={benefit.to}>{benefit.link} <span aria-hidden="true">→</span></Link>
+            </article>
+          ))}
         </div>
       </section>
 
-      <section className="ink-section solution-section" id="how-it-works">
+      <section className="page-frame flexible-section" id="flexible">
+        <div className="section-heading split-heading">
+          <div>
+            <p className="eyebrow">Flexible by design</p>
+            <h2>Compose the stack you need today. Change it tomorrow.</h2>
+          </div>
+          <p>
+            Three independent choices: how your application reaches files, where
+            the namespace lives, and where the bytes live. Try a few
+            combinations.
+          </p>
+        </div>
+        <StackComposer />
+      </section>
+
+      <section className="ink-section arch-fast" id="fast">
         <div className="page-frame">
           <div className="section-heading solution-heading">
-            <p className="eyebrow eyebrow-light">The mount-rs answer</p>
-            <h2>One observable file contract. Three decisions you can change independently.</h2>
-            <p>mount-rs keeps the core small and makes the boundary visible: use the API directly, create a real mount for a host, or put HTTP/WebDAV at the edge. Choose where namespace metadata lives and where immutable blocks are stored independently.</p>
+            <p className="eyebrow eyebrow-light">Fast by design</p>
+            <h2>Sub-millisecond metadata, even one server away.</h2>
+            <p>
+              Each drive has one owner that keeps its namespace in memory. Any
+              server can take a request and forward it in one HTTP/3 hop, so a
+              load balancer never needs to know where a drive lives.
+            </p>
           </div>
-          <div className="solution-grid">
-            <article className="solution-card"><span className="solution-card-number">01</span><h3>Contract</h3><p>Use paths, handles, stats, directory operations, and explicit sync behavior from Rust or Node.</p><Link to="/docs/rust">Explore the core API <span aria-hidden="true">→</span></Link></article>
-            <article className="solution-card"><span className="solution-card-number">02</span><h3>Storage planes</h3><p>Compose a metadata provider with an immutable block provider, then flush blocks before publishing references.</p><Link to="/docs/providers">Compare providers <span aria-hidden="true">→</span></Link></article>
-            <article className="solution-card"><span className="solution-card-number">03</span><h3>Mounts and transports</h3><p>Create a real filesystem mount with FUSE, NFS, 9P, or FSKit where the platform integration is available; use HTTP or WebDAV when the edge is networked.</p><Link to="/docs/transports">Choose the edge <span aria-hidden="true">→</span></Link></article>
+          <div className="home-fast-grid">
+            <article className="arch-fast-card">
+              <span className="solution-card-number">{fmt(benchRow('durable-refresh', 'forwarded', 'stat').p99)} ms</span>
+              <h3>Forwarded read p99</h3>
+              <p>Durable TiDB drive, 100 drives across three servers.</p>
+            </article>
+            <article className="arch-fast-card">
+              <span className="solution-card-number">{fmt(benchRow('exclusive', 'forwarded', 'rename').p99)} ms</span>
+              <h3>Forwarded rename p99</h3>
+              <p>Writeback drive: applied in memory, published afterwards.</p>
+            </article>
+            <article className="arch-fast-card">
+              <span className="solution-card-number">{fmt(benchRow('exclusive', 'local', 'stat').p99)} ms</span>
+              <h3>Local read p99</h3>
+              <p>Answered from the owner’s in-memory namespace.</p>
+            </article>
+            <article className="arch-fast-card">
+              <span className="solution-card-number">1 hop</span>
+              <h3>Any node, any drive</h3>
+              <p>Routes cached and refreshed in the background; pinned, pooled QUIC peers.</p>
+            </article>
+          </div>
+          <div className="home-fast-links">
+            <Link className="button button-warm" to="/architecture">See the architecture</Link>
+            <Link className="button button-ghost" to="/benchmarks">Read the benchmarks</Link>
           </div>
         </div>
       </section>
@@ -250,53 +371,6 @@ await fs.writeFile('/hello', Buffer.from('hello'));`}</CodeBlock>
             </p>
             <Link to="/docs/transports">Compare transports <span aria-hidden="true">→</span></Link>
           </article>
-        </div>
-      </section>
-
-      <section className="page-frame value-section">
-        <div className="value-strip">
-          <div><p className="eyebrow">What changes for your team</p><h2>Infrastructure can move without rewriting the product boundary.</h2></div>
-          <div className="value-list"><div><strong>Ship sooner</strong><span>Use memory or local providers while the product takes shape.</span></div><div><strong>Change deliberately</strong><span>Move metadata, blocks, or edge transport as separate decisions.</span></div><div><strong>Explain the risk</strong><span>Read provider maturity and acceptance evidence before production claims.</span></div></div>
-        </div>
-      </section>
-
-      <section className="ink-section arch-fast" id="fast">
-        <div className="page-frame">
-          <div className="section-heading solution-heading">
-            <p className="eyebrow eyebrow-light">Fast by design</p>
-            <h2>Sub-millisecond metadata, even one server away.</h2>
-            <p>
-              Each drive has one owner that keeps its namespace in memory. Any
-              server can take a request and forward it in one HTTP/3 hop, so a
-              load balancer never needs to know where a drive lives.
-            </p>
-          </div>
-          <div className="home-fast-grid">
-            <article className="arch-fast-card">
-              <span className="solution-card-number">{fmt(benchRow('durable-refresh', 'forwarded', 'stat').p99)} ms</span>
-              <h3>Forwarded read p99</h3>
-              <p>Durable TiDB drive, 100 drives across three servers.</p>
-            </article>
-            <article className="arch-fast-card">
-              <span className="solution-card-number">{fmt(benchRow('exclusive', 'forwarded', 'rename').p99)} ms</span>
-              <h3>Forwarded rename p99</h3>
-              <p>Writeback drive: applied in memory, published afterwards.</p>
-            </article>
-            <article className="arch-fast-card">
-              <span className="solution-card-number">{fmt(benchRow('exclusive', 'local', 'stat').p99)} ms</span>
-              <h3>Local read p99</h3>
-              <p>Answered from the owner’s in-memory namespace.</p>
-            </article>
-            <article className="arch-fast-card">
-              <span className="solution-card-number">1 hop</span>
-              <h3>Any node, any drive</h3>
-              <p>Routes cached and refreshed in the background; pinned, pooled QUIC peers.</p>
-            </article>
-          </div>
-          <div className="home-fast-links">
-            <Link className="button button-warm" to="/architecture">See the architecture</Link>
-            <Link className="button button-ghost" to="/benchmarks">Read the benchmarks</Link>
-          </div>
         </div>
       </section>
 

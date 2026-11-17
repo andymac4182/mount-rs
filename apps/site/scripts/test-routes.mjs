@@ -9,7 +9,7 @@ const routes = [
     path: '/',
     status: 200,
     contentType: 'text/html',
-    expected: ['Build file features.', 'prerelease', 'MemoryFs', 'Fast by design'],
+    expected: ['A real filesystem for your app.', 'Any storage underneath.', 'prerelease', 'MemoryFs', 'Fast by design', 'Compose the stack you need today.', 'Why mount-rs'],
   },
   {
     path: '/docs',
@@ -29,14 +29,14 @@ const routes = [
     path: '/architecture',
     status: 200,
     contentType: 'text/html',
-    expected: ['How a mount-rs server stays fast.', 'Forwarding: any node, one hop to the owner.', 'Seven layers between a request and the object store.', 'Durable by default, writeback by choice.', 'What makes it fast', 'Forwarding and remote sessions are experimental.'],
+    expected: ['How a mount-rs server', 'stays fast.', 'Load balancer', 'Send request', 'HTTP/3 peer mesh', 'Forwarding: any node, one hop to the owner.', 'Seven layers between a request and the object store.', 'Durable by default, writeback by choice.', 'What makes it fast', 'Forwarding and remote sessions are experimental.'],
   },
   { path: '/architecture/', status: 307, redirectTo: '/architecture' },
   {
     path: '/benchmarks',
     status: 200,
     contentType: 'text/html',
-    expected: ['Sub-millisecond metadata, even one hop away.', '44015339854', 'Intel Xeon 6973P-C', 'Durable mutations are bounded by the database commit.', 'Same code, three different runner CPUs.', 'metadata-latency-bench.py'],
+    expected: ['Sub-millisecond metadata,', 'even one hop away.', 'Every operation, every percentile.', '44015339854', 'Intel Xeon 6973P-C', 'Durable mutations are bounded by the database commit.', 'Same code, three different runner CPUs.', 'metadata-latency-bench.py'],
   },
   { path: '/benchmarks/', status: 307, redirectTo: '/benchmarks' },
   {
