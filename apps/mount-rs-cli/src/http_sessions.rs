@@ -475,7 +475,7 @@ async fn connect_forwarder(
             .map_err(|e| fail(&e))?,
         ));
     }
-    let registry = connect_registry(config).await?;
+    let registry = crate::redis_connect::connect_registry(config).await?;
     let forwarder = IngressForwarder::with_membership(
         registry,
         membership,
@@ -491,26 +491,6 @@ async fn connect_forwarder(
     .map_err(|e| fail(&e))?
     .with_additional_clients(peers[1..].to_vec());
     Ok((forwarder, peers))
-}
-
-async fn connect_registry(
-    config: &crate::config::ForwardingConfig,
-) -> Result<mount_rs_cluster::RedisRouteRegistry, CliError> {
-    use mount_rs_cluster::RedisRouteRegistry;
-    let url = std::env::var(&config.redis_url.name).map_err(|_| {
-        CliError::runtime(format!(
-            "missing environment variable {}",
-            config.redis_url.name
-        ))
-    })?;
-    let redis =
-        redis::Client::open(url).map_err(|_| CliError::runtime("invalid forwarding Redis URL"))?;
-    let manager = tokio::time::timeout(Duration::from_secs(5), redis.get_connection_manager())
-        .await
-        .map_err(|_| CliError::runtime("forwarding Redis connection timed out"))?
-        .map_err(|_| CliError::runtime("forwarding Redis connection failed"))?;
-    RedisRouteRegistry::with_manager(manager, config.namespace.clone(), Duration::from_secs(2))
-        .map_err(|e| CliError::runtime(e.to_string()))
 }
 
 struct OwnerService {
@@ -575,7 +555,7 @@ pub(crate) async fn start_owner(
     let tls = load_peer_server_config_from_pem(&files.certificate, &files.key, &files.ca)
         .map_err(|e| fail(&e))?;
     let endpoint = quinn::Endpoint::server(tls, member.address).map_err(|e| fail(&e))?;
-    let registry = connect_registry(config).await?;
+    let registry = crate::redis_connect::connect_registry(config).await?;
     let budget = mount_rs_cluster::SessionBudget::new(session_limits.max_sessions)?;
     let mut handlers = Vec::new();
     let mut registrations = Vec::new();
@@ -653,7 +633,9 @@ pub(crate) async fn start_owner(
         RegistrationRecovery {
             initial_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(2),
-            max_attempts: 10,
+            // A Redis outage of any length must not stop this server: its
+            // own drives do not depend on Redis.
+            max_attempts: RegistrationRecovery::UNLIMITED_ATTEMPTS,
         },
         Duration::from_secs(10),
     )

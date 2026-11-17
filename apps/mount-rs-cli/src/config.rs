@@ -323,6 +323,10 @@ pub(crate) struct ForwardingConfig {
     pub private_key: PathBuf,
     pub ca: PathBuf,
     pub redis_url: EnvReference,
+    /// PEM bundle that replaces the system roots for a `rediss://` server.
+    pub redis_ca: Option<PathBuf>,
+    /// Permit an unencrypted `redis://` connection to another host.
+    pub allow_plaintext_redis: bool,
     pub namespace: String,
     pub bind: std::net::SocketAddr,
     pub owner: bool,
@@ -920,6 +924,8 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "private_key",
             "ca",
             "redis_url",
+            "redis_ca",
+            "allow_plaintext_redis",
             "namespace",
             "bind",
             "owner",
@@ -986,6 +992,9 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
         private_key: required_path(fields, "private_key", path, base)?,
         ca: required_path(fields, "ca", path, base)?,
         redis_url: required_env_reference(fields, "redis_url", path)?,
+        redis_ca: optional_path(fields, "redis_ca", path, base)?,
+        allow_plaintext_redis: optional_bool(fields, "allow_plaintext_redis", path)?
+            .unwrap_or(false),
         namespace: namespace.to_owned(),
         bind: required_string(fields, "bind", path)?
             .parse()
@@ -3630,6 +3639,48 @@ mod tests {
         assert!(parse_config_str(&source.to_string(), base).is_err());
         source["http"].as_object_mut().unwrap().remove("forwarding");
         assert!(parse_config_str(&source.to_string(), base).is_err());
+    }
+
+    #[test]
+    fn redis_ca_and_plaintext_opt_in_are_optional_and_strictly_typed() {
+        let mut source = serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
+        }}});
+        let base = Path::new("/etc/mount-rs");
+        let parse = |source: &serde_json::Value| {
+            parse_config_str(&source.to_string(), base)
+                .map(|config| config.http.unwrap().forwarding.unwrap())
+        };
+        let defaults = parse(&source).unwrap();
+        assert_eq!(defaults.redis_ca, None);
+        assert!(!defaults.allow_plaintext_redis);
+
+        source["http"]["forwarding"]["redis_ca"] = "redis-ca.pem".into();
+        source["http"]["forwarding"]["allow_plaintext_redis"] = true.into();
+        let set = parse(&source).unwrap();
+        assert_eq!(set.redis_ca, Some(base.join("redis-ca.pem")));
+        assert!(set.allow_plaintext_redis);
+        source["http"]["forwarding"]["redis_ca"] = "/secrets/redis-ca.pem".into();
+        assert_eq!(
+            parse(&source).unwrap().redis_ca,
+            Some(PathBuf::from("/secrets/redis-ca.pem"))
+        );
+
+        for (key, invalid) in [
+            ("redis_ca", serde_json::json!("")),
+            ("redis_ca", serde_json::json!(true)),
+            ("redis_ca", serde_json::json!({"env":"REDIS_CA"})),
+            ("allow_plaintext_redis", serde_json::json!("true")),
+            ("allow_plaintext_redis", serde_json::json!(1)),
+        ] {
+            let mut source = source.clone();
+            source["http"]["forwarding"][key] = invalid;
+            assert!(parse(&source).is_err(), "{key}");
+        }
+        // A misspelled key is refused rather than silently ignored.
+        source["http"]["forwarding"]["allow_plaintext"] = true.into();
+        assert!(parse(&source).is_err());
     }
 
     #[test]
