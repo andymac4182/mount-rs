@@ -348,6 +348,14 @@ long.
   drive (it is retaken once the forged record is gone). Restrict the
   namespace as the README describes.
 - **Stale reads under clock skew** beyond the 5 s renewal margin; see Clocks.
+- **A standby's attempt on SQLite metadata is not read-only.** Opening a
+  SQLite metadata store folds the pending namespace change rows into the
+  stored document before the lease is tried. The namespace is unchanged and
+  the owner carries on (tested with 1700 attempts against an owner writing
+  throughout), but each attempt while the lease is held, at most one every
+  `5P` and only while no route is published, costs one rewrite of the whole
+  document. Trying the lease before folding would avoid it and is left for
+  the SQLite provider. The same contention has not been tried against TiDB.
 - **No replay.** Requests in flight on a failed owner are not replayed, and
   sessions and handles do not move.
 - **No faster recovery than the lease.** A standby cannot take a drive
