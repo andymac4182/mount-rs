@@ -103,7 +103,12 @@ pub struct DriveConfig {
     id: String,
     driver: Arc<dyn FsDriver>,
     bearer_token: String,
+    health_check: Option<HealthCheck>,
 }
+
+/// A readiness check for a drive beyond its driver's own
+/// [`FsDriver::health`]: see [`DriveConfig::with_health_check`].
+pub type HealthCheck = Arc<dyn Fn() -> Result<(), FsError> + Send + Sync>;
 
 impl fmt::Debug for DriveConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -121,6 +126,7 @@ impl Clone for DriveConfig {
             id: self.id.clone(),
             driver: Arc::clone(&self.driver),
             bearer_token: self.bearer_token.clone(),
+            health_check: self.health_check.clone(),
         }
     }
 }
@@ -140,7 +146,27 @@ impl DriveConfig {
             id,
             driver,
             bearer_token,
+            health_check: None,
         })
+    }
+
+    /// Make `/readyz` also ask `check` whether this drive can serve.
+    ///
+    /// It is for what the driver cannot know by itself, such as whether
+    /// the directory or file under it is still there. Like
+    /// [`FsDriver::health`] it runs on every probe, so it must answer from
+    /// memory: no I/O and no waiting. Whatever does the looking does it
+    /// elsewhere and leaves the answer for `check` to read.
+    pub fn with_health_check(mut self, check: HealthCheck) -> Self {
+        self.health_check = Some(check);
+        self
+    }
+
+    /// Whether the drive can serve: its driver has not failed, and the
+    /// drive's own check, when it has one, agrees.
+    fn health(&self) -> Result<(), FsError> {
+        self.driver.health()?;
+        self.health_check.as_ref().map_or(Ok(()), |check| check())
     }
 
     /// Validate a public drive path segment before opening its backend.
@@ -1791,12 +1817,13 @@ fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> 
 
     // Readiness asks every drive whether it can still serve. A drive that
     // failed closed answers every request with an error until the process
-    // is replaced, so one such drive takes the whole process out of rotation.
+    // is replaced, and one whose storage is unreachable cannot serve until
+    // it is back, so one such drive takes the whole process out of rotation.
     let failed = if readiness {
         registry
             .drives
             .values()
-            .filter(|drive| drive.driver.health().is_err())
+            .filter(|drive| drive.health().is_err())
             .count()
     } else {
         0

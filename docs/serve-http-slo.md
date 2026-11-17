@@ -58,11 +58,12 @@ Notes:
   probes.
 - The proxy log has the drive id in the path (`/v1/drives/<id>/...`), so
   availability can be split per drive. The server gives no per-drive figure.
-- `/readyz` has limits the runbook states plainly: it does no I/O; only
-  split-store drives report health; a failure is noticed only after an
-  operation or the background lease renewal records it. Readiness is a lower
-  bound on trouble, not a measure of health. Use the synthetic
-  read-after-write to cover `sqlite`-kind and `host` drives.
+- `/readyz` has limits the runbook states plainly: the probe does no I/O;
+  a split-store failure is noticed only after an operation or the
+  background lease renewal records it; the storage of a `host` or `sqlite`
+  drive is checked every two seconds for being there, not for being
+  writable. Readiness is a lower bound on trouble, not a measure of health.
+  Use the synthetic read-after-write to cover what it does not.
 - A `400 EIO` (the client aborted its upload) is the caller's doing and is
   counted as good.
 
@@ -280,8 +281,7 @@ subscriber and exporter receives them. See [`observability.md`](observability.md
 - The runbook's ["Observability"](serve-http-runbook.md#observability)
   section is the authoritative statement of what exists.
 - [`production-readiness.md`](production-readiness.md), "Gaps found outside
-  the audit", lists `/readyz` reporting health only for split-store drives
-  (rated Low), and statement timeouts missing for PGlite and TiDB (rated
+  the audit", lists statement timeouts missing for PGlite and TiDB (rated
   High): a stalled TiDB hangs a statement and every operation queues behind
   it. On `serve-http` that would be expected to show as request timeouts
   (`504`); this was not tested.

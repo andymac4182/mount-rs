@@ -363,6 +363,84 @@ async fn a_drive_that_failed_closed_answers_503_and_takes_readiness_down() {
 }
 
 #[tokio::test]
+async fn a_drive_with_its_own_health_check_is_ready_only_while_the_check_passes() {
+    // What the driver cannot know, such as whether the directory under it
+    // is still there, is told to the drive, and unlike a failed-closed
+    // driver it can be well again.
+    let reachable = Arc::new(AtomicBool::new(true));
+    let seen = Arc::clone(&reachable);
+    let mut registry = DriveRegistry::new();
+    let checked = DriveConfig::new("checked", Arc::new(MemoryFs::empty()), TOKEN)
+        .expect("drive config")
+        .with_health_check(Arc::new(move || {
+            if seen.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(FsError::new(ErrorCode::Eio))
+            }
+        }));
+    registry.register(checked).expect("register");
+    registry
+        .register(DriveConfig::new("plain", Arc::new(MemoryFs::empty()), TOKEN).unwrap())
+        .expect("register");
+    let server = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    let readiness = || async {
+        let ready = get(&server, "/readyz").await;
+        (
+            ready.status().as_u16(),
+            ready.json::<Value>().await.unwrap(),
+        )
+    };
+
+    assert_eq!(
+        readiness().await,
+        (200, json!({"status": "ready", "drives": 2}))
+    );
+    reachable.store(false, Ordering::Release);
+    assert_eq!(
+        readiness().await,
+        (
+            503,
+            json!({"status": "not_ready", "drives": 2, "failed": 1})
+        )
+    );
+    // The check is about readiness only: requests are still given to the
+    // drive, which answers them as it can.
+    assert_eq!(
+        get(&server, "/v1/drives/checked/stat").await.status(),
+        StatusCode::OK
+    );
+    reachable.store(true, Ordering::Release);
+    assert_eq!(
+        readiness().await,
+        (200, json!({"status": "ready", "drives": 2}))
+    );
+
+    // A driver that failed closed is not ready whatever the check says.
+    let failing = TestFs::new(true);
+    failing.failed.store(true, Ordering::Release);
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::new("failing", failing, TOKEN)
+                .unwrap()
+                .with_health_check(Arc::new(|| Ok(()))),
+        )
+        .expect("register");
+    let failed = HttpServer::start(registry, HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    assert_eq!(
+        get(&failed, "/readyz").await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    failed.close().await.expect("close");
+    server.close().await.expect("close");
+}
+
+#[tokio::test]
 async fn readiness_with_no_drives_is_not_ready() {
     let server = start(Vec::new(), HttpServerOptions::default()).await;
     let ready = get(&server, "/readyz").await;

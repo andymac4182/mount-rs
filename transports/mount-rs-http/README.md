@@ -555,11 +555,15 @@ Rules:
 | Route | 200 | 503 |
 | --- | --- | --- |
 | `/healthz` | `{"status":"ok"}`: the process serves HTTP | Only while shutting down (standard error body) |
-| `/readyz` | `{"status":"ready","drives":N}`: no drive has reported a failure | `{"status":"not_ready","drives":N,"failed":M}`: a drive has failed closed or none is configured. While shutting down: the standard error body |
+| `/readyz` | `{"status":"ready","drives":N}`: no drive has reported a failure | `{"status":"not_ready","drives":N,"failed":M}`: `M` drives have failed closed or lost their storage, or none is configured. While shutting down: the standard error body |
 
 Both are unauthenticated, accept `GET` and `HEAD`, and send
 `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. They never
-reveal drive ids. They do not probe an external dependency on each call.
+reveal drive ids. They do not probe an external dependency on each call:
+`/readyz` reports what each drive last found out about itself, in the
+background. A `503` from `/readyz` says nothing about any one request; a
+drive that is not ready answers its requests with the errors in the table
+above.
 
 ## Limits
 

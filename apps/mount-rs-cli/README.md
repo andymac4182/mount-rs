@@ -347,8 +347,12 @@ After every drive is open and the socket is bound, the process prints:
 
 `GET /healthz` reports that the process is alive. `GET /readyz` returns `200`
 with `{"status":"ready","drives":N}` and `503` with
-`{"status":"not_ready","drives":N,"failed":M}` when a drive has failed closed.
-Only split-store drives report health.
+`{"status":"not_ready","drives":N,"failed":M}` when a drive cannot serve: a
+split-store drive that has failed closed, a `host` drive whose root
+directory cannot be opened, or a `sqlite` drive whose database file cannot
+be opened or whose last save failed. The storage of `host` and `sqlite`
+drives is checked every two seconds in the background. A `memory` drive has
+nothing to check.
 
 Ctrl-C and, on Unix, SIGTERM start a graceful shutdown: the listener stops
 accepting, in-flight requests get up to `drain_timeout_ms`, the drives are

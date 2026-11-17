@@ -687,6 +687,128 @@ fn unix_http_subprocess_stops_gracefully_and_boundedly() {
     );
 }
 
+/// Poll `/readyz` until its body is `expected`, and return the status.
+#[cfg(unix)]
+fn readiness_becomes(address: SocketAddr, expected: &serde_json::Value) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let ready = request(address, "GET", "/readyz", "", &[]);
+        let body: serde_json::Value = serde_json::from_slice(&ready.body).expect("readiness body");
+        if &body == expected {
+            return ready.status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "/readyz stayed at {body} instead of becoming {expected}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// `/readyz` follows the storage of a `host` and a `sqlite` drive, not only
+/// a split-store drive's lease: it turns 503 while the directory or the
+/// database file is gone, without a request having to find out, and 200
+/// again once it is back.
+#[cfg(unix)]
+#[test]
+fn readiness_follows_the_storage_of_host_and_sqlite_drives() {
+    let root = temporary_root();
+    let host_root = root.join("host-root");
+    let database = root.join("drive.db");
+    fs::create_dir(&host_root).expect("host root");
+    let (uid, gid) = effective_identity();
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {
+            "host": "127.0.0.1",
+            "port": 0,
+            "drives": [
+                {
+                    "id": "memory",
+                    "token": {"env": "MOUNT_RS_HTTP_MEMORY_TOKEN"},
+                    "driver": {"kind": "memory"}
+                },
+                {
+                    "id": "host",
+                    "token": {"env": "MOUNT_RS_HTTP_SPLIT_TOKEN"},
+                    "driver": {"kind": "host", "root": host_root}
+                },
+                {
+                    "id": "sqlite",
+                    "token": {"env": "MOUNT_RS_HTTP_SQLITE_TOKEN"},
+                    "driver": {"kind": "sqlite", "database": database, "uid": uid, "gid": gid}
+                }
+            ]
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    let mut child = HttpChild::start(&config_path, root.clone());
+    let (address, _ready) = child.ready();
+    let ready = serde_json::json!({"status": "ready", "drives": 3});
+    let failed =
+        |count: u64| serde_json::json!({"status": "not_ready", "drives": 3, "failed": count});
+    assert_eq!(readiness_becomes(address, &ready), 200);
+
+    // Nothing asks the host drive for anything: the server notices itself.
+    let moved_root = root.join("host-root.moved");
+    fs::rename(&host_root, &moved_root).expect("move the host root away");
+    assert_eq!(readiness_becomes(address, &failed(1)), 503);
+    // The other drives still serve.
+    let memory = request(
+        address,
+        "GET",
+        "/v1/drives/memory/stat",
+        "memory-test-token",
+        &[],
+    );
+    assert_eq!(memory.status, 200);
+
+    let moved_database = root.join("drive.db.moved");
+    fs::rename(&database, &moved_database).expect("move the database away");
+    assert_eq!(readiness_becomes(address, &failed(2)), 503);
+
+    // Neither drive failed closed: each is ready again once its storage is.
+    fs::rename(&moved_root, &host_root).expect("move the host root back");
+    assert_eq!(readiness_becomes(address, &failed(1)), 503);
+    fs::rename(&moved_database, &database).expect("move the database back");
+    assert_eq!(readiness_becomes(address, &ready), 200);
+    let host = request(
+        address,
+        "GET",
+        "/v1/drives/host/stat",
+        "splitstore-test-token-for-sessions",
+        &[],
+    );
+    assert_eq!(host.status, 200);
+
+    child.signal(libc::SIGINT);
+    let status = child.wait_for_exit(Duration::from_secs(10));
+    assert!(status.success(), "{status}");
+    let (_stdout, stderr) = child.output();
+    let changes: Vec<(String, bool)> = stderr
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|record| record["event"] == "http_drive_storage")
+        .map(|record| {
+            (
+                record["drive"].as_str().expect("drive").to_owned(),
+                record["reachable"].as_bool().expect("reachable"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("host".to_owned(), false),
+            ("sqlite".to_owned(), false),
+            ("host".to_owned(), true),
+            ("sqlite".to_owned(), true),
+        ],
+        "one line per change, and none for the memory drive: {stderr:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn the_access_log_writes_one_line_per_request_and_no_path_or_token() {

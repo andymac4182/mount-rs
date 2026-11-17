@@ -162,8 +162,9 @@ paths:
       summary: Readiness probe.
       description: |
         200 only when at least one drive is configured and every drive is
-        healthy. 503 when any drive has failed closed. The body never
-        contains drive ids. A 503 from this route uses the readiness body
+        healthy. 503 when any drive has failed closed or cannot reach its
+        storage. The probe reads what the drives already know; it does no
+        I/O of its own. The body never contains drive ids. A 503 from this route uses the readiness body
         below, not the error envelope, except while the server is shutting
         down, when it is the standard error envelope.
       security: []
@@ -180,8 +181,9 @@ paths:
         "405": {$ref: "#/components/responses/MethodNotAllowed"}
         "503":
           description: |
-            At least one drive has failed closed, or no drive is configured,
-            or the server is shutting down.
+            At least one drive has failed closed or cannot reach its
+            storage, or no drive is configured, or the server is shutting
+            down.
           headers:
             Cache-Control:
               description: "`no-store`, with the readiness body."
@@ -1545,7 +1547,7 @@ components:
         failed:
           type: integer
           minimum: 0
-          description: Number of drives that have failed closed.
+          description: Number of drives that cannot serve, because they failed closed or their storage is unreachable.
     DriveSummary:
       type: object
       required: [id]

@@ -346,19 +346,42 @@ returns the server's `400`, and that an upload larger than `max_request_bytes`
 | Probe | Use for | 200 | 503 |
 | --- | --- | --- | --- |
 | `GET /healthz` | Liveness (restart decisions) | `{"status":"ok"}`. The process accepts and answers HTTP. It checks no drive. | Only for a probe in flight while the process starts draining (standard error body). After that the connection is refused. |
-| `GET /readyz` | Readiness (traffic decisions) and alerting | `{"status":"ready","drives":N}`. No configured drive has reported a failure. | `{"status":"not_ready","drives":N,"failed":M}`. `M` drives have failed closed. With no drive registered: `drives` 0, `failed` 0. While draining: the standard error body instead. |
+| `GET /readyz` | Readiness (traffic decisions) and alerting | `{"status":"ready","drives":N}`. No configured drive has reported a failure. | `{"status":"not_ready","drives":N,"failed":M}`. `M` drives cannot serve: they have failed closed, or their storage is unreachable. With no drive registered: `drives` 0, `failed` 0. While draining: the standard error body instead. |
 
 Both are unauthenticated, accept `GET` and `HEAD`, and send
 `Cache-Control: no-store`. The bodies contain no drive ids.
 
-What a `/readyz` 503 means: at least one drive has failed closed. A drive
-fails closed when it can no longer prove it holds its writer lease (a renewal
-failed or its outcome is unknown, typically because the metadata store was
-unreachable or too slow). From
-then on every request to that drive returns `503 ESTALE`. **The drive does not
-recover by itself; the process must be restarted.** The other drives keep
-serving. With one drive per process, a 503 from `/readyz` means the instance
-is serving nothing useful.
+What a `/readyz` 503 means: at least one drive cannot serve. What that is,
+and whether it clears by itself, depends on the drive's kind:
+
+| Drive kind | Not ready when | Noticed | Clears by itself? |
+| --- | --- | --- | --- |
+| `splitstore` | The drive has failed closed: it can no longer prove it holds its writer lease (a renewal failed or its outcome is unknown, typically because the metadata store was unreachable or too slow). Every request to it then returns `503 ESTALE`. | By the lease-renewal worker in the background, or by the operation that failed | **No. The process must be restarted.** |
+| `host` | The root directory cannot be opened: removed, renamed, unmounted, permission lost, or on a mount that has stopped answering | By a check every 2 seconds, off the request path | Yes, at the first check after the directory is back |
+| `sqlite` | The database file cannot be opened as a regular file (removed, renamed, its volume unmounted or not answering), **or** the most recent save to it failed (disk full, I/O error, the database changed underneath) | The file: by a check every 2 seconds. A failed save: at once | Yes: at the first check after the file is back, and at the first save that succeeds (any later write, or `POST .../ops/sync`) |
+| `memory` | Never. It has no storage that can be lost; its content lives and dies with the process. | | |
+
+The storage check of a `host` or `sqlite` drive opens the directory or the
+file and nothing more. One that has not returned after 5 seconds counts as a
+failure for as long as it stays out, which is how a hung network mount shows
+up. Each change is written to stderr as one line:
+
+```json
+{"event":"http_drive_storage","drive":"files","reachable":false,"error":"entity not found","check_ms":0}
+```
+
+`drive` is the drive id, `reachable` what the check now finds, `error` the
+kind of failure (`null` when reachable) and `check_ms` how long the check
+took. A check that took longer than 5 seconds writes a line when it returns
+even if what it found is unchanged. Nothing is written while storage stays
+as it was.
+
+The check is about readiness only. Requests to a drive that is not ready
+are still given to it and get whatever its storage answers (typically `404`
+or `500` from a `host` drive whose root is gone); a `sqlite` drive keeps
+answering reads from memory. The other drives keep serving. With one drive
+per process, a 503 from `/readyz` means the instance is serving nothing
+useful.
 
 Do not use `/readyz` as a liveness probe if an automatic restart is not what
 you want; see [Failure modes](#failure-modes-and-recovery) for when a restart
@@ -366,13 +389,24 @@ helps.
 
 Limits of `/readyz`, stated plainly:
 
-- It performs no I/O. It reports state the drives already hold in memory.
-- **Only split-store drives report health.** A `sqlite`-kind, `host` or
-  `memory` drive never reports unhealthy; `/readyz` stays 200 for it whatever
-  happens to its storage.
+- The probe itself performs no I/O. It reports what the drives and their
+  storage checks already hold in memory, so it answers at once even when
+  storage does not.
 - A split-store failure is noticed only after an operation or the background
   lease-renewal worker has recorded it. A storage outage on an idle drive
   shows up when the next renewal fails, not at once.
+- The `host` and `sqlite` checks prove that the directory or file can be
+  opened, not that it can be written: a full disk or a read-only remount is
+  not noticed by the check. A `sqlite` drive reports it at its next failed
+  save; a `host` drive does not report it, and its writes answer `507` or
+  `403`.
+- A `sqlite` database file that is deleted while the process runs is
+  reported, but the process may still hold the deleted file open, and then
+  saves to it appear to succeed. Stop the process and restore the file
+  rather than waiting for readiness to return.
+- A split-store drive whose providers are local files (`sqlite` metadata or
+  blocks, `host-file` blocks) is covered by its lease renewal like any
+  other split-store drive, not by a file check.
 - `503 ESTALE` is also returned, rarely, for a stale-handle race on a healthy
   drive. One `503 ESTALE` in the proxy log with `/readyz` at 200 is that race;
   the client retries. `503 ESTALE` on every request with `/readyz` at 503 is a
@@ -496,6 +530,7 @@ State of the default build, without qualification:
 | Fatal error on stderr at exit | Yes |
 | `mount_cache_stats` JSON lines on stderr | Only with `cache_report_interval_seconds`, only for drives with a cache |
 | `{"event":"http_accept_failed","total":N}` JSON line on stderr | Yes, each time the count of failed `accept` calls rises |
+| `{"event":"http_drive_storage",...}` JSON line on stderr | Yes, each time the storage of a `host` or `sqlite` drive becomes unreachable or reachable again (see [Health checks](#health-checks)) |
 | Per-request access log (`http_request` JSON lines on stderr) | Only with `"access_log": true`; off by default (see [Access log](#access-log)) |
 | Metrics endpoint (Prometheus or other) | **No** |
 | Request ids in responses | Yes: every response carries `X-Request-Id` (see [Request ids](#request-ids)) |
@@ -592,7 +627,8 @@ request.
 
 | Alert | Source | Meaning | First action |
 | --- | --- | --- | --- |
-| `/readyz` returns 503 for more than 1 minute | Load balancer or blackbox probe | A drive has failed closed | Check storage, then restart |
+| `/readyz` returns 503 for more than 1 minute | Load balancer or blackbox probe | A split-store drive has failed closed, or the storage of a `host` or `sqlite` drive is unreachable | Check storage. Restart for a split-store drive; a `host` or `sqlite` drive is ready again when its storage is |
+| `http_drive_storage` line with `"reachable":false` on stderr | Process stderr | The root directory of a `host` drive or the database file of a `sqlite` drive cannot be opened | Check the mount or volume named by the drive's config |
 | `/healthz` fails or times out | Probe | Process down or hung | Check the service manager; restart |
 | Process exits non-zero, or restart loop | Service manager | Startup failure | Read stderr; see exit codes |
 | 503 rate from upstream above baseline | Proxy log | Drive failed closed, contention, or draining | Check `/readyz` |
@@ -614,6 +650,8 @@ request.
 | Symptom | Cause | Recovery |
 | --- | --- | --- |
 | All requests to one drive return `503 ESTALE`; `/readyz` is 503 | The drive failed closed: its writer lease could not be renewed | Fix the storage or its connectivity. Restart the process with SIGTERM. Check `/readyz`. Data that was acknowledged is intact; clients were told to retry. |
+| `/readyz` is 503 and stderr has `http_drive_storage` with `"reachable":false` | The root of a `host` drive or the database file of a `sqlite` drive is gone or not answering | Restore the mount, directory or file. No restart is needed: `/readyz` returns to 200 within a few seconds and a `"reachable":true` line follows. |
+| `/readyz` is 503 for a `sqlite` drive whose file is there | Its last save failed; writes to it answered `500` or `507` | Free space or fix the volume, then `POST /v1/drives/<id>/ops/sync`: a save that succeeds makes the drive ready. Until then what was written since the failure is in memory only. |
 | `503` with `EBADF` | The drive's filesystem was shut down under the server | Restart. |
 | `503` with `EAGAIN`/`EBUSY` and `Retry-After: 1` | Transient contention in storage | None if brief. Sustained: check storage latency. |
 | Start fails at once with code 1 and `EAGAIN: resource temporarily unavailable, acquire writer` | Another process holds the drive's writer lease, or a killed process's lease has not expired | Make sure no other instance runs. The process does not wait for the lease; let the supervisor restart it with back-off until the lease expires. See below. |

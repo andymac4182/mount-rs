@@ -937,6 +937,27 @@ fn supports_sdk_reopen(options: &CliOptions) -> bool {
     }
 }
 
+/// The storage `/readyz` keeps an eye on for a drive, where the drive does
+/// not notice by itself that it has gone: the root of a `host` drive and
+/// the database of a `sqlite` drive. A split-store drive reports its own
+/// health, and a `memory` drive has no storage to lose.
+fn checked_storage(
+    options: &CliOptions,
+) -> Result<Option<crate::storage_check::Storage>, CliError> {
+    use crate::storage_check::Storage;
+    Ok(match options.driver {
+        DriverChoice::Host => Some(Storage::Directory(match options.root.as_deref() {
+            Some(root) => expand_path(root),
+            None => std::env::current_dir().map_err(io_error)?,
+        })),
+        DriverChoice::Sqlite => options
+            .database
+            .as_deref()
+            .map(|database| Storage::File(expand_path(database))),
+        DriverChoice::Memory | DriverChoice::SplitStore | DriverChoice::Remote => None,
+    })
+}
+
 async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     let spec = load_config(config_path)?;
     let http = spec.http.as_ref().ok_or_else(|| {
@@ -968,6 +989,8 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
 
     let mut metadata_pools =
         std::collections::BTreeMap::<String, mount_rs_sdk::TidbStorePool>::new();
+    // Kept until the command returns: dropping one stops its thread.
+    let mut storage_checks = Vec::new();
     let mut configured_drives = Vec::with_capacity(http.drives.len());
     for drive in &http.drives {
         let token = std::env::var(&drive.token.name).map_err(|_| {
@@ -1044,8 +1067,14 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
             }
             let invalid_drive =
                 |error| CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id));
-            let configured = HttpDriveConfig::new(drive.id.clone(), runtime.driver(), token)
+            let mut configured = HttpDriveConfig::new(drive.id.clone(), runtime.driver(), token)
                 .map_err(invalid_drive)?;
+            if let Some(storage) = checked_storage(&options)? {
+                let check = crate::storage_check::StorageCheck::start(&drive.id, storage)
+                    .map_err(io_error)?;
+                configured = configured.with_health_check(check.health_check());
+                storage_checks.push(check);
+            }
             registry.register(configured).map_err(invalid_drive)?;
         }
         if let Some(config) = http.forwarding.as_ref().filter(|config| config.owner) {
