@@ -98,7 +98,8 @@ is always either kept or released.
 - It fails for any other reason (storage unreachable, bad configuration):
   back to STANDBY with an exponential back-off (1 s doubling to 60 s). Until
   the back-off ends the node withdraws its announcement for that drive, so
-  the others stop counting it.
+  the others stop counting it. The doubling starts again from 1 s after an
+  open that reached the lease (acquired for a minute, or found held).
 
 **OWNER.** With the lease held, the node installs the drive in its peer
 router and public listener, and only then publishes the route, carrying the

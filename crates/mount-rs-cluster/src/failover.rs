@@ -127,7 +127,8 @@ pub struct FailoverMachine {
     /// No open may start before this (lease retry, back-off, hold-off).
     not_before: Option<Instant>,
     lease_retry: Duration,
-    /// Consecutive failed opens and lost leases.
+    /// Failed opens and lost leases in a row: ended by an open that
+    /// reached the lease, or by a minute of ownership.
     failures: u32,
     /// Not a candidate until this: the node recently failed to open or keep
     /// the volume.
@@ -247,6 +248,9 @@ impl FailoverMachine {
                 }
             }
             OpenOutcome::LeaseHeld => {
+                // Storage answered and the volume is openable; only the
+                // lease is taken. Whatever failed before is over.
+                self.failures = 0;
                 self.not_before = Some(now + self.lease_retry);
                 self.lease_retry = self
                     .lease_retry
@@ -484,6 +488,36 @@ mod tests {
         standby.released(now + SECOND * 61, ReleaseReason::LeaseLost);
         assert!(!standby.is_candidate(now + SECOND * 61));
         assert!(standby.is_candidate(now + SECOND * 62));
+    }
+
+    #[test]
+    fn reaching_the_lease_ends_a_streak_of_failed_opens() {
+        let (best, _) = ranked_pair();
+        let mut standby = machine(&best, timings());
+        let everyone = live(&["node-a", "node-b"]);
+        let mut now = Instant::now();
+        let mut backed_off = |standby: &mut FailoverMachine, outcome| {
+            while standby.standby(now, RouteView::Absent, Some(&everyone)) == StandbyAction::Wait {
+                now += SECOND;
+            }
+            standby.opened(now, outcome);
+            let from = now;
+            while !standby.is_candidate(now) {
+                now += SECOND;
+            }
+            now.duration_since(from).as_secs()
+        };
+        // Storage is unreachable for a while: the back-off grows.
+        let waits: Vec<u64> = (0..5)
+            .map(|_| backed_off(&mut standby, OpenOutcome::Failed))
+            .collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16]);
+        // Then it answers, and the lease is simply held by the owner. That
+        // open got as far as this node ever needs to: it is not failing.
+        assert_eq!(backed_off(&mut standby, OpenOutcome::LeaseHeld), 0);
+        // One failure much later starts again from one second, not from
+        // where the old outage left off.
+        assert_eq!(backed_off(&mut standby, OpenOutcome::Failed), 1);
     }
 
     #[test]
