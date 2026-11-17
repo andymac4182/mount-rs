@@ -392,6 +392,8 @@ mod tests {
         }
     }
 
+    // The Redis client only understands `unix://` addresses on Unix.
+    #[cfg(unix)]
     #[test]
     fn a_unix_socket_is_local_and_never_tls() {
         assert_eq!(
