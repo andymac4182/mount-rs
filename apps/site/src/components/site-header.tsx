@@ -37,9 +37,12 @@ export function SiteHeader() {
           <a href="/#problem">
             Why mount-rs
           </a>
-          <a href="/#how-it-works">
-            How it works
-          </a>
+          <Link to="/architecture" activeOptions={{ exact: true }}>
+            Architecture
+          </Link>
+          <Link to="/benchmarks" activeOptions={{ exact: true }}>
+            Benchmarks
+          </Link>
           <Link to="/docs" activeOptions={{ exact: false }}>
             Docs
           </Link>

@@ -1,5 +1,8 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { CodeBlock } from '../components/code-block'
+import { benchRow } from '../content/benchmarks'
+
+const fmt = (ms: number) => ms.toFixed(2)
 
 export const Route = createFileRoute('/')({
   head: () => ({
@@ -254,6 +257,46 @@ await fs.writeFile('/hello', Buffer.from('hello'));`}</CodeBlock>
         <div className="value-strip">
           <div><p className="eyebrow">What changes for your team</p><h2>Infrastructure can move without rewriting the product boundary.</h2></div>
           <div className="value-list"><div><strong>Ship sooner</strong><span>Use memory or local providers while the product takes shape.</span></div><div><strong>Change deliberately</strong><span>Move metadata, blocks, or edge transport as separate decisions.</span></div><div><strong>Explain the risk</strong><span>Read provider maturity and acceptance evidence before production claims.</span></div></div>
+        </div>
+      </section>
+
+      <section className="ink-section arch-fast" id="fast">
+        <div className="page-frame">
+          <div className="section-heading solution-heading">
+            <p className="eyebrow eyebrow-light">Fast by design</p>
+            <h2>Sub-millisecond metadata, even one server away.</h2>
+            <p>
+              Each drive has one owner that keeps its namespace in memory. Any
+              server can take a request and forward it in one HTTP/3 hop, so a
+              load balancer never needs to know where a drive lives.
+            </p>
+          </div>
+          <div className="home-fast-grid">
+            <article className="arch-fast-card">
+              <span className="solution-card-number">{fmt(benchRow('durable-refresh', 'forwarded', 'stat').p99)} ms</span>
+              <h3>Forwarded read p99</h3>
+              <p>Durable TiDB drive, 100 drives across three servers.</p>
+            </article>
+            <article className="arch-fast-card">
+              <span className="solution-card-number">{fmt(benchRow('exclusive', 'forwarded', 'rename').p99)} ms</span>
+              <h3>Forwarded rename p99</h3>
+              <p>Writeback drive: applied in memory, published afterwards.</p>
+            </article>
+            <article className="arch-fast-card">
+              <span className="solution-card-number">{fmt(benchRow('exclusive', 'local', 'stat').p99)} ms</span>
+              <h3>Local read p99</h3>
+              <p>Answered from the owner’s in-memory namespace.</p>
+            </article>
+            <article className="arch-fast-card">
+              <span className="solution-card-number">1 hop</span>
+              <h3>Any node, any drive</h3>
+              <p>Routes cached and refreshed in the background; pinned, pooled QUIC peers.</p>
+            </article>
+          </div>
+          <div className="home-fast-links">
+            <Link className="button button-warm" to="/architecture">See the architecture</Link>
+            <Link className="button button-ghost" to="/benchmarks">Read the benchmarks</Link>
+          </div>
         </div>
       </section>
 

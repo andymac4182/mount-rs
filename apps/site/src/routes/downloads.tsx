@@ -35,9 +35,15 @@ function DownloadsPage() {
           </a>{' '}
           is configured to publish matching CLI preview tags. Downloads here
           come from public GitHub Releases; Vercel does not mirror executable
-          bytes. The current <code>v0.1.0-cli-preview</code> asset and checksum
-          are live and verified, but no run of that publisher is recorded, so
-          we do not claim that workflow produced this release.
+          bytes. The current <code>{cliRelease.tag}</code> release was
+          published by that workflow from its tag in{' '}
+          <a href={cliRelease.publishRunUrl} {...externalProps()}>
+            run 43862615888
+          </a>
+          . The same version is published as a <code>linux/amd64</code> and{' '}
+          <code>linux/arm64</code> container image,{' '}
+          <code>{cliRelease.containerImage}</code>, with the CLI as its
+          entrypoint for <code>serve-http</code>.
         </p>
 
         <div className="callout callout-amber">

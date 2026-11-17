@@ -10,6 +10,8 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ArchitectureRouteImport } from './routes/architecture'
+import { Route as BenchmarksRouteImport } from './routes/benchmarks'
 import { Route as BrandLabRouteImport } from './routes/brand-lab'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as DownloadsRouteImport } from './routes/downloads'
@@ -27,6 +29,7 @@ import { Route as DocsProvidersOzoneRouteImport } from './routes/docs/providers/
 import { Route as DocsProvidersPgliteRouteImport } from './routes/docs/providers/pglite'
 import { Route as DocsProvidersR2RouteImport } from './routes/docs/providers/r2'
 import { Route as DocsProvidersRustfsRouteImport } from './routes/docs/providers/rustfs'
+import { Route as DocsProvidersSlatedbRouteImport } from './routes/docs/providers/slatedb'
 import { Route as DocsProvidersSqliteRouteImport } from './routes/docs/providers/sqlite'
 import { Route as DocsProvidersTidbRouteImport } from './routes/docs/providers/tidb'
 import { Route as DocsTransportsIndexRouteImport } from './routes/docs/transports/index'
@@ -40,6 +43,16 @@ import { Route as DocsTransportsWebdavRouteImport } from './routes/docs/transpor
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ArchitectureRoute = ArchitectureRouteImport.update({
+  id: '/architecture',
+  path: '/architecture',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BenchmarksRoute = BenchmarksRouteImport.update({
+  id: '/benchmarks',
+  path: '/benchmarks',
   getParentRoute: () => rootRouteImport,
 } as any)
 const BrandLabRoute = BrandLabRouteImport.update({
@@ -128,6 +141,11 @@ const DocsProvidersRustfsRoute = DocsProvidersRustfsRouteImport.update({
   path: '/rustfs',
   getParentRoute: () => DocsProvidersRoute,
 } as any)
+const DocsProvidersSlatedbRoute = DocsProvidersSlatedbRouteImport.update({
+  id: '/slatedb',
+  path: '/slatedb',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
 const DocsProvidersSqliteRoute = DocsProvidersSqliteRouteImport.update({
   id: '/sqlite',
   path: '/sqlite',
@@ -176,6 +194,8 @@ const DocsTransportsWebdavRoute = DocsTransportsWebdavRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/architecture': typeof ArchitectureRoute
+  '/benchmarks': typeof BenchmarksRoute
   '/brand-lab': typeof BrandLabRoute
   '/docs': typeof DocsRouteWithChildren
   '/downloads': typeof DownloadsRoute
@@ -192,6 +212,7 @@ export interface FileRoutesByFullPath {
   '/docs/providers/pglite': typeof DocsProvidersPgliteRoute
   '/docs/providers/r2': typeof DocsProvidersR2Route
   '/docs/providers/rustfs': typeof DocsProvidersRustfsRoute
+  '/docs/providers/slatedb': typeof DocsProvidersSlatedbRoute
   '/docs/providers/sqlite': typeof DocsProvidersSqliteRoute
   '/docs/providers/tidb': typeof DocsProvidersTidbRoute
   '/docs/transports/9p': typeof DocsTransports9pRoute
@@ -205,6 +226,8 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/architecture': typeof ArchitectureRoute
+  '/benchmarks': typeof BenchmarksRoute
   '/brand-lab': typeof BrandLabRoute
   '/downloads': typeof DownloadsRoute
   '/docs/cli': typeof DocsCliRoute
@@ -218,6 +241,7 @@ export interface FileRoutesByTo {
   '/docs/providers/pglite': typeof DocsProvidersPgliteRoute
   '/docs/providers/r2': typeof DocsProvidersR2Route
   '/docs/providers/rustfs': typeof DocsProvidersRustfsRoute
+  '/docs/providers/slatedb': typeof DocsProvidersSlatedbRoute
   '/docs/providers/sqlite': typeof DocsProvidersSqliteRoute
   '/docs/providers/tidb': typeof DocsProvidersTidbRoute
   '/docs/transports/9p': typeof DocsTransports9pRoute
@@ -232,6 +256,8 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/architecture': typeof ArchitectureRoute
+  '/benchmarks': typeof BenchmarksRoute
   '/brand-lab': typeof BrandLabRoute
   '/docs': typeof DocsRouteWithChildren
   '/downloads': typeof DownloadsRoute
@@ -248,6 +274,7 @@ export interface FileRoutesById {
   '/docs/providers/pglite': typeof DocsProvidersPgliteRoute
   '/docs/providers/r2': typeof DocsProvidersR2Route
   '/docs/providers/rustfs': typeof DocsProvidersRustfsRoute
+  '/docs/providers/slatedb': typeof DocsProvidersSlatedbRoute
   '/docs/providers/sqlite': typeof DocsProvidersSqliteRoute
   '/docs/providers/tidb': typeof DocsProvidersTidbRoute
   '/docs/transports/9p': typeof DocsTransports9pRoute
@@ -263,6 +290,8 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/architecture'
+    | '/benchmarks'
     | '/brand-lab'
     | '/docs'
     | '/downloads'
@@ -279,6 +308,7 @@ export interface FileRouteTypes {
     | '/docs/providers/pglite'
     | '/docs/providers/r2'
     | '/docs/providers/rustfs'
+    | '/docs/providers/slatedb'
     | '/docs/providers/sqlite'
     | '/docs/providers/tidb'
     | '/docs/transports/9p'
@@ -292,6 +322,8 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/architecture'
+    | '/benchmarks'
     | '/brand-lab'
     | '/downloads'
     | '/docs/cli'
@@ -305,6 +337,7 @@ export interface FileRouteTypes {
     | '/docs/providers/pglite'
     | '/docs/providers/r2'
     | '/docs/providers/rustfs'
+    | '/docs/providers/slatedb'
     | '/docs/providers/sqlite'
     | '/docs/providers/tidb'
     | '/docs/transports/9p'
@@ -318,6 +351,8 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/architecture'
+    | '/benchmarks'
     | '/brand-lab'
     | '/docs'
     | '/downloads'
@@ -334,6 +369,7 @@ export interface FileRouteTypes {
     | '/docs/providers/pglite'
     | '/docs/providers/r2'
     | '/docs/providers/rustfs'
+    | '/docs/providers/slatedb'
     | '/docs/providers/sqlite'
     | '/docs/providers/tidb'
     | '/docs/transports/9p'
@@ -348,6 +384,8 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ArchitectureRoute: typeof ArchitectureRoute
+  BenchmarksRoute: typeof BenchmarksRoute
   BrandLabRoute: typeof BrandLabRoute
   DocsRoute: typeof DocsRouteWithChildren
   DownloadsRoute: typeof DownloadsRoute
@@ -360,6 +398,20 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/architecture': {
+      id: '/architecture'
+      path: '/architecture'
+      fullPath: '/architecture'
+      preLoaderRoute: typeof ArchitectureRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/benchmarks': {
+      id: '/benchmarks'
+      path: '/benchmarks'
+      fullPath: '/benchmarks'
+      preLoaderRoute: typeof BenchmarksRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/brand-lab': {
@@ -481,6 +533,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DocsProvidersRustfsRouteImport
       parentRoute: typeof DocsProvidersRoute
     }
+    '/docs/providers/slatedb': {
+      id: '/docs/providers/slatedb'
+      path: '/slatedb'
+      fullPath: '/docs/providers/slatedb'
+      preLoaderRoute: typeof DocsProvidersSlatedbRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
     '/docs/providers/sqlite': {
       id: '/docs/providers/sqlite'
       path: '/sqlite'
@@ -555,6 +614,7 @@ interface DocsProvidersRouteChildren {
   DocsProvidersPgliteRoute: typeof DocsProvidersPgliteRoute
   DocsProvidersR2Route: typeof DocsProvidersR2Route
   DocsProvidersRustfsRoute: typeof DocsProvidersRustfsRoute
+  DocsProvidersSlatedbRoute: typeof DocsProvidersSlatedbRoute
   DocsProvidersSqliteRoute: typeof DocsProvidersSqliteRoute
   DocsProvidersTidbRoute: typeof DocsProvidersTidbRoute
   DocsProvidersIndexRoute: typeof DocsProvidersIndexRoute
@@ -568,6 +628,7 @@ const DocsProvidersRouteChildren: DocsProvidersRouteChildren = {
   DocsProvidersPgliteRoute: DocsProvidersPgliteRoute,
   DocsProvidersR2Route: DocsProvidersR2Route,
   DocsProvidersRustfsRoute: DocsProvidersRustfsRoute,
+  DocsProvidersSlatedbRoute: DocsProvidersSlatedbRoute,
   DocsProvidersSqliteRoute: DocsProvidersSqliteRoute,
   DocsProvidersTidbRoute: DocsProvidersTidbRoute,
   DocsProvidersIndexRoute: DocsProvidersIndexRoute,
@@ -623,6 +684,8 @@ const DocsRouteWithChildren = DocsRoute._addFileChildren(DocsRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ArchitectureRoute: ArchitectureRoute,
+  BenchmarksRoute: BenchmarksRoute,
   BrandLabRoute: BrandLabRoute,
   DocsRoute: DocsRouteWithChildren,
   DownloadsRoute: DownloadsRoute,

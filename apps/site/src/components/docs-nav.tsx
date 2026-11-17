@@ -17,6 +17,12 @@ export function DocsNav() {
         Node API
       </Link>
       <p className="eyebrow">Understand</p>
+      <Link to="/architecture" activeOptions={{ exact: true }}>
+        Architecture
+      </Link>
+      <Link to="/benchmarks" activeOptions={{ exact: true }}>
+        Benchmarks
+      </Link>
       <Link to="/docs/providers" activeOptions={{ exact: false }}>
         Providers
       </Link>
