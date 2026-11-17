@@ -1380,6 +1380,9 @@ fn http_server_options(
         max_buffered_upload_bytes: Some(config.max_buffered_upload_bytes),
         // Set by the caller, which owns the log's writer.
         access_log: None,
+        // A server of a forwarding cluster serves by forwarding: one that
+        // owns no drive is ready all the same.
+        ready_without_drives: config.forwarding.is_some(),
         #[cfg(feature = "observability")]
         telemetry,
     }

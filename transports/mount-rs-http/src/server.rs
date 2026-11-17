@@ -409,6 +409,11 @@ pub struct HttpServerOptions {
     /// Told about every request once its response is finished with
     /// (default: none). Without one a request pays for a single check.
     pub access_log: Option<Arc<dyn AccessLog>>,
+    /// Report ready from `/readyz` while no drive is registered (default:
+    /// false). For a server that forwards requests to the servers that own
+    /// the drives: it can serve without a drive of its own. A registered
+    /// drive that has failed still makes the server not ready.
+    pub ready_without_drives: bool,
     #[cfg(feature = "observability")]
     pub telemetry: Telemetry,
 }
@@ -431,6 +436,7 @@ impl Default for HttpServerOptions {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_buffered_upload_bytes: None,
             access_log: None,
+            ready_without_drives: false,
             #[cfg(feature = "observability")]
             telemetry: Telemetry::disabled(),
         }
@@ -501,6 +507,7 @@ struct RequestConfig {
     upload_budget: Arc<Semaphore>,
     control: RuntimeControl,
     access_log: Option<Arc<dyn AccessLog>>,
+    ready_without_drives: bool,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
 }
@@ -675,6 +682,7 @@ impl HttpServer {
                     upload_budget: Arc::new(Semaphore::new(upload_budget_units(upload_budget))),
                     control,
                     access_log: options.access_log,
+                    ready_without_drives: options.ready_without_drives,
                     #[cfg(feature = "observability")]
                     telemetry: options.telemetry,
                 },
@@ -710,19 +718,66 @@ impl HttpServer {
     /// Serve one request from an alternate transport using the same authorization,
     /// filesystem semantics, limits and shutdown tracking as the TCP listener.
     pub async fn handle(&self, request: Request<HttpBody>) -> Response<HttpBody> {
+        self.handle_in(self.state.clone(), request).await
+    }
+
+    /// Serve one request as [`HttpServer::handle`] does, but against
+    /// `drives` instead of the drives this application was built with.
+    ///
+    /// For a listener whose drives are each held by an application of
+    /// their own and may change while it runs (a cluster owner): it gives
+    /// the requests that name no drive (the probes, discovery and paths
+    /// that are no route) to one application together with every drive it
+    /// serves at that moment, so that they are answered as a single
+    /// application holding those drives would answer them.
+    pub async fn handle_with_drives(
+        &self,
+        drives: DriveRegistry,
+        request: Request<HttpBody>,
+    ) -> Response<HttpBody> {
+        let state = Arc::new(AppState {
+            handler: None,
+            registry: Arc::new(drives),
+            config: self.state.config.clone(),
+        });
+        self.handle_in(state, request).await
+    }
+
+    async fn handle_in(
+        &self,
+        state: Arc<AppState>,
+        request: Request<HttpBody>,
+    ) -> Response<HttpBody> {
         self.connections.fetch_add(1, Ordering::AcqRel);
         let _guard = ConnectionGuard {
             counter: self.connections.clone(),
             drained: self.drained.clone(),
         };
+        // Serve under the shutdown of the listener that received the
+        // request, when there is one in front of this application.
+        let state = match request.extensions().get::<ListenerShutdown>() {
+            Some(ListenerShutdown(listener)) => Arc::new(AppState {
+                handler: None,
+                registry: Arc::clone(&state.registry),
+                config: RequestConfig {
+                    control: RuntimeControl {
+                        shutdown: Arc::clone(&listener.shutdown),
+                        closing: Arc::clone(&listener.closing),
+                        ..state.config.control.clone()
+                    },
+                    ..state.config.clone()
+                },
+            }),
+            None => state,
+        };
         if self.closing.load(Ordering::Acquire) != 0 {
             let mut request = request;
             let id = assign_request_id(&mut request);
-            let observed = ObservedRequest::begin(&mut request, id.as_ref(), &self.state);
+            let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state);
             let response = with_request_id(error_response(RequestError::server_closing()), id);
             return ObservedRequest::finish(observed, response);
         }
-        match handle_request(request, self.state.clone()).await {
+        match handle_request(request, state).await {
             Ok(response) => response,
             Err(never) => match never {},
         }
@@ -1415,6 +1470,15 @@ impl HttpResponseFailure {
 #[derive(Clone, Copy)]
 struct RequestScope;
 
+/// Carried by a request that a listener gave to its handler: the shutdown
+/// of that listener. An application the handler passes the request to
+/// (`HttpServer::handle`) is closed only after the listener has drained, so
+/// without this a request in progress would not learn of the shutdown: an
+/// upload still arriving would hold the drain for all of its timeout
+/// instead of being refused at once, as the listener's own routes refuse it.
+#[derive(Clone)]
+struct ListenerShutdown(RuntimeControl);
+
 fn valid_request_id(value: &[u8]) -> bool {
     (1..=MAX_REQUEST_ID_BYTES).contains(&value.len())
         && value
@@ -1477,6 +1541,13 @@ async fn handle_request(
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
     let id = assign_request_id(&mut request);
+    if id.is_some() && state.handler.is_some() {
+        // This listener received the request and a handler will serve it:
+        // let an application behind the handler see this listener close.
+        request
+            .extensions_mut()
+            .insert(ListenerShutdown(state.config.control.clone()));
+    }
     let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state);
     let response = match handle_request_instrumented(request, state).await {
         Ok(response) => response,
@@ -1766,7 +1837,12 @@ async fn handle_request_uninstrumented(
 
     match &route {
         Route::Health { readiness } => {
-            return handle_health(&parts.method, &state.registry, *readiness);
+            return handle_health(
+                &parts.method,
+                &state.registry,
+                *readiness,
+                state.config.ready_without_drives,
+            );
         }
         Route::Discovery => {
             return handle_discovery(&parts.method, &parts.headers, &state.registry);
@@ -1903,7 +1979,12 @@ fn handle_discovery(
     json_response(StatusCode::OK, Bytes::from(body), method == Method::HEAD)
 }
 
-fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> Response<HttpBody> {
+fn handle_health(
+    method: &Method,
+    registry: &DriveRegistry,
+    readiness: bool,
+    ready_without_drives: bool,
+) -> Response<HttpBody> {
     if method != Method::GET && method != Method::HEAD {
         return error_response(RequestError::method_not_allowed("GET, HEAD"));
     }
@@ -1921,7 +2002,7 @@ fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> 
     } else {
         0
     };
-    let is_ready = !readiness || (!registry.is_empty() && failed == 0);
+    let is_ready = !readiness || ((!registry.is_empty() || ready_without_drives) && failed == 0);
     let status = if is_ready {
         StatusCode::OK
     } else {

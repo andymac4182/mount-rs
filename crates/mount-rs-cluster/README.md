@@ -382,9 +382,22 @@ Real socket tests now include public HTTP PUT, full/range GET, bearer refusal,
 internal-header spoof refusal, and listener shutdown. Two ingress listeners
 with independent route caches share the same owner and see each other's writes;
 closing either ingress does not close the shared owner. The fixture uses one
-process and a shared peer client. Production public TLS and native remote
-mounts remain open; `mount-rs serve-http` provides the CLI startup
-configuration.
+process and a shared peer client. `mount-rs serve-http` provides the CLI
+startup configuration, and the public surface it serves is specified in
+`transports/mount-rs-http/openapi-cluster.yaml` and checked with real
+processes by `apps/mount-rs-cli/tests/cluster_contract.rs`. Public TLS is the
+reverse proxy's job, as for a single server. Native remote mounts remain
+open.
+
+`IngressForwarder::forward` returns the owner's answer as it was, including
+an owner's refusal of a request it did not run (404, 409 or 503 with
+`x-mount-dispatch: not-dispatched` and no body). The `HttpRequestHandler`
+implementation, which is what a public listener uses, turns every such
+refusal into the one public answer for a request that was not dispatched:
+503 with `Retry-After: 1` and the standard error body. `ClusterIngress`
+does the same for a drive the server owns itself, and answers paths that
+name no drive (`/healthz`, `/readyz`, `/v1/drives`) from the drives the
+owner router holds at that moment instead of forwarding them.
 
 ## Remote handle lifecycle foundation
 
@@ -395,8 +408,8 @@ before open side effects, and provides retryable explicit close/drain. The
 future transport must own authentication, bounded session counts, expiration
 and cleanup; dropping the table alone is not cleanup. Pending opens reserve capacity without holding the
 table lock across backend work; cancellation releases the reservation and drain
-waits for admitted opens. This is not an implemented HTTP session protocol or
-remote driver.
+waits for admitted opens. The HTTP session protocol built on it is
+`SessionHttpHandler`, below.
 
 `VolumeSessions` adds bounded per-volume session ownership, 256-bit OS-random
 session tokens bound to authenticated client identities, idle-expiry admission
@@ -422,7 +435,9 @@ memory. Unbudgeted `new` remains a per-volume-only constructor.
 session HTTP routes. It rejects duplicate Authorization headers and never trusts
 caller identity headers. Supply high-entropy tokens over encrypted transport;
 length validation does not establish entropy. Debug redacts credential material.
-The helper is not yet wired into routes and does not manage TLS or rotation.
+`serve-http` uses it for the session routes of every drive when
+`http.remote_sessions` is set. It does not manage TLS or rotation: tokens
+are read at startup and change by restart.
 
 `SessionHttpHandler` implements `HttpRequestHandler` for authenticated POST/DELETE
 `/v1/drives/{volume}/sessions`. POST returns protocol version 1 and a session token;
@@ -438,7 +453,8 @@ the registry for that exact owned SDK filesystem and volume, using the supplied
 shared session budget. Obtain `session_registry()` to own its expiry worker.
 Drain public and peer listeners before owner close; owner close then drains the
 session registry before the caller shuts down the filesystem. Configuration is
-opt-in and not yet exposed by the production CLI startup path.
+opt-in; `mount-rs serve-http` turns it on with `http.remote_sessions: true`
+and sets the limits from `http.sessions`.
 
 Handle RPC uses authenticated POST JSON controls (open/read/stat/truncate/sync/
 close; 8KiB maximum), and PUT raw writes (64KiB maximum) with `x-mount-handle`

@@ -273,9 +273,16 @@ The full documentation is in three places:
 - Operator runbook (config reference, proxy, health, shutdown, recovery):
   [`docs/serve-http-runbook.md`](../../docs/serve-http-runbook.md)
 
-The v1 launch contract is plain `serve-http` with `remote_sessions: false` and
-no `forwarding` block. The session and forwarding features described later in
-this file are experimental and are not part of that contract.
+- Sessions, forwarding and failover: the contract is
+  [`transports/mount-rs-http/openapi-cluster.yaml`](../../transports/mount-rs-http/openapi-cluster.yaml),
+  checked against real servers by `apps/mount-rs-cli/tests/cluster_contract.rs`;
+  the operator chapter, with a config reference for every key, a worked
+  three-server example ([`examples/cluster/`](examples/cluster/)) and the
+  known limits, is ["Clusters" in the runbook](../../docs/serve-http-runbook.md#clusters).
+
+The file routes (v1) answer the same on a plain server, with
+`remote_sessions`, and on every server of a forwarding cluster; the
+specified differences are listed in the API guide's "Clusters" section.
 
 ### Configuration
 
@@ -784,9 +791,9 @@ Each volume needs an explicit non-secret scope identifying its backing generatio
 Change it if backing data is recreated or block IDs can be reused, including when
 starting a fresh memory backing store. The same scope cannot be owned by two
 independent disk-cache instances. This setting works for local split-store mounts
-and `serve-http` drives. The experimental remote client/session libraries exist,
-but production cluster-server startup and native remote-mount acceptance remain
-incomplete; this cache setting does not supply that lifecycle.
+and `serve-http` drives, including the drives of a cluster owner. Native
+remote-mount acceptance (the `remote` driver, below) remains incomplete; this
+cache setting does not supply that lifecycle.
 
 Limits cover encoded cache bytes (including 80-byte entry headers) and entry
 count. `max_bytes` must be at least 80 and `max_entries` positive. Omission keeps
@@ -857,8 +864,11 @@ not supported by this command. FUSE requests uncached kernel access for remote
 volumes. NFS/9p cache coherence and native remote mounts remain unqualified.
 The CLI owns a keepalive worker using the server-advertised idle timeout and
 joins it before session shutdown. Failed refreshes stop without recreating the
-session. Failover recovery and production server startup remain unfinished. Do not use
-this experimental mode as production acceptance evidence.
+session: after the server that owned the drive stops, or the drive fails over
+to another server, the mount's session is gone and the mount must be started
+again. The server side of this protocol (`http.remote_sessions`, below) has a
+contract and tests of its own; what is experimental here is the mount client.
+Do not use this client mode as production acceptance evidence.
 
 ### Remote sessions on a configured HTTP server
 

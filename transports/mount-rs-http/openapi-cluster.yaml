@@ -1,0 +1,1032 @@
+openapi: 3.1.0
+info:
+  title: mount-rs HTTP drive API, cluster additions
+  version: "1.0.0"
+  summary: Sessions, handles and forwarding responses of a clustered `mount-rs serve-http`.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  description: |
+    What `mount-rs serve-http` serves in addition to `openapi.yaml` when it
+    is configured with `remote_sessions` or `forwarding`. The file routes of
+    `openapi.yaml` are served unchanged by such a server; this document does
+    not repeat them.
+
+    It has two parts.
+
+    1. **Sessions and handles** (`paths`): served for a drive when the server
+       that owns the drive has `remote_sessions: true`. A session keeps open
+       file handles on the server between requests, which the file routes of
+       `openapi.yaml` cannot do. It is the protocol the remote drive client
+       (`mount-rs mount` with a `remote` block) speaks.
+    2. **Forwarding responses** (`x-forwarding-responses` and
+       `components/responses/Forwarding*`): what a server with a `forwarding`
+       block answers, instead of the drive's own response, when the request
+       could not be given to the server that owns the drive.
+
+    ## Authentication
+
+    The session routes take the drive's bearer token, as the file routes do.
+    A server with `remote_sessions: true` refuses to start unless every
+    drive token is 32 to 256 characters from `A-Z a-z 0-9 - . _ ~ + / =`.
+    On the session routes a request must carry exactly one `Authorization`
+    header of the form `Bearer <token>` with one space; anything else is 401.
+
+    A session is named by a session token: 64 lowercase hexadecimal
+    characters, returned once by `createSession` and sent afterwards in the
+    `x-mount-session` header, never in a URL. The session token alone grants
+    nothing: every request must also carry the drive's bearer token, and a
+    session is usable only with the bearer token that created it.
+
+    ## Order of checks
+
+    For the two session paths, the first failure is the response.
+
+    1. Server shutting down: 503 with the error body of `openapi.yaml`.
+    2. Declared `Content-Length` above `max_request_bytes`: 413 with the
+       error body of `openapi.yaml`, connection closed.
+    3. Bearer token: 401.
+    4. A query string: 400.
+    5. Method: 405 with `Allow`.
+    6. The `x-mount-session` header, then the session itself: 400, 403 or 409.
+    7. The other headers and the body: 400, 408 or 413.
+    8. The operation.
+
+    Unlike the file routes, a 405 is returned before the session is checked,
+    and an unknown drive is 401 on a server without `forwarding` and the
+    forwarding 503 on one with it.
+
+    ## Errors
+
+    The session routes use their own error body, `SessionError`:
+    `{"error":{"code":"ENOENT","syscall":"session"}}`. It has no `message`.
+    Branch on `code`. The HTTP status is coarser than on the file routes:
+    a filesystem error that is not listed under a specific status is
+    returned as 500 with its code, so `EEXIST`, `ENOTEMPTY`, `EISDIR`,
+    `ENOTDIR` and `ENOTSUP` are all 500 here. A 500 is therefore not by
+    itself a server fault on these routes; the code says what happened.
+
+    | Status | Codes |
+    | --- | --- |
+    | 400 | `EINVAL` |
+    | 401 | `EACCES` (bearer token) |
+    | 403 | `EACCES` (session unknown, closed, expired and removed, or created with another token; or a filesystem permission error) |
+    | 404 | `ENOENT` |
+    | 405 | `ENOSYS` |
+    | 408 | `EINTR` (the request body did not arrive within 5 seconds) |
+    | 409 | `EBADF` (unknown or closed handle; drive shutting down), `ESTALE` (session expired or closing; drive lease lost) |
+    | 413 | `EFBIG` |
+    | 429 | `ENFILE` (session limit), `EMFILE` (handle limit) |
+    | 503 | `EAGAIN` |
+    | 500 | every other code |
+
+    Three responses on these paths are produced by the listener before the
+    session code runs and carry the error body of `openapi.yaml`
+    (`{"error":{"code","message"}}`): 503 while shutting down, 413 for a
+    declared `Content-Length` above `max_request_bytes`, and 504 when the
+    request exceeds `request_timeout_ms`.
+
+    ## Limits
+
+    | Limit | Value | Effect when exceeded |
+    | --- | --- | --- |
+    | Bytes read or written by one request | 65536, or `max_request_bytes` if that is smaller. Reported as `max_io_bytes` by the `capabilities` operation | 413 `EFBIG` |
+    | JSON operation body | 8192 bytes, or `max_request_bytes` if smaller | 413 `EFBIG` |
+    | JSON response (listings, metadata) | 1 MiB | 413 `EFBIG`. A directory whose listing is larger cannot be listed through a session |
+    | Path length | 4096 bytes | 400 `EINVAL` |
+    | Time to receive a request body | 5 s | 408 `EINTR` |
+    | Sessions per drive (`http.sessions.max_sessions_per_drive`) | 128 | 429 `ENFILE` |
+    | Sessions per server (`http.sessions.max_sessions`) | 4096 | 429 `ENFILE` |
+    | Open handles per session (`http.sessions.max_handles_per_session`) | 128 | 429 `EMFILE` |
+    | Idle time (`http.sessions.idle_timeout_seconds`) | 60 s, reported as `idle_timeout_ms` | The session is closed with its handles |
+
+    ## Lifetime of a session
+
+    A session lives in the memory of the server that owns the drive. It
+    ends when it is closed, when no request has named it for the idle
+    timeout, when that server stops, and when the drive moves to another
+    server (a failover). After any of these every request that names it
+    gets 403 `EACCES` or 409 `ESTALE`, and its handles are gone. Data
+    written through a handle and acknowledged is not lost; a write that was
+    not acknowledged has an unknown outcome. A client recovers by creating
+    a new session and opening its files again. Any request that names the
+    session, including the `capabilities` operation, counts as use.
+
+    ## Retries
+
+    The server retries nothing and deduplicates nothing. A response that
+    was lost leaves the outcome unknown. `createSession` whose response was
+    lost leaves a session that expires by itself. Positional reads
+    (`readHandle`), `stat`, `capabilities` and the read-only path actions
+    may be repeated. Writes at an explicit position and whole-file writes
+    may be repeated and give the same result. Writes without a position,
+    cursor reads, `open` with `exclusive` or `truncate`, and the mutating
+    path actions must be reconciled by the client.
+
+    ## Request ids
+
+    Every response carries `X-Request-Id` as described in `openapi.yaml`.
+
+    ## What a forwarding server answers itself
+
+    `/healthz`, `/readyz`, `/v1/drives` and every path that names no drive
+    are answered by the server that received the request, never forwarded.
+    They are as `openapi.yaml` describes, with these differences:
+
+    - `/readyz` counts the drives the server serves itself. A server that
+      holds none is ready with `drives: 0` (`ForwardingReady`). Readiness
+      does not test Redis or the other servers.
+    - `/v1/drives` lists only drives the answering server serves itself. A
+      token for a drive held elsewhere gets 401 there.
+    - A forwarded response carries the owner's status, headers and body,
+      except connection-level headers: a response `openapi.yaml` describes
+      as closing the connection closes the stream between the servers, not
+      necessarily the client's connection. A declared `Content-Length`
+      above the limit is still refused, and the connection closed, by the
+      server that received the request.
+
+    ## Conformance
+
+    `apps/mount-rs-cli/tests/cluster_contract.rs` checks this document
+    against a running `mount-rs serve-http` on every change: the session
+    routes and methods, and for each operation the declared statuses,
+    content types, bodies and headers; and, with a Redis server, the
+    forwarding responses of a real cluster.
+servers:
+  - url: https://{host}
+    description: The TLS reverse proxy or load balancer in front of the cluster.
+    variables:
+      host:
+        default: files.example.com
+tags:
+  - name: sessions
+    description: Session lifecycle.
+  - name: handles
+    description: Operations inside a session.
+security:
+  - bearerAuth: []
+x-forwarding-responses:
+  description: |
+    A server with a `forwarding` block can answer any request whose path
+    starts with `/v1/drives/{id}/`, in `openapi.yaml` and in this document,
+    with one of these responses instead of the drive's own. They carry the
+    error body of `openapi.yaml` with code `EIO`, and an `x-mount-dispatch`
+    header that says whether the request can have been executed.
+
+    - 503, `not-dispatched`: no server owns the drive just now, the route
+      to its owner could not be read, or the owner refused the request
+      before running it. Nothing was executed. Retry; `Retry-After: 1`.
+      A drive id that no server is configured with gets this response too,
+      not the 401 of a single server.
+    - 502, `unknown`: the request was given to the owner and the response
+      was lost or cut short. A read may be repeated. A write may or may
+      not have been applied: read back, or repeat it with a precondition.
+      The server does not replay it.
+    - 400, `not-dispatched`: the request cannot be forwarded: it carries a
+      reserved header (`x-mount-hop`, `x-mount-owner-route`), a
+      `Content-Length` that is not a number or is above the server's limit,
+      or a drive id that is not a valid id. Do not retry unchanged.
+
+    A response body that has begun cannot be replaced by one of these: if
+    the owner fails while a download is being sent, the connection is
+    closed before the declared length is reached.
+  responses:
+    "400": {$ref: "#/components/responses/ForwardingRejected"}
+    "502": {$ref: "#/components/responses/ForwardingOutcomeUnknown"}
+    "503": {$ref: "#/components/responses/ForwardingUnavailable"}
+paths:
+  /v1/drives/{id}/sessions:
+    parameters:
+      - {$ref: "#/components/parameters/DriveId"}
+    post:
+      operationId: createSession
+      tags: [sessions]
+      summary: Create a session.
+      description: |
+        Takes no body, no query and no `x-mount-session` header. The
+        response is the only time the session token is sent.
+      responses:
+        "201":
+          description: The session was created.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Session"}
+              example:
+                protocol_version: 1
+                session: 7a2cb24a2dc06357e0d8a17aab3ec7166de8cab8d8418a6fbac59c57ce76b666
+                idle_timeout_ms: 60000
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "408": {$ref: "#/components/responses/RequestTimeout"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "429": {$ref: "#/components/responses/TooMany"}
+        "500": {$ref: "#/components/responses/OtherError"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    delete:
+      operationId: closeSession
+      tags: [sessions]
+      summary: Close a session and every handle it holds.
+      description: |
+        Takes no body and no query. A session that is unknown, already
+        closed or expired and removed is 403, so repeating a close whose
+        response was lost gives 403.
+      parameters:
+        - {$ref: "#/components/parameters/Session"}
+      responses:
+        "204":
+          description: The session and its handles are closed.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "408": {$ref: "#/components/responses/RequestTimeout"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "500": {$ref: "#/components/responses/OtherError"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+  /v1/drives/{id}/sessions/handles:
+    parameters:
+      - {$ref: "#/components/parameters/DriveId"}
+      - {$ref: "#/components/parameters/Session"}
+    get:
+      operationId: readHandle
+      tags: [handles]
+      summary: Read from an open handle at a position.
+      description: |
+        The request has no body. The response body is the bytes read: fewer
+        than `x-mount-length` at the end of the file, none past it.
+      parameters:
+        - {$ref: "#/components/parameters/Handle"}
+        - name: x-mount-position
+          in: header
+          required: true
+          description: Byte offset to read from.
+          schema: {$ref: "#/components/schemas/Decimal"}
+        - name: x-mount-length
+          in: header
+          required: true
+          description: Most bytes to return; at most `max_io_bytes`.
+          schema: {$ref: "#/components/schemas/Decimal"}
+      responses:
+        "200":
+          description: The bytes read.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "405": {$ref: "#/components/responses/MethodNotAllowed"}
+        "408": {$ref: "#/components/responses/RequestTimeout"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "500": {$ref: "#/components/responses/OtherError"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    post:
+      operationId: sessionOperation
+      tags: [handles]
+      summary: Run one operation in the session.
+      description: |
+        The body is one JSON object whose `operation` names what to do.
+        Unknown properties are rejected with 400. The request must not
+        carry `x-mount-handle`, `x-mount-position` or `x-mount-length`.
+
+        | `operation` | Success |
+        | --- | --- |
+        | `capabilities` | 200, `Capabilities` |
+        | `open` | 200, `{"handle": n}` |
+        | `read` | 200, `application/octet-stream`. Without `position` it reads at the handle's cursor and advances it |
+        | `stat` | 200, `Stats` of the open file |
+        | `truncate`, `sync`, `close` | 204 |
+        | `path` | By `request.action`: `stat`, `lstat` 200 `Stats`; `statfs` 200 `StatsFs`; `readdir` 200 array of `DirEntry`; `readlink` 200 string; `mkdir` 200 string (the first directory created, with `recursive`) or null; every other action 204 |
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Operation"}
+      responses:
+        "200":
+          description: The result of the operation.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OperationResult"}
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "204":
+          description: The operation succeeded and has no result.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "408": {$ref: "#/components/responses/RequestTimeout"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "429": {$ref: "#/components/responses/TooMany"}
+        "500": {$ref: "#/components/responses/OtherError"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+    put:
+      operationId: writeHandle
+      tags: [handles]
+      summary: Write to an open handle, or replace a whole file.
+      description: |
+        The body is the bytes to write, at most `max_io_bytes`.
+
+        With `x-mount-handle`: write to that handle at `x-mount-position`,
+        or at its cursor (or the end, for a handle opened with `append`)
+        when the position is absent. 200 with the number of bytes written.
+
+        With `x-mount-write-file` instead: replace the file at that path
+        with the body in one step, creating it if it is missing. 204. The
+        request must not also carry `x-mount-handle` or `x-mount-position`.
+      parameters:
+        - name: x-mount-handle
+          in: header
+          description: The handle to write to. Required unless `x-mount-write-file` is sent.
+          schema: {$ref: "#/components/schemas/Decimal"}
+        - name: x-mount-position
+          in: header
+          description: Byte offset to write at.
+          schema: {$ref: "#/components/schemas/Decimal"}
+        - name: x-mount-write-file
+          in: header
+          description: |
+            Absolute path of the file to replace, percent-encoded: every
+            byte outside the visible ASCII range, and `%` itself, as `%XX`.
+            The decoded path must be UTF-8, start with `/` and be at most
+            4096 bytes.
+          schema: {type: string}
+          example: /reports/2026%20plan.txt
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: Bytes were written to the handle.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Written"}
+              example: {written: 11}
+        "204":
+          description: The file was replaced.
+          headers:
+            Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "408": {$ref: "#/components/responses/RequestTimeout"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "413": {$ref: "#/components/responses/TooLarge"}
+        "500": {$ref: "#/components/responses/OtherError"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+        "504": {$ref: "#/components/responses/GatewayTimeout"}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        The drive's token: 32 to 256 characters from
+        `A-Z a-z 0-9 - . _ ~ + / =`. Exactly one `Authorization` header.
+  parameters:
+    DriveId:
+      name: id
+      in: path
+      required: true
+      description: The drive id, as in `openapi.yaml`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9._-]+$"
+    Session:
+      name: x-mount-session
+      in: header
+      required: true
+      description: The session token returned by `createSession`. Exactly one header.
+      schema: {$ref: "#/components/schemas/SessionToken"}
+    Handle:
+      name: x-mount-handle
+      in: header
+      required: true
+      description: A handle returned by the `open` operation of this session.
+      schema: {$ref: "#/components/schemas/Decimal"}
+  headers:
+    XRequestId:
+      description: The id of the request, as in `openapi.yaml`.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._-]+$"
+    CacheControlNoStore:
+      description: Always `no-store` on a response of the session routes.
+      required: true
+      schema: {type: string, const: no-store}
+    CacheControlNoStoreSometimes:
+      description: |
+        `no-store` on a response of the session routes; absent on the
+        responses the listener produces before them.
+      schema: {type: string, const: no-store}
+    NoSniff:
+      description: "`nosniff`."
+      required: true
+      schema: {type: string, const: nosniff}
+    WwwAuthenticate:
+      required: true
+      schema: {type: string, const: Bearer}
+    Allow:
+      description: The methods the path accepts.
+      required: true
+      schema: {type: string}
+    ConnectionClose:
+      description: The server closes the connection after this response.
+      required: true
+      schema: {type: string, const: close}
+    ConnectionCloseSometimes:
+      description: Present when the server closes the connection after this response.
+      schema: {type: string, const: close}
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: {type: integer, minimum: 1}
+    RetryAfterAlways:
+      description: Seconds to wait before retrying.
+      required: true
+      schema: {type: integer, minimum: 1}
+    MountDispatchNotDispatched:
+      description: The request was not given to the drive. Nothing was executed.
+      required: true
+      schema: {type: string, const: not-dispatched}
+    MountDispatchUnknown:
+      description: The request was given to the drive's owner and its outcome is not known.
+      required: true
+      schema: {type: string, const: unknown}
+  responses:
+    BadRequest:
+      description: |
+        The request is malformed (`EINVAL`): a query string, a missing,
+        repeated or malformed `x-mount-session`, `x-mount-handle`,
+        `x-mount-position`, `x-mount-length` or `x-mount-write-file` header,
+        a header the method does not take, a body where none is allowed, a
+        body that is not a documented operation, or a path that is not
+        absolute.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: EINVAL, syscall: session}}
+    Unauthorized:
+      description: The bearer token is missing, malformed, repeated or not the drive's (`EACCES`).
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+        WWW-Authenticate: {$ref: "#/components/headers/WwwAuthenticate"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: EACCES, syscall: session}}
+    Forbidden:
+      description: |
+        `EACCES`: the session does not exist for this bearer token. It was
+        never created, was closed, expired and was removed, was created
+        with another token, or was lost with the server that held it.
+        Create a new session. Also returned when the filesystem refuses
+        an operation for lack of permission.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: EACCES, syscall: session}}
+    NotFound:
+      description: The path does not exist (`ENOENT`).
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: ENOENT, syscall: session}}
+    MethodNotAllowed:
+      description: The path does not take this method (`ENOSYS`). `HEAD` is not served.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+        Allow: {$ref: "#/components/headers/Allow"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: ENOSYS, syscall: session}}
+    RequestTimeout:
+      description: The request body did not arrive within 5 seconds (`EINTR`). Nothing was executed.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: EINTR, syscall: session}}
+    Conflict:
+      description: |
+        `EBADF`: the handle is not open in this session, or the drive is
+        shutting down. `ESTALE`: the session has expired or is closing, or
+        the server no longer holds the drive. Create a new session.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: EBADF, syscall: session}}
+    TooLarge:
+      description: |
+        `EFBIG`: the body, the requested read length or the JSON result is
+        over its limit. With the session error body when the session routes
+        refuse it; with the error body of `openapi.yaml` and the connection
+        closed when the declared `Content-Length` is above
+        `max_request_bytes`.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStoreSometimes"}
+        Connection: {$ref: "#/components/headers/ConnectionCloseSometimes"}
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - {$ref: "#/components/schemas/SessionError"}
+              - {$ref: "#/components/schemas/Error"}
+          example: {error: {code: EFBIG, syscall: session}}
+    TooMany:
+      description: |
+        A limit on sessions (`ENFILE`) or on open handles in the session
+        (`EMFILE`) is reached. Close something, or wait for idle sessions
+        to expire.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: ENFILE, syscall: session}}
+    OtherError:
+      description: |
+        Any filesystem error without a status of its own, with its code:
+        `EEXIST`, `ENOTEMPTY`, `EISDIR`, `ENOTDIR`, `ENOTSUP`, `EIO` and
+        others. Not necessarily a server fault; branch on `code`.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SessionError"}
+          example: {error: {code: EEXIST, syscall: session}}
+    Unavailable:
+      description: |
+        Not served; retry. `EAGAIN` with the session error body, or the
+        error body of `openapi.yaml` with the connection closed while the
+        server is shutting down.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStoreSometimes"}
+        Connection: {$ref: "#/components/headers/ConnectionCloseSometimes"}
+        Retry-After: {$ref: "#/components/headers/RetryAfter"}
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - {$ref: "#/components/schemas/SessionError"}
+              - {$ref: "#/components/schemas/Error"}
+    GatewayTimeout:
+      description: |
+        The request exceeded `request_timeout_ms` (`ETIMEDOUT`), with the
+        error body of `openapi.yaml`. The connection is closed and the
+        outcome is unknown.
+      headers:
+        Connection: {$ref: "#/components/headers/ConnectionClose"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: ETIMEDOUT, message: request exceeded the configured timeout}}
+    ForwardingReady:
+      description: |
+        `GET /readyz` on a server with a `forwarding` block. Unlike the
+        `Ready` of `openapi.yaml`, `drives` may be 0: a server that holds
+        no drive of its own is ready to forward.
+      headers:
+        Cache-Control: {$ref: "#/components/headers/CacheControlNoStore"}
+        X-Content-Type-Options: {$ref: "#/components/headers/NoSniff"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ForwardingReady"}
+          example: {status: ready, drives: 0}
+    ForwardingRejected:
+      description: The request cannot be forwarded. Nothing was executed. See `x-forwarding-responses`.
+      headers:
+        X-Mount-Dispatch: {$ref: "#/components/headers/MountDispatchNotDispatched"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ForwardingError"}
+          example: {error: {code: EIO, message: volume request unavailable}}
+    ForwardingUnavailable:
+      description: No server could be given the request. Nothing was executed; retry. See `x-forwarding-responses`.
+      headers:
+        X-Mount-Dispatch: {$ref: "#/components/headers/MountDispatchNotDispatched"}
+        Retry-After: {$ref: "#/components/headers/RetryAfterAlways"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ForwardingError"}
+          example: {error: {code: EIO, message: volume request unavailable}}
+    ForwardingOutcomeUnknown:
+      description: The owner was given the request and its response was lost. See `x-forwarding-responses`.
+      headers:
+        X-Mount-Dispatch: {$ref: "#/components/headers/MountDispatchUnknown"}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ForwardingError"}
+          example: {error: {code: EIO, message: volume request unavailable}}
+  schemas:
+    ForwardingReady:
+      type: object
+      required: [status, drives]
+      additionalProperties: false
+      properties:
+        status: {type: string, const: ready}
+        drives:
+          type: integer
+          minimum: 0
+          description: Number of drives this server serves itself just now.
+    SessionToken:
+      type: string
+      description: 64 lowercase hexadecimal characters.
+      pattern: "^[0-9a-f]{64}$"
+    Decimal:
+      type: string
+      description: An unsigned 64-bit integer in decimal digits, with no sign or space.
+      pattern: "^[0-9]{1,20}$"
+    Session:
+      type: object
+      required: [protocol_version, session, idle_timeout_ms]
+      properties:
+        protocol_version:
+          type: integer
+          const: 1
+        session: {$ref: "#/components/schemas/SessionToken"}
+        idle_timeout_ms:
+          type: integer
+          minimum: 1000
+          maximum: 3600000
+          description: The session is closed after this long without a request that names it.
+    SessionError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, syscall]
+          properties:
+            code: {$ref: "#/components/schemas/ErrorCode"}
+            syscall:
+              type: string
+              const: session
+    Error:
+      type: object
+      description: The error body of `openapi.yaml`.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {$ref: "#/components/schemas/ErrorCode"}
+            message: {type: string}
+    ForwardingError:
+      type: object
+      description: The error body of `openapi.yaml`, always with code `EIO`.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string, const: EIO}
+            message: {type: string}
+    ErrorCode:
+      type: string
+      description: POSIX-style error name; the same set as in `openapi.yaml`.
+      enum:
+        - EPERM
+        - ENOENT
+        - EINTR
+        - EIO
+        - ENXIO
+        - EBADF
+        - EAGAIN
+        - ENOMEM
+        - EACCES
+        - EBUSY
+        - EEXIST
+        - EXDEV
+        - ENODEV
+        - ENOTDIR
+        - EISDIR
+        - EINVAL
+        - ENFILE
+        - EMFILE
+        - EFBIG
+        - ENOSPC
+        - ESPIPE
+        - EROFS
+        - EMLINK
+        - ERANGE
+        - ENAMETOOLONG
+        - ENOSYS
+        - ENOTEMPTY
+        - ELOOP
+        - ENODATA
+        - EPROTO
+        - EOVERFLOW
+        - ENOTSUP
+        - ESTALE
+        - EDQUOT
+        - ETIMEDOUT
+        - EPRECONDITION
+    AbsolutePath:
+      type: string
+      description: An absolute path on the drive, at most 4096 bytes, without a NUL.
+      pattern: "^/"
+      maxLength: 4096
+    OpenFlags:
+      type: object
+      required: [read, write, create, truncate, append, exclusive]
+      additionalProperties: false
+      properties:
+        read: {type: boolean}
+        write: {type: boolean}
+        create: {type: boolean}
+        truncate: {type: boolean}
+        append: {type: boolean}
+        exclusive: {type: boolean}
+    Operation:
+      description: One operation, selected by `operation`.
+      oneOf:
+        - type: object
+          required: [operation]
+          additionalProperties: false
+          properties:
+            operation: {type: string, const: capabilities}
+        - type: object
+          required: [operation, request]
+          additionalProperties: false
+          properties:
+            operation: {type: string, const: path}
+            request: {$ref: "#/components/schemas/PathRequest"}
+        - type: object
+          required: [operation, path, flags, mode]
+          additionalProperties: false
+          properties:
+            operation: {type: string, const: open}
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+            flags: {$ref: "#/components/schemas/OpenFlags"}
+            mode:
+              type: integer
+              minimum: 0
+              maximum: 4294967295
+              description: Permission bits for a file the open creates.
+        - type: object
+          required: [operation, handle, length]
+          additionalProperties: false
+          properties:
+            operation: {type: string, const: read}
+            handle: {type: integer, minimum: 0}
+            length:
+              type: integer
+              minimum: 0
+              description: At most `max_io_bytes`.
+            position:
+              type: [integer, "null"]
+              minimum: 0
+              description: Absent or null reads at the handle's cursor.
+        - type: object
+          required: [operation, handle]
+          additionalProperties: false
+          properties:
+            operation: {type: string, const: stat}
+            handle: {type: integer, minimum: 0}
+        - type: object
+          required: [operation, handle, length]
+          additionalProperties: false
+          properties:
+            operation: {type: string, const: truncate}
+            handle: {type: integer, minimum: 0}
+            length: {type: integer, minimum: 0}
+        - type: object
+          required: [operation, handle, data_only]
+          additionalProperties: false
+          properties:
+            operation: {type: string, const: sync}
+            handle: {type: integer, minimum: 0}
+            data_only: {type: boolean}
+        - type: object
+          required: [operation, handle]
+          additionalProperties: false
+          properties:
+            operation: {type: string, const: close}
+            handle: {type: integer, minimum: 0}
+    PathRequest:
+      description: An operation on a path, selected by `action`.
+      oneOf:
+        - type: object
+          required: [action, path]
+          additionalProperties: false
+          properties:
+            action:
+              type: string
+              enum: [stat, lstat, statfs, readdir, readlink, rmdir, unlink]
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+        - type: object
+          required: [action, path, recursive]
+          additionalProperties: false
+          properties:
+            action: {type: string, const: mkdir}
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+            recursive: {type: boolean}
+            mode:
+              type: [integer, "null"]
+              minimum: 0
+              maximum: 4294967295
+        - type: object
+          required: [action, source, destination]
+          additionalProperties: false
+          properties:
+            action:
+              type: string
+              enum: [rename, link]
+            source: {$ref: "#/components/schemas/AbsolutePath"}
+            destination: {$ref: "#/components/schemas/AbsolutePath"}
+        - type: object
+          required: [action, target, path]
+          additionalProperties: false
+          properties:
+            action: {type: string, const: symlink}
+            target:
+              type: string
+              maxLength: 4096
+              description: The link's content; need not be absolute.
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+        - type: object
+          required: [action, path, mode]
+          additionalProperties: false
+          properties:
+            action: {type: string, const: chmod}
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+            mode: {type: integer, minimum: 0, maximum: 4294967295}
+        - type: object
+          required: [action, path, uid, gid]
+          additionalProperties: false
+          properties:
+            action:
+              type: string
+              enum: [chown, lchown]
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+            uid: {type: integer, minimum: 0, maximum: 4294967295}
+            gid: {type: integer, minimum: 0, maximum: 4294967295}
+        - type: object
+          required: [action, path, length]
+          additionalProperties: false
+          properties:
+            action: {type: string, const: truncate}
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+            length: {type: integer, minimum: 0}
+        - type: object
+          required: [action, path, atime_ms, mtime_ms]
+          additionalProperties: false
+          properties:
+            action:
+              type: string
+              enum: [utimes, lutimes]
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+            atime_ms: {type: integer}
+            mtime_ms: {type: integer}
+        - type: object
+          required: [action, path, atime_ns, mtime_ns, follow_symlinks]
+          additionalProperties: false
+          properties:
+            action: {type: string, const: utimens}
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+            atime_ns:
+              type: string
+              description: Nanoseconds since the epoch, in decimal.
+              pattern: "^-?[0-9]+$"
+            mtime_ns:
+              type: string
+              pattern: "^-?[0-9]+$"
+            follow_symlinks: {type: boolean}
+        - type: object
+          required: [action, path, mode, dev]
+          additionalProperties: false
+          properties:
+            action: {type: string, const: mknod}
+            path: {$ref: "#/components/schemas/AbsolutePath"}
+            mode: {type: integer, minimum: 0, maximum: 4294967295}
+            dev: {type: integer, minimum: 0}
+        - type: object
+          required: [action]
+          additionalProperties: false
+          properties:
+            action: {type: string, const: syncfs}
+    OperationResult:
+      description: The JSON result of an operation; which one depends on the operation.
+      anyOf:
+        - {$ref: "#/components/schemas/Capabilities"}
+        - {$ref: "#/components/schemas/Opened"}
+        - {$ref: "#/components/schemas/Stats"}
+        - {$ref: "#/components/schemas/StatsFs"}
+        - type: array
+          items: {$ref: "#/components/schemas/DirEntry"}
+        - type: [string, "null"]
+    Capabilities:
+      type: object
+      required: [capabilities, utimens, max_io_bytes, positional_read_headers, write_file]
+      properties:
+        capabilities:
+          type: object
+          description: What the drive's filesystem supports, by name.
+          additionalProperties: {type: boolean}
+        utimens:
+          type: boolean
+          description: Whether the `utimens` path action is supported.
+        max_io_bytes:
+          type: integer
+          minimum: 1
+          maximum: 65536
+          description: Most bytes one read or write request may carry.
+        positional_read_headers:
+          type: boolean
+          description: Whether `readHandle` (`GET`) is served. Always true.
+        write_file:
+          type: boolean
+          description: Whether `x-mount-write-file` is served. Always true.
+    Opened:
+      type: object
+      required: [handle]
+      properties:
+        handle:
+          type: integer
+          minimum: 0
+          description: Names the open file within this session only.
+    Written:
+      type: object
+      required: [written]
+      properties:
+        written:
+          type: integer
+          minimum: 0
+          description: Bytes written; may be fewer than sent.
+    Stats:
+      type: object
+      required: [dev, ino, mode, nlink, uid, gid, rdev, size, blksize, blocks, atime_ms, mtime_ms, ctime_ms, birthtime_ms]
+      properties:
+        dev: {type: integer}
+        ino: {type: integer}
+        mode: {type: integer, minimum: 0}
+        nlink: {type: integer, minimum: 0}
+        uid: {type: integer, minimum: 0}
+        gid: {type: integer, minimum: 0}
+        rdev: {type: integer}
+        size: {type: integer, minimum: 0}
+        blksize: {type: integer, minimum: 0}
+        blocks: {type: integer, minimum: 0}
+        atime_ms: {type: integer}
+        mtime_ms: {type: integer}
+        ctime_ms: {type: integer}
+        birthtime_ms: {type: integer}
+    StatsFs:
+      type: object
+      required: [filesystem_type, block_size, blocks, blocks_free, blocks_available, files, files_free]
+      properties:
+        filesystem_type: {type: integer}
+        block_size: {type: integer, minimum: 0}
+        blocks: {type: integer, minimum: 0}
+        blocks_free: {type: integer, minimum: 0}
+        blocks_available: {type: integer, minimum: 0}
+        files: {type: integer, minimum: 0}
+        files_free: {type: integer, minimum: 0}
+    DirEntry:
+      type: object
+      required: [name, parent_path, file_type]
+      properties:
+        name: {type: string}
+        parent_path: {type: string}
+        file_type: {type: string}

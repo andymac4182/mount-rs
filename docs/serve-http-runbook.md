@@ -1,8 +1,10 @@
 # serve-http operator runbook
 
-How to run `mount-rs serve-http` in production. Scope: the v1 launch
-configuration, which is plain `serve-http` with `remote_sessions: false` and no
-`forwarding` block.
+How to run `mount-rs serve-http` in production. Everything up to
+[Clusters](#clusters) describes one server with `remote_sessions: false` and
+no `forwarding` block, and applies to each server of a cluster too. The
+[Clusters](#clusters) chapter covers remote sessions, forwarding between
+servers and drive failover.
 
 - API contract for consumers: [`transports/mount-rs-http/README.md`](../transports/mount-rs-http/README.md)
   and [`transports/mount-rs-http/openapi.yaml`](../transports/mount-rs-http/openapi.yaml).
@@ -16,6 +18,8 @@ bearer token. The process holds
 the exclusive writer lease of every split-store drive it serves, so **exactly
 one instance may serve a given drive**. There is no active-active mode at
 launch; a second instance pointed at the same storage fails to start.
+(Several servers can stand in for one another for the same drive, one at a
+time: see [Clusters](#clusters).)
 
 The process does not terminate TLS, and by default it listens only on a
 loopback address and writes no access log. A reverse proxy in front of it
@@ -127,13 +131,14 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | `token_reload_seconds` | integer | `30` | 0-3600 | How often the token files of the drives are looked at for a change. `0` turns the timer off, leaving SIGHUP as the only trigger. Only valid when a drive's token is a file. See [Rotation](#rotation). |
 | `tcp_nodelay` | boolean | `true` | | Disables Nagle on accepted connections. |
 | `http2_prior_knowledge` | boolean | `false` | | `true` makes the listener cleartext HTTP/2 only (no HTTP/1.1). Leave `false` at launch; the reference proxy configs below speak HTTP/1.1 upstream. With HTTP/2 a stalled download releases its file handle but its connection is not dropped. |
-| `drives` | array | required | at least one drive | See below. |
+| `drives` | array | required | at least one drive; `[]` only with `forwarding` | See below. |
 | `cache_capacity` | object | none | `{"ram_bytes": n, "disk_bytes": n}`, both required, >= 0 | Validation only: startup is refused when the sum of the drives' configured block-cache and disk-cache sizes exceeds these numbers. |
 | `disk_cache_budget` | object | none | `{"workers": 1-512, "fill_copies": 1-512}`, both required | Shared disk-cache worker budget for split-store drives that configure a disk cache. |
 | `tidb_metadata_pool_limit` | integer | none | >= 1 | Shares one TiDB connection pool of this size between drives that use the same TiDB connection variable. Only for TiDB metadata. |
 | `cache_report_interval_seconds` | integer | none | >= 1 | Writes a `mount_cache_stats` JSON line per drive to stderr at this interval. Only drives with a block or disk cache report. |
-| `remote_sessions` | boolean | `false` | | Experimental. Must stay `false` for the launch contract. |
-| `forwarding` | object | none | | Experimental. Must be absent for the launch contract. |
+| `remote_sessions` | boolean | `false` | | Serves the session and handle routes. See [Cluster configuration reference](#cluster-configuration-reference). |
+| `sessions` | object | defaults | | Session limits; only with `remote_sessions`. Same reference. |
+| `forwarding` | object | none | | Makes the server part of a cluster. Same reference. |
 
 ### `http.drives[]` keys
 
@@ -269,7 +274,7 @@ What to know:
 - `token.file` cannot be used together with `remote_sessions` or
   `forwarding`; the config is refused. A remote session and a forwarded
   request are authorized against the token read at startup, which a reload
-  would not reach. Those experimental modes still rotate by restart.
+  would not reach. Servers with those features rotate by restart.
 
 A drive whose token is an environment variable **rotates by restart**:
 
@@ -744,7 +749,7 @@ Limits:
 - Requests refused before they are read (connections over
   `max_connections`, a connection that sends no valid request) are not
   counted. `http_accept_failed` is still a stderr line only.
-- With the experimental `forwarding.owner`, drives are served through the
+- With `forwarding.owner`, drives are served through the
   peer listener and have no `mount_rs_http_drive_ready` series. The metrics
   have not been validated with `remote_sessions` or `forwarding`.
 
@@ -956,6 +961,561 @@ Notes:
 - Drives on other providers (TiDB, PGlite, FoundationDB, object stores) are
   backed up with those systems' tools; see the provider runbooks in `docs/`.
 
+## Clusters
+
+Everything above describes one process. This chapter is for running several
+`serve-http` processes as one service: remote sessions, forwarding between
+servers, and drive failover. What a client sees is in the API guide
+([Sessions and handles](../transports/mount-rs-http/README.md#sessions-and-handles),
+[Clusters](../transports/mount-rs-http/README.md#clusters)) and in
+[`openapi-cluster.yaml`](../transports/mount-rs-http/openapi-cluster.yaml).
+The design of failover, with its states and timing bounds, is in
+[`serve-http-failover.md`](serve-http-failover.md).
+
+### Topology
+
+| Role | Config | What it does |
+| --- | --- | --- |
+| Owner | `forwarding.owner: true`, drives in `http.drives` | Opens its drives, holds their writer leases, serves them on its public listener, and accepts forwarded requests for them from the other servers on a UDP port (HTTP/3 over QUIC, mutual TLS). It also forwards requests for drives it does not own. |
+| Ingress | `forwarding` with `owner` absent or `false`, `"drives": []` | Holds no drive. Forwards every drive request to the owner. |
+| Failover candidate | An owner with a `forwarding.failover` object | Several candidates list the same drive; one of them owns it at a time and another takes it when that one stops. A candidate that does not own a drive forwards requests for it, like an ingress. |
+
+```
+ clients ── TLS ──▶ load balancer / proxy ──▶ any server's public listener (HTTP/1.1, cleartext)
+                                                   │ drive owned here: served locally
+                                                   │ drive owned elsewhere:
+                                                   ▼
+                                         owner's peer port (UDP, HTTP/3, mutual TLS)
+
+ every server ──▶ Redis        (which server owns which drive; a hint, never an authority)
+ owners      ──▶ storage       (metadata store and block store; the writer lease lives here)
+```
+
+- Any server may receive any request. The load balancer needs no knowledge
+  of which server owns which drive. Sending a client to the owner directly
+  saves the forwarding hop, and keeps that drive available to it while Redis
+  is down.
+- **One owner per drive at a time.** That is enforced by the drive's writer
+  lease in its metadata store, not by Redis and not by configuration.
+  Without `failover`, exactly one server may list a drive; a second one
+  fails to start with `EAGAIN ... acquire writer`.
+- All drives of a server with `forwarding.owner` or `remote_sessions` must
+  be `splitstore` drives.
+- Remote sessions (`remote_sessions: true`) are independent of forwarding:
+  a single server may enable them. In a cluster, set it on the owners. An
+  ingress forwards session requests whatever its own setting.
+- TLS for clients is still the proxy's job, and everything in
+  [Reverse proxy](#reverse-proxy) applies to each server's public listener.
+
+Ports to open: each server's public `port` to the proxy; each owner's peer
+`address` (UDP) to every other server; Redis and storage from the servers.
+
+### Cluster configuration reference
+
+Every key the parser accepts, with its default and range. An unknown key or
+a value out of range is refused at startup (exit code 2), and
+`mount-rs validate-config` checks all of it without opening anything.
+
+`http.remote_sessions` and `http.sessions`:
+
+| Key | Type | Default | Range | Meaning |
+| --- | --- | --- | --- | --- |
+| `remote_sessions` | boolean | `false` | | Serve the session and handle routes on every drive. Requires every drive to be `splitstore`, every drive token to be 32-256 characters from `A-Z a-z 0-9 - . _ ~ + / =`, and no `token.file`. |
+| `sessions` | object | all defaults | | Only valid with `remote_sessions: true`. |
+| `sessions.max_sessions` | integer | `4096` | 1-65536 | Sessions the process admits across all drives. |
+| `sessions.max_sessions_per_drive` | integer | `128` | 1-4096 | Sessions one drive admits. A session needs room in both. |
+| `sessions.max_handles_per_session` | integer | `128` | 1-4096 | Open handles one session may hold. |
+| `sessions.idle_timeout_seconds` | integer | `60` | 1-3600 | A session no request has named for this long is closed with its handles. Reported to clients as `idle_timeout_ms`. |
+
+`http.forwarding`:
+
+| Key | Type | Default | Range | Meaning |
+| --- | --- | --- | --- | --- |
+| `peers` | path | required | | The membership file. See [Membership file](#membership-file). |
+| `certificate` | path | required | | This server's peer certificate (PEM). Read once at startup. |
+| `private_key` | path | required | | Its private key (PEM). Read once at startup. |
+| `ca` | path | required | | CA certificates (PEM) that peer certificates must chain to. Read once at startup. |
+| `redis_url` | `{"env": "NAME"}` | required | | The environment variable holding the Redis URL. A literal URL is refused. |
+| `redis_ca` | path | system roots | | CA certificates (PEM) trusted for a `rediss://` server, instead of the system roots. Read once at startup. |
+| `allow_plaintext_redis` | boolean | `false` | | Permit `redis://` to a host other than this one. |
+| `namespace` | string | required | 1-256 characters from `A-Z a-z 0-9 - _ .` | Prefix of this cluster's Redis keys. The same on every server of a cluster; different for clusters sharing a Redis. |
+| `bind` | UDP socket address | required | | Local address of the socket this server makes peer connections from. Use port `0`. (An owner *listens* on the `address` of its membership record, not here.) |
+| `owner` | boolean | `false` | | Own and serve the drives in `http.drives`, and accept forwarded requests for them. Requires `splitstore` drives. Without it `drives` must be `[]`. |
+| `refresh_active_routes` | boolean | `true` | | Re-read the routes of recently used drives before their one-second cache entry expires, so requests do not wait on Redis. About one Redis read per active drive per second. |
+| `route_refresh_idle_ttls` | integer | `5` | 1-60 | Stop refreshing a drive's route after this many route lifetimes (15 s each) without a request for it. |
+| `peer_connections` | integer | `4` | 1-16 | QUIC connections this server keeps to each owner it forwards to. |
+| `membership_reload_seconds` | integer | `30` | 0-3600 | How often the membership file is checked for a change. `0`: only on `SIGHUP`. |
+| `max_members` | integer | the larger of 64 and the number in the file at startup | 1-1024 | Most servers a membership reload may install. Connection limits are sized from it at startup; raising it needs a restart. |
+| `failover` | object | none | | Makes this owner a failover candidate for every drive it lists. Requires `owner: true`, at least one drive, exclusive ownership (no `concurrent_writes`, no shared `ownership_mode`) and metadata storage other than `memory`. `{}` takes every default. |
+
+`http.forwarding.failover`:
+
+| Key | Type | Default | Range | Meaning |
+| --- | --- | --- | --- | --- |
+| `poll_interval_ms` | integer | `1000` | 100-10000 | How often a standby reads the drive's route and an owner checks its lease. |
+| `takeover_stagger_ms` | integer | `2000` | 0-60000 | Extra wait per rank before a standby tries to take a drive nobody serves, so the candidates do not all try at once. |
+| `fail_back` | boolean | `false` | | Hand a drive back to a better-ranked candidate that has returned. Costs a drain and the drive's sessions each time. |
+| `fail_back_after_seconds` | integer | `60` | 10-86400 | How long that candidate must have ranked first without interruption before the hand-back. |
+
+Two values are fixed in the binary and matter for the timings below: a
+route in Redis lives **15 seconds** and is refreshed every 5; a server
+caches a route for 1 second. The time a crashed owner's drive stays
+unavailable is governed by the drive's own `driver.storage.lease_ttl_ms`
+(default 240 s for a structured `storage` object), see
+[Placement and failover](#placement-and-failover).
+
+Restrictions on other keys when a cluster feature is on:
+
+- `token.file` is refused with `remote_sessions` or `forwarding`. Tokens are
+  environment variables and rotate by restart.
+- `drives` may be `[]` only with `forwarding`.
+
+### Worked example: three servers with failover
+
+[`apps/mount-rs-cli/examples/cluster/`](../apps/mount-rs-cli/examples/cluster/)
+holds a complete set: `node-a.json` and `node-b.json` are failover
+candidates for one drive, `shared`, on TiDB metadata and S3 blocks;
+`node-c.json` is an ingress; `peers.json` is the membership file all three
+use. A test runs `mount-rs validate-config` on each config and parses the
+membership file with the cluster's own parser
+(`the_cluster_example_configs_are_valid`). The addresses, names and pins in
+them are placeholders.
+
+`node-a.json` (`node-b.json` differs in `host`, `bind`, the certificate
+paths and the lease label `owner`):
+
+```json
+{
+  "version": 1,
+  "http": {
+    "host": "10.0.1.11",
+    "allow_non_loopback": true,
+    "port": 8080,
+    "remote_sessions": true,
+    "sessions": {
+      "max_sessions": 4096,
+      "max_sessions_per_drive": 128,
+      "max_handles_per_session": 128,
+      "idle_timeout_seconds": 60
+    },
+    "forwarding": {
+      "peers": "peers.json",
+      "certificate": "/etc/mount-rs/tls/node-a.pem",
+      "private_key": "/etc/mount-rs/tls/node-a.key",
+      "ca": "/etc/mount-rs/tls/cluster-ca.pem",
+      "redis_url": {"env": "MOUNT_RS_CLUSTER_REDIS_URL"},
+      "redis_ca": "/etc/mount-rs/tls/redis-ca.pem",
+      "namespace": "files-prod",
+      "bind": "10.0.1.11:7443",
+      "owner": true,
+      "membership_reload_seconds": 30,
+      "failover": {
+        "poll_interval_ms": 1000,
+        "takeover_stagger_ms": 2000,
+        "fail_back": false
+      }
+    },
+    "drives": [
+      {
+        "id": "shared",
+        "token": {"env": "MOUNT_RS_SHARED_TOKEN"},
+        "driver": {
+          "kind": "splitstore",
+          "storage": {
+            "metadata": {
+              "kind": "tidb",
+              "connection": {"env": "MOUNT_RS_TIDB_URL"},
+              "volume_key": "files-prod-shared",
+              "durable": true
+            },
+            "blocks": {
+              "kind": "aws-s3",
+              "bucket": "example-private-bucket",
+              "region": "ap-southeast-2",
+              "prefix": "mount-rs/files-prod/shared",
+              "durable": true
+            },
+            "chunk_size_bytes": 65536,
+            "lease_ttl_ms": 20000,
+            "owner": "node-a"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+`node-c.json`, the ingress:
+
+```json
+{
+  "version": 1,
+  "http": {
+    "host": "10.0.1.13",
+    "allow_non_loopback": true,
+    "port": 8080,
+    "forwarding": {
+      "peers": "peers.json",
+      "certificate": "/etc/mount-rs/tls/node-c.pem",
+      "private_key": "/etc/mount-rs/tls/node-c.key",
+      "ca": "/etc/mount-rs/tls/cluster-ca.pem",
+      "redis_url": {"env": "MOUNT_RS_CLUSTER_REDIS_URL"},
+      "redis_ca": "/etc/mount-rs/tls/redis-ca.pem",
+      "namespace": "files-prod",
+      "bind": "10.0.1.13:7443",
+      "owner": false,
+      "membership_reload_seconds": 30
+    },
+    "drives": []
+  }
+}
+```
+
+What must be identical on the two candidates, and is **not checked by the
+server**: the drive `id`, the token, and the whole storage description
+(`metadata` connection and `volume_key`, `blocks` bucket and `prefix`,
+`chunk_size_bytes`). Two candidates that describe different storage for the
+same drive id would each serve their own copy in turn. The `owner` label
+inside `storage` may differ; it only labels the lease.
+
+Start order does not matter. Each server needs Redis reachable to start.
+Check each with `/readyz` (200 on all three; `drives` is 1 on the node that
+took the drive and 0 on the others) and, on stderr of the node that took the
+drive:
+
+```json
+{"drive":"shared","event":"drive_failover","fence":7,"state":"acquired"}
+{"drive":"shared","event":"drive_failover","fence":7,"state":"published"}
+```
+
+`lease_ttl_ms: 20000` is what makes a crash recover in about 25 seconds
+instead of about four minutes; see below for what it costs.
+
+### Membership file
+
+`forwarding.peers` names a JSON array with one record per server in the
+cluster, ingresses included. Every server should have the same file. It is
+the root of trust between servers: protect and distribute it as you would a
+CA certificate.
+
+```json
+[
+  {
+    "node": "node-a",
+    "boot": "2026-11-18-1",
+    "address": "10.0.1.11:7443",
+    "tls_server_name": "node-a.files.internal",
+    "spki_sha256": "64 hexadecimal digits"
+  }
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `node` | The server's name, unique in the file. Must equal the node in the URI SAN of its certificate, `urn:agent-tunnel:peer:<node>`. |
+| `boot` | An identifier for this deployment of the server. It is published in the server's routes, and a route is trusted only if it matches the file. |
+| `address` | The UDP socket address an owner listens on for forwarded requests. Not port 0. An ingress does not listen but still needs a well-formed address. |
+| `tls_server_name` | The DNS name the other servers verify in this server's certificate. |
+| `spki_sha256` | SHA-256 of the server's public key (DER `SubjectPublicKeyInfo`), 64 hexadecimal digits: the *pin*. |
+
+`node`, `boot` and `tls_server_name` are 1-256 characters from
+`A-Z a-z 0-9 - _ .`. Unknown fields are rejected. At most 1024 records, and
+at most `max_members`. The pin of a key:
+
+```sh
+openssl pkey -in node.key -pubout -outform DER | openssl dgst -sha256 -hex
+```
+
+**Reload.** A running server reads the file again on `SIGHUP` and every
+`membership_reload_seconds` if its contents changed. The new file is
+validated whole first; a file that cannot be read or parsed, breaks a rule,
+exceeds `max_members`, or would cut the server itself off is refused, the
+old membership stays in force, and one line says why:
+
+```text
+mount-rs: membership reload refused, keeping the current 3 servers: membership record 2 has an invalid `address`
+mount-rs: membership reload: now 4 servers from /etc/mount-rs/peers.json; added ["node-d"], removed [], changed []
+```
+
+Replace the file by writing a new one beside it and renaming it over the
+old one. What an accepted reload does:
+
+| Change | Effect |
+| --- | --- |
+| Server added | Accepted, and forwarded to, from its next connection. |
+| Server removed | Refused from then on. Its open connections are closed at once; a forwarded request in flight on one fails with `502` (outcome unknown). Stop the server or move its drives first. |
+| Server's pin changed | Connections made under the old key are closed at once; only the new key is accepted. |
+| Unchanged records | Connections kept. |
+
+An owner refuses a file that changes its own `boot`, `address` or
+`tls_server_name`; any server refuses a file that has no record matching its
+own node and key. Changing a server's own record needs a restart of that
+server.
+
+**Adding a server.** Issue its certificate, add its record, distribute the
+file, `SIGHUP` every running server (or wait one interval) and check each
+for the `added` line, then start the new server. **Removing a server.**
+Stop it (or move its drives), remove its record, distribute, `SIGHUP`.
+
+### Certificates and key rotation
+
+Each server has one certificate and key for the server-to-server
+connection, issued by a CA all servers trust (`forwarding.ca`). The
+certificate must have:
+
+- a URI SAN `urn:agent-tunnel:peer:<node>` with the server's `node`;
+- a DNS SAN equal to its `tls_server_name`;
+- extended key usage `clientAuth` and `serverAuth`, key usage
+  `digitalSignature`.
+
+A peer is accepted only if its certificate chains to `ca`, names a `node`
+in the membership file, and has exactly that record's public key. Redis
+never supplies an address, a name or a key.
+
+A server reads its certificate, key and CA once, at startup. Rotation:
+
+- **New certificate, same key** (a renewal): the pin does not change.
+  Install the certificate and restart that server. Nothing else changes.
+- **New key**:
+  1. Issue the new certificate and key; compute the new pin.
+  2. Stop the server. Without failover its drives are unavailable from
+     here to step 5; with failover another candidate takes them.
+  3. Install the new certificate and key; change its `spki_sha256` in the
+     membership file.
+  4. Distribute the file; `SIGHUP` every other server or wait one interval.
+  5. Start the server.
+
+**The limit to plan for: one record holds one pin.** There is no period in
+which a server's old and new keys are both accepted, so a key rotation
+always includes a restart of that server and an interval, between the other
+servers reloading and that server restarting, in which it is cut off. If
+the new file reaches the others while the server still runs with its old
+key, they stop accepting it, and it refuses the file itself and logs that;
+it recovers when restarted with the new key. Rotating the **CA** means
+restarting every server, since `ca` is read at startup; put both the old
+and the new CA certificate in the `ca` file for the transition.
+
+### Redis
+
+Redis holds one small record per drive (which server owns it) and, with
+failover, one sorted set per drive (which candidates are alive). It carries
+no file data and grants no ownership. Details of URLs, TLS, ACL users and
+error messages are under
+["The Redis connection"](../apps/mount-rs-cli/README.md#the-redis-connection)
+in the CLI README. For operation:
+
+| Requirement | Detail |
+| --- | --- |
+| One endpoint | Each server connects to the single address in its URL and reconnects to that same address. **Redis Sentinel and Redis Cluster addresses are not supported.** |
+| TLS | `rediss://` for any Redis not on the same host. The certificate must chain to the system roots or `redis_ca` and name the host in the URL. Verification cannot be turned off. Client certificates are not supported. |
+| Plaintext | `redis://` is accepted only to loopback, unless `allow_plaintext_redis: true`. |
+| Authentication | In the URL. This ACL is enough without failover, and is the one the TLS test uses: `~mount-rs:* +eval +getrange +get +set +del +pexpire +strlen +ping +client\|setinfo`. Failover also runs `TIME`, `ZADD`, `ZCARD`, `ZSCORE`, `ZRANGE`, `ZREM` and `ZREMRANGEBYSCORE` on keys under the same prefix; add `+time +zadd +zcard +zscore +zrange +zrem +zremrangebyscore`. That longer rule is read from the code and is **not** covered by a test: failover is tested with the default user. |
+| Persistence | Not needed. A Redis that comes back empty is refilled by the owners within seconds. |
+| Reachable at startup | A server connects, logs in and pings within 5 seconds before it reports listening. It cannot start while Redis is unreachable (exit code 1). |
+| Namespace | Keys are `mount-rs:<namespace>:...`. Give each cluster its own. |
+
+What a Redis outage does (measured with real servers, Redis cut off for 45
+seconds, by `apps/mount-rs-cli/tests/redis_connection.rs`):
+
+- An owner keeps serving requests that arrive at it for its own drives.
+- Requests that need forwarding get `503` not-dispatched within about two
+  seconds, for as long as the outage lasts. Nothing is queued.
+- No server exits. Owners re-register once Redis answers (0.3 to 5 seconds
+  in the test) and forwarding resumes.
+- With failover, standbys take nothing while they cannot read Redis. If an
+  owner dies during the outage, its drive stays unavailable until Redis is
+  back.
+
+High availability: put Redis behind one stable name or address that always
+reaches the current primary (a managed service's primary endpoint, or a
+virtual address your tooling moves). **Not tested:** a replicated pair
+failing over, Sentinel, Redis Cluster, a proxy in front of Redis,
+reconnecting to an address that still resolves to a demoted read-only
+replica, Unix sockets, and a certificate whose name does not match.
+
+### Placement and failover
+
+**Without `failover`** placement is the configuration: a drive is served by
+the one owner that lists it, from startup until that process stops. If the
+process stops, the drive is unavailable (`503` not-dispatched through the
+other servers) until it is started again; after a crash the restart also
+waits for the lease ([Lease takeover wait](#lease-takeover-wait)). An owner
+that loses a drive's lease exits with code 1.
+
+**With `failover`** on two or more owners that list the same drive:
+
+- Each candidate announces itself in Redis. Candidates are ranked per drive
+  by a fixed hash of drive id and node name; the best-ranked live candidate
+  tries first, the others `takeover_stagger_ms` later per rank. Rank only
+  orders the attempts. Who owns the drive is decided by who acquires the
+  writer lease in storage.
+- A candidate opens a drive only after reading that no route is published
+  for it. A candidate that does not own a drive does not open it.
+- A server with `failover` does not exit when a lease is held elsewhere or
+  lost: it becomes, or stays, a standby for that drive.
+
+Time until the drive is served again (`L` = `lease_ttl_ms` of the drive,
+`P` = `poll_interval_ms`, `S` = `takeover_stagger_ms`, `k` = rank of the
+taking node, 0 for the first):
+
+| Event | Bound | With the defaults | With `lease_ttl_ms: 20000` |
+| --- | --- | --- | --- |
+| Owner crashes (SIGKILL, host or power loss) | `max(15 s + k x S, L) + 5P +` open | about 245 s | about 25 s; measured 20.9 to 21.3 s |
+| Owner stops cleanly (SIGTERM, deploy) | `P + k x S + 5P +` open | 1 to 2 s | the same; measured 0.1 to 1.0 s |
+
+Clients see `503` not-dispatched in that time, and `502` outcome-unknown
+for requests that were in flight on the old owner or were forwarded to it
+while its route was still published (up to 15 seconds after a crash). An
+ingress follows the new owner within about a second of its route appearing.
+Every session and open handle on the old owner is lost.
+
+Choosing `lease_ttl_ms`: it bounds crash recovery from below, and it is
+also how long a live owner may fail to reach its metadata store before it
+must stop serving. Too short, and a slow metadata store makes healthy owners
+give up their drives. 20 seconds is what the tests run with.
+
+`fail_back` is off by default because every move costs a drain and the
+drive's sessions. Without it, after a rolling restart the drives stay on
+whichever candidates took them.
+
+Tested with real processes, each behind its own Redis proxy
+(`apps/mount-rs-cli/tests/failover.rs`): an owner cut off from Redis keeps
+its drive and the standby takes nothing; an owner killed during a Redis
+outage is replaced once Redis is back; fail-back; writes across a killed
+owner are complete or absent and never lost once acknowledged; an owner
+paused past its lease gives the drive up when it resumes; and a release
+that storage does not answer is abandoned so the lease expires.
+
+Each state change is a JSON line on stderr with `"event":"drive_failover"`;
+the states are listed in
+[`serve-http-failover.md`](serve-http-failover.md#startup-shutdown-and-logs).
+Alert on `open_failed` and `release_failed`, and on `lease_held` or
+`route_unpublished` that lasts.
+
+### Sessions in operation
+
+- A session and its handles exist only in the memory of the owner. They do
+  not survive a restart of the owner or a move of the drive. Clients get
+  `403 EACCES` and must create a new session; `mount-rs mount` with a
+  remote drive does **not** do this by itself (see the CLI README).
+- Each owner applies the `sessions` limits of its own config. A drive that
+  moves to a candidate with different limits gets those.
+- A session and each open handle hold memory and storage state on the
+  owner. Raise the limits with the process's memory in mind.
+- Shutdown closes the listener, drains for up to `drain_timeout_ms`, closes
+  every session and handle, withdraws the routes and releases the leases.
+  That still happens when the drain runs out of time; the exit code is
+  then 1.
+
+### Probes, logs and metrics in a cluster
+
+- `/healthz` and `/readyz` are answered by the server that receives them,
+  never forwarded. `/readyz` counts only the drives that server owns at that
+  moment: an ingress, and a standby, are ready with `"drives": 0`. A drive
+  the server owns that has failed makes it not ready. **Readiness does not
+  check Redis, the other servers, or that any owner exists for any drive.**
+  To monitor a drive end to end, request something on it through the
+  cluster (for example `GET /v1/drives/<id>/statfs`) and alert on anything
+  but `200`.
+- `GET /v1/drives` lists only drives the answering server owns.
+- With `access_log`, the `drive` field is absent on a server with
+  `remote_sessions` or `forwarding`.
+- Metrics (`http.metrics`) were not validated with `remote_sessions` or
+  `forwarding`, and an owner's drives have no `mount_rs_http_drive_ready`
+  series. Use the probes and the stderr events above.
+
+### Upgrading a cluster
+
+Running servers of different releases in one cluster is **not tested** and
+not supported: the server-to-server protocol and the Redis records carry no
+version negotiation. See
+[`serve-http-upgrade.md`](serve-http-upgrade.md#clusters). The supported
+procedure is a full stop of every server followed by a start of every
+server on the new release. With failover, a rolling restart *of one
+release* (for a config change or a host reboot) is supported and is what
+the clean-stop row above measures: stop one server with SIGTERM, wait for
+its drives to be `published` on another, start it again, move on.
+
+### Cluster failure modes
+
+| Symptom | Cause | Recovery |
+| --- | --- | --- |
+| `503` with `x-mount-dispatch: not-dispatched` for one drive | No route for it: its owner is down, is starting, or cannot reach Redis | Find the owner (`drive_failover` lines, or which server lists the drive). Start it, or fix its Redis connection. With failover, wait for the bound above and look for `lease_held` / `open_failed` on the standbys. |
+| The same for every drive through one server | That server cannot reach Redis | Fix the connection; no restart needed. Meanwhile route clients to the owners. |
+| The same for a drive id nobody configured | Expected: a cluster cannot tell an unknown drive from one that is down | Fix the client. |
+| `502` with `x-mount-dispatch: unknown` in bursts | An owner crashed or was removed from the membership with requests in flight; or its route outlived it (up to 15 s) | None for the server. Clients re-read or repeat with preconditions. |
+| `502` on every request through one new server | The owners have not loaded a membership file that lists it | Distribute the file and `SIGHUP` them. |
+| Start fails, code 1, naming Redis (`rediss://host:port`) | Redis unreachable, wrong CA, wrong or missing password | Fix as the message says. The URL's credentials are never printed. |
+| Start fails, code 2, `config.http.forwarding...` | A key out of range, `failover` without `owner`, `memory` metadata with failover, a `token.file`, a non-`splitstore` drive | Fix the config; `validate-config` reports the same. |
+| `membership reload refused` on stderr | The new file is invalid or would cut this server off | Fix the file. The old membership is still in force. |
+| An owner without failover exits with code 1 while running | It lost a drive's lease, or another server registered the drive | Find out why two servers claim the drive before restarting. |
+| `drive_failover` `lease_held` that never ends | The previous owner is alive and still holds the lease but cannot publish its route (cut off from Redis) | Fix that owner's Redis connection, or stop it so the lease is released. |
+
+### Known limits
+
+Stated plainly. None of these is hidden behind a feature flag.
+
+1. **Nothing checks that failover candidates describe the same storage.**
+   Two candidates whose configs give the same drive id different metadata
+   or block storage will each serve their own copy in turn, silently. Keep
+   the drive definitions in one place and generate the configs from it.
+   (`memory` metadata is refused with failover for this reason; other kinds
+   cannot be compared by the server.)
+2. **No token rotation without a restart.** `token.file` is refused with
+   `remote_sessions` or `forwarding`. A token change is a restart of every
+   server that lists the drive, with no period in which both tokens work.
+3. **One pin per server.** A key rotation needs that server restarted and
+   leaves it cut off between the others' reload and its restart. A CA
+   rotation needs every server restarted.
+4. **Mixed-release clusters are not tested.** An upgrade is a full stop and
+   start.
+5. **Redis high availability is not tested.** One endpoint only; no
+   Sentinel, no Redis Cluster. Behaviour across a replica promotion is
+   inferred from the outage tests, not measured.
+6. **The route lifetime is fixed at 15 seconds.** For that long after an
+   owner crashes, forwarded requests for its drives wait on the dead owner
+   (up to 30 seconds each) and then get `502`. Clients need their own
+   timeouts.
+7. **Crash recovery cannot be faster than the drive's lease.** About 245
+   seconds with the default `lease_ttl_ms`.
+8. **Sessions and handles do not move.** They are lost when their owner
+   stops or the drive moves, and requests in flight are not replayed.
+9. **Readiness is local.** `/readyz` is 200 on a server that cannot reach
+   Redis or any owner.
+10. **An unknown drive is `503`, not `401`,** on a forwarding server, and
+    the route lookup happens before the token is checked: a caller without
+    a valid token can learn whether a drive id currently has an owner.
+11. **An upload being forwarded when the ingress shuts down is not cut
+    short.** It runs until it finishes or the drain timeout aborts it. (An
+    upload to a drive the server owns is refused at once, as on a single
+    server.)
+12. **A forwarded response never closes the client's connection** where a
+    single server would send `Connection: close` (a `413` for an oversized
+    listing).
+13. **The session routes answer `500` for most filesystem errors**
+    (`EEXIST`, `ENOTEMPTY`, `EISDIR`, ...), where the file routes use
+    `409`, `400` and so on. Clients branch on `code`.
+14. **Metrics and the access log's `drive` field** are not available as on
+    a single server (see above).
+15. **Clocks.** Candidates and the metadata store must agree to within a
+    second or two (NTP is enough). Beyond the 5-second renewal margin a
+    deposed owner can answer *reads* from its last committed state after a
+    successor has taken the drive. Writes are refused throughout. See
+    "Clocks" in [`serve-http-failover.md`](serve-http-failover.md#clocks).
+16. **A candidate removed from the membership file while it runs keeps its
+    drives**, which are then unreachable through the other servers. Stop a
+    server before removing it.
+17. **With `fail_back`, a drive can be handed to a node that has just
+    died**, and is then unavailable for about 15 seconds.
+18. **Not exercised by any test:** a network partition of the
+    server-to-server (peer) link, as opposed to a server cut off from
+    Redis, which is tested; failover with a restricted Redis ACL user;
+    failover contention on TiDB metadata (tested on SQLite); more than a
+    handful of servers; and `http2_prior_knowledge` together with cluster
+    features. The rest of what failover leaves out is listed under "Not
+    handled" in [`serve-http-failover.md`](serve-http-failover.md#not-handled).
+
 ## Pre-launch checklist
 
 Run the end-to-end probe against the build you will deploy. It starts the
@@ -971,8 +1531,10 @@ Configuration
 
 - [ ] `host` is loopback, or `allow_non_loopback` is set and only the load
   balancer or proxy can reach the port; `port` is fixed (not `0`).
-- [ ] `remote_sessions` is `false` or absent; no `forwarding` block;
-      `http2_prior_knowledge` is `false`.
+- [ ] `http2_prior_knowledge` is `false`.
+- [ ] `remote_sessions` and `forwarding` are absent, or the
+      [Clusters](#clusters) chapter has been followed and its
+      [Known limits](#known-limits) accepted.
 - [ ] No `memory` drive.
 - [ ] `drain_timeout_ms` > `request_timeout_ms`.
 - [ ] `drive_shutdown_timeout_ms` covers the slowest flush the drives need.
@@ -1006,7 +1568,8 @@ Proxy
 
 Process
 
-- [ ] Exactly one instance per drive.
+- [ ] Exactly one instance per drive, or every instance that lists the
+      drive is a failover candidate with identical storage for it.
 - [ ] Stop signal SIGTERM; stop timeout above `drain_timeout_ms` + 5 s +
       `drive_shutdown_timeout_ms`, with SIGKILL as the fallback.
 - [ ] Restart on failure with a delay of several seconds; no restart on exit

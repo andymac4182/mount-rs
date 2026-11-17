@@ -86,6 +86,9 @@ pub const HOP_HEADER: &str = "x-mount-hop";
 pub struct OwnerHttpHandler {
     filesystem: Arc<Filesystem>,
     route: VolumeRoute,
+    /// The drive as `application` serves it, for the answers that are about
+    /// every drive of this server: readiness and discovery.
+    drive: DriveConfig,
     application: Arc<HttpServer>,
     sessions: Option<Arc<SessionHttpHandler>>,
     max_request_bytes: usize,
@@ -103,16 +106,16 @@ impl OwnerHttpHandler {
         if filesystem.checked_owner_fence().await.ok() != Some(route.fence) {
             return Err(RegistryError::InvalidInput);
         }
+        let drive = DriveConfig::new(route.volume.clone(), filesystem.driver(), bearer_token)
+            .map_err(|_| RegistryError::InvalidInput)?;
         let mut registry = DriveRegistry::new();
         registry
-            .register(
-                DriveConfig::new(route.volume.clone(), filesystem.driver(), bearer_token)
-                    .map_err(|_| RegistryError::InvalidInput)?,
-            )
+            .register(drive.clone())
             .map_err(|_| RegistryError::InvalidInput)?;
         Ok(Self {
             filesystem,
             route,
+            drive,
             max_request_bytes: options.max_request_bytes.max(1),
             application: Arc::new(HttpServer::unbound(registry, options)),
             sessions: None,
@@ -254,6 +257,7 @@ impl OwnerHttpHandler {
         ))
         .boxed_unsync();
         let transport_timing = request.extensions_mut().remove::<PeerStreamTiming>();
+        let is_head = request.method() == http::Method::HEAD;
         let application_start = Instant::now();
         let response = self.dispatch(request.map(|_| body)).await;
         let application = application_start.elapsed();
@@ -293,6 +297,19 @@ impl OwnerHttpHandler {
         // HTTP/1 connection management headers have no meaning on HTTP/3.
         parts.headers.remove("connection");
         parts.headers.remove("transfer-encoding");
+        // A listener states the length of a body it holds in full. Say it
+        // here too, so that the ingress can give its client the length
+        // the owner's own listener would have sent.
+        if !is_head
+            && parts.status != StatusCode::NO_CONTENT
+            && parts.status != StatusCode::NOT_MODIFIED
+            && !parts.headers.contains_key(http::header::CONTENT_LENGTH)
+            && let Some(length) = hyper::body::Body::size_hint(&body).exact()
+        {
+            parts
+                .headers
+                .insert(http::header::CONTENT_LENGTH, length.into());
+        }
         let headers_start = Instant::now();
         send.0
             .as_mut()
@@ -302,7 +319,14 @@ impl OwnerHttpHandler {
         counters.headers.record(headers_start);
         let mut read_time = Duration::ZERO;
         let mut send_time = Duration::ZERO;
+        // A response to HEAD has no body. The application still builds one
+        // for an error (the listener's HTTP/1 writer drops it); sending it
+        // to the ingress would put bytes where none are allowed, and the
+        // ingress would report the answer as lost.
         loop {
+            if is_head {
+                break;
+            }
             let read_start = Instant::now();
             let frame = body.frame().await;
             read_time += read_start.elapsed();
@@ -460,6 +484,15 @@ impl OwnerHttpRouter {
     }
     pub(crate) fn local(&self, volume: &str) -> Option<Arc<OwnerHttpHandler>> {
         self.owners.load().get(volume).cloned()
+    }
+    /// Every drive served here now, as one registry.
+    pub(crate) fn drives(&self) -> DriveRegistry {
+        let mut drives = DriveRegistry::new();
+        for owner in self.owners.load().values() {
+            // Volume names are the keys of the map, so none repeats.
+            let _ = drives.register(owner.drive.clone());
+        }
+        drives
     }
 }
 impl PeerRequestHandler for OwnerHttpRouter {

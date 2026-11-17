@@ -1,15 +1,17 @@
 openapi: 3.1.0
 info:
   title: mount-rs HTTP drive API
-  version: "1.0.1"
+  version: "1.0.2"
   summary: File and directory access to named mount-rs drives over HTTP.
   license:
     name: Apache-2.0
     identifier: Apache-2.0
   description: |
     The API served by `mount-rs serve-http`. Each drive is a named filesystem
-    with its own bearer token. This document is the v1 launch contract: plain
-    `serve-http` with `remote_sessions: false` and no forwarding.
+    with its own bearer token. This document is the v1 contract of the file
+    routes. It is written for a single server (`remote_sessions: false`, no
+    `forwarding`); what a server with those features adds is in
+    `openapi-cluster.yaml` and summarised under "Cluster features" below.
 
     ## Transport
 
@@ -89,11 +91,25 @@ info:
     methods, and for each operation the declared statuses, content types,
     JSON bodies and headers.
 
-    ## Not part of this contract
+    ## Cluster features
 
-    The same server binary can expose session and forwarding routes when
-    `remote_sessions` or `forwarding` is configured. Those are experimental
-    and are not part of the v1 launch contract.
+    The same server binary serves more when `remote_sessions` or
+    `forwarding` is configured. Those additions have their own document,
+    `openapi-cluster.yaml`, and are not repeated here:
+
+    - `remote_sessions: true` adds the session and handle routes under
+      `/v1/drives/{id}/sessions`. Without it those paths are 404.
+    - `forwarding` lets a server answer for drives another server holds. It
+      adds three responses to every drive route (503 and 400 with
+      `x-mount-dispatch: not-dispatched`, 502 with `x-mount-dispatch:
+      unknown`), answers 503 instead of 401 for a drive id no server
+      holds, and changes what `/readyz` and `/v1/drives` count.
+
+    Everything else in this document holds unchanged on such a server.
+    `apps/mount-rs-cli/tests/cluster_contract.rs` sends one sequence of
+    requests covering every operation here to a plain server, a server
+    with `remote_sessions`, the owner of a drive in a forwarding cluster
+    and an ingress that forwards to it, and requires the same answers.
 
     There is no `Last-Modified` or date precondition, no recursive delete, no copy, no chmod/chown/utimes, and no symlink
     creation.

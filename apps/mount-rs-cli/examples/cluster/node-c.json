@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "http": {
+    "host": "10.0.1.13",
+    "allow_non_loopback": true,
+    "port": 8080,
+    "forwarding": {
+      "peers": "peers.json",
+      "certificate": "/etc/mount-rs/tls/node-c.pem",
+      "private_key": "/etc/mount-rs/tls/node-c.key",
+      "ca": "/etc/mount-rs/tls/cluster-ca.pem",
+      "redis_url": {"env": "MOUNT_RS_CLUSTER_REDIS_URL"},
+      "redis_ca": "/etc/mount-rs/tls/redis-ca.pem",
+      "namespace": "files-prod",
+      "bind": "10.0.1.13:7443",
+      "owner": false,
+      "membership_reload_seconds": 30
+    },
+    "drives": []
+  }
+}

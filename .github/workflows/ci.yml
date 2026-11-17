@@ -991,6 +991,14 @@ jobs:
         # fail-back, writes across a kill, a paused owner and a release that
         # storage does not answer. About two minutes on a four-core runner.
         run: cargo test --locked -p mount-rs-cli --test failover -- --include-ignored
+      - name: Check the v1 and cluster HTTP contracts on a forwarding cluster
+        env:
+          MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+        # Real servers: the file routes of openapi.yaml on an owner and
+        # through an ingress, compared with a plain server, and the session
+        # routes and forwarding responses of openapi-cluster.yaml. The tests
+        # of this file that need no Redis also run in the workspace job.
+        run: cargo test --locked -p mount-rs-cli --test cluster_contract -- --include-ignored
 
   observability-qualification:
     name: Observability qualification (${{ matrix.os }})

@@ -2358,6 +2358,22 @@ async fn exercise_forwarder(
     );
     response.into_body().collect().await.unwrap();
     assert_eq!(fresh.diagnostics().mutations.route_cache_misses, 1);
+    // A public client is not shown the owner's refusal. Its status is
+    // about the route, not the file, and its body is empty; the client
+    // gets the one answer every request that was not dispatched gets.
+    let response = mount_rs_http::HttpRequestHandler::handle(
+        &fresh,
+        public_request("PUT", "secret-token", &[]),
+    )
+    .await;
+    assert_eq!(response.status(), 503);
+    assert_eq!(response.headers()["x-mount-dispatch"], "not-dispatched");
+    assert_eq!(response.headers()["retry-after"], "1");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        body.as_ref(),
+        br#"{"error":{"code":"EIO","message":"volume request unavailable"}}"#
+    );
     registry.remove(&stale).await.unwrap();
     registration.advertise().await.unwrap();
     let response = fresh
