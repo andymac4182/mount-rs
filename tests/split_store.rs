@@ -750,6 +750,87 @@ async fn sqlite_metadata_with_memory_blocks() {
     .await;
 }
 
+/// A standby opens a volume whose owner holds the writer lease, as a
+/// failover candidate does again and again. It is refused, and the refused
+/// open must not write to the metadata file: the owner's namespace change
+/// rows stay as they are, where the standby used to fold them into the
+/// stored document before it tried the lease.
+#[tokio::test]
+async fn a_refused_open_of_sqlite_metadata_leaves_the_owners_change_rows_untouched() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("metadata.db");
+    let blocks = MemoryBlockStore::new();
+    let open = |owner: &'static str| {
+        let (path, blocks) = (path.clone(), blocks.clone());
+        async move {
+            ChunkedFs::open(
+                SqliteMetadataStore::open(path)?,
+                blocks,
+                ChunkedOptions::fixed(owner, 4096)?,
+            )
+            .await
+        }
+    };
+    let owner = open("owner").await.unwrap();
+    let files = Loopback::new(owner.clone());
+    // Enough files that rewriting one is a small part of the namespace,
+    // which is when a publication is stored as a row.
+    for file in 0..32 {
+        files
+            .write_file(&format!("/file-{file}"), &[file as u8; 5000])
+            .await
+            .unwrap();
+    }
+    files.write_file("/file-3", &[9; 6000]).await.unwrap();
+
+    // What is stored, read on a connection of this test's own.
+    let observer = rusqlite::Connection::open(&path).unwrap();
+    let stored = || -> (Vec<(i64, String)>, String, i64, i64) {
+        let rows = observer
+            .prepare("SELECT revision, changes FROM mount_rs_namespace_changes ORDER BY 1")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let (document, fence) = observer
+            .query_row(
+                "SELECT namespace, fence FROM mount_rs_metadata WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        // Counts the commits by other connections that changed the file.
+        let commits = observer
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .unwrap();
+        (rows, document, fence, commits)
+    };
+    let before = stored();
+    assert!(!before.0.is_empty(), "the owner has no change rows to keep");
+
+    for _ in 0..5 {
+        let refused = open("standby").await.err().expect("the lease is held");
+        assert_eq!(refused.code, ErrorCode::Eagain, "{refused:?}");
+    }
+    assert_eq!(stored(), before, "a refused open wrote to the metadata");
+
+    // The owner carries on from its rows, and a successor that takes the
+    // lease after it reads everything it wrote.
+    files.write_file("/file-4", &[7; 100]).await.unwrap();
+    assert!(stored().0.len() > before.0.len());
+    owner.shutdown().await.unwrap();
+    let successor = open("standby").await.unwrap();
+    let files = Loopback::new(successor.clone());
+    assert_eq!(files.read_file("/file-3").await.unwrap(), [9; 6000]);
+    assert_eq!(files.read_file("/file-4").await.unwrap(), [7; 100]);
+    assert_eq!(files.read_file("/file-31").await.unwrap(), [31; 5000]);
+    // Taking the lease is what folded the rows away.
+    assert!(stored().0.is_empty());
+    assert_eq!(stored().2, before.2 + 1);
+    successor.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn memory_metadata_with_sqlite_blocks() {
     let directory = tempfile::tempdir().unwrap();
