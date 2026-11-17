@@ -4,8 +4,14 @@ Server-side advisory volume routing. Clients never connect to Redis. An ingress
 server resolves a volume route and forwards directly to the authenticated owner.
 TiDB grants ownership and fencing generations; Redis only advertises them.
 
-`RedisRouteRegistry` accepts a caller-established authenticated TLS Redis
-connection, a deployment namespace and a bounded request timeout. Register a
+`RedisRouteRegistry` takes a Redis client or connection that the caller has
+configured, a deployment namespace and a bounded request timeout. This crate
+does not open a connection from a URL and does not itself require TLS or
+authentication: whatever the caller's `redis::Client` was built with is what
+is used. `mount-rs serve-http` builds that client in
+`apps/mount-rs-cli/src/redis_connect.rs`, which is where `rediss://`, the
+password, a private CA and the refusal of plaintext to another host are
+enforced; see "The Redis connection" in `apps/mount-rs-cli/README.md`. Register a
 `VolumeRoute` only after validating TiDB ownership and loading the volume. The
 record includes node/boot/registration identities, a full u64 TiDB fence, socket
 address and TLS server name. Membership must authenticate that address/name;
@@ -40,9 +46,12 @@ MOUNT_RS_REDIS_TEST_URL=redis://127.0.0.1:6379/ \
 ```
 
 The real-service test uses a unique namespace and verifies takeover at the top
-of the u64 range, stale cleanup, exact refresh, expiry and lookup. The current
-acceptance used disposable Redis 8.4.0, loopback plaintext; production TLS,
-authorization, outages and full server lifecycle remain separate acceptance work.
+of the u64 range, stale cleanup, exact refresh, expiry and lookup. These
+tests use disposable Redis 8.4.0 over loopback plaintext. TLS with a private
+CA, password and ACL logins, refused handshakes and logins, and an outage
+longer than the route lifetime are tested with real `serve-http` processes
+in `apps/mount-rs-cli/tests/redis_connection.rs`. Redis Sentinel, Redis
+Cluster and a replicated pair failing over are not tested.
 
 ## HTTP/3 transport foundation
 
@@ -89,7 +98,9 @@ token and status watch channel. It reports failure before cleanup and attempts
 exact withdrawal on failure or graceful stop. It never automatically replays an
 unknown write or re-advertises a missing/replaced registration. Aborting the task
 clears its observed readiness; Redis TTL handles abandoned cleanup. Join this
-supervisor before filesystem shutdown. CLI configuration is not wired yet.
+supervisor before filesystem shutdown. `mount-rs serve-http` starts and joins
+it for each drive of a server configured with `http.forwarding.owner`
+(`apps/mount-rs-cli/src/http_sessions.rs`).
 Cancelled cleanup can leave only a TTL-bounded hint. If ownership changes during
 an advertisement, stale discovery may exist briefly; it never authorizes serving.
 
@@ -104,7 +115,9 @@ replays a filesystem request, and `run` does not invoke it automatically.
 
 `run_with_recovery` is an opt-in alternative. Supply `RegistrationRecovery`
 with a positive initial delay, a maximum delay no greater than 30 seconds and
-1–100 attempts per outage. It uses capped exponential backoff, publishes
+1–100 attempts per outage, or `RegistrationRecovery::UNLIMITED_ATTEMPTS` to
+keep reconciling for as long as the registry is unavailable. It uses capped
+exponential backoff, publishes
 `Recovering(error)` while unavailable, and resets the attempt budget after
 successful reconciliation. A conflicting registration observed during
 reconciliation, lost ownership or invalid registry data is terminal. Cancelling
@@ -115,11 +128,26 @@ entropy to spread retries across volumes and servers. A live Redis regression
 recovers 100 independent memory-backed volume registrations after concurrent
 route removal, preserves their fences and withdraws all routes on cancellation.
 This is control-plane coverage, not 100-client filesystem latency or Redis HA
-failover qualification. Fleet deployment tuning remains open. This
-library API is not yet wired into production CLI/server startup.
+failover qualification. Fleet deployment tuning remains open.
+`mount-rs serve-http` runs every owner registration this way through
+`RegistrationSupervisor`, with unlimited attempts and a two-second maximum
+delay: an owner serves its own drives without Redis, so a Redis outage of
+any length must not stop it. With a bounded budget the worker fails when the
+budget runs out, and the supervisor reports failure for the whole server.
 
-Use `RedisRouteRegistry::with_manager` with a caller-configured
-`redis::aio::ConnectionManager` when recovery must survive a dropped socket.
+Use `RedisRouteRegistry::with_client` when recovery must survive both a
+dropped socket and a connection that stays open but stops answering. It
+builds a `redis::aio::ConnectionManager` from the supplied `redis::Client`
+and configuration, and replaces it after three consecutive commands time out
+on it. The manager alone reconnects after a refused, reset or closed
+connection but never after a timeout, so a connection whose packets are
+silently dropped would otherwise fail every command until the operating
+system abandoned it. `with_client` connects lazily: check a connection from
+the same client first if a bad address, certificate or password should stop
+startup.
+
+`RedisRouteRegistry::with_manager` takes a caller-configured
+`redis::aio::ConnectionManager` and has the manager's behaviour only.
 The original `new(MultiplexedConnection, ...)` constructor remains available
 but does not reconnect that connection. With the pinned Redis 1.7 client, a
 failed command still returns its error while reconnection supports later
@@ -168,6 +196,44 @@ Status is observational: no cached Ready message authorizes a request, and
 mandatory. Redis delay/partition and cancellation during an ambiguous update
 still need combined failure testing.
 
+## Failover of volume ownership
+
+Several servers may be candidate owners of one volume. Which of them serves
+it is still decided only by the storage writer lease; these pieces decide
+who tries to take it, and when. Design and timing bounds:
+[`docs/serve-http-failover.md`](../../docs/serve-http-failover.md).
+
+- `placement` ranks a volume's candidates by rendezvous hashing of
+  `(volume, node)`. The hash is fixed (FNV-1a and a SplitMix64 finish) and
+  pinned by a test: every node must compute the same ranking.
+- `RedisRouteRegistry::announce_candidate`, `candidates` and
+  `withdraw_candidate` keep one sorted set per volume
+  (`mount-rs:<namespace>:candidates:<volume>`) of node ids scored with an
+  expiry on the Redis server clock. The set is a hint and must be
+  intersected with trusted membership.
+- `FailoverMachine` is the per-volume decision logic with no I/O: a standby
+  opens a volume only after reading that no route is published and waiting
+  `rank x stagger`; a registry that cannot be read is never evidence; an
+  owner lets go when it loses the lease or, if enabled, to hand the volume
+  back to a better-ranked live candidate.
+- `FailoverSupervisor` (feature `http3`) runs the machine for each candidate
+  volume of a server. It opens a volume through a caller-supplied
+  `DriveFactory`, installs it in the `OwnerHttpRouter` (`insert`), publishes
+  its route under the lease's fence, and on release withdraws the route,
+  removes and drains the handler, and shuts the volume down. A route is
+  never published for a volume that is not open. `mount-rs serve-http`
+  starts it for an owner configured with `http.forwarding.failover`.
+
+`OwnerHttpRouter` now serves a set of volumes that can change while it runs;
+requests read an immutable snapshot. An ingress answers `503` with
+`x-mount-dispatch: not-dispatched` and `Retry-After: 1` when no route is
+published.
+
+`tests/failover.rs` runs candidates against a real Redis and a SQLite-backed
+split store: clean handover, a crashed owner replaced only after its lease
+expires, a lost lease, a candidate that cannot open the volume, fail-back
+on and off, and three candidates across repeated stops.
+
 ## HTTP/3 owner application
 
 `OwnerHttpHandler` serves one SDK volume through the existing `mount-rs-http`
@@ -190,9 +256,11 @@ full file and a range, checks wrong-bearer refusal, stale fence and second-hop
 refusal without file changes, and ownership-loss refusal after SDK shutdown.
 It also verifies listener-free application shutdown. That test connects directly
 as an authenticated server peer. The cluster load harness exercises Redis route
-resolution and ingress forwarding across three processes. Production
-`serve-http` startup still needs to wire the peer listener, authenticated peer
-directory, and registration supervisor into the configured service lifecycle.
+resolution and ingress forwarding across three processes. `mount-rs
+serve-http` wires the peer listener, the authenticated membership and the
+registration supervisor into its service lifecycle when `http.forwarding` is
+configured; `scripts/serve-http-cluster-e2e.py` exercises that with real
+processes.
 
 ## Ingress forwarding
 
@@ -200,9 +268,79 @@ directory, and registration supervisor into the configured service lifecycle.
 route on the server, verifies it against a bounded operator-authenticated
 `PeerDirectory`, and streams to the owner using a shared `PeerClient`. The peer
 certificate must match the configured public-key pin and node role. Redis cannot
-supply its own trusted endpoint, boot identity or certificate. Replace the
-configured directory/forwarder when membership changes; live membership reload
-is not yet implemented.
+supply its own trusted endpoint, boot identity or certificate.
+
+### Live membership reload
+
+A server takes a changed membership without a restart. `PeerMembership` holds
+the current `PeerDirectory` and the SPKI pin set derived from it. Build the
+forwarder with `IngressForwarder::with_membership`, every `PeerClient` with
+`PeerClient::new_with_pin_provider(.., membership.pins(), ..)`, and the peer
+listener with `PeerServer::new_with_pin_provider(.., membership.pins(), ..)`
+and a request policy that calls `membership.accepts(identity)`. Nothing then
+holds a copy of an older membership:
+
+- the transports check a peer's pin against the current pin set after every
+  handshake, and the listener checks it again on every request;
+- the listener's policy checks the peer's node and pin against the current
+  directory on every request;
+- the forwarder resolves a route against the current directory on every
+  request, including a route it has cached, and requires the owner's
+  certificate to carry that record's node and pin.
+
+TLS chain validation against the CA is unchanged; the CA is read once at
+startup.
+
+`IngressForwarder::reload_membership(candidate)` (or `PeerMembership::apply`
+for a server with no forwarder) replaces the membership:
+
+1. The candidate is validated in full first. A reload is refused, and the
+   membership in force stays exactly as it was, when the file does not parse;
+   lists no servers, more than 1,024, or more than the capacity the
+   `PeerMembership` was created with; has an invalid record or a repeated
+   node; or would cut this server off. A server's own certificate must still
+   match a record (`with_local_identity`), and a server that listens for
+   peers must also keep its record's `boot`, `address` and `tls_server_name`
+   (`with_local_listener`), because its listener is bound to that address
+   and the routes it has published carry those values. `MembershipError`
+   says which rule and which record.
+2. The directory is swapped, then the pin set. Both are single atomic
+   replacements. A reader between the two sees the new directory with the
+   old pins and applies both checks, so it can refuse a peer the new
+   membership admits but cannot admit one that either membership refuses.
+3. Connections that the new membership no longer covers are closed. This is
+   an immediate close, not a drain.
+
+After a reload returns:
+
+- **A removed server** is refused on new inbound connections (its pin is
+  gone, and the policy no longer finds its node) and is no longer dialled:
+  a route naming it is `UntrustedRoute`. Connections already established
+  with it, in both directions, are closed. A request in flight on one of
+  them fails; for a write the outcome is unknown and it is not replayed, as
+  with any lost peer connection. Remove a server only after stopping it or
+  moving its volumes.
+- **A re-keyed server** (same node, new `spki_sha256`) is treated the same
+  way for its old key: connections made under the old pin are closed, and
+  the next handshake must present the new key. A pin that has left the file
+  does not keep working on an existing connection.
+- **A server whose `boot`, `address` or `tls_server_name` changed** keeps
+  its inbound connections if its pin is unchanged, but pooled outbound
+  connections to its old address are closed and routes carrying the old
+  values are no longer trusted.
+- **An added server** is accepted and dialled from the next handshake.
+- **Unchanged servers** keep their connections. A reload that describes the
+  membership already in force changes nothing and closes nothing.
+
+The capacity exists because the transports' connection limits are fixed when
+they are built: size them from `membership.capacity()`, not from the number
+of members at startup.
+
+The ignored `membership_reload_admits_added_peers_and_cuts_off_removed_ones`
+test covers this over real mTLS sockets: a peer added by reload forwards, a
+removed peer has its connection closed and is refused, invalid and
+self-excluding files change nothing, and a re-listed owner is used again
+only under its real key.
 
 The bounded route cache avoids a Redis round trip on each read. Entries are
 short-lived hints, not ownership grants. An owner `not-dispatched` response
@@ -226,9 +364,10 @@ MOUNT_RS_REDIS_TEST_URL=redis://127.0.0.1:6379/ \
   ./scripts/cargo-shared test -p mount-rs-cluster --features http3 --locked -- --include-ignored --nocapture
 ```
 
-The public ingress listener, CLI wiring, local-owner bypass, membership refresh,
-stream cancellation/failure stress tests and combined TiDB/RustFS routed tests
-remain outstanding. The current fixture starts at the ingress library boundary.
+Stream cancellation/failure stress tests and combined TiDB/RustFS routed
+tests remain outstanding. That fixture starts at the ingress library
+boundary; the public listener, CLI wiring, local-owner bypass and membership
+reload are covered by `scripts/serve-http-cluster-e2e.py`.
 
 ## Public ingress listener
 
@@ -243,8 +382,22 @@ Real socket tests now include public HTTP PUT, full/range GET, bearer refusal,
 internal-header spoof refusal, and listener shutdown. Two ingress listeners
 with independent route caches share the same owner and see each other's writes;
 closing either ingress does not close the shared owner. The fixture uses one
-process and a shared peer client. Production public TLS, independent-process
-failure testing, CLI startup configuration and native remote mounts remain open.
+process and a shared peer client. `mount-rs serve-http` provides the CLI
+startup configuration, and the public surface it serves is specified in
+`transports/mount-rs-http/openapi-cluster.yaml` and checked with real
+processes by `apps/mount-rs-cli/tests/cluster_contract.rs`. Public TLS is the
+reverse proxy's job, as for a single server. Native remote mounts remain
+open.
+
+`IngressForwarder::forward` returns the owner's answer as it was, including
+an owner's refusal of a request it did not run (404, 409 or 503 with
+`x-mount-dispatch: not-dispatched` and no body). The `HttpRequestHandler`
+implementation, which is what a public listener uses, turns every such
+refusal into the one public answer for a request that was not dispatched:
+503 with `Retry-After: 1` and the standard error body. `ClusterIngress`
+does the same for a drive the server owns itself, and answers paths that
+name no drive (`/healthz`, `/readyz`, `/v1/drives`) from the drives the
+owner router holds at that moment instead of forwarding them.
 
 ## Remote handle lifecycle foundation
 
@@ -255,8 +408,8 @@ before open side effects, and provides retryable explicit close/drain. The
 future transport must own authentication, bounded session counts, expiration
 and cleanup; dropping the table alone is not cleanup. Pending opens reserve capacity without holding the
 table lock across backend work; cancellation releases the reservation and drain
-waits for admitted opens. This is not an implemented HTTP session protocol or
-remote driver.
+waits for admitted opens. The HTTP session protocol built on it is
+`SessionHttpHandler`, below.
 
 `VolumeSessions` adds bounded per-volume session ownership, 256-bit OS-random
 session tokens bound to authenticated client identities, idle-expiry admission
@@ -282,7 +435,9 @@ memory. Unbudgeted `new` remains a per-volume-only constructor.
 session HTTP routes. It rejects duplicate Authorization headers and never trusts
 caller identity headers. Supply high-entropy tokens over encrypted transport;
 length validation does not establish entropy. Debug redacts credential material.
-The helper is not yet wired into routes and does not manage TLS or rotation.
+`serve-http` uses it for the session routes of every drive when
+`http.remote_sessions` is set. It does not manage TLS or rotation: tokens
+are read at startup and change by restart.
 
 `SessionHttpHandler` implements `HttpRequestHandler` for authenticated POST/DELETE
 `/v1/drives/{volume}/sessions`. POST returns protocol version 1 and a session token;
@@ -298,7 +453,8 @@ the registry for that exact owned SDK filesystem and volume, using the supplied
 shared session budget. Obtain `session_registry()` to own its expiry worker.
 Drain public and peer listeners before owner close; owner close then drains the
 session registry before the caller shuts down the filesystem. Configuration is
-opt-in and not yet exposed by the production CLI startup path.
+opt-in; `mount-rs serve-http` turns it on with `http.remote_sessions: true`
+and sets the limits from `http.sessions`.
 
 Handle RPC uses authenticated POST JSON controls (open/read/stat/truncate/sync/
 close; 8KiB maximum), and PUT raw writes (64KiB maximum) with `x-mount-handle`

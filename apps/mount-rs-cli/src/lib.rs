@@ -6,15 +6,20 @@
 //! for the explicit mount command (the default command is also a mount, just
 //! like the upstream `mountx` CLI).
 
+mod access_log;
 pub mod color;
 pub mod config;
 mod http_sessions;
 mod joined;
+mod membership_reload;
 pub mod parser;
+mod redis_connect;
 mod remote;
 pub mod runtime;
 mod server_cache;
 mod stale;
+mod storage_check;
+mod token_reload;
 pub mod watch;
 
 pub use parser::{CliOptions, Command, DriverChoice, ParseError, TransportChoice, parse_args};

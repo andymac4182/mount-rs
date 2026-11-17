@@ -32,8 +32,9 @@ esac
 
 # mysql_async defaults CA and hostname verification on when TLS is required.
 # Require the explicit SSL switch and reject URL options that disable either
-# verification or the built-in trust roots. Custom CA material must be wired
-# through the deployment/runtime rather than weakening this gate in the URL.
+# verification or the built-in trust roots. A private authority is added with
+# the provider's tls_ca_file parameter, which extends the trusted roots and
+# leaves both verifications on.
 query_tokens="&${query}&"
 case "$query_tokens" in
   *"&require_ssl=true&"*)
@@ -69,6 +70,6 @@ fi
   -p mount-rs-tidb \
   --features rustls \
   --test tidb \
-  -- --ignored --nocapture
+  -- --ignored --nocapture --test-threads=1
 
 echo "TIDB_TLS_ACCEPTANCE_PASS provider_contract=tidb tls=rustls"

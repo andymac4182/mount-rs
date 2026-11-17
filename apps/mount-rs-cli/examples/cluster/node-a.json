@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "http": {
+    "host": "10.0.1.11",
+    "allow_non_loopback": true,
+    "port": 8080,
+    "remote_sessions": true,
+    "sessions": {
+      "max_sessions": 4096,
+      "max_sessions_per_drive": 128,
+      "max_handles_per_session": 128,
+      "idle_timeout_seconds": 60
+    },
+    "forwarding": {
+      "peers": "peers.json",
+      "certificate": "/etc/mount-rs/tls/node-a.pem",
+      "private_key": "/etc/mount-rs/tls/node-a.key",
+      "ca": "/etc/mount-rs/tls/cluster-ca.pem",
+      "redis_url": {"env": "MOUNT_RS_CLUSTER_REDIS_URL"},
+      "redis_ca": "/etc/mount-rs/tls/redis-ca.pem",
+      "namespace": "files-prod",
+      "bind": "10.0.1.11:7443",
+      "owner": true,
+      "membership_reload_seconds": 30,
+      "failover": {
+        "poll_interval_ms": 1000,
+        "takeover_stagger_ms": 2000,
+        "fail_back": false
+      }
+    },
+    "drives": [
+      {
+        "id": "shared",
+        "token": {"env": "MOUNT_RS_SHARED_TOKEN"},
+        "driver": {
+          "kind": "splitstore",
+          "storage": {
+            "metadata": {
+              "kind": "tidb",
+              "connection": {"env": "MOUNT_RS_TIDB_URL"},
+              "volume_key": "files-prod-shared",
+              "durable": true
+            },
+            "blocks": {
+              "kind": "aws-s3",
+              "bucket": "example-private-bucket",
+              "region": "ap-southeast-2",
+              "prefix": "mount-rs/files-prod/shared",
+              "durable": true
+            },
+            "chunk_size_bytes": 65536,
+            "lease_ttl_ms": 20000,
+            "owner": "node-a"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -21,7 +21,7 @@ separate evidence.
 
 Without `MOUNT_RS_TRACE_BACKENDS`, the script retains its existing six local
 backend defaults and its existing opt-in `PGLITE_DATABASE_URL`/`MOUNT_RS_TRACE_R2`
-extensions. The first gate selects `memory` explicitly so this ledger makes no
+extensions, plus `chunked-tidb` when `MOUNT_RS_TIDB_URL` is set. The first gate selects `memory` explicitly so this ledger makes no
 new persistence, remote-provider, native, or live-service claim.
 
 The trace generator is unchanged in substance: seven fixed setup operations,

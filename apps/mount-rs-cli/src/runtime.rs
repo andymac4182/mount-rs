@@ -36,6 +36,12 @@ use crate::watch::{WatchOptions, watch_driver};
 pub struct CliError {
     code: u8,
     message: String,
+    /// The filesystem error this was made from, for a caller that must
+    /// tell a held writer lease (`EAGAIN`) from other open failures.
+    filesystem: Option<ErrorCode>,
+    /// Work this error gave up on is still running; see
+    /// [`CliError::abandons_running_work`].
+    abandoned: bool,
 }
 
 impl CliError {
@@ -43,6 +49,8 @@ impl CliError {
         Self {
             code: 2,
             message: redact_diagnostic(&message.into()),
+            filesystem: None,
+            abandoned: false,
         }
     }
 
@@ -50,7 +58,25 @@ impl CliError {
         Self {
             code: 1,
             message: redact_diagnostic(&message.into()),
+            filesystem: None,
+            abandoned: false,
         }
+    }
+
+    /// A runtime failure that leaves work running which may never finish.
+    pub(crate) fn abandoning(message: impl Into<String>) -> Self {
+        Self {
+            abandoned: true,
+            ..Self::runtime(message)
+        }
+    }
+
+    /// Whether the command gave up waiting for work that is still running,
+    /// such as a drive shutdown that ran out of time. The process must then
+    /// exit without waiting for its tasks or threads: one of them may be
+    /// blocked on storage that will never answer.
+    pub const fn abandons_running_work(&self) -> bool {
+        self.abandoned
     }
 
     pub const fn exit_code(&self) -> i32 {
@@ -186,7 +212,10 @@ impl From<ConfigError> for CliError {
 
 impl From<FsError> for CliError {
     fn from(error: FsError) -> Self {
-        Self::runtime(error.to_string())
+        Self {
+            filesystem: Some(error.code),
+            ..Self::runtime(error.to_string())
+        }
     }
 }
 
@@ -941,6 +970,27 @@ fn supports_sdk_reopen(options: &CliOptions) -> bool {
     }
 }
 
+/// The storage `/readyz` keeps an eye on for a drive, where the drive does
+/// not notice by itself that it has gone: the root of a `host` drive and
+/// the database of a `sqlite` drive. A split-store drive reports its own
+/// health, and a `memory` drive has no storage to lose.
+fn checked_storage(
+    options: &CliOptions,
+) -> Result<Option<crate::storage_check::Storage>, CliError> {
+    use crate::storage_check::Storage;
+    Ok(match options.driver {
+        DriverChoice::Host => Some(Storage::Directory(match options.root.as_deref() {
+            Some(root) => expand_path(root),
+            None => std::env::current_dir().map_err(io_error)?,
+        })),
+        DriverChoice::Sqlite => options
+            .database
+            .as_deref()
+            .map(|database| Storage::File(expand_path(database))),
+        DriverChoice::Memory | DriverChoice::SplitStore | DriverChoice::Remote => None,
+    })
+}
+
 async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     let spec = load_config(config_path)?;
     let http = spec.http.as_ref().ok_or_else(|| {
@@ -951,12 +1001,58 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     })?;
     let (uid, gid) = effective_identity();
     #[cfg(feature = "observability")]
-    let server_options = http_server_options(http, mount_rs_observability::global());
+    let mut server_options = http_server_options(http, mount_rs_observability::global());
     #[cfg(not(feature = "observability"))]
-    let server_options = http_server_options(http);
+    let mut server_options = http_server_options(http);
+    let access_log = if http.access_log {
+        Some(crate::access_log::JsonAccessLog::stderr().map_err(io_error)?)
+    } else {
+        None
+    };
+    // The metrics are counted from what the access log is told, whether
+    // or not that log is written. The listener is bound before any drive
+    // is opened, so that an address in use costs nothing to back out of;
+    // it is kept until the command returns.
+    let metrics = http
+        .metrics
+        .map(|_| mount_rs_http::HttpMetrics::new(env!("CARGO_PKG_VERSION")));
+    let _metrics_listener = match (http.metrics, &metrics) {
+        (Some(config), Some(metrics)) => {
+            let listener = mount_rs_http::MetricsServer::start(
+                config.listen,
+                config.allow_non_loopback,
+                Arc::clone(metrics),
+            )
+            .await
+            .map_err(|error| CliError::runtime(format!("metrics listener: {error}")))?;
+            let record = serde_json::json!({
+                "event": "http_metrics_listening",
+                "address": listener.local_addr().to_string(),
+            });
+            let _ = writeln!(std::io::stderr().lock(), "{record}");
+            Some(listener)
+        }
+        _ => None,
+    };
+    let mut logs: Vec<Arc<dyn mount_rs_http::AccessLog>> = Vec::new();
+    if let Some(log) = &access_log {
+        logs.push(Arc::clone(log) as Arc<dyn mount_rs_http::AccessLog>);
+        if let Some(metrics) = &metrics {
+            let log = Arc::clone(log);
+            metrics.observe_access_log_dropped(move || log.dropped_lines());
+        }
+    }
+    if let Some(metrics) = &metrics {
+        logs.push(Arc::clone(metrics) as Arc<dyn mount_rs_http::AccessLog>);
+    }
+    server_options.access_log = if logs.len() > 1 {
+        Some(Arc::new(mount_rs_http::AccessLogs(logs)))
+    } else {
+        logs.pop()
+    };
     let mut runtimes = Vec::with_capacity(http.drives.len());
     let mut registry = DriveRegistry::new();
-    let mut sessions = crate::http_sessions::Sessions::new(http.max_request_bytes)?;
+    let mut sessions = crate::http_sessions::Sessions::new(http.max_request_bytes, http.sessions)?;
     let disk_budget = http
         .disk_cache_budget
         .map(|limits| mount_rs_sdk::DiskCacheBudget::new(limits.workers, limits.fill_copies))
@@ -964,28 +1060,64 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
 
     let mut metadata_pools =
         std::collections::BTreeMap::<String, mount_rs_sdk::TidbStorePool>::new();
+    // Kept until the command returns: dropping one stops its thread.
+    let mut storage_checks = Vec::new();
     let mut configured_drives = Vec::with_capacity(http.drives.len());
+    // The drives whose token is a file, which is read again while the
+    // server runs.
+    let mut token_files = Vec::new();
     for drive in &http.drives {
-        let token = std::env::var(&drive.token.name).map_err(|_| {
-            CliError::runtime(format!("missing environment variable {}", drive.token.name))
-        })?;
-        HttpDriveConfig::validate_bearer_token(&token).map_err(|error| {
+        let invalid_drive = |error: &dyn std::fmt::Display| {
             CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id))
-        })?;
-        let credentials = if http.remote_sessions {
-            Some(mount_rs_cluster::SessionCredentials::new(vec![(
+        };
+        let (tokens, token) = match &drive.token {
+            crate::config::TokenSource::Env(variable) => {
+                let token = std::env::var(&variable.name).map_err(|_| {
+                    CliError::runtime(format!("missing environment variable {}", variable.name))
+                })?;
+                let tokens = mount_rs_http::DriveTokens::new(vec![token.clone()])
+                    .map_err(|error| invalid_drive(&error))?;
+                (tokens, Some(token))
+            }
+            crate::config::TokenSource::File(path) => {
+                let loaded = crate::token_reload::LoadedTokens::load(path)
+                    .map_err(|error| invalid_drive(&error))?;
+                let tokens = loaded.tokens();
+                token_files.push((drive.id.clone(), loaded));
+                (tokens, None)
+            }
+        };
+        let credentials = match (&token, http.remote_sessions) {
+            (Some(token), true) => Some(mount_rs_cluster::SessionCredentials::new(vec![(
                 "configured-volume-client".into(),
                 token.clone(),
-            )])?)
-        } else {
-            None
+            )])?),
+            _ => None,
         };
-        configured_drives.push((drive, token, credentials));
+        configured_drives.push((drive, tokens, token, credentials));
     }
     let mut ctrl_c = CtrlCHandler::install().await?;
+    // Only a server with a token file takes SIGHUP for itself: without one
+    // the signal does what it always did. Kept until the command returns:
+    // dropping it stops the reloads.
+    let _token_reloader = if token_files.is_empty() {
+        None
+    } else {
+        let poll =
+            (http.token_reload_seconds > 0).then(|| Duration::from_secs(http.token_reload_seconds));
+        Some(crate::token_reload::TokenReloader::start(
+            token_files,
+            poll,
+        )?)
+    };
+    let failover = http
+        .forwarding
+        .as_ref()
+        .filter(|config| config.owner && config.failover.is_some());
     let startup = async {
         let mut owned = Vec::new();
-        for (drive, token, credentials) in configured_drives {
+        let mut candidates = Vec::new();
+        for (drive, tokens, token, credentials) in configured_drives {
             let options = drive.driver.to_options();
             let metadata_pool = match (
                 http.tidb_metadata_pool_limit,
@@ -1005,6 +1137,43 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                 }
                 _ => None,
             };
+            if failover.is_some() {
+                // A failover candidate opens a drive only when it takes it
+                // over, and may do so many times while the process runs.
+                let disk_budget = disk_budget.clone();
+                let factory = move || {
+                    let (options, disk_budget, metadata_pool) =
+                        (options.clone(), disk_budget.clone(), metadata_pool.clone());
+                    async move {
+                        let shared = SharedResources {
+                            disk_budget,
+                            metadata_pool,
+                        };
+                        let opened =
+                            DriverRuntime::open_inner(&options, uid, gid, None, shared).await;
+                        let runtime = opened.map_err(|error| {
+                            FsError::new(error.filesystem.unwrap_or(ErrorCode::Eio))
+                                .with_syscall("open drive")
+                                .with_message(error.message)
+                        })?;
+                        runtime.local().cloned().ok_or_else(|| {
+                            FsError::new(ErrorCode::Enotsup).with_syscall("open drive")
+                        })
+                    }
+                };
+                let Some(token) = token else {
+                    return Err(CliError::usage(
+                        "peer owner requires drive tokens from the environment",
+                    ));
+                };
+                candidates.push(mount_rs_cluster::FailoverDrive {
+                    volume: drive.id.clone(),
+                    bearer_token: token,
+                    sessions: credentials,
+                    factory: Arc::new(factory),
+                });
+                continue;
+            }
             let runtime = DriverRuntime::open_inner(
                 &options,
                 uid,
@@ -1031,6 +1200,11 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                         "peer owner requires a local splitstore runtime",
                     ));
                 };
+                let Some(token) = token else {
+                    return Err(CliError::usage(
+                        "peer owner requires drive tokens from the environment",
+                    ));
+                };
                 owned.push((drive.id.clone(), token, filesystem.clone(), credentials));
                 continue;
             }
@@ -1040,12 +1214,41 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
             }
             let invalid_drive =
                 |error| CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id));
-            let configured = HttpDriveConfig::new(drive.id.clone(), runtime.driver(), token)
-                .map_err(invalid_drive)?;
+            let mut configured =
+                HttpDriveConfig::with_tokens(drive.id.clone(), runtime.driver(), tokens)
+                    .map_err(invalid_drive)?;
+            if let Some(storage) = checked_storage(&options)? {
+                let check = crate::storage_check::StorageCheck::start(&drive.id, storage)
+                    .map_err(io_error)?;
+                configured = configured.with_health_check(check.health_check());
+                storage_checks.push(check);
+            }
+            if let Some(metrics) = &metrics {
+                metrics.observe_drive(&configured);
+            }
             registry.register(configured).map_err(invalid_drive)?;
         }
         if let Some(config) = http.forwarding.as_ref().filter(|config| config.owner) {
-            return crate::http_sessions::start_owner(config, owned, server_options.clone()).await;
+            let drives = if failover.is_some() {
+                // Releasing a drive drains its requests and then shuts it
+                // down, each within its own limit.
+                crate::http_sessions::OwnedDrives::Candidates {
+                    drives: candidates,
+                    release_timeout: Duration::from_millis(
+                        http.drain_timeout_ms
+                            .saturating_add(http.drive_shutdown_timeout_ms),
+                    ),
+                }
+            } else {
+                crate::http_sessions::OwnedDrives::Open(owned)
+            };
+            return crate::http_sessions::start_owner(
+                config,
+                drives,
+                server_options.clone(),
+                http.sessions,
+            )
+            .await;
         }
         sessions
             .start(registry, server_options.clone(), http.forwarding.as_ref())
@@ -1055,20 +1258,21 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     let server = match startup {
         Ok(ready) => ready,
         Err(mut primary) => {
-            if let Err(cleanup) = shutdown_runtimes(&runtimes, &metadata_pools).await {
-                primary.message.push_str(&format!(
-                    " (drive rollback failed with {})",
-                    cleanup.code.as_str()
-                ));
+            if let Err(cleanup) = shutdown_runtimes(http, &runtimes, &metadata_pools).await {
+                primary
+                    .message
+                    .push_str(&format!(" (drive rollback failed: {cleanup})"));
+                primary.abandoned = cleanup.abandons_running_work();
             }
-            return Err(primary);
+            return leave_if_abandoned(Err(primary));
         }
     };
 
     let before_ready = poll_signal_registration(ctrl_c.signal.as_mut()).await;
     if !matches!(before_ready, Ok(false)) {
-        server.close().await?;
-        shutdown_runtimes(&runtimes, &metadata_pools).await?;
+        let closed = server.close().await;
+        let released = shutdown_runtimes(http, &runtimes, &metadata_pools).await;
+        leave_if_abandoned(stop_failure(closed, released))?;
         before_ready?;
         return Err(CliError::runtime(
             "received shutdown signal during HTTP startup",
@@ -1083,13 +1287,14 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     println!("http listening at {} (drives: {drive_ids})", server.url());
     println!("Press Ctrl-C to stop.");
     if let Err(error) = std::io::stdout().flush() {
-        server.close().await?;
-        shutdown_runtimes(&runtimes, &metadata_pools).await?;
+        let closed = server.close().await;
+        let released = shutdown_runtimes(http, &runtimes, &metadata_pools).await;
+        leave_if_abandoned(stop_failure(closed, released))?;
         return Err(io_error(error));
     }
 
     let signal_result = tokio::select! {
-        _ = report_cache_stats(http, &runtimes), if http.cache_report_interval_seconds.is_some() => unreachable!(),
+        _ = report_cache_stats(http, &runtimes, &server), if http.cache_report_interval_seconds.is_some() => unreachable!(),
         result = ctrl_c.wait() => result,
         reason = async {
             let mut accept_failures = 0;
@@ -1109,21 +1314,31 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     };
     // Keep SDK ownership alive through the listener/session drain.
     let closed = server.close().await;
+    if let Some(log) = access_log {
+        // The listener has stopped: write out the lines of the last
+        // requests before the drives, which may take a while, are closed.
+        let _ = tokio::task::spawn_blocking(move || log.flush(Duration::from_secs(2))).await;
+    }
     // A drain that ran out of time has aborted what it was still serving.
     // Release the drives regardless, so the writer lease is free for the
     // replacement process, and still exit with the failure. A session,
     // handle or forwarded request still in flight is no reason to keep the
     // lease: each drive's shutdown waits for the operations it admitted,
     // then fences the rest, and the process is about to exit anyway.
-    let released = shutdown_runtimes(&runtimes, &metadata_pools).await;
-    closed?;
-    released?;
+    // That shutdown is bounded as well: a drive whose storage has stopped
+    // answering must not keep the process from exiting.
+    let released = shutdown_runtimes(http, &runtimes, &metadata_pools).await;
+    leave_if_abandoned(stop_failure(closed, released))?;
     signal_result?;
     println!("http stopped");
     Ok(())
 }
 
-async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntime]) {
+async fn report_cache_stats(
+    config: &HttpServiceConfig,
+    runtimes: &[DriverRuntime],
+    server: &crate::http_sessions::Service,
+) {
     let period = Duration::from_secs(
         config
             .cache_report_interval_seconds
@@ -1131,10 +1346,15 @@ async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntim
     );
     loop {
         tokio::time::sleep(period).await;
-        for (drive, runtime) in config.drives.iter().zip(runtimes) {
-            let Some(fs) = runtime.local() else {
-                continue;
-            };
+        // Drives opened at startup, then the drives a failover candidate
+        // owns at this moment (it opens none at startup).
+        let open = config
+            .drives
+            .iter()
+            .zip(runtimes)
+            .filter_map(|(drive, runtime)| Some((drive.id.clone(), runtime.local()?.clone())))
+            .chain(server.failover_filesystems());
+        for (drive, fs) in open {
             let ram = fs.block_cache_stats().await.map(|s| {
                 serde_json::json!({
                     "hits": s.hits, "misses": s.misses, "evictions": s.evictions,
@@ -1154,7 +1374,7 @@ async fn report_cache_stats(config: &HttpServiceConfig, runtimes: &[DriverRuntim
                 Err(error) => Some(serde_json::json!({"error": error.code.as_str()})),
             };
             if ram.is_some() || disk.is_some() {
-                let record = serde_json::json!({"event":"mount_cache_stats", "drive":drive.id, "ram":ram, "disk":disk});
+                let record = serde_json::json!({"event":"mount_cache_stats", "drive":drive, "ram":ram, "disk":disk});
                 let _ = tokio::task::spawn_blocking(move || {
                     writeln!(std::io::stderr().lock(), "{record}")
                 })
@@ -1183,30 +1403,170 @@ fn http_server_options(
         max_connections: config.max_connections,
         request_timeout: Duration::from_millis(config.request_timeout_ms),
         max_buffered_upload_bytes: Some(config.max_buffered_upload_bytes),
+        // Set by the caller, which owns the log's writer.
+        access_log: None,
+        // A server of a forwarding cluster serves by forwarding: one that
+        // owns no drive is ready all the same.
+        ready_without_drives: config.forwarding.is_some(),
         #[cfg(feature = "observability")]
         telemetry,
     }
 }
 
+/// Shut the HTTP drives down, last opened first, and then the pools they
+/// share, all within `config.drive_shutdown_timeout_ms`.
+///
+/// Running out of time is an error that says which drives were left, and
+/// one the process must not outlive: see [`CliError::abandons_running_work`].
 async fn shutdown_runtimes(
+    config: &HttpServiceConfig,
     runtimes: &[DriverRuntime],
     pools: &std::collections::BTreeMap<String, mount_rs_sdk::TidbStorePool>,
-) -> FsResult<()> {
-    let mut first_error = None;
-    for runtime in runtimes.iter().rev() {
-        if let Err(error) = runtime.shutdown().await
-            && first_error.is_none()
-        {
-            first_error = Some(error);
+) -> Result<(), CliError> {
+    // Drives are opened in config order, so these are the first of them.
+    let drives = config
+        .drives
+        .iter()
+        .zip(runtimes)
+        .map(|(drive, runtime)| {
+            let runtime = runtime.clone();
+            (drive.id.as_str(), async move { runtime.shutdown().await })
+        })
+        .collect();
+    let pools: Vec<_> = pools.values().cloned().collect();
+    let pools = async move {
+        let mut first_error = None;
+        for pool in pools {
+            if let Err(error) = pool.close().await {
+                first_error.get_or_insert(error);
+            }
         }
-    }
-    // Shared pools close only after every volume borrowing them has shut down.
-    for pool in pools.values() {
-        if let Err(error) = pool.close().await {
+        first_error.map_or(Ok(()), Err)
+    };
+    shutdown_within(
+        Duration::from_millis(config.drive_shutdown_timeout_ms),
+        drives,
+        pools,
+    )
+    .await
+}
+
+/// Run `drives`' shutdowns one at a time, last first, then `shared`, and
+/// give up on whatever is still running when `limit` has passed.
+///
+/// The first failure is returned once everything has been tried. A drive
+/// that ran out of time is not a failure to carry on from: its shutdown is
+/// abandoned where it stands, the drives before it are not attempted, and
+/// the error names both, so that an incomplete shutdown is never reported
+/// as a clean one.
+///
+/// The shutdowns run on a task of their own. A storage call that blocks its
+/// thread instead of yielding (SQLite waiting for a lock, a file on a
+/// mount that has stopped answering) then cannot keep this function from
+/// noticing that the time is up.
+async fn shutdown_within<F>(
+    limit: Duration,
+    drives: Vec<(&str, F)>,
+    shared: impl Future<Output = FsResult<()>> + Send + 'static,
+) -> Result<(), CliError>
+where
+    F: Future<Output = FsResult<()>> + Send + 'static,
+{
+    let (ids, shutdowns): (Vec<&str>, Vec<F>) = drives.into_iter().unzip();
+    // How many drives, counted from the last, have finished shutting down.
+    let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let progress = Arc::clone(&finished);
+    let mut everything = tokio::spawn(async move {
+        let mut first_error = None;
+        for shutdown in shutdowns.into_iter().rev() {
+            if let Err(error) = shutdown.await {
+                first_error.get_or_insert(error);
+            }
+            progress.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        // Shared pools close only after every volume borrowing them has shut down.
+        if let Err(error) = shared.await {
             first_error.get_or_insert(error);
         }
+        first_error.map_or(Ok(()), Err)
+    });
+    match tokio::time::timeout(limit, &mut everything).await {
+        Ok(Ok(result)) => result.map_err(CliError::from),
+        Ok(Err(stopped)) => Err(CliError::abandoning(format!(
+            "drive shutdown did not complete: {stopped}"
+        ))),
+        Err(_) => {
+            // Stops it at its next yield, if it ever yields.
+            everything.abort();
+            let remaining = ids.len() - finished.load(std::sync::atomic::Ordering::SeqCst);
+            let left = match ids[..remaining].split_last() {
+                Some((stuck, untried)) => {
+                    let mut left = format!("drive '{stuck}' did not finish");
+                    if !untried.is_empty() {
+                        left.push_str(&format!(
+                            " and {} not attempted",
+                            untried
+                                .iter()
+                                .rev()
+                                .map(|id| format!("'{id}'"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    left
+                }
+                None => "the shared storage pools did not close".to_owned(),
+            };
+            Err(CliError::abandoning(format!(
+                "drive shutdown timed out after {} ms: {left}; a writer lease not released stays held until it expires, and writeback data not yet flushed may be lost",
+                limit.as_millis()
+            )))
+        }
     }
-    first_error.map_or(Ok(()), Err)
+}
+
+/// Report `error` and end the process at once with its exit code: no
+/// runtime shutdown, no destructors and no exit handlers. Any of those can
+/// wait on the work that was abandoned: dropping a SQLite-backed drive, for
+/// one, joins its storage thread, which is still inside the call that did
+/// not return.
+pub fn exit_without_waiting(error: &CliError) -> ! {
+    eprintln!("mount-rs: {}", Color::from_env().red(error));
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(unix)]
+    // SAFETY: `_exit` takes no pointers and does not return.
+    unsafe {
+        libc::_exit(error.exit_code())
+    }
+    #[cfg(not(unix))]
+    std::process::exit(error.exit_code())
+}
+
+/// Leave at once, here, when `result` is a failure that abandoned running
+/// work: returning it would first drop the drives and the server.
+fn leave_if_abandoned(result: Result<(), CliError>) -> Result<(), CliError> {
+    if let Err(error) = &result
+        && error.abandons_running_work()
+    {
+        exit_without_waiting(error);
+    }
+    result
+}
+
+/// The failure to exit with after a stop: the listener's, else the drives',
+/// except that a drive shutdown which ran out of time is always reported,
+/// with the listener's failure in front of it.
+fn stop_failure(
+    closed: Result<(), CliError>,
+    released: Result<(), CliError>,
+) -> Result<(), CliError> {
+    match (closed, released) {
+        (Err(closed), Err(released)) if released.abandons_running_work() => {
+            Err(CliError::abandoning(format!("{closed}; {released}")))
+        }
+        (closed, released) => closed.and(released),
+    }
 }
 
 async fn mount_command(options: CliOptions) -> Result<(), CliError> {
@@ -2034,6 +2394,193 @@ mod tests {
     use crate::config::{SplitStorageConfig, StorageProvider};
     use crate::parser::parse_args;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    type DriveShutdown = Pin<Box<dyn Future<Output = FsResult<()>> + Send>>;
+
+    /// A drive shutdown that records that it ran, and then finishes, fails
+    /// or never returns.
+    fn drive<'a>(
+        id: &'a str,
+        order: &Arc<std::sync::Mutex<Vec<String>>>,
+        outcome: Option<FsResult<()>>,
+    ) -> (&'a str, DriveShutdown) {
+        let order = order.clone();
+        let name = id.to_owned();
+        (
+            id,
+            Box::pin(async move {
+                order.lock().unwrap().push(name);
+                match outcome {
+                    Some(outcome) => outcome,
+                    None => std::future::pending().await,
+                }
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn drives_shut_down_last_first_and_then_the_shared_pools() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pools = order.clone();
+        let result = shutdown_within(
+            Duration::from_secs(30),
+            vec![
+                drive("a", &order, Some(Ok(()))),
+                drive("b", &order, Some(Ok(()))),
+                drive("c", &order, Some(Ok(()))),
+            ],
+            async move {
+                pools.lock().unwrap().push("pools".to_owned());
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(*order.lock().unwrap(), ["c", "b", "a", "pools"]);
+    }
+
+    #[tokio::test]
+    async fn a_drive_that_fails_to_shut_down_does_not_stop_the_others() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let error = shutdown_within(
+            Duration::from_secs(30),
+            vec![
+                drive("a", &order, Some(Ok(()))),
+                drive("b", &order, Some(Err(FsError::new(ErrorCode::Eio)))),
+                drive("c", &order, Some(Err(FsError::new(ErrorCode::Enospc)))),
+            ],
+            async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(*order.lock().unwrap(), ["c", "b", "a"]);
+        // The first failure, and an ordinary one: everything was tried.
+        assert!(error.to_string().contains("ENOSPC"), "{error}");
+        assert_eq!(error.exit_code(), 1);
+        assert!(!error.abandons_running_work());
+    }
+
+    #[tokio::test]
+    async fn a_drive_shutdown_that_runs_out_of_time_is_an_error_naming_what_was_left() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pools_closed = Arc::new(AtomicBool::new(false));
+        let closed = pools_closed.clone();
+        let started = std::time::Instant::now();
+        let error = shutdown_within(
+            Duration::from_millis(100),
+            vec![
+                drive("first", &order, Some(Ok(()))),
+                drive("second", &order, Some(Ok(()))),
+                drive("stuck", &order, None),
+                drive("last", &order, Some(Ok(()))),
+            ],
+            async move {
+                closed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .expect_err("a shutdown that did not finish is never reported as clean");
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // Nothing after the stuck drive ran, the shared pools included:
+        // they are still in use by a drive that has not shut down.
+        assert_eq!(*order.lock().unwrap(), ["last", "stuck"]);
+        assert!(!pools_closed.load(Ordering::SeqCst));
+        let message = error.to_string();
+        assert!(message.contains("timed out after 100 ms"), "{message}");
+        assert!(
+            message.contains("drive 'stuck' did not finish"),
+            "{message}"
+        );
+        assert!(
+            message.contains("'second', 'first' not attempted"),
+            "{message}"
+        );
+        assert!(!message.contains("'last'"), "{message}");
+        assert_eq!(error.exit_code(), 1);
+        assert!(error.abandons_running_work());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_drive_shutdown_that_blocks_its_thread_still_runs_out_of_time() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let error = shutdown_within(
+            Duration::from_millis(100),
+            vec![(
+                "blocked",
+                Box::pin(async move {
+                    // What a storage call that never yields looks like.
+                    let _ = blocked.recv_timeout(Duration::from_secs(20));
+                    Ok(())
+                }) as DriveShutdown,
+            )],
+            async { Ok(()) },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the bound waited for the blocked thread: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            error.to_string().contains("drive 'blocked' did not finish"),
+            "{error}"
+        );
+        assert!(error.abandons_running_work());
+        drop(release);
+    }
+
+    #[tokio::test]
+    async fn shared_pools_that_do_not_close_in_time_are_named() {
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let error = shutdown_within(
+            Duration::from_millis(50),
+            vec![drive("only", &order, Some(Ok(())))],
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("the shared storage pools did not close"),
+            "{error}"
+        );
+        assert!(error.abandons_running_work());
+    }
+
+    #[test]
+    fn a_timed_out_drive_shutdown_is_reported_whatever_else_failed() {
+        let drain = || CliError::runtime("HTTP server close timed out");
+        let drives = || CliError::abandoning("drive shutdown timed out after 5 ms");
+
+        assert!(stop_failure(Ok(()), Ok(())).is_ok());
+        let error = stop_failure(Err(drain()), Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), "HTTP server close timed out");
+        assert!(!error.abandons_running_work());
+
+        let error = stop_failure(Ok(()), Err(drives())).unwrap_err();
+        assert!(error.abandons_running_work());
+
+        // Both: the exit must not wait, and the message keeps both causes.
+        let error = stop_failure(Err(drain()), Err(drives())).unwrap_err();
+        assert!(error.abandons_running_work());
+        assert_eq!(
+            error.to_string(),
+            "HTTP server close timed out; drive shutdown timed out after 5 ms"
+        );
+        assert_eq!(error.exit_code(), 1);
+
+        // A drive that failed, rather than hung, leaves the drain's failure
+        // as the one reported, as before.
+        let failed = CliError::from(FsError::new(ErrorCode::Eio));
+        let error = stop_failure(Err(drain()), Err(failed)).unwrap_err();
+        assert_eq!(error.to_string(), "HTTP server close timed out");
+        assert!(!error.abandons_running_work());
+    }
 
     #[tokio::test]
     async fn remote_runtime_owns_keepalive_and_releases_capacity_on_shutdown() {

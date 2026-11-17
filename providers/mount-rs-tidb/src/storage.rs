@@ -11,13 +11,16 @@ use mount_rs_core::storage::{
     validate_inode_publication, validate_node_kind,
 };
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
-use mysql_async::prelude::Queryable;
+use mysql_async::prelude::{AsQuery, FromRow, Queryable, StatementLike};
 use mysql_async::{
     Conn, Error as MysqlError, IsolationLevel, Opts, OptsBuilder, Params, Pool, PoolConstraints,
     Transaction, TxOpts,
 };
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// A conservative default below TiDB's default single-entry and packet
@@ -27,6 +30,34 @@ pub const DEFAULT_MAX_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
 /// Namespace JSON is kept below the same conservative single-entry limit.
 pub const DEFAULT_MAX_NAMESPACE_BYTES: usize = 4 * 1024 * 1024;
+
+/// How long one TiDB round trip may take before the provider gives up on it.
+///
+/// The default is deliberately far above TiDB's own bounded waits (the 50 s
+/// pessimistic lock wait and the commit backoff budget), so it only fires for
+/// a server that has stopped answering, not for one that is merely slow. A
+/// timeout fails the operation closed, so a deployment that wants a tighter
+/// bound sets it explicitly.
+pub const DEFAULT_STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Connection-URL parameter that sets the statement timeout in milliseconds.
+/// The provider removes it before `mysql_async` parses the URL.
+pub const STATEMENT_TIMEOUT_URL_PARAMETER: &str = "statement_timeout_ms";
+
+/// Connection-URL parameter naming a PEM file of certificate authorities to
+/// trust in addition to the built-in public roots, for a TiDB whose server
+/// certificate is issued by a private authority. It requires
+/// `require_ssl=true` and does not relax certificate or host name
+/// verification. The provider removes it before `mysql_async` parses the URL.
+pub const TLS_CA_FILE_URL_PARAMETER: &str = "tls_ca_file";
+
+/// The client deadline is this much later than the server-side limit, so a
+/// SELECT that TiDB can interrupt itself returns a server error on a
+/// connection that stays usable instead of racing the client deadline.
+const CLIENT_DEADLINE_GRACE: Duration = Duration::from_secs(1);
+
+/// Largest `max_execution_time` TiDB accepts, in milliseconds.
+const MAX_SERVER_EXECUTION_MS: u128 = i32::MAX as u128;
 
 const MAX_SCOPE_CHARS: usize = 255;
 const BLOCK_ID_LENGTH: usize = 65;
@@ -94,6 +125,14 @@ pub struct TidbStorageOptions {
     pub durable: bool,
     pub max_block_bytes: usize,
     pub max_namespace_bytes: usize,
+    /// Upper bound for one statement, `COMMIT`, or connection attempt.
+    ///
+    /// `None` uses the connection URL's `statement_timeout_ms` parameter, or
+    /// the pool's value for a store borrowed from a [`TidbStorePool`], and
+    /// otherwise [`DEFAULT_STATEMENT_TIMEOUT`]. A write that times out after
+    /// its commit may have reached TiDB is reported with an unknown outcome
+    /// and is never retried.
+    pub statement_timeout: Option<Duration>,
 }
 
 impl TidbStorageOptions {
@@ -103,7 +142,15 @@ impl TidbStorageOptions {
             durable: false,
             max_block_bytes: DEFAULT_MAX_BLOCK_BYTES,
             max_namespace_bytes: DEFAULT_MAX_NAMESPACE_BYTES,
+            statement_timeout: None,
         }
+    }
+
+    /// Bound every TiDB round trip made by this store. See
+    /// [`TidbStorageOptions::statement_timeout`].
+    pub fn with_statement_timeout(mut self, statement_timeout: Duration) -> Self {
+        self.statement_timeout = Some(statement_timeout);
+        self
     }
 
     pub fn with_durable(mut self, durable: bool) -> Self {
@@ -131,6 +178,13 @@ impl TidbStorageOptions {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("TiDB maximum namespace size must be positive"));
         }
+        if self
+            .statement_timeout
+            .is_some_and(|timeout| timeout.is_zero())
+        {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("TiDB statement timeout must be positive"));
+        }
         Ok(())
     }
 }
@@ -151,6 +205,8 @@ struct Database {
     durable: bool,
     max_block_bytes: usize,
     max_namespace_bytes: usize,
+    /// Client deadline for one round trip; see [`bounded`].
+    deadline: Duration,
 }
 
 impl Database {
@@ -164,8 +220,11 @@ impl Database {
             return Err(FsError::new(ErrorCode::Einval).with_message("TiDB URL must not be empty"));
         }
         options.validate()?;
-        let opts = Opts::from_url(url)
-            .map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+        let (opts, parameters) = driver_options(url)?;
+        let statement_timeout = options
+            .statement_timeout
+            .or(parameters.statement_timeout)
+            .unwrap_or(DEFAULT_STATEMENT_TIMEOUT);
         // This pool is private to the mount-rs provider. Keep the verified
         // pessimistic transaction mode on each session instead of paying
         // mysql_async's COM_RESET_CONNECTION round trip every time a pooled
@@ -173,17 +232,26 @@ impl Database {
         // these connections and every newly created session is configured and
         // verified by the callback below.
         let pool_options = opts.pool_opts().clone().with_reset_connection(false);
-        let pool = Pool::new(
-            with_keepalive(opts)
-                .pool_opts(pool_options)
-                .after_connect(|connection| Box::pin(configure_pessimistic_session(connection))),
-        );
-        Self::from_pool(pool, true, options, schema, ensure_metadata_row).await
+        let pool = Pool::new(with_keepalive(opts).pool_opts(pool_options).after_connect(
+            move |connection| {
+                Box::pin(configure_pessimistic_session(connection, statement_timeout))
+            },
+        ));
+        Self::from_pool(
+            pool,
+            true,
+            statement_timeout,
+            options,
+            schema,
+            ensure_metadata_row,
+        )
+        .await
     }
 
     async fn from_pool(
         pool: Pool,
         owns_pool: bool,
+        statement_timeout: Duration,
         options: TidbStorageOptions,
         schema: &str,
         ensure_metadata_row: bool,
@@ -196,11 +264,11 @@ impl Database {
             durable: options.durable,
             max_block_bytes: options.max_block_bytes,
             max_namespace_bytes: options.max_namespace_bytes,
+            deadline: client_deadline(options.statement_timeout.unwrap_or(statement_timeout)),
         };
 
         let mut connection = database
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("connect to TiDB", error))?;
         connection
@@ -246,6 +314,19 @@ impl Database {
         Ok(database)
     }
 
+    /// Lease a pooled connection whose every round trip is bounded.
+    ///
+    /// Acquisition is bounded too: it can open a connection and run the
+    /// session setup statements, and it waits when the pool is exhausted by
+    /// connections that are themselves stuck.
+    async fn session(&self) -> MysqlResult<Session> {
+        let inner = bounded(self.deadline, self.pool.get_conn()).await?;
+        Ok(Bounded {
+            inner,
+            deadline: self.deadline,
+        })
+    }
+
     /// Complete the provider's post-commit acknowledgement round trip.
     ///
     /// This is the `flush` hook required by the storage contract, but the
@@ -255,8 +336,7 @@ impl Database {
     /// depends on the caller's TiDB/TiKV replication and sync-log policy.
     async fn acknowledgement_barrier(&self) -> Result<()> {
         let mut connection = self
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("flush TiDB acknowledgement round trip", error))?;
         connection
@@ -269,9 +349,7 @@ impl Database {
         if !self.owns_pool {
             return Ok(());
         }
-        self.pool
-            .clone()
-            .disconnect()
+        bounded(self.deadline, self.pool.clone().disconnect())
             .await
             .map_err(|error| db_error("close TiDB connection pool", error))
     }
@@ -284,6 +362,9 @@ impl Database {
 #[derive(Clone)]
 pub struct TidbStorePool {
     pool: std::sync::Arc<Pool>,
+    /// Applied server-side to every session of this pool, and client-side to
+    /// each borrowed store that does not choose its own value.
+    statement_timeout: Duration,
 }
 
 // Pool equality is owner identity, never credential or endpoint equality.
@@ -300,14 +381,16 @@ impl std::fmt::Debug for TidbStorePool {
     }
 }
 
-fn shared_pool_options(url: &str, max_connections: usize) -> Result<OptsBuilder> {
+fn shared_pool_options(url: &str, max_connections: usize) -> Result<(OptsBuilder, Duration)> {
     if url.trim().is_empty() {
         return Err(FsError::new(ErrorCode::Einval).with_message("TiDB URL must not be empty"));
     }
     let constraints = PoolConstraints::new(0, max_connections)
         .ok_or_else(|| FsError::new(ErrorCode::Einval).with_message("invalid TiDB pool limit"))?;
-    let opts =
-        Opts::from_url(url).map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+    let (opts, parameters) = driver_options(url)?;
+    let statement_timeout = parameters
+        .statement_timeout
+        .unwrap_or(DEFAULT_STATEMENT_TIMEOUT);
     // Same session policy as a private pool: every new session is configured
     // and verified for pessimistic transactions, so returned connections do
     // not need COM_RESET_CONNECTION.
@@ -317,20 +400,28 @@ fn shared_pool_options(url: &str, max_connections: usize) -> Result<OptsBuilder>
         .with_constraints(constraints)
         .with_inactive_connection_ttl(Duration::from_secs(30))
         .with_reset_connection(false);
-    Ok(OptsBuilder::from_opts(opts)
-        .pool_opts(pool_opts)
-        .after_connect(|connection| Box::pin(configure_pessimistic_session(connection))))
+    Ok((
+        OptsBuilder::from_opts(opts)
+            .pool_opts(pool_opts)
+            .after_connect(move |connection| {
+                Box::pin(configure_pessimistic_session(connection, statement_timeout))
+            }),
+        statement_timeout,
+    ))
 }
 
 impl TidbStorePool {
     /// Build a lazy pool with a hard connection limit, zero minimum idle count,
     /// and a 30-second idle retention window to reuse returned connections.
     /// URL transport, authentication and request timeout options are preserved;
-    /// pool capacity and idle retention are controlled by this owner.
+    /// pool capacity and idle retention are controlled by this owner. The
+    /// URL's `statement_timeout_ms` parameter (default
+    /// [`DEFAULT_STATEMENT_TIMEOUT`]) bounds every statement of the pool.
     pub fn new(url: &str, max_connections: usize) -> Result<Self> {
-        let opts = shared_pool_options(url, max_connections)?;
+        let (opts, statement_timeout) = shared_pool_options(url, max_connections)?;
         Ok(Self {
             pool: std::sync::Arc::new(Pool::new(opts)),
+            statement_timeout,
         })
     }
 
@@ -339,6 +430,7 @@ impl TidbStorePool {
             Database::from_pool(
                 self.pool.as_ref().clone(),
                 false,
+                self.statement_timeout,
                 options,
                 METADATA_SCHEMA,
                 true,
@@ -352,6 +444,7 @@ impl TidbStorePool {
             Database::from_pool(
                 self.pool.as_ref().clone(),
                 false,
+                self.statement_timeout,
                 options,
                 BLOCK_SCHEMA,
                 false,
@@ -362,12 +455,12 @@ impl TidbStorePool {
 
     /// Disconnect the shared pool. This affects every store created from it.
     pub async fn close(&self) -> Result<()> {
-        self.pool
-            .as_ref()
-            .clone()
-            .disconnect()
-            .await
-            .map_err(|error| db_error("close shared TiDB connection pool", error))
+        bounded(
+            client_deadline(self.statement_timeout),
+            self.pool.as_ref().clone().disconnect(),
+        )
+        .await
+        .map_err(|error| db_error("close shared TiDB connection pool", error))
     }
 }
 
@@ -485,7 +578,7 @@ type ConcurrentSqlRow = (
 );
 
 async fn concurrent_row<C: Queryable>(
-    connection: &mut C,
+    connection: &mut Bounded<C>,
     volume_key: &str,
 ) -> Result<ConcurrentRow> {
     let row: Option<ConcurrentSqlRow> = connection
@@ -530,7 +623,9 @@ fn concurrent_busy(operation: &str) -> FsError {
 
 async fn configure_pessimistic_session(
     connection: &mut Conn,
+    statement_timeout: Duration,
 ) -> std::result::Result<(), MysqlError> {
+    configure_statement_limits(connection, statement_timeout).await?;
     // A server's GLOBAL autocommit=0 must not turn an acknowledged statement
     // publication into a connection-local, uncommitted transaction.
     connection.query_drop("SET SESSION autocommit=1").await?;
@@ -564,13 +659,13 @@ async fn configure_pessimistic_session(
         .map_err(|error| MysqlError::Other(Box::new(error)))
 }
 
-async fn begin_pessimistic(connection: &mut Conn) -> Result<Transaction<'_>> {
+async fn begin_pessimistic(connection: &mut Session) -> Result<Tx<'_>> {
     // Sessions are configured and verified once when the pool creates them.
     // Keep the driver's transaction guard so cancellation and early-return
     // paths are rolled back before a pooled connection is reused.
     let options = TxOpts::default();
     connection
-        .start_transaction(options)
+        .begin(options)
         .await
         .map_err(|error| db_error("begin TiDB transaction", error))
 }
@@ -606,14 +701,274 @@ fn require_repeatable_read_isolation(isolation: Option<&str>) -> Result<()> {
     }
 }
 
-async fn rollback_and<T>(transaction: Transaction<'_>, error: FsError) -> Result<T> {
+type MysqlResult<T> = std::result::Result<T, MysqlError>;
+
+fn client_deadline(statement_timeout: Duration) -> Duration {
+    statement_timeout.saturating_add(CLIENT_DEADLINE_GRACE)
+}
+
+/// What the provider reads from a connection URL for itself.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UrlParameters {
+    statement_timeout: Option<Duration>,
+    tls_ca_file: Option<PathBuf>,
+}
+
+/// Parse a connection URL into driver options, applying the provider's own
+/// parameters.
+fn driver_options(url: &str) -> Result<(Opts, UrlParameters)> {
+    let (url, parameters) = split_url_parameters(url)?;
+    let opts =
+        Opts::from_url(&url).map_err(|error| db_error("parse TiDB URL", MysqlError::Url(error)))?;
+    let Some(authority) = &parameters.tls_ca_file else {
+        return Ok((opts, parameters));
+    };
+    // The file is an addition to the trust roots of a connection that
+    // already requires TLS. Accepting it on a plaintext URL would look like
+    // protection that is not there.
+    let Some(tls) = opts.ssl_opts().cloned() else {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("TiDB tls_ca_file requires require_ssl=true in the connection URL"));
+    };
+    let tls = tls.with_root_certs(vec![authority.clone().into()]);
+    Ok((
+        Opts::from(OptsBuilder::from_opts(opts).ssl_opts(tls)),
+        parameters,
+    ))
+}
+
+/// Decode the `%XX` escapes of a URL query value.
+fn percent_decode(value: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte != b'%' {
+            bytes.push(byte);
+            rest = tail;
+            continue;
+        }
+        let escape = std::str::from_utf8(tail.get(..2)?).ok()?;
+        bytes.push(u8::from_str_radix(escape, 16).ok()?);
+        rest = &tail[2..];
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Remove the provider's own parameters (`statement_timeout_ms`,
+/// `tls_ca_file`) from a connection URL, which `mysql_async` would otherwise
+/// reject as unknown.
+///
+/// Carrying them in the URL lets the SDK, the CLI and the Node bindings set
+/// them without a field of their own: each already passes the URL through
+/// unchanged. Error messages never repeat any part of the URL.
+fn split_url_parameters(url: &str) -> Result<(Cow<'_, str>, UrlParameters)> {
+    let mut parameters = UrlParameters::default();
+    let Some(query_start) = url.find('?') else {
+        return Ok((Cow::Borrowed(url), parameters));
+    };
+    let query_end = url[query_start..]
+        .find('#')
+        .map_or(url.len(), |offset| query_start + offset);
+    let mut kept = Vec::new();
+    for pair in url[query_start + 1..query_end].split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key == STATEMENT_TIMEOUT_URL_PARAMETER {
+            let millis = value.parse::<u64>().ok().filter(|millis| *millis > 0);
+            let Some(millis) = millis else {
+                return Err(FsError::new(ErrorCode::Einval).with_message(
+                    "TiDB statement_timeout_ms must be a positive whole number of milliseconds",
+                ));
+            };
+            parameters.statement_timeout = Some(Duration::from_millis(millis));
+        } else if key == TLS_CA_FILE_URL_PARAMETER {
+            let path = percent_decode(value).filter(|path| !path.is_empty());
+            let Some(path) = path else {
+                return Err(FsError::new(ErrorCode::Einval)
+                    .with_message("TiDB tls_ca_file must name a certificate authority file"));
+            };
+            parameters.tls_ca_file = Some(PathBuf::from(path));
+        } else {
+            kept.push(pair);
+        }
+    }
+    if parameters == UrlParameters::default() {
+        return Ok((Cow::Borrowed(url), parameters));
+    }
+    let mut stripped = url[..query_start].to_owned();
+    if !kept.is_empty() {
+        stripped.push('?');
+        stripped.push_str(&kept.join("&"));
+    }
+    stripped.push_str(&url[query_end..]);
+    Ok((Cow::Owned(stripped), parameters))
+}
+
+/// Give TiDB the same bound the client enforces.
+///
+/// `max_execution_time` makes TiDB interrupt a statement itself, which frees
+/// the server's resources and leaves the connection usable. Since TiDB
+/// v6.4.0 it only applies to read-only statements: it does not bound
+/// `UPDATE`, `INSERT`, `DELETE` or `COMMIT`, and no server setting can bound
+/// a server that has stopped answering. The client deadline in [`bounded`]
+/// covers those.
+///
+/// A pessimistic lock wait is a known non-commit that TiDB reports as error
+/// 1205, which the provider maps to a retryable `EAGAIN`. Keep the lock wait
+/// shorter than the statement timeout so a contended row is still reported
+/// that way instead of failing the operation as a timeout.
+async fn configure_statement_limits(
+    connection: &mut Conn,
+    statement_timeout: Duration,
+) -> MysqlResult<()> {
+    let millis = statement_timeout
+        .as_millis()
+        .clamp(1, MAX_SERVER_EXECUTION_MS);
+    connection
+        .query_drop(format!("SET SESSION max_execution_time={millis}"))
+        .await?;
+    let lock_wait: Option<u64> = connection
+        .query_first("SELECT @@SESSION.innodb_lock_wait_timeout")
+        .await?;
+    let limit_seconds = statement_timeout.as_secs();
+    if lock_wait.is_none_or(|seconds| seconds >= limit_seconds) {
+        let seconds = limit_seconds.saturating_sub(1).max(1);
+        connection
+            .query_drop(format!("SET SESSION innodb_lock_wait_timeout={seconds}"))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Fail a TiDB round trip that has not completed within `deadline`.
+///
+/// This is the only bound that covers every case: a write statement or
+/// `COMMIT` (which `max_execution_time` ignores), a connection attempt, and a
+/// server or network path that accepts bytes and never answers.
+///
+/// The timeout is reported as a driver I/O error, the same shape as a lost
+/// connection, so the existing classification applies unchanged: it is never
+/// a server-reported conflict and therefore never `EAGAIN`, and a timed-out
+/// `COMMIT` or autocommit write goes through [`ambiguous_commit_error`]
+/// because TiDB may still commit a statement it has already received.
+///
+/// Dropping the round trip part-way leaves the connection marked as
+/// disconnected inside `mysql_async`, so the pool discards it instead of
+/// reusing a session with an unread response. TiDB rolls back that session's
+/// open transaction when the socket closes.
+async fn bounded<T>(
+    deadline: Duration,
+    round_trip: impl Future<Output = MysqlResult<T>>,
+) -> MysqlResult<T> {
+    match tokio::time::timeout(deadline, round_trip).await {
+        Ok(result) => result,
+        Err(_) => Err(MysqlError::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "no TiDB response within the {} ms statement timeout",
+                deadline.as_millis()
+            ),
+        ))),
+    }
+}
+
+/// A connection or transaction whose every round trip is [`bounded`].
+///
+/// Provider code only reaches TiDB through this type, so a statement cannot
+/// be added without the deadline.
+struct Bounded<Q> {
+    inner: Q,
+    deadline: Duration,
+}
+
+type Session = Bounded<Conn>;
+type Tx<'a> = Bounded<Transaction<'a>>;
+
+impl<Q: Queryable> Bounded<Q> {
+    async fn query_drop<S>(&mut self, query: S) -> MysqlResult<()>
+    where
+        S: AsQuery,
+    {
+        bounded(self.deadline, self.inner.query_drop(query)).await
+    }
+
+    async fn query_first<T, S>(&mut self, query: S) -> MysqlResult<Option<T>>
+    where
+        S: AsQuery,
+        T: FromRow + Send + 'static,
+    {
+        bounded(self.deadline, self.inner.query_first(query)).await
+    }
+
+    async fn exec_first<T, S, P>(&mut self, statement: S, params: P) -> MysqlResult<Option<T>>
+    where
+        S: StatementLike,
+        P: Into<Params> + Send,
+        T: FromRow + Send + 'static,
+    {
+        bounded(self.deadline, self.inner.exec_first(statement, params)).await
+    }
+
+    async fn exec<T, S, P>(&mut self, statement: S, params: P) -> MysqlResult<Vec<T>>
+    where
+        S: StatementLike,
+        P: Into<Params> + Send,
+        T: FromRow + Send + 'static,
+    {
+        bounded(self.deadline, self.inner.exec(statement, params)).await
+    }
+
+    async fn exec_drop<S, P>(&mut self, statement: S, params: P) -> MysqlResult<()>
+    where
+        S: StatementLike,
+        P: Into<Params> + Send,
+    {
+        bounded(self.deadline, self.inner.exec_drop(statement, params)).await
+    }
+
+    /// Run a write statement and return its affected-row count.
+    async fn exec_changed<S, P>(&mut self, statement: S, params: P) -> MysqlResult<u64>
+    where
+        S: StatementLike,
+        P: Into<Params> + Send,
+    {
+        let inner = &mut self.inner;
+        bounded(self.deadline, async move {
+            let result = inner.exec_iter(statement, params).await?;
+            let changed = result.affected_rows();
+            result.drop_result().await?;
+            Ok(changed)
+        })
+        .await
+    }
+}
+
+impl Session {
+    async fn begin(&mut self, options: TxOpts) -> MysqlResult<Tx<'_>> {
+        let deadline = self.deadline;
+        let inner = bounded(deadline, self.inner.start_transaction(options)).await?;
+        Ok(Bounded { inner, deadline })
+    }
+}
+
+impl Tx<'_> {
+    async fn commit(self) -> MysqlResult<()> {
+        bounded(self.deadline, self.inner.commit()).await
+    }
+
+    async fn rollback(self) -> MysqlResult<()> {
+        bounded(self.deadline, self.inner.rollback()).await
+    }
+}
+
+async fn rollback_and<T>(transaction: Tx<'_>, error: FsError) -> Result<T> {
     let _ = transaction.rollback().await;
     Err(error)
 }
 
 fn ambiguous_commit_error(operation: &str, error: &MysqlError) -> FsError {
-    // A connection failure after COMMIT was sent cannot distinguish a
-    // committed transaction from a rolled-back one. Keep this separate from
+    // A connection failure or statement timeout after COMMIT was sent cannot
+    // distinguish a committed transaction from a rolled-back one: TiDB may
+    // still be committing after the client stopped waiting. Keep this separate from
     // statement-conflict mapping so callers cannot safely replay the whole
     // operation just because the server error code is normally retryable.
     FsError::backend(format!(
@@ -622,7 +977,7 @@ fn ambiguous_commit_error(operation: &str, error: &MysqlError) -> FsError {
     ))
 }
 
-async fn commit(transaction: Transaction<'_>, operation: &str) -> Result<()> {
+async fn commit(transaction: Tx<'_>, operation: &str) -> Result<()> {
     transaction
         .commit()
         .await
@@ -630,7 +985,7 @@ async fn commit(transaction: Transaction<'_>, operation: &str) -> Result<()> {
 }
 
 async fn changed_query<C, P>(
-    connection: &mut C,
+    connection: &mut Bounded<C>,
     statement: &str,
     params: P,
     operation: &str,
@@ -639,16 +994,10 @@ where
     C: Queryable,
     P: Into<Params> + Send,
 {
-    let result = connection
-        .exec_iter(statement, params)
+    connection
+        .exec_changed(statement, params)
         .await
-        .map_err(|error| db_error(operation, error))?;
-    let changed = result.affected_rows();
-    result
-        .drop_result()
-        .await
-        .map_err(|error| db_error(operation, error))?;
-    Ok(changed)
+        .map_err(|error| db_error(operation, error))
 }
 
 fn autocommit_error(operation: &str, error: MysqlError) -> FsError {
@@ -657,6 +1006,14 @@ fn autocommit_error(operation: &str, error: MysqlError) -> FsError {
     // conflict classification for that server response. A connection or
     // other acknowledgement error cannot distinguish commit from rollback;
     // fail closed instead of allowing the caller to replay the publication.
+    //
+    // Checked against TiDB v8.5.7 by
+    // `actual_tidb_autocommit_conflicts_are_known_non_commits`: error 9007
+    // ("Write conflict ... [try again later]") and error 1205 are both
+    // reported for an autocommit statement that did not commit. When TiDB
+    // cannot tell whether a commit applied it closes the connection instead
+    // of answering, which is not a server error and so lands in the
+    // unknown-outcome branch.
     if is_retryable_conflict(&error) {
         db_error(operation, error)
     } else {
@@ -665,7 +1022,7 @@ fn autocommit_error(operation: &str, error: MysqlError) -> FsError {
 }
 
 async fn changed_autocommit_query<P>(
-    connection: &mut Conn,
+    connection: &mut Session,
     statement: &str,
     params: P,
     operation: &str,
@@ -673,20 +1030,14 @@ async fn changed_autocommit_query<P>(
 where
     P: Into<Params> + Send,
 {
-    let result = connection
-        .exec_iter(statement, params)
+    connection
+        .exec_changed(statement, params)
         .await
-        .map_err(|error| autocommit_error(operation, error))?;
-    let changed = result.affected_rows();
-    result
-        .drop_result()
-        .await
-        .map_err(|error| autocommit_error(operation, error))?;
-    Ok(changed)
+        .map_err(|error| autocommit_error(operation, error))
 }
 
 async fn locked_lease_row<C: Queryable>(
-    connection: &mut C,
+    connection: &mut Bounded<C>,
     volume_key: &str,
 ) -> Result<Option<LeaseRow>> {
     let row: Option<(Option<String>, i64, i64, i64)> = connection
@@ -713,7 +1064,7 @@ async fn locked_lease_row<C: Queryable>(
 }
 
 async fn locked_publish_row<C: Queryable>(
-    connection: &mut C,
+    connection: &mut Bounded<C>,
     volume_key: &str,
 ) -> Result<Option<(u64, LeaseRow)>> {
     let row: Option<(i64, Option<String>, i64, i64, i64)> = connection
@@ -913,8 +1264,7 @@ impl TidbMetadataStore {
         let inspect = matches!(command, DelegationCommand::Inspect);
         let mut conn = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|e| db_error("connect TiDB delegation", e))?;
         let mut tx = begin_pessimistic(&mut conn).await?;
@@ -1058,13 +1408,13 @@ impl TidbMetadataStore {
     }
 }
 
-async fn begin_inode_write(connection: &mut Conn) -> Result<Transaction<'_>> {
+async fn begin_inode_write(connection: &mut Session) -> Result<Tx<'_>> {
     // Locking reads may wait across another structural commit. TiDB must then
     // read root authority from a fresh statement snapshot, not start_ts.
     let mut options = TxOpts::default();
     options.with_isolation_level(IsolationLevel::ReadCommitted);
     connection
-        .start_transaction(options)
+        .begin(options)
         .await
         .map_err(|e| db_error("begin TiDB inode publication", e))
 }
@@ -1122,7 +1472,7 @@ fn compact_inode_authority(
     )
 }
 async fn compact_inode_authority_row<C: Queryable>(
-    conn: &mut C,
+    conn: &mut Bounded<C>,
     volume: &str,
     backing: ConcurrentBackingId,
 ) -> Result<InodeModeState> {
@@ -1158,7 +1508,7 @@ fn decode_inode(row: InodeSqlRow, generation: u64) -> Result<(InodeId, LoadedIno
 }
 
 async fn replace_inode_guards(
-    tx: &mut Transaction<'_>,
+    tx: &mut Tx<'_>,
     volume: &str,
     generation: u64,
     namespace: &Namespace,
@@ -1195,8 +1545,7 @@ impl MetadataStore for TidbMetadataStore {
     async fn load(&self) -> Result<LoadedMetadata> {
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("load TiDB metadata", error))?;
         let row: Option<(i64, Option<String>, Option<Vec<u8>>)> = connection
@@ -1230,8 +1579,7 @@ impl MetadataStore for TidbMetadataStore {
     async fn inode_mode_state(&self) -> Result<Option<InodeModeState>> {
         let mut conn = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|e| db_error("read TiDB inode mode", e))?;
         let row: Option<InodeAuthoritySqlRow> = conn
@@ -1257,8 +1605,7 @@ impl MetadataStore for TidbMetadataStore {
         let generation_sql = signed(generation, "structural generation")?;
         let mut conn = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|e| db_error("prepare TiDB inode mode", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
@@ -1304,8 +1651,7 @@ impl MetadataStore for TidbMetadataStore {
     ) -> Result<InodeMetadataSnapshot> {
         let mut conn = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|e| db_error("load TiDB inode snapshot", e))?;
         let mut tx = begin_pessimistic(&mut conn).await?;
@@ -1373,8 +1719,7 @@ impl MetadataStore for TidbMetadataStore {
             .unwrap_or((-1, -1));
         let mut conn = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|e| db_error("load TiDB inode", e))?;
         type ReadRow = (
@@ -1465,8 +1810,7 @@ impl MetadataStore for TidbMetadataStore {
         }
         let mut conn = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|e| db_error("publish TiDB inode", e))?;
         // READ COMMITTED makes the nonlocking root read fresh after waiting for
@@ -1525,8 +1869,7 @@ impl MetadataStore for TidbMetadataStore {
         }
         let mut conn = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|e| db_error("publish TiDB structure", e))?;
         let mut tx = begin_inode_write(&mut conn).await?;
@@ -1635,8 +1978,7 @@ impl MetadataStore for TidbMetadataStore {
         }
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("conditionally load TiDB metadata", error))?;
         // The secondary index covers this header query without fetching the
@@ -1663,8 +2005,7 @@ impl MetadataStore for TidbMetadataStore {
     async fn concurrent_mode_state(&self) -> Result<ConcurrentModeState> {
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("read TiDB concurrent mode", error))?;
         concurrent_row(&mut connection, &self.0.volume_key)
@@ -1675,8 +2016,7 @@ impl MetadataStore for TidbMetadataStore {
     async fn preflight_new_bound_mode(&self) -> Result<()> {
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("preflight new bound TiDB metadata", error))?;
         let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
@@ -1690,8 +2030,7 @@ impl MetadataStore for TidbMetadataStore {
     async fn prepare_bound_concurrent_mode(&self, backing: ConcurrentBackingId) -> Result<()> {
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("prepare bound concurrent TiDB metadata", error))?;
         let changed = changed_autocommit_query(
@@ -1731,8 +2070,7 @@ impl MetadataStore for TidbMetadataStore {
         let ttl_ms = ttl_ms(ttl)?;
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("acquire TiDB writer", error))?;
         let mut transaction = begin_pessimistic(&mut connection).await?;
@@ -1751,14 +2089,31 @@ impl MetadataStore for TidbMetadataStore {
             )
             .await;
         }
-        let next_fence = row
-            .fence
-            .checked_add(1)
-            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow));
-        let next_fence = match next_fence {
-            Ok(value) => value,
-            Err(error) => return rollback_and(transaction, error).await,
-        };
+        if row.fence >= CONCURRENT_FENCE_SENTINEL as u64 {
+            // Concurrent write mode exhausts the fence so that no writer
+            // lease can ever be granted again. Report that the way SQLite
+            // and PGlite do, rather than as the arithmetic overflow the
+            // exhausted fence would otherwise produce.
+            let concurrent: Result<Option<bool>> = transaction
+                .exec_first(
+                    "SELECT write_mode IS NOT NULL FROM mount_rs_tidb_metadata
+                     WHERE volume_key=?",
+                    (&self.0.volume_key,),
+                )
+                .await
+                .map_err(|error| db_error("read TiDB write mode", error));
+            let error = match concurrent {
+                Ok(Some(true)) => FsError::new(ErrorCode::Ebusy)
+                    .with_syscall("TiDB acquire writer")
+                    .with_message("TiDB volume is in concurrent write mode"),
+                Ok(_) => FsError::new(ErrorCode::Eoverflow)
+                    .with_syscall("TiDB acquire writer")
+                    .with_message("TiDB writer fence is exhausted"),
+                Err(error) => error,
+            };
+            return rollback_and(transaction, error).await;
+        }
+        let next_fence = row.fence + 1;
         let expires_at_ms = match expiry(row.now_ms, ttl_ms) {
             Ok(value) => value,
             Err(error) => return rollback_and(transaction, error).await,
@@ -1818,8 +2173,7 @@ impl MetadataStore for TidbMetadataStore {
         let lease_expires = signed(lease.expires_at_ms, "metadata expiry")?;
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("renew TiDB writer", error))?;
         let mut transaction = begin_pessimistic(&mut connection).await?;
@@ -1884,8 +2238,7 @@ impl MetadataStore for TidbMetadataStore {
         let lease_expires = signed(lease.expires_at_ms, "metadata expiry")?;
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("release TiDB writer", error))?;
         let mut transaction = begin_pessimistic(&mut connection).await?;
@@ -1949,8 +2302,7 @@ impl MetadataStore for TidbMetadataStore {
 
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("publish TiDB metadata", error))?;
         // A conditional UPDATE is already an atomic single-statement
@@ -2027,8 +2379,7 @@ impl MetadataStore for TidbMetadataStore {
         }
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("publish bound TiDB metadata", error))?;
         // TiDB may retry its own single-statement autocommit internally. The
@@ -2081,8 +2432,7 @@ impl MetadataStore for TidbMetadataStore {
         let expected = signed(expected_revision, "metadata revision")?;
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("migrate MRC1 TiDB metadata", error))?;
         let changed = changed_autocommit_query(
@@ -2119,8 +2469,7 @@ impl MetadataStore for TidbMetadataStore {
         signed(expected_revision, "metadata revision")?;
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("preflight MRC1 TiDB metadata", error))?;
         let row = concurrent_row(&mut connection, &self.0.volume_key).await?;
@@ -2149,8 +2498,7 @@ impl BlockStore for TidbBlockStore {
     async fn prepare_concurrent_backing(&self) -> Result<ConcurrentBackingId> {
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("prepare TiDB block authority", error))?;
         // The server generates the candidate, avoiding a client-local identity
@@ -2186,8 +2534,7 @@ impl BlockStore for TidbBlockStore {
     async fn verify_concurrent_backing(&self, expected: ConcurrentBackingId) -> Result<()> {
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("verify TiDB block authority", error))?;
         let actual: Option<Vec<u8>> = connection
@@ -2222,14 +2569,13 @@ impl BlockStore for TidbBlockStore {
         let id = block_id(bytes);
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("put TiDB block", error))?;
         // The duplicate branch updates only the key. It can never replace
         // bytes written by an older layout, even when two writers race.
-        let result = connection
-            .exec_iter(
+        let changed = connection
+            .exec_changed(
                 "INSERT INTO mount_rs_tidb_blocks (volume_key, id, bytes)
                  VALUES (?, ?, ?)
                  ON DUPLICATE KEY UPDATE id=id",
@@ -2242,12 +2588,7 @@ impl BlockStore for TidbBlockStore {
         // key. Duplicate/no-op and server-specific affected-row results keep
         // the read-back collision check below; never treat those as verified
         // merely because the write statement succeeded.
-        let inserted = result.affected_rows() == 1;
-        result
-            .drop_result()
-            .await
-            .map_err(|error| db_error("finish TiDB block put", error))?;
-        if inserted {
+        if changed == 1 {
             return Ok(id);
         }
         let existing: Option<Vec<u8>> = connection
@@ -2269,8 +2610,7 @@ impl BlockStore for TidbBlockStore {
         validate_block_id(id)?;
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("get TiDB block", error))?;
         connection
@@ -2292,8 +2632,7 @@ impl BlockStore for TidbBlockStore {
         validate_block_id(id)?;
         let mut connection = self
             .0
-            .pool
-            .get_conn()
+            .session()
             .await
             .map_err(|error| db_error("delete TiDB block", error))?;
         connection
@@ -2423,7 +2762,7 @@ mod tests {
             .await
             .unwrap();
         store.prepare_inode_mode(backing, 1).await.unwrap();
-        let mut connection = store.0.pool.get_conn().await.unwrap();
+        let mut connection = store.0.session().await.unwrap();
         // Exact historical mode-blind revision probe must invalidate old G=1.
         let old_probe: i64 = connection.exec_first("SELECT revision FROM mount_rs_tidb_metadata USE INDEX (idx_mount_rs_volume_revision) WHERE volume_key=?",(&key,)).await.unwrap().unwrap();
         assert_ne!(old_probe, 1);
@@ -2551,7 +2890,7 @@ mod tests {
             inode: root + 99,
         });
         let corrupt_json = serde_json::to_string(&corrupt_root).unwrap();
-        let mut connection = store.0.pool.get_conn().await.unwrap();
+        let mut connection = store.0.session().await.unwrap();
         connection
             .exec_drop(
                 "UPDATE mount_rs_tidb_inodes SET node=? WHERE volume_key=? AND inode=?",
@@ -2571,7 +2910,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let mut connection = store.0.pool.get_conn().await.unwrap();
+        let mut connection = store.0.session().await.unwrap();
         let preserved: String = connection
             .exec_first(
                 "SELECT node FROM mount_rs_tidb_inodes WHERE volume_key=? AND inode=?",
@@ -2590,7 +2929,7 @@ mod tests {
             .unwrap();
         drop(connection);
         let known = store.load_inode(backing, root + 1).await.unwrap();
-        let mut connection = store.0.pool.get_conn().await.unwrap();
+        let mut connection = store.0.session().await.unwrap();
         connection
             .exec_drop(
                 "DELETE FROM mount_rs_tidb_inodes WHERE volume_key=? AND inode=?",
@@ -2841,6 +3180,595 @@ mod tests {
             Opts::from(with_keepalive(chosen)).tcp_keepalive(),
             Some(Duration::from_secs(5))
         );
+    }
+
+    #[test]
+    fn provider_url_parameters_are_removed_before_the_driver_sees_them() {
+        let timeout = |url: &str| split_url_parameters(url).unwrap().1.statement_timeout;
+        let plain = "mysql://root@127.0.0.1:4000/test";
+        let (url, parameters) = split_url_parameters(plain).unwrap();
+        assert!(
+            matches!(url, Cow::Borrowed(_)),
+            "an untouched URL is not rebuilt"
+        );
+        assert_eq!(url, plain);
+        assert_eq!(parameters, UrlParameters::default());
+
+        let other = "mysql://root@127.0.0.1:4000/test?tcp_keepalive=5000";
+        let (url, parameters) = split_url_parameters(other).unwrap();
+        assert_eq!(url, other);
+        assert_eq!(parameters, UrlParameters::default());
+
+        let with_timeout = "mysql://root@127.0.0.1:4000/test?statement_timeout_ms=2500";
+        assert_eq!(split_url_parameters(with_timeout).unwrap().0, plain);
+        assert_eq!(timeout(with_timeout), Some(Duration::from_millis(2500)));
+
+        let (url, parameters) = split_url_parameters(
+            "mysql://root@127.0.0.1:4000/test?tcp_keepalive=5000&statement_timeout_ms=30000&tcp_nodelay=true",
+        )
+        .unwrap();
+        assert_eq!(
+            url,
+            "mysql://root@127.0.0.1:4000/test?tcp_keepalive=5000&tcp_nodelay=true"
+        );
+        assert_eq!(parameters.statement_timeout, Some(Duration::from_secs(30)));
+        // The remaining URL is one the driver accepts.
+        Opts::from_url(&url).unwrap();
+
+        let password = "tidb-test-secret";
+        for value in ["0", "-1", "1.5", "soon", ""] {
+            let error = split_url_parameters(&format!(
+                "mysql://mount:{password}@127.0.0.1/test?statement_timeout_ms={value}"
+            ))
+            .expect_err("an unusable statement timeout must be rejected");
+            assert!(error.is(ErrorCode::Einval));
+            assert!(!error.to_string().contains(password));
+        }
+    }
+
+    #[test]
+    fn tls_ca_file_adds_a_trusted_root_without_relaxing_verification() {
+        let (url, parameters) = split_url_parameters(
+            "mysql://root@tidb.internal:4000/test?require_ssl=true&tls_ca_file=/etc/tidb/ca%20bundle.pem",
+        )
+        .unwrap();
+        assert_eq!(url, "mysql://root@tidb.internal:4000/test?require_ssl=true");
+        assert_eq!(
+            parameters.tls_ca_file,
+            Some(PathBuf::from("/etc/tidb/ca bundle.pem"))
+        );
+
+        let (opts, _) = driver_options(
+            "mysql://root@tidb.internal:4000/test?require_ssl=true&tls_ca_file=/etc/tidb/ca.pem",
+        )
+        .unwrap();
+        let tls = opts.ssl_opts().expect("TLS stays required");
+        assert_eq!(tls.root_certs().len(), 1);
+        assert!(!tls.accept_invalid_certs(), "the certificate is verified");
+        assert!(!tls.skip_domain_validation(), "the host name is verified");
+        assert!(
+            !tls.disable_built_in_roots(),
+            "public roots stay trusted unless the URL removes them"
+        );
+
+        // Without the parameter the driver options are exactly the URL's.
+        let (opts, _) =
+            driver_options("mysql://root@tidb.internal:4000/test?require_ssl=true").unwrap();
+        assert!(opts.ssl_opts().unwrap().root_certs().is_empty());
+
+        // An authority file on a plaintext URL would protect nothing.
+        let password = "tidb-test-secret";
+        for url in [
+            format!("mysql://mount:{password}@127.0.0.1/test?tls_ca_file=/etc/tidb/ca.pem"),
+            format!(
+                "mysql://mount:{password}@127.0.0.1/test?require_ssl=false&tls_ca_file=/etc/tidb/ca.pem"
+            ),
+            format!("mysql://mount:{password}@127.0.0.1/test?require_ssl=true&tls_ca_file="),
+            format!("mysql://mount:{password}@127.0.0.1/test?require_ssl=true&tls_ca_file=%zz"),
+        ] {
+            let error = match driver_options(&url) {
+                Ok(_) => panic!("an unusable tls_ca_file must be rejected"),
+                Err(error) => error,
+            };
+            assert!(error.is(ErrorCode::Einval), "{error}");
+            assert!(!error.to_string().contains(password));
+        }
+    }
+
+    #[test]
+    fn statement_timeout_option_must_be_positive() {
+        assert!(
+            TidbStorageOptions::new("volume")
+                .with_statement_timeout(Duration::ZERO)
+                .validate()
+                .is_err()
+        );
+        let options =
+            TidbStorageOptions::new("volume").with_statement_timeout(Duration::from_secs(5));
+        options.validate().unwrap();
+        assert_eq!(options.statement_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(TidbStorageOptions::new("volume").statement_timeout, None);
+        assert_eq!(
+            client_deadline(Duration::from_secs(5)),
+            Duration::from_secs(5) + CLIENT_DEADLINE_GRACE
+        );
+        assert_eq!(client_deadline(Duration::MAX), Duration::MAX);
+    }
+
+    async fn timed_out_round_trip() -> MysqlError {
+        bounded(
+            Duration::from_millis(20),
+            std::future::pending::<MysqlResult<()>>(),
+        )
+        .await
+        .expect_err("a round trip that never completes must time out")
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_round_trip_is_never_a_retryable_conflict() {
+        let error = timed_out_round_trip().await;
+        assert!(matches!(error, MysqlError::Io(_)), "{error:?}");
+        assert!(!is_retryable_conflict(&error));
+        // A statement known to precede the commit fails closed without a
+        // retry: the caller cannot tell a hung server from a slow one.
+        let error = db_error("read TiDB metadata lease", error);
+        assert!(error.is(ErrorCode::Eio));
+        assert!(!error.is(ErrorCode::Eagain));
+        assert!(error.to_string().contains("statement timeout"));
+
+        // Results that arrive in time pass through untouched.
+        let deadline = Duration::from_secs(30);
+        assert_eq!(bounded(deadline, async { Ok(7_u64) }).await.unwrap(), 7);
+        let conflict = bounded(deadline, async {
+            Err::<(), _>(MysqlError::Server(ServerError {
+                code: 1205,
+                message: "Lock wait timeout exceeded".to_owned(),
+                state: "HY000".to_owned(),
+            }))
+        })
+        .await
+        .expect_err("a server error is returned as it is");
+        assert!(is_retryable_conflict(&conflict));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_commit_or_autocommit_write_has_an_unknown_outcome() {
+        // `commit` and `changed_autocommit_query` map the error of a bounded
+        // round trip with exactly these two functions.
+        let error = ambiguous_commit_error("publish inode", &timed_out_round_trip().await);
+        assert!(error.is(ErrorCode::Eio));
+        assert!(!error.is(ErrorCode::Eagain));
+        assert!(error.to_string().contains("commit outcome is unknown"));
+
+        let error = autocommit_error("publish TiDB metadata", timed_out_round_trip().await);
+        assert!(error.is(ErrorCode::Eio));
+        assert!(!error.is(ErrorCode::Eagain));
+        assert!(error.to_string().contains("commit outcome is unknown"));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_answers_cannot_hang_a_connection_attempt() {
+        // Accept the TCP connection and say nothing: the MySQL handshake
+        // never starts, which no server-side setting could bound.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let started = std::time::Instant::now();
+        let error = match tokio::time::timeout(
+            Duration::from_secs(30),
+            TidbMetadataStore::connect_with_options(
+                &format!("mysql://root@127.0.0.1:{port}/test?statement_timeout_ms=200"),
+                TidbStorageOptions::new("silent-server"),
+            ),
+        )
+        .await
+        .expect("the provider must bound the connection attempt itself")
+        {
+            Ok(_) => panic!("a silent server cannot produce a store"),
+            Err(error) => error,
+        };
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(error.is(ErrorCode::Eio));
+        assert!(!error.is(ErrorCode::Eagain));
+        assert!(error.to_string().contains("statement timeout"), "{error}");
+        silent.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_sessions_carry_the_statement_limits() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("actual TiDB URL required");
+        let key = format!(
+            "statement-limits-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        async fn limits(store: TidbMetadataStore) -> (u64, u64) {
+            let mut session = store.0.session().await.unwrap();
+            let limits = session
+                .query_first(
+                    "SELECT @@SESSION.max_execution_time, @@SESSION.innodb_lock_wait_timeout",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            drop(session);
+            store.close().await.unwrap();
+            limits
+        }
+
+        // The default leaves TiDB's own lock wait alone.
+        let default = TidbMetadataStore::connect_with_key(&url, key.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            default.0.deadline,
+            client_deadline(DEFAULT_STATEMENT_TIMEOUT)
+        );
+        let (execution_ms, lock_wait_seconds) = limits(default).await;
+        assert_eq!(
+            u128::from(execution_ms),
+            DEFAULT_STATEMENT_TIMEOUT.as_millis()
+        );
+        assert!(lock_wait_seconds < DEFAULT_STATEMENT_TIMEOUT.as_secs());
+
+        // A tighter option lowers the lock wait below it, so contention is
+        // still reported by TiDB as error 1205 rather than as a timeout.
+        let tight = TidbMetadataStore::connect_with_options(
+            &url,
+            TidbStorageOptions::new(key.clone()).with_statement_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(limits(tight).await, (5_000, 4));
+
+        // The URL parameter is honoured, and the option wins over it.
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let with_parameter = format!("{url}{separator}statement_timeout_ms=7000");
+        let from_url = TidbMetadataStore::connect_with_key(&with_parameter, key.clone())
+            .await
+            .unwrap();
+        assert_eq!(limits(from_url).await, (7_000, 6));
+        let overridden = TidbMetadataStore::connect_with_options(
+            &with_parameter,
+            TidbStorageOptions::new(key.clone()).with_statement_timeout(Duration::from_secs(9)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(limits(overridden).await, (9_000, 8));
+
+        // A shared pool takes its bound from the URL for every session.
+        let pool = TidbStorePool::new(&with_parameter, 2).unwrap();
+        let shared = pool
+            .metadata(TidbStorageOptions::new(key.clone()))
+            .await
+            .unwrap();
+        assert_eq!(shared.0.deadline, client_deadline(Duration::from_secs(7)));
+        assert_eq!(limits(shared).await, (7_000, 6));
+        pool.close().await.unwrap();
+
+        let cleanup = TidbMetadataStore::connect_with_key(&url, key.clone())
+            .await
+            .unwrap();
+        let mut session = cleanup.0.session().await.unwrap();
+        session
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap();
+        drop(session);
+        cleanup.close().await.unwrap();
+    }
+
+    /// Run by `scripts/test-tidb-tls-local.sh` against a throwaway TiDB that
+    /// presents a certificate issued for `localhost` by a throwaway
+    /// authority.
+    #[cfg(feature = "rustls")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires the TLS-enabled TiDB started by scripts/test-tidb-tls-local.sh"]
+    async fn actual_tidb_tls_handshake_is_verified() {
+        fn lane_url(name: &str) -> String {
+            std::env::var(name)
+                .unwrap_or_else(|_| panic!("{name} must be set by scripts/test-tidb-tls-local.sh"))
+        }
+        let key = format!(
+            "tls-handshake-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+
+        // The verified session is really encrypted.
+        let store = TidbMetadataStore::connect_with_key(&lane_url("MOUNT_RS_TIDB_TLS_URL"), &key)
+            .await
+            .expect("a server certificate issued by the trusted authority must be accepted");
+        let mut session = store.0.session().await.unwrap();
+        let mut status = BTreeMap::new();
+        for name in ["Ssl_cipher", "Ssl_version"] {
+            let (_, value): (String, String) = session
+                .query_first(format!("SHOW SESSION STATUS LIKE '{name}'"))
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("TiDB reports no {name}"));
+            status.insert(name, value);
+        }
+        println!("TIDB_TLS_SESSION status={status:?}");
+        assert!(
+            !status["Ssl_cipher"].is_empty(),
+            "the session is not encrypted"
+        );
+        assert!(status["Ssl_version"].starts_with("TLS"), "{status:?}");
+        // TiDB takes this as a global variable, not a configuration file
+        // setting, and only accepts it from a session that is itself
+        // encrypted. From here on the lane's throwaway server refuses
+        // plaintext sessions, which the last case below relies on.
+        session
+            .query_drop("SET GLOBAL require_secure_transport = ON")
+            .await
+            .unwrap();
+        session
+            .exec_drop(
+                "DELETE FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                (&key,),
+            )
+            .await
+            .unwrap();
+        drop(session);
+        store.close().await.unwrap();
+
+        // Each of these reaches the same server and must be refused.
+        for (case, variable, markers) in [
+            (
+                "an authority that did not issue the server certificate",
+                "MOUNT_RS_TIDB_TLS_UNTRUSTED_URL",
+                &["UnknownIssuer"][..],
+            ),
+            (
+                "the public roots alone",
+                "MOUNT_RS_TIDB_TLS_PUBLIC_ROOTS_URL",
+                &["UnknownIssuer"][..],
+            ),
+            (
+                "a host name the certificate was not issued for",
+                "MOUNT_RS_TIDB_TLS_MISNAMED_URL",
+                &["not valid for name"][..],
+            ),
+            (
+                "a plaintext session",
+                "MOUNT_RS_TIDB_TLS_PLAINTEXT_URL",
+                // TiDB v8.5.7 answers the plaintext handshake with an error
+                // the driver reports only as an unexpected packet.
+                &["Unexpected packet", "insecure transport"][..],
+            ),
+        ] {
+            let attempt = tokio::time::timeout(
+                Duration::from_secs(60),
+                TidbMetadataStore::connect_with_key(&lane_url(variable), &key),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("the connection with {case} neither failed nor succeeded"));
+            let error = match attempt {
+                Ok(_) => panic!("the provider connected with {case}"),
+                Err(error) => error,
+            };
+            let rendered = error.to_string();
+            println!("TIDB_TLS_REJECTED case={case:?} error={rendered}");
+            assert!(error.is(ErrorCode::Eio), "{rendered}");
+            assert!(
+                markers.iter().any(|marker| rendered.contains(marker)),
+                "the connection with {case} failed for another reason: {rendered}"
+            );
+        }
+    }
+
+    /// A provider-configured session on a raw pool, so the test can run the
+    /// statements that provoke a conflict.
+    async fn conflict_session(pool: &Pool) -> Conn {
+        let mut connection = pool.get_conn().await.unwrap();
+        configure_pessimistic_session(&mut connection, DEFAULT_STATEMENT_TIMEOUT)
+            .await
+            .unwrap();
+        connection
+    }
+
+    async fn probe_value(connection: &mut Conn, table: &str) -> i64 {
+        connection
+            .query_first(format!("SELECT v FROM {table} WHERE id=1"))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_autocommit_conflicts_are_known_non_commits() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("actual TiDB URL required");
+        let pool = Pool::from_url(&url).unwrap();
+        let mut observer = conflict_session(&pool).await;
+        let version: String = observer
+            .query_first("SELECT VERSION()")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(version.to_ascii_lowercase().contains("tidb"), "{version}");
+        let table = format!("mount_rs_tidb_conflict_probe_{}", std::process::id());
+        observer
+            .query_drop(format!(
+                "CREATE TABLE {table} (id INT PRIMARY KEY, v BIGINT NOT NULL)"
+            ))
+            .await
+            .unwrap();
+        observer
+            .query_drop(format!("INSERT INTO {table} VALUES (1, 0)"))
+            .await
+            .unwrap();
+
+        // What the provider does with an error from an autocommit write.
+        fn classified_as_known_non_commit(error: &MysqlError) -> bool {
+            let MysqlError::Server(server) = error else {
+                return false;
+            };
+            is_retryable_conflict(error)
+                && autocommit_error("probe", MysqlError::Server(server.clone()))
+                    .is(ErrorCode::Eagain)
+        }
+
+        // 1. Write conflict. An autocommit statement commits optimistically.
+        //    With TiDB's automatic retry switched off, a commit by another
+        //    session between the statement's snapshot and its own commit
+        //    surfaces as the conflict error instead of being retried.
+        let mut slow = conflict_session(&pool).await;
+        slow.query_drop("SET SESSION tidb_retry_limit=0")
+            .await
+            .unwrap();
+        let slow_table = table.clone();
+        let slow_statement = tokio::spawn(async move {
+            slow.query_drop(format!(
+                "UPDATE {slow_table} SET v=v+1000 WHERE id=1 AND SLEEP(2)=0"
+            ))
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        observer
+            .query_drop(format!("UPDATE {table} SET v=v+1 WHERE id=1"))
+            .await
+            .unwrap();
+        let error = slow_statement
+            .await
+            .unwrap()
+            .expect_err("the overlapping autocommit statement must conflict");
+        println!("TIDB_CONFLICT version={version} case=write_conflict error={error}");
+        let MysqlError::Server(server) = &error else {
+            panic!("a write conflict is a server error: {error:?}");
+        };
+        assert_eq!(server.code, 9007, "{error}");
+        assert!(server.message.contains("Write conflict"), "{error}");
+        assert!(server.message.contains("[try again later]"), "{error}");
+        assert!(classified_as_known_non_commit(&error));
+        assert_eq!(
+            probe_value(&mut observer, &table).await,
+            1,
+            "the statement that reported a write conflict must not have committed"
+        );
+
+        // 2. Lock wait. Another session holds the row's pessimistic lock in
+        //    an open transaction for longer than the statement may wait.
+        let mut holder = conflict_session(&pool).await;
+        holder.query_drop("BEGIN PESSIMISTIC").await.unwrap();
+        holder
+            .query_drop(format!("UPDATE {table} SET v=v+10 WHERE id=1"))
+            .await
+            .unwrap();
+        let mut waiter = conflict_session(&pool).await;
+        waiter
+            .query_drop("SET SESSION innodb_lock_wait_timeout=1")
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(30),
+            waiter.query_drop(format!("UPDATE {table} SET v=v+100000 WHERE id=1")),
+        )
+        .await
+        .expect("TiDB must end the lock wait itself")
+        .expect_err("the row is locked for longer than the statement may wait");
+        println!("TIDB_CONFLICT version={version} case=lock_wait error={error}");
+        let MysqlError::Server(server) = &error else {
+            panic!("a lock wait timeout is a server error: {error:?}");
+        };
+        assert_eq!(server.code, 1205, "{error}");
+        assert!(classified_as_known_non_commit(&error));
+        holder.query_drop("COMMIT").await.unwrap();
+        assert_eq!(
+            probe_value(&mut observer, &table).await,
+            11,
+            "the statement that reported a lock wait timeout must not have committed"
+        );
+        drop((holder, waiter));
+
+        // 3. Contention. Many sessions increment the same row with autocommit
+        //    statements. Half use the provider's session as it is, and half
+        //    switch TiDB's automatic retry off so conflicts surface. If any
+        //    statement that reported an error had committed, the row would
+        //    count more increments than there were successes.
+        const SESSIONS: usize = 8;
+        const STATEMENTS: usize = 40;
+        let mut writers = tokio::task::JoinSet::new();
+        for index in 0..SESSIONS {
+            let mut session = conflict_session(&pool).await;
+            if index % 2 == 0 {
+                session
+                    .query_drop("SET SESSION tidb_retry_limit=0")
+                    .await
+                    .unwrap();
+            }
+            let table = table.clone();
+            writers.spawn(async move {
+                let mut succeeded = 0_i64;
+                let mut errors = Vec::new();
+                for _ in 0..STATEMENTS {
+                    match session
+                        .query_drop(format!("UPDATE {table} SET v=v+1 WHERE id=1"))
+                        .await
+                    {
+                        Ok(()) => succeeded += 1,
+                        Err(error) => errors.push(error),
+                    }
+                }
+                (succeeded, errors)
+            });
+        }
+        let mut succeeded = 0_i64;
+        let mut codes = BTreeMap::<u16, usize>::new();
+        while let Some(writer) = writers.join_next().await {
+            let (writer_succeeded, errors) = writer.unwrap();
+            succeeded += writer_succeeded;
+            for error in errors {
+                assert!(
+                    classified_as_known_non_commit(&error),
+                    "an error the provider would not treat as a known non-commit: {error:?}"
+                );
+                let MysqlError::Server(server) = &error else {
+                    unreachable!("classified errors are server errors");
+                };
+                *codes.entry(server.code).or_default() += 1;
+            }
+        }
+        let reported: usize = codes.values().sum();
+        println!(
+            "TIDB_CONFLICT version={version} case=contention statements={} succeeded={succeeded} errors={codes:?}",
+            SESSIONS * STATEMENTS
+        );
+        assert_eq!(succeeded as usize + reported, SESSIONS * STATEMENTS);
+        assert!(
+            reported > 0,
+            "the contention run surfaced no conflict, so it verified nothing"
+        );
+        assert_eq!(
+            probe_value(&mut observer, &table).await,
+            11 + succeeded,
+            "a statement that reported a conflict committed anyway"
+        );
+
+        observer
+            .query_drop(format!("DROP TABLE {table}"))
+            .await
+            .unwrap();
+        drop(observer);
+        pool.disconnect().await.unwrap();
     }
 
     #[test]

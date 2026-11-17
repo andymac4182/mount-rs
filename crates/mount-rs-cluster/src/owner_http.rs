@@ -86,6 +86,9 @@ pub const HOP_HEADER: &str = "x-mount-hop";
 pub struct OwnerHttpHandler {
     filesystem: Arc<Filesystem>,
     route: VolumeRoute,
+    /// The drive as `application` serves it, for the answers that are about
+    /// every drive of this server: readiness and discovery.
+    drive: DriveConfig,
     application: Arc<HttpServer>,
     sessions: Option<Arc<SessionHttpHandler>>,
     max_request_bytes: usize,
@@ -103,16 +106,16 @@ impl OwnerHttpHandler {
         if filesystem.checked_owner_fence().await.ok() != Some(route.fence) {
             return Err(RegistryError::InvalidInput);
         }
+        let drive = DriveConfig::new(route.volume.clone(), filesystem.driver(), bearer_token)
+            .map_err(|_| RegistryError::InvalidInput)?;
         let mut registry = DriveRegistry::new();
         registry
-            .register(
-                DriveConfig::new(route.volume.clone(), filesystem.driver(), bearer_token)
-                    .map_err(|_| RegistryError::InvalidInput)?,
-            )
+            .register(drive.clone())
             .map_err(|_| RegistryError::InvalidInput)?;
         Ok(Self {
             filesystem,
             route,
+            drive,
             max_request_bytes: options.max_request_bytes.max(1),
             application: Arc::new(HttpServer::unbound(registry, options)),
             sessions: None,
@@ -157,6 +160,10 @@ impl OwnerHttpHandler {
                 .map_err(|_| RegistryError::InvalidInput)?,
         ));
         Ok(self)
+    }
+    /// The route this handler serves; forwarded requests must carry it.
+    pub fn route(&self) -> &VolumeRoute {
+        &self.route
     }
     pub fn session_registry(&self) -> Option<Arc<VolumeSessions>> {
         self.sessions.as_ref().map(|handler| handler.registry())
@@ -250,6 +257,7 @@ impl OwnerHttpHandler {
         ))
         .boxed_unsync();
         let transport_timing = request.extensions_mut().remove::<PeerStreamTiming>();
+        let is_head = request.method() == http::Method::HEAD;
         let application_start = Instant::now();
         let response = self.dispatch(request.map(|_| body)).await;
         let application = application_start.elapsed();
@@ -289,6 +297,19 @@ impl OwnerHttpHandler {
         // HTTP/1 connection management headers have no meaning on HTTP/3.
         parts.headers.remove("connection");
         parts.headers.remove("transfer-encoding");
+        // A listener states the length of a body it holds in full. Say it
+        // here too, so that the ingress can give its client the length
+        // the owner's own listener would have sent.
+        if !is_head
+            && parts.status != StatusCode::NO_CONTENT
+            && parts.status != StatusCode::NOT_MODIFIED
+            && !parts.headers.contains_key(http::header::CONTENT_LENGTH)
+            && let Some(length) = hyper::body::Body::size_hint(&body).exact()
+        {
+            parts
+                .headers
+                .insert(http::header::CONTENT_LENGTH, length.into());
+        }
         let headers_start = Instant::now();
         send.0
             .as_mut()
@@ -298,7 +319,14 @@ impl OwnerHttpHandler {
         counters.headers.record(headers_start);
         let mut read_time = Duration::ZERO;
         let mut send_time = Duration::ZERO;
+        // A response to HEAD has no body. The application still builds one
+        // for an error (the listener's HTTP/1 writer drops it); sending it
+        // to the ingress would put bytes where none are allowed, and the
+        // ingress would report the answer as lost.
         loop {
+            if is_head {
+                break;
+            }
             let read_start = Instant::now();
             let frame = body.frame().await;
             read_time += read_start.elapsed();
@@ -361,28 +389,83 @@ impl Drop for CancelSend {
 }
 
 /// Bounded multi-volume dispatch on one Mount Server's private peer listener.
+///
+/// The set of volumes may change while the server runs (`insert`, `remove`):
+/// a failover candidate serves a volume only while it holds its writer
+/// lease. Requests read an immutable snapshot and take no lock. A change
+/// copies the snapshot and swaps the copy in only if the snapshot is still
+/// the current one, deciding again if it is not, so two changes at once
+/// both take effect and neither waits.
 #[derive(Clone)]
 pub struct OwnerHttpRouter {
-    owners: Arc<std::collections::BTreeMap<String, OwnerHttpHandler>>,
+    owners: Arc<arc_swap::ArcSwap<Owners>>,
 }
+type Owners = std::collections::BTreeMap<String, Arc<OwnerHttpHandler>>;
+const MAX_OWNED_VOLUMES: usize = 4096;
 impl OwnerHttpRouter {
     pub fn new(owners: Vec<OwnerHttpHandler>) -> Result<Self, RegistryError> {
-        if owners.len() > 4096 {
+        if owners.len() > MAX_OWNED_VOLUMES {
             return Err(RegistryError::InvalidInput);
         }
-        let mut map = std::collections::BTreeMap::new();
+        let mut map = Owners::new();
         for owner in owners {
-            if map.insert(owner.route.volume.clone(), owner).is_some() {
+            if map
+                .insert(owner.route.volume.clone(), Arc::new(owner))
+                .is_some()
+            {
                 return Err(RegistryError::InvalidInput);
             }
         }
         Ok(Self {
-            owners: Arc::new(map),
+            owners: Arc::new(arc_swap::ArcSwap::from_pointee(map)),
         })
+    }
+    /// Start serving `owner`'s volume. Refused if the volume is already
+    /// served here: remove and close the old handler first.
+    pub fn insert(&self, owner: OwnerHttpHandler) -> Result<(), RegistryError> {
+        let owner = Arc::new(owner);
+        loop {
+            let current = self.owners.load_full();
+            if current.len() >= MAX_OWNED_VOLUMES || current.contains_key(&owner.route.volume) {
+                return Err(RegistryError::InvalidInput);
+            }
+            let mut next = Owners::clone(&current);
+            next.insert(owner.route.volume.clone(), Arc::clone(&owner));
+            if self.swap_in(&current, next) {
+                return Ok(());
+            }
+        }
+    }
+    /// Make `next` the served set if `current` still is; `false` if another
+    /// change got in first, in which case nothing was changed.
+    fn swap_in(&self, current: &Arc<Owners>, next: Owners) -> bool {
+        let previous = self.owners.compare_and_swap(current, Arc::new(next));
+        Arc::ptr_eq(&previous, current)
+    }
+    /// Stop routing new requests to `volume` and return its handler, which
+    /// the caller must `close` before shutting the filesystem down. A
+    /// request that already holds the handler finishes or is refused by it.
+    ///
+    /// Of two removals of one volume, exactly one is given the handler.
+    pub fn remove(&self, volume: &str) -> Option<Arc<OwnerHttpHandler>> {
+        loop {
+            let current = self.owners.load_full();
+            let removed = current.get(volume)?.clone();
+            let mut next = Owners::clone(&current);
+            next.remove(volume);
+            if self.swap_in(&current, next) {
+                return Some(removed);
+            }
+        }
+    }
+    /// The volumes served here now.
+    pub fn volumes(&self) -> Vec<String> {
+        self.owners.load().keys().cloned().collect()
     }
     pub async fn close(&self) -> Result<(), mount_rs_http::HttpServerError> {
         let mut failure = None;
-        for owner in self.owners.values() {
+        let owners = self.owners.load_full();
+        for owner in owners.values() {
             if let Err(error) = owner.close().await {
                 failure.get_or_insert(error);
             }
@@ -395,6 +478,7 @@ impl OwnerHttpRouter {
     /// Bounded per-owner counters, without volume names or endpoint information.
     pub fn timing_snapshots(&self) -> Vec<OwnerTimingSnapshot> {
         self.owners
+            .load()
             .values()
             .map(|owner| OwnerTimingSnapshot {
                 reads: owner.diagnostics.reads.snapshot(),
@@ -411,8 +495,17 @@ impl OwnerHttpRouter {
             })
             .collect()
     }
-    pub(crate) fn local(&self, volume: &str) -> Option<&OwnerHttpHandler> {
-        self.owners.get(volume)
+    pub(crate) fn local(&self, volume: &str) -> Option<Arc<OwnerHttpHandler>> {
+        self.owners.load().get(volume).cloned()
+    }
+    /// Every drive served here now, as one registry.
+    pub(crate) fn drives(&self) -> DriveRegistry {
+        let mut drives = DriveRegistry::new();
+        for owner in self.owners.load().values() {
+            // Volume names are the keys of the map, so none repeats.
+            let _ = drives.register(owner.drive.clone());
+        }
+        drives
     }
 }
 impl PeerRequestHandler for OwnerHttpRouter {
@@ -423,11 +516,7 @@ impl PeerRequestHandler for OwnerHttpRouter {
         mut stream: PeerServerStream,
     ) -> PeerHandlerFuture {
         let route = request_route(&request);
-        if let Some(owner) = route
-            .as_ref()
-            .and_then(|r| self.owners.get(&r.volume))
-            .cloned()
-        {
+        if let Some(owner) = route.as_ref().and_then(|r| self.local(&r.volume)) {
             return Box::pin(async move { owner.serve(request, stream, route).await });
         }
         Box::pin(async move {
@@ -512,6 +601,64 @@ mod session_tests {
                 )
                 .unwrap();
         (fs, handler, token)
+    }
+    /// Changes from several threads at once: each insert and remove of a
+    /// thread's own volumes takes effect, one of the inserts of a shared
+    /// volume wins, and its handler is given to one of the removals.
+    #[tokio::test]
+    async fn changes_to_the_router_at_once_all_take_effect_and_a_volume_has_one_owner() {
+        const THREADS: usize = 8;
+        const VOLUMES: usize = 40;
+        let (_fs, handler, _token) = owner().await;
+        let named = |volume: String| {
+            let mut handler = handler.clone();
+            handler.route.volume = volume;
+            handler
+        };
+        let router = OwnerHttpRouter::new(Vec::new()).unwrap();
+        let (inserted, removed): (usize, usize) = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..THREADS)
+                .map(|thread| {
+                    let (router, named) = (&router, &named);
+                    scope.spawn(move || {
+                        let mut shared = (0, 0);
+                        for volume in 0..VOLUMES {
+                            router
+                                .insert(named(format!("{thread}-{volume}")))
+                                .expect("a volume of this thread's own");
+                            shared.0 += usize::from(router.insert(named("shared".into())).is_ok());
+                            if volume % 2 == 1 {
+                                let own = router
+                                    .remove(&format!("{thread}-{volume}"))
+                                    .expect("this thread's own volume");
+                                assert_eq!(own.route.volume, format!("{thread}-{volume}"));
+                            }
+                            shared.1 += usize::from(router.remove("shared").is_some());
+                        }
+                        shared
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().expect("a thread"))
+                .fold((0, 0), |sum, each| (sum.0 + each.0, sum.1 + each.1))
+        });
+        // Every handler of the shared volume that went in came out once,
+        // or is the one still there.
+        let left = usize::from(router.remove("shared").is_some());
+        assert!(inserted >= 1);
+        assert_eq!(inserted, removed + left);
+        let mut expected: Vec<String> = (0..THREADS)
+            .flat_map(|thread| {
+                (0..VOLUMES)
+                    .step_by(2)
+                    .map(move |volume| format!("{thread}-{volume}"))
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(router.volumes(), expected);
+        assert!(router.insert(named("0-0".into())).is_err());
     }
     #[tokio::test]
     async fn owner_dispatch_authenticates_sessions_and_drains_retained_handles() {

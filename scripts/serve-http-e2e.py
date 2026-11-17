@@ -188,8 +188,15 @@ FS = "/v1/drives/files/fs"
 
 
 def basics():
-    s, _, _ = req("GET", "/healthz", token=None)
+    s, h, _ = req("GET", "/healthz", token=None)
     check("healthz", s == 200, s)
+    lower = {k.lower(): v for k, v in h.items()}
+    check("a response carries a generated request id",
+          len(lower.get("x-request-id", "")) == 32, lower.get("x-request-id"))
+    s, h, _ = req("GET", "/healthz", token=None, headers={"X-Request-Id": "e2e-probe.1"})
+    lower = {k.lower(): v for k, v in h.items()}
+    check("a client request id is echoed", lower.get("x-request-id") == "e2e-probe.1",
+          lower.get("x-request-id"))
     s, _, d = req("GET", "/readyz", token=None)
     check("readyz", s == 200 and b"ready" in d, (s, d[:60]))
     s, _, _ = req("GET", "/v1/drives", token=None)
@@ -264,6 +271,22 @@ def limits():
         req("PUT", FS + f"/many/{i:04}", b"x")
     s, _, d = req("GET", "/v1/drives/files/entries/many")
     check("listing at the entry cap", s == 200 and len(json.loads(d)) == ENTRIES, (s, len(d)))
+    paged, cursor, pages = [], None, 0
+    while True:
+        query = "?limit=7" + (f"&cursor={cursor}" if cursor else "")
+        s, _, d = req("GET", "/v1/drives/files/entries/many" + query)
+        if s != 200:
+            break
+        page = json.loads(d)
+        paged += [entry["name"] for entry in page["entries"]]
+        cursor = page.get("next_cursor")
+        pages += 1
+        if not cursor or pages > ENTRIES:
+            break
+    check("paginated listing returns every entry once, in name order",
+          s == 200 and paged == [f"{i:04}" for i in range(ENTRIES)], (s, pages, len(paged)))
+    s, _, d = req("GET", "/v1/drives/files/entries/many?limit=0")
+    check("bad limit is 400 EINVAL", s == 400 and json.loads(d)["error"]["code"] == "EINVAL", (s, d[:80]))
     req("PUT", FS + "/many/extra", b"x")
     s, _, d = req("GET", "/v1/drives/files/entries/many")
     check("listing over the entry cap refused, not truncated", s >= 400, (s, d[:100]))

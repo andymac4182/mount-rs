@@ -15,6 +15,10 @@ mod forwarding;
 #[cfg(feature = "http3")]
 pub use forward_trace::{ForwardRequestTiming, ForwardRequestTrace};
 #[cfg(feature = "http3")]
+mod membership;
+#[cfg(feature = "http3")]
+pub use membership::{MembershipChange, MembershipError, PeerMembership};
+#[cfg(feature = "http3")]
 mod request_class;
 #[cfg(feature = "http3")]
 pub use forwarding::{
@@ -28,7 +32,14 @@ pub use owner_http::{HOP_HEADER, OwnerHttpHandler, OwnerHttpRouter, ROUTE_HEADER
 
 use redis::aio::{ConnectionManager, MultiplexedConnection};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::Duration,
+};
 
 #[cfg(feature = "http3")]
 mod session_auth;
@@ -45,6 +56,20 @@ pub use session_supervisor::SessionSupervisor;
 
 mod registration_supervisor;
 pub use registration_supervisor::RegistrationSupervisor;
+
+pub mod placement;
+
+mod failover;
+pub use failover::{
+    FailoverMachine, FailoverTimings, OpenOutcome, OwnerAction, OwnerView, ReleaseReason,
+    RouteView, StandbyAction,
+};
+#[cfg(feature = "http3")]
+mod failover_supervisor;
+#[cfg(feature = "http3")]
+pub use failover_supervisor::{
+    DriveFactory, DriveStatus, FailoverDrive, FailoverEvent, FailoverOptions, FailoverSupervisor,
+};
 
 mod sessions;
 pub use sessions::{SessionBudget, SessionToken, VolumeSessions};
@@ -105,12 +130,106 @@ pub struct RedisRouteRegistry {
 enum RegistryConnection {
     Fixed(MultiplexedConnection),
     Managed(ConnectionManager),
+    Replaceable(ReplaceableManager),
 }
 impl RegistryConnection {
     async fn query<T: redis::FromRedisValue>(&self, command: &redis::Cmd) -> redis::RedisResult<T> {
         match self {
             Self::Fixed(connection) => command.query_async(&mut connection.clone()).await,
             Self::Managed(connection) => command.query_async(&mut connection.clone()).await,
+            Self::Replaceable(connection) => connection.query(command).await,
+        }
+    }
+}
+
+/// Consecutive unanswered commands after which a connection is replaced.
+const UNANSWERED_BEFORE_REPLACEMENT: u32 = 3;
+
+/// A reconnecting client that is also replaced when it stops answering.
+///
+/// The connection manager reconnects after a refused, reset or closed
+/// connection, but a timeout leaves its connection in place. A connection
+/// that stays open and silent (a firewall or load balancer that lost its
+/// state, a host that vanished without a reset) would then fail every
+/// command until the operating system gave up on it, long after the service
+/// was reachable again on a new connection.
+#[derive(Clone)]
+struct ReplaceableManager {
+    /// What every replacement is built from.
+    source: Arc<(redis::Client, redis::aio::ConnectionManagerConfig)>,
+    current: Arc<arc_swap::ArcSwap<ManagerGeneration>>,
+}
+struct ManagerGeneration {
+    manager: ConnectionManager,
+    unanswered: AtomicU32,
+}
+impl ReplaceableManager {
+    fn new(
+        client: redis::Client,
+        config: redis::aio::ConnectionManagerConfig,
+    ) -> redis::RedisResult<Self> {
+        let manager = ConnectionManager::new_lazy_with_config(client.clone(), config.clone())?;
+        Ok(Self {
+            source: Arc::new((client, config)),
+            current: Arc::new(arc_swap::ArcSwap::from_pointee(ManagerGeneration {
+                manager,
+                unanswered: AtomicU32::new(0),
+            })),
+        })
+    }
+
+    async fn query<T: redis::FromRedisValue>(&self, command: &redis::Cmd) -> redis::RedisResult<T> {
+        struct Watch<'a> {
+            owner: &'a ReplaceableManager,
+            generation: Arc<ManagerGeneration>,
+            unanswered: bool,
+        }
+        impl Drop for Watch<'_> {
+            fn drop(&mut self) {
+                if self.unanswered {
+                    self.owner.unanswered(&self.generation);
+                } else {
+                    self.generation.unanswered.store(0, Ordering::Release);
+                }
+            }
+        }
+        // Armed across the await: a caller's deadline drops this future, and
+        // that is an unanswered command too.
+        let mut watch = Watch {
+            owner: self,
+            generation: self.current.load_full(),
+            unanswered: true,
+        };
+        let result = command
+            .query_async(&mut watch.generation.manager.clone())
+            .await;
+        // Any reply, and any failure the manager itself recovers from, shows
+        // that this connection is not silently stuck.
+        watch.unanswered = matches!(&result, Err(error) if error.is_timeout());
+        result
+    }
+
+    /// Count an unanswered command against the connection it used, and
+    /// replace that connection once, when it reaches the limit. Commands
+    /// still in flight on an older connection cannot replace a newer one.
+    fn unanswered(&self, generation: &Arc<ManagerGeneration>) {
+        if generation.unanswered.fetch_add(1, Ordering::AcqRel) + 1 < UNANSWERED_BEFORE_REPLACEMENT
+            || !Arc::ptr_eq(&self.current.load(), generation)
+            // A deadline can also fire while the runtime is shutting down.
+            || tokio::runtime::Handle::try_current().is_err()
+        {
+            return;
+        }
+        if let Ok(manager) =
+            ConnectionManager::new_lazy_with_config(self.source.0.clone(), self.source.1.clone())
+        {
+            self.current.compare_and_swap(
+                generation,
+                Arc::new(ManagerGeneration {
+                    manager,
+                    unanswered: AtomicU32::new(0),
+                }),
+            );
         }
     }
 }
@@ -173,6 +292,23 @@ redis.call('DEL', KEYS[1])
 return 1
 "#;
 
+// Candidate liveness for failover: one sorted set per volume, node ids scored
+// with an expiry on the Redis server clock, so no node clock is compared.
+// Expired members are dropped on every call. An empty node only reads.
+const CANDIDATES: &str = r#"
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+if ARGV[1] ~= '' then
+  if redis.call('ZCARD', KEYS[1]) >= 1024 and not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
+    return redis.error_reply('too many candidates')
+  end
+  redis.call('ZADD', KEYS[1], now + ARGV[2], ARGV[1])
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return redis.call('ZRANGE', KEYS[1], 0, 1023)
+"#;
+
 impl RedisRouteRegistry {
     /// Set an outer deadline for registry commands. The supplied Redis
     /// connection retains its own response timeout; a shorter client timeout
@@ -195,6 +331,32 @@ impl RedisRouteRegistry {
         timeout: Duration,
     ) -> Result<Self, RegistryError> {
         Self::with_connection(RegistryConnection::Managed(connection), namespace, timeout)
+    }
+
+    /// Use a reconnecting client built from `client`, and replace it when it
+    /// stops answering: after three consecutive commands time out on one
+    /// connection, the next command opens a new one. Prefer this to
+    /// [`Self::with_manager`], whose manager reconnects after a refused or
+    /// reset connection but keeps a connection that is open and silent.
+    ///
+    /// Nothing is connected here; the first command connects. Establish and
+    /// check a connection from the same `client` first if a wrong address,
+    /// certificate or password must be reported at startup. TLS and
+    /// credentials come from `client`; timeouts and the reconnect policy
+    /// from `config`. Must be called within a Tokio runtime.
+    pub fn with_client(
+        client: redis::Client,
+        config: redis::aio::ConnectionManagerConfig,
+        namespace: String,
+        timeout: Duration,
+    ) -> Result<Self, RegistryError> {
+        let connection =
+            ReplaceableManager::new(client, config).map_err(|_| RegistryError::InvalidInput)?;
+        Self::with_connection(
+            RegistryConnection::Replaceable(connection),
+            namespace,
+            timeout,
+        )
     }
 
     fn with_connection(
@@ -258,6 +420,67 @@ impl RedisRouteRegistry {
     }
     pub async fn remove(&self, route: &VolumeRoute) -> Result<bool, RegistryError> {
         self.change(REMOVE, route, Duration::from_secs(1)).await
+    }
+    fn candidates_key(&self, volume: &str) -> Result<String, RegistryError> {
+        if !identifier(volume) {
+            return Err(RegistryError::InvalidInput);
+        }
+        Ok(format!("mount-rs:{}:candidates:{volume}", self.namespace))
+    }
+    async fn candidate_set(
+        &self,
+        volume: &str,
+        node: &str,
+        ttl: Duration,
+    ) -> Result<Vec<String>, RegistryError> {
+        let mut cmd = redis::cmd("EVAL");
+        cmd.arg(CANDIDATES)
+            .arg(1)
+            .arg(self.candidates_key(volume)?)
+            .arg(node)
+            .arg(ttl.as_millis() as u64);
+        let members: Vec<String> = tokio::time::timeout(self.timeout, self.connection.query(&cmd))
+            .await
+            .map_err(|_| RegistryError::Unavailable)?
+            .map_err(|_| RegistryError::Unavailable)?;
+        // Redis content is a hint; never let it hand back a malformed id.
+        Ok(members.into_iter().filter(|m| identifier(m)).collect())
+    }
+    /// Announce `node` as a live failover candidate for `volume` for `ttl`,
+    /// and return every candidate currently announced, this one included.
+    ///
+    /// The set is advice about who should try to open a volume first. It
+    /// grants nothing and must be intersected with trusted membership.
+    /// Repeating an announcement is harmless, so a lost reply needs no
+    /// reconciliation.
+    pub async fn announce_candidate(
+        &self,
+        volume: &str,
+        node: &str,
+        ttl: Duration,
+    ) -> Result<Vec<String>, RegistryError> {
+        if !identifier(node) || ttl < Duration::from_millis(20) || ttl > Duration::from_secs(30) {
+            return Err(RegistryError::InvalidInput);
+        }
+        self.candidate_set(volume, node, ttl).await
+    }
+    /// The candidates currently announced for `volume`.
+    pub async fn candidates(&self, volume: &str) -> Result<Vec<String>, RegistryError> {
+        self.candidate_set(volume, "", Duration::from_secs(1)).await
+    }
+    /// Stop counting `node` as a candidate for `volume` at once, rather than
+    /// when its announcement expires.
+    pub async fn withdraw_candidate(&self, volume: &str, node: &str) -> Result<(), RegistryError> {
+        if !identifier(node) {
+            return Err(RegistryError::InvalidInput);
+        }
+        let mut cmd = redis::cmd("ZREM");
+        cmd.arg(self.candidates_key(volume)?).arg(node);
+        let _removed: i64 = tokio::time::timeout(self.timeout, self.connection.query(&cmd))
+            .await
+            .map_err(|_| RegistryError::Unavailable)?
+            .map_err(|_| RegistryError::Unavailable)?;
+        Ok(())
     }
     // GETRANGE includes its end offset. Read one extra byte so a record with
     // the expected prefix and any trailing bytes can never confirm ownership.

@@ -1,0 +1,43 @@
+name: Dependency audit
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so a new cargo-audit release cannot change the gate unreviewed.
+  CARGO_AUDIT_VERSION: 0.23.0
+
+jobs:
+  rust-advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      # Nothing in the workspace is built here; the cache only keeps the
+      # installed cargo-audit binary in ~/.cargo/bin between runs.
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          shared-key: cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
+          cache-targets: 'false'
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version "$CARGO_AUDIT_VERSION"
+      # Reads Cargo.lock against the current RustSec database. Vulnerabilities
+      # and, with --deny warnings, unsound, unmaintained and yanked crates all
+      # fail the job. Accepted advisories, each with its reason, are listed in
+      # .cargo/audit.toml.
+      - name: Check Cargo.lock against the RustSec advisory database
+        run: cargo audit --deny warnings

@@ -137,7 +137,6 @@ impl HttpChild {
         }
     }
 
-    #[cfg(unix)]
     fn output(&mut self) -> (Vec<String>, Vec<String>) {
         for reader in self.readers.drain(..) {
             reader.join().expect("join HTTP output reader");
@@ -680,6 +679,708 @@ fn unix_http_subprocess_stops_gracefully_and_boundedly() {
         stdout.iter().any(|line| line == "http stopped"),
         "HTTP subprocess did not report bounded shutdown: stdout={stdout:?}, stderr={stderr:?}"
     );
+    // The access log is off unless the config asks for it.
+    assert!(
+        !stderr.iter().any(|line| line.contains("http_request")),
+        "stderr={stderr:?}"
+    );
+}
+
+/// Poll `/readyz` until its body is `expected`, and return the status.
+#[cfg(unix)]
+fn readiness_becomes(address: SocketAddr, expected: &serde_json::Value) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let ready = request(address, "GET", "/readyz", "", &[]);
+        let body: serde_json::Value = serde_json::from_slice(&ready.body).expect("readiness body");
+        if &body == expected {
+            return ready.status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "/readyz stayed at {body} instead of becoming {expected}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// `/readyz` follows the storage of a `host` and a `sqlite` drive, not only
+/// a split-store drive's lease: it turns 503 while the directory or the
+/// database file is gone, without a request having to find out, and 200
+/// again once it is back.
+#[cfg(unix)]
+#[test]
+fn readiness_follows_the_storage_of_host_and_sqlite_drives() {
+    let root = temporary_root();
+    let host_root = root.join("host-root");
+    let database = root.join("drive.db");
+    fs::create_dir(&host_root).expect("host root");
+    let (uid, gid) = effective_identity();
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {
+            "host": "127.0.0.1",
+            "port": 0,
+            "drives": [
+                {
+                    "id": "memory",
+                    "token": {"env": "MOUNT_RS_HTTP_MEMORY_TOKEN"},
+                    "driver": {"kind": "memory"}
+                },
+                {
+                    "id": "host",
+                    "token": {"env": "MOUNT_RS_HTTP_SPLIT_TOKEN"},
+                    "driver": {"kind": "host", "root": host_root}
+                },
+                {
+                    "id": "sqlite",
+                    "token": {"env": "MOUNT_RS_HTTP_SQLITE_TOKEN"},
+                    "driver": {"kind": "sqlite", "database": database, "uid": uid, "gid": gid}
+                }
+            ]
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    let mut child = HttpChild::start(&config_path, root.clone());
+    let (address, _ready) = child.ready();
+    let ready = serde_json::json!({"status": "ready", "drives": 3});
+    let failed =
+        |count: u64| serde_json::json!({"status": "not_ready", "drives": 3, "failed": count});
+    assert_eq!(readiness_becomes(address, &ready), 200);
+
+    // Nothing asks the host drive for anything: the server notices itself.
+    let moved_root = root.join("host-root.moved");
+    fs::rename(&host_root, &moved_root).expect("move the host root away");
+    assert_eq!(readiness_becomes(address, &failed(1)), 503);
+    // The other drives still serve.
+    let memory = request(
+        address,
+        "GET",
+        "/v1/drives/memory/stat",
+        "memory-test-token",
+        &[],
+    );
+    assert_eq!(memory.status, 200);
+
+    let moved_database = root.join("drive.db.moved");
+    fs::rename(&database, &moved_database).expect("move the database away");
+    assert_eq!(readiness_becomes(address, &failed(2)), 503);
+
+    // Neither drive failed closed: each is ready again once its storage is.
+    fs::rename(&moved_root, &host_root).expect("move the host root back");
+    assert_eq!(readiness_becomes(address, &failed(1)), 503);
+    fs::rename(&moved_database, &database).expect("move the database back");
+    assert_eq!(readiness_becomes(address, &ready), 200);
+    let host = request(
+        address,
+        "GET",
+        "/v1/drives/host/stat",
+        "splitstore-test-token-for-sessions",
+        &[],
+    );
+    assert_eq!(host.status, 200);
+
+    child.signal(libc::SIGINT);
+    let status = child.wait_for_exit(Duration::from_secs(10));
+    assert!(status.success(), "{status}");
+    let (_stdout, stderr) = child.output();
+    let changes: Vec<(String, bool)> = stderr
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|record| record["event"] == "http_drive_storage")
+        .map(|record| {
+            (
+                record["drive"].as_str().expect("drive").to_owned(),
+                record["reachable"].as_bool().expect("reachable"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("host".to_owned(), false),
+            ("sqlite".to_owned(), false),
+            ("host".to_owned(), true),
+            ("sqlite".to_owned(), true),
+        ],
+        "one line per change, and none for the memory drive: {stderr:?}"
+    );
+}
+
+/// Replace a token file the way an operator should: written beside it and
+/// renamed over it, so the server never reads half a file.
+#[cfg(unix)]
+fn replace_token_file(path: &Path, contents: &str) {
+    let staged = path.with_extension("staged");
+    fs::write(&staged, contents).expect("write staged token file");
+    fs::rename(&staged, path).expect("rename token file into place");
+}
+
+/// Wait for the next `http_token_reload` line on stderr and return it with
+/// every stderr line read on the way.
+#[cfg(unix)]
+fn next_token_reload(child: &HttpChild, seen: &mut Vec<String>) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let line = child
+            .stderr
+            .recv_timeout(wait)
+            .unwrap_or_else(|error| panic!("no token reload line: {error}; stderr={seen:?}"));
+        seen.push(line.clone());
+        if let Ok(record) = serde_json::from_str::<serde_json::Value>(&line)
+            && record["event"] == "http_token_reload"
+        {
+            return record;
+        }
+    }
+}
+
+/// A drive whose token is a file is rotated without a restart: the new
+/// token is accepted beside the old one, then the old one is dropped and
+/// gets what a token that was never valid gets. A file that is not valid
+/// changes nothing, and SIGHUP reloads instead of ending the process.
+#[cfg(unix)]
+#[test]
+fn a_token_file_is_rotated_without_a_restart() {
+    const OLD: &str = "rotation-old-token";
+    const NEW: &str = "rotation-new-token";
+    let root = temporary_root();
+    let token_file = root.join("files.token");
+    fs::write(&token_file, format!("{OLD}\n")).expect("write token file");
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {
+            "host": "127.0.0.1",
+            "port": 0,
+            "token_reload_seconds": 1,
+            "drives": [
+                {
+                    "id": "files",
+                    // Relative to the config file.
+                    "token": {"file": "files.token"},
+                    "driver": {"kind": "memory"}
+                },
+                {
+                    "id": "memory",
+                    "token": {"env": "MOUNT_RS_HTTP_MEMORY_TOKEN"},
+                    "driver": {"kind": "memory"}
+                }
+            ]
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    let mut child = HttpChild::start(&config_path, root.clone());
+    let (address, _ready) = child.ready();
+    let stat = |token: &str| request(address, "GET", "/v1/drives/files/stat", token, &[]);
+    let status = |token: &str| stat(token).status;
+    let mut stderr = Vec::new();
+
+    assert_eq!((status(OLD), status(NEW)), (200, 401));
+    let never_valid = stat("never-a-token");
+    assert_eq!(never_valid.status, 401);
+
+    // The overlap, picked up by the timer with no signal sent.
+    replace_token_file(&token_file, &format!("{NEW}\n{OLD}\n"));
+    let reloaded = next_token_reload(&child, &mut stderr);
+    assert_eq!(
+        reloaded,
+        serde_json::json!({
+            "event": "http_token_reload", "drive": "files",
+            "outcome": "reloaded", "tokens": 2, "error": null
+        })
+    );
+    assert_eq!((status(OLD), status(NEW)), (200, 200));
+    let drives = request(address, "GET", "/v1/drives", NEW, &[]);
+    assert_eq!(drives.body, br#"[{"id":"files"}]"#);
+
+    // SIGHUP with nothing changed: an answer, and the process goes on.
+    child.signal(libc::SIGHUP);
+    let unchanged = next_token_reload(&child, &mut stderr);
+    assert_eq!(
+        (&unchanged["outcome"], &unchanged["tokens"]),
+        (&"unchanged".into(), &2.into())
+    );
+    assert_eq!((status(OLD), status(NEW)), (200, 200));
+
+    // The old token is dropped.
+    replace_token_file(&token_file, &format!("{NEW}\n"));
+    let dropped = next_token_reload(&child, &mut stderr);
+    assert_eq!(
+        (&dropped["outcome"], &dropped["tokens"]),
+        (&"reloaded".into(), &1.into())
+    );
+    assert_eq!(status(NEW), 200);
+    let old = stat(OLD);
+    assert_eq!(old.status, 401);
+    assert_eq!(old.body, never_valid.body);
+    assert_eq!(
+        old.header("www-authenticate"),
+        never_valid.header("www-authenticate")
+    );
+    assert_eq!(request(address, "GET", "/v1/drives", OLD, &[]).status, 401);
+
+    // Files that are not valid: each is refused and the token stays.
+    for (bad, reason) in [
+        (
+            format!("{OLD}\nrotation-third-token\nrotation-fourth-token\n"),
+            "more than 2",
+        ),
+        (format!("{OLD} with a space\n"), "line 1 is not a token"),
+        (String::new(), "lists no token"),
+    ] {
+        replace_token_file(&token_file, &bad);
+        let refused = next_token_reload(&child, &mut stderr);
+        assert_eq!(refused["outcome"], "refused", "{refused}");
+        assert_eq!(refused["tokens"], 1, "{refused}");
+        let error = refused["error"].as_str().expect("error");
+        assert!(error.contains(reason), "{error}");
+        assert_eq!((status(OLD), status(NEW)), (401, 200));
+    }
+    fs::remove_file(&token_file).expect("remove token file");
+    let missing = next_token_reload(&child, &mut stderr);
+    assert_eq!(missing["outcome"], "refused", "{missing}");
+    assert!(missing["error"].as_str().unwrap().contains("cannot read"));
+    assert_eq!((status(OLD), status(NEW)), (401, 200));
+
+    // The other drive's token, from the environment, was never touched.
+    let memory = request(
+        address,
+        "GET",
+        "/v1/drives/memory/stat",
+        "memory-test-token",
+        &[],
+    );
+    assert_eq!(memory.status, 200);
+
+    child.signal(libc::SIGINT);
+    let exit = child.wait_for_exit(Duration::from_secs(10));
+    assert!(exit.success(), "{exit}");
+    let (_stdout, rest) = child.output();
+    stderr.extend(rest);
+    let reloads = stderr
+        .iter()
+        .filter(|line| line.contains("http_token_reload"))
+        .count();
+    assert_eq!(reloads, 7, "a bad file is reported once: {stderr:?}");
+    assert!(
+        !stderr.iter().any(|line| line.contains("rotation-")),
+        "no token is written to stderr: {stderr:?}"
+    );
+}
+
+/// With `http.metrics` the process serves Prometheus text on a listener
+/// of its own, counting what the API listener did.
+#[cfg(unix)]
+#[test]
+fn the_metrics_listener_counts_requests_and_follows_drive_readiness() {
+    let root = temporary_root();
+    let host_root = root.join("host-root");
+    fs::create_dir(&host_root).expect("host root");
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {
+            "host": "127.0.0.1",
+            "port": 0,
+            "access_log": true,
+            "metrics": {"listen": "127.0.0.1:0"},
+            "drives": [
+                {
+                    "id": "memory",
+                    "token": {"env": "MOUNT_RS_HTTP_MEMORY_TOKEN"},
+                    "driver": {"kind": "memory"}
+                },
+                {
+                    "id": "host",
+                    "token": {"env": "MOUNT_RS_HTTP_SPLIT_TOKEN"},
+                    "driver": {"kind": "host", "root": host_root}
+                }
+            ]
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    let mut child = HttpChild::start(&config_path, root.clone());
+    let (address, _ready) = child.ready();
+    // The listener announces itself on stderr before the drives open.
+    let metrics_address: SocketAddr = loop {
+        let line = child
+            .stderr
+            .recv_timeout(Duration::from_secs(30))
+            .expect("metrics listener line");
+        if let Ok(record) = serde_json::from_str::<serde_json::Value>(&line)
+            && record["event"] == "http_metrics_listening"
+        {
+            break record["address"].as_str().unwrap().parse().unwrap();
+        }
+    };
+    assert!(metrics_address.ip().is_loopback());
+    assert_ne!(metrics_address, address);
+    let sample = |text: &str, series: &str| -> Option<f64> {
+        text.lines()
+            .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+            .map(|value| value.parse().expect("a number"))
+    };
+    // No token is asked for.
+    let scrape = || {
+        let response = request(metrics_address, "GET", "/metrics", "", &[]);
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header("content-type"),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        String::from_utf8(response.body).expect("metrics text")
+    };
+
+    let put = request(
+        address,
+        "PUT",
+        "/v1/drives/memory/fs/a-private-name.bin",
+        "memory-test-token",
+        &[1_u8; 500],
+    );
+    assert!((200..300).contains(&put.status), "{}", put.status);
+    for _ in 0..2 {
+        let got = request(
+            address,
+            "GET",
+            "/v1/drives/memory/fs/a-private-name.bin",
+            "memory-test-token",
+            &[],
+        );
+        assert_eq!(got.status, 200);
+    }
+    let denied = request(
+        address,
+        "GET",
+        "/v1/drives/memory/stat",
+        "not-the-token",
+        &[],
+    );
+    assert_eq!(denied.status, 401);
+
+    let fs_route = "/v1/drives/{id}/fs/{path}";
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let text = loop {
+        let text = scrape();
+        let denied = sample(
+            &text,
+            "mount_rs_http_requests_total{route=\"/v1/drives/{id}/stat/{path}\",method=\"GET\",status=\"4xx\"}",
+        );
+        if denied == Some(1.0) {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "{text}");
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(
+        sample(
+            &text,
+            &format!(
+                "mount_rs_http_requests_total{{route=\"{fs_route}\",method=\"PUT\",status=\"2xx\"}}"
+            )
+        ),
+        Some(1.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!(
+                "mount_rs_http_requests_total{{route=\"{fs_route}\",method=\"GET\",status=\"2xx\"}}"
+            )
+        ),
+        Some(2.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!("mount_rs_http_request_duration_seconds_count{{route=\"{fs_route}\"}}")
+        ),
+        Some(3.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_request_body_bytes_total"),
+        Some(500.0)
+    );
+    assert!(sample(&text, "mount_rs_http_response_body_bytes_total").unwrap() >= 1000.0);
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"memory\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_drive_ready{drive=\"host\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "mount_rs_http_access_log_dropped_lines_total"),
+        Some(0.0)
+    );
+    assert_eq!(
+        sample(
+            &text,
+            &format!(
+                "mount_rs_build_info{{version=\"{}\"}}",
+                env!("CARGO_PKG_VERSION")
+            )
+        ),
+        Some(1.0),
+        "{text}"
+    );
+    assert!(sample(&text, "process_start_time_seconds").unwrap() > 1.6e9);
+    for private in ["a-private-name", "memory-test-token", "not-the-token"] {
+        assert!(!text.contains(private), "{private} in {text}");
+    }
+
+    // A drive that loses its storage shows as not ready, by its id.
+    fs::rename(&host_root, root.join("host-root.moved")).expect("move the host root away");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let text = scrape();
+        if sample(&text, "mount_rs_http_drive_ready{drive=\"host\"}") == Some(0.0) {
+            assert_eq!(
+                sample(&text, "mount_rs_http_drive_ready{drive=\"memory\"}"),
+                Some(1.0)
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "{text}");
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // The two listeners are apart: neither serves the other's routes.
+    assert_eq!(request(address, "GET", "/metrics", "", &[]).status, 404);
+    assert_eq!(
+        request(metrics_address, "GET", "/healthz", "", &[]).status,
+        404
+    );
+    assert_eq!(
+        request(
+            metrics_address,
+            "GET",
+            "/v1/drives",
+            "memory-test-token",
+            &[]
+        )
+        .status,
+        404
+    );
+
+    child.signal(libc::SIGINT);
+    let exit = child.wait_for_exit(Duration::from_secs(10));
+    assert!(exit.success(), "{exit}");
+    // The access log was written as well as counted.
+    let (_stdout, stderr) = child.output();
+    assert!(
+        stderr
+            .iter()
+            .any(|line| line.contains("\"event\":\"http_request\"")),
+        "{stderr:?}"
+    );
+}
+
+/// The metrics are off unless asked for, and a metrics address that is in
+/// use stops the server before it opens a drive.
+#[test]
+fn the_metrics_listener_is_off_by_default_and_a_taken_address_fails_startup() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let root = temporary_root();
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {
+            "host": "127.0.0.1", "port": 0,
+            "metrics": {"listen": taken.local_addr().unwrap().to_string()},
+            "drives": [{
+                "id": "memory",
+                "token": {"env": "MOUNT_RS_HTTP_MEMORY_TOKEN"},
+                "driver": {"kind": "memory"}
+            }]
+        }
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    let output = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["serve-http", "--config"])
+        .arg(&config_path)
+        .env("MOUNT_RS_HTTP_MEMORY_TOKEN", "memory-test-token")
+        .output()
+        .expect("run mount-rs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("metrics listener"), "{stderr}");
+    let _ = fs::remove_dir_all(&root);
+
+    // Without the key: no listener, and the API listener has no such route.
+    let root = temporary_root();
+    let config_path = write_http_config(&root);
+    let mut child = HttpChild::start(&config_path, root);
+    let (address, _ready) = child.ready();
+    assert_eq!(request(address, "GET", "/metrics", "", &[]).status, 404);
+    let _ = child.kill_owned();
+    let (_stdout, stderr) = child.output();
+    assert!(
+        !stderr
+            .iter()
+            .any(|line| line.contains("http_metrics_listening")),
+        "{stderr:?}"
+    );
+}
+
+/// A server with no token file leaves SIGHUP alone: it ends the process,
+/// as it did before tokens could be reloaded.
+#[cfg(unix)]
+#[test]
+fn sighup_still_ends_a_server_that_has_no_token_file() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let root = temporary_root();
+    let config_path = write_http_config(&root);
+    let mut child = HttpChild::start(&config_path, root);
+    let (address, _ready) = child.ready();
+    assert_eq!(request(address, "GET", "/healthz", "", &[]).status, 200);
+    child.signal(libc::SIGHUP);
+    let exit = child.wait_for_exit(Duration::from_secs(10));
+    assert_eq!(exit.signal(), Some(libc::SIGHUP), "{exit}");
+}
+
+/// A token file that is missing or not valid stops the server from
+/// starting, and the message does not quote the file.
+#[test]
+fn a_token_file_that_is_not_valid_fails_startup() {
+    let root = temporary_root();
+    let token_file = root.join("files.token");
+    let config_path = root.join("http.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "http": {"host": "127.0.0.1", "port": 0, "drives": [{
+            "id": "files", "token": {"file": token_file}, "driver": {"kind": "memory"}
+        }]}
+    });
+    fs::write(&config_path, serde_json::to_vec(&config).unwrap()).expect("write HTTP config");
+    for (contents, reason) in [
+        (None, "cannot read"),
+        (
+            Some("startup-secret-a\nstartup-secret-b\nstartup-secret-c\n"),
+            "more than 2",
+        ),
+        (Some("\n"), "lists no token"),
+    ] {
+        if let Some(contents) = contents {
+            fs::write(&token_file, contents).expect("write token file");
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+            .args(["serve-http", "--config"])
+            .arg(&config_path)
+            .output()
+            .expect("run mount-rs");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid HTTP drive 'files'"), "{stderr}");
+        assert!(stderr.contains(reason), "{stderr}");
+        assert!(!stderr.contains("startup-secret"), "{stderr}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_access_log_writes_one_line_per_request_and_no_path_or_token() {
+    let root = temporary_root();
+    let path = write_http_config(&root);
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["http"]["access_log"] = true.into();
+    fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut child = HttpChild::start(&path, root);
+    let (address, _ready) = child.ready();
+
+    let token = "memory-test-token";
+    let put = request(
+        address,
+        "PUT",
+        "/v1/drives/memory/fs/private-report.txt?note=confidential",
+        token,
+        b"nineteen bytes here",
+    );
+    assert_eq!(put.status, 200);
+    let get = request(
+        address,
+        "GET",
+        "/v1/drives/memory/fs/private-report.txt",
+        token,
+        &[],
+    );
+    assert_eq!(get.body, b"nineteen bytes here");
+    let refused = request(
+        address,
+        "GET",
+        "/v1/drives/memory/fs/private-report.txt",
+        "not-the-memory-token",
+        &[],
+    );
+    assert_eq!(refused.status, 401);
+    let probe = request(address, "GET", "/readyz", "", &[]);
+    assert_eq!(probe.status, 200);
+    let ids: Vec<String> = [&put, &get, &refused, &probe]
+        .iter()
+        .map(|response| {
+            response
+                .header("x-request-id")
+                .expect("request id")
+                .to_owned()
+        })
+        .collect();
+
+    child.signal(libc::SIGTERM);
+    let status = child.wait_for_exit(Duration::from_secs(10));
+    assert!(status.success(), "exit status: {status}");
+    let (_stdout, stderr) = child.output();
+    let lines: Vec<serde_json::Value> = stderr
+        .iter()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|line| line["event"] == "http_request")
+        .collect();
+    // Every request, in the order they finished, flushed before the exit.
+    let logged: Vec<_> = lines
+        .iter()
+        .map(|line| line["request_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(logged, ids, "stderr={stderr:?}");
+    let fs_route = "/v1/drives/{id}/fs/{path}";
+    for (line, (method, route, drive, status, bytes_in, bytes_out)) in lines.iter().zip([
+        ("PUT", fs_route, Some("memory"), 200, 19, put.body.len()),
+        ("GET", fs_route, Some("memory"), 200, 0, 19),
+        ("GET", fs_route, Some("memory"), 401, 0, refused.body.len()),
+        ("GET", "/readyz", None, 200, 0, probe.body.len()),
+    ]) {
+        assert_eq!(line["method"], method, "{line}");
+        assert_eq!(line["route"], route, "{line}");
+        assert_eq!(line["drive"].as_str(), drive, "{line}");
+        assert_eq!(line["status"], status, "{line}");
+        assert_eq!(line["bytes_in"], bytes_in, "{line}");
+        assert_eq!(line["bytes_out"], bytes_out, "{line}");
+        assert!(line["duration_ms"].as_f64().unwrap() >= 0.0, "{line}");
+        assert!(
+            line["unix_ms"].as_u64().unwrap() > 1_600_000_000_000,
+            "{line}"
+        );
+        assert_eq!(
+            line.as_object().unwrap().len(),
+            9 + usize::from(drive.is_some())
+        );
+    }
+    let everything = stderr.join("\n");
+    for private in [
+        "private-report",
+        "confidential",
+        "memory-test-token",
+        "not-the-memory-token",
+        "Bearer",
+    ] {
+        assert!(!everything.contains(private), "{private} reached stderr");
+    }
 }
 
 /// A config serving one SQLite-backed split-store drive, `durable`.
@@ -1472,6 +2173,89 @@ async fn tidb_remote_sessions_recover_after_process_kill_and_lease_expiry() {
 #[ignore = "requires isolated actual TiDB and RustFS; waits for crashed owner lease expiry"]
 async fn tidb_remote_sessions_recover_rustfs_after_process_kill_and_lease_expiry() {
     run_configured_session_case(true, true, true).await;
+}
+
+/// A drive whose storage has stopped answering: the test holds SQLite's
+/// write lock on the metadata database, so the lease release at shutdown
+/// waits (for SQLite's five-second busy timeout, far beyond the bound set
+/// here).
+#[cfg(unix)]
+#[test]
+fn a_drive_that_cannot_shut_down_in_time_ends_the_process_with_a_failure() {
+    let root = temporary_root();
+    let lease_ttl_ms = 120_000;
+    let http = serde_json::json!({
+        "drain_timeout_ms": 1000,
+        "drive_shutdown_timeout_ms": 300
+    });
+    let config = write_sqlite_split_config(
+        &root,
+        "stuck.json",
+        "http-stuck-owner",
+        lease_ttl_ms,
+        http.clone(),
+    );
+    let successor_config = write_sqlite_split_config(
+        &root,
+        "successor.json",
+        "http-successor-owner",
+        lease_ttl_ms,
+        http,
+    );
+    let mut child = HttpChild::start(&config, root.clone());
+    let (address, _ready) = child.ready();
+    let token = "splitstore-test-token-for-sessions";
+    let kept = request(
+        address,
+        "PUT",
+        "/v1/drives/durable/fs/kept",
+        token,
+        b"acknowledged before the stop",
+    );
+    assert_eq!(kept.status, 200);
+
+    let blocker = rusqlite::Connection::open(root.join("metadata.db")).expect("open metadata");
+    blocker
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("take the metadata write lock");
+
+    let stopping = Instant::now();
+    child.signal(libc::SIGTERM);
+    let status = child.wait_for_exit(Duration::from_secs(10));
+    let took = stopping.elapsed();
+    // Bounded by the configured limit, not by how long the storage takes
+    // to give up: the blocked release alone would have waited five seconds.
+    assert!(took < Duration::from_secs(4), "the stop took {took:?}");
+    assert_eq!(status.code(), Some(1), "exit status: {status}");
+    let (stdout, stderr) = child.output();
+    assert!(
+        !stdout.iter().any(|line| line == "http stopped"),
+        "a shutdown that did not finish was reported as clean: stdout={stdout:?}"
+    );
+    assert!(
+        stderr.iter().any(|line| line
+            .contains("drive shutdown timed out after 300 ms: drive 'durable' did not finish")),
+        "stderr={stderr:?}"
+    );
+    blocker.execute_batch("ROLLBACK").expect("release the lock");
+    drop(blocker);
+
+    // Nothing was claimed that did not happen: the lease was not released,
+    // so a successor is kept out until it expires...
+    let mut successor = HttpChild::start(&successor_config, root.clone());
+    let status = successor.wait_for_exit(Duration::from_secs(30));
+    assert_eq!(status.code(), Some(1), "exit status: {status}");
+    let (_stdout, stderr) = successor.output();
+    assert!(
+        stderr.iter().any(|line| line.contains("EAGAIN")),
+        "stderr={stderr:?}"
+    );
+    // ...and the acknowledged upload is in the store, untouched.
+    let metadata = rusqlite::Connection::open(root.join("metadata.db")).expect("open metadata");
+    let integrity: String = metadata
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("integrity check");
+    assert_eq!(integrity, "ok");
 }
 
 #[test]

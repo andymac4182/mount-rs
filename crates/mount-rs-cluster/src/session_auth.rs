@@ -11,6 +11,15 @@ use subtle::ConstantTimeEq;
 pub struct SessionCredentials {
     entries: Vec<(String, String)>,
 }
+impl Clone for SessionCredentials {
+    /// A failover candidate builds a fresh session registry each time it
+    /// takes a volume, from the same configured credentials.
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+        }
+    }
+}
 impl fmt::Debug for SessionCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionCredentials")

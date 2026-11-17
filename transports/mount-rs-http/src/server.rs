@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -52,6 +52,15 @@ pub const DEFAULT_BUFFERED_UPLOAD_REQUESTS: usize = 4;
 /// Names beginning with this are the server's own: the temporary sibling an
 /// upload is written to before it replaces its target on a driver whose
 /// `write_file` is not atomic. Clients can neither name nor list them.
+/// The header that names a request. A request that carries one valid value
+/// (1 to 128 characters of `A-Z a-z 0-9 . _ -`) keeps it; any other request
+/// is given a generated one. Every response the application produces
+/// carries the value, and so does the request a handler or a forwarding hop
+/// sees.
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+/// Longest client-supplied request id that is echoed.
+pub const MAX_REQUEST_ID_BYTES: usize = 128;
+
 pub const RESERVED_NAME_PREFIX: &str = ".mount-rs-upload.";
 
 /// How long a close that ran out of drain time waits (at most; never longer
@@ -70,6 +79,8 @@ pub enum RegistryError {
     InvalidDriveId,
     EmptyBearerToken,
     DuplicateDrive,
+    /// A drive was given no token, or more than [`MAX_DRIVE_TOKENS`].
+    TokenCount,
 }
 
 impl fmt::Display for RegistryError {
@@ -82,26 +93,108 @@ impl fmt::Display for RegistryError {
                 f.write_str("drive bearer token must be non-empty and contain no whitespace")
             }
             Self::DuplicateDrive => f.write_str("drive id is already registered"),
+            Self::TokenCount => f.write_str("a drive accepts one or two bearer tokens"),
         }
     }
 }
 
 impl std::error::Error for RegistryError {}
 
-/// A named logical drive.  The bearer token is intentionally private and is
-/// never included in `Debug`, discovery responses, or error responses.
+/// Most bearer tokens a drive accepts at once: the current one and, while
+/// its clients move to it, the one before.
+pub const MAX_DRIVE_TOKENS: usize = 2;
+
+/// The bearer tokens a drive accepts. A request is authorized by any of
+/// them. The set can be replaced while the server runs, which is how a
+/// token is rotated without a restart: accept the new token beside the old
+/// one, move the clients, then drop the old one.
+///
+/// A clone is another handle on the same set: replacing the tokens through
+/// one is seen by the server that holds another. The tokens are never
+/// included in `Debug`.
+#[derive(Clone)]
+pub struct DriveTokens(Arc<ArcSwap<Vec<String>>>);
+
+impl fmt::Debug for DriveTokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DriveTokens")
+            .field("count", &self.len())
+            .field("tokens", &"<redacted>")
+            .finish()
+    }
+}
+
+impl DriveTokens {
+    /// One to [`MAX_DRIVE_TOKENS`] tokens, each valid by
+    /// [`DriveConfig::validate_bearer_token`].
+    pub fn new(tokens: Vec<String>) -> Result<Self, RegistryError> {
+        Self::validate(&tokens)?;
+        Ok(Self(Arc::new(ArcSwap::from_pointee(tokens))))
+    }
+
+    /// Accept `tokens` instead of the current set, from the next request
+    /// on. A set that is not valid is refused and the current one stays.
+    /// Returns whether the set changed.
+    pub fn replace(&self, tokens: Vec<String>) -> Result<bool, RegistryError> {
+        Self::validate(&tokens)?;
+        let changed = **self.0.load() != tokens;
+        if changed {
+            self.0.store(Arc::new(tokens));
+        }
+        Ok(changed)
+    }
+
+    /// How many tokens are accepted.
+    pub fn len(&self) -> usize {
+        self.0.load().len()
+    }
+
+    /// Never true: a drive always accepts at least one token.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn validate(tokens: &[String]) -> Result<(), RegistryError> {
+        if tokens.is_empty() || tokens.len() > MAX_DRIVE_TOKENS {
+            return Err(RegistryError::TokenCount);
+        }
+        tokens
+            .iter()
+            .try_for_each(|token| DriveConfig::validate_bearer_token(token))
+    }
+
+    /// Whether `candidate` is one of the tokens. Every token is compared
+    /// in full, whether or not an earlier one matched, so the time taken
+    /// says nothing about which token it was or how much of one matched.
+    fn matches(&self, candidate: &str) -> bool {
+        let tokens = self.0.load();
+        let mut matched = false;
+        for token in tokens.iter() {
+            matched |= constant_time_eq(token.as_bytes(), candidate.as_bytes());
+        }
+        matched
+    }
+}
+
+/// A named logical drive.  Its bearer tokens are intentionally private and
+/// are never included in `Debug`, discovery responses, or error responses.
 pub struct DriveConfig {
     id: String,
     driver: Arc<dyn FsDriver>,
-    bearer_token: String,
+    tokens: DriveTokens,
+    health_check: Option<HealthCheck>,
 }
+
+/// A readiness check for a drive beyond its driver's own
+/// [`FsDriver::health`]: see [`DriveConfig::with_health_check`].
+pub type HealthCheck = Arc<dyn Fn() -> Result<(), FsError> + Send + Sync>;
 
 impl fmt::Debug for DriveConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DriveConfig")
             .field("id", &self.id)
             .field("driver", &"<FsDriver>")
-            .field("bearer_token", &"<redacted>")
+            .field("bearer_tokens", &"<redacted>")
             .finish()
     }
 }
@@ -111,7 +204,9 @@ impl Clone for DriveConfig {
         Self {
             id: self.id.clone(),
             driver: Arc::clone(&self.driver),
-            bearer_token: self.bearer_token.clone(),
+            // The same set, so that a rotation reaches every copy.
+            tokens: self.tokens.clone(),
+            health_check: self.health_check.clone(),
         }
     }
 }
@@ -123,15 +218,43 @@ impl DriveConfig {
         driver: Arc<dyn FsDriver>,
         bearer_token: impl Into<String>,
     ) -> Result<Self, RegistryError> {
+        Self::with_tokens(id, driver, DriveTokens::new(vec![bearer_token.into()])?)
+    }
+
+    /// Create a drive that accepts `tokens`. Keep a clone of them to
+    /// [`DriveTokens::replace`] the set while the server runs.
+    pub fn with_tokens(
+        id: impl Into<String>,
+        driver: Arc<dyn FsDriver>,
+        tokens: DriveTokens,
+    ) -> Result<Self, RegistryError> {
         let id = id.into();
-        let bearer_token = bearer_token.into();
         Self::validate_id(&id)?;
-        Self::validate_bearer_token(&bearer_token)?;
         Ok(Self {
             id,
             driver,
-            bearer_token,
+            tokens,
+            health_check: None,
         })
+    }
+
+    /// Make `/readyz` also ask `check` whether this drive can serve.
+    ///
+    /// It is for what the driver cannot know by itself, such as whether
+    /// the directory or file under it is still there. Like
+    /// [`FsDriver::health`] it runs on every probe, so it must answer from
+    /// memory: no I/O and no waiting. Whatever does the looking does it
+    /// elsewhere and leaves the answer for `check` to read.
+    pub fn with_health_check(mut self, check: HealthCheck) -> Self {
+        self.health_check = Some(check);
+        self
+    }
+
+    /// Whether the drive can serve: its driver has not failed, and the
+    /// drive's own check, when it has one, agrees.
+    pub(crate) fn health(&self) -> Result<(), FsError> {
+        self.driver.health()?;
+        self.health_check.as_ref().map_or(Ok(()), |check| check())
     }
 
     /// Validate a public drive path segment before opening its backend.
@@ -166,7 +289,7 @@ impl DriveConfig {
     }
 
     fn token_matches(&self, candidate: &str) -> bool {
-        constant_time_eq(self.bearer_token.as_bytes(), candidate.as_bytes())
+        self.tokens.matches(candidate)
     }
 }
 
@@ -206,6 +329,50 @@ impl DriveRegistry {
     }
 }
 
+/// One request, as an [`AccessLog`] is told about it.
+///
+/// It names no path and no credential: the route is a template, and the
+/// drive is given only when the request named a drive this server is
+/// configured with, so nothing a client typed into the URL is repeated.
+#[derive(Debug, Clone, Copy)]
+pub struct AccessRecord<'a> {
+    /// The value of the response's `x-request-id`.
+    pub request_id: &'a str,
+    pub method: &'a str,
+    /// The route's template, such as `/v1/drives/{id}/fs/{path}`;
+    /// `unmatched` for a path that is no route, and `invalid` for one the
+    /// server rejects before routing.
+    pub route: &'static str,
+    /// The configured drive the request named, whether or not it was
+    /// authorized for it.
+    pub drive: Option<&'a str>,
+    /// The response status; `None` when the request ended before the
+    /// server produced a response (the client went away, or a shutdown
+    /// ran out of drain time).
+    pub status: Option<u16>,
+    /// From the request's arrival until its response body was finished
+    /// with: sent in full, or abandoned.
+    pub duration: Duration,
+    /// Request body bytes the server read.
+    pub bytes_in: u64,
+    /// Response body bytes handed to the connection. A `HEAD` response
+    /// counts none, and a download that was cut short counts what it sent.
+    pub bytes_out: u64,
+}
+
+/// Receives one [`AccessRecord`] per request.
+///
+/// `record` runs on the request's task, as its response body is dropped: it
+/// must not block and should hand the line to something that writes it
+/// elsewhere.
+pub trait AccessLog: fmt::Debug + Send + Sync + 'static {
+    /// A request has arrived. Exactly one [`record`](Self::record) follows,
+    /// when the request is finished. Like `record` it must not block.
+    fn begin(&self) {}
+
+    fn record(&self, record: &AccessRecord<'_>);
+}
+
 /// HTTP listener and transport limits.
 #[derive(Debug, Clone)]
 pub struct HttpServerOptions {
@@ -239,6 +406,14 @@ pub struct HttpServerOptions {
     /// `None` is four times `max_request_bytes`; a smaller value than
     /// `max_request_bytes` is raised to it.
     pub max_buffered_upload_bytes: Option<usize>,
+    /// Told about every request once its response is finished with
+    /// (default: none). Without one a request pays for a single check.
+    pub access_log: Option<Arc<dyn AccessLog>>,
+    /// Report ready from `/readyz` while no drive is registered (default:
+    /// false). For a server that forwards requests to the servers that own
+    /// the drives: it can serve without a drive of its own. A registered
+    /// drive that has failed still makes the server not ready.
+    pub ready_without_drives: bool,
     #[cfg(feature = "observability")]
     pub telemetry: Telemetry,
 }
@@ -260,6 +435,8 @@ impl Default for HttpServerOptions {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_buffered_upload_bytes: None,
+            access_log: None,
+            ready_without_drives: false,
             #[cfg(feature = "observability")]
             telemetry: Telemetry::disabled(),
         }
@@ -329,6 +506,8 @@ struct RequestConfig {
     request_timeout: Duration,
     upload_budget: Arc<Semaphore>,
     control: RuntimeControl,
+    access_log: Option<Arc<dyn AccessLog>>,
+    ready_without_drives: bool,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
 }
@@ -502,6 +681,8 @@ impl HttpServer {
                     request_timeout: positive_duration(options.request_timeout),
                     upload_budget: Arc::new(Semaphore::new(upload_budget_units(upload_budget))),
                     control,
+                    access_log: options.access_log,
+                    ready_without_drives: options.ready_without_drives,
                     #[cfg(feature = "observability")]
                     telemetry: options.telemetry,
                 },
@@ -537,15 +718,66 @@ impl HttpServer {
     /// Serve one request from an alternate transport using the same authorization,
     /// filesystem semantics, limits and shutdown tracking as the TCP listener.
     pub async fn handle(&self, request: Request<HttpBody>) -> Response<HttpBody> {
+        self.handle_in(self.state.clone(), request).await
+    }
+
+    /// Serve one request as [`HttpServer::handle`] does, but against
+    /// `drives` instead of the drives this application was built with.
+    ///
+    /// For a listener whose drives are each held by an application of
+    /// their own and may change while it runs (a cluster owner): it gives
+    /// the requests that name no drive (the probes, discovery and paths
+    /// that are no route) to one application together with every drive it
+    /// serves at that moment, so that they are answered as a single
+    /// application holding those drives would answer them.
+    pub async fn handle_with_drives(
+        &self,
+        drives: DriveRegistry,
+        request: Request<HttpBody>,
+    ) -> Response<HttpBody> {
+        let state = Arc::new(AppState {
+            handler: None,
+            registry: Arc::new(drives),
+            config: self.state.config.clone(),
+        });
+        self.handle_in(state, request).await
+    }
+
+    async fn handle_in(
+        &self,
+        state: Arc<AppState>,
+        request: Request<HttpBody>,
+    ) -> Response<HttpBody> {
         self.connections.fetch_add(1, Ordering::AcqRel);
         let _guard = ConnectionGuard {
             counter: self.connections.clone(),
             drained: self.drained.clone(),
         };
+        // Serve under the shutdown of the listener that received the
+        // request, when there is one in front of this application.
+        let state = match request.extensions().get::<ListenerShutdown>() {
+            Some(ListenerShutdown(listener)) => Arc::new(AppState {
+                handler: None,
+                registry: Arc::clone(&state.registry),
+                config: RequestConfig {
+                    control: RuntimeControl {
+                        shutdown: Arc::clone(&listener.shutdown),
+                        closing: Arc::clone(&listener.closing),
+                        ..state.config.control.clone()
+                    },
+                    ..state.config.clone()
+                },
+            }),
+            None => state,
+        };
         if self.closing.load(Ordering::Acquire) != 0 {
-            return error_response(RequestError::server_closing());
+            let mut request = request;
+            let id = assign_request_id(&mut request);
+            let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state);
+            let response = with_request_id(error_response(RequestError::server_closing()), id);
+            return ObservedRequest::finish(observed, response);
         }
-        match handle_request(request, self.state.clone()).await {
+        match handle_request(request, state).await {
             Ok(response) => response,
             Err(never) => match never {},
         }
@@ -1232,11 +1464,280 @@ impl HttpResponseFailure {
     }
 }
 
+/// Marks a request whose id has been settled, so that an application nested
+/// behind a handler (session routing in front of the drive routes) leaves
+/// the id to the listener that received the request.
+#[derive(Clone, Copy)]
+struct RequestScope;
+
+/// Carried by a request that a listener gave to its handler: the shutdown
+/// of that listener. An application the handler passes the request to
+/// (`HttpServer::handle`) is closed only after the listener has drained, so
+/// without this a request in progress would not learn of the shutdown: an
+/// upload still arriving would hold the drain for all of its timeout
+/// instead of being refused at once, as the listener's own routes refuse it.
+#[derive(Clone)]
+struct ListenerShutdown(RuntimeControl);
+
+fn valid_request_id(value: &[u8]) -> bool {
+    (1..=MAX_REQUEST_ID_BYTES).contains(&value.len())
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// A new request id: 32 lowercase hexadecimal characters, unique for
+/// practical purposes across processes. It identifies a request; it is not a
+/// secret and authorizes nothing.
+fn generate_request_id() -> header::HeaderValue {
+    use std::hash::{BuildHasher, RandomState};
+    static KEYS: OnceLock<(RandomState, RandomState)> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let (high, low) = KEYS.get_or_init(|| (RandomState::new(), RandomState::new()));
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let id = format!(
+        "{:016x}{:016x}",
+        high.hash_one(sequence),
+        low.hash_one(sequence)
+    );
+    header::HeaderValue::from_maybe_shared(Bytes::from(id))
+        .expect("hexadecimal digits are a valid header value")
+}
+
+/// Settle the id of a request that does not have one yet: keep the single
+/// valid `x-request-id` the client sent, or replace whatever it sent with a
+/// generated id. The request then carries exactly that value, which is what
+/// a handler forwards. Returns `None` for a request an outer listener has
+/// already settled.
+fn assign_request_id(request: &mut Request<HttpBody>) -> Option<header::HeaderValue> {
+    if request.extensions().get::<RequestScope>().is_some() {
+        return None;
+    }
+    request.extensions_mut().insert(RequestScope);
+    let headers = request.headers_mut();
+    let mut sent = headers.get_all(REQUEST_ID_HEADER).iter();
+    if let (Some(value), None) = (sent.next(), sent.next())
+        && valid_request_id(value.as_bytes())
+    {
+        return Some(value.clone());
+    }
+    let id = generate_request_id();
+    headers.insert(REQUEST_ID_HEADER, id.clone());
+    Some(id)
+}
+
+fn with_request_id(
+    mut response: Response<HttpBody>,
+    id: Option<header::HeaderValue>,
+) -> Response<HttpBody> {
+    if let Some(id) = id {
+        response.headers_mut().insert(REQUEST_ID_HEADER, id);
+    }
+    response
+}
+
 async fn handle_request(
-    request: Request<HttpBody>,
+    mut request: Request<HttpBody>,
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
-    handle_request_instrumented(request, state).await
+    let id = assign_request_id(&mut request);
+    if id.is_some() && state.handler.is_some() {
+        // This listener received the request and a handler will serve it:
+        // let an application behind the handler see this listener close.
+        request
+            .extensions_mut()
+            .insert(ListenerShutdown(state.config.control.clone()));
+    }
+    let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state);
+    let response = match handle_request_instrumented(request, state).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    };
+    Ok(ObservedRequest::finish(
+        observed,
+        with_request_id(response, id),
+    ))
+}
+
+/// The template of the route a request path names and, when the path names
+/// a configured drive, that drive's id. Decoding follows `parse_route`, so
+/// a request is labelled as it is routed.
+fn describe_route<'a>(path: &str, registry: &'a DriveRegistry) -> (&'static str, Option<&'a str>) {
+    let Ok(segments) = decode_uri_segments(path) else {
+        return ("invalid", None);
+    };
+    let segment = |index: usize| segments.get(index).map(String::as_str);
+    if segments.len() == 1 {
+        return match segment(0) {
+            Some("healthz") => ("/healthz", None),
+            Some("readyz") => ("/readyz", None),
+            _ => ("unmatched", None),
+        };
+    }
+    if segment(0) != Some("v1") || segment(1) != Some("drives") {
+        return ("unmatched", None);
+    }
+    let Some(drive) = segment(2) else {
+        return ("/v1/drives", None);
+    };
+    let route = match (segment(3), segments.len()) {
+        (Some("fs"), _) => "/v1/drives/{id}/fs/{path}",
+        (Some("entries"), _) => "/v1/drives/{id}/entries/{path}",
+        (Some("stat"), _) => "/v1/drives/{id}/stat/{path}",
+        (Some("lstat"), _) => "/v1/drives/{id}/lstat/{path}",
+        (Some("statfs"), _) => "/v1/drives/{id}/statfs/{path}",
+        (Some("readlink"), _) => "/v1/drives/{id}/readlink/{path}",
+        (Some("ops"), 5) => match segment(4) {
+            Some("mkdir") => "/v1/drives/{id}/ops/mkdir",
+            Some("rename") => "/v1/drives/{id}/ops/rename",
+            Some("truncate") => "/v1/drives/{id}/ops/truncate",
+            Some("sync") => "/v1/drives/{id}/ops/sync",
+            _ => return ("unmatched", None),
+        },
+        _ => return ("unmatched", None),
+    };
+    (route, registry.get(drive).map(DriveConfig::id))
+}
+
+/// What the access log is told about one request. It reports itself when
+/// it is dropped: with the response body once that has been sent or
+/// abandoned, or with the request's future if that never got as far as a
+/// response.
+struct ObservedRequest {
+    log: Arc<dyn AccessLog>,
+    id: header::HeaderValue,
+    method: Method,
+    route: &'static str,
+    drive: Option<String>,
+    started: Instant,
+    received: Arc<AtomicU64>,
+    status: Option<u16>,
+    sent: u64,
+}
+
+impl ObservedRequest {
+    /// Start observing a request whose id this listener settled, when an
+    /// access log is configured; otherwise nothing is measured or wrapped.
+    fn begin(
+        request: &mut Request<HttpBody>,
+        id: Option<&header::HeaderValue>,
+        state: &AppState,
+    ) -> Option<Box<Self>> {
+        let log = state.config.access_log.as_ref()?;
+        let id = id?;
+        let started = Instant::now();
+        log.begin();
+        let (route, drive) = describe_route(request.uri().path(), &state.registry);
+        let received = Arc::new(AtomicU64::new(0));
+        let body = std::mem::replace(request.body_mut(), empty_body());
+        *request.body_mut() = CountedRequestBody {
+            inner: body,
+            received: Arc::clone(&received),
+        }
+        .boxed_unsync();
+        Some(Box::new(Self {
+            log: Arc::clone(log),
+            id: id.clone(),
+            method: request.method().clone(),
+            route,
+            drive: drive.map(str::to_owned),
+            started,
+            received,
+            status: None,
+            sent: 0,
+        }))
+    }
+
+    /// Attach the observation to the response, so that it ends with the
+    /// response body.
+    fn finish(observed: Option<Box<Self>>, response: Response<HttpBody>) -> Response<HttpBody> {
+        let Some(mut observed) = observed else {
+            return response;
+        };
+        observed.status = Some(response.status().as_u16());
+        response.map(|inner| ObservedResponseBody { inner, observed }.boxed_unsync())
+    }
+}
+
+impl Drop for ObservedRequest {
+    fn drop(&mut self) {
+        self.log.record(&AccessRecord {
+            request_id: self.id.to_str().unwrap_or(""),
+            method: self.method.as_str(),
+            route: self.route,
+            drive: self.drive.as_deref(),
+            status: self.status,
+            duration: self.started.elapsed(),
+            bytes_in: self.received.load(Ordering::Relaxed),
+            bytes_out: self.sent,
+        });
+    }
+}
+
+/// Counts the request body bytes the application reads.
+struct CountedRequestBody {
+    inner: HttpBody,
+    received: Arc<AtomicU64>,
+}
+
+impl HttpBodyTrait for CountedRequestBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let frame = Pin::new(&mut self.inner).poll_frame(context);
+        if let Poll::Ready(Some(Ok(frame))) = &frame
+            && let Some(data) = frame.data_ref()
+        {
+            self.received
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Counts the response body bytes handed to the connection and reports the
+/// request when the connection is done with the body.
+struct ObservedResponseBody {
+    inner: HttpBody,
+    observed: Box<ObservedRequest>,
+}
+
+impl HttpBodyTrait for ObservedResponseBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let frame = Pin::new(&mut self.inner).poll_frame(context);
+        if let Poll::Ready(Some(Ok(frame))) = &frame
+            && let Some(data) = frame.data_ref()
+        {
+            self.observed.sent += data.len() as u64;
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 async fn handle_request_instrumented(
@@ -1336,7 +1837,12 @@ async fn handle_request_uninstrumented(
 
     match &route {
         Route::Health { readiness } => {
-            return handle_health(&parts.method, &state.registry, *readiness);
+            return handle_health(
+                &parts.method,
+                &state.registry,
+                *readiness,
+                state.config.ready_without_drives,
+            );
         }
         Route::Discovery => {
             return handle_discovery(&parts.method, &parts.headers, &state.registry);
@@ -1392,6 +1898,7 @@ async fn handle_request_uninstrumented(
             handle_entries(
                 parts.method,
                 &parts.headers,
+                parts.uri.query(),
                 drive,
                 path,
                 state.config.clone(),
@@ -1472,24 +1979,30 @@ fn handle_discovery(
     json_response(StatusCode::OK, Bytes::from(body), method == Method::HEAD)
 }
 
-fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> Response<HttpBody> {
+fn handle_health(
+    method: &Method,
+    registry: &DriveRegistry,
+    readiness: bool,
+    ready_without_drives: bool,
+) -> Response<HttpBody> {
     if method != Method::GET && method != Method::HEAD {
         return error_response(RequestError::method_not_allowed("GET, HEAD"));
     }
 
     // Readiness asks every drive whether it can still serve. A drive that
     // failed closed answers every request with an error until the process
-    // is replaced, so one such drive takes the whole process out of rotation.
+    // is replaced, and one whose storage is unreachable cannot serve until
+    // it is back, so one such drive takes the whole process out of rotation.
     let failed = if readiness {
         registry
             .drives
             .values()
-            .filter(|drive| drive.driver.health().is_err())
+            .filter(|drive| drive.health().is_err())
             .count()
     } else {
         0
     };
-    let is_ready = !readiness || (!registry.is_empty() && failed == 0);
+    let is_ready = !readiness || ((!registry.is_empty() || ready_without_drives) && failed == 0);
     let status = if is_ready {
         StatusCode::OK
     } else {
@@ -2402,6 +2915,7 @@ async fn remove_abandoned_siblings(driver: &dyn FsDriver, path: &str, max_entrie
 async fn handle_entries(
     method: Method,
     headers: &hyper::HeaderMap,
+    query: Option<&str>,
     drive: DriveConfig,
     path: String,
     config: RequestConfig,
@@ -2409,13 +2923,142 @@ async fn handle_entries(
     if method != Method::GET && method != Method::HEAD {
         return Err(RequestError::method_not_allowed("GET, HEAD"));
     }
+    let page = ListingPage::from_query(query, config.max_directory_entries)?;
     let entries = list_directory(&drive, &path, config.max_directory_entries).await?;
-    let payload = serde_json::to_vec(&entries)
-        .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
+    let payload = match page {
+        // Without `limit` the response is the whole listing, as an array.
+        None => serde_json::to_vec(&entries),
+        Some(page) => serde_json::to_vec(&page.select(entries)),
+    }
+    .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
     if payload.len() > config.max_response_bytes {
         return Err(RequestError::response_too_large());
     }
     entries_response(payload, headers, method == Method::HEAD).await
+}
+
+/// What a continuation token starts with. The rest is the name of the last
+/// entry of the page before, in lowercase hexadecimal.
+const CURSOR_PREFIX: &str = "v1.";
+/// Longest continuation token accepted: a name of 4096 bytes.
+const MAX_CURSOR_BYTES: usize = CURSOR_PREFIX.len() + 2 * 4096;
+
+/// One page of a listing asked for with `limit`: the entries whose names
+/// follow `after` in byte order, at most `limit` of them.
+#[derive(Debug, PartialEq, Eq)]
+struct ListingPage {
+    limit: usize,
+    after: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EntriesPage {
+    entries: Vec<mount_rs_core::DirEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+impl ListingPage {
+    /// Read `limit` and `cursor` from a query string. A query without
+    /// `limit` asks for no page, whatever else it holds: such requests keep
+    /// the unpaginated response they have always had.
+    fn from_query(query: Option<&str>, max_limit: usize) -> Result<Option<Self>, RequestError> {
+        let mut limit = None;
+        let mut cursor = None;
+        for parameter in query.unwrap_or("").split('&') {
+            let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+            let slot = match name {
+                "limit" => &mut limit,
+                "cursor" => &mut cursor,
+                _ => continue,
+            };
+            if slot.replace(value).is_some() {
+                return Err(RequestError::bad_request(format!(
+                    "{name} is given more than once"
+                )));
+            }
+        }
+        let Some(limit) = limit else {
+            return Ok(None);
+        };
+        // Plain decimal digits only: no sign, no leading zero, no encoding.
+        let limit = Some(limit)
+            .filter(|text| {
+                (1..=20).contains(&text.len())
+                    && text.bytes().all(|byte| byte.is_ascii_digit())
+                    && !text.starts_with('0')
+            })
+            .and_then(|text| text.parse::<usize>().ok())
+            .filter(|limit| *limit <= max_limit)
+            .ok_or_else(|| {
+                RequestError::bad_request(format!(
+                    "limit must be a whole number from 1 to {max_limit}"
+                ))
+            })?;
+        let after = cursor
+            .map(|token| {
+                decode_cursor(token).ok_or_else(|| {
+                    RequestError::bad_request("cursor is not a next_cursor returned by this API")
+                })
+            })
+            .transpose()?;
+        Ok(Some(Self { limit, after }))
+    }
+
+    /// The page out of a complete listing: the `limit` smallest names that
+    /// follow `after`, in order, and a cursor when more follow them.
+    fn select(&self, mut entries: Vec<mount_rs_core::DirEntry>) -> EntriesPage {
+        if let Some(after) = &self.after {
+            entries.retain(|entry| entry.name.as_str() > after.as_str());
+        }
+        let more = entries.len() > self.limit;
+        if more {
+            // Only the page is sorted, not the whole directory.
+            entries.select_nth_unstable_by(self.limit, |left, right| left.name.cmp(&right.name));
+            entries.truncate(self.limit);
+        }
+        entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        let next_cursor = entries
+            .last()
+            .filter(|_| more)
+            .map(|last| encode_cursor(&last.name));
+        EntriesPage {
+            entries,
+            next_cursor,
+        }
+    }
+}
+
+fn encode_cursor(name: &str) -> String {
+    use fmt::Write as _;
+    let mut token = String::with_capacity(CURSOR_PREFIX.len() + 2 * name.len());
+    token.push_str(CURSOR_PREFIX);
+    for byte in name.bytes() {
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
+}
+
+/// The name a continuation token stands for, or `None` for anything that
+/// `encode_cursor` could not have produced.
+fn decode_cursor(token: &str) -> Option<String> {
+    if token.len() > MAX_CURSOR_BYTES {
+        return None;
+    }
+    let digits = token.strip_prefix(CURSOR_PREFIX)?.as_bytes();
+    if digits.is_empty() || digits.len() % 2 != 0 {
+        return None;
+    }
+    let nibble = |digit: u8| match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    };
+    let name = digits
+        .chunks_exact(2)
+        .map(|pair| Some(nibble(pair[0])? << 4 | nibble(pair[1])?))
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(name).ok()
 }
 
 // Bound compression work across all drives without occupying async executor threads.
@@ -2748,8 +3391,13 @@ fn parse_route(raw_path: &str) -> Result<Route, RequestError> {
                 kind: kind.clone(),
             })
         }
+        // An operation that does not exist is no route: it answers 404
+        // before the token is looked at, as any other unknown path does.
         [version, drives, drive, kind, operation]
-            if version == "v1" && drives == "drives" && kind == "ops" =>
+            if version == "v1"
+                && drives == "drives"
+                && kind == "ops"
+                && matches!(operation.as_str(), "mkdir" | "rename" | "truncate" | "sync") =>
         {
             Ok(Route::Operation {
                 drive: drive.clone(),
@@ -3408,6 +4056,174 @@ mod tests {
         .await;
         // 10+20+40+80+160+320+640 ms, then one second each for the rest.
         assert_eq!(started.elapsed(), Duration::from_millis(1270 + 3000));
+    }
+
+    fn entry(name: &str) -> mount_rs_core::DirEntry {
+        mount_rs_core::DirEntry {
+            name: name.to_owned(),
+            parent_path: "/".to_owned(),
+            file_type: mount_rs_core::FileType::File,
+        }
+    }
+
+    fn page_query(query: &str) -> Result<Option<ListingPage>, String> {
+        ListingPage::from_query(Some(query), 1000).map_err(|error| match error {
+            RequestError::Client {
+                status,
+                code,
+                message,
+                ..
+            } => {
+                assert_eq!((status, code), (StatusCode::BAD_REQUEST, "EINVAL"));
+                message
+            }
+            RequestError::Fs(error) => panic!("unexpected {error:?}"),
+        })
+    }
+
+    #[test]
+    fn a_query_without_limit_asks_for_no_page() {
+        assert_eq!(ListingPage::from_query(None, 1000).unwrap(), None);
+        for query in [
+            "",
+            "x=1",
+            "cursor=v1.61",
+            "cursor=garbage",
+            "Limit=5",
+            "limit",
+        ] {
+            // `limit` with no value is a limit, and not a number.
+            if query == "limit" {
+                assert!(page_query(query).is_err());
+                continue;
+            }
+            assert_eq!(page_query(query).unwrap(), None, "{query}");
+        }
+    }
+
+    #[test]
+    fn limit_and_cursor_are_validated_strictly() {
+        assert_eq!(
+            page_query("limit=1").unwrap(),
+            Some(ListingPage {
+                limit: 1,
+                after: None
+            })
+        );
+        assert_eq!(
+            page_query("other=x&limit=1000&cursor=v1.61c3a9").unwrap(),
+            Some(ListingPage {
+                limit: 1000,
+                after: Some("a\u{e9}".to_owned())
+            })
+        );
+        for limit in [
+            "",
+            "0",
+            "1001",
+            "-1",
+            "+1",
+            "01",
+            "1.0",
+            "1e2",
+            "ten",
+            "%31",
+            " 1",
+            "1 ",
+            "99999999999999999999999",
+        ] {
+            let message = page_query(&format!("limit={limit}")).unwrap_err();
+            assert!(message.contains("limit must be"), "{limit:?}: {message}");
+        }
+        let long = format!("v1.{}", "61".repeat(4097));
+        for cursor in [
+            "",
+            "v1.",
+            "61",
+            "v2.61",
+            "v1.6",
+            "v1.6g",
+            "v1.6A",
+            "v1.ff",
+            "V1.61",
+            "v1.61%20",
+            long.as_str(),
+        ] {
+            let message = page_query(&format!("limit=5&cursor={cursor}")).unwrap_err();
+            assert!(message.contains("cursor is not"), "{cursor:?}: {message}");
+        }
+        for repeated in ["limit=1&limit=1", "limit=2&cursor=v1.61&cursor=v1.61"] {
+            let message = page_query(repeated).unwrap_err();
+            assert!(message.contains("more than once"), "{repeated}: {message}");
+        }
+    }
+
+    #[test]
+    fn cursors_round_trip_every_name() {
+        let longest = "n".repeat(4096);
+        for name in [
+            "a",
+            "with space",
+            "caf\u{e9}",
+            "\u{1f600}",
+            "%2F",
+            longest.as_str(),
+        ] {
+            let token = encode_cursor(name);
+            assert!(token.len() <= MAX_CURSOR_BYTES);
+            assert!(
+                token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.'),
+                "a cursor needs no escaping in a URL: {token}"
+            );
+            assert_eq!(decode_cursor(&token).as_deref(), Some(name));
+        }
+    }
+
+    #[test]
+    fn pages_walk_a_listing_in_name_order_without_gaps_or_repeats() {
+        // Enumeration order is the drive's; here it is deliberately not sorted.
+        let names = ["m", "b", "zz", "a", "B", "\u{e9}", "z", "10", "9", "c"];
+        let listing = || names.iter().map(|name| entry(name)).collect::<Vec<_>>();
+        let mut sorted: Vec<&str> = names.to_vec();
+        sorted.sort_unstable();
+        for limit in 1..=names.len() + 1 {
+            let mut walked = Vec::new();
+            let mut after = None;
+            loop {
+                let page = ListingPage { limit, after }.select(listing());
+                assert!(page.entries.len() <= limit);
+                walked.extend(page.entries.iter().map(|entry| entry.name.clone()));
+                match page.next_cursor {
+                    Some(cursor) => {
+                        assert_eq!(page.entries.len(), limit, "a short page is the last");
+                        after = Some(decode_cursor(&cursor).expect("cursor"));
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(walked, sorted, "limit {limit}");
+        }
+        // A cursor naming an entry that has since gone still has a place.
+        let page = ListingPage {
+            limit: 2,
+            after: Some("bb".to_owned()),
+        }
+        .select(listing());
+        let names: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["c", "m"]);
+        // Past the last name there is an empty last page.
+        let page = ListingPage {
+            limit: 2,
+            after: Some("\u{e9}".to_owned()),
+        }
+        .select(listing());
+        assert!(page.entries.is_empty() && page.next_cursor.is_none());
     }
 
     #[test]

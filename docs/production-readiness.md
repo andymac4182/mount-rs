@@ -69,8 +69,8 @@ repeated on `main` after all of them were merged.
   type and without a test that races `listen` against `close`.
 - NFSv4 keeps its parallel slot vectors.
 - Writer-lease refusal codes still differ between providers for a
-  concurrent-mode volume: SQLite and PGlite `EBUSY`, TiDB `EOVERFLOW`,
-  FoundationDB `ENOTSUP`. All are permanent errors.
+  concurrent-mode volume: SQLite, PGlite and TiDB `EBUSY`, FoundationDB
+  `ENOTSUP`. All are permanent errors.
 
 ## Remaining risk
 
@@ -79,9 +79,17 @@ repeated on `main` after all of them were merged.
   Node addon) still inherits the device descriptors and can hang the same
   way.
 - **TiDB autocommit publishes** treat a server error whose message contains
-  "write conflict" or "try again later" as a known non-commit. That rests on
-  TiDB never using those words for an undetermined commit, which was not
-  verified against TiDB itself.
+  "write conflict" or "try again later" as a known non-commit. Verified
+  against TiDB v8.5.7 by a live test
+  (`actual_tidb_autocommit_conflicts_are_known_non_commits`, run by
+  `scripts/test-tidb.sh`): error 9007 ("Write conflict ... [try again
+  later]") and error 1205 (lock wait timeout) were provoked for autocommit
+  statements, and in one contended run 142 of 320 statements reported 9007; in
+  every case the row showed that no statement which reported an error had
+  committed. Not provoked: 1213 (deadlock) and 9006 (GC life time) for an
+  autocommit statement, and other errors that carry "try again later". The
+  classification still rests on TiDB closing the connection, rather than
+  returning one of these errors, when a commit is undetermined.
 - **SlateDB**: if a publish future is cancelled while persisting, the
   provider is not marked failed and its in-memory revision may lag a write
   that committed. Not verified, not fixed.
@@ -105,15 +113,129 @@ listed first. The rest have not been verified further or started.
 | Gap | Failure mode | Severity |
 |-----|--------------|----------|
 | NFS file-handle table has no default cap (`transports/mount-rs-nfs/src/handles.rs`) | A crawl over a large tree grows memory without bound. A default cap would return stale-handle errors for files a client may still have open, so it needs a decision | High |
-| PGlite and TiDB statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision | High |
+| PGlite statements have no timeout; PGlite does not reconnect | A server that is alive but stalled hangs one statement, and every operation queues behind it. A timeout would fail the mount closed when the backend is merely slow, so its value is a deployment decision. TiDB now bounds every round trip (120 s by default, `statement_timeout_ms` in the connection URL); a write that times out is reported with an unknown outcome and is not retried | High |
 | Exclusive (writeback) mode publishes namespace changes only on fsync, shutdown or reconcile | Creates and renames made without fsync are lost on SIGKILL, OOM or power loss | Medium |
 | A remote mount rejects every operation after one transport error, and the CLI never checks its keepalive worker | A network blip leaves the mount attached and returning `EIO`, with no log or exit | Medium |
-| `/readyz` reports health only for split-store drives | A `sqlite`-kind, `host` or `memory` drive that has lost its storage stays in rotation | Low |
 | The mount CLI wires no transport error hooks | A filesystem that failed closed shows up only as `EIO` to applications | Medium |
 | The S3 server buffers up to 512 MiB per non-streamable request with no concurrency limit | A few concurrent oversized bodies exhaust memory | Low |
 
 The survey did not examine 9P fid tables, the FUSE inode table, WebDAV lock
 tables or the Node bindings in depth.
+
+One gap from this list is closed. `/readyz` reported health only for
+split-store drives, so a `sqlite`-kind or `host` drive that had lost its
+storage stayed in rotation. `serve-http` now looks at a `host` drive's root
+directory and a `sqlite` drive's database file every two seconds, off the
+request path, and a `sqlite` drive is also not ready while its last save
+failed. A `memory` drive has no storage to lose and always reports ready.
+The runbook's "Health checks" section has the details and the limits.
+
+## TiDB provider
+
+Where the TiDB provider stands against the items
+[`maturity.md`](maturity.md) requires. This section records evidence only;
+it does not change the provider's label. Every test named here needs an
+actual TiDB and fails, instead of skipping, without one. "Durable" means the
+harness's three PD, three TiKV and one TiDB topology on the pinned v8.5.7
+images.
+
+| Item | State | Evidence |
+|------|-------|----------|
+| A stalled server hung one statement, and everything queued behind it (rated High below) | Closed by #130 | Every statement, `COMMIT`, rollback and connect has a client deadline. `actual_tidb_stalled_commit_times_out_with_unknown_outcome` and `actual_tidb_stalled_autocommit_publication_times_out_with_unknown_outcome` stall the acknowledgement through a proxy and require an unknown outcome with no replay; `actual_tidb_max_execution_time_interrupts_reads_but_not_writes` and `actual_tidb_sessions_carry_the_statement_limits` pin what TiDB's own limit covers. Run by `scripts/test-tidb.sh`, so by the `tidb`, `tidb-rustfs` and `ozone-tidb` jobs |
+| Writer lease on a concurrent-mode volume was refused with `EOVERFLOW` | Closed by #130 | Returns `EBUSY`. Pinned by the live tests in `providers/mount-rs-tidb/tests/concurrent.rs` and by `delegated_directory_authority_fences_old_and_stale_clients`; same jobs |
+| Autocommit conflict errors were classified as non-commits without a live check | Partly closed | `actual_tidb_autocommit_conflicts_are_known_non_commits` provokes 9007 and 1205 and checks that no statement which reported one had committed. 1213 and 9006 have not been provoked for an autocommit statement; see "Remaining risk" |
+| Tests that no script ran | Closed by #130 | `shared_pool`, `lost_block_ack_rustfs`, the SDK `tidb` tests and the cluster `tidb_sessions_preserve_handles_and_reopen_persisted_writes` test are run by `scripts/test-tidb.sh` and `scripts/test-tidb-rustfs-consumers.sh` |
+| Restart, fencing, concurrent publication, ambiguous commit | Covered before #130 | `actual_tidb_split_store_contract` and `actual_tidb_provider_clock_fencing_and_concurrent_publication` before and after TiDB, TiKV and PD restarts; `actual_tidb_commit_outcome_is_ambiguous_and_not_replayed`. A run counts only when it ends with `TIDB_ACCEPTANCE evidence=durable-multinode-restart` |
+| Composition with another provider's blocks | Covered | `actual_tidb_chunked_rustfs_contract` and `actual_tidb_rustfs_lost_block_ack_preserves_commit_and_retry` (RustFS, `tidb-rustfs` job); the Ozone composition in the `ozone-tidb` job |
+| Differential traces | Closed by #130 | `scripts/check-trace-parity.mjs` has a `chunked-tidb` backend. The `tidb` job runs it against the pinned mountx oracle (`MOUNT_RS_TIDB_TRACE=1`) and cannot skip it |
+| A real TLS handshake, including rejected ones | Closed by #130 | `tidb-tls` job, `scripts/test-tidb-tls-local.sh`: the provider contract over a verified session, and four refusals (unrelated authority, public roots only, wrong host name, plaintext). A pass prints `TIDB_TLS_HANDSHAKE_ACCEPTANCE` |
+| Mounted SQLite hosting (`REQUIREMENTS.md`) | Closed after #130 | `tests/native_tidb_sqlite.rs`: `native_fuse_hosts_sqlite_on_tidb_metadata_and_tidb_blocks` and `native_fuse_hosts_sqlite_on_tidb_metadata_and_rustfs_blocks`, run by `scripts/test-tidb-rustfs-consumers.sh` in the `tidb-rustfs` job before and after the component restarts. Linux FUSE only |
+| Config validators and the new URL parameters | Checked | `scripts/verify-w08-production-config.mjs`, `scripts/verify-w26-ozone-production-config.mjs` and `scripts/test-tidb-tls.sh` in validate-only mode accept `tls_ca_file` and `statement_timeout_ms`, and still refuse `verify_ca=false` or `verify_identity=false` beside them. A step in the `tidb-tls` job keeps this true |
+| 1,000-IOPS lane with Ozone blocks | Passing | See below |
+
+### What has run where
+
+CI on Linux, durable topology, by manual dispatch of the CI workflow
+(`gh workflow run ci.yml`), which runs the same jobs as a push:
+
+| Job | Revision | Result | Run and job |
+|-----|----------|--------|-------------|
+| `tidb` | `26cb1cdc` (#130 as merged) | Pass: `TIDB_ACCEPTANCE evidence=durable-multinode-restart`; `TRACE_EVIDENCE PASS` for seeds 4182, 1, 42, 65535 and 4294967295 on `chunked-tidb`, 621 operations each, against mountx `85361a82` | [44111099561 / 134136607609](https://github.com/andymac4182/mount-rs/actions/runs/44111099561/job/134136607609) |
+| `tidb-rustfs` | `26cb1cdc` | Pass: `TIDB_CHUNKED_RUSTFS_REOPEN_PASS`, the lost-acknowledgement, SDK and cluster tests, `RUSTFS_COMBO_PASS` | [44111099561 / 134136608023](https://github.com/andymac4182/mount-rs/actions/runs/44111099561/job/134136608023) |
+| `tidb-tls` | `26cb1cdc` | Pass: TLS 1.3 session, four `TIDB_TLS_REJECTED` cases, `TIDB_TLS_HANDSHAKE_ACCEPTANCE` | [44111099561 / 134136608010](https://github.com/andymac4182/mount-rs/actions/runs/44111099561/job/134136608010) |
+| `tidb-tls-compile` | `26cb1cdc` | Pass | [44111099561 / 134136607918](https://github.com/andymac4182/mount-rs/actions/runs/44111099561/job/134136607918) |
+| `ozone-tidb` | `26cb1cdc` | Pass: 2,566 IOPS against the 1,000 target | [44111099561 / 134136607791](https://github.com/andymac4182/mount-rs/actions/runs/44111099561/job/134136607791) |
+| `tidb-rustfs` | `16818d44` (adds the SQLite-hosting test) | Pass: four `TIDB_SQLITE_HOSTING_PASS`, two before and two after the component restarts, SQLite 3.45.1, 19.6 s and 18.4 s per pair | [44114932613 / 134150333065](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150333065) |
+| `tidb` | `16818d44` | Pass: `TIDB_ACCEPTANCE evidence=durable-multinode-restart` | [44114932613 / 134150334955](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150334955) |
+| `ozone-tidb` | `16818d44` | **Fail**, before TiDB was started: the Ozone-only `real_ozone_gateway_failure_is_bounded` took 15.03 s against its 15 s limit | [44114932613 / 134150333098](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150333098) |
+
+Not yet observed: the `tidb-tls` job on `16818d44` or later (still queued
+when this was written), so the new URL-parameter step in `tidb-tls` has run
+locally only; and any of these jobs on a push to `main`, because the push
+run for #130 was cancelled by the next push before its jobs started.
+
+Elsewhere:
+
+- **macOS, single-node TiDB v8.5.7** (before #130 merged): clippy, the
+  provider tests, the single-node harness, the TLS lane and five trace
+  seeds.
+- **Linux container, single-node TiDB v8.5.7 and RustFS**: both mounted
+  SQLite-hosting cases (SQLite 3.40.1, 163 s for the pair on a 4 GiB
+  Docker host), inside the TiDB/RustFS harness.
+
+### The `ozone-tidb` 1,000-IOPS gate
+
+The gate is the `MOUNT_RS_TIDB_IOPS=1` step of `scripts/test-tidb.sh`, set
+only by the `ozone-tidb` job. It runs `benchmarks/storage/runner.mjs` for
+`mount-rs-split-tidb-r2` through the Node addon: durable TiDB metadata,
+Apache Ozone blocks through its S3 gateway, 400 write, read and delete
+lifecycles of a 4,096-byte payload, 64 at a time. IOPS is the count of
+successful operations divided by the wall time of those lifecycles. The job
+fails below 1,000, and the harness refuses a lower minimum or different
+workload settings.
+
+It failed on the hosted runs the W04, W05 and W26 ledgers record from
+September 2026, at 14 to 463 IOPS, and those ledgers still list it as open.
+It passed on each of the five most recent runs of `main` that reached it:
+3,813 (`87a7d276`), 5,116 (`f891abc3`), 1,850 (`015039a6`), 3,657
+(`f4ad0f0c`) and 5,017 (`90ce382e`), and at 2,566 on #130 as merged. The threshold and workload were not
+changed. The September figures predate the metadata work of 2026-09-24
+(per-inode revisions, skipping unchanged namespaces, fewer reads); which
+change moved the figure was not determined. The passing runs differ by a
+factor of 2.8 on shared runners, so the gate has margin, but the figure is
+not a capacity number.
+
+The same workload has not been measured with RustFS blocks: the
+`tidb-rustfs` job runs a 64-operation soak, not this benchmark. The gate
+therefore says nothing about TiDB with any block store other than Ozone.
+
+### Still open for TiDB
+
+- The `tidb-tls` job on a revision with the new URL-parameter step, and a
+  push run on `main`, as above.
+- The `ozone-tidb` job can fail in its Ozone-only phase. The block store
+  client stops retrying after 12 s but lets the last attempt run for up to
+  8 s, so `real_ozone_gateway_failure_is_bounded`, which allows 15 s, can
+  exceed its limit on a slow runner. Seen once in the runs above; the test
+  and the client were not changed.
+- Error codes 1213 and 9006 for an autocommit statement, unverified.
+- Power loss, host fsync, and a crash of the mounting process while SQLite
+  is hosted are not tested. Component restart is.
+- The mounted SQLite-hosting test runs on Linux FUSE only. macOS NFS with
+  TiDB is covered by the separate opt-in
+  `apps/mount-rs-cli/tests/native_two_process_tidb.rs`, which no CI job
+  runs.
+- The W08 release policy workflow, which carries the TiDB deployment
+  policy checks, failed on every push to `main` from #112 on: it asked for
+  release version 0.1.0 after the CLI moved to 0.2.0. #133 made it read
+  the version from the crate. An equivalent change passed by manual
+  dispatch
+  ([44116198478](https://github.com/andymac4182/mount-rs/actions/runs/44116198478));
+  a push run on `main` with #133 had not completed when this was written.
+- If TiDB's temporary directory is on a filesystem that is more than about
+  90% full, TiDB refuses the provider's index DDL with error 8256 and the
+  first open of a volume fails with `EIO`. Seen on a local Docker host; the
+  message names the directory.
 
 ## Locks
 
@@ -217,6 +339,10 @@ nothing a cheaper primitive could not guard was removed.
 | Blob cache index (`LocalCache.state`) | One immutable value replaced by compare-and-swap, over a persistent hash trie, with recency stamps in atomics beside it so a hit writes nothing shared; only the winning attempt's files are unlinked. Measured against the lock on 1,024 resident blocks: a hit 24 against 48 ns for one caller and 0.5 against 23 microseconds for eight; insert with eviction 5.4 against 8.7 microseconds for one caller, and 120 to 126 against 96 to 97 for eight, the one case that is slower, because a losing attempt reruns its scan. Benchmark: `local::tests::profile_index` |
 | Blob cache disk turn (`LocalCache.disk_io`), which made every disk insert, eviction and invalidation take turns | Narrowed, not removed: write-once file names, `{key}.{generation}`, so no two inserts touch the same name and inserts no longer take turns with each other. What is left is the `files` gate in the table below, which only an invalidation takes exclusively. An earlier attempt, a disk-writer thread, had measured slower and was reverted; this one does not: one inserter 0.23 ms median either way, eight inserters 5.4 to 5.9 thousand a second against 3.9. Caches in the old layout are adopted at startup; an older binary ignores the new names. Benchmark: `local::tests::profile_disk_inserts` |
 | Chunked pending access times gate | One atomic slot per inode with an atomic time; the sweep closes a slot by compare-and-swap |
+| HTTP metrics request counts and duration histograms (`HttpMetrics.counts`), a map taken once by every finished request and held for the whole of a scrape | One atomic counter per series. Each route template has a fixed block: methods by status classes, and the duration buckets with one more for requests over every bound. The blocks are in a list ordered by template, replaced whole by compare-and-swap the first time a template is counted; the templates are the server's constants, so that stops. A histogram's count is the sum of its buckets as read, not a counter of its own, so a scrape beside a request cannot show a bucket above the count. A request finishing during a scrape may be in one family and not yet in another, as it may between two scrapes. Test: `requests_recorded_beside_a_scrape_are_all_counted_and_each_scrape_is_consistent` |
+| HTTP metrics drive list (`HttpMetrics.drives`) | An atomic list replaced whole. It is added to while the server starts and read at each scrape |
+| Cluster membership reload turn (`PeerMembership.reload`), which kept two reloads from leaving one's directory with the other's pins | A reload replaces the directory by compare-and-swap against the one its change was worked out from, then sets the pins from whichever directory is installed, again if the directory moved meanwhile. The reload that sets the pins last therefore set them from the directory that stays. While reloads overlap a reader can see one's directory with another's pins; it applies both, as it already did between the two steps of one reload, so it can refuse a peer but not admit one both refuse. The server has one reloader task, so this is for a second caller of the public API. Test: `reloads_at_once_leave_the_pins_of_the_directory_that_stayed` |
+| Cluster owner router change turn (`OwnerHttpRouter.changes`) | `insert` and `remove` copy the served set and swap the copy in by compare-and-swap, deciding again if another change got in first: a volume still has one handler, and one removal is given it. Requests already read a snapshot. Test: `changes_to_the_router_at_once_all_take_effect_and_a_volume_has_one_owner` |
 
 Fixed keys mean a client can no longer grow a counter map: undefined NFS and
 MOUNT procedure numbers are counted as `unknown`, and WebDAV counts at most

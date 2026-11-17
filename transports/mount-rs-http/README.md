@@ -7,16 +7,25 @@ with `mount-rs serve-http --config <path>`.
 This file is the guide for services that call the API.
 
 - Machine-readable contract: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.1).
+  `tests/openapi_conformance.rs` checks it against a running server on
+  every change.
 - Running the server: [`docs/serve-http-runbook.md`](../../docs/serve-http-runbook.md).
 - Configuration file and local demo: [`apps/mount-rs-cli/README.md`](../../apps/mount-rs-cli/README.md#unmounted-http-service).
 
-The v1 launch contract covers plain `serve-http` with `remote_sessions: false`
-and no forwarding.
+- Sessions, handles and what a cluster of servers adds:
+  [Sessions and handles](#sessions-and-handles) and [Clusters](#clusters)
+  below, and [`openapi-cluster.yaml`](openapi-cluster.yaml).
+
+Everything up to "Sessions and handles" describes the file routes (v1). They
+behave the same on a single server, on a server with `remote_sessions`, and
+on any server of a forwarding cluster, apart from the differences listed
+under [Clusters](#clusters).
 
 ## Quick start
 
-The server listens on a loopback address. In production you reach it through
-the operator's TLS reverse proxy. The examples use two shell variables:
+The server listens on a loopback address unless the operator binds another
+one on a private network. In production you reach it through the operator's
+TLS reverse proxy or load balancer. The examples use two shell variables:
 
 ```sh
 BASE=http://127.0.0.1:8080        # or https://files.example.com
@@ -79,6 +88,16 @@ curl --compressed -H "Authorization: Bearer $TOKEN" \
 curl -H "Authorization: Bearer $TOKEN" "$BASE/v1/drives/memory/entries"
 ```
 
+List a large directory a page at a time, in name order:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v1/drives/memory/entries/reports?limit=1"
+# {"entries":[{"name":"2026","parent_path":"/reports","file_type":"Directory"}]}
+# With more entries left: {"entries":[...],"next_cursor":"v1.32303236"}; send it
+# back as &cursor=v1.32303236 for the next page.
+```
+
 `GET` on the `fs` route of a directory returns JSON metadata, not bytes:
 
 ```sh
@@ -134,6 +153,7 @@ curl -i -H "Authorization: Bearer $TOKEN" -X DELETE \
 | `PUT` | `/v1/drives/{id}/fs/{path}` | Create or replace a file | 200 `{"path":"...","bytes":N}` |
 | `DELETE` | `/v1/drives/{id}/fs/{path}` | Remove a file, symlink or empty directory | 204 |
 | `GET`, `HEAD` | `/v1/drives/{id}/entries/{path}` | List a directory | 200 `[{"name","parent_path","file_type"}]` |
+| `GET`, `HEAD` | `/v1/drives/{id}/entries/{path}?limit=N[&cursor=C]` | List a directory a page at a time | 200 `{"entries":[...],"next_cursor"?}` |
 | `GET`, `HEAD` | `/v1/drives/{id}/stat/{path}` | Metadata, following symlinks | 200 `Stats` object |
 | `GET`, `HEAD` | `/v1/drives/{id}/lstat/{path}` | Metadata of the link itself | 200 `Stats` object |
 | `GET`, `HEAD` | `/v1/drives/{id}/statfs/{path}` | Filesystem figures | 200 `StatsFs` object |
@@ -145,26 +165,59 @@ curl -i -H "Authorization: Bearer $TOKEN" -X DELETE \
 
 `{path}` may contain several `/`-separated segments. Leave it out
 (`/v1/drives/{id}/fs`, `/v1/drives/{id}/entries`, `/v1/drives/{id}/stat`,
-`/v1/drives/{id}/statfs`) to address the drive root.
+`/v1/drives/{id}/lstat`, `/v1/drives/{id}/statfs`,
+`/v1/drives/{id}/readlink`) to address the drive root. The root is a
+directory like any other: `PUT` on it is `409 EISDIR`, `DELETE` and
+`readlink` are `400 EINVAL`.
 
 ## Authentication
 
-Send `Authorization: Bearer <token>` on every `/v1` request. Each drive has one
-static token, provisioned by the operator. The scheme name is case-insensitive;
-the token is compared exactly.
+Send `Authorization: Bearer <token>` on every `/v1` request. Each drive has
+its own token, provisioned by the operator. The scheme name is
+case-insensitive; the token is compared exactly.
 
 - A missing header, a malformed header, a wrong token and an unknown drive id
   all return the same `401` with `WWW-Authenticate: Bearer`. You cannot tell
   from the response whether a drive exists.
 - A token for drive A is rejected with `401` on drive B.
-- Tokens change only when the operator restarts the service. After a rotation
-  the old token returns `401`; that is the signal to reload your credential.
+- The operator can rotate a drive's token. While a rotation is under way
+  the drive accepts two tokens, the new one and the one before, and both
+  work in every way. Once the operator drops the old token it returns the
+  same `401` as any wrong token; that is the signal to reload your
+  credential. Where the operator has not set the drive up for rotation
+  without a restart, the change happens at a restart and there is no period
+  in which both work.
+
+## Request ids
+
+Every response the server produces carries an `X-Request-Id` header: on
+success and on error, with or without a valid token, including the probes.
+
+- Send your own id to correlate a call with your logs: exactly one
+  `X-Request-Id` header of 1 to 128 characters from `A-Z a-z 0-9 . _ -`
+  comes back unchanged.
+- Anything else (no header, more than one, an empty or longer value, any
+  other character) is not an error. The server ignores it and answers with
+  an id it generates: 32 lowercase hexadecimal characters.
+- The id is in the header only. The JSON error body is unchanged.
+- Quote the id when you report a problem; the operator can find the request
+  by it when the server's access log is on. The id is not a secret and
+  grants nothing.
+- A response without the header did not come from the server's routes: it
+  was produced by the reverse proxy, or it is the bare `400` sent for a
+  request that is not valid HTTP.
+
+```sh
+curl -i -H 'X-Request-Id: checkout-7f3a.retry-2' "$BASE/healthz"
+# x-request-id: checkout-7f3a.retry-2
+```
 
 ## Paths
 
 In the URL, each path segment is percent-decoded once and must be valid UTF-8.
 Percent-encode spaces, `?`, `#`, `%` and non-ASCII bytes. The query string is
-ignored. In JSON bodies (`mkdir`, `rename`, `truncate`) paths are absolute
+ignored, except `limit` and `cursor` on the `entries` route (see
+[Listings](#listings)). In JSON bodies (`mkdir`, `rename`, `truncate`) paths are absolute
 (`/a/b`) and are not percent-encoded.
 
 The server rejects these with `400 EINVAL`, before it looks at the token:
@@ -198,6 +251,7 @@ do not have this body.
 | --- | --- | --- | --- |
 | 400 | `EINVAL` | Invalid path, invalid JSON, body sent to `sync`, argument rejected by the filesystem | No |
 | 400 | `EINVAL` | `readlink` on something that is not a symbolic link; rename of a directory into itself | No |
+| 400 | `EINVAL` | Listing `limit` that is not a whole number in range, `cursor` that is not a `next_cursor`, or either given twice | No |
 | 400 | `EXDEV`, `EMLINK`, `ELOOP`, `ENXIO` | Operation not possible on this path | No |
 | 400 | `EIO` | The request body could not be read (client aborted the upload) | Yes, resend |
 | 401 | `EACCES` | Missing or wrong token, or unknown drive | No; fix the credential |
@@ -233,7 +287,8 @@ Other things a client sees:
 The server checks a request in this order: shutting down (503), path syntax
 (400), route (404), drive and token (401), declared body size (413), method
 (405), then the operation. A `405` on a drive route is only returned to an
-authenticated caller. An unknown route is `404` with or without a token.
+authenticated caller. An unknown route is `404` with or without a token;
+that includes an operation name under `/ops/` other than the four above.
 
 ## Semantics
 
@@ -408,12 +463,69 @@ for anything that is not a symbolic link.
 `GET .../entries/{path}` returns an array of
 `{"name","parent_path","file_type"}`. `file_type` is one of `File`,
 `Directory`, `Symlink`, `BlockDevice`, `CharacterDevice`, `Fifo`, `Socket`.
-The order is not guaranteed. `.` and `..` are not included.
+Without `limit` the order is not guaranteed. `.` and `..` are not included.
 
-A listing is complete or it fails. A directory with more entries than the
-limit (100,000 by default), or whose JSON is larger than the response limit
-(32 MiB by default), returns `413 EOVERFLOW`. There is no pagination. Keep
-directories below the limit.
+Without `limit`, a listing is complete or it fails. A directory with more
+entries than the limit (100,000 by default), or whose JSON is larger than
+the response limit (32 MiB by default), returns `413 EOVERFLOW`.
+
+#### Pagination
+
+Add `limit` to read a directory a page at a time:
+
+```text
+GET /v1/drives/{id}/entries/{path}?limit=1000
+GET /v1/drives/{id}/entries/{path}?limit=1000&cursor=<next_cursor of the page before>
+```
+
+The response is then an object, not an array:
+
+```json
+{"entries": [{"name": "a", "parent_path": "/dir", "file_type": "File"}], "next_cursor": "v1.61"}
+```
+
+- `entries` holds at most `limit` entries, ordered by name. The order is the
+  byte order of the UTF-8 names (so `B` sorts before `a`, and `10` before
+  `9`); it is the same on every drive.
+- `next_cursor` is present exactly when more entries follow. Pass it back
+  unchanged as `cursor`, with any `limit`, to get the next page. When it is
+  absent you have the last page. A page shorter than `limit`, or empty, is
+  always the last.
+- `limit` is a whole number from 1 to the server's directory entry limit
+  (100,000 by default), written in plain decimal digits. `cursor` is an
+  opaque string of URL-safe characters: do not build or parse one. A bad
+  `limit` or `cursor`, or either given twice, is `400 EINVAL`.
+- Only `limit` turns pagination on. A request without it gets the complete
+  array described above, and anything else in its query string, including a
+  `cursor`, is ignored as it always was.
+- `HEAD`, `Accept-Encoding` and every error work as for an unpaginated
+  listing. A page whose JSON is larger than the response limit is
+  `413 EOVERFLOW`: ask for a smaller `limit`.
+
+What a walk through the pages guarantees, and what it does not:
+
+- Every page reads the directory afresh. The walk is **not a snapshot**.
+- An entry that exists under the same name from the first page to the last
+  is returned exactly once.
+- No name is returned twice.
+- An entry created, removed or renamed while you walk may or may not appear.
+  One created under a name before your position is not seen; one removed
+  after you passed it stays in what you already read; a renamed entry can
+  appear under its old name, its new name, both, or neither.
+- A cursor is a position in the name order, not a reference to an entry. It
+  stays valid if the entry it was taken from is deleted, it does not expire,
+  and it survives a server restart.
+- A directory that is deleted during the walk answers `404` on the next
+  page.
+
+What pagination does not change: the server still enumerates the whole
+directory for every page, so a directory with more entries than the
+directory entry limit still returns `413 EOVERFLOW`, with or without
+`limit`, and a page of a large directory costs the server about as much as
+the whole listing. Pagination bounds the size of each response, lifts the
+response-size limit for directories within the entry limit, and gives a
+stable order; it does not make very large directories cheap. Prefer a
+`limit` of a few thousand.
 
 With `Accept-Encoding: gzip`, listings of 1 KiB or more are returned with
 `Content-Encoding: gzip`. Without the header the response is plain JSON. All
@@ -454,11 +566,22 @@ Rules:
 | Route | 200 | 503 |
 | --- | --- | --- |
 | `/healthz` | `{"status":"ok"}`: the process serves HTTP | Only while shutting down (standard error body) |
-| `/readyz` | `{"status":"ready","drives":N}`: no drive has reported a failure | `{"status":"not_ready","drives":N,"failed":M}`: a drive has failed closed or none is configured. While shutting down: the standard error body |
+| `/readyz` | `{"status":"ready","drives":N}`: no drive has reported a failure | `{"status":"not_ready","drives":N,"failed":M}`: `M` drives have failed closed or lost their storage, or none is configured. While shutting down: the standard error body |
 
 Both are unauthenticated, accept `GET` and `HEAD`, and send
 `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. They never
-reveal drive ids. They do not probe an external dependency on each call.
+reveal drive ids. They do not probe an external dependency on each call:
+`/readyz` reports what each drive last found out about itself, in the
+background. A `503` from `/readyz` says nothing about any one request; a
+drive that is not ready answers its requests with the errors in the table
+above.
+
+## Metrics
+
+The API has no metrics route. An operator can turn on a separate listener,
+on a loopback address, that serves the server's own request counts,
+durations and per-drive readiness in the Prometheus text format; see the
+runbook's "Metrics" section. Nothing in it names a path or a token.
 
 ## Limits
 
@@ -468,8 +591,9 @@ Defaults; the operator can change them.
 | --- | --- | --- |
 | Upload (`PUT` body) | 5 GiB | `413 EFBIG`, connection closed |
 | Request body received in full (`PUT` and JSON) | 8 MiB | JSON: `413 EFBIG`, connection closed. `PUT`: streamed to storage instead |
-| Directory entries per listing | 100,000 | `413 EOVERFLOW`, connection closed |
-| Listing response (uncompressed JSON) | 32 MiB | `413 EOVERFLOW`, connection closed |
+| Entries in a directory that can be listed, paginated or not | 100,000 | `413 EOVERFLOW`, connection closed |
+| Listing response or page (uncompressed JSON) | 32 MiB | `413 EOVERFLOW`, connection closed; paginate, or lower `limit` |
+| Listing `limit` | 1 to the directory entry limit | `400 EINVAL` |
 | Request time | 30 s | `504 ETIMEDOUT`, connection closed |
 | Idle keep-alive, time to send request headers | 30 s | Connection closed without a response |
 | Download stalled by the client | 30 s without progress | Connection closed |
@@ -482,7 +606,8 @@ Defaults; the operator can change them.
 
 - Files larger than the upload limit; ranged, resumable or multipart
   upload; append.
-- Pagination of listings.
+- Listing a directory with more entries than the directory entry limit,
+  even in pages; a snapshot-consistent paginated listing.
 - `Last-Modified`, `If-Modified-Since`, `If-Unmodified-Since`.
 - Recursive delete; copy; `chmod`, `chown`, `utimes`; creating symbolic or
   hard links.
@@ -492,13 +617,140 @@ Defaults; the operator can change them.
 - CORS headers and browser clients.
 - Per-user identity or scopes. A token grants full read and write access to
   its drive.
-- Token rotation without a restart.
+- Token expiry and revocation lists. A token is valid until the operator
+  rotates it.
 - Change notifications, locking, and cross-request transactions.
 - Snapshot-isolated downloads.
 - Names beginning with `.mount-rs-upload.`.
 
-The session and forwarding routes enabled by `remote_sessions` or `forwarding`
-are experimental and are not part of the v1 launch contract.
+## Sessions and handles
+
+A server started with `remote_sessions: true` also serves a session
+protocol on every drive. A session lets a client hold files open on the
+server between requests: read and write at a position, truncate and sync
+an open file, and use the path operations the file routes do not have
+(`chmod`, `chown`, `utimes`, `link`, `symlink`, `mknod`). It is the protocol
+`mount-rs mount` speaks to a remote drive. A service that only reads and
+writes whole files does not need it.
+
+The exact requests, responses and schemas are in
+[`openapi-cluster.yaml`](openapi-cluster.yaml). This section is the summary.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/drives/{id}/sessions` | Create a session. No body. `201` with `{"protocol_version":1,"session":"<token>","idle_timeout_ms":60000}`. |
+| `DELETE` | `/v1/drives/{id}/sessions` | Close the session named by `x-mount-session` and every handle it holds. `204`. |
+| `POST` | `/v1/drives/{id}/sessions/handles` | One JSON operation: `capabilities`, `path`, `open`, `read`, `stat`, `truncate`, `sync`, `close`. |
+| `GET` | `/v1/drives/{id}/sessions/handles` | Read from a handle: `x-mount-handle`, `x-mount-position`, `x-mount-length`. `200` with the bytes. |
+| `PUT` | `/v1/drives/{id}/sessions/handles` | Write the body to a handle (`x-mount-handle`, optional `x-mount-position`): `200` `{"written":n}`. Or replace a whole file (`x-mount-write-file: <percent-encoded path>`): `204`. |
+
+On a server without `remote_sessions` these paths are `404`.
+
+**Authentication.** Every request carries the drive's bearer token, exactly
+as on the file routes. With `remote_sessions` the server refuses to start
+unless each drive token is 32 to 256 characters from
+`A-Z a-z 0-9 - . _ ~ + / =`. The session routes accept exactly one
+`Authorization: Bearer <token>` header.
+
+**The session token.** `POST .../sessions` returns it once: 64 lowercase
+hexadecimal characters. Send it in the `x-mount-session` header of every
+later request; never put it in a URL. It grants nothing by itself: each
+request needs the bearer token too, and a session is usable only with the
+token that created it.
+
+**Headers.**
+
+| Header | On | Value |
+| --- | --- | --- |
+| `x-mount-session` | Every request except create | The session token. Exactly one. |
+| `x-mount-handle` | `GET`, `PUT` to a handle | The handle number `open` returned. |
+| `x-mount-position` | `GET` (required), `PUT` (optional) | Byte offset. A `PUT` without it writes at the handle's cursor. |
+| `x-mount-length` | `GET` | Most bytes to return. |
+| `x-mount-write-file` | `PUT` of a whole file | The absolute path, percent-encoded. Not together with `x-mount-handle`. |
+
+**Errors.** The session routes use their own error body,
+`{"error":{"code":"ENOENT","syscall":"session"}}`, with no `message`.
+
+| Status | Codes | Meaning |
+| --- | --- | --- |
+| `400` | `EINVAL` | Malformed request: a query string, a missing or malformed header, a body where none is allowed, JSON that is not a known operation (unknown properties are rejected). |
+| `401` | `EACCES` | Missing, malformed, repeated or wrong bearer token. `WWW-Authenticate: Bearer`. |
+| `403` | `EACCES` | No such session for this token: never created, closed, expired, or lost when the drive moved to another server. |
+| `404` | `ENOENT` | The operation's path does not exist. |
+| `405` | `ENOSYS` | Method not allowed on the path. `Allow` lists the methods. Checked before the session. `HEAD` is not served. |
+| `408` | `EINTR` | The request body did not arrive within 5 seconds. |
+| `409` | `EBADF`, `ESTALE` | Unknown or closed handle; or the drive is no longer served here. |
+| `413` | `EFBIG` | A read or write above 65536 bytes, a JSON operation above 8192 bytes. A declared `Content-Length` above `max_request_bytes` gets the file routes' `413` and the connection is closed. |
+| `429` | `ENFILE`, `EMFILE` | Too many sessions (`ENFILE`) or too many open handles in this session (`EMFILE`). |
+| `500` | any other | The filesystem refused the operation: for example `EEXIST`, `ENOTEMPTY`, `EISDIR`, `ENOTSUP`. **Unlike the file routes, the session routes do not give these their own status. Branch on `code`.** |
+| `503` | `EAGAIN` | Shutting down or busy; retry. |
+
+`503` while shutting down and `504` on the server's request timeout carry
+the file routes' error body, because the listener produces them.
+
+**Limits.** Defaults; the operator can change the first four.
+
+| Limit | Default | When exceeded |
+| --- | --- | --- |
+| Sessions in the process (`sessions.max_sessions`) | 4096 | `429 ENFILE` |
+| Sessions per drive (`sessions.max_sessions_per_drive`) | 128 | `429 ENFILE` |
+| Open handles per session (`sessions.max_handles_per_session`) | 128 | `429 EMFILE` |
+| Idle time (`sessions.idle_timeout_seconds`) | 60 s | The session and its handles are closed. |
+| One read or write | 65536 bytes (less if `max_request_bytes` is smaller) | `413 EFBIG` |
+| One JSON operation | 8192 bytes | `413 EFBIG` |
+| Time to send a request body | 5 s | `408 EINTR` |
+
+**Lifetime.** A session lives in the memory of the one server that owns the
+drive. It ends when it is closed, when no request has named it for the idle
+timeout, when that server stops or restarts, and when the drive moves to
+another server. Any request that names the session counts as use; a client
+that holds files open sends `{"operation":"capabilities"}` more often than
+the idle timeout. After a session has ended, requests that name it get
+`403 EACCES` (or `409 ESTALE` if the drive is no longer on that server):
+create a new session and open the files again. Writes that were
+acknowledged are not lost. A write that was not acknowledged has an unknown
+outcome.
+
+**Retries.** Nothing is retried or deduplicated by the server. Positional
+reads, `stat`, `capabilities`, read-only path actions, writes at an explicit
+position and whole-file writes may be repeated. Writes at the cursor, cursor
+reads, `open` with `exclusive` or `truncate`, and mutating path actions must
+be reconciled by the client. A `createSession` whose response was lost
+leaves a session that expires by itself.
+
+## Clusters
+
+Several servers can serve one set of drives behind one address. Each drive
+is served by one server at a time, its *owner*; every server with a
+`forwarding` block accepts a request for any drive and passes it to the
+owner over an authenticated server-to-server connection. A server with no
+drives of its own is an *ingress*. With failover configured, a drive whose
+owner stops is taken over by another server. Operators: see the
+[cluster chapter of the runbook](../../docs/serve-http-runbook.md#clusters).
+
+A client uses the same URLs, tokens, requests and responses as against a
+single server. The differences it can observe are these, all stated in
+[`openapi-cluster.yaml`](openapi-cluster.yaml) and checked by the test
+named there:
+
+| Situation | Single server | Forwarding cluster |
+| --- | --- | --- |
+| No server owns the drive just now (owner stopped, failover in progress, route registry unreachable) | Does not arise | `503`, `x-mount-dispatch: not-dispatched`, `Retry-After: 1`, code `EIO`. Nothing was executed. Retry. |
+| The owner was given the request and its response was lost | Does not arise (the connection breaks) | `502`, `x-mount-dispatch: unknown`, code `EIO`. A read may be repeated. A write may or may not have been applied: read back, or repeat it with `If-Match` / `If-None-Match`. The server does not replay it. |
+| A drive id that no server is configured with | `401` | `503` not-dispatched, as in the first row: the cluster cannot tell an unknown drive from one whose owner is down. |
+| A request carrying `x-mount-hop` or `x-mount-owner-route` | Headers ignored | `400`, `x-mount-dispatch: not-dispatched`, code `EIO`. These headers are reserved for the servers. |
+| `GET /v1/drives` | Drives whose token matches | Only matching drives that the answering server owns itself; `401` on a server that owns none of them. Do not use discovery through a cluster address. |
+| `GET /readyz` | `drives` is the number configured, at least 1 | `drives` is the number the answering server owns itself, and may be 0. |
+| A `413` for a directory too large to list | `Connection: close` | No `Connection: close` when forwarded: the client's connection is kept. |
+| A response body cut short because the owner failed mid-download | The connection closes early | The same: the connection closes before `Content-Length` bytes were sent. |
+
+The `x-mount-dispatch` header is how a client tells "safe to retry" from
+"outcome unknown" without parsing the body. A `503` without that header is
+the drive's own (for example a drive that lost its storage lease, `ESTALE`).
+
+Sessions work through any server of the cluster, but live on the owner:
+when the drive moves, its sessions are gone and the client must create new
+ones, as described above.
 
 ## Embedding the crate
 
@@ -506,7 +758,13 @@ The crate exposes `HttpServer`, `HttpServerOptions`, `DriveRegistry` and
 `DriveConfig`. A drive is an id, a token and an `Arc<dyn FsDriver>`; the
 transport does not mount a filesystem and does not implement one.
 `HttpServer::start` refuses any host that is not loopback (`127.0.0.1`, `::1`,
-`localhost`) unless `HttpServerOptions::allow_non_loopback` is set. The `observability` feature records one `http.request` span and
+`localhost`) unless `HttpServerOptions::allow_non_loopback` is set.
+`HttpServerOptions::access_log` takes an `AccessLog`, which is told about
+every request once its response is finished with: request id, method, route
+template, the configured drive it named, status, duration and body byte
+counts, and never the path or a header. It is off by default and needs no
+feature; `mount-rs serve-http` writes these as JSON lines with
+`"access_log": true`. The `observability` feature records one `http.request` span and
 completion event per request through an application-supplied `Telemetry`
 handle; `observability-otlp` also reads the W3C trace context headers. Both are
 off by default.

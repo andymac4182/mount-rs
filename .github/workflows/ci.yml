@@ -461,16 +461,33 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: pithings/mountx
+          ref: 85361a8212ff9bff8e69f62fa8993ef2c2ec51e8
+          path: mountx-source
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 11
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Install pinned oracle dependencies without lifecycle scripts
+        run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - name: Verify durable TiDB, PD, and TiKV restart acceptance
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-cargo-target
+          # Compare TiDB with the pinned mountx oracle over the seeded traces.
+          MOUNT_RS_TIDB_TRACE: '1'
+          MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source
         run: ./scripts/test-tidb.sh
 
   tidb-tls-compile:
     # This verifies that every public TiDB consumer can ship the TLS-capable
-    # client graph. It is intentionally a compile gate; credentials, CA
-    # policy, and a real TLS handshake remain production provider gates.
+    # client graph. It is intentionally a compile gate; the `tidb-tls` job
+    # performs a real handshake against a throwaway local TiDB. Credentials,
+    # CA policy, and the production endpoint remain production provider gates.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -498,6 +515,25 @@ jobs:
             echo 'TLS guard accepted require_ssl=false' >&2
             exit 1
           fi
+
+  tidb-tls:
+    # A real TLS handshake between the provider and TiDB, with no secrets:
+    # the job creates a throwaway certificate authority, starts a single-node
+    # TiDB that serves a certificate it issued, runs the provider contract
+    # through scripts/test-tidb-tls.sh, and checks that an untrusted
+    # authority, a wrong host name and a plaintext session are all refused.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Verify the TiDB TLS handshake against a throwaway authority
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-tls-live-cargo-target
+        run: ./scripts/test-tidb-tls-local.sh
       - name: Verify W08 production config policy without credentials or network
         env:
           MOUNT_RS_TIDB_TLS_URL: mysql://tls-policy-user@tidb-policy.invalid:4000/app?require_ssl=true
@@ -509,6 +545,32 @@ jobs:
             echo 'W08 production config policy accepted an insecure fixture' >&2
             exit 1
           fi
+          # The provider's own URL parameters, a private authority file and
+          # a statement timeout, must pass every credential-free URL check,
+          # and must not hide a URL that turns verification off.
+          provider_parameters='tls_ca_file=/etc/mount-rs/tidb-ca.pem&statement_timeout_ms=30000'
+          policy_url="mysql://tls-policy-user@tidb-policy.invalid:4000/app?require_ssl=true&$provider_parameters"
+          MOUNT_RS_TIDB_TLS_URL="$policy_url" \
+            node scripts/verify-w08-production-config.mjs \
+              tests/tidb/production-config-policy.json
+          MOUNT_RS_TIDB_TLS_URL="$policy_url" \
+            node scripts/verify-w26-ozone-production-config.mjs \
+              tests/ozone/production-config-policy-tidb.json
+          MOUNT_RS_TIDB_TLS_VALIDATE_ONLY=1 MOUNT_RS_TIDB_TLS_URL="$policy_url" \
+            ./scripts/test-tidb-tls.sh
+          if MOUNT_RS_TIDB_TLS_URL="$policy_url&verify_ca=false" \
+            node scripts/verify-w08-production-config.mjs \
+              tests/tidb/production-config-policy.json; then
+            echo 'W08 production config policy accepted verify_ca=false beside tls_ca_file' >&2
+            exit 1
+          fi
+          if MOUNT_RS_TIDB_TLS_VALIDATE_ONLY=1 \
+            MOUNT_RS_TIDB_TLS_URL="$policy_url&verify_identity=false" \
+            ./scripts/test-tidb-tls.sh; then
+            echo 'TLS guard accepted verify_identity=false beside tls_ca_file' >&2
+            exit 1
+          fi
+          echo 'TIDB_PROVIDER_URL_PARAMETERS_POLICY_PASS parameters=tls_ca_file,statement_timeout_ms'
 
   tidb-rustfs:
     # This job keeps the real RustFS service alive while test-tidb.sh owns the
@@ -537,6 +599,10 @@ jobs:
           CARGOFLAGS: --locked
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
         run: pnpm --dir bindings/mount-rs-napi build
+      - name: Build the mounted SQLite-hosting test before the timed harness
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
+        run: cargo test --locked -p mount-rs-core --test native_tidb_sqlite --no-run
       - name: Install and verify the Linux FUSE prerequisite for the consumer gate
         run: |
           sh scripts/ci-apt-install.sh fuse3
@@ -916,9 +982,10 @@ jobs:
   cluster-http3:
     # The workspace build leaves the cluster's http3 feature off, so its
     # forwarding and coalescing tests are built and run only here, including
-    # the ones that need a disposable Redis.
+    # the ones that need a disposable Redis. The CLI's Redis connection tests
+    # run here too, because they need the same Redis.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     services:
@@ -940,12 +1007,38 @@ jobs:
         env:
           MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
         # The two skipped tests need scripts/test-redis-restart.sh and
-        # scripts/test-tidb.sh, which this job does not start.
+        # scripts/test-tidb.sh, which this job does not start. The TiDB one
+        # runs in the tidb and tidb-rustfs jobs.
         run: >-
           cargo test --locked -p mount-rs-cluster --features http3 --all-targets --
           --include-ignored
           --skip registration_recovers_after_server_restart
           --skip tidb_sessions_preserve_handles_and_reopen_persisted_writes
+      - name: Test the Redis connection with TLS, a password and an outage
+        env:
+          MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+          # Started by the test itself with a throwaway CA, on its own port.
+          MOUNT_RS_REDIS_TLS_TEST_IMAGE: redis:8.4@sha256:319f54e668c14f68cee51d1fdf9dba699deecac048fc0e52962433a3ef5562c0
+        # Real servers behind a proxy that cuts Redis off for three route
+        # lifetimes; this is the outage coverage the skipped restart test
+        # above cannot give without stopping the service container.
+        run: cargo test --locked -p mount-rs-cli --test redis_connection -- --include-ignored
+      - name: Test drive failover with real servers
+        env:
+          MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+        # Two candidates and an ingress per test, each behind its own Redis
+        # proxy: a partitioned owner, a Redis outage with the owner killed,
+        # fail-back, writes across a kill, a paused owner and a release that
+        # storage does not answer. About two minutes on a four-core runner.
+        run: cargo test --locked -p mount-rs-cli --test failover -- --include-ignored
+      - name: Check the v1 and cluster HTTP contracts on a forwarding cluster
+        env:
+          MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+        # Real servers: the file routes of openapi.yaml on an owner and
+        # through an ingress, compared with a plain server, and the session
+        # routes and forwarding responses of openapi-cluster.yaml. The tests
+        # of this file that need no Redis also run in the workspace job.
+        run: cargo test --locked -p mount-rs-cli --test cluster_contract -- --include-ignored
 
   observability-qualification:
     name: Observability qualification (${{ matrix.os }})

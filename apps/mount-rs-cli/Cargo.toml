@@ -58,6 +58,14 @@ libc = "0.2"
 [dev-dependencies]
 mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
+rcgen = "0.13"
 rusqlite = { version = "=0.39.0", features = ["bundled", "fallible_uint"] }
 tempfile = "3"
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
+# The contract tests check a real serve-http process, with and without
+# cluster features, against the HTTP transport's OpenAPI documents, using
+# the transport's own test support.
+flate2 = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde_yaml = "0.9"

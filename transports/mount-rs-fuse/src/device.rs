@@ -226,7 +226,9 @@ impl FuseDevice {
         validate_max_frame(max_frame)?;
         set_nonblocking(fd.as_raw_fd())?;
         let registered = RegisteredDevice::new(fd.as_raw_fd());
-        let io = tokio::io::unix::AsyncFd::new(fd)?;
+        // SAFETY: `fd` is an owned, open descriptor that the `AsyncFd` takes
+        // and keeps for its whole life; nothing else closes or replaces it.
+        let io = unsafe { tokio::io::unix::AsyncFd::register(fd) }?;
         Ok(Self {
             _registered: registered,
             io,

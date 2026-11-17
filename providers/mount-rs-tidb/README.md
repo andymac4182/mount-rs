@@ -38,6 +38,44 @@ mount-rs providers.
   bytes; the existing bytes are read back and compared before the ID is
   returned. `delete` is explicit and never runs as a close side effect.
 
+## Statement timeout
+
+Every round trip to TiDB is bounded: each statement, each `COMMIT`, and each
+connection attempt. The default is 120 seconds, chosen to sit well above
+TiDB's own bounded waits so that it fires for a server that has stopped
+answering rather than one that is slow. Set it with
+`TidbStorageOptions::with_statement_timeout`, or with the
+`statement_timeout_ms` parameter of the connection URL, which is how the SDK,
+the CLI and the Node bindings set it:
+
+```text
+mysql://user:password@tidb.example:4000/mount?statement_timeout_ms=30000
+```
+
+The option wins over the URL. A `TidbStorePool` takes the value from its URL;
+a store borrowed from it may shorten its own client deadline with the option.
+
+Two bounds work together:
+
+- The session sets `max_execution_time`, so TiDB interrupts a statement
+  itself and the connection stays usable. TiDB applies it to `SELECT`
+  (including `SELECT ... FOR UPDATE`) only; it does not interrupt `UPDATE`,
+  `INSERT`, `DELETE` or `COMMIT`. Checked against TiDB v8.5.7 by
+  `tests/statement_timeout.rs`.
+- The client stops waiting one second after that limit. This is the only
+  bound for writes, commits, connection attempts and a server that accepts
+  bytes and never answers. The abandoned connection is closed, not reused.
+
+A timeout is never retried. When it ends a `COMMIT` or a single-statement
+publication, TiDB may already have committed, so the error says the commit
+outcome is unknown, exactly as for a lost connection. When the configured
+timeout is at or below the session's `innodb_lock_wait_timeout`, the provider
+lowers the lock wait to one second less, so a contended row is still reported
+by TiDB as a retryable conflict instead of as a timeout.
+
+A timeout fails the operation closed. Choose a value above the slowest
+statement the deployment is expected to serve.
+
 `durable` is caller-declared. TiDB/TiKV replication, sync-log, backup, and
 power-loss guarantees are deployment properties and cannot be inferred from a
 connection URL. The provider's `flush` is an acknowledged TiDB round-trip
@@ -114,6 +152,28 @@ endpoint uses the crate's optional `rustls` feature:
 cargo test -p mount-rs-tidb --features rustls --test tidb -- --ignored --nocapture
 ```
 
+With `require_ssl=true` the server certificate and its host name are
+verified against the built-in public roots. A TiDB whose certificate comes
+from a private authority adds that authority with the provider's
+`tls_ca_file` URL parameter, which names a PEM file:
+
+```text
+mysql://user:password@tidb.internal:4000/mount?require_ssl=true&tls_ca_file=/etc/tidb/ca.pem
+```
+
+The parameter extends the trusted roots and leaves certificate and host name
+verification on. It is rejected without `require_ssl=true`, and a path with
+characters that are special in a URL query must be percent-encoded.
+
+`scripts/test-tidb-tls-local.sh` performs the handshake for real with no
+credentials: it creates a throwaway authority, starts a single-node TiDB
+serving a certificate issued for `localhost`, runs the provider contract over
+the verified session, and checks that the provider refuses an unrelated
+authority, the public roots alone, the same server reached as `127.0.0.1`,
+and, once `require_secure_transport` is on, a plaintext session. It ran
+against TiDB v8.5.7 (TLS 1.3, `TLS_AES_128_GCM_SHA256`). It does not cover a
+managed endpoint, certificate rotation or client certificates.
+
 The explicit ambiguous-commit lane uses a small plaintext MySQL-wire proxy to
 forward a real TiDB session and drop the successful publication response after
 the server commits the conditional UPDATE or explicit transaction. It verifies
@@ -139,6 +199,22 @@ reconciliation; such a lane is required before claiming ambiguous-commit and
 crash-recovery acceptance. macOS and Linux compile lanes can use the same
 remote/local TiDB endpoint; the native client is the MySQL protocol driver and
 does not require a TiDB SDK.
+
+With `MOUNT_RS_TIDB_TRACE=1` and `MOUNTX_SOURCE` naming the pinned mountx
+checkout, `scripts/test-tidb.sh` also runs the seeded differential traces of
+`scripts/check-trace-parity.mjs` against the `chunked-tidb` backend: TiDB
+metadata and TiDB blocks under the chunked filesystem, compared operation by
+operation with the mountx memory oracle for each seed. To run only that
+comparison against an endpoint you own:
+
+```text
+MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' \
+MOUNTX_SOURCE=/absolute/path/to/mountx \
+MOUNT_RS_TRACE_BACKENDS=chunked-tidb \
+  node scripts/check-trace-parity.mjs
+```
+
+Each trace writes under its own volume key and leaves its rows behind.
 
 The standard `scripts/test-tidb.sh` gate also runs the concurrent contracts
 and four-coordinator load before and after component restarts. Its owned
