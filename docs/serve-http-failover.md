@@ -136,6 +136,39 @@ announcement is withdrawn too.
 6. Routes only move forward: a takeover publishes a strictly higher fence,
    and Redis refuses to replace a live route with a lower or equal one.
 
+## Clocks
+
+No node compares its clock with another node's. Three clocks are read:
+
+- **Candidate announcements** expire on the Redis server clock.
+- **The lease** expires on the metadata store's clock, in the same statement
+  that checks it: the TiDB server's for TiDB, and for SQLite the clock of
+  whichever host runs the statement. Every acquisition, renewal, release
+  and publication is one conditional write on owner, fence and expiry, so a
+  clock that is wrong can make a lease end early or late but cannot let two
+  holders both commit: the second acquisition changes the fence, and from
+  then on the first holder's writes match nothing. File blocks are
+  content-addressed and written once; an upload by a node that has lost the
+  lease is never referenced by a publication.
+- **Each owner's own clock** decides only how long it trusts its last
+  renewal without asking storage again: until 5 s (or the whole lease, if
+  shorter) before the expiry storage returned. This is what an owner uses to
+  answer reads and to admit forwarded requests between renewals.
+
+The last one is the only place skew matters. An owner whose clock is behind
+the metadata store's by more than that margin, or two SQLite hosts whose
+clocks differ by more than it, can leave a deposed owner answering **reads**
+from its last committed state for the excess, after a successor has taken
+the lease. Its writes are refused throughout. Keep candidates and the
+metadata store within a second or two of each other (NTP is enough), as for
+any lease.
+
+A process that is stopped for longer than its lease (a paused VM, a long
+stall) is covered by the same rules: when it resumes its cached lease has
+expired on its own clock, the renewal is refused, the drive fails closed and
+the node releases it. `apps/mount-rs-cli/tests/failover.rs` pauses an owner
+past its lease and checks that it never serves its stale copy afterwards.
+
 ## Timing bounds
 
 Symbols: `R` = route TTL (15 s, fixed); `L` = the drive's `lease_ttl_ms`;
@@ -185,7 +218,9 @@ renewal.
 - Standbys do nothing while they cannot read the route. Owners keep their
   leases and keep serving their own public listeners. Requests that need
   forwarding fail with 503, as they did before failover.
-- When Redis comes back empty, owners republish within about 2 s. A standby
+- When Redis comes back empty, owners republish within a few seconds (one
+  poll after they can reach it; up to 5 s if Redis lost its data without the
+  owner seeing an error). A standby
   that reads "no route" in that window may try to open the drive; the
   attempt fails with `EAGAIN` because the owner still holds the lease, and
   nothing changes.
@@ -199,9 +234,11 @@ renewal.
   `lease_held` once, publishes nothing and tries again every `5P` at most.
   The owner is not displaced and there is one writer throughout. Requests
   that reach the owner directly are served; requests that need forwarding
-  get 503 until the owner can publish again, which it does within about 2 s
-  of reaching Redis. If the owner really is gone, the same attempts succeed
-  once its lease expires.
+  get 503 until the owner can publish again, which it does within a few
+  seconds of reaching Redis (measured 0.3 to 0.8 s after refused
+  connections and 1.2 to 3.2 s after a silent link, which first has to be
+  recognised as dead). If the owner really is gone, the same attempts
+  succeed once its lease expires.
 - **Every node cut off from Redis.** Nothing moves. If the owner also dies
   during the outage, the drive stays unavailable until a standby can read
   Redis again: a standby never opens a drive on a registry it cannot read.
@@ -287,6 +324,29 @@ long.
 
 ## Not handled
 
+- **A hand-back to a node that has just died.** Liveness is a 15 s
+  announcement. With `fail_back`, an owner can hand a drive back to a
+  preferred node that crashed within the last 15 s, or that announces
+  itself but cannot open the drive. The drive is then unavailable for the
+  hold-off (15 s) until the old owner, or another candidate, takes it
+  again. Later hand-backs are spaced out as described under Fail-back.
+- **A release outside shutdown is not bounded by the supervisor.** After a
+  lost lease or a hand-back the node drains for `drain_timeout_ms` and then
+  shuts the drive down with no limit of its own; it relies on the storage
+  client's timeouts. Until that returns the node is not a candidate for the
+  drive. Only the release at process shutdown has the overall limit
+  described above.
+- **A candidate removed from the membership file but left running** keeps
+  the drives it owns: the lease is still its own. Ingresses stop trusting
+  its route, so those drives are unreachable through them until the node
+  is stopped; standbys see its route, and its lease, and wait. Stop a node
+  (SIGTERM hands its drives over) before removing it.
+- **Redis can delay a failover, never cause two writers.** Anything able to
+  write the namespace can publish a route or an announcement that makes
+  standbys wait, or a higher-fence route that makes an owner release its
+  drive (it is retaken once the forged record is gone). Restrict the
+  namespace as the README describes.
+- **Stale reads under clock skew** beyond the 5 s renewal margin; see Clocks.
 - **No replay.** Requests in flight on a failed owner are not replayed, and
   sessions and handles do not move.
 - **No faster recovery than the lease.** A standby cannot take a drive
