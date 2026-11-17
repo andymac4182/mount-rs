@@ -266,6 +266,13 @@ service restart. Persisted mode must set all three scope values explicitly:
 identify TiDB via `SELECT tidb_version(), VERSION()`; MySQL, mock, and
 in-memory substitutes are rejected.
 
+`MOUNT_RS_TIDB_FAILOVER=1` adds `serve-http` drive failover after the
+consumer tests: real server processes whose writer lease is in this TiDB and
+whose blocks are in the harness's RustFS (see
+[`docs/serve-http-failover.md`](../../docs/serve-http-failover.md)). It
+needs a disposable plaintext Redis in `MOUNT_RS_REDIS_TEST_URL` and fails,
+instead of skipping, without one. The `tidb-rustfs` CI job sets both.
+
 Upstream references:
 
 - [TiDB local test cluster](https://docs.pingcap.com/tidb/stable/quick-start-with-tidb/)

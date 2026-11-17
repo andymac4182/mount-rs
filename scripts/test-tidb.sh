@@ -118,6 +118,22 @@ if [ "${MOUNT_RS_TIDB_TRACE:-0}" = "1" ]; then
     exit 2
   fi
 fi
+run_failover=0
+if [ "${MOUNT_RS_TIDB_FAILOVER:-0}" = "1" ]; then
+  # serve-http drive failover with the writer lease in this TiDB. The
+  # candidates are separate processes, so their blocks must be in a shared
+  # store (the RustFS a caller such as test-tidb-rustfs.sh owns), and they
+  # find each other through a disposable Redis. Asking for it without those
+  # is an error, not a skip.
+  run_failover=1
+  for failover_variable in MOUNT_RS_REDIS_TEST_URL RUSTFS_ENDPOINT RUSTFS_BUCKET \
+    RUSTFS_REGION RUSTFS_ACCESS_KEY_ID RUSTFS_SECRET_ACCESS_KEY; do
+    if ! printenv "$failover_variable" >/dev/null; then
+      echo "test-tidb.sh: MOUNT_RS_TIDB_FAILOVER=1 requires $failover_variable" >&2
+      exit 2
+    fi
+  done
+fi
 run_iops=0
 if [ "${MOUNT_RS_TIDB_IOPS:-0}" = "1" ]; then
   run_iops=1
@@ -771,6 +787,31 @@ run_consumer_tests() {
       -- --ignored --nocapture --test-threads=1
 }
 
+run_failover_tests() {
+  if [ "$run_failover" -ne 1 ]; then
+    return 0
+  fi
+  phase_name="serve-http drive failover tests"
+  echo "TiDB phase=$phase_name" >&2
+  # A standby that keeps trying the lease of a drive its owner is writing
+  # to, in one process and as fast as it can.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-cluster --features http3 \
+      --test failover opening_a_tidb_volume_its_owner_is_writing_to_only_finds_the_lease_held \
+      -- --ignored --nocapture --test-threads=1
+  # Two serve-http candidates and an ingress per test, with real processes:
+  # a killed owner under writes, a paused owner, a clean stop, a partitioned
+  # owner whose standby keeps retrying, a Redis outage, fail-back and a
+  # release that TiDB does not answer. Each test has its own volume key.
+  # One at a time, about five minutes: their 12 s lease allows a renewal
+  # 1.5 s, which eight clusters at once on a shared runner could exceed.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_FAILOVER_TEST_STORAGE=tidb-rustfs \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-cli --test failover \
+      -- --ignored --nocapture --test-threads=1
+  echo "TIDB_FAILOVER_PASS metadata=tidb blocks=rustfs" >&2
+}
+
 run_trace_test() {
   if [ "$run_trace" -ne 1 ]; then
     return 0
@@ -927,6 +968,7 @@ if [ "$topology" = durable ]; then
 fi
 
 run_consumer_tests
+run_failover_tests
 run_trace_test
 
 # The failure-injection lane deliberately drops a client connection after

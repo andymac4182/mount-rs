@@ -143,8 +143,11 @@ No node compares its clock with another node's. Three clocks are read:
 
 - **Candidate announcements** expire on the Redis server clock.
 - **The lease** expires on the metadata store's clock, in the same statement
-  that checks it: the TiDB server's for TiDB, and for SQLite the clock of
-  whichever host runs the statement. Every acquisition, renewal, release
+  that checks it. For SQLite that is the clock of whichever host runs the
+  statement. For TiDB it is `CURRENT_TIMESTAMP(3)` of the `tidb-server`
+  that runs the statement, which is that server's own host clock and not
+  the cluster's timestamp oracle: candidates that reach TiDB through
+  several `tidb-server` instances read as many clocks. Every acquisition, renewal, release
   and publication is one conditional write on owner, fence and expiry, so a
   clock that is wrong can make a lease end early or late but cannot let two
   holders both commit: the second acquisition changes the fence, and from
@@ -157,12 +160,13 @@ No node compares its clock with another node's. Three clocks are read:
   answer reads and to admit forwarded requests between renewals.
 
 The last one is the only place skew matters. An owner whose clock is behind
-the metadata store's by more than that margin, or two SQLite hosts whose
-clocks differ by more than it, can leave a deposed owner answering **reads**
-from its last committed state for the excess, after a successor has taken
-the lease. Its writes are refused throughout. Keep candidates and the
-metadata store within a second or two of each other (NTP is enough), as for
-any lease.
+the metadata store's by more than that margin, or two SQLite hosts (or two
+`tidb-server` hosts) whose clocks differ by more than it, can leave a
+deposed owner answering **reads** from its last committed state for the
+excess, after a successor has taken the lease. Its writes are refused
+throughout. Keep candidates and the metadata store, every `tidb-server`
+included, within a second or two of each other (NTP is enough), as for any
+lease.
 
 A process that is stopped for longer than its lease (a paused VM, a long
 stall) is covered by the same rules: when it resumes its cached lease has
@@ -213,6 +217,91 @@ only). The owner notices at its next renewal or poll, withdraws the route
 and releases. A standby that can reach storage takes over once the lease has
 expired: the crash bound applies, measured from the owner's last successful
 renewal.
+
+## TiDB metadata
+
+Nothing above is specific to SQLite. `apps/mount-rs-cli/tests/failover.rs`
+runs every scenario with real binaries against either store; with
+`MOUNT_RS_FAILOVER_TEST_STORAGE=tidb-rustfs` the lease is in TiDB and the
+blocks are in RustFS, as two candidates on different hosts would have them.
+The `tidb-rustfs` CI job runs them that way after its restart checks.
+
+Measured with TiDB v8.5.7 (one `tidb-server`, one TiKV, one PD, in Docker on
+a laptop), RustFS 1.0.0, `lease_ttl_ms: 12000` and the default
+`poll_interval_ms` and `takeover_stagger_ms`, over eight runs of the suite
+(six with its tests in parallel, two one at a time):
+
+| Scenario | Measured | Documented bound |
+| --- | --- | --- |
+| `kill -9` of the owner under four writers, to the new route | 14.7 to 15.7 s | 22 s plus the open |
+| Owner stopped with `SIGSTOP` past its lease, to the new route | 15.7 to 16.3 s | 22 s plus the open |
+| The resumed owner gives the drive up | 0.1 to 0.3 s after `SIGCONT`; it never served its stale copy | next poll |
+| Clean stop (`SIGTERM`), from the owner's exit to the new route | 1.0 to 3.6 s; a retrying client was served again 1.1 to 4.5 s after the signal | 8 s plus the open |
+| Redis down for 25 s with the owner killed, from Redis returning to the new route | 1.2 to 3.6 s | 8 s plus reconnecting and the open |
+| Fail-back to the preferred node, from its start | 12.4 to 15.8 s | 21 s |
+| Release that TiDB does not answer (the lease row is locked) | the owner exits non-zero 2.0 to 2.1 s after `SIGTERM` (limit 2 s); the standby takes the expired lease 11.3 to 15.0 s later | `L` + `5P` + open |
+| Owner cut off from Redis for 42 s | it served every direct write (98 to 132 of them; the slowest request took 0.45 s); the standby retried for 26 s and reported `lease_held` once and nothing else | no takeover |
+
+In the kill test every acknowledged write was read back complete from the
+new owner, and every write that was not acknowledged was either absent or
+complete.
+
+**What a standby's attempt costs TiDB.** Opening a TiDB drive connects,
+sends the provider's schema statements (`CREATE TABLE IF NOT EXISTS` and six
+`ALTER TABLE ... IF NOT EXISTS`), an `INSERT ... ON DUPLICATE KEY UPDATE`
+that changes nothing, and then reads the lease row `FOR UPDATE` in a
+pessimistic transaction, which it rolls back on finding the lease held. So
+an attempt is not read-only, but it rewrites nothing: unlike SQLite there is
+no document to fold. While the standbys above retried, TiDB ran no schema
+job (the last job id was the same before and after), and their open files
+stayed level. `crates/mount-rs-cluster/tests/failover.rs` opens a volume as
+fast as it can while the owner writes to it: 626 attempts in 30 s (641 in a
+second run) all found the lease held and nothing else, none of the owner's
+1182 (1385) writes in that time failed, and a successor read the files as
+the owner left them.
+The lease row is locked for the length of each attempt's locking read, so a
+publication by the owner can wait behind one; the slowest direct request in
+the partition runs above is the measure of that.
+
+**`lease_held` can also be a TiDB conflict.** The standby treats any
+`EAGAIN` from an open as "the lease is held". The TiDB provider also
+reports `EAGAIN` for an error TiDB asks to have retried (a write conflict, a
+lock wait timeout, a deadlock, or a message ending in `try again later`),
+whichever statement of the open it came from. Such an open is retried after
+`poll_interval_ms` like any other, without the back-off of `open_failed`,
+and is logged as `lease_held`. No test provokes one.
+
+**Choosing `lease_ttl_ms`.** The owner renews every eighth of the lease and
+gives each renewal as long again; a renewal that takes longer fails the
+drive closed, and the node releases it and becomes a standby again. On
+TiDB a renewal is one pessimistic transaction of four round trips to one
+`tidb-server`, so `lease_ttl_ms / 8` is the longest stall of TiDB (a
+`tidb-server` restart behind a load balancer, a TiKV leader election) that
+an owner rides out without giving its drive up, and `lease_ttl_ms` itself
+is how long a crashed owner's drive stays unavailable.
+
+- The default, 240 s, rides out a 30 s stall and recovers from a crash in
+  about four minutes. Keep it unless that recovery time is too long.
+- `lease_ttl_ms: 120000` rides out 15 s and recovers in about two minutes.
+  Go no lower if owners should keep their drives through a TiKV leader
+  election, which takes on the order of ten seconds after a store fails.
+- `lease_ttl_ms: 60000` rides out 7.5 s and recovers in about 65 s. A
+  longer stall costs every owner its drives: each is released, and taken
+  again by whichever candidate asks first once TiDB answers, with the
+  sessions on it lost.
+- The 12 s lease of the tests (1.5 s per renewal) lost no lease in the runs
+  above, on an idle single-node TiDB on the same host. It is a test value.
+
+None of the stall figures was measured by stalling TiDB: they follow from
+the renewal rule, and the length of a TiKV election is TiKV's own default.
+The recovery figures are the crash bound under Timing bounds, which the
+runs above met with the 12 s lease.
+
+A `SIGTERM` release is bounded by `drain_timeout_ms +
+drive_shutdown_timeout_ms` whatever TiDB does. An open, and a release after
+a lost lease, are bounded only by the provider's statement timeout (120 s
+unless `statement_timeout_ms` is set in the connection URL; a lock wait
+gives up after 50 s).
 
 ## Redis outages
 
@@ -355,7 +444,7 @@ long.
   throughout), but each attempt while the lease is held, at most one every
   `5P` and only while no route is published, costs one rewrite of the whole
   document. Trying the lease before folding would avoid it and is left for
-  the SQLite provider. The same contention has not been tried against TiDB.
+  the SQLite provider. A TiDB attempt folds nothing; see TiDB metadata.
 - **No replay.** Requests in flight on a failed owner are not replayed, and
   sessions and handles do not move.
 - **No faster recovery than the lease.** A standby cannot take a drive
