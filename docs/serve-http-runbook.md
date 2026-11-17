@@ -70,8 +70,9 @@ attestation (`gh attestation verify oci://ghcr.io/andymac4182/mount-rs:<version>
   The forwarding listener (`forwarding.bind`) may bind `0.0.0.0` for peers on
   other hosts.
 - Stopping the container sends SIGTERM, which drains as described under
-  [Shutdown](#shutdown). Give it a stop timeout above `drain_timeout_ms`
-  (`docker stop -t 40`, or `terminationGracePeriodSeconds: 40` in Kubernetes).
+  [Shutdown](#shutdown). Give it a stop timeout above `drain_timeout_ms` +
+  5 s + `drive_shutdown_timeout_ms` (`docker stop -t 75`, or
+  `terminationGracePeriodSeconds: 75` in Kubernetes, with the defaults).
 - Probe `/readyz` and `/healthz` from the sidecar or with an HTTP probe sent
   through it.
 
@@ -117,6 +118,7 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | `read_chunk_bytes` | integer | `65536` | >= 1 | Read size per chunk when streaming a download. |
 | `request_timeout_ms` | integer | `30000` | >= 1 | Limit for one request up to its response headers, including receiving the body and waiting for upload budget; exceeding it returns 504. A streamed upload (above `max_request_bytes`, or without a `Content-Length`) has no overall limit: instead each piece of its body, each write to the drive and the final publication must happen within this time, or it gets 504 and leaves the target unchanged. Also the header-read and idle keep-alive timeout (the connection is closed without a response) and the time a download may make no progress before it is cut. |
 | `drain_timeout_ms` | integer | `35000` | >= 1 | How long shutdown waits for in-flight requests before aborting them. Keep it above `request_timeout_ms`. |
+| `drive_shutdown_timeout_ms` | integer | `30000` | >= 1 | How long shutdown gives the drives, all together, to flush and release their writer leases once the listener has stopped. When it passes the process exits with code 1 without waiting further. See [Shutdown](#shutdown). |
 | `max_connections` | integer | `256` | >= 1 | Concurrent TCP connections. Excess connections are accepted and closed immediately with no HTTP response. |
 | `access_log` | boolean | `false` | | Writes one `http_request` JSON line per request to stderr. No path, query, token or header is written. See [Access log](#access-log). |
 | `tcp_nodelay` | boolean | `true` | | Disables Nagle on accepted connections. |
@@ -387,7 +389,8 @@ SIGINT and SIGTERM (Unix; Ctrl-C on Windows) start a graceful shutdown:
    body shorter than `Content-Length` and retries. Other requests in progress
    get up to `drain_timeout_ms` to finish.
 4. Every drive is shut down in reverse config order. This flushes the storage
-   and releases the writer lease.
+   and releases the writer lease. The drives have `drive_shutdown_timeout_ms`
+   for this, all together.
 5. The process prints `http stopped` to stdout and exits with code 0.
 
 If connections are still open when `drain_timeout_ms` passes (for example a
@@ -396,15 +399,52 @@ client that has stopped reading a download), they are aborted. Drive shutdown
 `mount-rs: HTTP server close timed out` to stderr, does not print
 `http stopped`, and exits with code 1.
 
-Worst-case stop time is `drain_timeout_ms`, plus up to 5 seconds for aborted
-requests to release their file handles, plus drive shutdown. Drive shutdown
-has no time bound of its own.
+If the drives have not all shut down when `drive_shutdown_timeout_ms` passes
+(storage that has stopped answering, or a flush that needs longer than the
+bound), the process stops waiting. It prints, for example,
+
+```text
+mount-rs: drive shutdown timed out after 30000 ms: drive 'files' did not finish and 'scratch' not attempted; a writer lease not released stays held until it expires, and writeback data not yet flushed may be lost
+```
+
+to stderr, does not print `http stopped`, and exits with code 1 at once. It
+does not claim anything that did not happen:
+
+- The drive named as not finished was abandoned mid-shutdown, and the
+  drives named as not attempted (those before it in the config) were never
+  shut down. Their writer leases were **not** released; the next start
+  waits for them as after a SIGKILL (see
+  [Lease takeover wait](#lease-takeover-wait)). Drives listed after the
+  stuck one in the config had already been shut down.
+- Every write that was acknowledged as durable is still durable: a `200`
+  for a `PUT` is sent only after the data is stored, and the timeout
+  changes nothing that is stored. The exception is the one that always
+  applies to an unclean stop: a drive with `writeback` may lose
+  acknowledged data it had not yet flushed.
+- Nothing is cleaned up on the way out. The process exits without running
+  the remaining teardown, because that teardown can block on the same
+  storage. This is the same state as after a SIGKILL at that moment, and
+  the next start recovers from it in the same way.
+
+Worst-case stop time is therefore bounded: `drain_timeout_ms`, plus up to 5
+seconds for aborted requests to release their file handles, plus
+`drive_shutdown_timeout_ms` (plus up to 2 seconds to flush the access log
+when it is enabled). With the defaults that is 70 seconds. A stop with no
+stalled client and healthy storage does not wait for any of these.
 
 Operational consequences:
 
 - Give the service manager a stop timeout above that worst case (for systemd,
-  `TimeoutStopSec=60` with the defaults) and let it fall back to SIGKILL
-  afterwards, because drive shutdown against unreachable storage can hang.
+  `TimeoutStopSec=75` with the defaults) and let it fall back to SIGKILL
+  afterwards. The process now ends by itself when storage hangs; SIGKILL
+  remains the backstop.
+- Size `drive_shutdown_timeout_ms` for the slowest legitimate flush, not the
+  typical one. Cutting a healthy but slow shutdown short leaves the lease
+  held, and the replacement then waits out the lease instead of starting at
+  once. Raise it for drives with `writeback` or large unflushed caches.
+- With several drives in one process, a drive that hangs keeps the drives
+  before it in the config from being shut down within the bound. One drive
+  per process avoids that.
 - A second SIGTERM does not speed the shutdown up.
 - SIGKILL skips step 4. A split-store drive's writer lease then stays held
   until it expires; see [Lease takeover wait](#lease-takeover-wait).
@@ -423,7 +463,7 @@ Operational consequences:
 ExecStart=/usr/local/bin/mount-rs serve-http --config /etc/mount-rs/http.json
 EnvironmentFile=/etc/mount-rs/tokens.env
 KillSignal=SIGTERM
-TimeoutStopSec=60
+TimeoutStopSec=75
 Restart=on-failure
 RestartSec=10
 LimitNOFILE=65536
@@ -434,7 +474,7 @@ LimitNOFILE=65536
 | Code | Meaning | Typical stderr |
 | --- | --- | --- |
 | 0 | Clean stop after a signal. `http stopped` was printed. | |
-| 1 | Runtime failure: missing token variable (`missing environment variable NAME`), drive failed to open (storage unreachable; lease held: `EAGAIN: resource temporarily unavailable, acquire writer`; corrupt block), bind failure (port in use), signal during startup, listener exited unexpectedly, drain deadline exceeded (`HTTP server close timed out`), drive shutdown failed. | `mount-rs: <message>` |
+| 1 | Runtime failure: missing token variable (`missing environment variable NAME`), drive failed to open (storage unreachable; lease held: `EAGAIN: resource temporarily unavailable, acquire writer`; corrupt block), bind failure (port in use), signal during startup, listener exited unexpectedly, drain deadline exceeded (`HTTP server close timed out`), drive shutdown failed, drive shutdown deadline exceeded (`drive shutdown timed out after N ms: ...`). | `mount-rs: <message>` |
 | 2 | Usage or configuration error: bad arguments, invalid or unknown config key, non-loopback host, invalid drive id, token with whitespace, config without an `http` section. | `mount-rs: <message>` then `try --help` |
 
 Error messages go to stderr with the prefix `mount-rs: `. Secrets in messages
@@ -561,6 +601,7 @@ request.
 | 502 from the proxy | Proxy log | Connection limit reached, process down, or keep-alive race | Check connection count against `max_connections` and the proxy keep-alive timeout |
 | `http_access_log_dropped` line on stderr | Process stderr | Access-log lines were dropped because stderr was not being read fast enough | Check the log collector; requests were not affected |
 | `http_accept_failed` line on stderr | Process stderr | The process could not accept connections, usually out of file descriptors (`EMFILE`/`ENFILE`). It keeps retrying with a 10 ms to 1 s back-off; clients are turned away meanwhile | Raise `LimitNOFILE`; look for leaked connections |
+| `drive shutdown timed out` on stderr at stop | Process stderr | A drive did not flush and release its lease within `drive_shutdown_timeout_ms`; the lease stays held until it expires | Check the storage of the drive named in the message; expect the restart to wait for the lease; raise the bound if the storage was only slow |
 | `HTTP server close timed out` on stderr at stop | Process stderr | The drain deadline passed and requests were aborted | Usually a stalled client; check that `drain_timeout_ms` exceeds `request_timeout_ms` |
 | 401 rate spike | Proxy log | Rotated token not picked up, or probing | Check with the consumer |
 | 413 rate above baseline | Proxy log | Consumers hitting the upload or listing limit | Talk to the consumer; consider the limits |
@@ -580,6 +621,7 @@ request.
 | Start fails with code 1 and `missing environment variable` | Token variable not set | Fix the environment source. |
 | `HTTP listener exited unexpectedly`, exit 1 | The accept task ended | Restart. Accept errors, including `EMFILE`/`ENFILE`, are retried with back-off and logged as `http_accept_failed`; they do not cause this. |
 | `http_accept_failed` lines, clients time out connecting | Out of file descriptors | Raise `LimitNOFILE`; the listener recovers by itself when descriptors are free. |
+| Stop ends with code 1 and `drive shutdown timed out after N ms: drive 'X' did not finish` | The drive's storage did not answer in time while flushing or releasing the lease | Fix the storage. The lease of that drive, and of any drive named as not attempted, stays held until it expires, so restarts fail with `EAGAIN ... acquire writer` until then. Acknowledged durable writes are intact. |
 | Downloads cut off after `request_timeout_ms` | The client (or the proxy, if it buffers to a slow client) stopped reading | Expected: a download that makes no progress for `request_timeout_ms` is dropped to free its connection and file handle. |
 | 507 on writes | Storage full | Free space or grow the volume. No restart needed. |
 | Clients get connection resets or the proxy logs 502 | `max_connections` reached, or keep-alive idle race | Lower proxy keep-alive count and idle time, or raise `max_connections` and `LimitNOFILE`. |
@@ -739,6 +781,7 @@ Configuration
       `http2_prior_knowledge` is `false`.
 - [ ] No `memory` drive.
 - [ ] `drain_timeout_ms` > `request_timeout_ms`.
+- [ ] `drive_shutdown_timeout_ms` covers the slowest flush the drives need.
 - [ ] Twice `max_buffered_upload_bytes` fits the memory limit of the process.
 - [ ] No drive sets `writeback`, unless its consumers accept non-durable `200`s.
 - [ ] `mount-rs validate-config --config <path>` passes.
@@ -767,7 +810,7 @@ Process
 
 - [ ] Exactly one instance per drive.
 - [ ] Stop signal SIGTERM; stop timeout above `drain_timeout_ms` + 5 s +
-      storage flush, with SIGKILL as the fallback.
+      `drive_shutdown_timeout_ms`, with SIGKILL as the fallback.
 - [ ] Restart on failure with a delay of several seconds; no restart on exit
       code 2.
 - [ ] `LimitNOFILE` raised.

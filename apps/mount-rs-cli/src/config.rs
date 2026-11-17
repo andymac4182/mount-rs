@@ -30,6 +30,10 @@ const DEFAULT_HTTP_READ_CHUNK_BYTES: usize = 64 * 1024;
 // Longer than the request timeout: a graceful stop lets every accepted
 // request finish or time out by itself before anything is aborted.
 const DEFAULT_HTTP_DRAIN_TIMEOUT_MS: u64 = 35_000;
+/// Long enough for a healthy drive to flush and release its lease many
+/// times over; short enough that a stuck one does not outlast a supervisor's
+/// stop timeout by much.
+const DEFAULT_HTTP_DRIVE_SHUTDOWN_TIMEOUT_MS: u64 = 30_000;
 // Upload memory budget, as a multiple of `max_request_bytes`.
 const DEFAULT_HTTP_BUFFERED_UPLOAD_REQUESTS: usize = 4;
 const DEFAULT_HTTP_MAX_CONNECTIONS: usize = 256;
@@ -274,6 +278,8 @@ pub(crate) struct HttpServiceConfig {
     pub tcp_nodelay: bool,
     pub http2_prior_knowledge: bool,
     pub drain_timeout_ms: u64,
+    /// Longest the drives may take to shut down, all together.
+    pub drive_shutdown_timeout_ms: u64,
     pub max_connections: usize,
     pub request_timeout_ms: u64,
     /// Write one JSON line per request to stderr.
@@ -624,6 +630,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "tcp_nodelay",
             "http2_prior_knowledge",
             "drain_timeout_ms",
+            "drive_shutdown_timeout_ms",
             "max_connections",
             "request_timeout_ms",
             "access_log",
@@ -708,6 +715,11 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         .map(|value| positive_u64(value, "config.http.drain_timeout_ms"))
         .transpose()?
         .unwrap_or(DEFAULT_HTTP_DRAIN_TIMEOUT_MS);
+    let drive_shutdown_timeout_ms = object
+        .get("drive_shutdown_timeout_ms")
+        .map(|value| positive_u64(value, "config.http.drive_shutdown_timeout_ms"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_DRIVE_SHUTDOWN_TIMEOUT_MS);
     let max_connections = object
         .get("max_connections")
         .map(|value| positive_usize(value, "config.http.max_connections"))
@@ -786,6 +798,7 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         http2_prior_knowledge: optional_bool(object, "http2_prior_knowledge", "config.http")?
             .unwrap_or(false),
         drain_timeout_ms,
+        drive_shutdown_timeout_ms,
         max_connections,
         request_timeout_ms,
         access_log,
@@ -3779,6 +3792,43 @@ mod tests {
         let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
         assert!(error.to_string().contains("config.http.access_logs"));
         assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn http_drive_shutdown_timeout_defaults_to_thirty_seconds_and_must_be_positive() {
+        let mut value = serde_json::json!({
+            "drives": [{"id":"memory", "token":{"env":"TEST_TOKEN"},
+                "driver":{"kind":"memory"}}]
+        });
+        let parsed = parse_http(&value, Path::new("/tmp")).unwrap();
+        assert_eq!(parsed.drive_shutdown_timeout_ms, 30_000);
+        value["drive_shutdown_timeout_ms"] = 250.into();
+        let parsed = parse_http(&value, Path::new("/tmp")).unwrap();
+        assert_eq!(parsed.drive_shutdown_timeout_ms, 250);
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("30s"),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+        ] {
+            value["drive_shutdown_timeout_ms"] = invalid;
+            let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("config.http.drive_shutdown_timeout_ms"),
+                "{error}"
+            );
+        }
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("drive_shutdown_timeout_ms");
+        value["drive_shutdown_timeout"] = 30.into();
+        let error = parse_http(&value, Path::new("/tmp")).unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     #[test]

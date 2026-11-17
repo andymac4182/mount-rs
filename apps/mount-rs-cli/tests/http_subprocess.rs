@@ -1577,6 +1577,89 @@ async fn tidb_remote_sessions_recover_rustfs_after_process_kill_and_lease_expiry
     run_configured_session_case(true, true, true).await;
 }
 
+/// A drive whose storage has stopped answering: the test holds SQLite's
+/// write lock on the metadata database, so the lease release at shutdown
+/// waits (for SQLite's five-second busy timeout, far beyond the bound set
+/// here).
+#[cfg(unix)]
+#[test]
+fn a_drive_that_cannot_shut_down_in_time_ends_the_process_with_a_failure() {
+    let root = temporary_root();
+    let lease_ttl_ms = 120_000;
+    let http = serde_json::json!({
+        "drain_timeout_ms": 1000,
+        "drive_shutdown_timeout_ms": 300
+    });
+    let config = write_sqlite_split_config(
+        &root,
+        "stuck.json",
+        "http-stuck-owner",
+        lease_ttl_ms,
+        http.clone(),
+    );
+    let successor_config = write_sqlite_split_config(
+        &root,
+        "successor.json",
+        "http-successor-owner",
+        lease_ttl_ms,
+        http,
+    );
+    let mut child = HttpChild::start(&config, root.clone());
+    let (address, _ready) = child.ready();
+    let token = "splitstore-test-token-for-sessions";
+    let kept = request(
+        address,
+        "PUT",
+        "/v1/drives/durable/fs/kept",
+        token,
+        b"acknowledged before the stop",
+    );
+    assert_eq!(kept.status, 200);
+
+    let blocker = rusqlite::Connection::open(root.join("metadata.db")).expect("open metadata");
+    blocker
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("take the metadata write lock");
+
+    let stopping = Instant::now();
+    child.signal(libc::SIGTERM);
+    let status = child.wait_for_exit(Duration::from_secs(10));
+    let took = stopping.elapsed();
+    // Bounded by the configured limit, not by how long the storage takes
+    // to give up: the blocked release alone would have waited five seconds.
+    assert!(took < Duration::from_secs(4), "the stop took {took:?}");
+    assert_eq!(status.code(), Some(1), "exit status: {status}");
+    let (stdout, stderr) = child.output();
+    assert!(
+        !stdout.iter().any(|line| line == "http stopped"),
+        "a shutdown that did not finish was reported as clean: stdout={stdout:?}"
+    );
+    assert!(
+        stderr.iter().any(|line| line
+            .contains("drive shutdown timed out after 300 ms: drive 'durable' did not finish")),
+        "stderr={stderr:?}"
+    );
+    blocker.execute_batch("ROLLBACK").expect("release the lock");
+    drop(blocker);
+
+    // Nothing was claimed that did not happen: the lease was not released,
+    // so a successor is kept out until it expires...
+    let mut successor = HttpChild::start(&successor_config, root.clone());
+    let status = successor.wait_for_exit(Duration::from_secs(30));
+    assert_eq!(status.code(), Some(1), "exit status: {status}");
+    let (_stdout, stderr) = successor.output();
+    assert!(
+        stderr.iter().any(|line| line.contains("EAGAIN")),
+        "stderr={stderr:?}"
+    );
+    // ...and the acknowledged upload is in the store, untouched.
+    let metadata = rusqlite::Connection::open(root.join("metadata.db")).expect("open metadata");
+    let integrity: String = metadata
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("integrity check");
+    assert_eq!(integrity, "ok");
+}
+
 #[test]
 // The disk cache needs directory synchronization, which it only has on Unix;
 // elsewhere it refuses to open and the CLI exits before it is ready.
