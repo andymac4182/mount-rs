@@ -175,8 +175,10 @@ CI on Linux, durable topology, by manual dispatch of the CI workflow
 | `tidb-tls-compile` | `031050cc` | Pass | [44141640175 / 134245706338](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706338) |
 | `ozone-tidb` | `031050cc` | Pass: 3,738 IOPS against the 1,000 target | [44141640175 / 134245706208](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706208) |
 
-Run 44141640175 was a manual dispatch on `main`. No push run on `main` has
-finished these jobs: each was superseded by the next push.
+Run 44141640175 was a manual dispatch on `main`. The push run for the next
+commit, `d69d11f0`
+([44157532696](https://github.com/andymac4182/mount-rs/actions/runs/44157532696)),
+passed the same five jobs.
 
 Elsewhere:
 
@@ -215,7 +217,6 @@ therefore says nothing about TiDB with any block store other than Ozone.
 
 ### Still open for TiDB
 
-- A push run on `main`, as above.
 - The `ozone-tidb` job can fail in its Ozone-only phase. The block store
   client stops retrying after 12 s but lets the last attempt run for up to
   8 s, so `real_ozone_gateway_failure_is_bounded`, which allows 15 s, can

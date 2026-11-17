@@ -1000,10 +1000,11 @@ curl -H 'Authorization: Bearer demo-memory' \
         the lease in TiDB. The <code>rust</code> jobs run the transport
         suites and the OpenAPI conformance test, and{' '}
         <code>http-observability</code> runs the all-features health,
-        readiness and OTLP checks. Not covered by that run: the workspace
-        test job on macOS arm64, which never received a hosted runner and was
-        re-queued; clusters of mixed releases; Redis Sentinel and Redis
-        Cluster; and any deployed collector, dashboard or pager.{' '}
+        readiness and OTLP checks. The workspace test job on macOS arm64
+        passed on the run’s second attempt, after no hosted runner picked it
+        up on the first. Not covered: clusters of mixed releases; Redis
+        Sentinel and Redis Cluster; and any deployed collector, dashboard or
+        pager.{' '}
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,
         ranges, truncate, concurrent writes, restart/reopen, and cleanup. The
         optional <code>mount-rs-observability</code> seam can attach a
