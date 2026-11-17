@@ -970,10 +970,16 @@ curl -H 'Authorization: Bearer demo-memory' \
         listed even in pages, and a walk through the pages is not a snapshot.
         A token grants full access to its drive; there is no per-user
         identity, token expiry, CORS or TLS in the server. Token-file
-        rotation is refused together with <code>remote_sessions</code> or{' '}
-        <code>forwarding</code>: a cluster still rotates tokens by restart.
-        Metrics are not split by drive and have not been validated with{' '}
-        <code>remote_sessions</code> or <code>forwarding</code>. Each drive
+        rotation also works with <code>remote_sessions</code> and{' '}
+        <code>forwarding</code>, but the file is per server: the owner of a
+        drive checks the token, so the rotation is made on every server that
+        lists the drive, and nothing distributes the file or checks that the
+        servers agree. A session stays with the token that opened it and is
+        closed by idle expiry once that token is dropped; clients open a new
+        session with the new token. Metrics are not split by drive, and in a
+        cluster each server counts what it handled, so a forwarded request
+        is counted by the ingress and by the owner (subtract{' '}
+        <code>mount_rs_http_forwarded_requests_total</code>). Each drive
         has one owner at a time. Failover is opt-in, needs split-store drives
         with exclusive ownership, and cannot move a drive before the failed
         owner’s storage lease expires (240 s by default); requests in flight

@@ -7,6 +7,14 @@
 //! file that cannot be read or does not list valid tokens is reported once
 //! and the tokens in force stay as they were.
 //!
+//! The set a file is loaded into is the one every check of the drive's
+//! token reads: the file routes, the session routes of `remote_sessions`,
+//! and the owner of the drive in a forwarding cluster, which is where a
+//! forwarded request is authorized. A reload therefore reaches all of them
+//! at once. On a server with `remote_sessions` every token of the file
+//! must also be one the session routes accept, or the file is refused
+//! whole.
+//!
 //! Nothing here writes token text anywhere: not to a log line and not into
 //! an error.
 
@@ -41,7 +49,10 @@ fn read_file(path: &Path) -> Result<Vec<u8>, String> {
 /// The tokens a file lists: one per line, blank lines and the white space
 /// around a token ignored. The file is taken whole or not at all, and a
 /// refusal says which line is wrong without quoting it.
-fn parse_tokens(bytes: &[u8]) -> Result<Vec<String>, String> {
+///
+/// `sessions` is whether the drive also serves the session routes, whose
+/// tokens have a stricter form.
+fn parse_tokens(bytes: &[u8], sessions: bool) -> Result<Vec<String>, String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "is not UTF-8 text".to_owned())?;
     let mut tokens: Vec<String> = Vec::new();
     for (index, line) in text.lines().enumerate() {
@@ -51,6 +62,12 @@ fn parse_tokens(bytes: &[u8]) -> Result<Vec<String>, String> {
         }
         DriveConfig::validate_bearer_token(token)
             .map_err(|error| format!("line {} is not a token: {error}", index + 1))?;
+        if sessions && !mount_rs_cluster::SessionCredentials::valid_token(token) {
+            return Err(format!(
+                "line {} is not a token remote_sessions accepts: 32 to 256 characters from A-Z a-z 0-9 - . _ ~ + / =",
+                index + 1
+            ));
+        }
         if tokens.iter().any(|seen| seen == token) {
             continue;
         }
@@ -72,20 +89,23 @@ pub(crate) struct LoadedTokens {
     path: PathBuf,
     bytes: Vec<u8>,
     tokens: DriveTokens,
+    sessions: bool,
 }
 
 impl LoadedTokens {
     /// Read `path`. Unlike a reload, a file that is not valid is an error:
-    /// there are no earlier tokens to keep.
-    pub(crate) fn load(path: &Path) -> Result<Self, String> {
+    /// there are no earlier tokens to keep. `sessions` is whether the
+    /// server has `remote_sessions`, now and at every reload.
+    pub(crate) fn load(path: &Path, sessions: bool) -> Result<Self, String> {
         let bytes = read_file(path)?;
-        let tokens = parse_tokens(&bytes)
+        let tokens = parse_tokens(&bytes, sessions)
             .and_then(|tokens| DriveTokens::new(tokens).map_err(|error| error.to_string()))
             .map_err(|error| format!("token file {} {error}", path.display()))?;
         Ok(Self {
             path: path.to_owned(),
             bytes,
             tokens,
+            sessions,
         })
     }
 
@@ -114,6 +134,7 @@ struct Watch {
     path: PathBuf,
     seen: Result<Vec<u8>, String>,
     tokens: DriveTokens,
+    sessions: bool,
 }
 
 impl Watch {
@@ -123,6 +144,7 @@ impl Watch {
             path: loaded.path,
             seen: Ok(loaded.bytes),
             tokens: loaded.tokens,
+            sessions: loaded.sessions,
         }
     }
 
@@ -143,7 +165,7 @@ impl Watch {
             Ok(bytes) => bytes,
             Err(error) => return Outcome::Refused(error.clone()),
         };
-        let replaced = parse_tokens(bytes)
+        let replaced = parse_tokens(bytes, self.sessions)
             .and_then(|tokens| self.tokens.replace(tokens).map_err(|e| e.to_string()));
         match replaced {
             Ok(true) => Outcome::Reloaded,
@@ -234,7 +256,7 @@ mod tests {
     use super::*;
 
     fn tokens(text: &str) -> Result<Vec<String>, String> {
-        parse_tokens(text.as_bytes())
+        parse_tokens(text.as_bytes(), false)
     }
 
     #[test]
@@ -265,7 +287,7 @@ mod tests {
             assert!(!error.contains("secret"), "{error}");
         }
         assert_eq!(
-            parse_tokens(&[b's', 0xff, b'\n']),
+            parse_tokens(&[b's', 0xff, b'\n'], false),
             Err("is not UTF-8 text".to_owned())
         );
     }
@@ -278,10 +300,14 @@ mod tests {
 
     impl Fixture {
         fn new(text: &str) -> Self {
+            Self::with_sessions(text, false)
+        }
+
+        fn with_sessions(text: &str, sessions: bool) -> Self {
             let root = tempfile::tempdir().unwrap();
             let path = root.path().join("drive.token");
             std::fs::write(&path, text).unwrap();
-            let loaded = LoadedTokens::load(&path).expect("token file");
+            let loaded = LoadedTokens::load(&path, sessions).expect("token file");
             let tokens = loaded.tokens();
             Self {
                 _root: root,
@@ -299,15 +325,52 @@ mod tests {
     fn a_token_file_that_is_missing_or_not_valid_stops_startup() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("drive.token");
-        let missing = LoadedTokens::load(&path).err().expect("missing");
+        let missing = LoadedTokens::load(&path, false).err().expect("missing");
         assert!(missing.contains("cannot read"), "{missing}");
         std::fs::write(&path, "a-secret with-a-space\n").unwrap();
-        let invalid = LoadedTokens::load(&path).err().expect("invalid");
+        let invalid = LoadedTokens::load(&path, false).err().expect("invalid");
         assert!(invalid.contains("line 1 is not a token"), "{invalid}");
         assert!(!invalid.contains("secret"), "{invalid}");
         std::fs::write(&path, vec![b'x'; MAX_TOKEN_FILE_BYTES as usize + 1]).unwrap();
-        let large = LoadedTokens::load(&path).err().expect("too large");
+        let large = LoadedTokens::load(&path, false).err().expect("too large");
         assert!(large.contains("larger than"), "{large}");
+    }
+
+    /// With `remote_sessions` a token must also be one the session routes
+    /// accept, at startup and at every reload. A file with one that is not
+    /// is refused whole, so the file routes and the session routes never
+    /// disagree about which tokens the drive accepts.
+    #[tokio::test]
+    async fn with_sessions_a_token_the_session_routes_refuse_is_not_loaded() {
+        let (old, new) = ("o".repeat(32), "n".repeat(40));
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("drive.token");
+        std::fs::write(&path, "a-short-secret\n").unwrap();
+        // The same file is a valid token file without sessions.
+        assert!(LoadedTokens::load(&path, false).is_ok());
+        let refused = LoadedTokens::load(&path, true).err().expect("too short");
+        assert!(refused.contains("line 1 is not a token remote_sessions accepts"));
+        assert!(!refused.contains("secret"), "{refused}");
+
+        let mut fixture = Fixture::with_sessions(&format!("{old}\n"), true);
+        fixture.write(&format!("{new}\n{old}\n"));
+        assert_eq!(fixture.watch.look(false).await, Outcome::Reloaded);
+        assert_eq!(fixture.tokens.len(), 2);
+
+        // Too short, and a character the session routes do not take.
+        for bad in ["a-short-secret".to_owned(), format!("{new}!")] {
+            fixture.write(&format!("{bad}\n{new}\n"));
+            let Outcome::Refused(reason) = fixture.watch.look(false).await else {
+                panic!("a token the session routes refuse was loaded");
+            };
+            assert!(reason.contains("line 1 is not a token remote_sessions accepts"));
+            assert!(!reason.contains("secret") && !reason.contains(&new));
+            assert_eq!(fixture.tokens.len(), 2);
+        }
+
+        fixture.write(&format!("{new}\n"));
+        assert_eq!(fixture.watch.look(false).await, Outcome::Reloaded);
+        assert_eq!(fixture.tokens.len(), 1);
     }
 
     #[tokio::test]

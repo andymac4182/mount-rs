@@ -38,6 +38,14 @@ info:
     nothing: every request must also carry the drive's bearer token, and a
     session is usable only with the bearer token that created it.
 
+    While the operator rotates a drive's token the drive accepts two: the
+    new one and the one before. Each is checked against the tokens the
+    drive's owner accepts when the request reaches it. A session does not
+    move from one to the other: with the other accepted token it is 403,
+    and once the token that created it is dropped every request with that
+    token is 401 and the session is closed when its idle timeout passes.
+    Create a new session with the new token.
+
     ## Order of checks
 
     For the two session paths, the first failure is the response.

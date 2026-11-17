@@ -78,7 +78,7 @@ impl SessionHttpHandler {
             return operations::serve(
                 request,
                 &self.registry,
-                principal,
+                &principal,
                 self.max_request_bytes,
                 timings,
             )
@@ -119,12 +119,12 @@ impl SessionHttpHandler {
             Err(_) => return rejected(StatusCode::REQUEST_TIMEOUT, ErrorCode::Eintr),
         }
         if let Some(token) = token {
-            match self.registry.close_session(principal, &token).await {
+            match self.registry.close_session(&principal, &token).await {
                 Ok(()) => response(StatusCode::NO_CONTENT, Bytes::new()),
                 Err(error) => filesystem_error(error),
             }
         } else {
-            match self.registry.create(principal).await {
+            match self.registry.create(&principal).await {
                 Ok(token) => response(
                     StatusCode::CREATED,
                     Bytes::from(
