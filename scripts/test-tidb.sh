@@ -104,6 +104,20 @@ if [ "${MOUNT_RS_TIDB_NAPI:-0}" = "1" ]; then
     exit 2
   fi
 fi
+run_trace=0
+if [ "${MOUNT_RS_TIDB_TRACE:-0}" = "1" ]; then
+  # The seeded differential trace compares the provider with the pinned
+  # mountx oracle. Asking for it without the oracle is an error, not a skip.
+  run_trace=1
+  if ! command -v node >/dev/null 2>&1; then
+    echo "test-tidb.sh: MOUNT_RS_TIDB_TRACE=1 requires node" >&2
+    exit 2
+  fi
+  if [ -z "${MOUNTX_SOURCE:-}" ] || [ ! -d "$MOUNTX_SOURCE" ]; then
+    echo "test-tidb.sh: MOUNT_RS_TIDB_TRACE=1 requires MOUNTX_SOURCE to name the pinned mountx checkout" >&2
+    exit 2
+  fi
+fi
 run_iops=0
 if [ "${MOUNT_RS_TIDB_IOPS:-0}" = "1" ]; then
   run_iops=1
@@ -656,7 +670,7 @@ run_direct_provider_test() {
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
   MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
-    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture --test-threads=1 \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb --test shared_pool -- --ignored --nocapture --test-threads=1 \
       || return "$?"
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
@@ -739,11 +753,68 @@ run_node_provider_test() {
   fi
 }
 
+run_consumer_tests() {
+  phase_name="SDK and cluster consumer tests"
+  echo "TiDB phase=$phase_name" >&2
+  # The SDK and the cluster session table are the paths applications use to
+  # reach the provider. Each test uses its own volume keys, so one run after
+  # the restart checks is enough. A caller that also owns a RustFS service
+  # (scripts/test-tidb-rustfs.sh) exports MOUNT_RS_SDK_RUSTFS=1 and
+  # MOUNT_RS_SESSION_TEST_BLOCKS=rustfs to add that block store to both.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-sdk --test tidb \
+      -- --ignored --nocapture --test-threads=1
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TIDB_RUN_DIR="$run_dir" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-cluster --lib \
+      tidb_sessions_preserve_handles_and_reopen_persisted_writes \
+      -- --ignored --nocapture --test-threads=1
+}
+
+run_trace_test() {
+  if [ "$run_trace" -ne 1 ]; then
+    return 0
+  fi
+  phase_name="seeded differential trace"
+  echo "TiDB phase=$phase_name" >&2
+  # Only the TiDB backend runs here; the local backends are compared with the
+  # same oracle and seeds by the node job. The harness exits non-zero on any
+  # divergence, and it cannot skip because MOUNTX_SOURCE was checked above.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TRACE_BACKENDS=chunked-tidb \
+    node "$repo_dir/scripts/check-trace-parity.mjs"
+}
+
 run_ambiguous_commit_test() {
   phase_name="ambiguous commit test"
   echo "TiDB phase=$phase_name" >&2
   MOUNT_RS_TIDB_URL="$tidb_url" \
     "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
+}
+
+run_statement_timeout_test() {
+  phase_name="statement timeout test"
+  echo "TiDB phase=$phase_name" >&2
+  # What TiDB's own statement limit covers, and that provider sessions carry
+  # the configured limits. The stalled-acknowledgement cases run with the
+  # ambiguous commit lane above.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test statement_timeout -- --ignored --nocapture
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
+      actual_tidb_sessions_carry_the_statement_limits \
+      -- --ignored --nocapture --test-threads=1
+}
+
+run_conflict_classification_test() {
+  phase_name="conflict classification test"
+  echo "TiDB phase=$phase_name" >&2
+  # Provokes TiDB's write-conflict and lock-wait errors for autocommit
+  # statements and checks that none of those statements committed.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
+      actual_tidb_autocommit_conflicts_are_known_non_commits \
+      -- --ignored --nocapture --test-threads=1
 }
 
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2
@@ -855,12 +926,17 @@ if [ "$topology" = durable ]; then
   fi
 fi
 
+run_consumer_tests
+run_trace_test
+
 # The failure-injection lane deliberately drops a client connection after
 # TiDB has processed COMMIT. Keep it after the durable restart/reopen gate so
 # an intentionally unknown client outcome cannot contaminate the frontend
 # startup check; it still exercises the provider's no-replay contract before
 # the owned topology is cleaned up.
 run_ambiguous_commit_test
+run_statement_timeout_test
+run_conflict_classification_test
 
 if [ "$topology" = durable ] && [ "$capacity_issue" -eq 0 ]; then
   evidence_class="durable-multinode-restart"

@@ -134,6 +134,29 @@ async fn main() {
                 .unwrap(),
             )
         }
+        "chunked-tidb" => {
+            let url = std::env::var("MOUNT_RS_TIDB_URL").expect("MOUNT_RS_TIDB_URL required");
+            // Every trace gets its own volume, so seeds and reruns never see
+            // each other's namespace or blocks.
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let key = format!("chunked-trace-{}-{nonce}", std::process::id());
+            Loopback::new(
+                mount_rs_chunked::ChunkedFs::open(
+                    mount_rs_tidb::TidbMetadataStore::connect_with_key(&url, &key)
+                        .await
+                        .unwrap(),
+                    mount_rs_tidb::TidbBlockStore::connect_with_key(&url, &key)
+                        .await
+                        .unwrap(),
+                    mount_rs_chunked::ChunkedOptions::fixed("trace", 7).unwrap(),
+                )
+                .await
+                .unwrap(),
+            )
+        }
         "pglite" => {
             let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
             Loopback::new(

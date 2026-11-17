@@ -22,6 +22,7 @@ const ALLOWED_BACKENDS = new Set([
   ...DEFAULT_BACKENDS,
   'pglite',
   'chunked-pglite',
+  'chunked-tidb',
   'r2',
 ]);
 const FAILURE_CONTEXT_RADIUS = 2;
@@ -61,6 +62,7 @@ function parseBackends() {
   if (configured === undefined) {
     backends = [...DEFAULT_BACKENDS];
     if (process.env.PGLITE_DATABASE_URL) backends.push('pglite', 'chunked-pglite');
+    if (process.env.MOUNT_RS_TIDB_URL) backends.push('chunked-tidb');
     if (process.env.MOUNT_RS_TRACE_R2 === '1') backends.push('r2');
   } else {
     const tokens = configured.split(',').map(token => token.trim());
