@@ -235,6 +235,22 @@ fn write_settled(server: &Server, name: &str, body: &[u8]) {
     }
 }
 
+/// How many files `server` holds open, where the platform can say.
+fn open_files(server: &Server) -> Option<usize> {
+    let pid = server.child.id();
+    if let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) {
+        return Some(entries.count());
+    }
+    let listed = Command::new("lsof")
+        .args(["-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    listed
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&listed.stdout).lines().count())
+}
+
 /// An owner that cannot reach Redis, while its standby and the ingress can,
 /// keeps its drive: it serves requests that reach it, the standby finds the
 /// lease held and takes nothing, and the route returns when the link does.
@@ -261,6 +277,8 @@ fn owner_cut_off_from_redis(link: Link) {
     let mut acknowledged = BTreeMap::new();
     let mut slowest = Duration::ZERO;
     let mut unrouted_at = None;
+    // The standby's open files once it has started retrying the lease.
+    let mut retrying = None;
     let mut round = 0;
     while cut.elapsed() < partition {
         round += 1;
@@ -296,6 +314,9 @@ fn owner_cut_off_from_redis(link: Link) {
         assert!(b.states("acquired").is_empty(), "{:?}", b.events());
         assert!(b.states("published").is_empty(), "{:?}", b.events());
         assert_eq!(cluster.lease(), (Some("a".into()), fence));
+        if retrying.is_none() && !b.states("lease_held").is_empty() {
+            retrying = Some((cut.elapsed(), open_files(&b)));
+        }
         for server in [&mut a, &mut b, &mut c] {
             server.assert_running("a server during the partition");
         }
@@ -310,6 +331,18 @@ fn owner_cut_off_from_redis(link: Link) {
     // once, and kept trying without ever opening the drive.
     assert_eq!(b.states("lease_held").len(), 1, "{:?}", b.events());
     assert!(b.states("open_failed").is_empty(), "{:?}", b.events());
+    // Each retry opens the storage and gives it up again. It keeps nothing:
+    // a standby may retry every few seconds for as long as an outage lasts.
+    let (since, early) = retrying.expect("the standby never tried the lease");
+    let late = open_files(&b);
+    let retried_for = cut.elapsed() - since;
+    assert!(retried_for > POLL * 15, "{retried_for:?}");
+    if let (Some(early), Some(late)) = (early, late) {
+        assert!(
+            late <= early + 4,
+            "the standby went from {early} to {late} open files in {retried_for:?} of retries"
+        );
+    }
     assert_eq!(a.states("route_unpublished").len(), 1, "{:?}", a.events());
     assert!(a.states("released").is_empty(), "{:?}", a.events());
 
@@ -329,7 +362,8 @@ fn owner_cut_off_from_redis(link: Link) {
     eprintln!(
         "{link:?} partition of the owner for {:?}: {round} direct writes served (slowest \
          request {slowest:?}); route lapsed after {unrouted_at:?}; route back {republished:?} \
-         and forwarding back {forwarding:?} after the link returned",
+         and forwarding back {forwarding:?} after the link returned; the standby retried \
+         the lease for {retried_for:?}, its open files going from {early:?} to {late:?}",
         partition
     );
     // Nothing that was acknowledged is missing, through either other server.
