@@ -896,6 +896,11 @@ impl IngressForwarder {
         strip_connection_headers(&mut parts.headers);
         parts.headers.remove(ROUTE_HEADER);
         parts.headers.remove(HOP_HEADER);
+        if parts.status == http::StatusCode::NO_CONTENT {
+            // The peer hop states the length of every response. A 204 must
+            // not carry one, and the owner's own listener sends none.
+            parts.headers.remove(http::header::CONTENT_LENGTH);
+        }
         let body = StreamBody::new(futures_util::stream::try_unfold(
             state,
             |mut state| async move {
@@ -1205,7 +1210,7 @@ impl mount_rs_http::HttpRequestHandler for IngressForwarder {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response<HttpBody>> + Send + '_>> {
         Box::pin(async move {
             match self.forward(request).await {
-                Ok(response) => response,
+                Ok(response) => public_response(response),
                 Err(error) => {
                     let (status, certainty) = match error {
                         ForwardError::InvalidRequest => {
@@ -1222,25 +1227,54 @@ impl mount_rs_http::HttpRequestHandler for IngressForwarder {
                         }
                         ForwardError::OutcomeUnknown => (http::StatusCode::BAD_GATEWAY, "unknown"),
                     };
-                    // No endpoint, credentials or provider diagnostics leave ingress.
-                    let body = http_body_util::Full::new(hyper::body::Bytes::from_static(b"{\"error\":{\"code\":\"EIO\",\"message\":\"volume request unavailable\"}}"))
-                        .map_err(|never| match never {}).boxed_unsync();
-                    let mut response = Response::builder()
-                        .status(status)
-                        .header("content-type", "application/json")
-                        .header("x-mount-dispatch", certainty);
-                    if status == http::StatusCode::SERVICE_UNAVAILABLE {
-                        // Nothing was executed and an owner may be published
-                        // shortly (a restart or a failover): tell the client
-                        // to retry, as the filesystem's own 503s do.
-                        response = response.header(http::header::RETRY_AFTER, "1");
-                    }
-                    response
-                        .body(body)
-                        .expect("static forwarding error response")
+                    cluster_response(status, certainty)
                 }
             }
         })
+    }
+}
+
+/// The response a public client gets when the cluster, not the drive's
+/// filesystem, answers: the standard error body, and `x-mount-dispatch`
+/// saying whether the request can have been executed.
+fn cluster_response(status: http::StatusCode, certainty: &'static str) -> Response<HttpBody> {
+    // No endpoint, credentials or provider diagnostics leave ingress.
+    let body = http_body_util::Full::new(hyper::body::Bytes::from_static(
+        b"{\"error\":{\"code\":\"EIO\",\"message\":\"volume request unavailable\"}}",
+    ))
+    .map_err(|never| match never {})
+    .boxed_unsync();
+    let mut response = Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .header("x-mount-dispatch", certainty);
+    if status == http::StatusCode::SERVICE_UNAVAILABLE {
+        // Nothing was executed and an owner may be published shortly (a
+        // restart or a failover): tell the client to retry, as the
+        // filesystem's own 503s do.
+        response = response.header(http::header::RETRY_AFTER, "1");
+    }
+    response
+        .body(body)
+        .expect("static forwarding error response")
+}
+
+/// What a public client is given for `response`. A server asked for a drive
+/// it does not hold under the route the request named refuses the request
+/// before running it, with a status that is about routing: 404 (the drive
+/// is not served there), 409 (it is served under another route) or 503 (its
+/// lease is gone), and no body. None of those is the drive's answer, and a
+/// client must not take the 404 for a missing file, so it is told the one
+/// thing they all mean: nothing ran, ask again.
+fn public_response(response: Response<HttpBody>) -> Response<HttpBody> {
+    let refused = response
+        .headers()
+        .get("x-mount-dispatch")
+        .is_some_and(|value| value == "not-dispatched");
+    if refused {
+        cluster_response(http::StatusCode::SERVICE_UNAVAILABLE, "not-dispatched")
+    } else {
+        response
     }
 }
 
@@ -1250,10 +1284,28 @@ impl mount_rs_http::HttpRequestHandler for IngressForwarder {
 pub struct ClusterIngress {
     local: crate::OwnerHttpRouter,
     remote: IngressForwarder,
+    /// Answers the requests that name no drive: `/healthz`, `/readyz`,
+    /// `GET /v1/drives` and every path that is no route. It holds no drive
+    /// of its own; each request is served against the drives owned then.
+    /// The listener in front applies its own limits, timeout and access
+    /// log before a request gets here.
+    node: Arc<mount_rs_http::HttpServer>,
 }
 impl ClusterIngress {
     pub fn new(local: crate::OwnerHttpRouter, remote: IngressForwarder) -> Self {
-        Self { local, remote }
+        let node = mount_rs_http::HttpServer::unbound(
+            mount_rs_http::DriveRegistry::new(),
+            mount_rs_http::HttpServerOptions {
+                // This server forwards, so it can serve while it owns nothing.
+                ready_without_drives: true,
+                ..Default::default()
+            },
+        );
+        Self {
+            local,
+            remote,
+            node: Arc::new(node),
+        }
     }
 }
 impl mount_rs_http::HttpRequestHandler for ClusterIngress {
@@ -1271,8 +1323,17 @@ impl mount_rs_http::HttpRequestHandler for ClusterIngress {
                     .strip_prefix("/v1/drives/")
                     .and_then(|path| path.split_once('/'))
                     .map(|(volume, _)| volume);
-                if let Some(owner) = volume.and_then(|volume| self.local.local(volume)) {
-                    return owner.local(request).await;
+                let Some(volume) = volume else {
+                    // No drive is named, so there is nothing to forward: the
+                    // probes, discovery and unknown paths are this server's
+                    // own to answer, about the drives it owns now.
+                    return self
+                        .node
+                        .handle_with_drives(self.local.drives(), request)
+                        .await;
+                };
+                if let Some(owner) = self.local.local(volume) {
+                    return public_response(owner.local(request).await);
                 }
             }
             mount_rs_http::HttpRequestHandler::handle(&self.remote, request).await
