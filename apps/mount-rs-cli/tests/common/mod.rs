@@ -77,11 +77,16 @@ pub fn free_tcp_port() -> u16 {
 }
 
 pub fn unique(prefix: &str) -> String {
+    // The clock alone is not enough: tests start together on their own
+    // threads, and where it only counts microseconds two of them can read
+    // the same value and then share a Redis namespace or a storage volume.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("{prefix}-{}-{nanos}", std::process::id())
+    format!("{prefix}-{}-{nanos}-{sequence}", std::process::id())
 }
 
 pub fn collect(stream: impl Read + Send + 'static) -> Arc<Mutex<Vec<String>>> {

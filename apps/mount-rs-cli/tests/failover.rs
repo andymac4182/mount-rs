@@ -1,7 +1,14 @@
 //! Drive failover between two `serve-http` candidates (`a`, `b`) and an
-//! ingress (`c`), with the real binary, a real Redis and SQLite storage that
-//! the candidates share. Each server reaches Redis through its own proxy, so
-//! one of them can be cut off while the others are not.
+//! ingress (`c`), with the real binary, a real Redis and storage that the
+//! candidates share. Each server reaches Redis through its own proxy, so one
+//! of them can be cut off while the others are not.
+//!
+//! The storage is SQLite files in a shared directory unless
+//! `MOUNT_RS_FAILOVER_TEST_STORAGE=tidb-rustfs`, which puts the metadata (and
+//! so the writer lease) in the TiDB at `MOUNT_RS_TIDB_URL` and the blocks in
+//! the RustFS described by `RUSTFS_ENDPOINT`, `RUSTFS_BUCKET`,
+//! `RUSTFS_REGION`, `RUSTFS_ACCESS_KEY_ID` and `RUSTFS_SECRET_ACCESS_KEY`.
+//! Every test uses its own volume key and block prefix there.
 //!
 //! See `docs/serve-http-failover.md` for the rules these tests hold the
 //! servers to. They never assert on a fixed sleep: every wait polls for an
@@ -38,11 +45,103 @@ const STAGGER: Duration = Duration::from_secs(2);
 /// drive, and a loaded runner.
 const SLACK: Duration = Duration::from_secs(20);
 
+/// Print a measurement, naming the storage it was taken on.
+macro_rules! report {
+    ($cluster:expr, $($format:tt)*) => {
+        eprintln!("{}: {}", $cluster.storage.name(), format!($($format)*))
+    };
+}
+
+const STORAGE_ENV: &str = "MOUNT_RS_FAILOVER_TEST_STORAGE";
+const TIDB_ENV: &str = "MOUNT_RS_TIDB_URL";
+
+/// Where the candidates keep the drive, and so where its lease lives.
+enum Storage {
+    Sqlite,
+    Tidb {
+        runtime: tokio::runtime::Runtime,
+        pool: mysql_async::Pool,
+        volume_key: String,
+    },
+}
+
+impl Storage {
+    fn from_env() -> Self {
+        match std::env::var(STORAGE_ENV).as_deref() {
+            Err(_) | Ok("sqlite") => Self::Sqlite,
+            Ok("tidb-rustfs") => {
+                let url = std::env::var(TIDB_ENV).expect("a disposable TiDB URL");
+                Self::Tidb {
+                    runtime: tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap(),
+                    pool: mysql_async::Pool::new(mysql_async::Opts::from_url(&url).unwrap()),
+                    volume_key: unique("failover"),
+                }
+            }
+            Ok(other) => panic!("{STORAGE_ENV} must be sqlite or tidb-rustfs, not {other}"),
+        }
+    }
+
+    /// `driver.storage` of a candidate's drive, without owner and lease.
+    fn config(&self) -> serde_json::Value {
+        match self {
+            Self::Sqlite => serde_json::json!({
+                "metadata":{"kind":"sqlite","path":"./shared/meta.db"},
+                "blocks":{"kind":"sqlite","path":"./shared/blocks.db"},
+            }),
+            Self::Tidb { volume_key, .. } => {
+                let env = |name: &str| {
+                    std::env::var(name).unwrap_or_else(|_| panic!("{name} for the RustFS blocks"))
+                };
+                serde_json::json!({
+                    "metadata":{"kind":"tidb","connection":{"env":TIDB_ENV},
+                        "volume_key":volume_key,"durable":true},
+                    "blocks":{"kind":"rustfs","endpoint":env("RUSTFS_ENDPOINT"),
+                        "bucket":env("RUSTFS_BUCKET"),"region":env("RUSTFS_REGION"),
+                        "prefix":format!("mount-rs-failover/{volume_key}"),
+                        "access_key_id":{"env":"RUSTFS_ACCESS_KEY_ID"},
+                        "secret_access_key":{"env":"RUSTFS_SECRET_ACCESS_KEY"},
+                        "durable":true},
+                })
+            }
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Sqlite => "SQLite",
+            Self::Tidb { .. } => "TiDB and RustFS",
+        }
+    }
+}
+
+/// Holds the lock a release of the lease needs, until dropped.
+enum Blocked<'a> {
+    Sqlite(#[allow(dead_code)] rusqlite::Connection),
+    Tidb(&'a tokio::runtime::Runtime, Option<mysql_async::Conn>),
+}
+
+impl Drop for Blocked<'_> {
+    fn drop(&mut self) {
+        if let Self::Tidb(runtime, connection) = self {
+            use mysql_async::prelude::Queryable;
+            let mut connection = connection.take().unwrap();
+            runtime.block_on(async {
+                connection.query_drop("ROLLBACK").await.unwrap();
+                drop(connection);
+            });
+        }
+    }
+}
+
 struct Cluster {
     dir: tempfile::TempDir,
     namespace: String,
     upstream: SocketAddr,
     direct: Mutex<redis::Connection>,
+    storage: Storage,
 }
 
 impl Cluster {
@@ -76,6 +175,7 @@ impl Cluster {
         }
         write("peers.json", serde_json::Value::Array(peers).to_string());
         let namespace = unique("failover");
+        let storage = Storage::from_env();
         for node in ["a", "b", "c"] {
             let candidate = node != "c";
             let mut config = serde_json::json!({"version":1,"http":{
@@ -88,13 +188,13 @@ impl Cluster {
             }});
             if candidate {
                 config["http"]["forwarding"]["failover"] = failover.clone();
+                let mut drive = storage.config();
+                drive["chunk_size_bytes"] = 65536.into();
+                drive["owner"] = node.into();
+                drive["lease_ttl_ms"] = (LEASE.as_millis() as u64).into();
                 config["http"]["drives"] = serde_json::json!([{
                     "id":"volume","token":{"env":TOKEN_ENV},
-                    "driver":{"kind":"splitstore","storage":{
-                        "metadata":{"kind":"sqlite","path":"./shared/meta.db"},
-                        "blocks":{"kind":"sqlite","path":"./shared/blocks.db"},
-                        "chunk_size_bytes":65536,"owner":node,
-                        "lease_ttl_ms":LEASE.as_millis() as u64}}
+                    "driver":{"kind":"splitstore","storage":drive}
                 }]);
             }
             for (key, value) in http.as_object().unwrap() {
@@ -107,6 +207,7 @@ impl Cluster {
             namespace,
             upstream,
             direct: Mutex::new(direct),
+            storage,
         }
     }
 
@@ -151,6 +252,25 @@ impl Cluster {
 
     /// `(owner label, fence)` of the drive's writer lease row in storage.
     fn lease(&self) -> (Option<String>, u64) {
+        if let Storage::Tidb {
+            runtime,
+            pool,
+            volume_key,
+        } = &self.storage
+        {
+            use mysql_async::prelude::Queryable;
+            return runtime.block_on(async {
+                let mut connection = pool.get_conn().await.unwrap();
+                connection
+                    .exec_first(
+                        "SELECT owner, fence FROM mount_rs_tidb_metadata WHERE volume_key=?",
+                        (volume_key,),
+                    )
+                    .await
+                    .unwrap()
+                    .expect("the drive's metadata row")
+            });
+        }
         let db = rusqlite::Connection::open_with_flags(
             self.path("shared/meta.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -163,6 +283,60 @@ impl Cluster {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap()
+    }
+
+    /// The id of the last schema change job TiDB ran, for any table. Every
+    /// open of a TiDB drive sends `IF NOT EXISTS` schema statements.
+    fn last_schema_job(&self) -> Option<u64> {
+        let Storage::Tidb { runtime, pool, .. } = &self.storage else {
+            return None;
+        };
+        use mysql_async::prelude::Queryable;
+        runtime.block_on(async {
+            let mut connection = pool.get_conn().await.unwrap();
+            connection
+                .query_first("SELECT MAX(JOB_ID) FROM information_schema.ddl_jobs")
+                .await
+                .unwrap()
+                .unwrap()
+        })
+    }
+
+    /// Make storage leave a release of the lease unanswered: take the write
+    /// lock of the SQLite file, or lock the lease row in TiDB. A holder
+    /// waits for either for longer than a release is given (SQLite's busy
+    /// timeout is 5 s, TiDB's lock wait 50 s).
+    fn block_release(&self) -> Blocked<'_> {
+        match &self.storage {
+            Storage::Sqlite => {
+                let blocker = rusqlite::Connection::open(self.path("shared/meta.db")).unwrap();
+                blocker.busy_timeout(Duration::from_secs(30)).unwrap();
+                blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+                Blocked::Sqlite(blocker)
+            }
+            Storage::Tidb {
+                runtime,
+                pool,
+                volume_key,
+            } => {
+                use mysql_async::prelude::Queryable;
+                let connection = runtime.block_on(async {
+                    let mut connection = pool.get_conn().await.unwrap();
+                    connection.query_drop("BEGIN PESSIMISTIC").await.unwrap();
+                    let locked: Option<u64> = connection
+                        .exec_first(
+                            "SELECT fence FROM mount_rs_tidb_metadata
+                             WHERE volume_key=? FOR UPDATE",
+                            (volume_key,),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(locked.is_some());
+                    connection
+                });
+                Blocked::Tidb(runtime, Some(connection))
+            }
+        }
     }
 }
 
@@ -271,6 +445,7 @@ fn owner_cut_off_from_redis(link: Link) {
     assert_eq!(c.put("before.bin", &before).unwrap().0, 200);
     assert_eq!(b.get("before.bin").unwrap(), (200, before.clone()));
 
+    let schema_job = cluster.last_schema_job();
     owner_link.set(link);
     let cut = Instant::now();
     // Long enough for the route to lapse, for the standby to try the lease
@@ -347,6 +522,15 @@ fn owner_cut_off_from_redis(link: Link) {
     }
     assert_eq!(a.states("route_unpublished").len(), 1, "{:?}", a.events());
     assert!(a.states("released").is_empty(), "{:?}", a.events());
+    if let Some(before) = schema_job {
+        // Tests that run beside this one open drives too, and none of them
+        // creates a table once the first has: a job here is a retry's.
+        let after = cluster.last_schema_job();
+        report!(
+            cluster,
+            "the standby's retries left TiDB's last schema job at {after:?} (it was {before})"
+        );
+    }
 
     owner_link.set(Link::Up);
     let healed = Instant::now();
@@ -361,7 +545,8 @@ fn owner_cut_off_from_redis(link: Link) {
             .is_ok_and(|(status, body)| status == 200 && body == acknowledged[&last])
     });
     let forwarding = healed.elapsed();
-    eprintln!(
+    report!(
+        cluster,
         "{link:?} partition of the owner for {:?}: {round} direct writes served (slowest \
          request {slowest:?}); route lapsed after {unrouted_at:?}; route back {republished:?} \
          and forwarding back {forwarding:?} after the link returned; the standby retried \
@@ -449,7 +634,8 @@ fn a_standby_waits_out_a_redis_outage_before_replacing_an_owner_killed_during_it
         b.assert_running("the standby after the outage");
         cluster.route() == Some(("b".into(), fence + 1))
     });
-    eprintln!(
+    report!(
+        cluster,
         "Redis down for {outage:?} with the owner killed: answers meanwhile {answers:?}; the \
          standby published {took:?} after Redis returned (documented bound {bound:?} plus \
          reconnecting and the open)"
@@ -521,7 +707,8 @@ fn fail_back_returns_the_drive_to_the_preferred_node_once_and_it_stays() {
         read_settled(&c, "before-0.bin");
         start.elapsed()
     };
-    eprintln!(
+    report!(
+        cluster,
         "fail-back: the drive returned to {preferred} {took:?} after it started (bound \
          {bound:?}); a retrying client was served again {unavailable:?} after the new route"
     );
@@ -710,7 +897,8 @@ fn writes_across_a_killed_owner_are_complete_or_absent_and_never_lost_once_ackno
         body.len(),
         versions.len()
     );
-    eprintln!(
+    report!(
+        cluster,
         "kill -9 of the owner under {} writes: new route after {took:?} (documented bound \
          {bound:?} plus the open); outcomes {summary:?}; of the unacknowledged writes \
          {absent} are absent and {complete} complete; the overwritten file holds version \
@@ -788,7 +976,8 @@ fn an_owner_paused_past_its_lease_gives_the_drive_up_when_it_resumes() {
         a.get("file.bin")
             .is_ok_and(|answer| answer == (200, new.clone()))
     });
-    eprintln!(
+    report!(
+        cluster,
         "owner paused for {:?}: the standby published {took:?} after the pause began (bound \
          {bound:?} plus the open); the resumed owner released {released:?} after resuming, \
          answering {answers:?} meanwhile",
@@ -835,19 +1024,14 @@ fn a_release_that_storage_does_not_answer_is_abandoned_and_the_lease_expires() {
     let before = content("before", 100_000);
     assert_eq!(c.put("before.bin", &before).unwrap().0, 200);
 
-    // Hold SQLite's write lock: the owner's release (a write) waits for it,
-    // for up to its 5 s busy timeout, which is longer than the limit above.
-    let mut blocker = rusqlite::Connection::open(cluster.path("shared/meta.db")).unwrap();
-    blocker.busy_timeout(Duration::from_secs(30)).unwrap();
-    let lock = blocker
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .unwrap();
+    // The owner's release (a write) waits for this lock for longer than the
+    // limit above.
+    let lock = cluster.block_release();
     a.signal(libc::SIGTERM);
     let asked = Instant::now();
     let status = a.wait_exit(Duration::from_secs(60));
     let exited = asked.elapsed();
     drop(lock);
-    drop(blocker);
     let stderr = a.stderr().join("\n");
     assert!(!status.success(), "exit {status}; {stderr}");
     assert!(
@@ -866,7 +1050,8 @@ fn a_release_that_storage_does_not_answer_is_abandoned_and_the_lease_expires() {
         b.assert_running("the standby");
         cluster.route() == Some(("b".into(), fence + 1))
     });
-    eprintln!(
+    report!(
+        cluster,
         "release blocked by storage: the owner exited {status} {exited:?} after SIGTERM \
          (limit {:?}); the standby published {:?} after that exit ({took:?} after the lock \
          was dropped)",
@@ -876,4 +1061,70 @@ fn a_release_that_storage_does_not_answer_is_abandoned_and_the_lease_expires() {
     assert_eq!(cluster.lease(), (Some("b".into()), fence + 1));
     assert_eq!(read_settled(&c, "before.bin"), (200, before));
     write_settled(&c, "after.bin", b"after");
+}
+
+/// An owner that is told to stop releases its lease, and the standby takes
+/// the drive without waiting for that lease to expire.
+#[test]
+#[ignore = "requires isolated MOUNT_RS_REDIS_TEST_URL"]
+fn a_stopped_owner_hands_the_drive_over_before_its_lease_would_expire() {
+    let cluster = Cluster::new(serde_json::json!({}), serde_json::json!({}));
+    let link = cluster.proxy();
+    let mut a = cluster.start("a", &link);
+    wait_states(&a, "published", 1, SLACK);
+    let fence = acquired_fence(&a);
+    let mut b = cluster.start("b", &link);
+    let c = cluster.start("c", &link);
+    let mut written = BTreeMap::new();
+    for index in 0..8 {
+        let name = format!("before-{index}.bin");
+        let body = content(&name, 150_000);
+        assert_eq!(c.put(&name, &body).unwrap().0, 200);
+        written.insert(name, body);
+    }
+
+    a.signal(libc::SIGTERM);
+    let asked = Instant::now();
+    let status = a.wait_exit(Duration::from_secs(60));
+    let exited = asked.elapsed();
+    assert!(status.success(), "exit {status}; {:?}", a.stderr());
+    assert_eq!(
+        a.states("released")[0]["reason"],
+        "shutdown",
+        "{:?}",
+        a.events()
+    );
+    // Documented: P + k x S + 5P + open after the release.
+    let bound = POLL * 6 + STAGGER;
+    let took = wait_until("the standby to take over", bound + SLACK, || {
+        b.assert_running("the standby");
+        cluster.route() == Some(("b".into(), fence + 1))
+    });
+    let handed_over = asked.elapsed();
+    assert!(
+        handed_over < LEASE,
+        "the hand-over took {handed_over:?}, as long as the {LEASE:?} lease"
+    );
+    let unavailable = {
+        read_settled(&c, "before-0.bin");
+        asked.elapsed()
+    };
+    report!(
+        cluster,
+        "clean stop of the owner: it exited {status} {exited:?} after SIGTERM; the standby \
+         published {took:?} after that exit (documented bound {bound:?} plus the open); a \
+         retrying client was served again {unavailable:?} after the SIGTERM",
+    );
+    assert_eq!(cluster.lease(), (Some("b".into()), fence + 1));
+    assert_eq!(acquired_fence(&b), fence + 1);
+    assert!(b.states("open_failed").is_empty(), "{:?}", b.events());
+    for (name, body) in &written {
+        assert_eq!(read_settled(&c, name), (200, body.clone()), "{name}");
+        assert_eq!(read_settled(&b, name), (200, body.clone()), "{name}");
+    }
+    write_settled(&c, "after.bin", b"after the hand-over");
+    assert_eq!(
+        read_settled(&b, "after.bin"),
+        (200, b"after the hand-over".to_vec())
+    );
 }

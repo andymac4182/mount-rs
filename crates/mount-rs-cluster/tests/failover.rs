@@ -528,6 +528,65 @@ async fn redis_three_candidates_never_serve_one_volume_twice_across_repeated_sto
 async fn opening_a_volume_its_owner_is_writing_to_only_finds_the_lease_held() {
     let dir = tempfile::tempdir().unwrap();
     let open = |node: &str| factory(dir.path().to_owned(), node.to_owned(), Arc::default());
+    let (attempts, written) = open_against_a_writing_owner(open, Duration::from_secs(5)).await;
+    assert!(written > 50, "the owner only wrote {written} files");
+    assert!(attempts > 20, "the standby only tried {attempts} times");
+}
+
+/// The same with the lease in TiDB, where a standby's attempt is a new
+/// connection, the schema statements, and a locking read of the row the
+/// owner publishes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a disposable TiDB at MOUNT_RS_TIDB_URL"]
+async fn opening_a_tidb_volume_its_owner_is_writing_to_only_finds_the_lease_held() {
+    let connection = std::env::var("MOUNT_RS_TIDB_URL").expect("TiDB fixture URL");
+    let dir = tempfile::tempdir().unwrap();
+    let volume_key = namespace("contention");
+    let open = |node: &str| -> Arc<dyn DriveFactory> {
+        let options = SplitOptions {
+            metadata: StoreConfig::Tidb {
+                connection: connection.clone(),
+                volume_key: volume_key.clone(),
+                durable: true,
+            },
+            blocks: StoreConfig::Local {
+                path: dir.path().to_owned(),
+            },
+            ..SplitOptions::memory(node.to_owned(), 4096)
+        };
+        // Long enough that a renewal on a loaded TiDB is never what fails.
+        let runtime = SplitRuntimeOptions {
+            lease_ttl: Duration::from_secs(60),
+            read_lease_cache_window: Duration::from_secs(15),
+            ..Default::default()
+        };
+        Arc::new(move || {
+            let options = options.clone();
+            async move {
+                Filesystem::split_with_runtime(options, runtime)
+                    .await
+                    .map(Arc::new)
+            }
+        })
+    };
+    let window = Duration::from_secs(30);
+    let (attempts, written) = open_against_a_writing_owner(open, window).await;
+    println!(
+        "TIDB_STANDBY_OPEN_CONTENTION attempts={attempts} owner_writes={written} \
+         window_seconds={}",
+        window.as_secs()
+    );
+    assert!(written > 50, "the owner only wrote {written} files");
+    assert!(attempts > 20, "the standby only tried {attempts} times");
+}
+
+/// Open a volume as `node-a` and keep writing to it while `node-b` tries
+/// to open it for `window`; then check the files as a successor. Returns
+/// how often the standby tried and how many files the owner wrote.
+async fn open_against_a_writing_owner(
+    open: impl Fn(&str) -> Arc<dyn DriveFactory>,
+    window: Duration,
+) -> (usize, u32) {
     let owner = open("node-a").open().await.unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let writer = {
@@ -549,7 +608,7 @@ async fn opening_a_volume_its_owner_is_writing_to_only_finds_the_lease_held() {
     let standby = open("node-b");
     let mut outcomes = std::collections::BTreeMap::<String, usize>::new();
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(5) {
+    while started.elapsed() < window {
         let outcome = match standby.open().await {
             Ok(_) => "opened".to_owned(),
             Err(error) if error.code == mount_rs_core::ErrorCode::Eagain => "EAGAIN".to_owned(),
@@ -559,7 +618,6 @@ async fn opening_a_volume_its_owner_is_writing_to_only_finds_the_lease_held() {
     }
     stop.store(true, Ordering::SeqCst);
     let written = writer.await.unwrap();
-    assert!(written > 50, "the owner only wrote {written} files");
     assert_eq!(
         outcomes.keys().collect::<Vec<_>>(),
         ["EAGAIN"],
@@ -579,4 +637,5 @@ async fn opening_a_volume_its_owner_is_writing_to_only_finds_the_lease_held() {
         assert!(read == vec![last as u8; 20_000], "file {}", last % 8);
     }
     successor.shutdown().await.unwrap();
+    (outcomes["EAGAIN"], written)
 }
