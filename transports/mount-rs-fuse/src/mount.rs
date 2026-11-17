@@ -1984,7 +1984,9 @@ async fn recv_fd_async(
     use std::os::fd::AsRawFd;
 
     set_nonblocking(socket.as_raw_fd())?;
-    let socket = tokio::io::unix::AsyncFd::new(socket)?;
+    // SAFETY: `socket` is an owned, open descriptor that the `AsyncFd` takes
+    // and keeps for its whole life; nothing else closes or replaces it.
+    let socket = unsafe { tokio::io::unix::AsyncFd::register(socket) }?;
     let receive = async {
         loop {
             let mut ready = socket.readable().await?;
