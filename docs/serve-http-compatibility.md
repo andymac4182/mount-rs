@@ -106,6 +106,7 @@ its contract and the test that holds the server to it.
 | The config keys `http.remote_sessions`, `http.sessions.*`, `http.forwarding.*` and `http.forwarding.failover.*`: name, type, default, range | Runbook "Cluster configuration reference" | Parser tests in `apps/mount-rs-cli/src/config.rs`; the example configs are validated by the binary in `the_cluster_example_configs_are_valid` |
 | The membership file format (`node`, `boot`, `address`, `tls_server_name`, `spki_sha256`) and reload on `SIGHUP` and on a timer | Runbook "Membership file" | `crates/mount-rs-cluster` membership tests; reload with real processes in `scripts/serve-http-cluster-e2e.py` |
 | The `drive_failover` stderr event and its `state` values | `serve-http-failover.md` | `scripts/serve-http-cluster-e2e.py`; `apps/mount-rs-cli/tests/failover.rs` |
+| What a client sees when two servers share no peer protocol version: the forwarding `503` with `x-mount-dispatch: not-dispatched` and `Retry-After: 1`, and nothing run. The `peer_protocol_refused` stderr event (`role`, `peer`, `drive`, `accepts` or `offered`, `speaks`, `suppressed`) | `serve-http-upgrade.md` "The peer protocol version" | `crates/mount-rs-cluster/tests/peer_protocol.rs`; the "a later owner's record" checks of `scripts/serve-http-cluster-e2e.py`; the event's fields in `apps/mount-rs-cli/src/http_sessions.rs` tests |
 
 The tolerance rules of the next section apply to this surface too, with
 one difference: the session routes reject unknown properties in a request
@@ -288,9 +289,9 @@ Not covered. Each may change in any release without a deprecation window:
 
 | Surface | Why it is not covered |
 | --- | --- |
-| The peer protocol: HTTP/3 between servers, the `x-mount-owner-route` and `x-mount-hop` headers, the timing headers, the peer certificate profile beyond what the runbook asks an operator to issue | Internal. No document specifies it and no test pins its wire form. |
-| The Redis key layout and record formats (routes, candidate sets) | Internal. Readable only by servers of the same release. |
-| **Running servers of different releases in one cluster** | Not tested. It follows from the two rows above that it cannot be promised. An upgrade is a full stop and start; see [`serve-http-upgrade.md`](serve-http-upgrade.md#clusters). |
+| The peer protocol: HTTP/3 between servers, the `x-mount-owner-route`, `x-mount-hop` and `x-mount-peer-protocol` headers, the timing headers, the peer certificate profile beyond what the runbook asks an operator to issue | Internal: no client or operator may depend on its wire form, and it may change in any release. It carries a version, and a server refuses a peer whose version it does not speak; see the next row. |
+| The Redis key layout and record formats (routes, candidate sets) | Internal. A route record states the protocol versions its owner accepts; a server that cannot speak any of them does not use the record. |
+| **Running servers of different releases in one cluster** | Defined by the peer protocol version, and tested for one pair of builds: the current commit with `main` at `031050cc` (CI job `cluster-mixed-release`). Not tested between published releases, so not promised for them yet. The policy is two adjacent releases for the length of a rolling upgrade, and a full stop otherwise; see [`serve-http-upgrade.md`](serve-http-upgrade.md#clusters). |
 | Sessions surviving a restart of their owner or a failover | Not provided. Sessions are lost, by design. |
 | Redis Sentinel, Redis Cluster, a replicated Redis failing over | Not supported or not tested; see the runbook. |
 | Token rotation without a restart on a server with cluster features | Not provided: `token.file` is refused there. |
