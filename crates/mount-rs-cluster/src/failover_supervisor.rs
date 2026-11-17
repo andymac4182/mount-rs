@@ -509,6 +509,7 @@ impl Worker {
             fence,
             address: self.options.address,
             tls_server_name: self.options.tls_server_name.clone(),
+            protocols: crate::PeerProtocolRange::SUPPORTED,
         };
         let registration = OwnedVolumeRegistration::new(
             filesystem.clone(),

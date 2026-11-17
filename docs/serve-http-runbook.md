@@ -1524,15 +1524,27 @@ What to know:
 
 ### Upgrading a cluster
 
-Running servers of different releases in one cluster is **not tested** and
-not supported: the server-to-server protocol and the Redis records carry no
-version negotiation. See
-[`serve-http-upgrade.md`](serve-http-upgrade.md#clusters). The supported
-procedure is a full stop of every server followed by a start of every
-server on the new release. With failover, a rolling restart *of one
-release* (for a config change or a host reboot) is supported and is what
-the clean-stop row above measures: stop one server with SIGTERM, wait for
-its drives to be `published` on another, start it again, move on.
+The server-to-server protocol has a version (currently 1), named on every
+forwarded request and in each drive's route record. A server refuses a peer
+whose version it does not speak instead of misreading it: the client gets
+`503` with `x-mount-dispatch: not-dispatched`, and the server writes a
+`peer_protocol_refused` line on stderr. See
+[`serve-http-upgrade.md`](serve-http-upgrade.md#clusters) for the rule, the
+rolling upgrade procedure and the full-stop procedure.
+
+What is tested is one pair of builds: the current commit in a cluster with
+`main` at `031050cc`, in both arrangements (CI job `cluster-mixed-release`:
+forwarding, sessions, membership reload and failover hand-off between the
+two). No pair of published releases has been run together. The policy is
+that two adjacent releases may share a cluster for the length of an
+upgrade, one server at a time; any other pair is upgraded by stopping every
+server and starting every server on the new release.
+
+With failover, a rolling restart *of one release* (for a config change or
+a host reboot) is supported and is what the clean-stop row above measures:
+stop one server with SIGTERM, wait for its drives to be `published` on
+another, start it again, move on. A rolling upgrade is the same with the
+binary replaced in between.
 
 ### Cluster failure modes
 
@@ -1547,6 +1559,7 @@ its drives to be `published` on another, start it again, move on.
 | Start fails, code 2, `config.http.forwarding...` | A key out of range, `failover` without `owner`, `memory` metadata with failover, a non-`splitstore` drive | Fix the config; `validate-config` reports the same. |
 | `membership reload refused` on stderr | The new file is invalid or would cut this server off | Fix the file. The old membership is still in force. |
 | An owner without failover exits with code 1 while running | It lost a drive's lease, or another server registered the drive | Find out why two servers claim the drive before restarting. |
+| `503` with `x-mount-dispatch: not-dispatched` for a drive whose owner is up, and `peer_protocol_refused` on stderr of the forwarding server or the owner | The two servers run releases that share no version of the server-to-server protocol | Finish the upgrade, or roll the newer server back. The line names the peer, what it accepts or offered, and what this server speaks. Nothing was run. |
 | `drive_failover` `lease_held` that never ends | The previous owner is alive and still holds the lease but cannot publish its route (cut off from Redis) | Fix that owner's Redis connection, or stop it so the lease is released. |
 
 ### Known limits
@@ -1567,8 +1580,11 @@ Stated plainly. None of these is hidden behind a feature flag.
 3. **One pin per server.** A key rotation needs that server restarted and
    leaves it cut off between the others' reload and its restart. A CA
    rotation needs every server restarted.
-4. **Mixed-release clusters are not tested.** An upgrade is a full stop and
-   start.
+4. **Mixed-release clusters are tested for one pair of builds only**: the
+   current commit with `main` at `031050cc`. A rolling upgrade between
+   published releases has not been run; rehearse it, or stop every server.
+   A peer of an incompatible protocol version is refused with `503`, not
+   misread.
 5. **Redis high availability is not tested.** One endpoint only; no
    Sentinel, no Redis Cluster. Behaviour across a replica promotion is
    inferred from the outage tests, not measured.

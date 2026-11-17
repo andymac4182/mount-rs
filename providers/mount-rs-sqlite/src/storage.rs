@@ -707,6 +707,17 @@ impl Database {
         .await
     }
 
+    /// `run_blocking` on the connection as it is. For opening a store, which
+    /// must not write to a namespace another process holds the writer lease
+    /// on: folding replaces the document and deletes the holder's rows.
+    fn run_blocking_unfolded<T: Send>(
+        &self,
+        work: impl FnOnce(&mut Connection) -> Result<T> + Send,
+    ) -> Result<T> {
+        self.owner
+            .run_blocking(move |state| work(&mut state.connection))?
+    }
+
     /// For tests: one blocking job with the namespace folded, given the
     /// connection directly. A panic in `work` poisons the database.
     #[cfg(test)]
@@ -962,6 +973,9 @@ const VERSION_SCHEMA_NAME: &str = "mount-rs-versioning";
 // Keep version 1 until the first such record commits so older readers can reopen.
 const VERSION_SCHEMA_BASE_VERSION: i64 = 1;
 const VERSION_SCHEMA_VERSION: i64 = 2;
+/// How far the first trigger of `METADATA_SCHEMA` raises the versioning
+/// schema version while a namespace change row exists.
+const NAMESPACE_CHANGES_VERSION_RAISE: i64 = 3;
 
 type MetadataModeRow = (
     Option<String>,
@@ -1218,20 +1232,27 @@ fn initialize_block_schema_on(database: &Database, connection: &mut Connection) 
 }
 
 fn initialize_version_schema(database: &Database) -> Result<()> {
-    database.run_blocking(|connection| initialize_version_schema_on(database, connection))
+    database.run_blocking_unfolded(|connection| initialize_version_schema_on(database, connection))
 }
 
 fn initialize_version_schema_on(database: &Database, connection: &mut Connection) -> Result<()> {
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(backend_error)?;
-    if database.namespace_changes {
-        // The caller folded before this transaction began, and a live
-        // writer may have published a change row since. A row raises the
-        // schema version past what the check below accepts, so fold again
-        // now that nothing else can write.
-        fold_namespace_changes(&tx)?;
-    }
+    // Opening does not fold: the process opening may be a standby, and the
+    // rows belong to whoever holds the writer lease. While a row exists the
+    // stored schema version is raised by `NAMESPACE_CHANGES_VERSION_RAISE`
+    // (see `METADATA_SCHEMA`), so the checks below are made on the version
+    // without that, and the raise is kept when the version is written back.
+    // Nothing else can write until this transaction ends.
+    let namespace_changes: bool = database.namespace_changes
+        && tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM mount_rs_namespace_changes)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(backend_error)?;
 
     let schema_columns = table_columns(&tx, SCHEMA_VERSION_TABLE)?;
     if let Some(columns) = schema_columns {
@@ -1259,6 +1280,14 @@ fn initialize_version_schema_on(database: &Database, connection: &mut Connection
         )
         .optional()
         .map_err(backend_error)?;
+    let raised_version = stored_version;
+    let stored_version = stored_version.map(|version| {
+        if namespace_changes && version > VERSION_SCHEMA_VERSION {
+            version - NAMESPACE_CHANGES_VERSION_RAISE
+        } else {
+            version
+        }
+    });
     if stored_version.is_some_and(|version| !(0..=VERSION_SCHEMA_VERSION).contains(&version)) {
         return Err(incompatible_schema(
             "unsupported mount-rs versioning schema version",
@@ -1342,6 +1371,12 @@ fn initialize_version_schema_on(database: &Database, connection: &mut Connection
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
         )
         .map_err(backend_error)?;
+    if namespace_changes && mode.is_some() {
+        // Only a lease holder adds rows, and no write mode has a lease.
+        return Err(incompatible_schema(
+            "namespace changes do not belong to the stored namespace",
+        ));
+    }
     match mode.as_deref() {
         None if backing.is_none() && fence != CONCURRENT_FENCE_SENTINEL => {}
         Some(CONCURRENT_WRITE_MODE)
@@ -1627,14 +1662,22 @@ fn initialize_version_schema_on(database: &Database, connection: &mut Connection
         VERSION_SCHEMA_VERSION
     } else {
         VERSION_SCHEMA_BASE_VERSION
+    } + if namespace_changes {
+        NAMESPACE_CHANGES_VERSION_RAISE
+    } else {
+        0
     };
-    tx.execute(
-        "INSERT INTO mount_rs_schema_versions(schema_name, schema_version)
-         VALUES (?1, ?2)
-         ON CONFLICT(schema_name) DO UPDATE SET schema_version=excluded.schema_version",
-        params![VERSION_SCHEMA_NAME, schema_version],
-    )
-    .map_err(backend_error)?;
+    // Written only when it changes, so that opening a store that is already
+    // current does not modify the file.
+    if raised_version != Some(schema_version) {
+        tx.execute(
+            "INSERT INTO mount_rs_schema_versions(schema_name, schema_version)
+             VALUES (?1, ?2)
+             ON CONFLICT(schema_name) DO UPDATE SET schema_version=excluded.schema_version",
+            params![VERSION_SCHEMA_NAME, schema_version],
+        )
+        .map_err(backend_error)?;
+    }
     tx.commit().map_err(backend_error)
 }
 
@@ -1749,7 +1792,7 @@ fn incompatible_schema(message: impl Into<String>) -> FsError {
 }
 
 fn load_volume_id(database: &Database) -> Result<VolumeId> {
-    let value: String = database.run_blocking(|connection| {
+    let value: String = database.run_blocking_unfolded(|connection| {
         connection
             .query_row(
                 "SELECT volume_id FROM mount_rs_metadata WHERE id=1",
@@ -3291,8 +3334,11 @@ impl MetadataStore for SqliteMetadataStore {
               AND fence<9223372036854775807 AND ?2<=9223372036854775807-{NOW}"
         );
         let owner = owner.to_owned();
+        let namespace_changes = self.0.namespace_changes;
+        // Not folded first: an attempt that finds the lease held must leave
+        // the holder's rows alone.
         self.0
-            .run(move |connection| {
+            .run_unfolded(move |connection, published| {
                 let owner = owner.as_str();
                 let tx = connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3304,6 +3350,13 @@ impl MetadataStore for SqliteMetadataStore {
                     return Err(backend_error(
                         "SQLite writer acquisition changed multiple rows",
                     ));
+                }
+                if changed == 1 && namespace_changes {
+                    // The lease is this caller's once the transaction
+                    // commits, and it commits with the rows folded or not at
+                    // all: the new writer starts from a plain document.
+                    *published = None;
+                    fold_namespace_changes(&tx)?;
                 }
                 let lease = if changed == 1 {
                     let (fence, expires_at_ms): (u64, u64) = tx
@@ -9257,12 +9310,20 @@ mod tests {
         };
         same(run(store.load()).unwrap());
         let reader = SqliteMetadataStore::open(&path).unwrap();
-        // Opening folded the rows away: plain document, old schema version.
-        assert_eq!((change_rows(&reader), versioning_schema(&reader)), (0, 1));
-        assert_eq!(stored_document(&reader).nodes, third.nodes);
+        // Opening leaves the rows to the lease holder, and reads through
+        // them.
+        assert_eq!(change_rows(&reader), 2);
+        assert!(versioning_schema(&reader) > VERSION_SCHEMA_VERSION);
+        assert_eq!(stored_document(&reader).nodes, first.nodes);
         same(run(reader.load()).unwrap());
         assert!(run(reader.load_if_changed(3)).unwrap().is_none());
         same(run(reader.load_if_changed(2)).unwrap().unwrap());
+        // An operation that reads the namespace column folds them away:
+        // plain document, old schema version.
+        assert!(run(reader.version_head()).unwrap().is_none());
+        assert_eq!((change_rows(&reader), versioning_schema(&reader)), (0, 1));
+        assert_eq!(stored_document(&reader).nodes, third.nodes);
+        same(run(reader.load()).unwrap());
 
         // The writer's rows were folded away underneath it, so what it knows
         // of them no longer holds: it stores a whole document, then rows.
@@ -9299,6 +9360,124 @@ mod tests {
         assert_eq!(loaded.revision, 7);
         assert_eq!(loaded.namespace.unwrap().nodes, sixth.nodes);
         drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// What another connection can see of the namespace as stored: the
+    /// document, the rows, the schema version and the lease.
+    fn stored_state(store: &SqliteMetadataStore) -> (String, Vec<(i64, String)>, i64, String) {
+        store.0.with_unfolded(|connection| {
+            let (document, lease): (String, String) = connection
+                .query_row(
+                    "SELECT namespace, owner || '/' || fence || '/' || expires
+                     FROM mount_rs_metadata WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            let rows = connection
+                .prepare("SELECT revision, changes FROM mount_rs_namespace_changes ORDER BY 1")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let version = connection
+                .query_row(
+                    "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=?1",
+                    params![VERSION_SCHEMA_NAME],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (document, rows, version, lease)
+        })
+    }
+
+    /// SQLite's count of commits by other connections that changed the
+    /// database file, as this store's connection sees it.
+    fn data_version(store: &SqliteMetadataStore) -> i64 {
+        store
+            .0
+            .with_unfolded(|connection| {
+                connection.query_row("PRAGMA data_version", [], |row| row.get(0))
+            })
+            .unwrap()
+    }
+
+    /// A standby opens the store and tries the lease while the owner holds
+    /// it. Only the holder writes the namespace, so the attempt must not
+    /// fold the owner's change rows into the document, or write at all.
+    #[test]
+    fn an_open_that_finds_the_lease_held_leaves_the_change_rows_untouched() {
+        let path = super::super::tests::unique_database_path();
+        let owner = SqliteMetadataStore::open(&path).unwrap();
+        let lease = run(owner.acquire_writer("owner", Duration::from_secs(60))).unwrap();
+        let first = wide_namespace(64);
+        run(owner.publish(0, &lease, first.clone())).unwrap();
+        let mut second = first.clone();
+        second.nodes.get_mut(&(first.root + 3)).unwrap().stats.size = 77;
+        run(owner.publish(1, &lease, second.clone())).unwrap();
+        let mut third = second.clone();
+        third.nodes.get_mut(&(first.root + 4)).unwrap().stats.size = 9;
+        run(owner.publish(2, &lease, third.clone())).unwrap();
+        let before = stored_state(&owner);
+        assert_eq!(before.1.len(), 2);
+        assert!(before.2 > VERSION_SCHEMA_VERSION);
+        let commits = data_version(&owner);
+
+        for _ in 0..3 {
+            let standby = SqliteMetadataStore::open(&path).unwrap();
+            assert_eq!(standby.volume_id(), owner.volume_id());
+            assert!(
+                run(standby.acquire_writer("standby", Duration::from_secs(60)))
+                    .unwrap_err()
+                    .is(ErrorCode::Eagain)
+            );
+            // It reads the current namespace through the rows.
+            let loaded = run(standby.load()).unwrap();
+            assert_eq!(loaded.revision, 3);
+            assert_eq!(loaded.namespace.unwrap().nodes, third.nodes);
+        }
+        assert_eq!(stored_state(&owner), before);
+        assert_eq!(
+            data_version(&owner),
+            commits,
+            "a refused open committed a change to the metadata file"
+        );
+
+        // The owner's next publication is one more row, not the whole
+        // document again, which it would be had the rows been folded away.
+        let mut fourth = third.clone();
+        fourth.nodes.get_mut(&(first.root + 5)).unwrap().stats.size = 5;
+        assert_eq!(run(owner.publish(3, &lease, fourth.clone())).unwrap(), 4);
+        assert_eq!(change_rows(&owner), 3);
+        assert_eq!(stored_document(&owner).nodes, first.nodes);
+
+        // Taking the lease is what folds: the successor starts from a plain
+        // document at the owner's last revision and adds rows of its own.
+        run(owner.release_writer(&lease)).unwrap();
+        let successor = SqliteMetadataStore::open(&path).unwrap();
+        assert_eq!(change_rows(&successor), 3);
+        let taken = run(successor.acquire_writer("standby", Duration::from_secs(60))).unwrap();
+        assert_eq!(taken.fence, lease.fence + 1);
+        assert_eq!(
+            (change_rows(&successor), versioning_schema(&successor)),
+            (0, 1)
+        );
+        assert_eq!(stored_document(&successor).nodes, fourth.nodes);
+        let loaded = run(successor.load()).unwrap();
+        assert_eq!(loaded.revision, 4);
+        assert_eq!(loaded.namespace.unwrap().nodes, fourth.nodes);
+        let mut fifth = fourth.clone();
+        fifth.nodes.get_mut(&(first.root + 6)).unwrap().stats.size = 6;
+        assert_eq!(run(successor.publish(4, &taken, fifth.clone())).unwrap(), 5);
+        // The old owner's lease is fenced off as before.
+        assert!(
+            run(owner.publish(4, &lease, fifth.clone()))
+                .unwrap_err()
+                .is(ErrorCode::Estale)
+        );
+        drop((owner, successor));
         std::fs::remove_file(path).unwrap();
     }
 

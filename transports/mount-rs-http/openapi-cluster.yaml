@@ -184,6 +184,9 @@ x-forwarding-responses:
     - 503, `not-dispatched`: no server owns the drive just now, the route
       to its owner could not be read, or the owner refused the request
       before running it. Nothing was executed. Retry; `Retry-After: 1`.
+      This is also the answer while this server and the drive's owner run
+      releases that share no version of the server-to-server protocol,
+      which lasts until one of them is upgraded.
       A drive id that no server is configured with gets this response too,
       not the 401 of a single server.
     - 502, `unknown`: the request was given to the owner and the response

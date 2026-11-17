@@ -988,8 +988,14 @@ curl -H 'Authorization: Bearer demo-memory' \
         and Redis Cluster are not supported. The session routes, the
         cluster configuration and what a client sees from a cluster are
         covered by the compatibility policy and checked by tests; the
-        server-to-server protocol is internal and clusters of mixed releases
-        are untested, so a cluster is upgraded by stopping every server. The local demo does not prove
+        server-to-server protocol is internal and carries a version: a
+        server refuses a peer whose version it does not speak, with a{' '}
+        <code>503</code> and nothing run. Clusters of mixed releases are
+        tested for one pair of builds only, the current commit with{' '}
+        <code>main</code> at <code>031050cc</code>; no pair of published
+        releases has been run together, so a rolling upgrade between
+        releases should be rehearsed, or the cluster upgraded by stopping
+        every server. The local demo does not prove
         internet-facing deployment security.
       </>
     ),
@@ -1008,7 +1014,10 @@ curl -H 'Authorization: Bearer demo-memory' \
         <code>http-observability</code> runs the all-features health,
         readiness and OTLP checks. The workspace test job on macOS arm64
         passed on the run’s second attempt, after no hosted runner picked it
-        up on the first. Not covered: clusters of mixed releases; Redis
+        up on the first. That run predates the <code>cluster-mixed-release</code>{' '}
+        job, which runs the cluster test with one server on the current
+        commit and one on <code>031050cc</code>. Not covered: clusters of mixed releases built from
+        two published releases; Redis
         Sentinel and Redis Cluster; and any deployed collector, dashboard or
         pager.{' '}
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,

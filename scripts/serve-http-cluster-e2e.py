@@ -13,6 +13,15 @@ candidates for one drive on shared SQLite storage: its owner is killed, then
 stopped cleanly, and the drive must move each time with no acknowledged
 write lost and never two holders of its writer lease. Needs `openssl` for
 the test PKI. Prints PASS/FAIL per check and exits 1 on any FAIL.
+
+A node can run another build: MOUNT_RS_E2E_BINARY_A, _B and _C name the
+binary of the nodes called a, b and c in every cluster above, and a node
+without one runs <binary>. With one node on an earlier release, the same
+checks then prove that the two releases forward to each other, carry each
+other's sessions and hand a drive over in a failover. Every node of the
+first cluster is also shown a route record whose owner accepts only later
+versions of the server-to-server protocol, which it must refuse without
+sending the request.
 """
 import concurrent.futures as cf
 import hashlib
@@ -148,10 +157,16 @@ def start_cluster(binary, work, nodes, sessions=True, extra_http=None, ingress=(
     return started
 
 
+def node_binary(n, binary):
+    """The binary node `n` runs: its own from the environment, or `binary`."""
+    return os.environ.get(f"MOUNT_RS_E2E_BINARY_{n.upper()}") or binary
+
+
 def read_events(stream, events):
-    """Keep the node's `drive_failover` records; drain everything else."""
+    """Keep the node's `drive_failover` and `peer_protocol_refused` records;
+    drain everything else."""
     for line in stream:
-        if '"drive_failover"' in line:
+        if '"drive_failover"' in line or '"peer_protocol_refused"' in line:
             try:
                 events.append((time.time(), json.loads(line)))
             except ValueError:
@@ -161,7 +176,7 @@ def read_events(stream, events):
 def launch(binary, work, n, config=None):
     """Start node `n` from the config `start_cluster` wrote for it."""
     path = os.path.join(work, config or f"{n}.json")
-    proc = subprocess.Popen([binary, "serve-http", "--config", path], text=True,
+    proc = subprocess.Popen([node_binary(n, binary), "serve-http", "--config", path], text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env=dict(os.environ, CLUSTER_TOKEN=TOKEN))
     line = proc.stdout.readline()
@@ -482,26 +497,87 @@ def membership_reload():
               codes)
 
 
-def redis_get(key):
-    """GET `key` from the test Redis, or None if the URL needs more than a
-    plain connection (the route is then checked through the lease only)."""
+def redis_command(*args):
+    """The reply of one command to the test Redis: a string for a bulk
+    reply ("" for nil), the reply line otherwise. None if the URL needs more
+    than a plain connection."""
     url = urllib.parse.urlparse(os.environ["MOUNT_RS_REDIS_URL"])
     if url.scheme != "redis" or url.username or url.password:
         return None
+
+    def encode(*words):
+        words = [w if isinstance(w, bytes) else str(w).encode() for w in words]
+        return b"*%d\r\n" % len(words) + b"".join(b"$%d\r\n%s\r\n" % (len(w), w) for w in words)
+
     with socket.create_connection((url.hostname, url.port or 6379), timeout=10) as conn:
         database = url.path.strip("/")
         command = b""
         if database and database != "0":
-            command += b"*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n" % (len(database), database.encode())
-        command += b"*2\r\n$3\r\nGET\r\n$%d\r\n%s\r\n" % (len(key), key.encode())
+            command += encode("SELECT", database)
+        command += encode(*args)
         conn.sendall(command)
         reader = conn.makefile("rb")
         if database and database != "0":
             reader.readline()
         header = reader.readline()
-        if not header.startswith(b"$") or header.startswith(b"$-1"):
+        if header.startswith(b"$-1"):
             return ""
+        if not header.startswith(b"$"):
+            return header.decode().strip()
         return reader.read(int(header[1:]) + 2)[:-2].decode()
+
+
+def redis_get(key):
+    """GET `key` from the test Redis, "" if there is none, or None if this
+    Redis cannot be read from here (the route is then checked through the
+    lease only)."""
+    reply = redis_command("GET", key)
+    return reply if reply is None or not reply.startswith(("+", "-", ":")) else ""
+
+
+def protocol_refusal(namespace):
+    """A route record whose owner accepts only later protocol versions.
+
+    The owner named is the other, running node, so a request that was sent
+    would be answered by it. A node of this build must not send it: its
+    client gets the cluster's 503 and its log says why. A node of an
+    earlier release cannot read the record at all and answers the same."""
+    with open(os.path.join(WORK, "peers.json")) as f:
+        peers = {p["node"]: p for p in json.load(f)}
+    for via, owner in (("a", "b"), ("b", "a")):
+        drive = f"future-{via}"
+        peer = peers[owner]
+        record = json.dumps({
+            "volume": drive, "node": owner, "boot": peer["boot"],
+            "registration": "from-a-later-release", "fence": 1, "address": peer["address"],
+            "tls_server_name": peer["tls_server_name"],
+            "protocols": {"min": 2, "max": 3}}, separators=(",", ":"))
+        reply = redis_command("SET", f"mount-rs:{namespace}:route:{drive}",
+                              f"{1:020}|{record}", "PX", 60000)
+        if reply is None:
+            print("INFO protocol refusal not checked: this Redis cannot be written from here",
+                  flush=True)
+            return
+        current = node_binary(via, BIN) == BIN
+        tag = f"a later owner's record through {via} ({'this build' if current else 'earlier release'})"
+        t = time.time()
+        s, h, d = req(via, "PUT", fs(drive, "/x"), b"never sent", timeout=15)
+        check(f"{tag}: refused with 503, not-dispatched and Retry-After",
+              reply == "+OK" and s == 503 and h.get("x-mount-dispatch") == "not-dispatched"
+              and h.get("retry-after") == "1" and time.time() - t < 5,
+              (reply, s, h.get("x-mount-dispatch"), d[:80]))
+        if current:
+            deadline = time.time() + 5
+            logged = []
+            while not logged and time.time() < deadline:
+                logged = [e for _, e in list(nodes[via].events)
+                          if e.get("event") == "peer_protocol_refused" and e.get("drive") == drive]
+                time.sleep(0.05)
+            check(f"{tag}: the node logs which owner and which versions",
+                  [(e.get("role"), e.get("peer"), e.get("accepts"), e.get("speaks"))
+                   for e in logged[:1]] == [("forwarder", owner, "2-3", "1-1")], logged[:2])
+        s, _, _ = req(via, "GET", fs(owner, "/rr"))
+        check(f"{tag}: the node still forwards to that owner's own drive", s == 200, s)
 
 
 def failover():
@@ -737,7 +813,8 @@ def failover():
         del static["http"]["forwarding"]["failover"]
         with open(os.path.join(work, "static.json"), "w") as f:
             json.dump(static, f)
-        refused = subprocess.run([BIN, "serve-http", "--config", os.path.join(work, "static.json")],
+        refused = subprocess.run([node_binary(standby, BIN), "serve-http", "--config",
+                                  os.path.join(work, "static.json")],
                                  text=True, capture_output=True, timeout=60,
                                  env=dict(os.environ, CLUSTER_TOKEN=TOKEN))
         check("an owner without failover still fails at startup while the lease is held",
@@ -753,8 +830,12 @@ def failover():
 
 def main():
     global nodes
-    nodes = start_cluster(BIN, WORK, ["a", "b"], extra_http={"max_request_bytes": CAP,
-                                                                  "max_upload_bytes": UPLOAD})
+    for n in "abc":
+        if node_binary(n, BIN) != BIN:
+            print(f"INFO node {n} runs {node_binary(n, BIN)}; the others run {BIN}", flush=True)
+    namespace = "fwd-" + uuid.uuid4().hex[:12]
+    nodes = start_cluster(BIN, WORK, ["a", "b"], namespace=namespace,
+                          extra_http={"max_request_bytes": CAP, "max_upload_bytes": UPLOAD})
     try:
         every_route()
         conditional()
@@ -762,6 +843,7 @@ def main():
         big_and_limits()
         concurrency()
         sessions()
+        protocol_refusal(namespace)
         owner_restart()
         owner_connection_limit()
         membership_reload()

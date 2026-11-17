@@ -4,8 +4,9 @@ How to replace the `mount-rs` binary under a running `serve-http` service,
 how to go back, and when going back is not safe.
 
 Scope: the v1 launch configuration, which is one process per drive set with
-`remote_sessions: false` and no `forwarding` block. Clusters are covered only
-by [Clusters](#clusters), which says what is not supported.
+`remote_sessions: false` and no `forwarding` block. Clusters are covered by
+[Clusters](#clusters): the rule for servers of different releases in one
+cluster, what a test proves about it, and the rolling upgrade.
 
 Related documents:
 
@@ -24,7 +25,7 @@ Related documents:
 | Configuration reload without a restart | **Not implemented.** There is no reload signal. Every config and token change is a restart. |
 | Rollback to the previous binary | Supported only under the conditions in [When a rollback is unsafe](#when-a-rollback-is-unsafe). **Not tested**: no test in the repository starts one release against data written by another. |
 | Skipping releases (N to N+2) | **Not tested.** Nothing in the code forbids it: schema steps are idempotent and applied at every open. Rehearse it. |
-| Mixed-release clusters | **Not tested, not supported.** See [Clusters](#clusters). |
+| A cluster with servers of two releases, and a rolling upgrade of a cluster | Defined by a protocol version, and **tested for one pair of builds**: the current commit with `main` at `031050cc`. Not tested between published releases. See [Clusters](#clusters). |
 
 ## Why an upgrade is a restart
 
@@ -345,19 +346,141 @@ rollback of that pair of releases works.
 
 ## Clusters
 
-The following is **not supported and not tested**:
+### The peer protocol version
 
-- Servers of different releases in one forwarding cluster. The
-  client-facing session routes and forwarding responses have a contract
-  (`openapi-cluster.yaml`), but the protocol between servers and the Redis
-  record formats are internal, are not versioned and carry no compatibility
-  promise between releases; see
-  [Cluster features](serve-http-compatibility.md#cluster-features). No test
-  runs two releases together.
-- A rolling upgrade across releases, for the same reason.
+Servers of a forwarding cluster read two things that another server wrote:
+a forwarded request and its response, and the drive's route record in
+Redis. Together these are the peer protocol, and it has a version: a
+single number, currently **1**. Nothing else passes between servers. A
+failover hand-off goes through the storage lease and a Redis set of
+candidate names, and is covered by the same test.
 
-An upgrade of a cluster is therefore a full stop of every server followed
-by a start of every server on the new release:
+- An owner publishes the range of versions it accepts in its route record
+  (`protocols`, with `min` and `max`). A record without the field means
+  version 1 only, which is what a version 1 owner writes, so the record is
+  unchanged from earlier builds.
+- A forwarding server picks the highest version that it and the owner both
+  speak and names it on every forwarded request, in the
+  `x-mount-peer-protocol` header. A request without the header is
+  version 1.
+- A build speaks the versions from `MIN_PEER_PROTOCOL_VERSION` to
+  `PEER_PROTOCOL_VERSION` (`crates/mount-rs-cluster/src/peer_protocol.rs`).
+  Both are 1 today.
+
+**A server never runs or sends a request in a version it does not speak:**
+
+| Case | What the server does | What the client sees | What is logged |
+| --- | --- | --- | --- |
+| A forwarding server reads a route record whose owner accepts no version it speaks | Sends nothing to the owner | `503`, `x-mount-dispatch: not-dispatched`, `Retry-After: 1`, the standard cluster error body | On the forwarding server: `{"event":"peer_protocol_refused","role":"forwarder","drive":...,"peer":...,"accepts":"2-3","speaks":"1-1",...}` |
+| An owner receives a forwarded request in a version it does not speak, or with a version header it cannot read | Answers the peer `426` with `x-mount-dispatch: not-dispatched` before reading anything else. The request is not run. | The same `503` from the forwarding server | On the owner: `"role":"owner"` with the peer's name and the version `offered`. On the forwarding server: `"role":"forwarder"` |
+| A build from before the marker (see below) reads a record that carries `protocols` | Rejects the record as invalid and sends nothing | The same `503` | Nothing: those builds have no such event |
+
+The `503` lasts until the two servers run compatible releases or the drive
+moves to an owner the forwarding server can speak to. `peer_protocol_refused`
+lines are limited to one every 5 seconds per process; `suppressed` counts
+the refusals since the last line. The owner's own clients, and requests that
+reach an owner directly, are not affected: the version applies to the
+server-to-server hop only.
+
+Tested in `crates/mount-rs-cluster/tests/peer_protocol.rs` (a real owner
+and forwarder over HTTP/3: versions absent and `1` are served; `2`, `0`,
+unreadable and repeated headers are refused and the write does not happen;
+a record accepting only later versions is not dialled; a record accepting
+1 and a later version is sent version 1), in unit tests of the record and
+header forms, and with real processes by the "a later owner's record"
+checks of `scripts/serve-http-cluster-e2e.py`.
+
+### What is tested between builds
+
+CI job `cluster-mixed-release` builds two binaries, the commit under test
+and a pinned **baseline**, and runs `scripts/serve-http-cluster-e2e.py`
+with the two in one cluster, twice: baseline as node a with the current
+build as nodes b and c, then the reverse. The baseline is `main` at
+`031050cc78032e4827b06264fd771344d1f6967a` (the merge of #148). It predates
+the version marker, so it sends no version header and writes no
+`protocols` field: this is the "no version means version 1" case.
+
+Each run covers, between a server of one build and a server of the other:
+
+- file requests forwarded in both directions (create, read, range, `HEAD`,
+  `stat`, delete, wrong token, conditional requests, 200 alternating
+  writes, 64 parallel writes and 256 parallel reads, an upload at the
+  request cap and a streamed one above it, the `413` over the upload
+  limit);
+- a session created through the server that does not own the drive, with
+  positional reads and writes on one handle through both servers (each
+  run does this in one direction; the two runs cover both);
+- an owner restart; an owner serving more than 16 peer connections; a
+  membership reload that adds and removes an ingress;
+- failover of one drive on shared SQLite storage between a candidate of
+  each build: after `kill -9` and after a clean stop, with writers
+  running, no acknowledged write lost and one lease holder at a time. The
+  drive is opened by one build, then the other, then the first again;
+- the baseline answering `503` for a record with a `protocols` field.
+
+What this does **not** prove:
+
+- Anything about a **published release**. The baseline is a commit on
+  `main`, and no pair of releases has been run together.
+- Any pair other than the one in the job, including builds older than the
+  baseline.
+- A version change. Only version 1 exists, so the test proves that the
+  marker is compatible with builds that lack it, and that refusal works;
+  it has not exercised two builds that speak different versions and still
+  interoperate.
+- Storage other than SQLite metadata with SQLite blocks. The failover
+  tests on TiDB (`tidb-rustfs`) run one build.
+- Storage format compatibility in general. In a mixed cluster with
+  failover a drive can be opened by the new release and then by the old
+  one again, which is the rollback case of
+  [When a rollback is unsafe](#when-a-rollback-is-unsafe). The mixed test
+  does this on SQLite for this pair only.
+
+### Policy
+
+- A cluster may run servers of **two adjacent releases** for the length of
+  an upgrade. This is the intent from here on, and it is enforced by
+  moving the baseline of `cluster-mixed-release` to the previous release
+  whenever a release is cut. Until a release pair has passed that job,
+  treat a rolling upgrade between published releases as untested and
+  rehearse it.
+- A release that changes what servers send each other raises the protocol
+  version and keeps speaking the previous one for one release, so the
+  adjacent pair still shares a version.
+- Releases that are not adjacent, and any pair that does not share a
+  version, are upgraded by a full stop (below). A server refuses such a
+  peer as in the table above; it does not misread it.
+
+### Rolling upgrade
+
+For two builds that the mixed-release job has passed for.
+
+1. Check that neither release's notes forbid opening the other's storage
+   (the storage rules of this document apply while the cluster is mixed,
+   in both directions).
+2. Run the new binary's `validate-config` on every server's config.
+3. One server at a time:
+   1. Stop it with SIGTERM. With `failover`, wait until each of its drives
+      is `published` by another candidate (`drive_failover` lines; one to
+      two seconds after a clean stop). Without `failover`, its drives
+      answer `503` until step 3.3.
+   2. Replace the binary.
+   3. Start it and wait for `/readyz`.
+   4. Send one request per drive through it and through another server.
+      Look for `peer_protocol_refused` on stderr of every server: there
+      must be none.
+4. Do not adopt a new optional config key until every server runs the new
+   release.
+
+Sessions and open handles on a drive that moves are lost, as in any
+failover. Requests in flight on a stopping owner are drained; forwarded
+requests that arrive while it stops are answered `503` or `502` as
+described in [Placement and failover](serve-http-runbook.md#placement-and-failover).
+A rollback is the same procedure with the old binary.
+
+### Full stop
+
+For any pair of releases the rolling upgrade does not apply to:
 
 1. Run the new binary's `validate-config` on every server's config.
 2. Stop every server with SIGTERM. Each withdraws its routes, closes its
@@ -370,8 +493,10 @@ The API is unavailable between steps 2 and 3, and remote mount clients lose
 their sessions. A rollback is the same procedure with the old binary, under
 the storage rules in the rest of this document.
 
-What is supported and tested within **one** release is a rolling restart
-of failover candidates (for a config change or a host reboot): a clean stop
+### Rolling restart of one release
+
+A rolling restart of failover candidates on one release (for a config
+change or a host reboot) is supported and tested: a clean stop
 hands each drive to another candidate in one to two seconds
 (`scripts/serve-http-cluster-e2e.py`; see
 [Placement and failover](serve-http-runbook.md#placement-and-failover)).
