@@ -224,16 +224,21 @@ The change log keeps the existing single-document form as the form at rest:
   document's revision: updating it too rewrites the row with the document in
   it, which is what the first version of this did and why it still took
   2.6 ms at 8000 files.
-- `publish`, `load` and `load_if_changed` understand rows. Every other
-  operation on the store folds first and then sees the plain document, so
-  delegated mode, bound mode, inode mode, versions and the migrations between
-  them are unchanged. Acquiring the writer lease folds, so only the lease
-  holder ever adds rows.
+- `publish`, `load` and `load_if_changed` understand rows, and opening the
+  store and an attempt on the writer lease that finds it held leave them
+  alone. Every other operation on the store folds first and then sees the
+  plain document, so delegated mode, bound mode, inode mode, versions and
+  the migrations between them are unchanged. Acquiring the writer lease
+  folds in the transaction that takes it, so only the lease holder ever adds
+  rows and a new holder starts without any.
 - While rows exist, a trigger keeps the versioning schema version above what
   a build without this change accepts, so such a build refuses the database
-  instead of reading a document that is behind. A fold lowers it again, and this build folds whenever
-  it opens the database; a database in the folded form, which includes every
-  small volume, opens in older builds as before. A second trigger aborts any
+  instead of reading a document that is behind. A fold lowers it again; a
+  database in the folded form, which includes every small volume, opens in
+  older builds as before. This build no longer folds on opening the database
+  (a standby opening a store its owner is writing to would rewrite the
+  owner's document), so a database last written by a holder that left rows
+  keeps them, and the raised version, until the lease is next acquired. A second trigger aborts any
   update of the document while rows exist, which is what stops an older
   build that already had the database open from publishing over them.
 - Rows that do not count up from the document's revision are refused.
