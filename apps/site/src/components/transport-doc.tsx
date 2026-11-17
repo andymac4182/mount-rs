@@ -916,8 +916,9 @@ curl -H 'Authorization: Bearer demo-memory' \
     ),
     limitations: (
       <>
-        <code>PUT</code> is a bounded streaming write, not an atomic publish;
-        a disconnect can leave a partial file. Distributed caching and
+        <code>PUT</code> publishes atomically: readers see the old content
+        or the complete new content, and an upload cut off while its body is
+        still arriving leaves no partial file. Distributed caching and
         cross-process version coordination are outside this slice. The local
         demo does not prove internet-facing deployment security.
       </>
