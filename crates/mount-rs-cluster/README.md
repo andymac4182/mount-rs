@@ -4,8 +4,14 @@ Server-side advisory volume routing. Clients never connect to Redis. An ingress
 server resolves a volume route and forwards directly to the authenticated owner.
 TiDB grants ownership and fencing generations; Redis only advertises them.
 
-`RedisRouteRegistry` accepts a caller-established authenticated TLS Redis
-connection, a deployment namespace and a bounded request timeout. Register a
+`RedisRouteRegistry` takes a Redis client or connection that the caller has
+configured, a deployment namespace and a bounded request timeout. This crate
+does not open a connection from a URL and does not itself require TLS or
+authentication: whatever the caller's `redis::Client` was built with is what
+is used. `mount-rs serve-http` builds that client in
+`apps/mount-rs-cli/src/redis_connect.rs`, which is where `rediss://`, the
+password, a private CA and the refusal of plaintext to another host are
+enforced; see "The Redis connection" in `apps/mount-rs-cli/README.md`. Register a
 `VolumeRoute` only after validating TiDB ownership and loading the volume. The
 record includes node/boot/registration identities, a full u64 TiDB fence, socket
 address and TLS server name. Membership must authenticate that address/name;
@@ -40,9 +46,12 @@ MOUNT_RS_REDIS_TEST_URL=redis://127.0.0.1:6379/ \
 ```
 
 The real-service test uses a unique namespace and verifies takeover at the top
-of the u64 range, stale cleanup, exact refresh, expiry and lookup. The current
-acceptance used disposable Redis 8.4.0, loopback plaintext; production TLS,
-authorization, outages and full server lifecycle remain separate acceptance work.
+of the u64 range, stale cleanup, exact refresh, expiry and lookup. These
+tests use disposable Redis 8.4.0 over loopback plaintext. TLS with a private
+CA, password and ACL logins, refused handshakes and logins, and an outage
+longer than the route lifetime are tested with real `serve-http` processes
+in `apps/mount-rs-cli/tests/redis_connection.rs`. Redis Sentinel, Redis
+Cluster and a replicated pair failing over are not tested.
 
 ## HTTP/3 transport foundation
 
@@ -106,7 +115,9 @@ replays a filesystem request, and `run` does not invoke it automatically.
 
 `run_with_recovery` is an opt-in alternative. Supply `RegistrationRecovery`
 with a positive initial delay, a maximum delay no greater than 30 seconds and
-1–100 attempts per outage. It uses capped exponential backoff, publishes
+1–100 attempts per outage, or `RegistrationRecovery::UNLIMITED_ATTEMPTS` to
+keep reconciling for as long as the registry is unavailable. It uses capped
+exponential backoff, publishes
 `Recovering(error)` while unavailable, and resets the attempt budget after
 successful reconciliation. A conflicting registration observed during
 reconciliation, lost ownership or invalid registry data is terminal. Cancelling
@@ -117,11 +128,26 @@ entropy to spread retries across volumes and servers. A live Redis regression
 recovers 100 independent memory-backed volume registrations after concurrent
 route removal, preserves their fences and withdraws all routes on cancellation.
 This is control-plane coverage, not 100-client filesystem latency or Redis HA
-failover qualification. Fleet deployment tuning remains open. This
-library API is not yet wired into production CLI/server startup.
+failover qualification. Fleet deployment tuning remains open.
+`mount-rs serve-http` runs every owner registration this way through
+`RegistrationSupervisor`, with unlimited attempts and a two-second maximum
+delay: an owner serves its own drives without Redis, so a Redis outage of
+any length must not stop it. With a bounded budget the worker fails when the
+budget runs out, and the supervisor reports failure for the whole server.
 
-Use `RedisRouteRegistry::with_manager` with a caller-configured
-`redis::aio::ConnectionManager` when recovery must survive a dropped socket.
+Use `RedisRouteRegistry::with_client` when recovery must survive both a
+dropped socket and a connection that stays open but stops answering. It
+builds a `redis::aio::ConnectionManager` from the supplied `redis::Client`
+and configuration, and replaces it after three consecutive commands time out
+on it. The manager alone reconnects after a refused, reset or closed
+connection but never after a timeout, so a connection whose packets are
+silently dropped would otherwise fail every command until the operating
+system abandoned it. `with_client` connects lazily: check a connection from
+the same client first if a bad address, certificate or password should stop
+startup.
+
+`RedisRouteRegistry::with_manager` takes a caller-configured
+`redis::aio::ConnectionManager` and has the manager's behaviour only.
 The original `new(MultiplexedConnection, ...)` constructor remains available
 but does not reconnect that connection. With the pinned Redis 1.7 client, a
 failed command still returns its error while reconnection supports later
