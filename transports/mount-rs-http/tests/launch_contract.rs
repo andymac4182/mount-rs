@@ -1232,3 +1232,217 @@ async fn mkdir_takes_only_permission_bits_from_the_client() {
     assert_eq!(stats.mode & 0o7777, 0o777);
     server.close().await.expect("close");
 }
+
+// ------------------------------------------------------------ request ids
+
+fn request_id_of(response: &reqwest::Response) -> String {
+    let mut values = response.headers().get_all("x-request-id").iter();
+    let id = values.next().expect("x-request-id header");
+    assert!(values.next().is_none(), "one x-request-id header");
+    id.to_str().expect("request id text").to_owned()
+}
+
+fn is_generated_request_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_response_carries_a_request_id_and_the_error_body_is_unchanged() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+    let client = reqwest::Client::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for route in ["/healthz", "/readyz", "/v1/drives", "/v1/drives/d/entries"] {
+        let response = get(&server, route).await;
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        let id = request_id_of(&response);
+        assert!(is_generated_request_id(&id), "{route}: {id}");
+        assert!(seen.insert(id), "{route}: a request id was reused");
+    }
+    let written = put(&server, "d", "file", b"body".to_vec()).await;
+    assert_eq!(written.status(), StatusCode::OK);
+    assert!(seen.insert(request_id_of(&written)));
+
+    // Errors name their request in the header only: the body keeps its
+    // two fields.
+    for (route, authorized, status, code) in [
+        ("/v1/drives/d/fs/missing", true, 404, "ENOENT"),
+        ("/v1/drives/d/fs/file", false, 401, "EACCES"),
+        ("/v1/drives/d/fs/a%2Fb", true, 400, "EINVAL"),
+        ("/v1/unknown", true, 404, "ENOENT"),
+    ] {
+        let mut request = client.get(format!("{}{route}", server.url()));
+        if authorized {
+            request = request.header(AUTHORIZATION, bearer());
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status().as_u16(), status, "{route}");
+        let id = request_id_of(&response);
+        assert!(is_generated_request_id(&id), "{route}: {id}");
+        assert!(seen.insert(id), "{route}: a request id was reused");
+        assert_eq!(error_of(response).await.0, code, "{route}");
+    }
+
+    let head = client
+        .head(format!("{}/v1/drives/d/fs/file", server.url()))
+        .header(AUTHORIZATION, bearer())
+        .send()
+        .await
+        .unwrap();
+    assert!(is_generated_request_id(&request_id_of(&head)));
+    server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_safe_client_request_id_is_echoed_and_any_other_is_replaced() {
+    let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let server = start(vec![("d", driver)], HttpServerOptions::default()).await;
+    let client = reqwest::Client::new();
+    let send = |values: Vec<String>| {
+        let mut request = client.get(format!("{}/v1/drives/d/fs/missing", server.url()));
+        for value in values {
+            request = request.header("x-request-id", value);
+        }
+        async move {
+            let response = request.send().await.unwrap();
+            // With or without a token, the id comes back.
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            request_id_of(&response)
+        }
+    };
+
+    let longest = "a".repeat(128);
+    for accepted in [
+        "a",
+        "Req_01.trace-9",
+        "0123456789abcdef0123456789abcdef",
+        longest.as_str(),
+    ] {
+        assert_eq!(send(vec![accepted.to_owned()]).await, accepted);
+    }
+    let too_long = "a".repeat(129);
+    for refused in [
+        "",
+        too_long.as_str(),
+        "has space",
+        "slash/inside",
+        "colon:inside",
+        "quote\"inside",
+        "caf\u{e9}",
+    ] {
+        let id = send(vec![refused.to_owned()]).await;
+        assert!(
+            is_generated_request_id(&id),
+            "{refused:?} came back as {id}"
+        );
+    }
+    // Two values name no one request.
+    let id = send(vec!["first".to_owned(), "second".to_owned()]).await;
+    assert!(is_generated_request_id(&id), "{id}");
+    server.close().await.expect("close");
+}
+
+/// What the CLI does with sessions or forwarding enabled: a handler in front
+/// of the drive routes, which are a second, unbound application.
+struct RecordsRequestId {
+    application: HttpServer,
+    seen: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl mount_rs_http::HttpRequestHandler for RecordsRequestId {
+    fn handle(
+        &self,
+        request: hyper::Request<mount_rs_http::HttpBody>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = hyper::Response<mount_rs_http::HttpBody>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            let ids = request
+                .headers()
+                .get_all("x-request-id")
+                .iter()
+                .map(|value| value.to_str().unwrap().to_owned())
+                .collect();
+            self.seen.lock().unwrap().push(ids);
+            self.application.handle(request).await
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handler_is_given_the_request_id_the_response_carries() {
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(DriveConfig::new("d", Arc::new(MemoryFs::empty()), TOKEN).unwrap())
+        .unwrap();
+    let handler = Arc::new(RecordsRequestId {
+        application: HttpServer::unbound(registry, HttpServerOptions::default()),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let server = HttpServer::start_with_handler(handler.clone(), HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/drives/d/entries", server.url());
+
+    let generated = client
+        .get(&url)
+        .header(AUTHORIZATION, bearer())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(generated.status(), StatusCode::OK);
+    let generated = request_id_of(&generated);
+    assert!(is_generated_request_id(&generated), "{generated}");
+
+    let echoed = client
+        .get(&url)
+        .header(AUTHORIZATION, bearer())
+        .header("x-request-id", "caller-7")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(request_id_of(&echoed), "caller-7");
+
+    // An unsafe value never reaches the handler, or a forwarding hop.
+    let replaced = client
+        .get(&url)
+        .header(AUTHORIZATION, bearer())
+        .header("x-request-id", "not safe")
+        .header("x-request-id", "second")
+        .send()
+        .await
+        .unwrap();
+    let replaced = request_id_of(&replaced);
+    assert!(is_generated_request_id(&replaced), "{replaced}");
+
+    assert_eq!(
+        *handler.seen.lock().unwrap(),
+        vec![vec![generated], vec!["caller-7".to_owned()], vec![replaced]]
+    );
+    server.close().await.expect("close");
+    handler.application.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn a_request_refused_during_shutdown_still_carries_its_request_id() {
+    use http_body_util::BodyExt;
+
+    let server = HttpServer::unbound(DriveRegistry::new(), HttpServerOptions::default());
+    server.close().await.expect("close");
+    let empty = http_body_util::Empty::<bytes::Bytes>::new()
+        .map_err(|never| -> mount_rs_http::BoxError { match never {} })
+        .boxed_unsync();
+    let request = hyper::Request::builder()
+        .uri("/healthz")
+        .header("x-request-id", "probe-1")
+        .body(empty)
+        .unwrap();
+    let response = server.handle(request).await;
+    assert_eq!(response.status().as_u16(), 503);
+    assert_eq!(response.headers()["x-request-id"], "probe-1");
+}

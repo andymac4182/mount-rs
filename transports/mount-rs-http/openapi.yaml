@@ -57,6 +57,20 @@ info:
     request body of at most `max_upload_bytes`; there is no ranged,
     chunked-resume or multipart upload.
 
+    ## Request ids
+
+    Every response the server produces carries an `X-Request-Id` header,
+    on success and on error, with or without a valid token. A request that
+    sends exactly one `X-Request-Id` of 1 to 128 characters from
+    `A-Z a-z 0-9 . _ -` gets that value back. Any other request (no header,
+    several headers, an empty, longer or otherwise different value) gets an
+    id the server generates: 32 lowercase hexadecimal characters. The id is
+    not part of the JSON error body. It identifies the request in the
+    server's access log; it is not a secret and grants nothing. A response
+    without the header was not produced by the server's routes: it came
+    from the reverse proxy, or it is the bare 400 sent for a request that is
+    not valid HTTP.
+
     ## Not part of this contract
 
     The same server binary can expose session and forwarding routes when
@@ -1045,6 +1059,16 @@ components:
         creates only.
       schema: {type: string}
       example: "*"
+    XRequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: |
+        An id for this request, accepted on every route and returned in the
+        response's `X-Request-Id`. A value that does not match the pattern
+        is not an error: the server replaces it with a generated id.
+      schema: {type: string, pattern: "^[A-Za-z0-9._-]{1,128}$"}
+      example: checkout-7f3a.retry-2
     AcceptEncoding:
       name: Accept-Encoding
       in: header
@@ -1056,6 +1080,14 @@ components:
         type: string
       example: gzip
   headers:
+    XRequestId:
+      description: |
+        The request's id, on every response: the request's own
+        `X-Request-Id` when it sent exactly one of 1 to 128 characters from
+        `A-Z a-z 0-9 . _ -`, otherwise 32 hexadecimal characters generated
+        by the server.
+      schema: {type: string, pattern: "^[A-Za-z0-9._-]{1,128}$"}
+      example: 3f9c1d2e4b5a69788796a5b4c3d2e1f0
     ETag:
       description: |
         The file's entity tag, quoted. On a split-store drive it is derived

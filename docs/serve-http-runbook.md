@@ -226,7 +226,7 @@ Requirements:
 | Terminate TLS at the proxy | The server has no TLS. |
 | Run in the same network namespace as the server (same host, or same pod as a sidecar) | The server binds loopback only. A proxy on another host or in another container network cannot reach it. |
 | Forward the request path unmodified | The server validates percent-encoding itself. Do not let the proxy decode, normalise or merge slashes in the upstream URI. |
-| Forward `Authorization`, `Range`, `If-Range`, `If-Match`, `If-None-Match`, `Accept-Encoding` and the response's `ETag` unchanged; do not cache | Authentication is per request. Responses depend on the token. Conditional writes rely on the tags reaching both ways intact. |
+| Forward `Authorization`, `Range`, `If-Range`, `If-Match`, `If-None-Match`, `Accept-Encoding`, `X-Request-Id` and the response's `ETag` and `X-Request-Id` unchanged; do not cache | Authentication is per request. Responses depend on the token. Conditional writes rely on the tags reaching both ways intact. |
 | Request body cap >= `max_upload_bytes` | A smaller cap rejects uploads the server would accept. Equal is best: then the proxy rejects oversize uploads without opening an upstream connection. |
 | Stream request bodies upstream; do not buffer them | Large uploads are streamed to storage as they arrive. A proxy that buffers a multi-gigabyte upload to its own disk first doubles the disk traffic and delays the upload's start. The server gives up on an upload that stalls for `request_timeout_ms`, so a slow client cannot hold it forever. |
 | Do not buffer or cap response bodies | Downloads have no size limit and are streamed. |
@@ -455,8 +455,26 @@ State of the default build, without qualification:
 | `{"event":"http_accept_failed","total":N}` JSON line on stderr | Yes, each time the count of failed `accept` calls rises |
 | Per-request access log | **No** |
 | Metrics endpoint (Prometheus or other) | **No** |
-| Request ids, trace headers in responses | **No** |
+| Request ids in responses | Yes: every response carries `X-Request-Id` (see [Request ids](#request-ids)) |
+| Trace headers in responses | **No** |
 | Per-request error log (which request got a 500 and why) | **No** |
+
+### Request ids
+
+Every response the process produces carries `X-Request-Id`. A request that
+sends exactly one `X-Request-Id` of 1 to 128 characters from
+`A-Z a-z 0-9 . _ -` keeps its value; any other request is given a generated
+id of 32 hexadecimal characters. A value outside that set is never echoed
+or forwarded. Nothing needs configuring.
+
+- Let the proxy pass the client's `X-Request-Id` through, or set one itself
+  (nginx: `proxy_set_header X-Request-Id $request_id;`), and log the
+  response's `X-Request-Id` in the proxy access log. That joins the proxy's
+  line and the client's report.
+- With `forwarding`, the server that receives a request sends the same id
+  to the owner, so both servers name the request alike.
+- A response without the header came from the proxy, or is the bare `400`
+  the HTTP parser sends for a request that is not valid HTTP.
 
 The error detail a client receives is the POSIX code only; the underlying
 storage message is not logged anywhere in the default build.

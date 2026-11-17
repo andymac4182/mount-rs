@@ -160,6 +160,30 @@ the token is compared exactly.
 - Tokens change only when the operator restarts the service. After a rotation
   the old token returns `401`; that is the signal to reload your credential.
 
+## Request ids
+
+Every response the server produces carries an `X-Request-Id` header: on
+success and on error, with or without a valid token, including the probes.
+
+- Send your own id to correlate a call with your logs: exactly one
+  `X-Request-Id` header of 1 to 128 characters from `A-Z a-z 0-9 . _ -`
+  comes back unchanged.
+- Anything else (no header, more than one, an empty or longer value, any
+  other character) is not an error. The server ignores it and answers with
+  an id it generates: 32 lowercase hexadecimal characters.
+- The id is in the header only. The JSON error body is unchanged.
+- Quote the id when you report a problem; the operator can find the request
+  by it when the server's access log is on. The id is not a secret and
+  grants nothing.
+- A response without the header did not come from the server's routes: it
+  was produced by the reverse proxy, or it is the bare `400` sent for a
+  request that is not valid HTTP.
+
+```sh
+curl -i -H 'X-Request-Id: checkout-7f3a.retry-2' "$BASE/healthz"
+# x-request-id: checkout-7f3a.retry-2
+```
+
 ## Paths
 
 In the URL, each path segment is percent-decoded once and must be valid UTF-8.

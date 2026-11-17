@@ -52,6 +52,15 @@ pub const DEFAULT_BUFFERED_UPLOAD_REQUESTS: usize = 4;
 /// Names beginning with this are the server's own: the temporary sibling an
 /// upload is written to before it replaces its target on a driver whose
 /// `write_file` is not atomic. Clients can neither name nor list them.
+/// The header that names a request. A request that carries one valid value
+/// (1 to 128 characters of `A-Z a-z 0-9 . _ -`) keeps it; any other request
+/// is given a generated one. Every response the application produces
+/// carries the value, and so does the request a handler or a forwarding hop
+/// sees.
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+/// Longest client-supplied request id that is echoed.
+pub const MAX_REQUEST_ID_BYTES: usize = 128;
+
 pub const RESERVED_NAME_PREFIX: &str = ".mount-rs-upload.";
 
 /// How long a close that ran out of drain time waits (at most; never longer
@@ -543,7 +552,9 @@ impl HttpServer {
             drained: self.drained.clone(),
         };
         if self.closing.load(Ordering::Acquire) != 0 {
-            return error_response(RequestError::server_closing());
+            let mut request = request;
+            let id = assign_request_id(&mut request);
+            return with_request_id(error_response(RequestError::server_closing()), id);
         }
         match handle_request(request, self.state.clone()).await {
             Ok(response) => response,
@@ -1232,11 +1243,79 @@ impl HttpResponseFailure {
     }
 }
 
+/// Marks a request whose id has been settled, so that an application nested
+/// behind a handler (session routing in front of the drive routes) leaves
+/// the id to the listener that received the request.
+#[derive(Clone, Copy)]
+struct RequestScope;
+
+fn valid_request_id(value: &[u8]) -> bool {
+    (1..=MAX_REQUEST_ID_BYTES).contains(&value.len())
+        && value
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// A new request id: 32 lowercase hexadecimal characters, unique for
+/// practical purposes across processes. It identifies a request; it is not a
+/// secret and authorizes nothing.
+fn generate_request_id() -> header::HeaderValue {
+    use std::hash::{BuildHasher, RandomState};
+    static KEYS: OnceLock<(RandomState, RandomState)> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let (high, low) = KEYS.get_or_init(|| (RandomState::new(), RandomState::new()));
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let id = format!(
+        "{:016x}{:016x}",
+        high.hash_one(sequence),
+        low.hash_one(sequence)
+    );
+    header::HeaderValue::from_maybe_shared(Bytes::from(id))
+        .expect("hexadecimal digits are a valid header value")
+}
+
+/// Settle the id of a request that does not have one yet: keep the single
+/// valid `x-request-id` the client sent, or replace whatever it sent with a
+/// generated id. The request then carries exactly that value, which is what
+/// a handler forwards. Returns `None` for a request an outer listener has
+/// already settled.
+fn assign_request_id(request: &mut Request<HttpBody>) -> Option<header::HeaderValue> {
+    if request.extensions().get::<RequestScope>().is_some() {
+        return None;
+    }
+    request.extensions_mut().insert(RequestScope);
+    let headers = request.headers_mut();
+    let mut sent = headers.get_all(REQUEST_ID_HEADER).iter();
+    if let (Some(value), None) = (sent.next(), sent.next())
+        && valid_request_id(value.as_bytes())
+    {
+        return Some(value.clone());
+    }
+    let id = generate_request_id();
+    headers.insert(REQUEST_ID_HEADER, id.clone());
+    Some(id)
+}
+
+fn with_request_id(
+    mut response: Response<HttpBody>,
+    id: Option<header::HeaderValue>,
+) -> Response<HttpBody> {
+    if let Some(id) = id {
+        response.headers_mut().insert(REQUEST_ID_HEADER, id);
+    }
+    response
+}
+
 async fn handle_request(
-    request: Request<HttpBody>,
+    mut request: Request<HttpBody>,
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
-    handle_request_instrumented(request, state).await
+    let id = assign_request_id(&mut request);
+    let response = match handle_request_instrumented(request, state).await {
+        Ok(response) => response,
+        Err(never) => match never {},
+    };
+    Ok(with_request_id(response, id))
 }
 
 async fn handle_request_instrumented(
