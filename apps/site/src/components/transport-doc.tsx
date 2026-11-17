@@ -867,8 +867,8 @@ xcodebuild -project transports/mount-rs-fskit/MountRsFSKit.xcodeproj \
     slug: 'http',
     name: 'HTTP multi-drive API',
     eyebrow: 'Transport / unmounted service',
-    maturity: 'Preview',
-    maturityNote: 'Loopback service with bearer isolation, ranges, streaming, reopen, and bounded health/readiness probes; a hosted all-features HTTP/OTLP gate now passes, while deployment hardening remains the caller’s job.',
+    maturity: 'Validated',
+    maturityNote: 'The v1 contract, the session routes and the cluster configuration are written down, checked against the OpenAPI documents by tests, and exercised end to end from the built binary on every platform a release publishes for. Validated describes the software, not a deployment: TLS termination, identity, backup, capacity and alerting remain the operator’s job, and every CLI release is still a preview.',
     summary: (
       <>
         The HTTP service exposes named mount-rs drives without creating a
@@ -989,6 +989,21 @@ curl -H 'Authorization: Bearer demo-memory' \
     ),
     evidence: (
       <>
+        CI run <code>44141640175</code> on <code>main</code> at source{' '}
+        <code>031050cc</code> is the current evidence. Its{' '}
+        <code>serve-http-e2e</code> jobs start the built binary and drive it
+        over real sockets on Linux x86_64 and arm64, macOS arm64 and Intel,
+        and Windows. <code>cluster-http3</code> runs the cluster contract
+        against a real Redis: forwarding, remote sessions, membership reload
+        and drive failover, including a crashed owner replaced only after its
+        storage lease expires. <code>tidb-rustfs</code> repeats failover with
+        the lease in TiDB. The <code>rust</code> jobs run the transport
+        suites and the OpenAPI conformance test, and{' '}
+        <code>http-observability</code> runs the all-features health,
+        readiness and OTLP checks. Not covered by that run: the workspace
+        test job on macOS arm64, which never received a hosted runner and was
+        re-queued; clusters of mixed releases; Redis Sentinel and Redis
+        Cluster; and any deployed collector, dashboard or pager.{' '}
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,
         ranges, truncate, concurrent writes, restart/reopen, and cleanup. The
         optional <code>mount-rs-observability</code> seam can attach a
@@ -1019,7 +1034,10 @@ curl -H 'Authorization: Bearer demo-memory' \
       { label: 'HTTP observability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/observability.md' },
       { label: 'Observability platform qualification', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w30.5-platform-qualification.md' },
       { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/src/server.rs' },
-      { label: 'Hosted HTTP observability CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35599817215' },
+      { label: 'Current CI evidence on main (run 44141640175)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175' },
+      { label: 'Cluster contract, forwarding and failover job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245707825' },
+      { label: 'Binary end-to-end job, Windows', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706441' },
+      { label: 'Earlier hosted HTTP observability CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35599817215' },
       { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#quick-local-demo' },
       { label: 'OpenAPI 3.1 contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/openapi.yaml' },
       { label: 'OpenAPI conformance test', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/tests/openapi_conformance.rs' },

@@ -133,8 +133,9 @@ The runbook's "Health checks" section has the details and the limits.
 ## TiDB provider
 
 Where the TiDB provider stands against the items
-[`maturity.md`](maturity.md) requires. This section records evidence only;
-it does not change the provider's label. Every test named here needs an
+[`maturity.md`](maturity.md) requires. The provider's label was raised to
+Validated on the evidence of run 44141640175, the last rows of the table
+under "What has run where". Every test named here needs an
 actual TiDB and fails, instead of skipping, without one. "Durable" means the
 harness's three PD, three TiKV and one TiDB topology on the pinned v8.5.7
 images.
@@ -168,11 +169,14 @@ CI on Linux, durable topology, by manual dispatch of the CI workflow
 | `tidb-rustfs` | `16818d44` (adds the SQLite-hosting test) | Pass: four `TIDB_SQLITE_HOSTING_PASS`, two before and two after the component restarts, SQLite 3.45.1, 19.6 s and 18.4 s per pair | [44114932613 / 134150333065](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150333065) |
 | `tidb` | `16818d44` | Pass: `TIDB_ACCEPTANCE evidence=durable-multinode-restart` | [44114932613 / 134150334955](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150334955) |
 | `ozone-tidb` | `16818d44` | **Fail**, before TiDB was started: the Ozone-only `real_ozone_gateway_failure_is_bounded` took 15.03 s against its 15 s limit | [44114932613 / 134150333098](https://github.com/andymac4182/mount-rs/actions/runs/44114932613/job/134150333098) |
+| `tidb` | `031050cc` (`main` after #148) | Pass: `TIDB_ACCEPTANCE evidence=durable-multinode-restart`; five `TRACE_EVIDENCE PASS` | [44141640175 / 134245706049](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706049) |
+| `tidb-tls` | `031050cc` | Pass: `TIDB_TLS_HANDSHAKE_ACCEPTANCE`, four `TIDB_TLS_REJECTED`, with the URL-parameter step | [44141640175 / 134245706134](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706134) |
+| `tidb-rustfs` | `031050cc` | Pass: `TIDB_CHUNKED_RUSTFS_REOPEN_PASS`, `RUSTFS_COMBO_PASS`, four `TIDB_SQLITE_HOSTING_PASS`, `TIDB_FAILOVER_PASS`, `TIDB_STANDBY_OPEN_CONTENTION attempts=1866 owner_writes=5873` | [44141640175 / 134245706570](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706570) |
+| `tidb-tls-compile` | `031050cc` | Pass | [44141640175 / 134245706338](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706338) |
+| `ozone-tidb` | `031050cc` | Pass: 3,738 IOPS against the 1,000 target | [44141640175 / 134245706208](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706208) |
 
-Not yet observed: the `tidb-tls` job on `16818d44` or later (still queued
-when this was written), so the new URL-parameter step in `tidb-tls` has run
-locally only; and any of these jobs on a push to `main`, because the push
-run for #130 was cancelled by the next push before its jobs started.
+Run 44141640175 was a manual dispatch on `main`. No push run on `main` has
+finished these jobs: each was superseded by the next push.
 
 Elsewhere:
 
@@ -211,8 +215,7 @@ therefore says nothing about TiDB with any block store other than Ozone.
 
 ### Still open for TiDB
 
-- The `tidb-tls` job on a revision with the new URL-parameter step, and a
-  push run on `main`, as above.
+- A push run on `main`, as above.
 - The `ozone-tidb` job can fail in its Ozone-only phase. The block store
   client stops retrying after 12 s but lets the last attempt run for up to
   8 s, so `real_ozone_gateway_failure_is_bounded`, which allows 15 s, can
