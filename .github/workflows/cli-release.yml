@@ -1,6 +1,6 @@
 name: Publish CLI preview release
 
-# Builds, tests and packages the `mount-rs` CLI on a native
+# Builds, tests, packages and smoke-tests the `mount-rs` CLI on a native
 # runner for every target below, and on a `v*-cli-preview*` tag publishes the
 # archives as one GitHub prerelease with checksums, release manifests,
 # CycloneDX SBOMs and verified provenance attestations.
@@ -10,7 +10,7 @@ name: Publish CLI preview release
 # prerelease. There is no other channel.
 #
 # Dispatching the workflow by hand is build-only unless `publish` is ticked:
-# every target is built, packaged and checksummed, the assets
+# every target is built, packaged, checksummed and smoke-tested, the assets
 # are kept as workflow artifacts, and nothing is attested or published.
 # `publish` is honoured only when the workflow is dispatched on a preview
 # tag, for a release whose own run failed.
@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the prerelease (only on a v*-cli-preview* tag). Off builds and packages every target without publishing.
+        description: Publish the prerelease (only on a v*-cli-preview* tag). Off builds, packages and smoke-tests every target without publishing.
         required: true
         default: false
         type: boolean
@@ -106,7 +106,7 @@ jobs:
           echo "CLI_RELEASE_PLAN publish=$publish tag=$release_tag commit=$release_commit version=$package_version"
 
   build:
-    name: Build ${{ matrix.target }}
+    name: Build and smoke-test ${{ matrix.target }}
     needs: plan
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -139,6 +139,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
 
       - name: Test and package the CLI
+        id: package
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
           PACKAGE_VERSION: ${{ needs.plan.outputs.package_version }}
@@ -209,6 +210,39 @@ jobs:
             --version "$PACKAGE_VERSION" \
             --artifact "$release_dir/$artifact"
 
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+
+      # What is tested is the archive that would be published, unpacked the
+      # way a user unpacks it, not the build directory's binary.
+      - name: Smoke-test the packaged binary
+        timeout-minutes: 10
+        env:
+          ARTIFACT: ${{ steps.package.outputs.artifact }}
+          BINARY: ${{ steps.package.outputs.binary }}
+          PACKAGE_VERSION: ${{ needs.plan.outputs.package_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_dir="$RUNNER_TEMP/mount-rs-cli-release"
+          extracted_dir="$RUNNER_TEMP/mount-rs-cli-extracted"
+          work_dir="$RUNNER_TEMP/mount-rs-cli-smoke"
+          mkdir -p "$extracted_dir" "$work_dir"
+          test "$(cd "$release_dir" && tar -tzf "$ARTIFACT")" = "$BINARY"
+          cp "$release_dir/$ARTIFACT" "$extracted_dir/$ARTIFACT"
+          (cd "$extracted_dir" && tar -xzf "$ARTIFACT" && rm "$ARTIFACT")
+          test "$("$extracted_dir/$BINARY" --version)" = "mount-rs $PACKAGE_VERSION"
+
+          python=python3
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python=python
+          fi
+          # serve-http on loopback with a durable SQLite drive: health and
+          # readiness, auth, put, get, list, a graceful stop that exits 0,
+          # a restart that still has the data, and a second graceful stop.
+          "$python" -I scripts/serve-http-e2e.py --smoke "$extracted_dir/$BINARY" "$work_dir"
+          echo "CLI_RELEASE_SMOKE_PASS target=${{ matrix.target }} artifact=$ARTIFACT"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -458,7 +492,7 @@ jobs:
           Published targets: ${targets[*]}
           Each target has an archive mount-rs-${PACKAGE_VERSION}-<target>.tar.gz, a release-manifest-<target>.json and a release-sbom-<target>.json.
           Checksums: SHA256SUMS
-          Each archive was built on a native runner.
+          Each archive was built on a native runner, and its packaged binary served a file over HTTP and stopped cleanly on that runner before publication.
           GitHub Sigstore provenance and CycloneDX SBOM attestations were generated and verified in this workflow.
 
           This is a CLI preview. It does not imply overall project release readiness. See docs/support-matrix.md for what each platform supports."
@@ -519,7 +553,8 @@ jobs:
             fi
             test "$(tar -tzf "$verification_dir/$artifact")" = "$binary"
           done
-          # The one archive this runner can execute.
+          # The one archive this runner can execute; every archive was run on
+          # its own platform by the build job.
           extracted_dir="$verification_dir/extracted"
           mkdir -p "$extracted_dir"
           tar -xzf "$verification_dir/mount-rs-${PACKAGE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C "$extracted_dir"
