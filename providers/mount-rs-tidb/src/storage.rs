@@ -945,6 +945,14 @@ fn autocommit_error(operation: &str, error: MysqlError) -> FsError {
     // conflict classification for that server response. A connection or
     // other acknowledgement error cannot distinguish commit from rollback;
     // fail closed instead of allowing the caller to replay the publication.
+    //
+    // Checked against TiDB v8.5.7 by
+    // `actual_tidb_autocommit_conflicts_are_known_non_commits`: error 9007
+    // ("Write conflict ... [try again later]") and error 1205 are both
+    // reported for an autocommit statement that did not commit. When TiDB
+    // cannot tell whether a commit applied it closes the connection instead
+    // of answering, which is not a server error and so lands in the
+    // unknown-outcome branch.
     if is_retryable_conflict(&error) {
         db_error(operation, error)
     } else {
@@ -3351,6 +3359,202 @@ mod tests {
             .unwrap();
         drop(session);
         cleanup.close().await.unwrap();
+    }
+
+    /// A provider-configured session on a raw pool, so the test can run the
+    /// statements that provoke a conflict.
+    async fn conflict_session(pool: &Pool) -> Conn {
+        let mut connection = pool.get_conn().await.unwrap();
+        configure_pessimistic_session(&mut connection, DEFAULT_STATEMENT_TIMEOUT)
+            .await
+            .unwrap();
+        connection
+    }
+
+    async fn probe_value(connection: &mut Conn, table: &str) -> i64 {
+        connection
+            .query_first(format!("SELECT v FROM {table} WHERE id=1"))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_autocommit_conflicts_are_known_non_commits() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("actual TiDB URL required");
+        let pool = Pool::from_url(&url).unwrap();
+        let mut observer = conflict_session(&pool).await;
+        let version: String = observer
+            .query_first("SELECT VERSION()")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(version.to_ascii_lowercase().contains("tidb"), "{version}");
+        let table = format!("mount_rs_tidb_conflict_probe_{}", std::process::id());
+        observer
+            .query_drop(format!(
+                "CREATE TABLE {table} (id INT PRIMARY KEY, v BIGINT NOT NULL)"
+            ))
+            .await
+            .unwrap();
+        observer
+            .query_drop(format!("INSERT INTO {table} VALUES (1, 0)"))
+            .await
+            .unwrap();
+
+        // What the provider does with an error from an autocommit write.
+        fn classified_as_known_non_commit(error: &MysqlError) -> bool {
+            let MysqlError::Server(server) = error else {
+                return false;
+            };
+            is_retryable_conflict(error)
+                && autocommit_error("probe", MysqlError::Server(server.clone()))
+                    .is(ErrorCode::Eagain)
+        }
+
+        // 1. Write conflict. An autocommit statement commits optimistically.
+        //    With TiDB's automatic retry switched off, a commit by another
+        //    session between the statement's snapshot and its own commit
+        //    surfaces as the conflict error instead of being retried.
+        let mut slow = conflict_session(&pool).await;
+        slow.query_drop("SET SESSION tidb_retry_limit=0")
+            .await
+            .unwrap();
+        let slow_table = table.clone();
+        let slow_statement = tokio::spawn(async move {
+            slow.query_drop(format!(
+                "UPDATE {slow_table} SET v=v+1000 WHERE id=1 AND SLEEP(2)=0"
+            ))
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        observer
+            .query_drop(format!("UPDATE {table} SET v=v+1 WHERE id=1"))
+            .await
+            .unwrap();
+        let error = slow_statement
+            .await
+            .unwrap()
+            .expect_err("the overlapping autocommit statement must conflict");
+        println!("TIDB_CONFLICT version={version} case=write_conflict error={error}");
+        let MysqlError::Server(server) = &error else {
+            panic!("a write conflict is a server error: {error:?}");
+        };
+        assert_eq!(server.code, 9007, "{error}");
+        assert!(server.message.contains("Write conflict"), "{error}");
+        assert!(server.message.contains("[try again later]"), "{error}");
+        assert!(classified_as_known_non_commit(&error));
+        assert_eq!(
+            probe_value(&mut observer, &table).await,
+            1,
+            "the statement that reported a write conflict must not have committed"
+        );
+
+        // 2. Lock wait. Another session holds the row's pessimistic lock in
+        //    an open transaction for longer than the statement may wait.
+        let mut holder = conflict_session(&pool).await;
+        holder.query_drop("BEGIN PESSIMISTIC").await.unwrap();
+        holder
+            .query_drop(format!("UPDATE {table} SET v=v+10 WHERE id=1"))
+            .await
+            .unwrap();
+        let mut waiter = conflict_session(&pool).await;
+        waiter
+            .query_drop("SET SESSION innodb_lock_wait_timeout=1")
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(30),
+            waiter.query_drop(format!("UPDATE {table} SET v=v+100000 WHERE id=1")),
+        )
+        .await
+        .expect("TiDB must end the lock wait itself")
+        .expect_err("the row is locked for longer than the statement may wait");
+        println!("TIDB_CONFLICT version={version} case=lock_wait error={error}");
+        let MysqlError::Server(server) = &error else {
+            panic!("a lock wait timeout is a server error: {error:?}");
+        };
+        assert_eq!(server.code, 1205, "{error}");
+        assert!(classified_as_known_non_commit(&error));
+        holder.query_drop("COMMIT").await.unwrap();
+        assert_eq!(
+            probe_value(&mut observer, &table).await,
+            11,
+            "the statement that reported a lock wait timeout must not have committed"
+        );
+        drop((holder, waiter));
+
+        // 3. Contention. Many sessions increment the same row with autocommit
+        //    statements. Half use the provider's session as it is, and half
+        //    switch TiDB's automatic retry off so conflicts surface. If any
+        //    statement that reported an error had committed, the row would
+        //    count more increments than there were successes.
+        const SESSIONS: usize = 8;
+        const STATEMENTS: usize = 40;
+        let mut writers = tokio::task::JoinSet::new();
+        for index in 0..SESSIONS {
+            let mut session = conflict_session(&pool).await;
+            if index % 2 == 0 {
+                session
+                    .query_drop("SET SESSION tidb_retry_limit=0")
+                    .await
+                    .unwrap();
+            }
+            let table = table.clone();
+            writers.spawn(async move {
+                let mut succeeded = 0_i64;
+                let mut errors = Vec::new();
+                for _ in 0..STATEMENTS {
+                    match session
+                        .query_drop(format!("UPDATE {table} SET v=v+1 WHERE id=1"))
+                        .await
+                    {
+                        Ok(()) => succeeded += 1,
+                        Err(error) => errors.push(error),
+                    }
+                }
+                (succeeded, errors)
+            });
+        }
+        let mut succeeded = 0_i64;
+        let mut codes = BTreeMap::<u16, usize>::new();
+        while let Some(writer) = writers.join_next().await {
+            let (writer_succeeded, errors) = writer.unwrap();
+            succeeded += writer_succeeded;
+            for error in errors {
+                assert!(
+                    classified_as_known_non_commit(&error),
+                    "an error the provider would not treat as a known non-commit: {error:?}"
+                );
+                let MysqlError::Server(server) = &error else {
+                    unreachable!("classified errors are server errors");
+                };
+                *codes.entry(server.code).or_default() += 1;
+            }
+        }
+        let reported: usize = codes.values().sum();
+        println!(
+            "TIDB_CONFLICT version={version} case=contention statements={} succeeded={succeeded} errors={codes:?}",
+            SESSIONS * STATEMENTS
+        );
+        assert_eq!(succeeded as usize + reported, SESSIONS * STATEMENTS);
+        assert!(
+            reported > 0,
+            "the contention run surfaced no conflict, so it verified nothing"
+        );
+        assert_eq!(
+            probe_value(&mut observer, &table).await,
+            11 + succeeded,
+            "a statement that reported a conflict committed anyway"
+        );
+
+        observer
+            .query_drop(format!("DROP TABLE {table}"))
+            .await
+            .unwrap();
+        drop(observer);
+        pool.disconnect().await.unwrap();
     }
 
     #[test]

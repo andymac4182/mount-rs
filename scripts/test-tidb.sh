@@ -760,6 +760,17 @@ run_statement_timeout_test() {
       -- --ignored --nocapture --test-threads=1
 }
 
+run_conflict_classification_test() {
+  phase_name="conflict classification test"
+  echo "TiDB phase=$phase_name" >&2
+  # Provokes TiDB's write-conflict and lock-wait errors for autocommit
+  # statements and checks that none of those statements committed.
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
+      actual_tidb_autocommit_conflicts_are_known_non_commits \
+      -- --ignored --nocapture --test-threads=1
+}
+
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2
 docker pull --platform "$docker_platform" "$pd_image" >/dev/null
 docker pull --platform "$docker_platform" "$tikv_image" >/dev/null
@@ -876,6 +887,7 @@ fi
 # the owned topology is cleaned up.
 run_ambiguous_commit_test
 run_statement_timeout_test
+run_conflict_classification_test
 
 if [ "$topology" = durable ] && [ "$capacity_issue" -eq 0 ]; then
   evidence_class="durable-multinode-restart"

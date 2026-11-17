@@ -79,9 +79,17 @@ repeated on `main` after all of them were merged.
   Node addon) still inherits the device descriptors and can hang the same
   way.
 - **TiDB autocommit publishes** treat a server error whose message contains
-  "write conflict" or "try again later" as a known non-commit. That rests on
-  TiDB never using those words for an undetermined commit, which was not
-  verified against TiDB itself.
+  "write conflict" or "try again later" as a known non-commit. Verified
+  against TiDB v8.5.7 by a live test
+  (`actual_tidb_autocommit_conflicts_are_known_non_commits`, run by
+  `scripts/test-tidb.sh`): error 9007 ("Write conflict ... [try again
+  later]") and error 1205 (lock wait timeout) were provoked for autocommit
+  statements, and in one contended run 142 of 320 statements reported 9007; in
+  every case the row showed that no statement which reported an error had
+  committed. Not provoked: 1213 (deadlock) and 9006 (GC life time) for an
+  autocommit statement, and other errors that carry "try again later". The
+  classification still rests on TiDB closing the connection, rather than
+  returning one of these errors, when a commit is undetermined.
 - **SlateDB**: if a publish future is cancelled while persisting, the
   provider is not marked failed and its in-memory revision may lag a write
   that committed. Not verified, not fixed.
