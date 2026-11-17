@@ -24,12 +24,18 @@ trap cleanup EXIT INT TERM
 ) >"$log_file" 2>&1 &
 server_pid=$!
 ready=0
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+# 60 s: the server printed nothing within 20 s on a loaded macOS Intel
+# runner, where starting PGlite's WebAssembly is slow.
+waited=0
+while [ "$waited" -lt 60 ]; do
   if grep -q PGLITE_READY "$log_file"; then ready=1; break; fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
   sleep 1
+  waited=$((waited + 1))
 done
 if [ "$ready" -ne 1 ]; then
-  sed -n '1,160p' "$log_file"
+  echo "PGlite server was not ready after ${waited}s; its output follows" >&2
+  sed -n '1,160p' "$log_file" >&2
   exit 1
 fi
 
