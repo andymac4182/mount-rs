@@ -524,6 +524,10 @@ async fn redis_three_candidates_never_serve_one_volume_twice_across_repeated_sto
 /// while the owner keeps writing. Each try must find the lease held and
 /// nothing else: any other error makes the standby back off and stop
 /// announcing itself, as if it could not reach the storage at all.
+///
+/// Unix only: the blocks are a local directory, which other platforms
+/// refuse with ENOTSUP because its durability is unverified there.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opening_a_volume_its_owner_is_writing_to_only_finds_the_lease_held() {
     let dir = tempfile::tempdir().unwrap();
