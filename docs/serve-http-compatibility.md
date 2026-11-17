@@ -295,7 +295,7 @@ Not covered. Each may change in any release without a deprecation window:
 | Redis Sentinel, Redis Cluster, a replicated Redis failing over | Not supported or not tested; see the runbook. |
 | Token rotation without a restart on a server with cluster features | Not provided: `token.file` is refused there. |
 | Metrics with `remote_sessions` or `forwarding` | Not validated. |
-| A network partition of the server-to-server link; failover with a restricted Redis ACL user; failover contention on TiDB metadata | Not exercised by a test. (A server cut off from Redis, a Redis outage during a failover, fail-back, a paused owner and an unanswered release are, in `apps/mount-rs-cli/tests/failover.rs`.) |
+| A network partition of the server-to-server link; failover with a restricted Redis ACL user | Not exercised by a test. (A server cut off from Redis, a Redis outage during a failover, fail-back, a paused owner and an unanswered release are, on SQLite and on TiDB metadata, in `apps/mount-rs-cli/tests/failover.rs`.) |
 | `mount-rs mount` with a `remote` driver (the client of the session routes) | A separate component with its own status; see the CLI README. |
 
 Differences from a plain server that are specified, and so covered, are in

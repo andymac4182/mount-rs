@@ -484,7 +484,12 @@ Limits of `/readyz`, stated plainly:
 
 ## Shutdown
 
-SIGINT and SIGTERM (Unix; Ctrl-C on Windows) start a graceful shutdown:
+SIGINT and SIGTERM on Unix start a graceful shutdown. On Windows, Ctrl-C,
+Ctrl-Break, closing the console window and system shutdown do; Windows
+ends the process about 5 seconds after the last two whatever
+`drain_timeout_ms` says, and `taskkill /F` is never graceful. The
+platforms each release is tested on are in
+[`support-matrix.md`](support-matrix.md). A graceful shutdown:
 
 1. The listener stops accepting connections. New connections are refused.
 2. Idle keep-alive connections are closed without a response.
@@ -1511,8 +1516,7 @@ Stated plainly. None of these is hidden behind a feature flag.
 18. **Not exercised by any test:** a network partition of the
     server-to-server (peer) link, as opposed to a server cut off from
     Redis, which is tested; failover with a restricted Redis ACL user;
-    failover contention on TiDB metadata (tested on SQLite); more than a
-    handful of servers; and `http2_prior_knowledge` together with cluster
+    more than a handful of servers; and `http2_prior_knowledge` together with cluster
     features. The rest of what failover leaves out is listed under "Not
     handled" in [`serve-http-failover.md`](serve-http-failover.md#not-handled).
 
