@@ -12,13 +12,13 @@
 //! by the API's: the API listener is the one a reverse proxy publishes, and
 //! the metrics need no token.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::service::service_fn;
@@ -56,49 +56,75 @@ const MAX_METRICS_CONNECTIONS: usize = 8;
 /// How long a scraper may take to send its request.
 const METRICS_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Default)]
-struct Durations {
-    /// Requests whose duration was at most each bucket's bound, not
-    /// cumulative: summed when rendered.
-    buckets: [u64; BUCKETS.len()],
-    count: u64,
-    sum_micros: u64,
+/// The methods a request is counted under, in the order they are written.
+/// A fixed list, so that a client cannot create a series by inventing a
+/// method.
+const METHODS: [&str; 8] = [
+    "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "other",
+];
+
+/// The status classes a request is counted under, in the order they are
+/// written. `none` is a request that ended before the server produced a
+/// response.
+const STATUSES: [&str; 7] = ["1xx", "2xx", "3xx", "4xx", "5xx", "none", "other"];
+
+/// Everything counted for one route template. Every series is a counter of
+/// its own, so a request adds to them without waiting for another request
+/// or for a scrape.
+struct RouteCounts {
+    route: &'static str,
+    /// By method, then status class, as indexed in [`METHODS`] and
+    /// [`STATUSES`].
+    requests: [[AtomicU64; STATUSES.len()]; METHODS.len()],
+    /// Requests whose duration was at most each bucket's bound and over the
+    /// one before, not cumulative: summed when rendered. The last counts
+    /// the requests over every bound. The histogram's count is the sum of
+    /// these and is not kept separately, so a scrape that runs beside a
+    /// request can never show a bucket above the count.
+    buckets: [AtomicU64; BUCKETS.len() + 1],
+    sum_micros: AtomicU64,
 }
 
-#[derive(Default)]
-struct Counts {
-    /// By route template, method and status class.
-    requests: BTreeMap<(&'static str, &'static str, &'static str), u64>,
-    /// By route template.
-    durations: BTreeMap<&'static str, Durations>,
-}
+impl RouteCounts {
+    fn new(route: &'static str) -> Self {
+        Self {
+            route,
+            requests: Default::default(),
+            buckets: Default::default(),
+            sum_micros: AtomicU64::new(0),
+        }
+    }
 
-/// The method as a label: one of a fixed list, so that a client cannot
-/// create a series by inventing a method.
-fn method_label(method: &str) -> &'static str {
-    match method {
-        "GET" => "GET",
-        "HEAD" => "HEAD",
-        "PUT" => "PUT",
-        "POST" => "POST",
-        "DELETE" => "DELETE",
-        "OPTIONS" => "OPTIONS",
-        "PATCH" => "PATCH",
-        _ => "other",
+    fn count(&self, method: usize, status: usize, micros: u64) {
+        self.requests[method][status].fetch_add(1, Ordering::Relaxed);
+        let bucket = BUCKETS
+            .iter()
+            .position(|(_, bound)| micros <= *bound)
+            .unwrap_or(BUCKETS.len());
+        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+        // Saturating, as the sum always was. The closure never refuses.
+        let _ = self
+            .sum_micros
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sum| {
+                Some(sum.saturating_add(micros))
+            });
     }
 }
 
-/// The status as a label: its class, or `none` for a request that ended
-/// before the server produced a response.
-fn status_label(status: Option<u16>) -> &'static str {
+/// Where `method` is in [`METHODS`].
+fn method_index(method: &str) -> usize {
+    METHODS
+        .iter()
+        .position(|known| *known == method)
+        .unwrap_or(METHODS.len() - 1)
+}
+
+/// Where `status` is in [`STATUSES`].
+fn status_index(status: Option<u16>) -> usize {
     match status.map(|status| status / 100) {
-        None => "none",
-        Some(1) => "1xx",
-        Some(2) => "2xx",
-        Some(3) => "3xx",
-        Some(4) => "4xx",
-        Some(5) => "5xx",
-        Some(_) => "other",
+        Some(class @ 1..=5) => usize::from(class) - 1,
+        None => 5,
+        Some(_) => 6,
     }
 }
 
@@ -125,11 +151,17 @@ type Reading = Arc<dyn Fn() -> u64 + Send + Sync>;
 pub struct HttpMetrics {
     version: String,
     started: SystemTime,
-    counts: Mutex<Counts>,
+    /// One entry per route template that has been counted, ordered by
+    /// template. Route templates are the server's own constants, so the
+    /// list stops growing once each has been seen; until then a new one is
+    /// added by copying the list and swapping it in. A request for a route
+    /// already listed reads the list and writes only that route's counters.
+    routes: ArcSwap<Vec<Arc<RouteCounts>>>,
     in_flight: AtomicI64,
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
-    drives: Mutex<Vec<DriveConfig>>,
+    /// Added to while the server starts, read at each scrape.
+    drives: ArcSwap<Vec<DriveConfig>>,
     access_log_dropped: OnceLock<Reading>,
 }
 
@@ -147,11 +179,11 @@ impl HttpMetrics {
         Arc::new(Self {
             version: version.into(),
             started: SystemTime::now(),
-            counts: Mutex::default(),
+            routes: ArcSwap::from_pointee(Vec::new()),
             in_flight: AtomicI64::new(0),
             bytes_in: AtomicU64::new(0),
             bytes_out: AtomicU64::new(0),
-            drives: Mutex::default(),
+            drives: ArcSwap::from_pointee(Vec::new()),
             access_log_dropped: OnceLock::new(),
         })
     }
@@ -159,10 +191,34 @@ impl HttpMetrics {
     /// Report whether `drive` is ready, as `/readyz` counts it, under its
     /// drive id.
     pub fn observe_drive(&self, drive: &DriveConfig) {
-        self.drives
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(drive.clone());
+        self.drives.rcu(|drives| {
+            let mut next = Vec::clone(drives);
+            next.push(drive.clone());
+            next
+        });
+    }
+
+    /// The counters for `route`, adding them if this is the first request
+    /// counted for it. Two first requests for one route end with the same
+    /// counters: the one whose list was not swapped in finds the other's.
+    fn add_route(&self, route: &'static str) -> Arc<RouteCounts> {
+        let fresh = Arc::new(RouteCounts::new(route));
+        let mut chosen = Arc::clone(&fresh);
+        self.routes.rcu(
+            |routes| match routes.binary_search_by(|listed| listed.route.cmp(route)) {
+                Ok(found) => {
+                    chosen = Arc::clone(&routes[found]);
+                    Arc::clone(routes)
+                }
+                Err(place) => {
+                    chosen = Arc::clone(&fresh);
+                    let mut next = Vec::clone(routes);
+                    next.insert(place, Arc::clone(&fresh));
+                    Arc::new(next)
+                }
+            },
+        );
+        chosen
     }
 
     /// Report the lines an access log has dropped, read from `dropped` at
@@ -180,51 +236,60 @@ impl HttpMetrics {
     }
 
     fn write(&self, out: &mut String) -> std::fmt::Result {
-        {
-            let counts = self
-                .counts
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            out.push_str(
-                "# HELP mount_rs_http_requests_total Requests finished, by route template, method and status class.\n\
-                 # TYPE mount_rs_http_requests_total counter\n",
-            );
-            for ((route, method, status), count) in &counts.requests {
-                writeln!(
-                    out,
-                    "mount_rs_http_requests_total{{route=\"{route}\",method=\"{method}\",status=\"{status}\"}} {count}"
-                )?;
-            }
-            out.push_str(
-                "# HELP mount_rs_http_request_duration_seconds Time from a request's arrival until its response body was sent or abandoned, by route template.\n\
-                 # TYPE mount_rs_http_request_duration_seconds histogram\n",
-            );
-            for (route, durations) in &counts.durations {
-                let mut cumulative = 0;
-                for ((bound, _), count) in BUCKETS.iter().zip(durations.buckets) {
-                    cumulative += count;
+        // Each counter is read once. A request finishing during the scrape
+        // may be in one family and not yet in another, as it may between
+        // any two scrapes; within a histogram the count is the sum of the
+        // buckets read, so the buckets never pass it.
+        let routes = self.routes.load_full();
+        out.push_str(
+            "# HELP mount_rs_http_requests_total Requests finished, by route template, method and status class.\n\
+             # TYPE mount_rs_http_requests_total counter\n",
+        );
+        for counts in routes.iter() {
+            let route = counts.route;
+            for (method, by_status) in METHODS.iter().zip(&counts.requests) {
+                for (status, count) in STATUSES.iter().zip(by_status) {
+                    let count = count.load(Ordering::Relaxed);
+                    if count == 0 {
+                        continue;
+                    }
                     writeln!(
                         out,
-                        "mount_rs_http_request_duration_seconds_bucket{{route=\"{route}\",le=\"{bound}\"}} {cumulative}"
+                        "mount_rs_http_requests_total{{route=\"{route}\",method=\"{method}\",status=\"{status}\"}} {count}"
                     )?;
                 }
+            }
+        }
+        out.push_str(
+            "# HELP mount_rs_http_request_duration_seconds Time from a request's arrival until its response body was sent or abandoned, by route template.\n\
+             # TYPE mount_rs_http_request_duration_seconds histogram\n",
+        );
+        for counts in routes.iter() {
+            let route = counts.route;
+            let mut cumulative: u64 = 0;
+            for ((bound, _), count) in BUCKETS.iter().zip(&counts.buckets) {
+                cumulative += count.load(Ordering::Relaxed);
                 writeln!(
                     out,
-                    "mount_rs_http_request_duration_seconds_bucket{{route=\"{route}\",le=\"+Inf\"}} {}",
-                    durations.count
-                )?;
-                writeln!(
-                    out,
-                    "mount_rs_http_request_duration_seconds_sum{{route=\"{route}\"}} {}.{:06}",
-                    durations.sum_micros / 1_000_000,
-                    durations.sum_micros % 1_000_000
-                )?;
-                writeln!(
-                    out,
-                    "mount_rs_http_request_duration_seconds_count{{route=\"{route}\"}} {}",
-                    durations.count
+                    "mount_rs_http_request_duration_seconds_bucket{{route=\"{route}\",le=\"{bound}\"}} {cumulative}"
                 )?;
             }
+            let total = cumulative + counts.buckets[BUCKETS.len()].load(Ordering::Relaxed);
+            let sum_micros = counts.sum_micros.load(Ordering::Relaxed);
+            writeln!(
+                out,
+                "mount_rs_http_request_duration_seconds_bucket{{route=\"{route}\",le=\"+Inf\"}} {total}"
+            )?;
+            writeln!(
+                out,
+                "mount_rs_http_request_duration_seconds_sum{{route=\"{route}\"}} {}.{:06}",
+                sum_micros / 1_000_000,
+                sum_micros % 1_000_000
+            )?;
+            writeln!(
+                out,
+                "mount_rs_http_request_duration_seconds_count{{route=\"{route}\"}} {total}"
+            )?;
         }
         writeln!(
             out,
@@ -251,12 +316,8 @@ impl HttpMetrics {
             "# HELP mount_rs_http_drive_ready Whether the drive is ready as /readyz counts it: 1 ready, 0 not.\n\
              # TYPE mount_rs_http_drive_ready gauge\n",
         );
-        let drives = self
-            .drives
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        for drive in &drives {
+        let drives = self.drives.load_full();
+        for drive in drives.iter() {
             writeln!(
                 out,
                 "mount_rs_http_drive_ready{{drive=\"{}\"}} {}",
@@ -306,26 +367,15 @@ impl AccessLog for HttpMetrics {
         self.bytes_out
             .fetch_add(record.bytes_out, Ordering::Relaxed);
         let micros = u64::try_from(record.duration.as_micros()).unwrap_or(u64::MAX);
-        // Held for a few map operations: a request never waits here for
-        // anything slower than another request doing the same.
-        let mut counts = self
-            .counts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *counts
-            .requests
-            .entry((
-                record.route,
-                method_label(record.method),
-                status_label(record.status),
-            ))
-            .or_default() += 1;
-        let durations = counts.durations.entry(record.route).or_default();
-        if let Some(bucket) = BUCKETS.iter().position(|(_, bound)| micros <= *bound) {
-            durations.buckets[bucket] += 1;
+        let (method, status) = (method_index(record.method), status_index(record.status));
+        let routes = self.routes.load();
+        match routes.binary_search_by(|listed| listed.route.cmp(record.route)) {
+            Ok(found) => routes[found].count(method, status, micros),
+            Err(_) => {
+                drop(routes);
+                self.add_route(record.route).count(method, status, micros);
+            }
         }
-        durations.count += 1;
-        durations.sum_micros = durations.sum_micros.saturating_add(micros);
     }
 }
 
@@ -712,6 +762,133 @@ mod tests {
                 assert!(labels.starts_with('{') && labels.ends_with("\"}"), "{line}");
             }
         }
+    }
+
+    /// Requests recorded from several threads while another scrapes: no
+    /// count is lost, every route is listed once, and no scrape shows a
+    /// histogram whose buckets fall or pass its count.
+    #[test]
+    fn requests_recorded_beside_a_scrape_are_all_counted_and_each_scrape_is_consistent() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 5_000;
+        const ROUTES: [&str; 4] = ["/a", "/b", "/c/{id}", "/d"];
+        // One under a bound, one on a bound, one over every bound.
+        const MICROS: [u64; 3] = [1, 5_000, 400_000_000];
+        let series = |text: &str, name: &str, route: &str, le: Option<&str>| -> Option<u64> {
+            let le = le.map(|le| format!(",le=\"{le}\"")).unwrap_or_default();
+            value(
+                text,
+                &format!("mount_rs_http_request_duration_seconds_{name}{{route=\"{route}\"{le}}}"),
+            )
+            .map(|count| count.parse().expect("a count"))
+        };
+        let metrics = HttpMetrics::new("v");
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let scrapes = std::thread::scope(|scope| {
+            let scraper = scope.spawn(|| {
+                let mut scrapes = 0_u32;
+                loop {
+                    // Read before the scrape, so the last one is of the
+                    // finished counts.
+                    let last = done.load(Ordering::Acquire);
+                    let text = metrics.render();
+                    for route in ROUTES {
+                        let Some(infinity) = series(&text, "bucket", route, Some("+Inf")) else {
+                            // Not counted yet.
+                            continue;
+                        };
+                        let mut before = 0;
+                        for (bound, _) in BUCKETS {
+                            let count =
+                                series(&text, "bucket", route, Some(bound)).expect("a bucket");
+                            assert!(count >= before, "{route} le={bound}: {text}");
+                            before = count;
+                        }
+                        assert!(infinity >= before, "{route}: {text}");
+                        assert_eq!(
+                            series(&text, "count", route, None),
+                            Some(infinity),
+                            "{route}: {text}"
+                        );
+                    }
+                    scrapes += 1;
+                    if last {
+                        return scrapes;
+                    }
+                }
+            });
+            let recorders: Vec<_> = (0..THREADS)
+                .map(|thread| {
+                    let metrics = &metrics;
+                    scope.spawn(move || {
+                        for round in 0..ROUNDS {
+                            let turn = thread + round;
+                            record(
+                                metrics,
+                                if turn % 2 == 0 { "GET" } else { "PUT" },
+                                ROUTES[turn % ROUTES.len()],
+                                Some(200),
+                                Duration::from_micros(MICROS[round % MICROS.len()]),
+                                (1, 2),
+                            );
+                        }
+                    })
+                })
+                .collect();
+            for recorder in recorders {
+                recorder.join().expect("a recorder");
+            }
+            done.store(true, Ordering::Release);
+            scraper.join().expect("the scraper")
+        });
+        assert!(scrapes >= 1);
+
+        let text = metrics.render();
+        let total = (THREADS * ROUNDS) as u64;
+        let samples = |prefix: &str| -> Vec<f64> {
+            text.lines()
+                .filter(|line| line.starts_with(prefix))
+                .map(|line| {
+                    let (_, sample) = line.rsplit_once(' ').expect("a sample");
+                    sample.parse::<f64>().expect("a number")
+                })
+                .collect()
+        };
+        let requests: f64 = samples("mount_rs_http_requests_total{").iter().sum();
+        assert_eq!(requests as u64, total, "{text}");
+        // Each route's histogram is written once, however many first
+        // requests for it raced, and between them they hold every request.
+        let counts = samples("mount_rs_http_request_duration_seconds_count{");
+        assert_eq!(counts.len(), ROUTES.len(), "{text}");
+        assert_eq!(counts.iter().sum::<f64>() as u64, total, "{text}");
+        let mut over_every_bound = 0;
+        for route in ROUTES {
+            let count = series(&text, "count", route, None).expect("a count");
+            assert_eq!(series(&text, "bucket", route, Some("+Inf")), Some(count));
+            over_every_bound += count - series(&text, "bucket", route, Some("300")).expect("300");
+        }
+        let rounds_over = (0..ROUNDS)
+            .filter(|round| round % MICROS.len() == 2)
+            .count();
+        assert_eq!(over_every_bound, (rounds_over * THREADS) as u64, "{text}");
+        // Every round's duration is known, so the sum is exact too.
+        let per_thread: u64 = (0..ROUNDS).map(|round| MICROS[round % MICROS.len()]).sum();
+        let micros = per_thread * THREADS as u64;
+        let seconds: f64 = samples("mount_rs_http_request_duration_seconds_sum{")
+            .iter()
+            .sum();
+        assert!(
+            (seconds - micros as f64 / 1e6).abs() < 0.001,
+            "{seconds} against {micros} microseconds"
+        );
+        assert_eq!(
+            value(&text, "mount_rs_http_request_body_bytes_total"),
+            Some(total.to_string())
+        );
+        assert_eq!(
+            value(&text, "mount_rs_http_requests_in_flight").as_deref(),
+            Some("0")
+        );
     }
 
     #[tokio::test]

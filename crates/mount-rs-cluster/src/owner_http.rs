@@ -392,12 +392,13 @@ impl Drop for CancelSend {
 ///
 /// The set of volumes may change while the server runs (`insert`, `remove`):
 /// a failover candidate serves a volume only while it holds its writer
-/// lease. Requests read an immutable snapshot and take no lock.
+/// lease. Requests read an immutable snapshot and take no lock. A change
+/// copies the snapshot and swaps the copy in only if the snapshot is still
+/// the current one, deciding again if it is not, so two changes at once
+/// both take effect and neither waits.
 #[derive(Clone)]
 pub struct OwnerHttpRouter {
     owners: Arc<arc_swap::ArcSwap<Owners>>,
-    /// Serializes `insert` and `remove`; never held across an await.
-    changes: Arc<std::sync::Mutex<()>>,
 }
 type Owners = std::collections::BTreeMap<String, Arc<OwnerHttpHandler>>;
 const MAX_OWNED_VOLUMES: usize = 4096;
@@ -417,33 +418,45 @@ impl OwnerHttpRouter {
         }
         Ok(Self {
             owners: Arc::new(arc_swap::ArcSwap::from_pointee(map)),
-            changes: Arc::default(),
         })
     }
     /// Start serving `owner`'s volume. Refused if the volume is already
     /// served here: remove and close the old handler first.
     pub fn insert(&self, owner: OwnerHttpHandler) -> Result<(), RegistryError> {
-        let _change = self.changes.lock().unwrap_or_else(|e| e.into_inner());
-        let current = self.owners.load();
-        if current.len() >= MAX_OWNED_VOLUMES || current.contains_key(&owner.route.volume) {
-            return Err(RegistryError::InvalidInput);
+        let owner = Arc::new(owner);
+        loop {
+            let current = self.owners.load_full();
+            if current.len() >= MAX_OWNED_VOLUMES || current.contains_key(&owner.route.volume) {
+                return Err(RegistryError::InvalidInput);
+            }
+            let mut next = Owners::clone(&current);
+            next.insert(owner.route.volume.clone(), Arc::clone(&owner));
+            if self.swap_in(&current, next) {
+                return Ok(());
+            }
         }
-        let mut next = Owners::clone(&current);
-        next.insert(owner.route.volume.clone(), Arc::new(owner));
-        self.owners.store(Arc::new(next));
-        Ok(())
+    }
+    /// Make `next` the served set if `current` still is; `false` if another
+    /// change got in first, in which case nothing was changed.
+    fn swap_in(&self, current: &Arc<Owners>, next: Owners) -> bool {
+        let previous = self.owners.compare_and_swap(current, Arc::new(next));
+        Arc::ptr_eq(&previous, current)
     }
     /// Stop routing new requests to `volume` and return its handler, which
     /// the caller must `close` before shutting the filesystem down. A
     /// request that already holds the handler finishes or is refused by it.
+    ///
+    /// Of two removals of one volume, exactly one is given the handler.
     pub fn remove(&self, volume: &str) -> Option<Arc<OwnerHttpHandler>> {
-        let _change = self.changes.lock().unwrap_or_else(|e| e.into_inner());
-        let current = self.owners.load();
-        let removed = current.get(volume)?.clone();
-        let mut next = Owners::clone(&current);
-        next.remove(volume);
-        self.owners.store(Arc::new(next));
-        Some(removed)
+        loop {
+            let current = self.owners.load_full();
+            let removed = current.get(volume)?.clone();
+            let mut next = Owners::clone(&current);
+            next.remove(volume);
+            if self.swap_in(&current, next) {
+                return Some(removed);
+            }
+        }
     }
     /// The volumes served here now.
     pub fn volumes(&self) -> Vec<String> {
@@ -588,6 +601,64 @@ mod session_tests {
                 )
                 .unwrap();
         (fs, handler, token)
+    }
+    /// Changes from several threads at once: each insert and remove of a
+    /// thread's own volumes takes effect, one of the inserts of a shared
+    /// volume wins, and its handler is given to one of the removals.
+    #[tokio::test]
+    async fn changes_to_the_router_at_once_all_take_effect_and_a_volume_has_one_owner() {
+        const THREADS: usize = 8;
+        const VOLUMES: usize = 40;
+        let (_fs, handler, _token) = owner().await;
+        let named = |volume: String| {
+            let mut handler = handler.clone();
+            handler.route.volume = volume;
+            handler
+        };
+        let router = OwnerHttpRouter::new(Vec::new()).unwrap();
+        let (inserted, removed): (usize, usize) = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..THREADS)
+                .map(|thread| {
+                    let (router, named) = (&router, &named);
+                    scope.spawn(move || {
+                        let mut shared = (0, 0);
+                        for volume in 0..VOLUMES {
+                            router
+                                .insert(named(format!("{thread}-{volume}")))
+                                .expect("a volume of this thread's own");
+                            shared.0 += usize::from(router.insert(named("shared".into())).is_ok());
+                            if volume % 2 == 1 {
+                                let own = router
+                                    .remove(&format!("{thread}-{volume}"))
+                                    .expect("this thread's own volume");
+                                assert_eq!(own.route.volume, format!("{thread}-{volume}"));
+                            }
+                            shared.1 += usize::from(router.remove("shared").is_some());
+                        }
+                        shared
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().expect("a thread"))
+                .fold((0, 0), |sum, each| (sum.0 + each.0, sum.1 + each.1))
+        });
+        // Every handler of the shared volume that went in came out once,
+        // or is the one still there.
+        let left = usize::from(router.remove("shared").is_some());
+        assert!(inserted >= 1);
+        assert_eq!(inserted, removed + left);
+        let mut expected: Vec<String> = (0..THREADS)
+            .flat_map(|thread| {
+                (0..VOLUMES)
+                    .step_by(2)
+                    .map(move |volume| format!("{thread}-{volume}"))
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(router.volumes(), expected);
+        assert!(router.insert(named("0-0".into())).is_err());
     }
     #[tokio::test]
     async fn owner_dispatch_authenticates_sessions_and_drains_retained_handles() {
