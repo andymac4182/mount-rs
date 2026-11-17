@@ -120,13 +120,15 @@ CONSOLE_EVENT_HELPER = """
 import ctypes, sys, time
 pid, event = int(sys.argv[1]), int(sys.argv[2])
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-# The event reaches every process on the console, this one included.
-ignore = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(lambda _event: 1)
-if not kernel32.SetConsoleCtrlHandler(ignore, 1):
-    sys.exit("SetConsoleCtrlHandler failed: %d" % ctypes.get_last_error())
 kernel32.FreeConsole()
 if not kernel32.AttachConsole(pid):
     sys.exit("AttachConsole failed: %d" % ctypes.get_last_error())
+# The event reaches every process on the console, this one included, so
+# ignore it here. This has to follow AttachConsole to take effect.
+ignore = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(lambda _event: 1)
+kernel32.SetConsoleCtrlHandler(None, 1)
+if not kernel32.SetConsoleCtrlHandler(ignore, 1):
+    sys.exit("SetConsoleCtrlHandler failed: %d" % ctypes.get_last_error())
 if not kernel32.GenerateConsoleCtrlEvent(event, 0):
     sys.exit("GenerateConsoleCtrlEvent failed: %d" % ctypes.get_last_error())
 time.sleep(0.5)
@@ -143,7 +145,9 @@ def request_stop(proc, second=False):
             capture_output=True, text=True, timeout=30,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        if sent.returncode != 0:
+        # 0xC000013A is the helper ended by the event it raised: the event
+        # was delivered to the console, which is all that is needed of it.
+        if sent.returncode not in (0, 0xC000013A):
             raise SystemExit("could not send a console event: exit "
                              f"{sent.returncode:#x} {sent.stdout.strip()} {sent.stderr.strip()}")
         return "Ctrl-Break" if second else "Ctrl-C"
