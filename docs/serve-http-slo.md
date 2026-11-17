@@ -17,10 +17,11 @@ Related documents:
 
 ## Where measurements come from
 
-The default build of the server writes no access log, exposes no metrics
-endpoint and adds no request id to responses. The runbook says so in its
-"Observability" section, and concludes that the reverse proxy is the source
-of request telemetry. Every indicator below is therefore measured at one of
+The server exposes no metrics endpoint. It adds a request id to every
+response, and with `"access_log": true` writes one line per request to
+stderr (status, duration, route template, byte counts, request id), which is
+off by default. The runbook's "Observability" section describes both and
+keeps the reverse proxy as the source of request metrics. Every indicator below is therefore measured at one of
 three places:
 
 | Source | Gives |
@@ -254,9 +255,10 @@ table, or follow from it.
 
 | Wanted | Status in the default build | Workaround |
 | --- | --- | --- |
-| Request count, status and latency from the server itself | **Not implemented.** No access log, no metrics endpoint | Proxy access log and metrics |
+| Request count, status and latency from the server itself | **Partly.** Per request, with `"access_log": true`: an `http_request` JSON line on stderr with status and duration. No metrics endpoint and no aggregation | Derive counts and latencies from those lines in the log pipeline, or use the proxy's access log and metrics |
 | Why a request got a `500` | **Not implemented.** The client receives a POSIX code; the underlying storage message is not logged anywhere | Correlate by time with storage-side logs |
-| Request ids or trace headers in responses | **Not implemented** | Have the proxy add and log a request id |
+| Request ids in responses | Implemented: every response carries `X-Request-Id`, echoed from the request when it is safe | Have the proxy pass or set `X-Request-Id` and log it |
+| Trace headers in responses | **Not implemented** | |
 | Time spent in storage per request | **Not implemented** | Storage-side metrics |
 | Lease renewal latency or margin before a drive fails closed | **Not implemented.** The only signal is `/readyz` turning `503` after the fact | Monitor the metadata store's latency directly |
 | Health of `sqlite`-kind, `host` and `memory` drives | **Not implemented.** They never report unhealthy | Synthetic read-after-write |
@@ -283,8 +285,8 @@ subscriber and exporter receives them. See [`observability.md`](observability.md
   High): a stalled TiDB hangs a statement and every operation queues behind
   it. On `serve-http` that would be expected to show as request timeouts
   (`504`); this was not tested.
-- **There is no GitHub issue for the missing access log, metrics endpoint or
-  request ids.** At the time of writing the repository's issue tracker has
+- **There is no GitHub issue for the missing metrics endpoint.** (Request
+  ids and an opt-in access log have since been added.) At the time of writing the repository's issue tracker has
   one open issue, on an unrelated subject. The gap is recorded only in the
   two documents above. Opening an issue for it is recommended, so that
   [`maturity.md`](maturity.md)'s requirement for "the observability a
@@ -313,7 +315,7 @@ metadata and block databases together, start the service.
 | Copying the SQLite files while the service runs | **Not qualified.** The metadata and block databases are one unit and must be consistent with each other; the runbook says a mismatched pair produces missing-block or hash-mismatch errors. It also notes that a copy taken from a running process carries a live lease, so a start from it first waits for the lease to expire. |
 | SQLite's online backup API, `VACUUM INTO`, or `sqlite3 .backup` against a live drive | **Not tested.** Each could give a consistent copy of one database; nothing coordinates the pair. |
 | A filesystem or volume snapshot taken while the service runs | **Not tested.** The runbook accepts a snapshot only "while the process is stopped". |
-| A backup through the API (listing and downloading every file) | **Not qualified as a backup.** Downloads are not snapshot-isolated, listings are not paginated and fail above the entry limit, and there is no change feed. It yields a file-level copy with no consistent point in time. |
+| A backup through the API (listing and downloading every file) | **Not qualified as a backup.** Downloads are not snapshot-isolated, listings fail above the entry limit and a paginated listing is not a snapshot either, and there is no change feed. It yields a file-level copy with no consistent point in time. |
 | Drives on TiDB, PGlite, FoundationDB or object stores | **No procedure in this repository for `serve-http`.** The runbook defers to those systems' own tools. The same pairing concern applies in principle: a metadata store restored to a point in time must still find every block it references in the block store. Whether a given provider pair tolerates a metadata restore without a matching block restore was not examined here. |
 | Point-in-time recovery, incremental backup, continuous replication to a standby | **Not implemented** in `mount-rs`. |
 

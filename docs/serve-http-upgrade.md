@@ -44,8 +44,11 @@ sections; they decide the procedure.
   `splitstore` drive with a structured `storage` object, 30 s with the legacy
   `database` + `blocks` pair, or the drive's `lease_ttl_ms`. It does not
   wait; the service manager must retry.
-- Drive shutdown has no time bound of its own. Against unreachable storage it
-  can hang, which is why the service manager's stop timeout ends in SIGKILL.
+- Drive shutdown is bounded by `drive_shutdown_timeout_ms` (30 s by
+  default). Against unreachable storage the process gives up at that bound
+  and exits with code 1 and `drive shutdown timed out after N ms: ...`. The
+  lease of a drive named there was not released, as after SIGKILL. The
+  service manager's stop timeout still ends in SIGKILL as the backstop.
 
 So the downtime of a clean upgrade is: drain time of the requests in flight,
 plus storage flush, plus the new process's startup (open every drive, bind).
@@ -176,9 +179,9 @@ says.
       open of the current binary; this matters when rights were tightened
       after first deployment.)
 - [ ] The service manager's stop timeout is above `drain_timeout_ms` + 5 s +
-      storage flush, with SIGKILL as the fallback (`TimeoutStopSec=60`, or
-      `docker stop -t 40` / `terminationGracePeriodSeconds: 40`, with the
-      defaults).
+      `drive_shutdown_timeout_ms`, with SIGKILL as the fallback
+      (`TimeoutStopSec=75`, or `docker stop -t 75` /
+      `terminationGracePeriodSeconds: 75`, with the defaults).
 - [ ] Consumers know there will be an outage of the length estimated above,
       and that requests during it fail with `502`/`503` from the proxy.
       The API guide already tells them to retry `503` and connection
@@ -195,7 +198,7 @@ unless a step says "through the proxy".
    `503` itself. The runbook's shutdown section asks for this so that the
    drain affects no client.
 2. **Stop with SIGTERM** through the service manager
-   (`systemctl stop mount-rs`, `docker stop -t 40 mount-rs`). Wait for the
+   (`systemctl stop mount-rs`, `docker stop -t 75 mount-rs`). Wait for the
    process to exit.
 3. **Check how it stopped.**
 
@@ -203,6 +206,7 @@ unless a step says "through the proxy".
    | --- | --- | --- | --- |
    | 0 | `http stopped` | Clean. Storage flushed, lease released. | Yes. |
    | 1 | `HTTP server close timed out` | Drain deadline passed; requests were aborted. Drives were still shut down and the lease released. | Yes. A mutating request that was aborted has an unknown outcome for its client. |
+   | 1 | `drive shutdown timed out after N ms: drive 'X' did not finish ...` | The drives did not shut down within `drive_shutdown_timeout_ms`. The lease of each drive the message names is still held. Writes acknowledged as durable are intact. | Investigate storage first. Then yes, but expect the lease wait in step 6, and do not take a cold backup now. |
    | 1 | Anything else, or a drive-shutdown error | Drive shutdown failed. | Investigate storage before starting anything. |
    | Killed by SIGKILL | | Shutdown did not finish. The lease is still held. | Yes, but expect the lease wait in step 6. Do not take a cold backup now: the copy would carry a live lease. |
 

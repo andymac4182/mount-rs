@@ -21,9 +21,10 @@ Related documents:
 ## Summary
 
 The server authenticates each request with one static bearer token per drive
-and nothing else. It has no TLS, no user identity, no rate limiting and no
-access log. It is built to sit on a loopback address behind a reverse proxy
-that supplies those. A token is the whole of a caller's authority: whoever
+and nothing else. It has no TLS, no user identity and no rate limiting, and
+its access log is off by default and records no path, client or token. It
+is built to sit on a loopback address behind a reverse proxy that supplies
+those. A token is the whole of a caller's authority: whoever
 holds a drive's token can read, replace and delete everything on that drive.
 
 ## Assets
@@ -152,9 +153,20 @@ can modify its tree.
   `message`. For filesystem and storage errors the message is the fixed
   description of the code (for example `no such file or directory`), not the
   underlying error text.
-- The server writes no access log and no per-request error log. Nothing about
-  a request, including its path and its token, is written anywhere in the
-  default build.
+- By default the server writes no access log and no per-request error log:
+  nothing about a request is written anywhere. With `"access_log": true` it
+  writes one line per request to stderr holding the request id, method,
+  route template (`/v1/drives/{id}/fs/{path}`, never the path), status,
+  duration, byte counts and, only when the request named a configured
+  drive, that drive's id. The path, the query string, the token, every
+  request header and the client address are never written, with the log on
+  or off.
+- Every response carries `X-Request-Id`. A client-supplied value is echoed
+  only if it is one header of 1 to 128 characters from `A-Z a-z 0-9 . _ -`;
+  anything else is replaced with a generated id, so the header cannot be
+  used to inject text into a response, a log line or a forwarded request.
+  The id is an identifier, not a credential, and generated ids are not
+  designed to be unguessable.
 - With the optional `observability` feature, the request span records the
   shape of the path (whether rooted, its depth, a size bucket), not the path.
 
@@ -165,7 +177,7 @@ can modify its tree.
 | TLS | No TLS in the listener | Terminate at a reverse proxy in the same network namespace, or at a load balancer in front of a private network with `allow_non_loopback`. The runbook has nginx and Caddy configurations. |
 | Rate limiting and brute-force detection | Not implemented | Limit requests and concurrent connections per client address at the proxy. Alert on the `401` rate. |
 | Per-client connection limits | The server has one global connection limit | At the proxy. Keep the proxy's upstream pool below `max_connections`. |
-| Access and audit log | Not implemented | The proxy's access log: method, path, status, upstream time, bytes. Never the `Authorization` header. There is no record of which token made a request unless the proxy adds one (for example a hash of the header). |
+| Access and audit log | The server's optional access log has no path, no client address and no caller identity, so it is not an audit log | The proxy's access log: method, path, status, upstream time, bytes. Never the `Authorization` header. There is no record of which token made a request unless the proxy adds one (for example a hash of the header). |
 | Secret storage | Tokens are plain environment variables | Deliver through the service manager's secret mechanism (systemd `LoadCredential=` or an `EnvironmentFile=` with mode 0600; a Kubernetes Secret). Not the command line, not the config file. On Linux a process's environment is readable by the same user and by root through `/proc/<pid>/environ`; run the service as a dedicated user. |
 | Token rotation | **Needs a restart.** A drive accepts one token; there is no reload and no overlap in which old and new both work | Follow the runbook's rotation steps. Budget an outage of one restart per rotation, and rotate on a schedule so that the procedure is practised. |
 | Network isolation of the listener | With `allow_non_loopback` anything that can reach the port can try tokens and read cleartext traffic | A security group or NetworkPolicy that admits only the load balancer. |
